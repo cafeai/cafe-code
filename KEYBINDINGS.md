@@ -1,8 +1,10 @@
 # Keybindings
 
-T3 Code reads keybindings from:
+Cafe Code reads keybindings from:
 
-- `~/.t3/keybindings.json`
+- `~/.cafecode/keybindings.json`
+
+Existing `~/.t3/keybindings.json` files remain supported as a legacy fallback.
 
 The file must be a JSON array of rules:
 

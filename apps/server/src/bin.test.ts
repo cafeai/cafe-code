@@ -6,7 +6,7 @@ import { join } from "node:path";
 
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as NetService from "@t3tools/shared/Net";
+import * as NetService from "@cafecode/shared/Net";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -62,7 +62,7 @@ const makeCliTestServerConfig = (baseDir: string) =>
       otlpTracesUrl: undefined,
       otlpMetricsUrl: undefined,
       otlpExportIntervalMs: 10_000,
-      otlpServiceName: "t3-server",
+      otlpServiceName: "cafe-code-server",
       mode: "web",
       port: 0,
       host: "127.0.0.1",
@@ -248,7 +248,7 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
       if (error._tag !== "ShowHelp") {
         assert.fail(`Expected ShowHelp, got ${error._tag}`);
       }
-      assert.deepEqual(error.commandPath, ["t3", "auth", "pairing", "create"]);
+      assert.deepEqual(error.commandPath, ["cafe-code", "auth", "pairing", "create"]);
       const ttlError = error.errors[0] as CliError.CliError | undefined;
       if (!ttlError || ttlError._tag !== "InvalidValue") {
         assert.fail(`Expected InvalidValue, got ${String(ttlError?._tag)}`);
@@ -262,8 +262,8 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
 
   it.effect("adds, renames, and removes projects offline through the orchestration engine", () =>
     Effect.gen(function* () {
-      const baseDir = mkdtempSync(join(tmpdir(), "t3-cli-projects-offline-test-"));
-      const workspaceRoot = mkdtempSync(join(tmpdir(), "t3-cli-projects-workspace-"));
+      const baseDir = mkdtempSync(join(tmpdir(), "cafecode-cli-projects-offline-test-"));
+      const workspaceRoot = mkdtempSync(join(tmpdir(), "cafecode-cli-projects-workspace-"));
 
       yield* runCliWithRuntime([
         "project",
@@ -306,8 +306,8 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
 
   it.effect("routes project commands through a running server when runtime state is present", () =>
     Effect.gen(function* () {
-      const baseDir = mkdtempSync(join(tmpdir(), "t3-cli-projects-live-test-"));
-      const workspaceRoot = mkdtempSync(join(tmpdir(), "t3-cli-projects-live-workspace-"));
+      const baseDir = mkdtempSync(join(tmpdir(), "cafecode-cli-projects-live-test-"));
+      const workspaceRoot = mkdtempSync(join(tmpdir(), "cafecode-cli-projects-live-workspace-"));
 
       yield* withLiveProjectCliServer(baseDir, () =>
         Effect.gen(function* () {
@@ -335,7 +335,7 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
   it.effect("rejects dev-url on project commands", () =>
     Effect.gen(function* () {
       const workspaceRoot = mkdtempSync(
-        join(tmpdir(), "t3-cli-projects-unknown-option-workspace-"),
+        join(tmpdir(), "cafecode-cli-projects-unknown-option-workspace-"),
       );
       const error = yield* runCliWithRuntime([
         "project",
@@ -351,7 +351,7 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
       if (error._tag !== "ShowHelp") {
         assert.fail(`Expected ShowHelp, got ${error._tag}`);
       }
-      assert.deepEqual(error.commandPath, ["t3", "project", "add"]);
+      assert.deepEqual(error.commandPath, ["cafe-code", "project", "add"]);
       const optionError = error.errors[0] as CliError.CliError | undefined;
       if (!optionError || optionError._tag !== "UnrecognizedOption") {
         assert.fail(`Expected UnrecognizedOption, got ${String(optionError?._tag)}`);

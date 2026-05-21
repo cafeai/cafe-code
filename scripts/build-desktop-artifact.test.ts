@@ -22,8 +22,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   });
 
   it("switches desktop packaging product names to nightly for nightly builds", () => {
-    assert.equal(resolveDesktopProductName("0.0.17"), "T3 Code (Alpha)");
-    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "T3 Code (Nightly)");
+    assert.equal(resolveDesktopProductName("0.0.17"), "Cafe Code (Alpha)");
+    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "Cafe Code (Nightly)");
   });
 
   it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
@@ -45,10 +45,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       resolveDesktopRuntimeDependencies(
         {
           "@effect/platform-node": "catalog:",
-          "@t3tools/contracts": "workspace:*",
-          "@t3tools/shared": "workspace:*",
-          "@t3tools/ssh": "workspace:*",
-          "@t3tools/tailscale": "workspace:*",
+          "@cafecode/contracts": "workspace:*",
+          "@cafecode/shared": "workspace:*",
+          "@cafecode/ssh": "workspace:*",
+          "@cafecode/tailscale": "workspace:*",
           effect: "catalog:",
           electron: "41.5.0",
         },
@@ -107,11 +107,11 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           ConfigProvider.layer(
             ConfigProvider.fromEnv({
               env: {
-                T3CODE_DESKTOP_SKIP_BUILD: "true",
-                T3CODE_DESKTOP_KEEP_STAGE: "true",
-                T3CODE_DESKTOP_SIGNED: "true",
-                T3CODE_DESKTOP_VERBOSE: "true",
-                T3CODE_DESKTOP_MOCK_UPDATES: "true",
+                CAFE_CODE_DESKTOP_SKIP_BUILD: "true",
+                CAFE_CODE_DESKTOP_KEEP_STAGE: "true",
+                CAFE_CODE_DESKTOP_SIGNED: "true",
+                CAFE_CODE_DESKTOP_VERBOSE: "true",
+                CAFE_CODE_DESKTOP_MOCK_UPDATES: "true",
               },
             }),
           ),

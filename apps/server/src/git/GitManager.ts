@@ -29,28 +29,30 @@ import {
   type VcsStatusRemoteResult,
   VcsStatusResult,
   ModelSelection,
-} from "@t3tools/contracts";
+} from "@cafecode/contracts";
 import {
   detectSourceControlProviderFromGitRemoteUrl,
+  LEGACY_WORKTREE_BRANCH_PREFIX,
   mergeGitStatusParts,
   resolveAutoFeatureBranchName,
   sanitizeBranchFragment,
   sanitizeFeatureBranchName,
-} from "@t3tools/shared/git";
+  WORKTREE_BRANCH_PREFIX,
+} from "@cafecode/shared/git";
 import {
   getChangeRequestTerminologyForKind,
   type ChangeRequestTerminology,
-} from "@t3tools/shared/sourceControl";
+} from "@cafecode/shared/sourceControl";
 
-import { GitManagerError } from "@t3tools/contracts";
+import { GitManagerError } from "@cafecode/contracts";
 import { TextGeneration } from "../textGeneration/TextGeneration.ts";
 import { ProjectSetupScriptRunner } from "../project/Services/ProjectSetupScriptRunner.ts";
 import { extractBranchNameFromRemoteRef } from "./remoteRefs.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
-import type { GitManagerServiceError } from "@t3tools/contracts";
+import type { GitManagerServiceError } from "@cafecode/contracts";
 import { GitVcsDriver, type GitStatusDetails } from "../vcs/GitVcsDriver.ts";
 import { SourceControlProviderRegistry } from "../sourceControl/SourceControlProviderRegistry.ts";
-import type { ChangeRequest } from "@t3tools/contracts";
+import type { ChangeRequest } from "@cafecode/contracts";
 
 export interface GitActionProgressReporter {
   readonly publish: (event: GitActionProgressEvent) => Effect.Effect<void, never>;
@@ -87,7 +89,7 @@ export interface GitManagerShape {
 }
 
 export class GitManager extends Context.Service<GitManager, GitManagerShape>()(
-  "t3/git/GitManager",
+  "cafecode/git/GitManager",
 ) {}
 
 const COMMIT_TIMEOUT_MS = 10 * 60_000;
@@ -185,7 +187,7 @@ function resolvePullRequestWorktreeLocalBranchName(
 
   const sanitizedHeadBranch = sanitizeBranchFragment(pullRequest.headBranch).trim();
   const suffix = sanitizedHeadBranch.length > 0 ? sanitizedHeadBranch : "head";
-  return `t3code/pr-${pullRequest.number}/${suffix}`;
+  return `${WORKTREE_BRANCH_PREFIX}/pr-${pullRequest.number}/${suffix}`;
 }
 
 function parseGitHubRepositoryNameWithOwnerFromRemoteUrl(url: string | null): string | null {
@@ -1301,7 +1303,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       modelSelection,
     });
 
-    const bodyFile = path.join(tempDir, `t3code-pr-body-${process.pid}-${randomUUID()}.md`);
+    const bodyFile = path.join(tempDir, `cafecode-pr-body-${process.pid}-${randomUUID()}.md`);
     yield* fileSystem
       .writeFileString(bodyFile, generated.body)
       .pipe(
@@ -1460,11 +1462,19 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       } as const;
       const localPullRequestBranch =
         resolvePullRequestWorktreeLocalBranchName(pullRequestWithRemoteInfo);
+      const legacyPullRequestBranch = localPullRequestBranch.startsWith(
+        `${WORKTREE_BRANCH_PREFIX}/`,
+      )
+        ? `${LEGACY_WORKTREE_BRANCH_PREFIX}/${localPullRequestBranch.slice(WORKTREE_BRANCH_PREFIX.length + 1)}`
+        : null;
+      const localPullRequestBranchCandidates = legacyPullRequestBranch
+        ? [localPullRequestBranch, legacyPullRequestBranch]
+        : [localPullRequestBranch];
 
       const findLocalHeadBranch = Effect.fn("findLocalHeadBranch")(function* (cwd: string) {
         const result = yield* gitCore.listRefs({ cwd });
         const localBranch = result.refs.find(
-          (branch) => !branch.isRemote && branch.name === localPullRequestBranch,
+          (branch) => !branch.isRemote && localPullRequestBranchCandidates.includes(branch.name),
         );
         if (localBranch) {
           return localBranch;
@@ -1498,7 +1508,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         yield* ensureExistingWorktreeUpstream(existingBranchBeforeFetch.worktreePath);
         return {
           pullRequest,
-          branch: localPullRequestBranch,
+          branch: existingBranchBeforeFetch.name,
           worktreePath: existingBranchBeforeFetch.worktreePath,
         };
       }
@@ -1526,7 +1536,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         yield* ensureExistingWorktreeUpstream(existingBranchAfterFetch.worktreePath);
         return {
           pullRequest,
-          branch: localPullRequestBranch,
+          branch: existingBranchAfterFetch.name,
           worktreePath: existingBranchAfterFetch.worktreePath,
         };
       }

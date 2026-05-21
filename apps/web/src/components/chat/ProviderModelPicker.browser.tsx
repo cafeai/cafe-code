@@ -1,6 +1,6 @@
-import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
-import { EnvironmentId } from "@t3tools/contracts";
-import { createModelCapabilities } from "@t3tools/shared/model";
+import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@cafecode/contracts";
+import { EnvironmentId } from "@cafecode/contracts";
+import { createModelCapabilities } from "@cafecode/shared/model";
 import { page, userEvent } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
@@ -16,7 +16,7 @@ import {
   DEFAULT_CLIENT_SETTINGS,
   DEFAULT_UNIFIED_SETTINGS,
   type UnifiedSettings,
-} from "@t3tools/contracts/settings";
+} from "@cafecode/contracts/settings";
 import { __resetLocalApiForTests } from "../../localApi";
 
 // Mock the environments/runtime module to provide a mock primary environment connection

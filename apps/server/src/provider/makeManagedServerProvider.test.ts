@@ -1,12 +1,13 @@
 import { describe, it, assert } from "@effect/vitest";
-import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
-import { createModelCapabilities } from "@t3tools/shared/model";
+import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@cafecode/contracts";
+import { createModelCapabilities } from "@cafecode/shared/model";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import { makeManagedServerProvider } from "./makeManagedServerProvider.ts";
 
@@ -283,6 +284,50 @@ describe("makeManagedServerProvider", () => {
         ]);
         assert.deepStrictEqual(latest, enrichedSnapshotSecond);
       }),
+    ),
+  );
+
+  it.effect("can disable periodic refresh while preserving manual refresh", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const checkCalls = yield* Ref.make(0);
+        const releaseInitialCheck = yield* Deferred.make<void>();
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+          initialSnapshot: () => Effect.succeed(initialSnapshot),
+          checkProvider: Ref.updateAndGet(checkCalls, (count) => count + 1).pipe(
+            Effect.flatMap((count) =>
+              count === 1
+                ? Deferred.await(releaseInitialCheck).pipe(Effect.as(refreshedSnapshot))
+                : Effect.succeed(refreshedSnapshotSecond),
+            ),
+          ),
+          refreshInterval: null,
+        });
+
+        yield* Effect.yieldNow;
+        assert.strictEqual(yield* Ref.get(checkCalls), 1);
+
+        const initialUpdateFiber = yield* Stream.take(provider.streamChanges, 1).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* Effect.yieldNow;
+        yield* Deferred.succeed(releaseInitialCheck, undefined);
+        const initialUpdate = yield* Fiber.join(initialUpdateFiber);
+        assert.deepStrictEqual(Array.from(initialUpdate), [refreshedSnapshot]);
+
+        yield* TestClock.adjust("2 hours");
+        yield* Effect.yieldNow;
+        assert.strictEqual(yield* Ref.get(checkCalls), 1);
+
+        const manualRefresh = yield* provider.refresh;
+        assert.deepStrictEqual(manualRefresh, refreshedSnapshotSecond);
+        assert.strictEqual(yield* Ref.get(checkCalls), 2);
+      }).pipe(Effect.provide(TestClock.layer())),
     ),
   );
 });

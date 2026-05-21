@@ -1,5 +1,5 @@
-import { type ServerLifecycleWelcomePayload } from "@t3tools/contracts";
-import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime";
+import { type ServerLifecycleWelcomePayload } from "@cafecode/contracts";
+import { scopedProjectKey, scopeProjectRef } from "@cafecode/client-runtime";
 import {
   Outlet,
   createRootRouteWithContext,
@@ -49,10 +49,7 @@ import { syncBrowserChromeTheme } from "../hooks/useTheme";
 import {
   ensureEnvironmentConnectionBootstrapped,
   getPrimaryEnvironmentConnection,
-  listSavedEnvironmentRecords,
-  waitForSavedEnvironmentRegistryHydration,
   startEnvironmentConnectionService,
-  useSavedEnvironmentRegistryStore,
 } from "../environments/runtime";
 import { configureClientTracing } from "../observability/clientTracing";
 import {
@@ -61,29 +58,11 @@ import {
   resolveInitialServerAuthGateState,
   updatePrimaryEnvironmentDescriptor,
 } from "../environments/primary";
-import { hasHostedPairingRequest, isHostedStaticApp } from "../hostedPairing";
 
 export const Route = createRootRouteWithContext<{
   queryClient: QueryClient;
 }>()({
-  beforeLoad: async ({ location }) => {
-    if (location.pathname === "/pair" && hasHostedPairingRequest(new URL(window.location.href))) {
-      return {
-        authGateState: {
-          status: "hosted-pairing",
-        } as const,
-      };
-    }
-
-    if (isHostedStaticApp(new URL(window.location.href))) {
-      await waitForSavedEnvironmentRegistryHydration();
-      return {
-        authGateState: {
-          status: "hosted-static",
-        } as const,
-      };
-    }
-
+  beforeLoad: async () => {
     const [, authGateState] = await Promise.all([
       ensurePrimaryEnvironmentReady(),
       resolveInitialServerAuthGateState(),
@@ -117,7 +96,7 @@ function RootRouteView() {
     return <Outlet />;
   }
 
-  if (authGateState.status !== "authenticated" && authGateState.status !== "hosted-static") {
+  if (authGateState.status !== "authenticated") {
     return <Outlet />;
   }
 
@@ -136,7 +115,6 @@ function RootRouteView() {
         {primaryEnvironmentAuthenticated ? <ServerStateBootstrap /> : null}
         <EnvironmentConnectionManagerBootstrap />
         <SshPasswordPromptDialog />
-        <HostedStaticEnvironmentBootstrap />
         {primaryEnvironmentAuthenticated ? <EventRouter /> : null}
         {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
         {primaryEnvironmentAuthenticated ? <WebSocketConnectionCoordinator /> : null}
@@ -149,32 +127,6 @@ function RootRouteView() {
       </AnchoredToastProvider>
     </ToastProvider>
   );
-}
-
-function HostedStaticEnvironmentBootstrap() {
-  const savedEnvironmentCount = useSavedEnvironmentRegistryStore(
-    (state) => Object.keys(state.byId).length,
-  );
-
-  useEffect(() => {
-    if (getPrimaryKnownEnvironment()) {
-      return;
-    }
-
-    const currentActiveEnvironmentId = useStore.getState().activeEnvironmentId;
-    if (currentActiveEnvironmentId) {
-      return;
-    }
-
-    const firstSavedEnvironment = listSavedEnvironmentRecords()[0];
-    if (!firstSavedEnvironment) {
-      return;
-    }
-
-    useStore.getState().setActiveEnvironmentId(firstSavedEnvironment.environmentId);
-  }, [savedEnvironmentCount]);
-
-  return null;
 }
 
 function RootRouteErrorView({ error, reset }: ErrorComponentProps) {

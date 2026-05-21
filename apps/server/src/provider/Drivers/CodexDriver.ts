@@ -21,8 +21,7 @@
  *
  * @module provider/Drivers/CodexDriver
  */
-import { CodexSettings, ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
-import * as Duration from "effect/Duration";
+import { CodexSettings, ProviderDriverKind, type ServerProvider } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -54,7 +53,10 @@ import {
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("codex");
-const SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
+// A Codex status refresh starts `codex app-server`, which can touch remote
+// Codex/ChatGPT endpoints. Keep it user-driven instead of running it forever
+// while the desktop app is idle in the background.
+const PERIODIC_SNAPSHOT_REFRESH_INTERVAL: null = null;
 const UPDATE = makePackageManagedProviderMaintenanceResolver({
   provider: DRIVER_KIND,
   npmPackageName: "@openai/codex",
@@ -174,7 +176,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
             Effect.provideService(HttpClient.HttpClient, httpClient),
             Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),
           ),
-        refreshInterval: SNAPSHOT_REFRESH_INTERVAL,
+        refreshInterval: PERIODIC_SNAPSHOT_REFRESH_INTERVAL,
       }).pipe(
         Effect.mapError(
           (cause) =>

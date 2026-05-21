@@ -3,7 +3,8 @@ import type {
   AuthSessionState,
   AuthWebSocketTokenResult,
   ExecutionEnvironmentDescriptor,
-} from "@t3tools/contracts";
+} from "@cafecode/contracts";
+import { ENVIRONMENT_ENDPOINT_PATHS } from "@cafecode/shared/environmentEndpoint";
 
 class RemoteEnvironmentAuthHttpError extends Error {
   readonly status: number;
@@ -116,10 +117,18 @@ export async function fetchRemoteSessionState(input: {
 export async function fetchRemoteEnvironmentDescriptor(input: {
   readonly httpBaseUrl: string;
 }): Promise<ExecutionEnvironmentDescriptor> {
-  return fetchRemoteJson<ExecutionEnvironmentDescriptor>({
-    httpBaseUrl: input.httpBaseUrl,
-    pathname: "/.well-known/t3/environment",
-  });
+  let lastError: unknown;
+  for (const pathname of ENVIRONMENT_ENDPOINT_PATHS) {
+    try {
+      return await fetchRemoteJson<ExecutionEnvironmentDescriptor>({
+        httpBaseUrl: input.httpBaseUrl,
+        pathname,
+      });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Failed to fetch remote environment.");
 }
 
 export async function issueRemoteWebSocketToken(input: {

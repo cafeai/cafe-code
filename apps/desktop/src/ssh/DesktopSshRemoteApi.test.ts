@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
-import { SshHttpBridgeError } from "@t3tools/ssh/errors";
+import { SshHttpBridgeError } from "@cafecode/ssh/errors";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
@@ -54,7 +54,7 @@ describe("DesktopSshRemoteApi", () => {
       });
 
       assert.equal(descriptor.label, "Remote Devbox");
-      assert.deepEqual(requestUrls, ["http://127.0.0.1:41773/.well-known/t3/environment"]);
+      assert.deepEqual(requestUrls, ["http://127.0.0.1:41773/.well-known/cafe-code/environment"]);
     }).pipe(Effect.provide(layer));
   });
 

@@ -1,5 +1,4 @@
 import { getPairingTokenFromUrl } from "../../pairingUrl";
-import { readHostedPairingRequest } from "../../hostedPairing";
 
 export interface ResolvedRemotePairingTarget {
   readonly credential: string;
@@ -58,16 +57,6 @@ export function resolveRemotePairingTarget(input: {
   const pairingUrl = input.pairingUrl?.trim() ?? "";
   if (pairingUrl.length > 0) {
     const url = new URL(pairingUrl, window.location.origin);
-    const hostedPairingRequest = readHostedPairingRequest(url);
-    if (hostedPairingRequest) {
-      const hostedBackendUrl = normalizeRemoteBaseUrl(hostedPairingRequest.host);
-      return {
-        credential: hostedPairingRequest.token,
-        httpBaseUrl: toHttpBaseUrl(hostedBackendUrl),
-        wsBaseUrl: toWsBaseUrl(hostedBackendUrl),
-      };
-    }
-
     const credential = getPairingTokenFromUrl(url) ?? "";
     if (!credential) {
       throw new Error("Pairing URL is missing its token.");

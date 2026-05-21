@@ -20,9 +20,9 @@ describe("branding", () => {
       value: {
         desktopBridge: {
           getAppBranding: () => ({
-            baseName: "T3 Code",
+            baseName: "Cafe Code",
             stageLabel: "Nightly",
-            displayName: "T3 Code (Nightly)",
+            displayName: "Cafe Code (Nightly)",
           }),
         },
       },
@@ -30,28 +30,15 @@ describe("branding", () => {
 
     const branding = await import("./branding");
 
-    expect(branding.APP_BASE_NAME).toBe("T3 Code");
+    expect(branding.APP_BASE_NAME).toBe("Cafe Code");
     expect(branding.APP_STAGE_LABEL).toBe("Nightly");
-    expect(branding.APP_DISPLAY_NAME).toBe("T3 Code (Nightly)");
+    expect(branding.APP_DISPLAY_NAME).toBe("Cafe Code (Nightly)");
   });
 
-  it("normalizes hosted app channel metadata", async () => {
-    vi.stubEnv("VITE_HOSTED_APP_CHANNEL", "nightly");
-
+  it("uses a fallback stage label without desktop branding", async () => {
     const branding = await import("./branding");
 
-    expect(branding.HOSTED_APP_CHANNEL).toBe("nightly");
-    expect(branding.HOSTED_APP_CHANNEL_LABEL).toBe("Nightly");
-    expect(branding.APP_STAGE_LABEL).toBe("Nightly");
-    expect(branding.APP_DISPLAY_NAME).toBe("T3 Code (Nightly)");
-  });
-
-  it("ignores unknown hosted app channels", async () => {
-    vi.stubEnv("VITE_HOSTED_APP_CHANNEL", "preview");
-
-    const branding = await import("./branding");
-
-    expect(branding.HOSTED_APP_CHANNEL).toBeNull();
-    expect(branding.HOSTED_APP_CHANNEL_LABEL).toBeNull();
+    expect(["Dev", "Alpha"]).toContain(branding.APP_STAGE_LABEL);
+    expect(branding.APP_DISPLAY_NAME).toBe(`Cafe Code (${branding.APP_STAGE_LABEL})`);
   });
 });

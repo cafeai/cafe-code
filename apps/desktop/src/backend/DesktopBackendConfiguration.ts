@@ -1,4 +1,4 @@
-import { parsePersistedServerObservabilitySettings } from "@t3tools/shared/serverSettings";
+import { parsePersistedServerObservabilitySettings } from "@cafecode/shared/serverSettings";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -19,7 +19,7 @@ export interface DesktopBackendConfigurationShape {
 export class DesktopBackendConfiguration extends Context.Service<
   DesktopBackendConfiguration,
   DesktopBackendConfigurationShape
->()("t3/desktop/BackendConfiguration") {}
+>()("cafecode/desktop/BackendConfiguration") {}
 
 interface BackendObservabilitySettings {
   readonly otlpTracesUrl: Option.Option<string>;
@@ -32,20 +32,20 @@ const emptyBackendObservabilitySettings: BackendObservabilitySettings = {
 };
 
 const DESKTOP_BACKEND_ENV_NAMES = [
-  "T3CODE_PORT",
-  "T3CODE_MODE",
-  "T3CODE_NO_BROWSER",
-  "T3CODE_HOST",
-  "T3CODE_DESKTOP_WS_URL",
-  "T3CODE_DESKTOP_LAN_ACCESS",
-  "T3CODE_DESKTOP_LAN_HOST",
-  "T3CODE_DESKTOP_HTTPS_ENDPOINTS",
-  "T3CODE_TAILSCALE_SERVE",
-  "T3CODE_TAILSCALE_SERVE_PORT",
+  "CAFE_CODE_PORT",
+  "CAFE_CODE_MODE",
+  "CAFE_CODE_NO_BROWSER",
+  "CAFE_CODE_HOST",
+  "CAFE_CODE_DESKTOP_WS_URL",
+  "CAFE_CODE_DESKTOP_LAN_ACCESS",
+  "CAFE_CODE_DESKTOP_LAN_HOST",
+  "CAFE_CODE_DESKTOP_HTTPS_ENDPOINTS",
+  "CAFE_CODE_TAILSCALE_SERVE",
+  "CAFE_CODE_TAILSCALE_SERVE_PORT",
 ] as const;
 
 const backendChildEnvPatch = (): Record<string, string | undefined> =>
-  Object.fromEntries(DESKTOP_BACKEND_ENV_NAMES.map((name) => [name, undefined]));
+  Object.fromEntries(DESKTOP_BACKEND_ENV_NAMES.map((name) => [name, undefined] as const));
 
 const { logWarning: logBackendConfigurationWarning } = DesktopObservability.makeComponentLogger(
   "desktop-backend-configuration",
@@ -122,7 +122,7 @@ const resolveBackendStartConfig = Effect.fn("desktop.backendConfiguration.resolv
         mode: "desktop",
         noBrowser: true,
         port: backendExposure.port,
-        t3Home: environment.baseDir,
+        cafeCodeHome: environment.baseDir,
         host: backendExposure.bindHost,
         desktopBootstrapToken: input.bootstrapToken,
         tailscaleServeEnabled: backendExposure.tailscaleServeEnabled,

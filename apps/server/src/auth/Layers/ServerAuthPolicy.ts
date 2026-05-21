@@ -1,4 +1,4 @@
-import type { ServerAuthDescriptor } from "@t3tools/contracts";
+import type { ServerAuthDescriptor } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 

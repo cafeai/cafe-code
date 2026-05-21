@@ -1,4 +1,4 @@
-import { DEFAULT_SERVER_SETTINGS, ServerSettings, WS_METHODS } from "@t3tools/contracts";
+import { DEFAULT_SERVER_SETTINGS, ServerSettings, WS_METHODS } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -222,7 +222,7 @@ describe("WsTransport", () => {
         closeCode: 1006,
         closeReason: "server unavailable",
         hasConnected: false,
-        lastError: "Unable to connect to the T3 server WebSocket.",
+        lastError: "Unable to connect to the Cafe Code server WebSocket.",
         phase: "disconnected",
       });
     });

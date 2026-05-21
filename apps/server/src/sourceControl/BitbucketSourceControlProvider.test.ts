@@ -19,7 +19,7 @@ it.effect("maps Bitbucket PR summaries into provider-neutral change requests", (
         Effect.succeed({
           number: 42,
           title: "Add Bitbucket provider",
-          url: "https://bitbucket.org/pingdotgg/t3code/pull-requests/42",
+          url: "https://bitbucket.org/cafeai/cafe-code/pull-requests/42",
           baseRefName: "main",
           headRefName: "feature/source-control",
           state: "open",
@@ -39,7 +39,7 @@ it.effect("maps Bitbucket PR summaries into provider-neutral change requests", (
       provider: "bitbucket",
       number: 42,
       title: "Add Bitbucket provider",
-      url: "https://bitbucket.org/pingdotgg/t3code/pull-requests/42",
+      url: "https://bitbucket.org/cafeai/cafe-code/pull-requests/42",
       baseRefName: "main",
       headRefName: "feature/source-control",
       state: "open",

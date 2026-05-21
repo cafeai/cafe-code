@@ -24,7 +24,7 @@ export interface DesktopShutdownShape {
 }
 
 export class DesktopShutdown extends Context.Service<DesktopShutdown, DesktopShutdownShape>()(
-  "t3/desktop/Shutdown",
+  "cafecode/desktop/Shutdown",
 ) {}
 
 const makeShutdown = Effect.gen(function* () {
@@ -62,7 +62,7 @@ export interface DesktopLifecycleShape {
 }
 
 export class DesktopLifecycle extends Context.Service<DesktopLifecycle, DesktopLifecycleShape>()(
-  "t3/desktop/Lifecycle",
+  "cafecode/desktop/Lifecycle",
 ) {}
 
 const { logInfo: logLifecycleInfo, logError: logLifecycleError } =

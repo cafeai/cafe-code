@@ -1,5 +1,5 @@
-import type { DesktopEnvironmentBootstrap } from "@t3tools/contracts";
-import type { KnownEnvironment } from "@t3tools/client-runtime";
+import type { DesktopEnvironmentBootstrap } from "@cafecode/contracts";
+import type { KnownEnvironment } from "@cafecode/client-runtime";
 
 export interface PrimaryEnvironmentTarget {
   readonly source: KnownEnvironment["source"];

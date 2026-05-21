@@ -16,13 +16,13 @@ import {
   type DesktopSshEnvironmentTarget,
   type DesktopServerExposureState,
   type EnvironmentId,
-} from "@t3tools/contracts";
+} from "@cafecode/contracts";
 import * as DateTime from "effect/DateTime";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { cn } from "../../lib/utils";
 import { formatElapsedDurationLabel, formatExpiresInLabel } from "../../timestampFormat";
-import { resolveDesktopPairingUrl, resolveHostedPairingUrl } from "./pairingUrls";
+import { resolveDesktopPairingUrl } from "./pairingUrls";
 import {
   SettingsPageContainer,
   SettingsRow,
@@ -71,7 +71,6 @@ import {
 } from "../ui/menu";
 import { Textarea } from "../ui/textarea";
 import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "../../pairingUrl";
-import { readHostedPairingRequest } from "../../hostedPairing";
 import {
   createServerPairingCredential,
   fetchSessionState,
@@ -268,13 +267,6 @@ function parsePairingUrlFields(
         ? trimmed
         : `https://${trimmed}`;
     const url = new URL(urlLikeInput, window.location.origin);
-    const hostedPairingRequest = readHostedPairingRequest(url);
-    if (hostedPairingRequest) {
-      return {
-        host: hostedPairingRequest.host,
-        pairingCode: hostedPairingRequest.token,
-      };
-    }
 
     const pairingCode = getPairingTokenFromUrl(url);
     if (!pairingCode) return null;
@@ -433,7 +425,6 @@ function selectPairingEndpoint(
   return (
     availableEndpoints.find((endpoint) => endpoint.isDefault) ??
     availableEndpoints.find((endpoint) => endpoint.reachability !== "loopback") ??
-    availableEndpoints.find((endpoint) => endpoint.compatibility.hostedHttpsApp === "compatible") ??
     null
   );
 }
@@ -470,27 +461,12 @@ function resolveAdvertisedEndpointPairingUrl(
   endpoint: AdvertisedEndpoint,
   credential: string,
 ): string {
-  if (endpoint.compatibility.hostedHttpsApp === "compatible") {
-    return (
-      resolveHostedPairingUrl(endpoint.httpBaseUrl, credential) ??
-      resolveDesktopPairingUrl(endpoint.httpBaseUrl, credential)
-    );
-  }
   return resolveDesktopPairingUrl(endpoint.httpBaseUrl, credential);
 }
 
 function resolveCurrentOriginPairingUrl(credential: string): string {
   const url = new URL("/pair", window.location.href);
   return setPairingTokenOnUrl(url, credential).toString();
-}
-
-function isHostedAppPairingUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return url.pathname === "/pair" && url.searchParams.has("host");
-  } catch {
-    return false;
-  }
 }
 
 type PairingLinkListRowProps = {
@@ -523,13 +499,6 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
     () => resolveCurrentOriginPairingUrl(pairingLink.credential),
     [pairingLink.credential],
   );
-  const hostedPairingUrl = useMemo(
-    () =>
-      endpointUrl != null && endpointUrl !== ""
-        ? resolveHostedPairingUrl(endpointUrl, pairingLink.credential)
-        : null,
-    [endpointUrl, pairingLink.credential],
-  );
   const endpointPairingUrl = useMemo(() => {
     const endpoint = selectPairingEndpoint(endpoints, defaultEndpointKey);
     return endpoint ? resolveAdvertisedEndpointPairingUrl(endpoint, pairingLink.credential) : null;
@@ -544,7 +513,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
             key: endpointDefaultPreferenceKey(endpoint),
             label: endpoint.label,
             url,
-            detail: isHostedAppPairingUrl(url) ? "Hosted app link" : "Backend pairing URL",
+            detail: "Backend pairing URL",
           };
         }),
     [endpoints, pairingLink.credential],
@@ -552,34 +521,25 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
   const shareablePairingUrl =
     endpointPairingUrl ??
     (endpointUrl != null && endpointUrl !== ""
-      ? (hostedPairingUrl ?? resolveDesktopPairingUrl(endpointUrl, pairingLink.credential))
+      ? resolveDesktopPairingUrl(endpointUrl, pairingLink.credential)
       : isLoopbackHostname(window.location.hostname)
         ? null
         : currentOriginPairingUrl);
   const revealValue = shareablePairingUrl ?? pairingLink.credential;
-  const isShareableHostedAppPairingUrl =
-    shareablePairingUrl !== null && isHostedAppPairingUrl(shareablePairingUrl);
   const canCopyToClipboard =
     typeof window !== "undefined" &&
     window.isSecureContext &&
     navigator.clipboard?.writeText != null;
 
-  const { copyToClipboard } = useCopyToClipboard<"code" | "hosted-link" | "link">({
+  const { copyToClipboard } = useCopyToClipboard<"code" | "link">({
     onCopy: (kind) => {
       toastManager.add({
         type: "success",
-        title:
-          kind === "hosted-link"
-            ? "Hosted app link copied"
-            : kind === "link"
-              ? "Pairing URL copied"
-              : "Pairing code copied",
+        title: kind === "link" ? "Pairing URL copied" : "Pairing code copied",
         description:
-          kind === "hosted-link"
-            ? "Open it in the browser on the device you want to connect."
-            : kind === "link"
-              ? "Open it in the client you want to pair to this environment."
-              : "Paste it into another client to finish pairing.",
+          kind === "link"
+            ? "Open it in the client you want to pair to this environment."
+            : "Paste it into another client to finish pairing.",
       });
     },
     onError: (error, kind) => {
@@ -588,11 +548,9 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
         stackedThreadToast({
           type: "error",
           title: canCopyToClipboard
-            ? kind === "hosted-link"
-              ? "Could not copy hosted app link"
-              : kind === "link"
-                ? "Could not copy pairing URL"
-                : "Could not copy pairing code"
+            ? kind === "link"
+              ? "Could not copy pairing URL"
+              : "Could not copy pairing code"
             : "Clipboard copy unavailable",
           description: canCopyToClipboard ? error.message : "Showing the full value instead.",
         }),
@@ -601,15 +559,10 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
   });
 
   const copyPairingValue = useCallback(
-    (value: string, kind: "code" | "hosted-link" | "link") => {
+    (value: string, kind: "code" | "link") => {
       copyToClipboard(value, kind);
     },
     [copyToClipboard],
-  );
-
-  const copyKindForUrl = useCallback(
-    (url: string): "hosted-link" | "link" => (isHostedAppPairingUrl(url) ? "hosted-link" : "link"),
-    [],
   );
 
   const handleCopyCode = useCallback(() => {
@@ -618,8 +571,8 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
 
   const handleCopyDefaultLink = useCallback(() => {
     if (!shareablePairingUrl) return;
-    copyPairingValue(shareablePairingUrl, copyKindForUrl(shareablePairingUrl));
-  }, [copyKindForUrl, copyPairingValue, shareablePairingUrl]);
+    copyPairingValue(shareablePairingUrl, "link");
+  }, [copyPairingValue, shareablePairingUrl]);
 
   const expiresAbsolute = formatAccessTimestamp(pairingLink.expiresAt);
 
@@ -630,21 +583,12 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
     endpointCopyOptions[0] ??
     null;
   const defaultEndpointCopyLabel = defaultEndpointCopyOption?.label ?? "URL";
-  const backendEndpointCopyOptions = endpointCopyOptions.filter(
-    (option) => !isHostedAppPairingUrl(option.url),
-  );
-  const hostedEndpointCopyOptions = endpointCopyOptions.filter((option) =>
-    isHostedAppPairingUrl(option.url),
-  );
   const renderEndpointMenuItems = (
     options: typeof endpointCopyOptions = endpointCopyOptions,
     renderDetail = true,
   ) =>
     options.map((option) => (
-      <MenuItem
-        key={option.key}
-        onClick={() => copyPairingValue(option.url, copyKindForUrl(option.url))}
-      >
+      <MenuItem key={option.key} onClick={() => copyPairingValue(option.url, "link")}>
         <span className="min-w-0 flex-1">
           <span className="block truncate">{option.label}</span>
           {renderDetail ? (
@@ -690,12 +634,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
           {endpointCopyOptions.length > 0 ? <MenuSeparator /> : null}
         </>
       ) : null}
-      {renderCompactEndpointGroup("Pairing URLs", backendEndpointCopyOptions, false)}
-      {renderCompactEndpointGroup(
-        "Hosted app link",
-        hostedEndpointCopyOptions,
-        backendEndpointCopyOptions.length > 0,
-      )}
+      {renderCompactEndpointGroup("Pairing URLs", endpointCopyOptions, false)}
       {!options?.codeFirst ? (
         <>
           {endpointCopyOptions.length > 0 ? <MenuSeparator /> : null}
@@ -809,18 +748,10 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
             )}
             <DialogPopup className="max-w-md">
               <DialogHeader>
-                <DialogTitle>
-                  {shareablePairingUrl
-                    ? isShareableHostedAppPairingUrl
-                      ? "Hosted app pairing link"
-                      : "Pairing link"
-                    : "Pairing code"}
-                </DialogTitle>
+                <DialogTitle>{shareablePairingUrl ? "Pairing link" : "Pairing code"}</DialogTitle>
                 <DialogDescription>
                   {shareablePairingUrl
-                    ? isShareableHostedAppPairingUrl
-                      ? "Clipboard copy is unavailable here. Open or manually copy this hosted app link on the device you want to connect."
-                      : "Clipboard copy is unavailable here. Open or manually copy this full pairing URL on the device you want to connect."
+                    ? "Clipboard copy is unavailable here. Open or manually copy this full pairing URL on the device you want to connect."
                     : "Clipboard copy is unavailable here. Manually copy this code into another client."}
                 </DialogDescription>
               </DialogHeader>
@@ -2502,8 +2433,8 @@ export function ConnectionsSettings() {
                 </AlertDialogTitle>
                 <AlertDialogDescription>
                   {pendingDesktopServerExposureMode === "network-accessible"
-                    ? "T3 Code will restart to expose this environment over the network."
-                    : "T3 Code will restart and limit this environment back to this machine."}
+                    ? "Cafe Code will restart to expose this environment over the network."
+                    : "Cafe Code will restart and limit this environment back to this machine."}
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
@@ -2547,7 +2478,7 @@ export function ConnectionsSettings() {
               <AlertDialogHeader>
                 <AlertDialogTitle>Disable Tailscale HTTPS?</AlertDialogTitle>
                 <AlertDialogDescription>
-                  T3 Code will restart the local backend without Tailscale Serve.
+                  Cafe Code will restart the local backend without Tailscale Serve.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
@@ -2585,7 +2516,7 @@ export function ConnectionsSettings() {
               <DialogHeader>
                 <DialogTitle>Set up Tailscale HTTPS?</DialogTitle>
                 <DialogDescription>
-                  T3 Code will restart the local backend with Tailscale Serve enabled and ask
+                  Cafe Code will restart the local backend with Tailscale Serve enabled and ask
                   Tailscale to proxy HTTPS traffic to this backend.
                 </DialogDescription>
               </DialogHeader>

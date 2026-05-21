@@ -3,10 +3,11 @@ import type {
   DesktopAppStageLabel,
   DesktopRuntimeArch,
   DesktopRuntimeInfo,
-} from "@t3tools/contracts";
+} from "@cafecode/contracts";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -56,7 +57,7 @@ export interface DesktopEnvironmentShape {
   readonly preloadPath: string;
   readonly appUpdateYmlPath: string;
   readonly devServerUrl: Option.Option<URL>;
-  readonly devRemoteT3ServerEntryPath: Option.Option<string>;
+  readonly devRemoteServerEntryPath: Option.Option<string>;
   readonly configuredBackendPort: Option.Option<number>;
   readonly commitHashOverride: Option.Option<string>;
   readonly otlpTracesUrl: Option.Option<string>;
@@ -78,9 +79,9 @@ export interface DesktopEnvironmentShape {
 export class DesktopEnvironment extends Context.Service<
   DesktopEnvironment,
   DesktopEnvironmentShape
->()("t3/desktop/Environment") {}
+>()("cafecode/desktop/Environment") {}
 
-const APP_BASE_NAME = "T3 Code";
+const APP_BASE_NAME = "Cafe Code";
 
 function resolveDesktopAppStageLabel(input: {
   readonly isDevelopment: boolean;
@@ -137,8 +138,13 @@ function resolveDesktopRuntimeInfo(input: {
 
 const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
   input: MakeDesktopEnvironmentInput,
-): Effect.fn.Return<DesktopEnvironmentShape, Config.ConfigError, Path.Path> {
+): Effect.fn.Return<
+  DesktopEnvironmentShape,
+  Config.ConfigError,
+  Path.Path | FileSystem.FileSystem
+> {
   const path = yield* Path.Path;
+  const fileSystem = yield* FileSystem.FileSystem;
   const config = yield* DesktopConfig.DesktopConfig;
   const homeDirectory = input.homeDirectory;
   const devServerUrl = config.devServerUrl;
@@ -151,7 +157,21 @@ const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
       : input.platform === "darwin"
         ? path.join(homeDirectory, "Library", "Application Support")
         : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
-  const baseDir = Option.getOrElse(config.t3Home, () => path.join(homeDirectory, ".t3"));
+  const baseDir = yield* Option.match(config.cafeCodeHome, {
+    onSome: (value) => Effect.succeed(value),
+    onNone: () =>
+      Effect.gen(function* () {
+        const cafeHome = path.join(homeDirectory, ".cafecode");
+        const legacyHome = path.join(homeDirectory, ".t3");
+        if (yield* fileSystem.exists(cafeHome).pipe(Effect.orElseSucceed(() => false))) {
+          return cafeHome;
+        }
+        if (yield* fileSystem.exists(legacyHome).pipe(Effect.orElseSucceed(() => false))) {
+          return legacyHome;
+        }
+        return cafeHome;
+      }),
+  });
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
   const branding = resolveDesktopAppBranding({
@@ -160,7 +180,7 @@ const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
   });
   const displayName = branding.displayName;
   const stateDir = path.join(baseDir, isDevelopment ? "dev" : "userdata");
-  const userDataDirName = isDevelopment ? "t3code-dev" : "t3code";
+  const userDataDirName = isDevelopment ? "cafecode-dev" : "cafecode";
   const legacyUserDataDirName = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)";
   const resourcesPath = input.resourcesPath;
 
@@ -192,16 +212,16 @@ const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
       ? path.join(resourcesPath, "app-update.yml")
       : path.join(input.appPath, "dev-app-update.yml"),
     devServerUrl,
-    devRemoteT3ServerEntryPath: config.devRemoteT3ServerEntryPath,
+    devRemoteServerEntryPath: config.devRemoteServerEntryPath,
     configuredBackendPort: config.configuredBackendPort,
     commitHashOverride: config.commitHashOverride,
     otlpTracesUrl: config.otlpTracesUrl,
     otlpExportIntervalMs: config.otlpExportIntervalMs,
     branding,
     displayName,
-    appUserModelId: isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code",
-    linuxDesktopEntryName: isDevelopment ? "t3code-dev.desktop" : "t3code.desktop",
-    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code",
+    appUserModelId: isDevelopment ? "com.cafeai.cafecode.dev" : "com.cafeai.cafecode",
+    linuxDesktopEntryName: isDevelopment ? "cafecode-dev.desktop" : "cafecode.desktop",
+    linuxWmClass: isDevelopment ? "cafecode-dev" : "cafecode",
     userDataDirName,
     legacyUserDataDirName,
     defaultDesktopSettings: resolveDefaultDesktopSettings(input.appVersion),

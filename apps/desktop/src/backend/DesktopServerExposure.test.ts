@@ -77,7 +77,10 @@ function makeEnvironmentLayer(baseDir: string, env: Record<string, string | unde
     runningUnderArm64Translation: false,
   }).pipe(
     Layer.provide(
-      Layer.mergeAll(NodeServices.layer, DesktopConfig.layerTest({ T3CODE_HOME: baseDir, ...env })),
+      Layer.mergeAll(
+        NodeServices.layer,
+        DesktopConfig.layerTest({ CAFE_CODE_HOME: baseDir, ...env }),
+      ),
     ),
   );
 }
@@ -87,7 +90,7 @@ function makeLayer(input: {
   readonly networkInterfaces?: DesktopNetworkInterfaces;
   readonly env?: Record<string, string | undefined>;
 }) {
-  const env = { T3CODE_HOME: input.baseDir, ...input.env };
+  const env = { CAFE_CODE_HOME: input.baseDir, ...input.env };
   const environmentLayer = makeEnvironmentLayer(input.baseDir, env);
   const networkLayer = Layer.succeed(DesktopServerExposure.DesktopNetworkInterfacesService, {
     read: Effect.succeed(input.networkInterfaces ?? emptyNetworkInterfaces),
@@ -257,8 +260,8 @@ describe("DesktopServerExposure", () => {
         );
       }),
       {
-        T3CODE_DESKTOP_LAN_HOST: "10.0.0.7",
-        T3CODE_DESKTOP_HTTPS_ENDPOINTS: "https://public.example.test",
+        CAFE_CODE_DESKTOP_LAN_HOST: "10.0.0.7",
+        CAFE_CODE_DESKTOP_HTTPS_ENDPOINTS: "https://public.example.test",
       },
     ),
   );
@@ -285,10 +288,6 @@ describe("DesktopServerExposure", () => {
             httpBaseUrl: "http://127.0.0.1:3773/",
             wsBaseUrl: "ws://127.0.0.1:3773/",
             reachability: "loopback",
-            compatibility: {
-              hostedHttpsApp: "mixed-content-blocked",
-              desktopApp: "compatible",
-            },
             source: "desktop-core",
             status: "available",
             description: "Loopback endpoint for this desktop app.",
@@ -305,10 +304,6 @@ describe("DesktopServerExposure", () => {
             httpBaseUrl: "http://192.168.1.20:3773/",
             wsBaseUrl: "ws://192.168.1.20:3773/",
             reachability: "lan",
-            compatibility: {
-              hostedHttpsApp: "mixed-content-blocked",
-              desktopApp: "compatible",
-            },
             source: "desktop-core",
             status: "available",
             isDefault: true,
@@ -326,10 +321,6 @@ describe("DesktopServerExposure", () => {
             httpBaseUrl: "https://desktop.example.ts.net/",
             wsBaseUrl: "wss://desktop.example.ts.net/",
             reachability: "public",
-            compatibility: {
-              hostedHttpsApp: "compatible",
-              desktopApp: "compatible",
-            },
             source: "user",
             status: "unknown",
             description: "User-configured HTTPS endpoint for this desktop backend.",
@@ -346,10 +337,6 @@ describe("DesktopServerExposure", () => {
             httpBaseUrl: "http://desktop.example.test:3773/",
             wsBaseUrl: "ws://desktop.example.test:3773/",
             reachability: "public",
-            compatibility: {
-              hostedHttpsApp: "mixed-content-blocked",
-              desktopApp: "compatible",
-            },
             source: "user",
             status: "unknown",
             description: "User-configured endpoint for this desktop backend.",
@@ -357,7 +344,7 @@ describe("DesktopServerExposure", () => {
         ]);
       }),
       {
-        T3CODE_DESKTOP_HTTPS_ENDPOINTS:
+        CAFE_CODE_DESKTOP_HTTPS_ENDPOINTS:
           "https://desktop.example.ts.net,http://desktop.example.test:3773,not-a-url",
       },
     ),

@@ -1,0 +1,4 @@
+name = "cafe-code"
+description = "Selene-managed T3 Code fork: Bun/TypeScript monorepo for browser and desktop coding-agent sessions."
+implementer = "codex"
+auditor = "claude"

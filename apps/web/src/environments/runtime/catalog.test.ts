@@ -2,7 +2,7 @@ import {
   EnvironmentId,
   type LocalApi,
   type PersistedSavedEnvironmentRecord,
-} from "@t3tools/contracts";
+} from "@cafecode/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {

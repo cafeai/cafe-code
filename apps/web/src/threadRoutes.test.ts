@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { scopeThreadRef } from "@t3tools/client-runtime";
-import { ThreadId } from "@t3tools/contracts";
+import { scopeThreadRef } from "@cafecode/client-runtime";
+import { ThreadId } from "@cafecode/contracts";
 import { DraftId } from "./composerDraftStore";
 
 import {

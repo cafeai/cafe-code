@@ -1,4 +1,4 @@
-import { type ServerProvider } from "@t3tools/contracts";
+import { type ServerProvider } from "@cafecode/contracts";
 import { memo } from "react";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { CircleAlertIcon } from "lucide-react";

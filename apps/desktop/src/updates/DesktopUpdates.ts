@@ -4,7 +4,7 @@ import type {
   DesktopUpdateChannel,
   DesktopUpdateCheckResult,
   DesktopUpdateState,
-} from "@t3tools/contracts";
+} from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
@@ -100,7 +100,7 @@ export interface DesktopUpdatesShape {
 }
 
 export class DesktopUpdates extends Context.Service<DesktopUpdates, DesktopUpdatesShape>()(
-  "t3/desktop/Updates",
+  "cafecode/desktop/Updates",
 ) {}
 
 const {
@@ -173,7 +173,7 @@ function getAutoUpdateDisabledReason(args: {
     return "Automatic updates are only available in packaged production builds.";
   }
   if (args.disabledByEnv) {
-    return "Automatic updates are disabled by the T3CODE_DISABLE_AUTO_UPDATE setting.";
+    return "Automatic updates are disabled by the CAFE_CODE_DISABLE_AUTO_UPDATE setting.";
   }
   if (args.platform === "linux" && !args.appImage) {
     return "Automatic updates on Linux require running the AppImage build.";

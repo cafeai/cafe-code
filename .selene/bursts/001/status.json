@@ -1,0 +1,22 @@
+{
+  "adjudication_decision": "auditor",
+  "adjudication_note": "Both reconciliations agreed substantively on a source-grounded tiered rename classification plan. Adopt Claude's reconciliation for the agreed-plan skeleton and treat .selene/bursts/001/design/rename-classification.md as the detailed Burst 001 planning artifact for the Cafe Code rename. No implementation burst is approved yet.",
+  "adjudication_phase": "design",
+  "audit": ".selene/bursts/001/audit.md",
+  "correction_round": 0,
+  "final_verdict": "AUDIT_PASS",
+  "finished_at": "2026-05-21T00:12:50.164213+00:00",
+  "finished_audit_at": "2026-05-21T00:45:41.736787+00:00",
+  "finished_burst_at": "2026-05-21T00:45:41.737313+00:00",
+  "finished_implementation_at": "2026-05-21T00:35:08.381454+00:00",
+  "implementation_log": ".selene/bursts/001/implement_codex.log",
+  "implementation_report": ".selene/bursts/001/artifacts/IMPLEMENTATION_REPORT.md",
+  "last_audit": ".selene/bursts/001/audit.md",
+  "last_verdict": "AUDIT_PASS",
+  "phase": "burst-complete",
+  "plan_path": ".selene/bursts/001/design/adjudication_request.md",
+  "started_at": "2026-05-21T00:22:30.344770+00:00",
+  "started_audit_at": "2026-05-21T00:35:08.381959+00:00",
+  "started_burst_at": "2026-05-21T00:22:30.344183+00:00",
+  "updated_at": "2026-05-21T00:45:41.737374+00:00"
+}

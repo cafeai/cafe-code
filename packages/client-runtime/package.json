@@ -1,6 +1,7 @@
 {
-  "name": "@t3tools/client-runtime",
+  "name": "@cafecode/client-runtime",
   "private": true,
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
     ".": {
@@ -13,8 +14,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@t3tools/contracts": "workspace:*",
-    "@t3tools/shared": "workspace:*",
+    "@cafecode/contracts": "workspace:*",
+    "@cafecode/shared": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {

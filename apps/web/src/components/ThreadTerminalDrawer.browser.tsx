@@ -1,7 +1,7 @@
 import "../index.css";
 
-import { scopeThreadRef } from "@t3tools/client-runtime";
-import { ThreadId } from "@t3tools/contracts";
+import { scopeThreadRef } from "@cafecode/client-runtime";
+import { ThreadId } from "@cafecode/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 

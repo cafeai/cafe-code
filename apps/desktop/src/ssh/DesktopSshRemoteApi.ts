@@ -7,9 +7,10 @@ import {
   type AuthWebSocketTokenResult as AuthWebSocketTokenResultType,
   ExecutionEnvironmentDescriptor,
   type ExecutionEnvironmentDescriptor as ExecutionEnvironmentDescriptorType,
-} from "@t3tools/contracts";
-import { SshHttpBridgeError } from "@t3tools/ssh/errors";
-import { fetchLoopbackSshJson } from "@t3tools/ssh/tunnel";
+} from "@cafecode/contracts";
+import { CAFE_CODE_ENVIRONMENT_ENDPOINT_PATH } from "@cafecode/shared/environmentEndpoint";
+import { SshHttpBridgeError } from "@cafecode/ssh/errors";
+import { fetchLoopbackSshJson } from "@cafecode/ssh/tunnel";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -53,7 +54,7 @@ export interface DesktopSshRemoteApiShape {
 export class DesktopSshRemoteApi extends Context.Service<
   DesktopSshRemoteApi,
   DesktopSshRemoteApiShape
->()("t3/desktop/SshRemoteApi") {}
+>()("cafecode/desktop/SshRemoteApi") {}
 
 const decodeExecutionEnvironmentDescriptor = Schema.decodeUnknownEffect(
   ExecutionEnvironmentDescriptor,
@@ -76,7 +77,7 @@ const make = Effect.gen(function* () {
     fetchEnvironmentDescriptor: ({ httpBaseUrl }) =>
       fetchLoopbackSshJson<unknown>({
         httpBaseUrl,
-        pathname: "/.well-known/t3/environment",
+        pathname: CAFE_CODE_ENVIRONMENT_ENDPOINT_PATH,
       }).pipe(
         Effect.flatMap(decodeExecutionEnvironmentDescriptor),
         Effect.mapError(mapError("fetch-environment-descriptor")),

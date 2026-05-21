@@ -10,10 +10,11 @@ import {
   type SourceControlProviderAuth,
   type SourceControlRepositoryCloneUrls,
   type SourceControlRepositoryVisibility,
-} from "@t3tools/contracts";
+} from "@cafecode/contracts";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
-import { sanitizeBranchFragment } from "@t3tools/shared/git";
-import { detectSourceControlProviderFromRemoteUrl } from "@t3tools/shared/sourceControl";
+import { cafeCodeConfigWithDefault, cafeCodeOptionalConfig } from "@cafecode/shared/compatEnv";
+import { sanitizeBranchFragment, WORKTREE_BRANCH_PREFIX } from "@cafecode/shared/git";
+import { detectSourceControlProviderFromRemoteUrl } from "@cafecode/shared/sourceControl";
 
 import * as BitbucketPullRequests from "./bitbucketPullRequests.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
@@ -23,12 +24,14 @@ import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 const DEFAULT_API_BASE_URL = "https://api.bitbucket.org/2.0";
 
 const BitbucketApiEnvConfig = Config.all({
-  baseUrl: Config.string("T3CODE_BITBUCKET_API_BASE_URL").pipe(
-    Config.withDefault(DEFAULT_API_BASE_URL),
+  baseUrl: cafeCodeConfigWithDefault(
+    "CAFE_CODE_BITBUCKET_API_BASE_URL",
+    Config.string,
+    DEFAULT_API_BASE_URL,
   ),
-  accessToken: Config.string("T3CODE_BITBUCKET_ACCESS_TOKEN").pipe(Config.option),
-  email: Config.string("T3CODE_BITBUCKET_EMAIL").pipe(Config.option),
-  apiToken: Config.string("T3CODE_BITBUCKET_API_TOKEN").pipe(Config.option),
+  accessToken: cafeCodeOptionalConfig("CAFE_CODE_BITBUCKET_ACCESS_TOKEN", Config.string),
+  email: cafeCodeOptionalConfig("CAFE_CODE_BITBUCKET_EMAIL", Config.string),
+  apiToken: cafeCodeOptionalConfig("CAFE_CODE_BITBUCKET_API_TOKEN", Config.string),
 });
 
 export class BitbucketApiError extends Schema.TaggedErrorClass<BitbucketApiError>()(
@@ -154,7 +157,7 @@ export interface BitbucketApiShape {
 }
 
 export class BitbucketApi extends Context.Service<BitbucketApi, BitbucketApiShape>()(
-  "t3/source-control/BitbucketApi",
+  "cafecode/source-control/BitbucketApi",
 ) {}
 
 function nonEmpty(value: string | undefined): Option.Option<string> {
@@ -295,7 +298,7 @@ function checkoutBranchName(input: {
     return input.headBranch;
   }
 
-  return `t3code/pr-${input.pullRequestId}/${sanitizeBranchFragment(input.headBranch)}`;
+  return `${WORKTREE_BRANCH_PREFIX}/pr-${input.pullRequestId}/${sanitizeBranchFragment(input.headBranch)}`;
 }
 
 function repositoryNameWithOwner(
@@ -337,7 +340,7 @@ function authFromConfig(
     account: Option.none(),
     host: Option.some("bitbucket.org"),
     detail: Option.some(
-      "Set T3CODE_BITBUCKET_EMAIL and T3CODE_BITBUCKET_API_TOKEN, or T3CODE_BITBUCKET_ACCESS_TOKEN.",
+      "Set CAFE_CODE_BITBUCKET_EMAIL and CAFE_CODE_BITBUCKET_API_TOKEN, or CAFE_CODE_BITBUCKET_ACCESS_TOKEN.",
     ),
   };
 }

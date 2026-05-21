@@ -1,4 +1,4 @@
-import { EnvironmentId, type PersistedSavedEnvironmentRecord } from "@t3tools/contracts";
+import { EnvironmentId, type PersistedSavedEnvironmentRecord } from "@cafecode/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const testEnvironmentId = EnvironmentId.make("environment-1");
@@ -55,6 +55,43 @@ afterEach(() => {
 });
 
 describe("clientPersistenceStorage", () => {
+  it("migrates legacy browser client settings into the Cafe Code key", async () => {
+    const testWindow = getTestWindow();
+    const { DEFAULT_CLIENT_SETTINGS } = await import("@cafecode/contracts/settings");
+    const {
+      CLIENT_SETTINGS_STORAGE_KEY,
+      LEGACY_CLIENT_SETTINGS_STORAGE_KEY,
+      readBrowserClientSettings,
+    } = await import("./clientPersistenceStorage");
+    testWindow.localStorage.setItem(
+      LEGACY_CLIENT_SETTINGS_STORAGE_KEY,
+      JSON.stringify(DEFAULT_CLIENT_SETTINGS),
+    );
+
+    expect(readBrowserClientSettings()).toEqual(DEFAULT_CLIENT_SETTINGS);
+    expect(testWindow.localStorage.getItem(CLIENT_SETTINGS_STORAGE_KEY)).not.toBeNull();
+    expect(testWindow.localStorage.getItem(LEGACY_CLIENT_SETTINGS_STORAGE_KEY)).toBeNull();
+  });
+
+  it("migrates legacy saved environments into the Cafe Code key", async () => {
+    const testWindow = getTestWindow();
+    const {
+      LEGACY_SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
+      SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
+      readBrowserSavedEnvironmentRegistry,
+    } = await import("./clientPersistenceStorage");
+    testWindow.localStorage.setItem(
+      LEGACY_SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
+      JSON.stringify({ version: 1, records: [savedRegistryRecord] }),
+    );
+
+    expect(readBrowserSavedEnvironmentRegistry()).toEqual([savedRegistryRecord]);
+    expect(testWindow.localStorage.getItem(SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY)).not.toBeNull();
+    expect(
+      testWindow.localStorage.getItem(LEGACY_SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY),
+    ).toBeNull();
+  });
+
   it("stores browser secrets inline with the saved environment record", async () => {
     const testWindow = getTestWindow();
     const {

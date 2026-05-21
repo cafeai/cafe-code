@@ -1,4 +1,4 @@
-import type { DesktopSshPasswordPromptRequest } from "@t3tools/contracts";
+import type { DesktopSshPasswordPromptRequest } from "@cafecode/contracts";
 import { useEffect, useId, useRef, useState } from "react";
 
 import { Button } from "../ui/button";
@@ -159,9 +159,9 @@ export function SshPasswordPromptDialog() {
         <DialogHeader>
           <DialogTitle>SSH Password Required</DialogTitle>
           <DialogDescription>
-            T3 needs your SSH password to connect to{" "}
+            Cafe Code needs your SSH password to connect to{" "}
             {target ? <code>{target}</code> : "the remote host"}. The password is passed to the
-            local SSH process for this connection attempt and is not saved by T3 Code.
+            local SSH process for this connection attempt and is not saved by Cafe Code.
           </DialogDescription>
         </DialogHeader>
         <DialogPanel className="space-y-3" scrollFade={false}>

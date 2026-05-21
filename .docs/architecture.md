@@ -1,10 +1,10 @@
 # Architecture
 
-T3 Code runs as a **Node.js WebSocket server** that wraps `codex app-server` (JSON-RPC over stdio) and serves a React web app.
+Cafe Code runs as an **Electron desktop app** backed by a Node.js WebSocket server that wraps `codex app-server` (JSON-RPC over stdio) and serves the React renderer assets locally.
 
 ```
 ┌─────────────────────────────────┐
-│  Browser (React + Vite)         │
+│  Electron renderer (React/Vite) │
 │  wsTransport (state machine)    │
 │  Typed push decode at boundary  │
 └──────────┬──────────────────────┘
@@ -27,9 +27,9 @@ T3 Code runs as a **Node.js WebSocket server** that wraps `codex app-server` (JS
 
 ## Components
 
-- **Browser app**: The React app renders session state, owns the client-side WebSocket transport, and treats typed push events as the boundary between server runtime details and UI state.
+- **Electron renderer**: The React app renders session state, owns the client-side WebSocket transport, and treats typed push events as the boundary between server runtime details and UI state.
 
-- **Server**: `apps/server` is the main coordinator. It serves the web app, accepts WebSocket requests, waits for startup readiness before welcoming clients, and sends all outbound pushes through a single ordered push path.
+- **Server**: `apps/server` is the main coordinator. It serves the renderer assets, accepts WebSocket requests, waits for startup readiness before welcoming clients, and sends all outbound pushes through a single ordered push path.
 
 - **Provider runtime**: `codex app-server` does the actual provider/session work. The server talks to it over JSON-RPC on stdio and translates those runtime events into the app's orchestration model.
 

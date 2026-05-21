@@ -4,7 +4,7 @@ import {
   CursorSettings,
   OpenCodeSettings,
   ProviderDriverKind,
-} from "@t3tools/contracts";
+} from "@cafecode/contracts";
 import type * as Schema from "effect/Schema";
 import { ClaudeAI, CursorIcon, type Icon, OpenAI, OpenCodeIcon } from "../Icons";
 
@@ -14,7 +14,7 @@ type ProviderSettingsSchema = {
 
 /**
  * Browser-safe provider definition. This is deliberately shaped like the
- * future provider package client export: the core web app gets a schema with
+ * future provider package client export: the core renderer gets a schema with
  * field annotations plus provider-level presentation metadata, then renders
  * settings generically.
  */

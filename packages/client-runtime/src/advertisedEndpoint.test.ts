@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  classifyHostedHttpsCompatibility,
   createAdvertisedEndpoint,
   deriveWsBaseUrl,
   normalizeHttpBaseUrl,
@@ -22,15 +21,6 @@ describe("advertised endpoint helpers", () => {
     expect(deriveWsBaseUrl("http://127.0.0.1:3773")).toBe("ws://127.0.0.1:3773/");
   });
 
-  it("marks HTTP endpoints as blocked from hosted HTTPS apps", () => {
-    expect(classifyHostedHttpsCompatibility("http://192.168.1.44:3773")).toBe(
-      "mixed-content-blocked",
-    );
-    expect(classifyHostedHttpsCompatibility("https://desktop.example.com", "compatible")).toBe(
-      "compatible",
-    );
-  });
-
   it("creates provider-neutral endpoint records", () => {
     expect(
       createAdvertisedEndpoint({
@@ -49,10 +39,6 @@ describe("advertised endpoint helpers", () => {
       httpBaseUrl: "http://192.168.1.44:3773/",
       wsBaseUrl: "ws://192.168.1.44:3773/",
       reachability: "lan",
-      compatibility: {
-        hostedHttpsApp: "mixed-content-blocked",
-        desktopApp: "compatible",
-      },
       source: "desktop-core",
       status: "available",
       isDefault: true,

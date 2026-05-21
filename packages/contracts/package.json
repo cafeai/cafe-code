@@ -1,7 +1,8 @@
 {
-  "name": "@t3tools/contracts",
+  "name": "@cafecode/contracts",
   "version": "0.0.24",
   "private": true,
+  "license": "AGPL-3.0-or-later",
   "files": [
     "dist"
   ],

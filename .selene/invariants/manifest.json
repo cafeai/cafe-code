@@ -1,0 +1,8 @@
+{
+  "files": {
+    ".selene/adrs/0001-adopt-selene-strict-close-methodology.md": "26de842af08ace392b0f32ff4aa6156247d7a767b9d45850956dacccfc08b2b9",
+    ".selene/classifications.py": "a04460af881d4d0632c840aaf506f8ae0d3615c98c5c5b6bc7d0c652727deb9d",
+    ".selene/nonclaims.md": "a455fe90640d5768ce73c252631c09c085ec2eb8548565e1490d38fca5bc0a98",
+    ".selene/terminology_lock_v1.md": "6f0dc19acd70119df7a4b346817ecd501d3da710c8cf534cd46f7f31d955bca8"
+  }
+}

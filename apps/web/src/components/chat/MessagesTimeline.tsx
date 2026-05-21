@@ -3,7 +3,7 @@ import {
   type MessageId,
   type ServerProviderSkill,
   type TurnId,
-} from "@t3tools/contracts";
+} from "@cafecode/contracts";
 import {
   createContext,
   memo,
@@ -57,7 +57,7 @@ import {
 } from "~/lib/terminalContext";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
-import { type TimestampFormat } from "@t3tools/contracts/settings";
+import { type TimestampFormat } from "@cafecode/contracts/settings";
 import { formatTimestamp } from "../../timestampFormat";
 
 import {

@@ -1,5 +1,6 @@
 import Mime from "@effect/platform-node/Mime";
-import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
+import { CAFE_CODE_ENVIRONMENT_ENDPOINT_PATH } from "@cafecode/shared/environmentEndpoint";
+import { decodeOtlpTraceRecords } from "@cafecode/shared/observability";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -67,18 +68,20 @@ const requireAuthenticatedRequest = Effect.gen(function* () {
   yield* serverAuth.authenticateHttpRequest(request);
 });
 
+const serverEnvironmentRouteHandler = Effect.gen(function* () {
+  const descriptor = yield* Effect.service(ServerEnvironment).pipe(
+    Effect.flatMap((serverEnvironment) => serverEnvironment.getDescriptor),
+  );
+  return HttpServerResponse.jsonUnsafe(descriptor, {
+    status: 200,
+    headers: browserApiCorsHeaders,
+  });
+});
+
 export const serverEnvironmentRouteLayer = HttpRouter.add(
   "GET",
-  "/.well-known/t3/environment",
-  Effect.gen(function* () {
-    const descriptor = yield* Effect.service(ServerEnvironment).pipe(
-      Effect.flatMap((serverEnvironment) => serverEnvironment.getDescriptor),
-    );
-    return HttpServerResponse.jsonUnsafe(descriptor, {
-      status: 200,
-      headers: browserApiCorsHeaders,
-    });
-  }),
+  CAFE_CODE_ENVIRONMENT_ENDPOINT_PATH,
+  serverEnvironmentRouteHandler,
 );
 
 class DecodeOtlpTraceRecordsError extends Data.TaggedError("DecodeOtlpTraceRecordsError")<{

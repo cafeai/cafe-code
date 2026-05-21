@@ -3,7 +3,7 @@ import {
   type EnvironmentId,
   type GitManagerServiceError,
   type VcsStatusResult,
-} from "@t3tools/contracts";
+} from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
 import { Atom } from "effect/unstable/reactivity";
 import { useEffect } from "react";

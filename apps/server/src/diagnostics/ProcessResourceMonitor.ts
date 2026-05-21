@@ -3,7 +3,7 @@ import type {
   ServerProcessResourceHistoryInput,
   ServerProcessResourceHistoryResult,
   ServerProcessResourceHistorySummary,
-} from "@t3tools/contracts";
+} from "@cafecode/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -50,7 +50,7 @@ export interface ProcessResourceMonitorShape {
 export class ProcessResourceMonitor extends Context.Service<
   ProcessResourceMonitor,
   ProcessResourceMonitorShape
->()("t3/diagnostics/ProcessResourceMonitor") {}
+>()("cafecode/diagnostics/ProcessResourceMonitor") {}
 
 function dateTimeFromMillis(ms: number): DateTime.Utc {
   return DateTime.makeUnsafe(ms);

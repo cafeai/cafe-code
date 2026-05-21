@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { ChildProcessSpawner } from "effect/unstable/process";
-import { VcsProcessSpawnError } from "@t3tools/contracts";
+import { VcsProcessSpawnError } from "@cafecode/contracts";
 
 import { ServerConfig } from "../config.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
@@ -94,7 +94,7 @@ Logged in to github.com account juliusmarminge (keyring)
             account: Option.none(),
             host: Option.some("bitbucket.org"),
             detail: Option.some(
-              "Set T3CODE_BITBUCKET_EMAIL and T3CODE_BITBUCKET_API_TOKEN, or T3CODE_BITBUCKET_ACCESS_TOKEN.",
+              "Set CAFE_CODE_BITBUCKET_EMAIL and CAFE_CODE_BITBUCKET_API_TOKEN, or CAFE_CODE_BITBUCKET_ACCESS_TOKEN.",
             ),
           }),
         },

@@ -1,3 +1,4 @@
+import { ENVIRONMENT_ENDPOINT_PATHS } from "@cafecode/shared/environmentEndpoint";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -292,14 +293,21 @@ export const probeTailscaleHttpsEndpoint = (input: {
   Effect.gen(function* () {
     const client = yield* HttpClient.HttpClient;
     const response = yield* Effect.gen(function* () {
-      const url = new URL("/.well-known/t3/environment", input.baseUrl);
-      const request = HttpClientRequest.get(url.toString());
-      return yield* client.execute(request);
+      for (const pathname of ENVIRONMENT_ENDPOINT_PATHS) {
+        const url = new URL(pathname, input.baseUrl);
+        const request = HttpClientRequest.get(url.toString());
+        const candidate = yield* client.execute(request);
+        if (candidate.status >= 200 && candidate.status < 300) {
+          return candidate;
+        }
+      }
+      return null;
     }).pipe(Effect.timeoutOption(input.timeoutMs ?? TAILSCALE_PROBE_TIMEOUT_MS));
 
     return Option.match(response, {
       onNone: () => false,
-      onSome: (httpResponse) => httpResponse.status >= 200 && httpResponse.status < 300,
+      onSome: (httpResponse) =>
+        httpResponse !== null && httpResponse.status >= 200 && httpResponse.status < 300,
     });
   }).pipe(Effect.catch(() => Effect.succeed(false)));
 

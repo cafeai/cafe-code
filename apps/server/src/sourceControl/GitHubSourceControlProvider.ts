@@ -7,7 +7,7 @@ import {
   SourceControlProviderError,
   type ChangeRequest,
   type ChangeRequestState,
-} from "@t3tools/contracts";
+} from "@cafecode/contracts";
 
 import * as GitHubCli from "./GitHubCli.ts";
 import * as GitHubPullRequests from "./gitHubPullRequests.ts";

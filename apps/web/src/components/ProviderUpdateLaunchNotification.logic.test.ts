@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
+import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@cafecode/contracts";
 
 import {
   canOneClickUpdateProviderCandidate,

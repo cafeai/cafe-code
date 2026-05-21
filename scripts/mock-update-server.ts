@@ -4,6 +4,7 @@ import * as NodeHttp from "node:http";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { cafeCodeConfigWithDefault } from "@cafecode/shared/compatEnv";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -20,9 +21,11 @@ const resolveMockUpdateServerConfig = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const config = yield* Config.all({
-    port: Config.port("T3CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT").pipe(Config.withDefault(3000)),
-    root: Config.string("T3CODE_DESKTOP_MOCK_UPDATE_SERVER_ROOT").pipe(
-      Config.withDefault("../release-mock"),
+    port: cafeCodeConfigWithDefault("CAFE_CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT", Config.port, 3000),
+    root: cafeCodeConfigWithDefault(
+      "CAFE_CODE_DESKTOP_MOCK_UPDATE_SERVER_ROOT",
+      Config.string,
+      "../release-mock",
     ),
   }).asEffect();
 

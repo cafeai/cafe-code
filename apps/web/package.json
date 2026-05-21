@@ -1,7 +1,8 @@
 {
-  "name": "@t3tools/web",
+  "name": "@cafecode/web",
   "version": "0.0.24",
   "private": true,
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,6 +15,9 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",
+    "@cafecode/client-runtime": "workspace:*",
+    "@cafecode/contracts": "workspace:*",
+    "@cafecode/shared": "workspace:*",
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/modifiers": "^9.0.0",
     "@dnd-kit/sortable": "^10.0.0",
@@ -23,9 +27,6 @@
     "@legendapp/list": "3.0.0-beta.44",
     "@lexical/react": "^0.41.0",
     "@pierre/diffs": "catalog:",
-    "@t3tools/client-runtime": "workspace:*",
-    "@t3tools/contracts": "workspace:*",
-    "@t3tools/shared": "workspace:*",
     "@tanstack/react-pacer": "^0.19.4",
     "@tanstack/react-query": "^5.90.0",
     "@tanstack/react-router": "^1.160.2",
@@ -50,7 +51,6 @@
     "@types/babel__core": "^7.20.5",
     "@types/react": "~19.2.14",
     "@types/react-dom": "~19.2.3",
-    "@vercel/config": "^0.3.0",
     "@vitejs/plugin-react": "^6.0.0",
     "@vitest/browser-playwright": "^4.0.18",
     "babel-plugin-react-compiler": "1.0.0",

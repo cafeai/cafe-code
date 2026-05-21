@@ -1,6 +1,7 @@
 {
-  "name": "@t3tools/tailscale",
+  "name": "@cafecode/tailscale",
   "private": true,
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
     ".": {
@@ -13,6 +14,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@cafecode/shared": "workspace:*",
     "@effect/platform-node": "catalog:",
     "effect": "catalog:"
   },

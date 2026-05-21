@@ -16,7 +16,7 @@ import {
   type ServerProcessResourceHistoryResult,
   type ServerProvider,
   type SourceControlDiscoveryResult,
-} from "@t3tools/contracts";
+} from "@cafecode/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import { page } from "vitest/browser";
@@ -590,10 +590,6 @@ describe("GeneralSettingsPanel observability", () => {
           httpBaseUrl: "http://127.0.0.1:3773/",
           wsBaseUrl: "ws://127.0.0.1:3773/",
           reachability: "loopback",
-          compatibility: {
-            hostedHttpsApp: "mixed-content-blocked",
-            desktopApp: "compatible",
-          },
           source: "desktop-core",
           status: "available",
           isDefault: true,
@@ -610,10 +606,6 @@ describe("GeneralSettingsPanel observability", () => {
           httpBaseUrl: "http://100.105.39.17:3773/",
           wsBaseUrl: "ws://100.105.39.17:3773/",
           reachability: "private-network",
-          compatibility: {
-            hostedHttpsApp: "mixed-content-blocked",
-            desktopApp: "compatible",
-          },
           source: "desktop-addon",
           status: "available",
         },
@@ -662,10 +654,6 @@ describe("GeneralSettingsPanel observability", () => {
           httpBaseUrl: "http://127.0.0.1:3773/",
           wsBaseUrl: "ws://127.0.0.1:3773/",
           reachability: "loopback",
-          compatibility: {
-            hostedHttpsApp: "mixed-content-blocked",
-            desktopApp: "compatible",
-          },
           source: "desktop-core",
           status: "available",
         },
@@ -681,10 +669,6 @@ describe("GeneralSettingsPanel observability", () => {
           httpBaseUrl: "http://192.168.86.39:3773/",
           wsBaseUrl: "ws://192.168.86.39:3773/",
           reachability: "lan",
-          compatibility: {
-            hostedHttpsApp: "mixed-content-blocked",
-            desktopApp: "compatible",
-          },
           source: "desktop-core",
           status: "available",
           isDefault: true,
@@ -701,10 +685,6 @@ describe("GeneralSettingsPanel observability", () => {
           httpBaseUrl: "http://100.105.39.17:3773/",
           wsBaseUrl: "ws://100.105.39.17:3773/",
           reachability: "private-network",
-          compatibility: {
-            hostedHttpsApp: "mixed-content-blocked",
-            desktopApp: "compatible",
-          },
           source: "desktop-addon",
           status: "available",
         },
@@ -981,7 +961,9 @@ describe("GeneralSettingsPanel observability", () => {
     await networkAccessToggle.click();
     await expect.element(page.getByText("Enable network access?")).toBeInTheDocument();
     await expect
-      .element(page.getByText("T3 Code will restart to expose this environment over the network."))
+      .element(
+        page.getByText("Cafe Code will restart to expose this environment over the network."),
+      )
       .toBeInTheDocument();
     await page.getByRole("button", { name: "Restart and enable", exact: true }).click();
     await vi.waitFor(() => {

@@ -1,4 +1,5 @@
-import type { ProjectScript } from "@t3tools/contracts";
+import type { ProjectScript } from "@cafecode/contracts";
+import { writeCafeCodeEnv } from "./compatEnv.ts";
 
 interface ProjectScriptRuntimeEnvInput {
   project: {
@@ -20,14 +21,15 @@ export function projectScriptCwd(input: {
 export function projectScriptRuntimeEnv(
   input: ProjectScriptRuntimeEnvInput,
 ): Record<string, string> {
-  const env: Record<string, string> = {
-    T3CODE_PROJECT_ROOT: input.project.cwd,
-  };
+  const env: Record<string, string> = {};
+  writeCafeCodeEnv(env, "CAFE_CODE_PROJECT_ROOT", input.project.cwd);
   if (input.worktreePath) {
-    env.T3CODE_WORKTREE_PATH = input.worktreePath;
+    writeCafeCodeEnv(env, "CAFE_CODE_WORKTREE_PATH", input.worktreePath);
   }
   if (input.extraEnv) {
-    return { ...env, ...input.extraEnv };
+    for (const [key, value] of Object.entries(input.extraEnv)) {
+      env[key] = value;
+    }
   }
   return env;
 }

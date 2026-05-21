@@ -1,0 +1,8 @@
+{
+  "burst": 1,
+  "decision": "auditor",
+  "note": "Both reconciliations agreed substantively on a source-grounded tiered rename classification plan. Adopt Claude's reconciliation for the agreed-plan skeleton and treat .selene/bursts/001/design/rename-classification.md as the detailed Burst 001 planning artifact for the Cafe Code rename. No implementation burst is approved yet.",
+  "phase": "design",
+  "recorded_at": "2026-05-21T00:16:27.273268+00:00",
+  "synthesised_agreed_plan": ".selene/bursts/001/design/agreed_plan.md"
+}

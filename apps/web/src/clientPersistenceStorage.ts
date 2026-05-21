@@ -4,13 +4,18 @@ import {
   type ClientSettings,
   type EnvironmentId as EnvironmentIdValue,
   type PersistedSavedEnvironmentRecord,
-} from "@t3tools/contracts";
+} from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
 
-import { getLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
+import {
+  getLocalStorageItemWithLegacy,
+  setLocalStorageItemWithLegacy,
+} from "./hooks/useLocalStorage";
 
-export const CLIENT_SETTINGS_STORAGE_KEY = "t3code:client-settings:v1";
-export const SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY = "t3code:saved-environment-registry:v1";
+export const CLIENT_SETTINGS_STORAGE_KEY = "cafecode:client-settings:v1";
+export const LEGACY_CLIENT_SETTINGS_STORAGE_KEY = "t3code:client-settings:v1";
+export const SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY = "cafecode:saved-environment-registry:v1";
+export const LEGACY_SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY = "t3code:saved-environment-registry:v1";
 
 const BrowserSavedEnvironmentRecordSchema = Schema.Struct({
   environmentId: EnvironmentId,
@@ -62,7 +67,11 @@ export function readBrowserClientSettings(): ClientSettings | null {
   }
 
   try {
-    return getLocalStorageItem(CLIENT_SETTINGS_STORAGE_KEY, ClientSettingsSchema);
+    return getLocalStorageItemWithLegacy(
+      CLIENT_SETTINGS_STORAGE_KEY,
+      [LEGACY_CLIENT_SETTINGS_STORAGE_KEY],
+      ClientSettingsSchema,
+    );
   } catch {
     return null;
   }
@@ -73,7 +82,12 @@ export function writeBrowserClientSettings(settings: ClientSettings): void {
     return;
   }
 
-  setLocalStorageItem(CLIENT_SETTINGS_STORAGE_KEY, settings, ClientSettingsSchema);
+  setLocalStorageItemWithLegacy(
+    CLIENT_SETTINGS_STORAGE_KEY,
+    [LEGACY_CLIENT_SETTINGS_STORAGE_KEY],
+    settings,
+    ClientSettingsSchema,
+  );
 }
 
 function readBrowserSavedEnvironmentRegistryDocument(): BrowserSavedEnvironmentRegistryDocument {
@@ -82,8 +96,9 @@ function readBrowserSavedEnvironmentRegistryDocument(): BrowserSavedEnvironmentR
   }
 
   try {
-    const parsed = getLocalStorageItem(
+    const parsed = getLocalStorageItemWithLegacy(
       SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
+      [LEGACY_SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY],
       BrowserSavedEnvironmentRegistryDocumentSchema,
     );
     return parsed ?? {};
@@ -99,8 +114,9 @@ function writeBrowserSavedEnvironmentRegistryDocument(
     return;
   }
 
-  setLocalStorageItem(
+  setLocalStorageItemWithLegacy(
     SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
+    [LEGACY_SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY],
     document,
     BrowserSavedEnvironmentRegistryDocumentSchema,
   );

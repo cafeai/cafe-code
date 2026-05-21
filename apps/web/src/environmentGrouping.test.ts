@@ -1,5 +1,5 @@
-import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
-import { scopeProjectRef } from "@t3tools/client-runtime";
+import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@cafecode/contracts";
+import { scopeProjectRef } from "@cafecode/client-runtime";
 import { describe, expect, it } from "vitest";
 
 import {

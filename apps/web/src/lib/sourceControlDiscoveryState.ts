@@ -5,8 +5,8 @@ import {
   createSourceControlDiscoveryManager,
   getSourceControlDiscoveryTargetKey,
   sourceControlDiscoveryStateAtom,
-} from "@t3tools/client-runtime";
-import { EnvironmentId, type SourceControlDiscoveryResult } from "@t3tools/contracts";
+} from "@cafecode/client-runtime";
+import { EnvironmentId, type SourceControlDiscoveryResult } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import { Atom } from "effect/unstable/reactivity";
 

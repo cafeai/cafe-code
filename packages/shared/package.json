@@ -1,6 +1,7 @@
 {
-  "name": "@t3tools/shared",
+  "name": "@cafecode/shared",
   "private": true,
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
     "./model": {
@@ -90,6 +91,14 @@
     "./keybindings": {
       "types": "./src/keybindings.ts",
       "import": "./src/keybindings.ts"
+    },
+    "./compatEnv": {
+      "types": "./src/compatEnv.ts",
+      "import": "./src/compatEnv.ts"
+    },
+    "./environmentEndpoint": {
+      "types": "./src/environmentEndpoint.ts",
+      "import": "./src/environmentEndpoint.ts"
     }
   },
   "scripts": {
@@ -97,7 +106,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@t3tools/contracts": "workspace:*",
+    "@cafecode/contracts": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {

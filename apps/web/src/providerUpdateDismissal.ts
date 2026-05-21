@@ -1,9 +1,14 @@
 import { useCallback, useMemo } from "react";
 import * as Schema from "effect/Schema";
 
-import { getLocalStorageItem, setLocalStorageItem, useLocalStorage } from "./hooks/useLocalStorage";
+import {
+  getLocalStorageItemWithLegacy,
+  setLocalStorageItemWithLegacy,
+  useLocalStorage,
+} from "./hooks/useLocalStorage";
 
-export const PROVIDER_UPDATE_DISMISSALS_STORAGE_KEY = "t3code:provider-update-dismissals:v1";
+export const PROVIDER_UPDATE_DISMISSALS_STORAGE_KEY = "cafecode:provider-update-dismissals:v1";
+export const LEGACY_PROVIDER_UPDATE_DISMISSALS_STORAGE_KEY = "t3code:provider-update-dismissals:v1";
 
 const ProviderUpdateDismissalsSchema = Schema.Struct({
   keys: Schema.Array(Schema.String),
@@ -14,8 +19,9 @@ type ProviderUpdateDismissals = typeof ProviderUpdateDismissalsSchema.Type;
 function readProviderUpdateDismissals(): ProviderUpdateDismissals {
   try {
     return (
-      getLocalStorageItem(
+      getLocalStorageItemWithLegacy(
         PROVIDER_UPDATE_DISMISSALS_STORAGE_KEY,
+        [LEGACY_PROVIDER_UPDATE_DISMISSALS_STORAGE_KEY],
         ProviderUpdateDismissalsSchema,
       ) ?? {
         keys: [],
@@ -28,8 +34,9 @@ function readProviderUpdateDismissals(): ProviderUpdateDismissals {
 
 function writeProviderUpdateDismissals(document: ProviderUpdateDismissals): void {
   try {
-    setLocalStorageItem(
+    setLocalStorageItemWithLegacy(
       PROVIDER_UPDATE_DISMISSALS_STORAGE_KEY,
+      [LEGACY_PROVIDER_UPDATE_DISMISSALS_STORAGE_KEY],
       document,
       ProviderUpdateDismissalsSchema,
     );
@@ -66,6 +73,7 @@ export function useDismissedProviderUpdateNotificationKeys() {
     PROVIDER_UPDATE_DISMISSALS_STORAGE_KEY,
     { keys: [] },
     ProviderUpdateDismissalsSchema,
+    [LEGACY_PROVIDER_UPDATE_DISMISSALS_STORAGE_KEY],
   );
   const dismissedKeys = dismissals.keys;
 

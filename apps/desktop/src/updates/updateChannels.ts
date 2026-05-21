@@ -1,4 +1,4 @@
-import type { DesktopUpdateChannel } from "@t3tools/contracts";
+import type { DesktopUpdateChannel } from "@cafecode/contracts";
 
 const NIGHTLY_VERSION_PATTERN = /-nightly\.\d{8}\.\d+$/;
 

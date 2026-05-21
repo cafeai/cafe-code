@@ -6,7 +6,8 @@ type ThemeSnapshot = {
   systemDark: boolean;
 };
 
-const STORAGE_KEY = "t3code:theme";
+const STORAGE_KEY = "cafecode:theme";
+const LEGACY_STORAGE_KEY = "t3code:theme";
 const MEDIA_QUERY = "(prefers-color-scheme: dark)";
 const DEFAULT_THEME_SNAPSHOT: ThemeSnapshot = {
   theme: "system",
@@ -35,6 +36,12 @@ function getStored(): Theme {
   if (!hasThemeStorage()) return DEFAULT_THEME_SNAPSHOT.theme;
   const raw = localStorage.getItem(STORAGE_KEY);
   if (raw === "light" || raw === "dark" || raw === "system") return raw;
+  const legacyRaw = localStorage.getItem(LEGACY_STORAGE_KEY);
+  if (legacyRaw === "light" || legacyRaw === "dark" || legacyRaw === "system") {
+    localStorage.setItem(STORAGE_KEY, legacyRaw);
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+    return legacyRaw;
+  }
   return DEFAULT_THEME_SNAPSHOT.theme;
 }
 
@@ -157,7 +164,7 @@ function subscribe(listener: () => void): () => void {
 
   // Listen for storage changes from other tabs
   const handleStorage = (e: StorageEvent) => {
-    if (e.key === STORAGE_KEY) {
+    if (e.key === STORAGE_KEY || e.key === LEGACY_STORAGE_KEY) {
       applyTheme(getStored(), true);
       emitChange();
     }
@@ -181,6 +188,7 @@ export function useTheme() {
   const setTheme = useCallback((next: Theme) => {
     if (!hasThemeStorage()) return;
     localStorage.setItem(STORAGE_KEY, next);
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
     applyTheme(next, true);
     emitChange();
   }, []);

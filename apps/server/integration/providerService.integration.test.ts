@@ -1,6 +1,6 @@
-import type { ProviderRuntimeEvent } from "@t3tools/contracts";
-import { ProviderDriverKind, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
-import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts/settings";
+import type { ProviderRuntimeEvent } from "@cafecode/contracts";
+import { ProviderDriverKind, ProviderInstanceId, ThreadId } from "@cafecode/contracts";
+import { DEFAULT_SERVER_SETTINGS } from "@cafecode/contracts/settings";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, assert } from "@effect/vitest";
 import * as Effect from "effect/Effect";

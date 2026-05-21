@@ -1,11 +1,11 @@
-# T3 Code
+# Cafe Code
 
-T3 Code is a minimal web GUI for coding agents (currently Codex, Claude, and OpenCode, more coming soon).
+Cafe Code is a minimal desktop GUI for coding agents (currently Codex, Claude, and OpenCode, more coming soon).
 
 ## Installation
 
 > [!WARNING]
-> T3 Code currently supports Codex, Claude, and OpenCode.
+> Cafe Code currently supports Codex, Claude, and OpenCode.
 > Install and authenticate at least one provider before use:
 >
 > - Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
@@ -15,30 +15,16 @@ T3 Code is a minimal web GUI for coding agents (currently Codex, Claude, and Ope
 ### Run without installing
 
 ```bash
-npx t3
+npx cafe-code
 ```
+
+Run Cafe Code with `npx cafe-code`.
 
 ### Desktop app
 
-Install the latest version of the desktop app from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), or from your favorite package registry:
+Install the latest version of the desktop app from [GitHub Releases](https://github.com/cafeai/cafe-code/releases).
 
-#### Windows (`winget`)
-
-```bash
-winget install T3Tools.T3Code
-```
-
-#### macOS (Homebrew)
-
-```bash
-brew install --cask t3-code
-```
-
-#### Arch Linux (AUR)
-
-```bash
-yay -S t3code-bin
-```
+Package registry aliases are deferred until Cafe Code-owned package IDs are published.
 
 ## Some notes
 

@@ -2,15 +2,14 @@ import {
   attachEnvironmentDescriptor,
   createKnownEnvironment,
   type KnownEnvironment,
-} from "@t3tools/client-runtime";
-import type { EnvironmentId, ExecutionEnvironmentDescriptor } from "@t3tools/contracts";
+} from "@cafecode/client-runtime";
+import type { EnvironmentId, ExecutionEnvironmentDescriptor } from "@cafecode/contracts";
+import { ENVIRONMENT_ENDPOINT_PATHS } from "@cafecode/shared/environmentEndpoint";
 import { create } from "zustand";
 
 import { BootstrapHttpError, retryTransientBootstrap } from "./auth";
 
 import { readPrimaryEnvironmentTarget, resolvePrimaryEnvironmentHttpUrl } from "./target";
-
-const SERVER_ENVIRONMENT_DESCRIPTOR_PATH = "/.well-known/t3/environment";
 
 interface PrimaryEnvironmentBootstrapState {
   readonly descriptor: ExecutionEnvironmentDescriptor | null;
@@ -48,19 +47,25 @@ function createPrimaryKnownEnvironment(input: {
 
 async function fetchPrimaryEnvironmentDescriptor(): Promise<ExecutionEnvironmentDescriptor> {
   return retryTransientBootstrap(async () => {
-    const response = await fetch(
-      resolvePrimaryEnvironmentHttpUrl(SERVER_ENVIRONMENT_DESCRIPTOR_PATH),
-    );
-    if (!response.ok) {
-      throw new BootstrapHttpError({
-        message: `Failed to load server environment descriptor (${response.status}).`,
-        status: response.status,
-      });
+    for (const pathname of ENVIRONMENT_ENDPOINT_PATHS) {
+      const response = await fetch(resolvePrimaryEnvironmentHttpUrl(pathname));
+      if (response.ok) {
+        const descriptor = (await response.json()) as ExecutionEnvironmentDescriptor;
+        writePrimaryEnvironmentDescriptor(descriptor);
+        return descriptor;
+      }
+      if (pathname === ENVIRONMENT_ENDPOINT_PATHS.at(-1)) {
+        throw new BootstrapHttpError({
+          message: `Failed to load server environment descriptor (${response.status}).`,
+          status: response.status,
+        });
+      }
     }
 
-    const descriptor = (await response.json()) as ExecutionEnvironmentDescriptor;
-    writePrimaryEnvironmentDescriptor(descriptor);
-    return descriptor;
+    throw new BootstrapHttpError({
+      message: "Failed to load server environment descriptor.",
+      status: 0,
+    });
   });
 }
 

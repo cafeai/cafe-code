@@ -3,13 +3,13 @@ import * as NodeOS from "node:os";
 import {
   createAdvertisedEndpoint,
   type CreateAdvertisedEndpointInput,
-} from "@t3tools/shared/advertisedEndpoint";
+} from "@cafecode/shared/advertisedEndpoint";
 import type {
   AdvertisedEndpoint,
   AdvertisedEndpointProvider,
   DesktopServerExposureMode,
   DesktopServerExposureState,
-} from "@t3tools/contracts";
+} from "@cafecode/contracts";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -192,16 +192,14 @@ const resolveDesktopCoreAdvertisedEndpoints = (
 
   for (const customEndpointUrl of input.customHttpsEndpointUrls ?? []) {
     try {
-      const isHttpsEndpoint = isHttpsEndpointUrl(customEndpointUrl);
       endpoints.push(
         createManualEndpoint({
           id: `manual:${customEndpointUrl}`,
-          label: isHttpsEndpoint ? "Custom HTTPS" : "Custom endpoint",
+          label: isHttpsEndpointUrl(customEndpointUrl) ? "Custom HTTPS" : "Custom endpoint",
           httpBaseUrl: customEndpointUrl,
           reachability: "public",
-          ...(isHttpsEndpoint ? ({ hostedHttpsCompatibility: "compatible" } as const) : {}),
           status: "unknown",
-          description: isHttpsEndpoint
+          description: isHttpsEndpointUrl(customEndpointUrl)
             ? "User-configured HTTPS endpoint for this desktop backend."
             : "User-configured endpoint for this desktop backend.",
         }),
@@ -275,7 +273,7 @@ export interface DesktopServerExposureShape {
 export class DesktopServerExposure extends Context.Service<
   DesktopServerExposure,
   DesktopServerExposureShape
->()("t3/desktop/ServerExposure") {}
+>()("cafecode/desktop/ServerExposure") {}
 
 export interface DesktopNetworkInterfacesServiceShape {
   readonly read: Effect.Effect<DesktopNetworkInterfaces>;
@@ -284,7 +282,7 @@ export interface DesktopNetworkInterfacesServiceShape {
 export class DesktopNetworkInterfacesService extends Context.Service<
   DesktopNetworkInterfacesService,
   DesktopNetworkInterfacesServiceShape
->()("t3/desktop/ServerExposure/NetworkInterfaces") {}
+>()("cafecode/desktop/ServerExposure/NetworkInterfaces") {}
 
 interface RuntimeState {
   readonly requestedMode: DesktopServerExposureMode;

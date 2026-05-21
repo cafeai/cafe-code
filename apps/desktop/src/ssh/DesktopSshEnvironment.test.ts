@@ -1,8 +1,8 @@
 import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import * as NetService from "@t3tools/shared/Net";
-import { SshPasswordPromptError } from "@t3tools/ssh/errors";
+import * as NetService from "@cafecode/shared/Net";
+import { SshPasswordPromptError } from "@cafecode/ssh/errors";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";

@@ -1,8 +1,11 @@
-import type { EnvironmentId, ServerConfig } from "@t3tools/contracts";
+import type { EnvironmentId, ServerConfig } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
 
 import { APP_VERSION } from "./branding";
-import { getLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
+import {
+  getLocalStorageItemWithLegacy,
+  setLocalStorageItemWithLegacy,
+} from "./hooks/useLocalStorage";
 
 export interface VersionMismatch {
   readonly clientVersion: string;
@@ -10,7 +13,9 @@ export interface VersionMismatch {
   readonly hint: string;
 }
 
-export const VERSION_MISMATCH_DISMISSALS_STORAGE_KEY = "t3code:version-mismatch-dismissals:v1";
+export const VERSION_MISMATCH_DISMISSALS_STORAGE_KEY = "cafecode:version-mismatch-dismissals:v1";
+export const LEGACY_VERSION_MISMATCH_DISMISSALS_STORAGE_KEY =
+  "t3code:version-mismatch-dismissals:v1";
 
 const VersionMismatchDismissalsSchema = Schema.Struct({
   keys: Schema.Array(Schema.String),
@@ -39,7 +44,7 @@ export function resolveVersionMismatch(
   return {
     clientVersion: normalizedClientVersion,
     serverVersion: normalizedServerVersion,
-    hint: "Version mismatch. Try syncing the client and server to the same T3 Code version.",
+    hint: "Version mismatch. Try syncing the client and server to the same Cafe Code version.",
   };
 }
 
@@ -59,8 +64,9 @@ export function buildVersionMismatchDismissalKey(
 function readVersionMismatchDismissals(): VersionMismatchDismissals {
   try {
     return (
-      getLocalStorageItem(
+      getLocalStorageItemWithLegacy(
         VERSION_MISMATCH_DISMISSALS_STORAGE_KEY,
+        [LEGACY_VERSION_MISMATCH_DISMISSALS_STORAGE_KEY],
         VersionMismatchDismissalsSchema,
       ) ?? { keys: [] }
     );
@@ -71,8 +77,9 @@ function readVersionMismatchDismissals(): VersionMismatchDismissals {
 
 function writeVersionMismatchDismissals(document: VersionMismatchDismissals): void {
   try {
-    setLocalStorageItem(
+    setLocalStorageItemWithLegacy(
       VERSION_MISMATCH_DISMISSALS_STORAGE_KEY,
+      [LEGACY_VERSION_MISMATCH_DISMISSALS_STORAGE_KEY],
       document,
       VersionMismatchDismissalsSchema,
     );

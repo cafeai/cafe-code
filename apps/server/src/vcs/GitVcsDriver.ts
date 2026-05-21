@@ -25,10 +25,11 @@ import {
   type VcsRemoveWorktreeInput,
   type VcsStatusInput,
   type VcsStatusResult,
-} from "@t3tools/contracts";
+} from "@cafecode/contracts";
 import * as GitVcsDriverCore from "./GitVcsDriverCore.ts";
 import * as VcsDriver from "./VcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
+import { legacyCheckpointRefAlias } from "../checkpointing/Utils.ts";
 
 export interface ExecuteGitInput {
   readonly operation: string;
@@ -217,7 +218,7 @@ export interface GitVcsDriverShape {
 }
 
 export class GitVcsDriver extends Context.Service<GitVcsDriver, GitVcsDriverShape>()(
-  "t3/vcs/GitVcsDriver",
+  "cafecode/vcs/GitVcsDriver",
 ) {}
 
 const WORKSPACE_FILES_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
@@ -574,20 +575,26 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
     }).pipe(Effect.map((result) => result.exitCode === 0));
 
   const resolveCheckpointCommit = (cwd: string, checkpointRef: string) =>
-    execute({
-      operation: "GitVcsDriver.checkpoints.resolveCheckpointCommit",
-      cwd,
-      args: ["rev-parse", "--verify", "--quiet", `${checkpointRef}^{commit}`],
-      allowNonZeroExit: true,
-    }).pipe(
-      Effect.map((result) => {
-        if (result.exitCode !== 0) {
-          return null;
+    Effect.gen(function* () {
+      const checkpointRefs = [checkpointRef, legacyCheckpointRefAlias(checkpointRef)].filter(
+        (value): value is string => typeof value === "string" && value.length > 0,
+      );
+      for (const candidateRef of checkpointRefs) {
+        const result = yield* execute({
+          operation: "GitVcsDriver.checkpoints.resolveCheckpointCommit",
+          cwd,
+          args: ["rev-parse", "--verify", "--quiet", `${candidateRef}^{commit}`],
+          allowNonZeroExit: true,
+        });
+        if (result.exitCode === 0) {
+          const commit = result.stdout.trim();
+          if (commit.length > 0) {
+            return commit;
+          }
         }
-        const commit = result.stdout.trim();
-        return commit.length > 0 ? commit : null;
-      }),
-    );
+      }
+      return null;
+    });
 
   const resolveGitCommonDir = (cwd: string) =>
     Effect.gen(function* () {
@@ -604,14 +611,14 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
     captureCheckpoint: Effect.fn("GitVcsDriver.checkpoints.captureCheckpoint")(function* (input) {
       const operation = "GitVcsDriver.checkpoints.captureCheckpoint";
       const gitCommonDir = yield* resolveGitCommonDir(input.cwd);
-      const tempIndexPath = path.join(gitCommonDir, `t3-checkpoint-index-${randomUUID()}`);
+      const tempIndexPath = path.join(gitCommonDir, `cafecode-checkpoint-index-${randomUUID()}`);
       const commitEnv: NodeJS.ProcessEnv = {
         ...process.env,
         GIT_INDEX_FILE: tempIndexPath,
-        GIT_AUTHOR_NAME: "T3 Code",
-        GIT_AUTHOR_EMAIL: "t3code@users.noreply.github.com",
-        GIT_COMMITTER_NAME: "T3 Code",
-        GIT_COMMITTER_EMAIL: "t3code@users.noreply.github.com",
+        GIT_AUTHOR_NAME: "Cafe Code",
+        GIT_AUTHOR_EMAIL: "cafecode@users.noreply.github.com",
+        GIT_COMMITTER_NAME: "Cafe Code",
+        GIT_COMMITTER_EMAIL: "cafecode@users.noreply.github.com",
       };
 
       const cleanupTempIndex = fileSystem
@@ -653,7 +660,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           });
         }
 
-        const message = `t3 checkpoint ref=${input.checkpointRef}`;
+        const message = `Cafe Code checkpoint ref=${input.checkpointRef}`;
         const commitTreeResult = yield* execute({
           operation,
           cwd: input.cwd,
@@ -676,6 +683,14 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           cwd: input.cwd,
           args: ["update-ref", input.checkpointRef, commitOid],
         });
+        const legacyRef = legacyCheckpointRefAlias(input.checkpointRef);
+        if (legacyRef !== null) {
+          yield* execute({
+            operation,
+            cwd: input.cwd,
+            args: ["update-ref", legacyRef, commitOid],
+          });
+        }
       }).pipe(Effect.ensuring(cleanupTempIndex));
     }),
 
@@ -730,27 +745,19 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         "checkpoint.fallback_from_to_head": input.fallbackFromToHead,
       });
 
-      let fromRevision: string = input.fromCheckpointRef;
-      if (input.fallbackFromToHead === true) {
-        const resolvedFromCommit = yield* resolveCheckpointCommit(
-          input.cwd,
-          input.fromCheckpointRef,
-        );
-        if (resolvedFromCommit) {
-          fromRevision = resolvedFromCommit;
-        } else {
-          const headCommit = yield* resolveHeadCommit(input.cwd);
-          if (!headCommit) {
-            return yield* new VcsProcessExitError({
-              operation,
-              command: "git diff",
-              cwd: input.cwd,
-              exitCode: 1,
-              detail: "Checkpoint ref is unavailable for diff operation.",
-            });
-          }
-          fromRevision = headCommit;
-        }
+      let fromRevision = yield* resolveCheckpointCommit(input.cwd, input.fromCheckpointRef);
+      if (!fromRevision && input.fallbackFromToHead === true) {
+        fromRevision = yield* resolveHeadCommit(input.cwd);
+      }
+      const toRevision = yield* resolveCheckpointCommit(input.cwd, input.toCheckpointRef);
+      if (!fromRevision || !toRevision) {
+        return yield* new VcsProcessExitError({
+          operation,
+          command: "git diff",
+          cwd: input.cwd,
+          exitCode: 1,
+          detail: "Checkpoint ref is unavailable for diff operation.",
+        });
       }
 
       const result = yield* execute({
@@ -764,7 +771,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           "--no-textconv",
           ...(input.ignoreWhitespace ? ["--ignore-all-space"] : []),
           `${fromRevision}^{commit}`,
-          `${input.toCheckpointRef}^{commit}`,
+          `${toRevision}^{commit}`,
         ],
         allowNonZeroExit: true,
         maxOutputBytes: CHECKPOINT_DIFF_MAX_OUTPUT_BYTES,
@@ -786,7 +793,12 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
     deleteCheckpointRefs: Effect.fn("GitVcsDriver.checkpoints.deleteCheckpointRefs")(
       function* (input) {
         yield* Effect.forEach(
-          input.checkpointRefs,
+          input.checkpointRefs.flatMap((checkpointRef) => [
+            checkpointRef,
+            ...(legacyCheckpointRefAlias(checkpointRef)
+              ? [legacyCheckpointRefAlias(checkpointRef)!]
+              : []),
+          ]),
           (checkpointRef) =>
             execute({
               operation: "GitVcsDriver.checkpoints.deleteCheckpointRefs",

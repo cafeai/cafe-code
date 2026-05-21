@@ -72,10 +72,6 @@ describe("tailscale endpoint provider", () => {
           httpBaseUrl: "http://100.100.100.100:3773/",
           wsBaseUrl: "ws://100.100.100.100:3773/",
           reachability: "private-network",
-          compatibility: {
-            hostedHttpsApp: "mixed-content-blocked",
-            desktopApp: "compatible",
-          },
           source: "desktop-addon",
           status: "available",
           description: "Reachable from devices on the same Tailnet.",
@@ -92,10 +88,6 @@ describe("tailscale endpoint provider", () => {
           httpBaseUrl: "https://desktop.tail.ts.net/",
           wsBaseUrl: "wss://desktop.tail.ts.net/",
           reachability: "private-network",
-          compatibility: {
-            hostedHttpsApp: "requires-configuration",
-            desktopApp: "compatible",
-          },
           source: "desktop-addon",
           status: "unavailable",
           description: "MagicDNS hostname. Configure Tailscale Serve for HTTPS access.",
@@ -128,10 +120,6 @@ describe("tailscale endpoint provider", () => {
             httpBaseUrl: "https://desktop.tail.ts.net/",
             wsBaseUrl: "wss://desktop.tail.ts.net/",
             reachability: "private-network",
-            compatibility: {
-              hostedHttpsApp: "compatible",
-              desktopApp: "compatible",
-            },
             source: "desktop-addon",
             status: "available",
             description: "HTTPS endpoint served by Tailscale Serve.",

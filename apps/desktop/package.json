@@ -1,7 +1,8 @@
 {
-  "name": "@t3tools/desktop",
+  "name": "@cafecode/desktop",
   "version": "0.0.24",
   "private": true,
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
@@ -15,11 +16,11 @@
     "smoke-test": "node scripts/smoke-test.mjs"
   },
   "dependencies": {
+    "@cafecode/contracts": "workspace:*",
+    "@cafecode/shared": "workspace:*",
+    "@cafecode/ssh": "workspace:*",
+    "@cafecode/tailscale": "workspace:*",
     "@effect/platform-node": "catalog:",
-    "@t3tools/contracts": "workspace:*",
-    "@t3tools/shared": "workspace:*",
-    "@t3tools/ssh": "workspace:*",
-    "@t3tools/tailscale": "workspace:*",
     "effect": "catalog:",
     "electron": "41.5.0",
     "electron-updater": "^6.6.2"
@@ -32,5 +33,5 @@
     "typescript": "catalog:",
     "vitest": "catalog:"
   },
-  "productName": "T3 Code (Alpha)"
+  "productName": "Cafe Code (Alpha)"
 }

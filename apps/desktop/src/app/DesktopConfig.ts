@@ -1,3 +1,4 @@
+import { cafeCodeConfigWithDefault, cafeCodeOptionalConfig } from "@cafecode/shared/compatEnv";
 import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Option from "effect/Option";
@@ -8,10 +9,13 @@ const trimNonEmptyOption = (value: string): Option.Option<string> => {
 };
 
 const trimmedString = (name: string) =>
-  Config.string(name).pipe(Config.option, Config.map(Option.flatMap(trimNonEmptyOption)));
+  (name.startsWith("CAFE_CODE_")
+    ? cafeCodeOptionalConfig(name, Config.string)
+    : Config.string(name).pipe(Config.option)
+  ).pipe(Config.map(Option.flatMap(trimNonEmptyOption)));
 
 const optionalBoolean = (name: string) =>
-  Config.boolean(name).pipe(Config.option, Config.map(Option.getOrElse(() => false)));
+  cafeCodeOptionalConfig(name, Config.boolean).pipe(Config.map(Option.getOrElse(() => false)));
 
 const commaSeparatedStrings = (name: string) =>
   trimmedString(name).pipe(
@@ -35,22 +39,26 @@ const compactEnv = (env: Readonly<Record<string, string | undefined>>): Record<s
 export const DesktopConfig = Config.all({
   appDataDirectory: trimmedString("APPDATA"),
   xdgConfigHome: trimmedString("XDG_CONFIG_HOME"),
-  t3Home: trimmedString("T3CODE_HOME"),
+  cafeCodeHome: trimmedString("CAFE_CODE_HOME"),
   devServerUrl: Config.url("VITE_DEV_SERVER_URL").pipe(Config.option),
-  devRemoteT3ServerEntryPath: trimmedString("T3CODE_DEV_REMOTE_T3_SERVER_ENTRY_PATH"),
-  configuredBackendPort: Config.port("T3CODE_PORT").pipe(Config.option),
-  commitHashOverride: trimmedString("T3CODE_COMMIT_HASH"),
-  desktopLanHostOverride: trimmedString("T3CODE_DESKTOP_LAN_HOST"),
-  desktopHttpsEndpointUrls: commaSeparatedStrings("T3CODE_DESKTOP_HTTPS_ENDPOINTS"),
-  otlpTracesUrl: trimmedString("T3CODE_OTLP_TRACES_URL"),
-  otlpExportIntervalMs: Config.int("T3CODE_OTLP_EXPORT_INTERVAL_MS").pipe(
-    Config.withDefault(10_000),
+  devRemoteServerEntryPath: trimmedString("CAFE_CODE_DEV_REMOTE_SERVER_ENTRY_PATH"),
+  configuredBackendPort: cafeCodeOptionalConfig("CAFE_CODE_PORT", Config.port),
+  commitHashOverride: trimmedString("CAFE_CODE_COMMIT_HASH"),
+  desktopLanHostOverride: trimmedString("CAFE_CODE_DESKTOP_LAN_HOST"),
+  desktopHttpsEndpointUrls: commaSeparatedStrings("CAFE_CODE_DESKTOP_HTTPS_ENDPOINTS"),
+  otlpTracesUrl: trimmedString("CAFE_CODE_OTLP_TRACES_URL"),
+  otlpExportIntervalMs: cafeCodeConfigWithDefault(
+    "CAFE_CODE_OTLP_EXPORT_INTERVAL_MS",
+    Config.int,
+    10_000,
   ),
   appImagePath: trimmedString("APPIMAGE"),
-  disableAutoUpdate: optionalBoolean("T3CODE_DISABLE_AUTO_UPDATE"),
-  mockUpdates: optionalBoolean("T3CODE_DESKTOP_MOCK_UPDATES"),
-  mockUpdateServerPort: Config.port("T3CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT").pipe(
-    Config.withDefault(3000),
+  disableAutoUpdate: optionalBoolean("CAFE_CODE_DISABLE_AUTO_UPDATE"),
+  mockUpdates: optionalBoolean("CAFE_CODE_DESKTOP_MOCK_UPDATES"),
+  mockUpdateServerPort: cafeCodeConfigWithDefault(
+    "CAFE_CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT",
+    Config.port,
+    3000,
   ),
 });
 

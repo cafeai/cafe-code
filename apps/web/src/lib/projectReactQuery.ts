@@ -1,4 +1,4 @@
-import type { EnvironmentId, ProjectSearchEntriesResult } from "@t3tools/contracts";
+import type { EnvironmentId, ProjectSearchEntriesResult } from "@cafecode/contracts";
 import { queryOptions } from "@tanstack/react-query";
 import { ensureEnvironmentApi } from "~/environmentApi";
 

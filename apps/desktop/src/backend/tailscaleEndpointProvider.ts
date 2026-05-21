@@ -1,12 +1,12 @@
-import { createAdvertisedEndpoint } from "@t3tools/shared/advertisedEndpoint";
-import type { AdvertisedEndpoint, AdvertisedEndpointProvider } from "@t3tools/contracts";
+import { createAdvertisedEndpoint } from "@cafecode/shared/advertisedEndpoint";
+import type { AdvertisedEndpoint, AdvertisedEndpointProvider } from "@cafecode/contracts";
 import {
   buildTailscaleHttpsBaseUrl,
   isTailscaleIpv4Address,
   parseTailscaleMagicDnsName,
   probeTailscaleHttpsEndpoint,
   readTailscaleStatus,
-} from "@t3tools/tailscale";
+} from "@cafecode/tailscale";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import { HttpClient } from "effect/unstable/http";
@@ -14,7 +14,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 
 import type { DesktopNetworkInterfaces } from "./DesktopServerExposure.ts";
 
-export { isTailscaleIpv4Address, parseTailscaleMagicDnsName } from "@t3tools/tailscale";
+export { isTailscaleIpv4Address, parseTailscaleMagicDnsName } from "@cafecode/tailscale";
 
 const TAILSCALE_ENDPOINT_PROVIDER: AdvertisedEndpointProvider = {
   id: "tailscale",
@@ -89,7 +89,6 @@ const resolveTailscaleMagicDnsAdvertisedEndpoint = Effect.fn(
       label: "Tailscale HTTPS",
       httpBaseUrl,
       reachability: "private-network",
-      hostedHttpsCompatibility: isReachable ? "compatible" : "requires-configuration",
       status: isReachable ? "available" : "unavailable",
       description: isReachable
         ? "HTTPS endpoint served by Tailscale Serve."

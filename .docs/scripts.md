@@ -1,13 +1,13 @@
 # Scripts
 
-- `bun run dev` — Starts contracts, server, and web in `turbo watch` mode.
+- `bun run dev` — Starts contracts, server, and renderer in `turbo watch` mode.
 - `bun run dev:server` — Starts just the WebSocket server (uses Bun TypeScript execution).
-- `bun run dev:web` — Starts just the Vite dev server for the web app.
-- Dev commands default `T3CODE_STATE_DIR` to `~/.t3/dev` to keep dev state isolated from desktop/prod state.
+- `bun run dev:web` — Starts just the Vite dev server for the Electron renderer.
+- Dev commands default `CAFE_CODE_HOME` to `~/.cafecode/dev` while still falling back to an existing `~/.t3/dev` during migration.
 - Override server CLI-equivalent flags from root dev commands with `--`, for example:
   `bun run dev -- --base-dir ~/.t3-2`
-- `bun run start` — Runs the production server (serves built web app as static files).
-- `bun run build` — Builds contracts, web app, and server through Turbo.
+- `bun run start` — Runs the production server (serves built renderer assets as static files).
+- `bun run build` — Builds contracts, renderer, and server through Turbo.
 - `bun run typecheck` — Strict TypeScript checks for all packages.
 - `bun run test` — Runs workspace tests.
 - `bun run dist:desktop:artifact -- --platform <mac|linux|win> --target <target> --arch <arch>` — Builds a desktop artifact for a specific platform/target/arch.
@@ -20,8 +20,8 @@
 
 - Default build is unsigned/not notarized for local sharing.
 - The DMG build uses `assets/macos-icon-1024.png` as the production app icon source.
-- Desktop production windows load the bundled UI from `t3://app/index.html` (not a `127.0.0.1` document URL).
-- Desktop packaging includes `apps/server/dist` (the `t3` backend) and starts it on loopback with an auth token for WebSocket/API traffic.
+- Desktop production windows load the bundled UI from `cafecode://app/index.html` (not a `127.0.0.1` document URL).
+- Desktop packaging includes `apps/server/dist` (the `cafe-code` backend) and starts it on loopback with an auth token for WebSocket/API traffic.
 - Your tester can still open it on macOS by right-clicking the app and choosing **Open** on first launch.
 - To keep staging files for debugging package contents, run: `bun run dist:desktop:dmg -- --keep-stage`
 - To allow code-signing/notarization when configured in CI/secrets, add: `--signed`.
@@ -33,10 +33,10 @@
 
 ## Running multiple dev instances
 
-Set `T3CODE_DEV_INSTANCE` to any value to deterministically shift all dev ports together.
+Set `CAFE_CODE_DEV_INSTANCE` to any value to deterministically shift all dev ports together.
 
-- Default ports: server `3773`, web `5733`
-- Shifted ports: `base + offset` (offset is hashed from `T3CODE_DEV_INSTANCE`)
-- Example: `T3CODE_DEV_INSTANCE=branch-a bun run dev:desktop`
+- Default ports: server `3773`, renderer dev server `5733`
+- Shifted ports: `base + offset` (offset is hashed from `CAFE_CODE_DEV_INSTANCE`)
+- Example: `CAFE_CODE_DEV_INSTANCE=branch-a bun run dev:desktop`
 
-If you want full control instead of hashing, set `T3CODE_PORT_OFFSET` to a numeric offset.
+If you want full control instead of hashing, set `CAFE_CODE_PORT_OFFSET` to a numeric offset.

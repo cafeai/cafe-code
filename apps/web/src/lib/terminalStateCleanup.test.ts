@@ -1,5 +1,5 @@
-import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime";
-import { ThreadId } from "@t3tools/contracts";
+import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
+import { ThreadId } from "@cafecode/contracts";
 import { describe, expect, it } from "vitest";
 
 import { collectActiveTerminalThreadIds } from "./terminalStateCleanup";

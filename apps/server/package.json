@@ -1,14 +1,14 @@
 {
-  "name": "t3",
+  "name": "cafe-code",
   "version": "0.0.24",
-  "license": "MIT",
+  "license": "AGPL-3.0-or-later",
   "repository": {
     "type": "git",
-    "url": "https://github.com/pingdotgg/t3code",
+    "url": "https://github.com/cafeai/cafe-code",
     "directory": "apps/server"
   },
   "bin": {
-    "t3": "./dist/bin.mjs"
+    "cafe-code": "./dist/bin.mjs"
   },
   "files": [
     "dist"
@@ -34,12 +34,12 @@
     "node-pty": "^1.1.0"
   },
   "devDependencies": {
+    "@cafecode/contracts": "workspace:*",
+    "@cafecode/shared": "workspace:*",
+    "@cafecode/tailscale": "workspace:*",
+    "@cafecode/web": "workspace:*",
     "@effect/language-service": "catalog:",
     "@effect/vitest": "catalog:",
-    "@t3tools/contracts": "workspace:*",
-    "@t3tools/shared": "workspace:*",
-    "@t3tools/tailscale": "workspace:*",
-    "@t3tools/web": "workspace:*",
     "@types/bun": "catalog:",
     "@types/node": "catalog:",
     "effect-acp": "workspace:*",
