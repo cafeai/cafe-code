@@ -1,6 +1,20 @@
 {
   "name": "@cafeai/cafe-code",
   "version": "0.0.25",
+  "description": "A minimal AI chat harness for coding agents.",
+  "keywords": [
+    "agent",
+    "ai",
+    "claude",
+    "codex",
+    "coding-agent",
+    "desktop",
+    "electron"
+  ],
+  "homepage": "https://github.com/cafeai/cafe-code#readme",
+  "bugs": {
+    "url": "https://github.com/cafeai/cafe-code/issues"
+  },
   "license": "AGPL-3.0-or-later",
   "repository": {
     "type": "git",
@@ -11,9 +25,13 @@
     "cafe-code": "./dist/bin.mjs"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "dev": "node --watch src/bin.ts",
     "build": "node scripts/cli.ts build",

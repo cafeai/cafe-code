@@ -56,6 +56,7 @@ const makeEnvironmentLayer = (baseDir: string) =>
         NodeServices.layer,
         DesktopConfig.layerTest({
           CAFE_CODE_HOME: baseDir,
+          CAFE_CODE_DESKTOP_DEV: "true",
           VITE_DEV_SERVER_URL: "http://127.0.0.1:5733",
         }),
       ),

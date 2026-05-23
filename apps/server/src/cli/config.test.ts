@@ -98,6 +98,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
                   CAFE_CODE_PORT: "4001",
                   CAFE_CODE_HOST: "0.0.0.0",
                   CAFE_CODE_HOME: baseDir,
+                  CAFE_CODE_DEV_URL: "http://127.0.0.1:5173",
                   VITE_DEV_SERVER_URL: "http://127.0.0.1:5173",
                   CAFE_CODE_NO_BROWSER: "true",
                   CAFE_CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD: "false",
@@ -129,6 +130,48 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
       });
+    }),
+  );
+
+  it.effect("ignores renderer-only Vite dev URL unless Cafe Code dev URL is explicit", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-config-vite-only-" });
+      const derivedPaths = yield* deriveServerPaths(baseDir, undefined);
+      const resolved = yield* resolveServerConfig(
+        {
+          mode: Option.some("desktop"),
+          port: Option.none(),
+          host: Option.none(),
+          baseDir: Option.none(),
+          cwd: Option.none(),
+          devUrl: Option.none(),
+          noBrowser: Option.none(),
+          bootstrapFd: Option.none(),
+          autoBootstrapProjectFromCwd: Option.none(),
+          logWebSocketEvents: Option.none(),
+          tailscaleServeEnabled: Option.none(),
+          tailscaleServePort: Option.none(),
+        },
+        Option.none(),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: {
+                  CAFE_CODE_HOME: baseDir,
+                  VITE_DEV_SERVER_URL: "http://127.0.0.1:5173",
+                },
+              }),
+            ),
+            NetService.layer,
+          ),
+        ),
+      );
+
+      expect(resolved.devUrl).toBeUndefined();
+      expect(resolved.stateDir).toBe(derivedPaths.stateDir);
     }),
   );
 
@@ -164,6 +207,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
                   CAFE_CODE_PORT: "4001",
                   CAFE_CODE_HOST: "0.0.0.0",
                   CAFE_CODE_HOME: join(NodeOS.tmpdir(), "ignored-base"),
+                  CAFE_CODE_DEV_URL: "http://127.0.0.1:5173",
                   VITE_DEV_SERVER_URL: "http://127.0.0.1:5173",
                   CAFE_CODE_NO_BROWSER: "false",
                   CAFE_CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD: "false",

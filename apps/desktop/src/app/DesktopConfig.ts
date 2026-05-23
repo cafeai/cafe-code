@@ -40,6 +40,7 @@ export const DesktopConfig = Config.all({
   appDataDirectory: trimmedString("APPDATA"),
   xdgConfigHome: trimmedString("XDG_CONFIG_HOME"),
   cafeCodeHome: trimmedString("CAFE_CODE_HOME"),
+  desktopDevelopmentMode: optionalBoolean("CAFE_CODE_DESKTOP_DEV"),
   devServerUrl: Config.url("VITE_DEV_SERVER_URL").pipe(Config.option),
   devRemoteServerEntryPath: trimmedString("CAFE_CODE_DEV_REMOTE_SERVER_ENTRY_PATH"),
   configuredBackendPort: cafeCodeOptionalConfig("CAFE_CODE_PORT", Config.port),

@@ -45,7 +45,7 @@ export const baseDirFlag = Flag.string("base-dir").pipe(
 );
 export const devUrlFlag = Flag.string("dev-url").pipe(
   Flag.withSchema(Schema.URLFromString),
-  Flag.withDescription("Dev web URL to proxy/redirect to (equivalent to VITE_DEV_SERVER_URL)."),
+  Flag.withDescription("Development web URL to proxy/redirect to."),
   Flag.optional,
 );
 export const noBrowserFlag = Flag.boolean("no-browser").pipe(
@@ -114,7 +114,7 @@ const EnvServerConfig = Config.all({
   port: cafeCodeOptionalValueConfig("CAFE_CODE_PORT", Config.port),
   host: cafeCodeOptionalValueConfig("CAFE_CODE_HOST", Config.string),
   cafeCodeHome: cafeCodeOptionalValueConfig("CAFE_CODE_HOME", Config.string),
-  devUrl: Config.url("VITE_DEV_SERVER_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  devUrl: Config.url("CAFE_CODE_DEV_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
   noBrowser: cafeCodeOptionalValueConfig("CAFE_CODE_NO_BROWSER", Config.boolean),
   bootstrapFd: cafeCodeOptionalValueConfig("CAFE_CODE_BOOTSTRAP_FD", Config.int),
   autoBootstrapProjectFromCwd: cafeCodeOptionalValueConfig(

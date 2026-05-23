@@ -167,6 +167,7 @@ export function createDevRunnerEnv({
         devUrl?.toString() ??
         `http://${isDesktopMode ? DESKTOP_DEV_LOOPBACK_HOST : "localhost"}:${webPort}`,
     };
+    writeCafeCodeEnv(output, "CAFE_CODE_DEV_URL", output.VITE_DEV_SERVER_URL);
     writeCafeCodeEnv(output, "CAFE_CODE_HOME", resolvedBaseDir);
 
     if (!isDesktopMode) {
@@ -174,6 +175,7 @@ export function createDevRunnerEnv({
       output.VITE_HTTP_URL = `http://localhost:${serverPort}`;
       output.VITE_WS_URL = `ws://localhost:${serverPort}`;
     } else {
+      writeCafeCodeEnv(output, "CAFE_CODE_DESKTOP_DEV", "true");
       writeCafeCodeEnv(output, "CAFE_CODE_PORT", String(serverPort));
       output.VITE_HTTP_URL = `http://${DESKTOP_DEV_LOOPBACK_HOST}:${serverPort}`;
       output.VITE_WS_URL = `ws://${DESKTOP_DEV_LOOPBACK_HOST}:${serverPort}`;
@@ -515,7 +517,7 @@ const devRunnerCli = Command.make("dev-runner", {
   ),
   devUrl: Flag.string("dev-url").pipe(
     Flag.withSchema(Schema.URLFromString),
-    Flag.withDescription("Web dev URL override (forwards to VITE_DEV_SERVER_URL)."),
+    Flag.withDescription("Web dev URL override for development server wiring."),
     Flag.withFallbackConfig(optionalUrlConfig("VITE_DEV_SERVER_URL")),
   ),
   dryRun: Flag.boolean("dry-run").pipe(

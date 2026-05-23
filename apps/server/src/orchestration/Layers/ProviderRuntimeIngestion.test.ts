@@ -2362,7 +2362,7 @@ describe("ProviderRuntimeIngestion", () => {
     expect(completionEvents).toHaveLength(1);
   });
 
-  it("keeps a turn running after assistant message completion until provider thread idle", async () => {
+  it("completes assistant output independently from later provider thread idle/completion events", async () => {
     const harness = await createHarness();
     const turnId = asTurnId("turn-provider-idle");
 
@@ -2408,22 +2408,21 @@ describe("ProviderRuntimeIngestion", () => {
       },
     });
 
-    const stillRunning = await waitForThread(
+    const completedOutput = await waitForThread(
       harness.readModel,
       (thread) =>
         thread.latestTurn?.turnId === turnId &&
-        thread.latestTurn.state === "running" &&
-        thread.latestTurn.completedAt === null &&
-        thread.session?.status === "running" &&
-        thread.session.activeTurnId === turnId &&
+        thread.latestTurn.state === "completed" &&
+        thread.latestTurn.completedAt === "2026-01-01T00:00:02.000Z" &&
+        thread.session?.status === "ready" &&
+        thread.session.activeTurnId === null &&
         thread.messages.some(
           (message: ProviderRuntimeTestMessage) =>
             message.id === "assistant:item-provider-idle" && !message.streaming,
         ),
     );
-    expect(stillRunning.latestTurn?.state).toBe("running");
-    expect(stillRunning.latestTurn?.completedAt).toBeNull();
-    expect(stillRunning.session?.status).toBe("running");
+    expect(completedOutput.latestTurn?.state).toBe("completed");
+    expect(completedOutput.session?.status).toBe("ready");
 
     harness.emit({
       type: "thread.state.changed",
@@ -2440,9 +2439,10 @@ describe("ProviderRuntimeIngestion", () => {
       harness.readModel,
       (thread) =>
         thread.latestTurn?.turnId === turnId &&
-        thread.latestTurn.state === "running" &&
+        thread.latestTurn.state === "completed" &&
+        thread.latestTurn.completedAt === "2026-01-01T00:00:02.000Z" &&
         thread.session?.status === "ready" &&
-        thread.session.activeTurnId === turnId,
+        thread.session.activeTurnId === null,
     );
     expect(readyAfterIdle.session?.status).toBe("ready");
 
@@ -2463,7 +2463,7 @@ describe("ProviderRuntimeIngestion", () => {
       (thread) =>
         thread.latestTurn?.turnId === turnId &&
         thread.latestTurn.state === "completed" &&
-        thread.latestTurn.completedAt === "2026-01-01T00:00:04.000Z" &&
+        thread.latestTurn.completedAt === "2026-01-01T00:00:02.000Z" &&
         thread.session?.status === "ready",
     );
     expect(completed.latestTurn?.state).toBe("completed");

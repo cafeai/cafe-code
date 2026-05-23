@@ -44,6 +44,7 @@ describe("DesktopEnvironment", () => {
         {
           CAFE_CODE_HOME: " /tmp/t3 ",
           CAFE_CODE_COMMIT_HASH: " 0123456789abcdef ",
+          CAFE_CODE_DESKTOP_DEV: "true",
           CAFE_CODE_PORT: "4949",
           VITE_DEV_SERVER_URL: "http://localhost:5173",
           CAFE_CODE_DEV_REMOTE_SERVER_ENTRY_PATH: " /remote/server.mjs ",
@@ -80,6 +81,25 @@ describe("DesktopEnvironment", () => {
       assert.deepEqual(environment.commitHashOverride, Option.some("0123456789abcdef"));
       assert.deepEqual(environment.otlpTracesUrl, Option.some("http://127.0.0.1:4318/v1/traces"));
       assert.equal(environment.otlpExportIntervalMs, 2500);
+    }),
+  );
+
+  it.effect("does not switch app identity to development from an inherited Vite URL", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment(
+        {},
+        {
+          CAFE_CODE_HOME: "/tmp/t3",
+          VITE_DEV_SERVER_URL: "http://localhost:5173",
+        },
+      );
+
+      assert.equal(environment.isDevelopment, false);
+      assert.equal(environment.stateDir, "/tmp/t3/userdata");
+      assert.equal(environment.branding.stageLabel, "Alpha");
+      assert.equal(environment.displayName, "Cafe Code (Alpha)");
+      assert.equal(environment.userDataDirName, "cafecode");
+      assert.equal(environment.appUserModelId, "com.cafeai.cafecode");
     }),
   );
 

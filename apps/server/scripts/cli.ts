@@ -22,16 +22,26 @@ import serverPackageJson from "../package.json" with { type: "json" };
 
 interface PackageJson {
   name: string;
+  description?: string;
+  license: string;
+  homepage?: string;
+  bugs?: {
+    url: string;
+  };
   repository: {
     type: string;
     url: string;
     directory: string;
   };
+  keywords?: string[];
   bin: Record<string, string>;
   type: string;
   version: string;
   engines: Record<string, string>;
   files: string[];
+  publishConfig?: {
+    access: string;
+  };
   dependencies: Record<string, string>;
   overrides: Record<string, string>;
 }
@@ -217,12 +227,18 @@ const publishCmd = Command.make(
           const version = Option.getOrElse(config.appVersion, () => serverPackageJson.version);
           const pkg: PackageJson = {
             name: serverPackageJson.name,
+            description: serverPackageJson.description,
+            license: serverPackageJson.license,
+            homepage: serverPackageJson.homepage,
+            bugs: serverPackageJson.bugs,
             repository: serverPackageJson.repository,
+            keywords: serverPackageJson.keywords,
             bin: serverPackageJson.bin,
             type: serverPackageJson.type,
             version,
             engines: serverPackageJson.engines,
             files: serverPackageJson.files,
+            publishConfig: serverPackageJson.publishConfig,
             dependencies: resolveCatalogDependencies(
               serverPackageJson.dependencies,
               rootPackageJson.workspaces.catalog,
