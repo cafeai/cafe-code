@@ -1,4 +1,4 @@
-import type { AuthPairingLink } from "@cafecode/contracts";
+import type { AuthPairingLink } from "@cafecode/contracts/auth";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";

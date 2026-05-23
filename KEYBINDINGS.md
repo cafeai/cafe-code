@@ -2,9 +2,7 @@
 
 Cafe Code reads keybindings from:
 
-- `~/.cafecode/keybindings.json`
-
-Existing `~/.t3/keybindings.json` files remain supported as a legacy fallback.
+- `~/.cafe-code/keybindings.json`
 
 The file must be a JSON array of rules:
 

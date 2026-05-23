@@ -93,10 +93,6 @@ vi.mock("~/localApi", () => ({
   })),
 }));
 
-vi.mock("~/lib/terminalStateCleanup", () => ({
-  collectActiveTerminalThreadIds: vi.fn(() => []),
-}));
-
 vi.mock("~/orchestrationEventEffects", () => ({
   deriveOrchestrationBatchEffects: vi.fn(() => ({
     promotedThreadRefs: [],
@@ -129,16 +125,6 @@ vi.mock("~/store", () => ({
   selectSidebarThreadSummaryByRef: vi.fn(() => null),
   selectThreadByRef: vi.fn(() => null),
   selectThreadsAcrossEnvironments: vi.fn(() => []),
-}));
-
-vi.mock("~/terminalStateStore", () => ({
-  useTerminalStateStore: {
-    getState: () => ({
-      applyTerminalEvent: vi.fn(),
-      removeTerminalState: vi.fn(),
-      clearTerminalSelection: vi.fn(),
-    }),
-  },
 }));
 
 vi.mock("~/uiStateStore", () => ({
@@ -182,17 +168,6 @@ function createClient() {
       subscribeShell: vi.fn(() => () => undefined),
       subscribeThread: vi.fn(() => () => undefined),
       dispatchCommand: vi.fn(async () => undefined),
-      getTurnDiff: vi.fn(async () => undefined),
-      getFullThreadDiff: vi.fn(async () => undefined),
-    },
-    terminal: {
-      open: vi.fn(async () => undefined),
-      write: vi.fn(async () => undefined),
-      resize: vi.fn(async () => undefined),
-      clear: vi.fn(async () => undefined),
-      restart: vi.fn(async () => undefined),
-      close: vi.fn(async () => undefined),
-      onEvent: vi.fn(() => () => undefined),
     },
     projects: {
       searchEntries: vi.fn(async () => []),
@@ -205,7 +180,6 @@ function createClient() {
       pull: vi.fn(async () => undefined),
       refreshStatus: vi.fn(async () => undefined),
       onStatus: vi.fn(() => () => undefined),
-      runStackedAction: vi.fn(async () => ({})),
       listBranches: vi.fn(async () => []),
       createWorktree: vi.fn(async () => undefined),
       removeWorktree: vi.fn(async () => undefined),

@@ -246,6 +246,34 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.restore": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (thread.deletedAt === null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' is not in the Recycle Bin.`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.restored",
+        payload: {
+          threadId: command.threadId,
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
     case "thread.archive": {
       yield* requireThreadNotArchived({
         readModel,
@@ -292,11 +320,27 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.meta.update": {
-      yield* requireThread({
+      const existingThread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      let clearWorktreePathForProjectMove = false;
+      if (command.projectId !== undefined) {
+        const targetProject = yield* requireProject({
+          readModel,
+          command,
+          projectId: command.projectId,
+        });
+        if (targetProject.deletedAt !== null) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Project '${command.projectId}' has been deleted and cannot receive moved threads.`,
+          });
+        }
+        clearWorktreePathForProjectMove =
+          existingThread.projectId !== command.projectId && command.worktreePath === undefined;
+      }
       const occurredAt = yield* nowIso;
       return {
         ...withEventBase({
@@ -308,12 +352,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.meta-updated",
         payload: {
           threadId: command.threadId,
+          ...(command.projectId !== undefined ? { projectId: command.projectId } : {}),
           ...(command.title !== undefined ? { title: command.title } : {}),
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
             : {}),
           ...(command.branch !== undefined ? { branch: command.branch } : {}),
-          ...(command.worktreePath !== undefined ? { worktreePath: command.worktreePath } : {}),
+          ...(command.worktreePath !== undefined
+            ? { worktreePath: command.worktreePath }
+            : clearWorktreePathForProjectMove
+              ? { worktreePath: null }
+              : {}),
           updatedAt: occurredAt,
         },
       };
@@ -460,6 +509,56 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           createdAt: command.createdAt,
         },
       };
+    }
+
+    case "thread.turn.steer": {
+      const targetThread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (targetThread.session?.status !== "running") {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' does not have a running provider turn to steer.`,
+        });
+      }
+      const userMessageEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.message-sent",
+        payload: {
+          threadId: command.threadId,
+          messageId: command.message.messageId,
+          role: "user",
+          text: command.message.text,
+          attachments: command.message.attachments,
+          turnId: targetThread.session.activeTurnId,
+          streaming: false,
+          createdAt: command.createdAt,
+          updatedAt: command.createdAt,
+        },
+      };
+      const turnSteerRequestedEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        }),
+        causationEventId: userMessageEvent.eventId,
+        type: "thread.turn-steer-requested",
+        payload: {
+          threadId: command.threadId,
+          messageId: command.message.messageId,
+          createdAt: command.createdAt,
+        },
+      };
+      return [userMessageEvent, turnSteerRequestedEvent];
     }
 
     case "thread.approval.respond": {

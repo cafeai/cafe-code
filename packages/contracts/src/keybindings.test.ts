@@ -25,15 +25,15 @@ it.effect("parses keybinding rules", () =>
   Effect.gen(function* () {
     const parsed = yield* decode(KeybindingRule, {
       key: "mod+j",
-      command: "terminal.toggle",
+      command: "commandPalette.toggle",
     });
-    assert.strictEqual(parsed.command, "terminal.toggle");
+    assert.strictEqual(parsed.command, "commandPalette.toggle");
 
     const parsedClose = yield* decode(KeybindingRule, {
       key: "mod+w",
-      command: "terminal.close",
+      command: "chat.new",
     });
-    assert.strictEqual(parsedClose.command, "terminal.close");
+    assert.strictEqual(parsedClose.command, "chat.new");
 
     const parsedDiffToggle = yield* decode(KeybindingRule, {
       key: "mod+d",
@@ -70,6 +70,20 @@ it.effect("parses keybinding rules", () =>
       command: "thread.previous",
     });
     assert.strictEqual(parsedThreadPrevious.command, "thread.previous");
+
+    const parsedComposerSubmit = yield* decode(KeybindingRule, {
+      key: "enter",
+      command: "composer.submit",
+      when: "composerFocused",
+    });
+    assert.strictEqual(parsedComposerSubmit.command, "composer.submit");
+
+    const parsedComposerSteer = yield* decode(KeybindingRule, {
+      key: "mod+enter",
+      command: "composer.steer",
+      when: "composerFocused",
+    });
+    assert.strictEqual(parsedComposerSteer.command, "composer.steer");
   }),
 );
 
@@ -98,8 +112,8 @@ it.effect("accepts dynamic script run commands", () =>
 it.effect("parses keybindings array payload", () =>
   Effect.gen(function* () {
     const parsed = yield* decode(KeybindingsConfig, [
-      { key: "mod+j", command: "terminal.toggle" },
-      { key: "mod+d", command: "terminal.split", when: "terminalFocus" },
+      { key: "mod+j", command: "commandPalette.toggle" },
+      { key: "mod+d", command: "diff.toggle", when: "modelPickerOpen" },
     ]);
     assert.lengthOf(parsed, 2);
   }),
@@ -108,7 +122,7 @@ it.effect("parses keybindings array payload", () =>
 it.effect("parses resolved keybinding rules", () =>
   Effect.gen(function* () {
     const parsed = yield* decode(ResolvedKeybindingRule, {
-      command: "terminal.split",
+      command: "diff.toggle",
       shortcut: {
         key: "d",
         metaKey: false,
@@ -119,10 +133,10 @@ it.effect("parses resolved keybinding rules", () =>
       },
       whenAst: {
         type: "and",
-        left: { type: "identifier", name: "terminalOpen" },
+        left: { type: "identifier", name: "modelPickerOpen" },
         right: {
           type: "not",
-          node: { type: "identifier", name: "terminalFocus" },
+          node: { type: "identifier", name: "false" },
         },
       },
     });
@@ -134,7 +148,7 @@ it.effect("parses resolved keybindings arrays", () =>
   Effect.gen(function* () {
     const parsed = yield* decode(ResolvedKeybindingsConfig, [
       {
-        command: "terminal.toggle",
+        command: "commandPalette.toggle",
         shortcut: {
           key: "j",
           metaKey: false,
@@ -162,7 +176,7 @@ it.effect("parses resolved keybindings arrays", () =>
 
 it.effect("drops unknown fields in resolved keybinding rules", () =>
   decodeResolvedRule({
-    command: "terminal.toggle",
+    command: "commandPalette.toggle",
     shortcut: {
       key: "j",
       metaKey: false,
@@ -176,7 +190,7 @@ it.effect("drops unknown fields in resolved keybinding rules", () =>
     Effect.map((parsed) => {
       const view = parsed as Record<string, unknown>;
       assert.strictEqual("key" in view, false);
-      assert.strictEqual(view.command, "terminal.toggle");
+      assert.strictEqual(view.command, "commandPalette.toggle");
     }),
   ),
 );

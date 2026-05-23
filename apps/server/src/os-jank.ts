@@ -1,6 +1,5 @@
 import * as NodeOS from "node:os";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import {
   readPathFromLoginShell,
@@ -98,17 +97,8 @@ export const expandHomePath = Effect.fn(function* (input: string) {
 
 export const resolveBaseDir = Effect.fn(function* (raw: string | undefined) {
   const { join, resolve } = yield* Path.Path;
-  const fileSystem = yield* FileSystem.FileSystem;
   if (!raw || raw.trim().length === 0) {
-    const cafeHome = join(NodeOS.homedir(), ".cafecode");
-    const legacyHome = join(NodeOS.homedir(), ".t3");
-    if (yield* fileSystem.exists(cafeHome).pipe(Effect.orElseSucceed(() => false))) {
-      return cafeHome;
-    }
-    if (yield* fileSystem.exists(legacyHome).pipe(Effect.orElseSucceed(() => false))) {
-      return legacyHome;
-    }
-    return cafeHome;
+    return join(NodeOS.homedir(), ".cafe-code");
   }
   return resolve(yield* expandHomePath(raw.trim()));
 });

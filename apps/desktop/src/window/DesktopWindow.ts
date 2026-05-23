@@ -16,6 +16,7 @@ import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
+import * as DesktopIpc from "../ipc/DesktopIpc.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 
 const TITLEBAR_HEIGHT = 40;
@@ -36,7 +37,8 @@ type DesktopWindowRuntimeServices =
   | ElectronMenu.ElectronMenu
   | ElectronShell.ElectronShell
   | ElectronTheme.ElectronTheme
-  | ElectronWindow.ElectronWindow;
+  | ElectronWindow.ElectronWindow
+  | DesktopIpc.DesktopIpc;
 
 export class DesktopWindowDevServerUrlMissingError extends Data.TaggedError(
   "DesktopWindowDevServerUrlMissingError",
@@ -151,6 +153,7 @@ const make = Effect.gen(function* () {
   const electronShell = yield* ElectronShell.ElectronShell;
   const electronTheme = yield* ElectronTheme.ElectronTheme;
   const electronWindow = yield* ElectronWindow.ElectronWindow;
+  const desktopIpc = yield* DesktopIpc.DesktopIpc;
   const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
   const state = yield* DesktopState.DesktopState;
   const context = yield* Effect.context<DesktopWindowRuntimeServices>();
@@ -180,6 +183,7 @@ const make = Effect.gen(function* () {
         sandbox: true,
       },
     });
+    yield* desktopIpc.trustWebContents(window.webContents);
 
     window.webContents.on("context-menu", (event, params) => {
       event.preventDefault();

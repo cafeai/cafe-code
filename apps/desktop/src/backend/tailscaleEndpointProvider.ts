@@ -111,12 +111,15 @@ export const resolveTailscaleAdvertisedEndpoints = Effect.fn("resolveTailscaleAd
     ChildProcessSpawner.ChildProcessSpawner | HttpClient.HttpClient
   > {
     const ipEndpoints = resolveTailscaleIpAdvertisedEndpoints(input);
+    const shouldReadMagicDnsStatus = input.statusJson !== undefined || input.serveEnabled === true;
     const dnsName =
       input.statusJson === undefined
-        ? yield* readTailscaleStatus.pipe(
-            Effect.map((status) => status.magicDnsName),
-            Effect.catch(() => Effect.succeed(null)),
-          )
+        ? shouldReadMagicDnsStatus
+          ? yield* readTailscaleStatus.pipe(
+              Effect.map((status) => status.magicDnsName),
+              Effect.catch(() => Effect.succeed(null)),
+            )
+          : null
         : input.statusJson
           ? yield* parseTailscaleMagicDnsName(input.statusJson).pipe(
               Effect.catch(() => Effect.succeed(null)),

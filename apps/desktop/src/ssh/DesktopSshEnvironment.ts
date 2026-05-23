@@ -4,11 +4,6 @@ import type {
   DesktopSshEnvironmentTarget,
 } from "@cafecode/contracts";
 import * as NetService from "@cafecode/shared/Net";
-import {
-  SshPasswordPrompt,
-  type SshPasswordPromptShape,
-  type SshPasswordRequest,
-} from "@cafecode/ssh/auth";
 import { discoverSshHosts } from "@cafecode/ssh/config";
 import {
   SshCommandError,
@@ -16,7 +11,6 @@ import {
   SshInvalidTargetError,
   SshLaunchError,
   SshPairingError,
-  SshPasswordPromptError,
   SshReadinessError,
 } from "@cafecode/ssh/errors";
 import { SshEnvironmentManager, type RemoteCafeCodeRunnerOptions } from "@cafecode/ssh/tunnel";
@@ -27,8 +21,6 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
-
-import * as DesktopSshPasswordPrompts from "./DesktopSshPasswordPrompts.ts";
 
 export type DesktopSshEnvironmentRuntimeServices =
   | ChildProcessSpawner.ChildProcessSpawner
@@ -43,7 +35,6 @@ export type DesktopSshEnvironmentOperationError =
   | SshLaunchError
   | SshPairingError
   | SshReadinessError
-  | SshPasswordPromptError
   | NetService.NetError;
 
 export type DesktopSshEnvironmentDiscoverError = SshHostDiscoveryError;
@@ -79,36 +70,9 @@ function discoverDesktopSshHostsEffect(input?: { readonly homeDir?: string }) {
   return discoverSshHosts(input ?? {});
 }
 
-export function isDesktopSshPasswordPromptCancellation(
-  error: unknown,
-): error is SshPasswordPromptError {
-  return (
-    error instanceof SshPasswordPromptError &&
-    DesktopSshPasswordPrompts.isDesktopSshPasswordPromptCancellation(error.cause)
-  );
-}
-
-const makePasswordPrompt = (
-  prompts: DesktopSshPasswordPrompts.DesktopSshPasswordPromptsShape,
-): SshPasswordPromptShape => ({
-  isAvailable: true,
-  request: (request: SshPasswordRequest) =>
-    prompts.request(request).pipe(
-      Effect.mapError(
-        (cause) =>
-          new SshPasswordPromptError({
-            message: cause.message,
-            cause,
-          }),
-      ),
-    ),
-});
-
 const make = Effect.gen(function* () {
   const manager = yield* SshEnvironmentManager;
-  const prompts = yield* DesktopSshPasswordPrompts.DesktopSshPasswordPrompts;
   const runtimeContext = yield* Effect.context<DesktopSshEnvironmentRuntimeServices>();
-  const passwordPrompt = SshPasswordPrompt.of(makePasswordPrompt(prompts));
 
   return DesktopSshEnvironment.of({
     discoverHosts: (input) =>
@@ -119,19 +83,11 @@ const make = Effect.gen(function* () {
     ensureEnvironment: (target, ensureOptions) =>
       manager
         .ensureEnvironment(target, ensureOptions)
-        .pipe(
-          Effect.provideService(SshPasswordPrompt, passwordPrompt),
-          Effect.provide(runtimeContext),
-          Effect.withSpan("desktop.ssh.ensureEnvironment"),
-        ),
+        .pipe(Effect.provide(runtimeContext), Effect.withSpan("desktop.ssh.ensureEnvironment")),
     disconnectEnvironment: (target) =>
       manager
         .disconnectEnvironment(target)
-        .pipe(
-          Effect.provideService(SshPasswordPrompt, passwordPrompt),
-          Effect.provide(runtimeContext),
-          Effect.withSpan("desktop.ssh.disconnectEnvironment"),
-        ),
+        .pipe(Effect.provide(runtimeContext), Effect.withSpan("desktop.ssh.disconnectEnvironment")),
   });
 });
 

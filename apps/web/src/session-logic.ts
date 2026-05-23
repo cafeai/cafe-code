@@ -153,6 +153,14 @@ export function isLatestTurnSettled(
   if (!latestTurn.completedAt) return false;
   if (!session) return true;
   if (session.orchestrationStatus === "running") return false;
+  if (
+    session.activeTurnId === latestTurn.turnId &&
+    session.orchestrationStatus !== "error" &&
+    session.orchestrationStatus !== "interrupted" &&
+    session.orchestrationStatus !== "stopped"
+  ) {
+    return false;
+  }
   return true;
 }
 
@@ -538,7 +546,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
       payload.detail.length > 0
       ? stripTrailingExitCode(payload.detail).output
       : null
-    : extractToolDetail(payload, title ?? activity.summary);
+    : extractActivityDetail(activity.kind, payload, title ?? activity.summary);
   const toolCallId = isTaskActivity ? null : extractToolCallId(payload);
   const entry: DerivedWorkLogEntry = {
     id: activity.id,
@@ -710,6 +718,20 @@ function asTrimmedString(value: unknown): string | null {
 
 function asNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function safeJsonPreview(value: unknown): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value === "string") {
+    return asTrimmedString(value);
+  }
+  try {
+    return asTrimmedString(JSON.stringify(value));
+  } catch {
+    return null;
+  }
 }
 
 function trimMatchingOuterQuotes(value: string): string {
@@ -1000,6 +1022,25 @@ function extractToolDetail(
   return null;
 }
 
+function extractActivityDetail(
+  activityKind: OrchestrationThreadActivity["kind"],
+  payload: Record<string, unknown> | null,
+  heading: string,
+): string | null {
+  if (activityKind === "runtime.warning" || activityKind === "runtime.error") {
+    const message = asTrimmedString(payload?.message);
+    const detail = safeJsonPreview(payload?.detail);
+    const normalizedMessage = normalizePreviewForComparison(message);
+    const normalizedDetail = normalizePreviewForComparison(detail);
+    if (message && detail && normalizedMessage !== normalizedDetail) {
+      return `${message}\n${detail}`;
+    }
+    return message ?? detail;
+  }
+
+  return extractToolDetail(payload, heading);
+}
+
 function stripTrailingExitCode(value: string): {
   output: string | null;
   exitCode?: number | undefined;
@@ -1045,11 +1086,18 @@ function extractWorkLogRequestKind(
 
 function pushChangedFile(target: string[], seen: Set<string>, value: unknown) {
   const normalized = asTrimmedString(value);
-  if (!normalized || seen.has(normalized)) {
+  if (!normalized || isTruncatedPathCandidate(normalized) || seen.has(normalized)) {
     return;
   }
   seen.add(normalized);
   target.push(normalized);
+}
+
+function isTruncatedPathCandidate(value: string): boolean {
+  const normalized = value.trim();
+  return (
+    normalized.includes("…") || normalized.includes("[truncated]") || normalized.includes("...")
+  );
 }
 
 function collectChangedFiles(value: unknown, target: string[], seen: Set<string>, depth: number) {
@@ -1058,6 +1106,13 @@ function collectChangedFiles(value: unknown, target: string[], seen: Set<string>
   }
   if (Array.isArray(value)) {
     for (const entry of value) {
+      if (typeof entry === "string") {
+        pushChangedFile(target, seen, entry);
+        if (target.length >= 12) {
+          return;
+        }
+        continue;
+      }
       collectChangedFiles(entry, target, seen, depth + 1);
       if (target.length >= 12) {
         return;
@@ -1073,10 +1128,14 @@ function collectChangedFiles(value: unknown, target: string[], seen: Set<string>
 
   pushChangedFile(target, seen, record.path);
   pushChangedFile(target, seen, record.filePath);
+  pushChangedFile(target, seen, record.file_path);
   pushChangedFile(target, seen, record.relativePath);
+  pushChangedFile(target, seen, record.relative_path);
   pushChangedFile(target, seen, record.filename);
   pushChangedFile(target, seen, record.newPath);
+  pushChangedFile(target, seen, record.new_path);
   pushChangedFile(target, seen, record.oldPath);
+  pushChangedFile(target, seen, record.old_path);
 
   for (const nestedKey of [
     "item",
@@ -1089,6 +1148,7 @@ function collectChangedFiles(value: unknown, target: string[], seen: Set<string>
     "patch",
     "patches",
     "operations",
+    "changedFiles",
   ]) {
     if (!(nestedKey in record)) {
       continue;
@@ -1101,6 +1161,11 @@ function collectChangedFiles(value: unknown, target: string[], seen: Set<string>
 }
 
 function extractChangedFiles(payload: Record<string, unknown> | null): string[] {
+  const itemType = extractWorkLogItemType(payload);
+  const requestKind = extractWorkLogRequestKind(payload);
+  if (itemType !== "file_change" && requestKind !== "file-change") {
+    return [];
+  }
   const changedFiles: string[] = [];
   const seen = new Set<string>();
   collectChangedFiles(asRecord(payload?.data), changedFiles, seen, 0);

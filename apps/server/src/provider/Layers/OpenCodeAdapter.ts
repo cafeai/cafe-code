@@ -1415,6 +1415,7 @@ export function makeOpenCodeAdapter(
       provider: PROVIDER,
       capabilities: {
         sessionModelSwitch: "in-session",
+        liveSteer: "unsupported",
       },
       startSession,
       sendTurn,

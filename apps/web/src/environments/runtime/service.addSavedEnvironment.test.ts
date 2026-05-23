@@ -602,6 +602,32 @@ describe("addSavedEnvironment", () => {
     await resetEnvironmentServiceForTests();
   });
 
+  it("times out desktop ssh bootstrap without creating a saved environment", async () => {
+    vi.useFakeTimers();
+    mockEnsureSshEnvironment.mockImplementation(() => new Promise(() => {}));
+
+    const { connectDesktopSshEnvironment, resetEnvironmentServiceForTests } =
+      await import("./service");
+
+    const connectPromise = connectDesktopSshEnvironment({
+      alias: "devbox",
+      hostname: "devbox",
+      username: null,
+      port: null,
+    });
+    const rejectionExpectation = expect(connectPromise).rejects.toThrow(
+      "Timed out while starting the SSH environment",
+    );
+
+    await vi.advanceTimersByTimeAsync(90_000);
+
+    await rejectionExpectation;
+    expect(mockResolveRemotePairingTarget).not.toHaveBeenCalled();
+    expect(mockUpsert).not.toHaveBeenCalled();
+
+    await resetEnvironmentServiceForTests();
+  });
+
   it("disconnects the desktop ssh process before removing a saved ssh environment", async () => {
     mockSavedRecords = [
       {

@@ -111,6 +111,16 @@ export type ServerProviderSkill = typeof ServerProviderSkill.Type;
 export const ServerProviderAvailability = Schema.Literals(["available", "unavailable"]);
 export type ServerProviderAvailability = typeof ServerProviderAvailability.Type;
 
+export const ServerProviderLiveSteerSupport = Schema.Literals(["supported", "unsupported"]);
+export type ServerProviderLiveSteerSupport = typeof ServerProviderLiveSteerSupport.Type;
+
+export const ServerProviderRuntimeCapabilities = Schema.Struct({
+  liveSteer: ServerProviderLiveSteerSupport.pipe(
+    Schema.withDecodingDefault(Effect.succeed("unsupported" as const)),
+  ),
+});
+export type ServerProviderRuntimeCapabilities = typeof ServerProviderRuntimeCapabilities.Type;
+
 export const ServerProviderContinuation = Schema.Struct({
   groupKey: TrimmedNonEmptyString,
 });
@@ -186,6 +196,7 @@ export const ServerProvider = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   skills: Schema.Array(ServerProviderSkill).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  runtimeCapabilities: Schema.optionalKey(ServerProviderRuntimeCapabilities),
   versionAdvisory: Schema.optionalKey(ServerProviderVersionAdvisory),
   updateState: Schema.optionalKey(ServerProviderUpdateState),
 });

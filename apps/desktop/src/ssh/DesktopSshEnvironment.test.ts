@@ -2,14 +2,12 @@ import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as NetService from "@cafecode/shared/Net";
-import { SshPasswordPromptError } from "@cafecode/ssh/errors";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 
 import * as DesktopSshEnvironment from "./DesktopSshEnvironment.ts";
-import * as DesktopSshPasswordPrompts from "./DesktopSshPasswordPrompts.ts";
 
 function makeTempHomeDir() {
   return Effect.gen(function* () {
@@ -19,21 +17,6 @@ function makeTempHomeDir() {
 }
 
 describe("sshEnvironment", () => {
-  it("treats password prompt timeouts as cancellable authentication prompts", () => {
-    assert.equal(
-      DesktopSshEnvironment.isDesktopSshPasswordPromptCancellation(
-        new SshPasswordPromptError({
-          message: "SSH authentication timed out for devbox.",
-          cause: new DesktopSshPasswordPrompts.DesktopSshPromptTimedOutError({
-            requestId: "prompt-1",
-            destination: "devbox",
-          }),
-        }),
-      ),
-      true,
-    );
-  });
-
   it.effect("wires desktop host discovery through the ssh package runtime", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -100,13 +83,6 @@ describe("sshEnvironment", () => {
     }).pipe(
       Effect.provide(
         DesktopSshEnvironment.layer().pipe(
-          Layer.provideMerge(
-            Layer.succeed(DesktopSshPasswordPrompts.DesktopSshPasswordPrompts, {
-              request: () => Effect.die("unexpected password prompt request"),
-              resolve: () => Effect.die("unexpected password prompt resolution"),
-              cancelPending: () => Effect.void,
-            }),
-          ),
           Layer.provideMerge(NodeServices.layer),
           Layer.provideMerge(NodeHttpClient.layerUndici),
           Layer.provideMerge(NetService.layer),

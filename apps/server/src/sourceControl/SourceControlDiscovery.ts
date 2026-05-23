@@ -17,7 +17,6 @@ interface DiscoveryProbe {
   readonly label: string;
   readonly executable?: string;
   readonly versionArgs?: ReadonlyArray<string>;
-  readonly implemented: boolean;
   readonly installHint: string;
 }
 
@@ -31,7 +30,6 @@ interface DiscoveryProbeResult<Kind extends string> {
   readonly kind: Kind;
   readonly label: string;
   readonly executable?: string;
-  readonly implemented: boolean;
   readonly status: "available" | "missing";
   readonly version: Option.Option<string>;
   readonly installHint: string;
@@ -44,16 +42,7 @@ const VCS_PROBES: ReadonlyArray<VcsProbe> = [
     label: "Git",
     executable: "git",
     versionArgs: ["--version"],
-    implemented: true,
     installHint: "Install Git from https://git-scm.com/downloads or with your package manager.",
-  },
-  {
-    kind: "jj",
-    label: "Jujutsu",
-    executable: "jj",
-    versionArgs: ["--version"],
-    implemented: false,
-    installHint: "Install Jujutsu with `brew install jj` or from https://github.com/jj-vcs/jj.",
   },
 ];
 
@@ -84,7 +73,6 @@ export const layer = Layer.effect(
         return Effect.succeed({
           kind: input.kind,
           label: input.label,
-          implemented: input.implemented,
           status: "missing" as const,
           version: Option.none<string>(),
           installHint: input.installHint,
@@ -109,7 +97,6 @@ export const layer = Layer.effect(
                 kind: input.kind,
                 label: input.label,
                 executable,
-                implemented: input.implemented,
                 status: "available" as const,
                 version: Option.orElse(
                   SourceControlProviderDiscovery.firstNonEmptyLine(result.stdout),
@@ -124,7 +111,6 @@ export const layer = Layer.effect(
               kind: input.kind,
               label: input.label,
               executable,
-              implemented: input.implemented,
               status: "missing" as const,
               version: Option.none<string>(),
               installHint: input.installHint,

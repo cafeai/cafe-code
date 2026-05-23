@@ -62,6 +62,15 @@ function createBrowserLocalApi(rpcClient?: WsRpcClient): LocalApi {
 
         window.open(url, "_blank", "noopener,noreferrer");
       },
+      openPath: async (path) => {
+        if (!window.desktopBridge) {
+          throw unavailableLocalBackendError();
+        }
+        const opened = await window.desktopBridge.openPath(path);
+        if (!opened) {
+          throw new Error("Unable to open file.");
+        }
+      },
     },
     contextMenu: {
       show: async <T extends string>(

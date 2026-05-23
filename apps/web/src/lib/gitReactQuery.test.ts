@@ -17,8 +17,6 @@ import {
   gitBranchSearchInfiniteQueryOptions,
   gitMutationKeys,
   gitPreparePullRequestThreadMutationOptions,
-  gitPullMutationOptions,
-  gitRunStackedActionMutationOptions,
   invalidateGitQueries,
 } from "./gitReactQuery";
 
@@ -38,18 +36,6 @@ const ENVIRONMENT_A = EnvironmentId.make("environment-a");
 const ENVIRONMENT_B = EnvironmentId.make("environment-b");
 
 describe("gitMutationKeys", () => {
-  it("scopes stacked action keys by cwd", () => {
-    expect(gitMutationKeys.runStackedAction(ENVIRONMENT_A, "/repo/a")).not.toEqual(
-      gitMutationKeys.runStackedAction(ENVIRONMENT_A, "/repo/b"),
-    );
-  });
-
-  it("scopes pull keys by cwd", () => {
-    expect(gitMutationKeys.pull(ENVIRONMENT_A, "/repo/a")).not.toEqual(
-      gitMutationKeys.pull(ENVIRONMENT_A, "/repo/b"),
-    );
-  });
-
   it("scopes pull request thread preparation keys by cwd", () => {
     expect(gitMutationKeys.preparePullRequestThread(ENVIRONMENT_A, "/repo/a")).not.toEqual(
       gitMutationKeys.preparePullRequestThread(ENVIRONMENT_A, "/repo/b"),
@@ -59,24 +45,6 @@ describe("gitMutationKeys", () => {
 
 describe("git mutation options", () => {
   const queryClient = new QueryClient();
-
-  it("attaches cwd-scoped mutation key for runStackedAction", () => {
-    const options = gitRunStackedActionMutationOptions({
-      environmentId: ENVIRONMENT_A,
-      cwd: "/repo/a",
-      queryClient,
-    });
-    expect(options.mutationKey).toEqual(gitMutationKeys.runStackedAction(ENVIRONMENT_A, "/repo/a"));
-  });
-
-  it("attaches cwd-scoped mutation key for pull", () => {
-    const options = gitPullMutationOptions({
-      environmentId: ENVIRONMENT_A,
-      cwd: "/repo/a",
-      queryClient,
-    });
-    expect(options.mutationKey).toEqual(gitMutationKeys.pull(ENVIRONMENT_A, "/repo/a"));
-  });
 
   it("attaches cwd-scoped mutation key for preparePullRequestThread", () => {
     const options = gitPreparePullRequestThreadMutationOptions({

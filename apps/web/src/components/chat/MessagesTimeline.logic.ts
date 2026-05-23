@@ -1,6 +1,6 @@
 import * as Equal from "effect/Equal";
 import { type TimelineEntry, type WorkLogEntry } from "../../session-logic";
-import { type ChatMessage, type ProposedPlan, type TurnDiffSummary } from "../../types";
+import { type ChatMessage, type ProposedPlan } from "../../types";
 import { type MessageId, type TurnId } from "@cafecode/contracts";
 
 export const MAX_VISIBLE_WORK_LOG_ENTRIES = 6;
@@ -29,7 +29,6 @@ export type MessagesTimelineRow =
       completionSummary: string | null;
       showAssistantCopyButton: boolean;
       assistantCopyStreaming: boolean;
-      assistantTurnDiffSummary?: TurnDiffSummary | undefined;
       revertTurnCount?: number | undefined;
     }
   | {
@@ -71,7 +70,6 @@ export function normalizeCompactToolLabel(value: string): string {
 export function resolveAssistantMessageCopyState({
   text,
   showCopyButton,
-  streaming,
 }: {
   text: string | null;
   showCopyButton: boolean;
@@ -80,34 +78,8 @@ export function resolveAssistantMessageCopyState({
   const hasText = text !== null && text.trim().length > 0;
   return {
     text: hasText ? text : null,
-    visible: showCopyButton && hasText && !streaming,
+    visible: showCopyButton && hasText,
   };
-}
-
-function deriveTerminalAssistantMessageIds(timelineEntries: ReadonlyArray<TimelineEntry>) {
-  const lastAssistantMessageIdByResponseKey = new Map<string, string>();
-  let nullTurnResponseIndex = 0;
-
-  for (const timelineEntry of timelineEntries) {
-    if (timelineEntry.kind !== "message") {
-      continue;
-    }
-    const { message } = timelineEntry;
-    if (message.role === "user") {
-      nullTurnResponseIndex += 1;
-      continue;
-    }
-    if (message.role !== "assistant") {
-      continue;
-    }
-
-    const responseKey = message.turnId
-      ? `turn:${message.turnId}`
-      : `unkeyed:${nullTurnResponseIndex}`;
-    lastAssistantMessageIdByResponseKey.set(responseKey, message.id);
-  }
-
-  return new Set(lastAssistantMessageIdByResponseKey.values());
 }
 
 export function deriveMessagesTimelineRows(input: {
@@ -118,14 +90,12 @@ export function deriveMessagesTimelineRows(input: {
   activeTurnInProgress?: boolean;
   activeTurnId?: TurnId | null;
   activeTurnStartedAt: string | null;
-  turnDiffSummaryByAssistantMessageId: ReadonlyMap<MessageId, TurnDiffSummary>;
   revertTurnCountByUserMessageId: ReadonlyMap<MessageId, number>;
 }): MessagesTimelineRow[] {
   const nextRows: MessagesTimelineRow[] = [];
   const durationStartByMessageId = computeMessageDurationStart(
     input.timelineEntries.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
   );
-  const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(input.timelineEntries);
 
   for (let index = 0; index < input.timelineEntries.length; index += 1) {
     const timelineEntry = input.timelineEntries[index];
@@ -181,14 +151,8 @@ export function deriveMessagesTimelineRows(input: {
         durationStartByMessageId.get(timelineEntry.message.id) ?? timelineEntry.message.createdAt,
       showCompletionDivider,
       completionSummary: showCompletionDivider ? (input.completionSummary ?? null) : null,
-      showAssistantCopyButton:
-        timelineEntry.message.role === "assistant" &&
-        terminalAssistantMessageIds.has(timelineEntry.message.id),
+      showAssistantCopyButton: timelineEntry.message.role === "assistant",
       assistantCopyStreaming: timelineEntry.message.streaming || assistantTurnStillInProgress,
-      assistantTurnDiffSummary:
-        timelineEntry.message.role === "assistant"
-          ? input.turnDiffSummaryByAssistantMessageId.get(timelineEntry.message.id)
-          : undefined,
       revertTurnCount:
         timelineEntry.message.role === "user"
           ? input.revertTurnCountByUserMessageId.get(timelineEntry.message.id)
@@ -250,7 +214,6 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
         a.completionSummary === bm.completionSummary &&
         a.showAssistantCopyButton === bm.showAssistantCopyButton &&
         a.assistantCopyStreaming === bm.assistantCopyStreaming &&
-        a.assistantTurnDiffSummary === bm.assistantTurnDiffSummary &&
         a.revertTurnCount === bm.revertTurnCount
       );
     }

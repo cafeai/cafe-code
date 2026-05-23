@@ -12,16 +12,11 @@ import { type ChatMessage, type SessionPhase, type Thread, type ThreadSession } 
 import { type ComposerImageAttachment, type DraftThreadState } from "../composerDraftStore";
 import * as Schema from "effect/Schema";
 import { selectThreadByRef, useStore } from "../store";
-import {
-  filterTerminalContextsWithText,
-  stripInlineTerminalContextPlaceholders,
-  type TerminalContextDraft,
-} from "../lib/terminalContext";
 import type { DraftThreadEnvMode } from "../composerDraftStore";
 
-export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "cafecode:last-invoked-script-by-project";
-export const LEGACY_LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by-project";
-export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
+export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "cafe-code:last-invoked-script-by-project";
+export const LEGACY_LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "cafecode:last-invoked-script-by-project";
+const INLINE_CONTEXT_PLACEHOLDER = "\uFFFC";
 
 export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
 
@@ -71,37 +66,6 @@ export function shouldWriteThreadErrorToCurrentServerThread(input: {
     input.serverThread.environmentId === input.routeThreadRef.environmentId &&
     input.serverThread.id === input.targetThreadId,
   );
-}
-
-export function reconcileMountedTerminalThreadIds(input: {
-  currentThreadIds: ReadonlyArray<string>;
-  openThreadIds: ReadonlyArray<string>;
-  activeThreadId: string | null;
-  activeThreadTerminalOpen: boolean;
-  maxHiddenThreadCount?: number;
-}): string[] {
-  const openThreadIdSet = new Set(input.openThreadIds);
-  const hiddenThreadIds = input.currentThreadIds.filter(
-    (threadId) => threadId !== input.activeThreadId && openThreadIdSet.has(threadId),
-  );
-  const maxHiddenThreadCount = Math.max(
-    0,
-    input.maxHiddenThreadCount ?? MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
-  );
-  const nextThreadIds =
-    hiddenThreadIds.length > maxHiddenThreadCount
-      ? hiddenThreadIds.slice(-maxHiddenThreadCount)
-      : hiddenThreadIds;
-
-  if (
-    input.activeThreadId &&
-    input.activeThreadTerminalOpen &&
-    !nextThreadIds.includes(input.activeThreadId)
-  ) {
-    nextThreadIds.push(input.activeThreadId);
-  }
-
-  return nextThreadIds;
 }
 
 export function revokeBlobPreviewUrl(previewUrl: string | undefined): void {
@@ -181,44 +145,14 @@ export function cloneComposerImageForRetry(
   }
 }
 
-export function deriveComposerSendState(options: {
-  prompt: string;
-  imageCount: number;
-  terminalContexts: ReadonlyArray<TerminalContextDraft>;
-}): {
+export function deriveComposerSendState(options: { prompt: string; imageCount: number }): {
   trimmedPrompt: string;
-  sendableTerminalContexts: TerminalContextDraft[];
-  expiredTerminalContextCount: number;
   hasSendableContent: boolean;
 } {
-  const trimmedPrompt = stripInlineTerminalContextPlaceholders(options.prompt).trim();
-  const sendableTerminalContexts = filterTerminalContextsWithText(options.terminalContexts);
-  const expiredTerminalContextCount =
-    options.terminalContexts.length - sendableTerminalContexts.length;
+  const trimmedPrompt = options.prompt.replaceAll(INLINE_CONTEXT_PLACEHOLDER, "").trim();
   return {
     trimmedPrompt,
-    sendableTerminalContexts,
-    expiredTerminalContextCount,
-    hasSendableContent:
-      trimmedPrompt.length > 0 || options.imageCount > 0 || sendableTerminalContexts.length > 0,
-  };
-}
-
-export function buildExpiredTerminalContextToastCopy(
-  expiredTerminalContextCount: number,
-  variant: "omitted" | "empty",
-): { title: string; description: string } {
-  const count = Math.max(1, Math.floor(expiredTerminalContextCount));
-  const noun = count === 1 ? "Expired terminal context" : "Expired terminal contexts";
-  if (variant === "empty") {
-    return {
-      title: `${noun} won't be sent`,
-      description: "Remove it or re-add it to include terminal output.",
-    };
-  }
-  return {
-    title: `${noun} omitted from message`,
-    description: "Re-add it if you want that terminal output included.",
+    hasSendableContent: trimmedPrompt.length > 0 || options.imageCount > 0,
   };
 }
 
@@ -336,6 +270,37 @@ export function createLocalDispatchSnapshot(
   };
 }
 
+function completedTurnAcknowledgesLocalDispatch(
+  localDispatch: LocalDispatchSnapshot,
+  latestTurn: Thread["latestTurn"] | null,
+): boolean {
+  if (!latestTurn?.completedAt) {
+    return false;
+  }
+
+  const dispatchStartedAt = Date.parse(localDispatch.startedAt);
+  const turnCompletedAt = Date.parse(latestTurn.completedAt);
+  if (!Number.isFinite(dispatchStartedAt) || !Number.isFinite(turnCompletedAt)) {
+    return false;
+  }
+
+  return turnCompletedAt >= dispatchStartedAt;
+}
+
+export function resolveFollowUpQueuePhase(input: {
+  phase: SessionPhase;
+  latestTurn: Thread["latestTurn"] | null;
+  activeTurnId: TurnId | null | undefined;
+}): SessionPhase {
+  if (input.phase !== "running") {
+    return input.phase;
+  }
+  if (!input.latestTurn?.completedAt) {
+    return input.phase;
+  }
+  return "ready";
+}
+
 export function hasServerAcknowledgedLocalDispatch(input: {
   localDispatch: LocalDispatchSnapshot | null;
   phase: SessionPhase;
@@ -349,6 +314,10 @@ export function hasServerAcknowledgedLocalDispatch(input: {
     return false;
   }
   if (input.hasPendingApproval || input.hasPendingUserInput || Boolean(input.threadError)) {
+    return true;
+  }
+
+  if (completedTurnAcknowledgesLocalDispatch(input.localDispatch, input.latestTurn)) {
     return true;
   }
 

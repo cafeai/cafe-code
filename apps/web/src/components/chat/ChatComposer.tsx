@@ -50,12 +50,6 @@ import {
   useEffectiveComposerModelState,
 } from "../../composerDraftStore";
 import {
-  type TerminalContextDraft,
-  type TerminalContextSelection,
-  insertInlineTerminalContextPlaceholder,
-  removeInlineTerminalContextPlaceholder,
-} from "../../lib/terminalContext";
-import {
   shouldUseCompactComposerPrimaryActions,
   shouldUseCompactComposerFooter,
 } from "../composerFooterLayout";
@@ -79,6 +73,7 @@ import { ContextWindowMeter } from "./ContextWindowMeter";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { basenameOfPath } from "../../vscode-icons";
 import { cn, randomUUID } from "~/lib/utils";
+import { resolveShortcutCommand } from "../../keybindings";
 import { Separator } from "../ui/separator";
 import { Button } from "../ui/button";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -86,12 +81,15 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import {
   BotIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
   CircleAlertIcon,
   ListTodoIcon,
   type LucideIcon,
   LockIcon,
   LockOpenIcon,
   PenLineIcon,
+  Trash2Icon,
   XIcon,
 } from "lucide-react";
 import { proposedPlanTitle } from "../../proposedPlan";
@@ -156,23 +154,6 @@ const extendReplacementRangeForTrailingSpace = (
   }
   return text[rangeEnd] === " " ? rangeEnd + 1 : rangeEnd;
 };
-
-const syncTerminalContextsByIds = (
-  contexts: ReadonlyArray<TerminalContextDraft>,
-  ids: ReadonlyArray<string>,
-): TerminalContextDraft[] => {
-  const contextsById = new Map(contexts.map((context) => [context.id, context]));
-  return ids.flatMap((id) => {
-    const context = contextsById.get(id);
-    return context ? [context] : [];
-  });
-};
-
-const terminalContextIdListsEqual = (
-  contexts: ReadonlyArray<TerminalContextDraft>,
-  ids: ReadonlyArray<string>,
-): boolean =>
-  contexts.length === ids.length && contexts.every((context, index) => context.id === ids[index]);
 
 function isInsideComposerFloatingLayer(element: Element): boolean {
   return element.closest(COMPOSER_FLOATING_LAYER_SELECTOR) !== null;
@@ -347,7 +328,6 @@ export interface ChatComposerHandle {
     value: string;
     cursor: number;
     expandedCursor: number;
-    terminalContextIds: string[];
   };
   /** Reset composer cursor/trigger/highlight after external prompt mutations (e.g. onSend). */
   resetCursorState: (options?: {
@@ -355,13 +335,10 @@ export interface ChatComposerHandle {
     prompt?: string;
     detectTrigger?: boolean;
   }) => void;
-  /** Insert a terminal context from the terminal drawer. */
-  addTerminalContext: (selection: TerminalContextSelection) => void;
   /** Get the current prompt/effort/model state for use in send. */
   getSendContext: () => {
     prompt: string;
     images: ComposerImageAttachment[];
-    terminalContexts: TerminalContextDraft[];
     selectedPromptEffort: string | null;
     selectedModelOptionsForDispatch: unknown;
     selectedModelSelection: ModelSelection;
@@ -369,6 +346,158 @@ export interface ChatComposerHandle {
     selectedModel: string;
     selectedProviderModels: ReadonlyArray<ServerProvider["models"][number]>;
   };
+}
+
+export interface FollowUpQueueViewItem {
+  id: string;
+  preview: string;
+  promptText: string;
+  images: readonly ComposerImageAttachment[];
+  queuedAt: string;
+  expanded: boolean;
+  canExpand: boolean;
+  blockedReason: string | null;
+}
+
+export function FollowUpQueueShelf(props: {
+  items: readonly FollowUpQueueViewItem[];
+  actionLabel: string;
+  actionTitle: string;
+  onToggleExpanded: (itemId: string) => void;
+  onAction: (itemId: string) => void;
+  onRemove: (itemId: string) => void;
+  onClear: () => void;
+  onExpandImage: (preview: ExpandedImagePreview) => void;
+}) {
+  if (props.items.length === 0) {
+    return null;
+  }
+
+  return (
+    <div
+      className="cafe-followup-queue relative mb-2 overflow-hidden rounded-2xl border border-border/70 bg-card/80 px-3 py-2 text-sm shadow-lg/5 backdrop-blur-sm"
+      data-cafe-followup-queue="true"
+    >
+      <div className="relative z-10 flex min-w-0 items-center justify-between gap-3">
+        <div className="min-w-0 text-muted-foreground text-xs font-medium">
+          {props.items.length === 1 ? "1 message queued" : `${props.items.length} messages queued`}
+        </div>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-7 shrink-0 px-2 text-muted-foreground/80 hover:text-foreground"
+          onClick={props.onClear}
+        >
+          Clear
+        </Button>
+      </div>
+      <div className="relative z-10 mt-1.5 grid gap-1">
+        {props.items.map((item) => (
+          <div key={item.id} className="rounded-xl border border-border/45 bg-background/42 p-2">
+            <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-2">
+              {item.canExpand ? (
+                <button
+                  type="button"
+                  className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent/70 hover:text-foreground"
+                  aria-label={item.expanded ? "Collapse queued message" : "Expand queued message"}
+                  onClick={() => props.onToggleExpanded(item.id)}
+                >
+                  {item.expanded ? (
+                    <ChevronDownIcon className="size-4" />
+                  ) : (
+                    <ChevronRightIcon className="size-4" />
+                  )}
+                </button>
+              ) : (
+                <span className="size-6 shrink-0" aria-hidden="true" />
+              )}
+              <button
+                type="button"
+                className="min-w-0 truncate text-left text-muted-foreground transition-colors data-[expandable=false]:cursor-default data-[expandable=true]:hover:text-foreground"
+                data-expandable={item.canExpand ? "true" : "false"}
+                onClick={() => {
+                  if (item.canExpand) {
+                    props.onToggleExpanded(item.id);
+                  }
+                }}
+                title={item.canExpand ? item.preview : undefined}
+              >
+                {item.preview}
+              </button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="cafe-followup-steer-button h-7 shrink-0 px-2 transition-colors"
+                title={props.actionTitle}
+                onClick={() => props.onAction(item.id)}
+              >
+                {props.actionLabel}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                className="size-7 shrink-0 text-muted-foreground/75 hover:text-destructive"
+                aria-label="Remove queued message"
+                onClick={() => props.onRemove(item.id)}
+              >
+                <Trash2Icon className="size-4" />
+              </Button>
+            </div>
+            {item.canExpand && item.expanded ? (
+              <div className="mt-2 grid gap-2 rounded-lg border border-border/35 bg-background/55 p-2">
+                {item.images.length > 0 ? (
+                  <div className="grid max-h-40 grid-cols-2 gap-2 overflow-y-auto pr-1 sm:grid-cols-3">
+                    {item.images.map((image) => (
+                      <div
+                        key={image.id}
+                        className="overflow-hidden rounded-lg border border-border/70 bg-background/70"
+                      >
+                        {image.previewUrl ? (
+                          <button
+                            type="button"
+                            className="block h-full w-full cursor-zoom-in"
+                            aria-label={`Preview queued image ${image.name}`}
+                            onClick={() => {
+                              const preview = buildExpandedImagePreview(item.images, image.id);
+                              if (!preview) return;
+                              props.onExpandImage(preview);
+                            }}
+                          >
+                            <img
+                              src={image.previewUrl}
+                              alt={image.name}
+                              className="block h-24 w-full object-cover"
+                            />
+                          </button>
+                        ) : (
+                          <div className="flex min-h-20 items-center justify-center px-2 py-3 text-center text-[11px] text-muted-foreground/70">
+                            {image.name}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                <textarea
+                  readOnly
+                  aria-label="Queued message prompt"
+                  value={item.promptText.trim().length > 0 ? item.promptText : item.preview}
+                  className="max-h-36 min-h-20 w-full resize-none overflow-y-auto rounded-md border border-border/30 bg-background/40 p-2 text-muted-foreground text-xs leading-5 outline-none [overflow-wrap:anywhere]"
+                  onChange={() => undefined}
+                />
+              </div>
+            ) : null}
+            {item.blockedReason ? (
+              <div className="mt-2 text-[11px] text-destructive/85">{item.blockedReason}</div>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 // --------------------------------------------------------------------------
@@ -441,13 +570,14 @@ export interface ChatComposerProps {
   resolvedTheme: "light" | "dark";
   settings: UnifiedSettings;
   keybindings: ResolvedKeybindingsConfig;
-  terminalOpen: boolean;
   gitCwd: string | null;
+  followUpQueueItems: readonly FollowUpQueueViewItem[];
+  followUpQueueActionLabel: string;
+  followUpQueueActionTitle: string;
 
   // Refs the parent needs kept in sync
   promptRef: React.RefObject<string>;
   composerImagesRef: React.RefObject<ComposerImageAttachment[]>;
-  composerTerminalContextsRef: React.RefObject<TerminalContextDraft[]>;
   composerRef: React.RefObject<ChatComposerHandle | null>;
 
   // Scroll
@@ -456,6 +586,11 @@ export interface ChatComposerProps {
 
   // Callbacks
   onSend: (e?: { preventDefault: () => void }) => void;
+  onSteer: (e?: { preventDefault: () => void }) => void;
+  onToggleFollowUpQueueItem: (itemId: string) => void;
+  onActivateFollowUpQueueItem: (itemId: string) => void;
+  onRemoveFollowUpQueueItem: (itemId: string) => void;
+  onClearFollowUpQueue: () => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
   onRespondToApproval: (
@@ -531,15 +666,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     resolvedTheme,
     settings,
     keybindings,
-    terminalOpen,
     gitCwd,
+    followUpQueueItems,
+    followUpQueueActionLabel,
+    followUpQueueActionTitle,
     promptRef,
     composerRef,
     composerImagesRef,
-    composerTerminalContextsRef,
     shouldAutoScrollRef,
     scheduleStickToBottom,
     onSend,
+    onSteer,
+    onToggleFollowUpQueueItem,
+    onActivateFollowUpQueueItem,
+    onRemoveFollowUpQueueItem,
+    onClearFollowUpQueue,
     onInterrupt,
     onImplementPlanInNewThread,
     onRespondToApproval,
@@ -559,27 +700,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   } = props;
 
   // ------------------------------------------------------------------
-  // Store subscriptions (prompt / images / terminal contexts)
+  // Store subscriptions (prompt / images)
   // ------------------------------------------------------------------
   const composerDraft = useComposerThreadDraft(composerDraftTarget);
   const prompt = composerDraft.prompt;
   const composerImages = composerDraft.images;
-  const composerTerminalContexts = composerDraft.terminalContexts;
   const nonPersistedComposerImageIds = composerDraft.nonPersistedImageIds;
 
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
   const addComposerDraftImage = useComposerDraftStore((store) => store.addImage);
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
   const removeComposerDraftImage = useComposerDraftStore((store) => store.removeImage);
-  const insertComposerDraftTerminalContext = useComposerDraftStore(
-    (store) => store.insertTerminalContext,
-  );
-  const removeComposerDraftTerminalContext = useComposerDraftStore(
-    (store) => store.removeTerminalContext,
-  );
-  const setComposerDraftTerminalContexts = useComposerDraftStore(
-    (store) => store.setTerminalContexts,
-  );
   const clearComposerDraftPersistedAttachments = useComposerDraftStore(
     (store) => store.clearPersistedAttachments,
   );
@@ -822,9 +953,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       deriveComposerSendState({
         prompt,
         imageCount: composerImages.length,
-        terminalContexts: composerTerminalContexts,
       }),
-    [composerImages.length, composerTerminalContexts, prompt],
+    [composerImages.length, prompt],
   );
 
   // ------------------------------------------------------------------
@@ -1086,29 +1216,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [composerDraftTarget, removeComposerDraftImage],
   );
 
-  const removeComposerTerminalContextFromDraft = useCallback(
-    (contextId: string) => {
-      const contextIndex = composerTerminalContexts.findIndex(
-        (context) => context.id === contextId,
-      );
-      if (contextIndex < 0) return;
-      const removal = removeInlineTerminalContextPlaceholder(promptRef.current, contextIndex);
-      promptRef.current = removal.prompt;
-      setPrompt(removal.prompt);
-      removeComposerDraftTerminalContext(composerDraftTarget, contextId);
-      const nextCursor = collapseExpandedComposerCursor(removal.prompt, removal.cursor);
-      setComposerCursor(nextCursor);
-      setComposerTrigger(detectComposerTrigger(removal.prompt, removal.cursor));
-    },
-    [
-      composerDraftTarget,
-      composerTerminalContexts,
-      promptRef,
-      removeComposerDraftTerminalContext,
-      setPrompt,
-    ],
-  );
-
   // ------------------------------------------------------------------
   // Sync refs back to parent
   // ------------------------------------------------------------------
@@ -1120,10 +1227,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   useEffect(() => {
     composerImagesRef.current = composerImages;
   }, [composerImages, composerImagesRef]);
-
-  useEffect(() => {
-    composerTerminalContextsRef.current = composerTerminalContexts;
-  }, [composerTerminalContexts, composerTerminalContextsRef]);
 
   // ------------------------------------------------------------------
   // Composer menu highlight sync
@@ -1345,7 +1448,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       nextCursor: number,
       expandedCursor: number,
       cursorAdjacentToMention: boolean,
-      terminalContextIds: string[],
     ) => {
       if (activePendingProgress?.activeQuestion && pendingUserInputs.length > 0) {
         setComposerCursor(nextCursor);
@@ -1363,12 +1465,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
       promptRef.current = nextPrompt;
       setPrompt(nextPrompt);
-      if (!terminalContextIdListsEqual(composerTerminalContexts, terminalContextIds)) {
-        setComposerDraftTerminalContexts(
-          composerDraftTarget,
-          syncTerminalContextsByIds(composerTerminalContexts, terminalContextIds),
-        );
-      }
       setComposerCursor(nextCursor);
       setComposerTrigger(
         cursorAdjacentToMention ? null : detectComposerTrigger(nextPrompt, expandedCursor),
@@ -1380,9 +1476,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       onChangeActivePendingUserInputCustomAnswer,
       promptRef,
       setPrompt,
-      composerDraftTarget,
-      composerTerminalContexts,
-      setComposerDraftTerminalContexts,
     ],
   );
 
@@ -1443,7 +1536,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     value: string;
     cursor: number;
     expandedCursor: number;
-    terminalContextIds: string[];
   } => {
     const editorSnapshot = composerEditorRef.current?.readSnapshot();
     if (editorSnapshot) {
@@ -1453,9 +1545,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       value: promptRef.current,
       cursor: composerCursor,
       expandedCursor: expandCollapsedComposerCursor(promptRef.current, composerCursor),
-      terminalContextIds: composerTerminalContexts.map((context) => context.id),
     };
-  }, [composerCursor, composerTerminalContexts, promptRef]);
+  }, [composerCursor, promptRef]);
 
   const resolveActiveComposerTrigger = useCallback((): {
     snapshot: { value: string; cursor: number; expandedCursor: number };
@@ -1621,6 +1712,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     },
     [blurMobileComposerAfterSend, onSend, shouldBlurMobileComposerOnSubmit],
   );
+  const steerComposer = useCallback(
+    (event?: { preventDefault: () => void }) => {
+      onSteer(event);
+      if (shouldBlurMobileComposerOnSubmit()) {
+        blurMobileComposerAfterSend();
+      }
+    },
+    [blurMobileComposerAfterSend, onSteer, shouldBlurMobileComposerOnSubmit],
+  );
   const expandMobileComposer = useCallback(() => {
     if (composerBlurFrameRef.current !== null) {
       window.cancelAnimationFrame(composerBlurFrameRef.current);
@@ -1674,8 +1774,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
     }
     if (key === "Enter" && !event.shiftKey) {
-      submitComposer();
-      return true;
+      const command = resolveShortcutCommand(event, keybindings, {
+        context: {
+          composerFocused: true,
+          modelPickerOpen: isComposerModelPickerOpen,
+        },
+      });
+      if (command === "composer.steer") {
+        steerComposer();
+        return true;
+      }
+      if (command === "composer.submit" || (!event.metaKey && !event.ctrlKey && !event.altKey)) {
+        submitComposer();
+        return true;
+      }
+      return false;
     }
     return false;
   };
@@ -1869,45 +1982,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             : null,
         );
       },
-      addTerminalContext: (selection: TerminalContextSelection) => {
-        if (!activeThread) return;
-        const snapshot = composerEditorRef.current?.readSnapshot() ?? {
-          value: promptRef.current,
-          cursor: composerCursor,
-          expandedCursor: expandCollapsedComposerCursor(promptRef.current, composerCursor),
-          terminalContextIds: composerTerminalContexts.map((context) => context.id),
-        };
-        const insertion = insertInlineTerminalContextPlaceholder(
-          snapshot.value,
-          snapshot.expandedCursor,
-        );
-        const nextCollapsedCursor = collapseExpandedComposerCursor(
-          insertion.prompt,
-          insertion.cursor,
-        );
-        const inserted = insertComposerDraftTerminalContext(
-          composerDraftTarget,
-          insertion.prompt,
-          {
-            id: randomUUID(),
-            threadId: activeThread.id,
-            createdAt: new Date().toISOString(),
-            ...selection,
-          },
-          insertion.contextIndex,
-        );
-        if (!inserted) return;
-        promptRef.current = insertion.prompt;
-        setComposerCursor(nextCollapsedCursor);
-        setComposerTrigger(detectComposerTrigger(insertion.prompt, insertion.cursor));
-        window.requestAnimationFrame(() => {
-          composerEditorRef.current?.focusAt(nextCollapsedCursor);
-        });
-      },
       getSendContext: () => ({
         prompt: promptRef.current,
         images: composerImagesRef.current,
-        terminalContexts: composerTerminalContextsRef.current,
         selectedPromptEffort,
         selectedModelOptionsForDispatch,
         selectedModelSelection,
@@ -1917,14 +1994,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }),
     }),
     [
-      activeThread,
-      composerDraftTarget,
-      composerCursor,
-      composerTerminalContexts,
-      insertComposerDraftTerminalContext,
       promptRef,
       composerImagesRef,
-      composerTerminalContextsRef,
       isComposerModelPickerOpen,
       readComposerSnapshot,
       selectedModel,
@@ -1945,6 +2016,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       className="mx-auto w-full min-w-0 max-w-208"
       data-chat-composer-form="true"
     >
+      <FollowUpQueueShelf
+        items={followUpQueueItems}
+        actionLabel={followUpQueueActionLabel}
+        actionTitle={followUpQueueActionTitle}
+        onToggleExpanded={onToggleFollowUpQueueItem}
+        onAction={onActivateFollowUpQueueItem}
+        onRemove={onRemoveFollowUpQueueItem}
+        onClear={onClearFollowUpQueue}
+        onExpandImage={onExpandImage}
+      />
       <div
         className={cn(
           "group rounded-[22px] p-px transition-colors duration-200",
@@ -2235,14 +2316,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       : prompt
                 }
                 cursor={composerCursor}
-                terminalContexts={
-                  !isComposerApprovalState && pendingUserInputs.length === 0
-                    ? composerTerminalContexts
-                    : []
-                }
                 skills={selectedProviderStatus?.skills ?? []}
                 {...(showMobilePendingAnswerActions ? { className: "max-sm:pb-11" } : {})}
-                onRemoveTerminalContext={removeComposerTerminalContextFromDraft}
                 onChange={onPromptChange}
                 onCommandKeyDown={onComposerCommandKey}
                 onPaste={onComposerPaste}
@@ -2324,7 +2399,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   instanceEntries={providerInstanceEntries}
                   keybindings={keybindings}
                   modelOptionsByInstance={modelOptionsByInstance}
-                  terminalOpen={terminalOpen}
                   open={isComposerModelPickerOpen}
                   {...(composerProviderState.modelPickerIconClassName
                     ? {

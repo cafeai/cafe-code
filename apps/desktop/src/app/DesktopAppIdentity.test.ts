@@ -118,7 +118,7 @@ const withIdentity = <A, E, R>(
         Layer.provideMerge(
           FileSystem.layerNoop({
             exists: (path) =>
-              Effect.succeed(input.legacyPathExists === true && path.includes("T3 Code (Alpha)")),
+              Effect.succeed(input.legacyPathExists === true && path.includes("Cafe Code (Alpha)")),
             readFileString: () =>
               Effect.succeed(input.packageJson ?? '{"cafeCodeCommitHash":"abcdef1234567890"}'),
           }),
@@ -132,13 +132,13 @@ const withIdentity = <A, E, R>(
 };
 
 describe("DesktopAppIdentity", () => {
-  it.effect("keeps using the legacy userData path when it already exists", () =>
+  it.effect("uses the Cafe Code state directory for Electron userData", () =>
     withIdentity(
       Effect.gen(function* () {
         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
         const userDataPath = yield* identity.resolveUserDataPath;
 
-        assert.equal(userDataPath, "/Users/alice/Library/Application Support/T3 Code (Alpha)");
+        assert.equal(userDataPath, "/Users/alice/.cafe-code/userdata");
       }),
       { legacyPathExists: true },
     ),
@@ -156,7 +156,7 @@ describe("DesktopAppIdentity", () => {
         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
         yield* identity.configure;
 
-        assert.deepEqual(calls.setName, ["Cafe Code (Alpha)"]);
+        assert.deepEqual(calls.setName, ["Cafe Code"]);
         assert.equal(calls.setAboutPanelOptions[0]?.applicationName, "Cafe Code (Alpha)");
         assert.equal(calls.setAboutPanelOptions[0]?.applicationVersion, "1.2.3");
         assert.equal(calls.setAboutPanelOptions[0]?.version, "0123456789ab");

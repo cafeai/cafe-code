@@ -366,8 +366,11 @@ const createDesktopBridgeStub = (overrides?: {
       wsBaseUrl: "ws://127.0.0.1:3773",
       bootstrapToken: "desktop-bootstrap-token",
     }),
+    getDebugEndpointState: vi.fn().mockResolvedValue({ enabled: false, url: null }),
+    publishDebugSnapshot: vi.fn().mockResolvedValue(undefined),
     getClientSettings: vi.fn().mockResolvedValue(null),
     setClientSettings: vi.fn().mockResolvedValue(undefined),
+    setPowerSaveBlockerState: vi.fn().mockResolvedValue(undefined),
     getSavedEnvironmentRegistry: vi.fn().mockResolvedValue([]),
     setSavedEnvironmentRegistry: vi.fn().mockResolvedValue(undefined),
     getSavedEnvironmentSecret: vi.fn().mockResolvedValue(null),
@@ -416,8 +419,6 @@ const createDesktopBridgeStub = (overrides?: {
       token: "ssh-ws-token",
       expiresAt: "2026-05-01T12:05:00.000Z",
     }),
-    onSshPasswordPrompt: vi.fn(() => () => {}),
-    resolveSshPasswordPrompt: vi.fn().mockResolvedValue(undefined),
     getServerExposureState: vi.fn().mockResolvedValue(
       overrides?.serverExposureState ?? {
         mode: "local-only",
@@ -449,6 +450,7 @@ const createDesktopBridgeStub = (overrides?: {
     setTheme: vi.fn().mockResolvedValue(undefined),
     showContextMenu: vi.fn().mockResolvedValue(null),
     openExternal: vi.fn().mockResolvedValue(true),
+    openPath: vi.fn().mockResolvedValue(true),
     onMenuAction: () => () => {},
     getUpdateState: vi.fn().mockResolvedValue(idleUpdateState),
     setUpdateChannel:
@@ -739,6 +741,79 @@ describe("GeneralSettingsPanel observability", () => {
         ),
       )
       .toBeInTheDocument();
+  });
+
+  it("persists the keep-awake preference from General settings", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <GeneralSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByText("Keep awake")).toBeInTheDocument();
+    await page.getByLabelText("Keep awake").click();
+
+    await page.getByText("During chats", { exact: true }).click();
+
+    await vi.waitFor(() => {
+      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ powerSaveBlockerMode: "during-chats" }),
+      );
+    });
+  });
+
+  it("shows detected editor icons in the General default editor selector", async () => {
+    const platformSpy = vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    setServerConfigSnapshot({
+      ...createBaseServerConfig(),
+      availableEditors: ["vscode", "antigravity", "file-manager"],
+    });
+
+    try {
+      mounted = await renderWithTestRouter(
+        <AppAtomRegistryProvider>
+          <GeneralSettingsPanel />
+        </AppAtomRegistryProvider>,
+      );
+
+      await page.getByLabelText("Default editor").click();
+
+      await expect
+        .element(page.getByTestId("default-editor-option-vscode-icon"))
+        .toBeInTheDocument();
+      await expect
+        .element(page.getByTestId("default-editor-option-antigravity-icon"))
+        .toBeInTheDocument();
+      await expect
+        .element(page.getByTestId("default-editor-option-file-manager-icon"))
+        .toBeInTheDocument();
+      await expect.element(page.getByText("Finder", { exact: true })).toBeInTheDocument();
+      await expect.element(page.getByText("Cursor", { exact: true })).not.toBeInTheDocument();
+
+      await page.getByText("VS Code", { exact: true }).click();
+
+      await vi.waitFor(() => {
+        expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
+          expect.objectContaining({ defaultEditor: "vscode" }),
+        );
+      });
+      await expect
+        .element(
+          page.getByTestId("default-editor-selected-option").getByText("VS Code", { exact: true }),
+        )
+        .toBeInTheDocument();
+      await expect
+        .element(page.getByTestId("default-editor-selected-option-icon"))
+        .toBeInTheDocument();
+    } finally {
+      platformSpy.mockRestore();
+    }
   });
 
   it("creates and shows a pairing link when network access is enabled", async () => {
@@ -1284,7 +1359,6 @@ describe("SourceControlSettingsPanel discovery states", () => {
           kind: "git",
           label: "Git",
           executable: "git",
-          implemented: true,
           status: "available",
           version: Option.some("git version 2.50.0"),
           installHint: "Install Git.",
@@ -1311,7 +1385,6 @@ describe("SourceControlSettingsPanel discovery states", () => {
           kind: "git",
           label: "Git",
           executable: "git",
-          implemented: true,
           status: "available",
           version: Option.some("git version 2.50.0"),
           installHint: "Install Git.",
@@ -1351,7 +1424,6 @@ describe("SourceControlSettingsPanel discovery states", () => {
             kind: "git",
             label: "Git",
             executable: "git",
-            implemented: true,
             status: "available",
             version: Option.some("git version 2.50.0"),
             installHint: "Install Git.",

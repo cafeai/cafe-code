@@ -636,6 +636,29 @@ describe("deriveWorkLogEntries", () => {
     expect(entries[0]?.label).toBe("Searching for API endpoints");
   });
 
+  it("shows runtime warning message details in work log entries", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "runtime-warning",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "runtime.warning",
+        summary: "Runtime warning",
+        tone: "info",
+        payload: {
+          message: "Provider stderr: failed to read cached session",
+          detail: { retrying: true },
+        },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities, undefined);
+    expect(entries[0]).toMatchObject({
+      id: "runtime-warning",
+      label: "Runtime warning",
+      detail: 'Provider stderr: failed to read cached session\n{"retrying":true}',
+    });
+  });
+
   it("uses payload detail as label for task.completed and preserves error tone", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
@@ -906,6 +929,8 @@ describe("deriveWorkLogEntries", () => {
               changes: [
                 { path: "apps/web/src/components/ChatView.tsx" },
                 { filename: "apps/web/src/session-logic.ts" },
+                { file_path: "/Users/mike/selia/selia/.selene/adrs/0110-deferred-arcs.md" },
+                { path: "/Users/mike/selia/selia/.selene/adrs/0110-truncated…" },
               ],
             },
           },
@@ -917,7 +942,34 @@ describe("deriveWorkLogEntries", () => {
     expect(entry?.changedFiles).toEqual([
       "apps/web/src/components/ChatView.tsx",
       "apps/web/src/session-logic.ts",
+      "/Users/mike/selia/selia/.selene/adrs/0110-deferred-arcs.md",
     ]);
+  });
+
+  it("does not treat command metadata paths as changed-file pills", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "command-with-search-path",
+        kind: "tool.completed",
+        summary: "Ran command",
+        payload: {
+          itemType: "command_execution",
+          data: {
+            commandActions: [
+              {
+                command: "rg -n deferred /Users/mike/selia/selia/.selene/adrs",
+                path: "selia/...",
+                type: "search",
+              },
+            ],
+            changedFiles: [{ path: "selia/..." }],
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities, undefined);
+    expect(entry?.changedFiles).toBeUndefined();
   });
 
   it("drops duplicated tool detail when it only repeats the title", () => {
@@ -1440,6 +1492,15 @@ describe("isLatestTurnSettled", () => {
         activeTurnId: undefined,
       }),
     ).toBe(true);
+  });
+
+  it("returns false while a ready session still owns the active turn", () => {
+    expect(
+      isLatestTurnSettled(latestTurn, {
+        orchestrationStatus: "ready",
+        activeTurnId: TurnId.make("turn-1"),
+      }),
+    ).toBe(false);
   });
 
   it("returns false when turn timestamps are incomplete", () => {

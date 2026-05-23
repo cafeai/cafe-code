@@ -1,9 +1,4 @@
-import type {
-  AuthClientMetadata,
-  AuthClientSession,
-  AuthSessionId,
-  ServerAuthSessionMethod,
-} from "@cafecode/contracts";
+import type * as AuthContracts from "@cafecode/contracts/auth";
 import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -14,19 +9,19 @@ import type * as Stream from "effect/Stream";
 export type SessionRole = "owner" | "client";
 
 export interface IssuedSession {
-  readonly sessionId: AuthSessionId;
+  readonly sessionId: AuthContracts.AuthSessionId;
   readonly token: string;
-  readonly method: ServerAuthSessionMethod;
-  readonly client: AuthClientMetadata;
+  readonly method: AuthContracts.ServerAuthSessionMethod;
+  readonly client: AuthContracts.AuthClientMetadata;
   readonly expiresAt: DateTime.DateTime;
   readonly role: SessionRole;
 }
 
 export interface VerifiedSession {
-  readonly sessionId: AuthSessionId;
+  readonly sessionId: AuthContracts.AuthSessionId;
   readonly token: string;
-  readonly method: ServerAuthSessionMethod;
-  readonly client: AuthClientMetadata;
+  readonly method: AuthContracts.ServerAuthSessionMethod;
+  readonly client: AuthContracts.AuthClientMetadata;
   readonly expiresAt?: DateTime.DateTime;
   readonly subject: string;
   readonly role: SessionRole;
@@ -35,11 +30,11 @@ export interface VerifiedSession {
 export type SessionCredentialChange =
   | {
       readonly type: "clientUpserted";
-      readonly clientSession: AuthClientSession;
+      readonly clientSession: AuthContracts.AuthClientSession;
     }
   | {
       readonly type: "clientRemoved";
-      readonly sessionId: AuthSessionId;
+      readonly sessionId: AuthContracts.AuthSessionId;
     };
 
 export class SessionCredentialError extends Data.TaggedError("SessionCredentialError")<{
@@ -52,13 +47,13 @@ export interface SessionCredentialServiceShape {
   readonly issue: (input?: {
     readonly ttl?: Duration.Duration;
     readonly subject?: string;
-    readonly method?: ServerAuthSessionMethod;
+    readonly method?: AuthContracts.ServerAuthSessionMethod;
     readonly role?: SessionRole;
-    readonly client?: AuthClientMetadata;
+    readonly client?: AuthContracts.AuthClientMetadata;
   }) => Effect.Effect<IssuedSession, SessionCredentialError>;
   readonly verify: (token: string) => Effect.Effect<VerifiedSession, SessionCredentialError>;
   readonly issueWebSocketToken: (
-    sessionId: AuthSessionId,
+    sessionId: AuthContracts.AuthSessionId,
     input?: {
       readonly ttl?: Duration.Duration;
     },
@@ -73,16 +68,18 @@ export interface SessionCredentialServiceShape {
     token: string,
   ) => Effect.Effect<VerifiedSession, SessionCredentialError>;
   readonly listActive: () => Effect.Effect<
-    ReadonlyArray<AuthClientSession>,
+    ReadonlyArray<AuthContracts.AuthClientSession>,
     SessionCredentialError
   >;
   readonly streamChanges: Stream.Stream<SessionCredentialChange>;
-  readonly revoke: (sessionId: AuthSessionId) => Effect.Effect<boolean, SessionCredentialError>;
+  readonly revoke: (
+    sessionId: AuthContracts.AuthSessionId,
+  ) => Effect.Effect<boolean, SessionCredentialError>;
   readonly revokeAllExcept: (
-    sessionId: AuthSessionId,
+    sessionId: AuthContracts.AuthSessionId,
   ) => Effect.Effect<number, SessionCredentialError>;
-  readonly markConnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
-  readonly markDisconnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
+  readonly markConnected: (sessionId: AuthContracts.AuthSessionId) => Effect.Effect<void, never>;
+  readonly markDisconnected: (sessionId: AuthContracts.AuthSessionId) => Effect.Effect<void, never>;
 }
 
 export class SessionCredentialService extends Context.Service<

@@ -55,7 +55,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
   });
 
   describe("createDevRunnerEnv", () => {
-    it.effect("defaults Cafe Code home with a legacy .t3 fallback", () =>
+    it.effect("defaults Cafe Code home to the Cafe Code state directory", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const env = yield* createDevRunnerEnv({
@@ -72,10 +72,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           devUrl: undefined,
         });
 
-        assert.ok(
-          env.CAFE_CODE_HOME === path.resolve(NodeOS.homedir(), ".cafecode") ||
-            env.CAFE_CODE_HOME === path.resolve(NodeOS.homedir(), ".t3"),
-        );
+        assert.equal(env.CAFE_CODE_HOME, path.resolve(NodeOS.homedir(), ".cafe-code"));
       }),
     );
 

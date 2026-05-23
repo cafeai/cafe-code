@@ -20,15 +20,15 @@ import {
   type VcsPullResult,
   type VcsRemoveWorktreeInput,
   type GitResolvePullRequestResult,
-  type GitRunStackedActionInput,
-  type GitRunStackedActionResult,
   type VcsStatusInput,
   type VcsStatusLocalResult,
   type VcsStatusRemoteResult,
   type VcsStatusResult,
+  type VcsWorkingTreeDiffInput,
+  type VcsWorkingTreeDiffResult,
 } from "@cafecode/contracts";
 
-import { GitManager, type GitRunStackedActionOptions } from "./GitManager.ts";
+import { GitManager } from "./GitManager.ts";
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { VcsDriverRegistry } from "../vcs/VcsDriverRegistry.ts";
 
@@ -42,14 +42,13 @@ export interface GitWorkflowServiceShape {
   readonly remoteStatus: (
     input: VcsStatusInput,
   ) => Effect.Effect<VcsStatusRemoteResult | null, GitManagerServiceError>;
+  readonly workingTreeDiff: (
+    input: VcsWorkingTreeDiffInput,
+  ) => Effect.Effect<VcsWorkingTreeDiffResult, GitManagerServiceError>;
   readonly invalidateLocalStatus: (cwd: string) => Effect.Effect<void, never>;
   readonly invalidateRemoteStatus: (cwd: string) => Effect.Effect<void, never>;
   readonly invalidateStatus: (cwd: string) => Effect.Effect<void, never>;
   readonly pullCurrentBranch: (cwd: string) => Effect.Effect<VcsPullResult, GitCommandError>;
-  readonly runStackedAction: (
-    input: GitRunStackedActionInput,
-    options?: GitRunStackedActionOptions,
-  ) => Effect.Effect<GitRunStackedActionResult, GitManagerServiceError>;
   readonly resolvePullRequest: (
     input: GitPullRequestRefInput,
   ) => Effect.Effect<GitResolvePullRequestResult, GitManagerServiceError>;
@@ -265,16 +264,41 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
           isGitRepository ? gitManager.remoteStatus(input) : Effect.succeed(null),
         ),
       ),
+    workingTreeDiff: (input) =>
+      detectGitRepositoryForStatus("GitWorkflowService.workingTreeDiff", input.cwd).pipe(
+        Effect.flatMap((isGitRepository) => {
+          if (!isGitRepository) {
+            return Effect.succeed({
+              cwd: input.cwd,
+              diff: "",
+            } satisfies VcsWorkingTreeDiffResult);
+          }
+
+          return git
+            .workingTreeDiff(input.cwd, { ignoreWhitespace: input.ignoreWhitespace ?? false })
+            .pipe(
+              Effect.map(
+                (diff): VcsWorkingTreeDiffResult => ({
+                  cwd: input.cwd,
+                  diff,
+                }),
+              ),
+              Effect.mapError(
+                (error) =>
+                  new GitManagerError({
+                    operation: "GitWorkflowService.workingTreeDiff",
+                    detail: error.message,
+                  }),
+              ),
+            );
+        }),
+      ),
     invalidateLocalStatus: gitManager.invalidateLocalStatus,
     invalidateRemoteStatus: gitManager.invalidateRemoteStatus,
     invalidateStatus: gitManager.invalidateStatus,
     pullCurrentBranch: (cwd) =>
       ensureGitCommand("GitWorkflowService.pullCurrentBranch", cwd).pipe(
         Effect.andThen(git.pullCurrentBranch(cwd)),
-      ),
-    runStackedAction: (input, options) =>
-      ensureGit("GitWorkflowService.runStackedAction", input.cwd).pipe(
-        Effect.andThen(gitManager.runStackedAction(input, options)),
       ),
     resolvePullRequest: routeGitManager(
       "GitWorkflowService.resolvePullRequest",

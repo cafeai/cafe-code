@@ -13,6 +13,10 @@ import {
   waitForSavedEnvironmentRegistryHydration,
 } from "./catalog";
 
+const unresolvedRegistryRead = () => {
+  throw new Error("Registry read resolver was not initialized.");
+};
+
 describe("environment runtime catalog stores", () => {
   beforeEach(async () => {
     vi.stubGlobal("window", {
@@ -95,9 +99,7 @@ describe("environment runtime catalog stores", () => {
   });
 
   it("does not let stale hydration overwrite records added while hydration is in flight", async () => {
-    let resolveRegistryRead: () => void = () => {
-      throw new Error("Registry read resolver was not initialized.");
-    };
+    let resolveRegistryRead: () => void = unresolvedRegistryRead;
 
     vi.stubGlobal("window", {
       nativeApi: {

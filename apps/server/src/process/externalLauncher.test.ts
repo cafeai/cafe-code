@@ -18,6 +18,7 @@ import {
   resolveAvailableEditors,
   resolveBrowserLaunch,
   resolveEditorLaunch,
+  resolveEditorProcessLaunch,
 } from "./externalLauncher.ts";
 
 function encodeUtf16LeBase64(input: string): string {
@@ -632,13 +633,10 @@ it.layer(NodeServices.layer)("launchEditorProcess", (it) => {
       assertSuccess(result, undefined);
       assert.ok(spawnedCommand);
       assert.equal(spawnedCommand.command, process.execPath);
-      assert.deepEqual(
-        spawnedCommand.args,
-        process.platform === "win32" ? expectedArgs.map((arg) => `"${arg}"`) : expectedArgs,
-      );
+      assert.deepEqual(spawnedCommand.args, expectedArgs);
       assert.deepEqual(spawnedCommand.options, {
         detached: true,
-        shell: process.platform === "win32",
+        shell: false,
         stdin: "ignore",
         stdout: "ignore",
         stderr: "ignore",
@@ -657,6 +655,35 @@ it.layer(NodeServices.layer)("launchEditorProcess", (it) => {
       assert.equal(result._tag, "Failure");
     }),
   );
+});
+
+it("resolveEditorProcessLaunch keeps hostile Windows paths as argv data", () => {
+  const hostilePaths = [
+    String.raw`C:\work\file" & calc.exe & ".ts`,
+    String.raw`C:\work\%COMSPEC%\project^name\file.ts`,
+    "C:\\work\\newline\n& whoami\nfile.ts",
+    String.raw`\\server\share\folder & powershell -nop -c calc\file.ts`,
+  ];
+
+  for (const hostilePath of hostilePaths) {
+    const launch = resolveEditorProcessLaunch(
+      {
+        command: "code",
+        args: ["--goto", hostilePath],
+      },
+      "win32",
+    );
+
+    assert.equal(launch.command, "code");
+    assert.deepEqual(launch.args, ["--goto", hostilePath]);
+    assert.deepEqual(launch.options, {
+      detached: true,
+      shell: false,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+  }
 });
 
 it.layer(NodeServices.layer)("isCommandAvailable", (it) => {

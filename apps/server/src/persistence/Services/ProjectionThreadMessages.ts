@@ -56,7 +56,7 @@ export interface ProjectionThreadMessageRepositoryShape {
   /**
    * Insert or replace a projected thread message row.
    *
-   * Upserts by `messageId`.
+   * Upserts by `threadId` and `messageId`.
    */
   readonly upsert: (
     message: ProjectionThreadMessage,
@@ -77,6 +77,14 @@ export interface ProjectionThreadMessageRepositoryShape {
   readonly listByThreadId: (
     input: ListProjectionThreadMessagesInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadMessage>, ProjectionRepositoryError>;
+
+  /**
+   * Read the latest user-authored message timestamp for summary projections
+   * without loading message bodies.
+   */
+  readonly getLatestUserMessageAtByThreadId: (
+    input: ListProjectionThreadMessagesInput,
+  ) => Effect.Effect<Option.Option<IsoDateTime>, ProjectionRepositoryError>;
 
   /**
    * Delete projected thread messages by thread.

@@ -1,6 +1,6 @@
 {
   "name": "@cafecode/contracts",
-  "version": "0.0.24",
+  "version": "0.0.25",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "files": [
@@ -11,6 +11,10 @@
     ".": {
       "types": "./src/index.ts",
       "import": "./src/index.ts"
+    },
+    "./auth": {
+      "types": "./src/auth.ts",
+      "import": "./src/auth.ts"
     },
     "./settings": {
       "types": "./src/settings.ts",

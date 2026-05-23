@@ -1362,6 +1362,29 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
   const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
 
+  const retireExitedSession = Effect.fn("CodexAdapter.retireExitedSession")(function* (
+    threadId: ThreadId,
+    reason: string,
+  ) {
+    const session = sessions.get(threadId);
+    if (!session || session.stopped) {
+      return;
+    }
+
+    session.stopped = true;
+    sessions.delete(threadId);
+    yield* Effect.logWarning("codex.session.retired-after-runtime-exit", {
+      threadId,
+      reason,
+    });
+
+    yield* session.runtime.close.pipe(Effect.ignore);
+    yield* Effect.ignore(Scope.close(session.scope, Exit.void));
+    yield* Effect.forkChild(
+      Effect.yieldNow.pipe(Effect.andThen(Fiber.interrupt(session.eventFiber).pipe(Effect.ignore))),
+    );
+  });
+
   const startSession: CodexAdapterShape["startSession"] = (input) =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1431,6 +1454,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               return;
             }
             yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
+            if (event.method === "session/exited" || event.method === "session/closed") {
+              yield* retireExitedSession(
+                event.threadId,
+                event.message ?? `${event.method} received from Codex runtime`,
+              );
+            }
           }),
         ).pipe(Effect.forkChild);
 
@@ -1673,6 +1702,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     provider: PROVIDER,
     capabilities: {
       sessionModelSwitch: "in-session",
+      liveSteer: "supported",
     },
     startSession,
     sendTurn,

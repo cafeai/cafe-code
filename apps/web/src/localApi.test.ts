@@ -10,8 +10,6 @@ import {
   ProviderInstanceId,
   type ServerConfig,
   type ServerProvider,
-  type TerminalEvent,
-  ThreadId,
 } from "@cafecode/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -32,23 +30,11 @@ function registerListener<T>(listeners: Set<(event: T) => void>, listener: (even
   };
 }
 
-const terminalEventListeners = new Set<(event: TerminalEvent) => void>();
 const shellStreamListeners = new Set<(event: OrchestrationShellStreamItem) => void>();
 const gitStatusListeners = new Set<(event: VcsStatusResult) => void>();
 
 const rpcClientMock = {
   dispose: vi.fn(),
-  terminal: {
-    open: vi.fn(),
-    write: vi.fn(),
-    resize: vi.fn(),
-    clear: vi.fn(),
-    restart: vi.fn(),
-    close: vi.fn(),
-    onEvent: vi.fn((listener: (event: TerminalEvent) => void) =>
-      registerListener(terminalEventListeners, listener),
-    ),
-  },
   projects: {
     searchEntries: vi.fn(),
     writeFile: vi.fn(),
@@ -59,7 +45,6 @@ const rpcClientMock = {
   sourceControl: {
     lookupRepository: vi.fn(),
     cloneRepository: vi.fn(),
-    publishRepository: vi.fn(),
   },
   shell: {
     openInEditor: vi.fn(),
@@ -78,7 +63,6 @@ const rpcClientMock = {
     init: vi.fn(),
   },
   git: {
-    runStackedAction: vi.fn(),
     resolvePullRequest: vi.fn(),
     preparePullRequestThread: vi.fn(),
   },
@@ -95,8 +79,7 @@ const rpcClientMock = {
   },
   orchestration: {
     dispatchCommand: vi.fn(),
-    getTurnDiff: vi.fn(),
-    getFullThreadDiff: vi.fn(),
+    hardDeleteThread: vi.fn(),
     subscribeShell: vi.fn((listener: (event: OrchestrationShellStreamItem) => void) =>
       registerListener(shellStreamListeners, listener),
     ),
@@ -172,8 +155,11 @@ function makeDesktopBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridg
   return {
     getAppBranding: () => null,
     getLocalEnvironmentBootstrap: () => null,
+    getDebugEndpointState: async () => ({ enabled: false, url: null }),
+    publishDebugSnapshot: async () => undefined,
     getClientSettings: async () => null,
     setClientSettings: async () => undefined,
+    setPowerSaveBlockerState: async () => undefined,
     getSavedEnvironmentRegistry: async () => [],
     setSavedEnvironmentRegistry: async () => undefined,
     getSavedEnvironmentSecret: async () => null,
@@ -196,8 +182,6 @@ function makeDesktopBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridg
     issueSshWebSocketToken: async () => {
       throw new Error("issueSshWebSocketToken not implemented in test");
     },
-    onSshPasswordPrompt: () => () => undefined,
-    resolveSshPasswordPrompt: async () => undefined,
     getServerExposureState: async () => ({
       mode: "local-only",
       endpointUrl: null,
@@ -225,6 +209,7 @@ function makeDesktopBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridg
     setTheme: async () => undefined,
     showContextMenu: async () => null,
     openExternal: async () => true,
+    openPath: async () => true,
     onMenuAction: () => () => undefined,
     getUpdateState: async () => {
       throw new Error("getUpdateState not implemented in test");
@@ -315,12 +300,15 @@ beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   showContextMenuFallbackMock.mockReset();
-  terminalEventListeners.clear();
   shellStreamListeners.clear();
   gitStatusListeners.clear();
   const testWindow = getWindowForTest();
   Reflect.deleteProperty(testWindow, "desktopBridge");
   Object.defineProperty(testWindow, "localStorage", {
+    configurable: true,
+    value: createLocalStorageStub(),
+  });
+  Object.defineProperty(testWindow, "sessionStorage", {
     configurable: true,
     value: createLocalStorageStub(),
   });
@@ -343,24 +331,13 @@ describe("wsApi", () => {
     expect(rpcClientMock.server.subscribeLifecycle).not.toHaveBeenCalled();
   });
 
-  it("forwards terminal and shell stream events", async () => {
+  it("forwards shell stream events", async () => {
     const { createEnvironmentApi } = await import("./environmentApi");
 
     const api = createEnvironmentApi(rpcClientMock as never);
-    const onTerminalEvent = vi.fn();
     const onShellEvent = vi.fn();
 
-    api.terminal.onEvent(onTerminalEvent);
     api.orchestration.subscribeShell(onShellEvent);
-
-    const terminalEvent = {
-      threadId: "thread-1",
-      terminalId: "terminal-1",
-      createdAt: "2026-02-24T00:00:00.000Z",
-      type: "output",
-      data: "hello",
-    } as const;
-    emitEvent(terminalEventListeners, terminalEvent);
 
     const shellEvent = {
       kind: "project-upserted" as const,
@@ -380,7 +357,6 @@ describe("wsApi", () => {
     } satisfies OrchestrationShellStreamItem;
     emitEvent(shellStreamListeners, shellEvent);
 
-    expect(onTerminalEvent).toHaveBeenCalledWith(terminalEvent);
     expect(onShellEvent).toHaveBeenCalledWith(shellEvent);
   });
 
@@ -480,22 +456,6 @@ describe("wsApi", () => {
     expect(rpcClientMock.filesystem.browse).toHaveBeenCalledWith({
       partialPath: "/tmp/project/",
       cwd: "/tmp/project",
-    });
-  });
-
-  it("forwards full-thread diff requests to the orchestration RPC", async () => {
-    rpcClientMock.orchestration.getFullThreadDiff.mockResolvedValue({ diff: "patch" });
-    const { createEnvironmentApi } = await import("./environmentApi");
-
-    const api = createEnvironmentApi(rpcClientMock as never);
-    await api.orchestration.getFullThreadDiff({
-      threadId: ThreadId.make("thread-1"),
-      toTurnCount: 1,
-    });
-
-    expect(rpcClientMock.orchestration.getFullThreadDiff).toHaveBeenCalledWith({
-      threadId: "thread-1",
-      toTurnCount: 1,
     });
   });
 
@@ -605,8 +565,10 @@ describe("wsApi", () => {
       dismissedProviderUpdateNotificationKeys: [],
       diffIgnoreWhitespace: true,
       diffWordWrap: true,
+      defaultEditor: "system-default" as const,
       favorites: [],
       providerModelPreferences: {},
+      powerSaveBlockerMode: "off" as const,
       sidebarProjectGroupingMode: "repository_path" as const,
       sidebarProjectGroupingOverrides: {
         "environment-local:/tmp/project": "separate" as const,
@@ -668,8 +630,10 @@ describe("wsApi", () => {
       dismissedProviderUpdateNotificationKeys: [],
       diffIgnoreWhitespace: true,
       diffWordWrap: true,
+      defaultEditor: "system-default" as const,
       favorites: [],
       providerModelPreferences: {},
+      powerSaveBlockerMode: "off" as const,
       sidebarProjectGroupingMode: "repository_path" as const,
       sidebarProjectGroupingOverrides: {
         "environment-local:/tmp/project": "separate" as const,
@@ -696,6 +660,18 @@ describe("wsApi", () => {
       "bearer-token",
     );
 
+    const persistedRegistry = JSON.parse(
+      getWindowForTest().localStorage.getItem("cafe-code:saved-environment-registry:v1") ?? "{}",
+    );
+    expect(persistedRegistry.records?.[0]).not.toHaveProperty("bearerToken");
+    const sessionSecrets = JSON.parse(
+      getWindowForTest().sessionStorage.getItem("cafe-code:saved-environment-session-secrets:v1") ??
+        "{}",
+    );
+    expect(sessionSecrets.secrets).toEqual({
+      "environment-local": "bearer-token",
+    });
+
     await expect(api.persistence.getClientSettings()).resolves.toEqual(clientSettings);
     await expect(api.persistence.getSavedEnvironmentRegistry()).resolves.toEqual([
       {
@@ -716,5 +692,50 @@ describe("wsApi", () => {
     await expect(
       api.persistence.getSavedEnvironmentSecret(EnvironmentId.make("environment-local")),
     ).resolves.toBeNull();
+  });
+
+  it("scrubs legacy browser-persisted saved environment bearer tokens", async () => {
+    getWindowForTest().localStorage.setItem(
+      "cafecode:saved-environment-registry:v1",
+      JSON.stringify({
+        version: 1,
+        records: [
+          {
+            environmentId: "environment-legacy",
+            label: "Legacy",
+            httpBaseUrl: "http://localhost:3000",
+            wsBaseUrl: "ws://localhost:3000",
+            createdAt: "2026-04-09T00:00:00.000Z",
+            lastConnectedAt: null,
+            bearerToken: "legacy-bearer-token",
+          },
+        ],
+      }),
+    );
+
+    const { createLocalApi } = await import("./localApi");
+    const api = createLocalApi(rpcClientMock as never);
+
+    await expect(api.persistence.getSavedEnvironmentRegistry()).resolves.toEqual([
+      {
+        environmentId: EnvironmentId.make("environment-legacy"),
+        label: "Legacy",
+        httpBaseUrl: "http://localhost:3000",
+        wsBaseUrl: "ws://localhost:3000",
+        createdAt: "2026-04-09T00:00:00.000Z",
+        lastConnectedAt: null,
+      },
+    ]);
+    await expect(
+      api.persistence.getSavedEnvironmentSecret(EnvironmentId.make("environment-legacy")),
+    ).resolves.toBeNull();
+
+    expect(getWindowForTest().localStorage.getItem("cafecode:saved-environment-registry:v1")).toBe(
+      null,
+    );
+    const migratedRegistry = JSON.parse(
+      getWindowForTest().localStorage.getItem("cafe-code:saved-environment-registry:v1") ?? "{}",
+    );
+    expect(migratedRegistry.records?.[0]).not.toHaveProperty("bearerToken");
   });
 });

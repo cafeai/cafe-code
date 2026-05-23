@@ -3,10 +3,25 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
-export interface DesktopIpcInvokeEvent {}
+export interface DesktopIpcWebContents {
+  readonly id?: number;
+  isDestroyed?: () => boolean;
+}
+
+export interface DesktopIpcWebFrame {
+  readonly url: string;
+  readonly top?: DesktopIpcWebFrame | null;
+}
+
+export interface DesktopIpcInvokeEvent {
+  readonly sender?: DesktopIpcWebContents;
+  readonly senderFrame?: DesktopIpcWebFrame | null;
+}
 
 export interface DesktopIpcSyncEvent {
   returnValue: unknown;
+  readonly sender?: DesktopIpcWebContents;
+  readonly senderFrame?: DesktopIpcWebFrame | null;
 }
 
 export type DesktopIpcHandleListener = (
@@ -34,6 +49,7 @@ export interface DesktopSyncIpcMethod<E, R> {
 }
 
 export interface DesktopIpcShape {
+  readonly trustWebContents: (webContents: DesktopIpcWebContents) => Effect.Effect<void>;
   readonly handle: <E, R>(
     input: DesktopIpcMethod<E, R>,
   ) => Effect.Effect<void, never, R | Scope.Scope>;
@@ -46,8 +62,73 @@ export class DesktopIpc extends Context.Service<DesktopIpc, DesktopIpcShape>()(
   "cafecode/desktop/Ipc",
 ) {}
 
-export const make = (ipcMain: DesktopIpcMain): DesktopIpcShape =>
-  DesktopIpc.of({
+export class DesktopIpcSenderValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DesktopIpcSenderValidationError";
+  }
+}
+
+function normalizeHostname(hostname: string): string {
+  return hostname.replace(/^\[|\]$/g, "").toLowerCase();
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = normalizeHostname(hostname);
+  return normalized === "localhost" || normalized === "::1" || /^127(?:\.|$)/.test(normalized);
+}
+
+export function isTrustedDesktopIpcFrameUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol === "file:") {
+      return true;
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return false;
+    }
+    return isLoopbackHostname(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isTopLevelFrame(frame: DesktopIpcWebFrame): boolean {
+  return frame.top === undefined || frame.top === null || frame.top === frame;
+}
+
+function validateDesktopIpcSender(
+  event: DesktopIpcInvokeEvent | DesktopIpcSyncEvent,
+  trustedWebContents: WeakSet<object>,
+): void {
+  const sender = event.sender;
+  if (typeof sender !== "object" || sender === null || !trustedWebContents.has(sender)) {
+    throw new DesktopIpcSenderValidationError("Rejected IPC call from an untrusted webContents.");
+  }
+
+  if (sender.isDestroyed?.() === true) {
+    throw new DesktopIpcSenderValidationError("Rejected IPC call from a destroyed webContents.");
+  }
+
+  const frame = event.senderFrame;
+  if (!frame || !isTopLevelFrame(frame)) {
+    throw new DesktopIpcSenderValidationError("Rejected IPC call from an untrusted frame.");
+  }
+
+  if (!isTrustedDesktopIpcFrameUrl(frame.url)) {
+    throw new DesktopIpcSenderValidationError("Rejected IPC call from an untrusted frame URL.");
+  }
+}
+
+export const make = (ipcMain: DesktopIpcMain): DesktopIpcShape => {
+  const trustedWebContents = new WeakSet<object>();
+
+  return DesktopIpc.of({
+    trustWebContents: (webContents) =>
+      Effect.sync(() => {
+        trustedWebContents.add(webContents);
+      }),
+
     handle: Effect.fn("desktop.ipc.registerInvoke")(function* <E, R>({
       channel,
       handler,
@@ -59,14 +140,20 @@ export const make = (ipcMain: DesktopIpcMain): DesktopIpcShape =>
       yield* Effect.acquireRelease(
         Effect.sync(() => {
           ipcMain.removeHandler(channel);
-          ipcMain.handle(channel, (_event, raw) =>
-            runPromise(
+          ipcMain.handle(channel, (event, raw) => {
+            try {
+              validateDesktopIpcSender(event, trustedWebContents);
+            } catch (error) {
+              return Promise.reject(error);
+            }
+
+            return runPromise(
               Effect.gen(function* () {
                 yield* Effect.annotateCurrentSpan({ channel });
                 return yield* handler(raw);
               }).pipe(Effect.annotateLogs({ channel }), Effect.withSpan("desktop.ipc.invoke")),
-            ),
-          );
+            );
+          });
         }),
         () => Effect.sync(() => ipcMain.removeHandler(channel)),
       );
@@ -84,6 +171,16 @@ export const make = (ipcMain: DesktopIpcMain): DesktopIpcShape =>
         Effect.sync(() => {
           ipcMain.removeAllListeners(channel);
           ipcMain.on(channel, (event) => {
+            try {
+              validateDesktopIpcSender(event, trustedWebContents);
+            } catch (error) {
+              if (error instanceof DesktopIpcSenderValidationError) {
+                event.returnValue = null;
+                return;
+              }
+              throw error;
+            }
+
             event.returnValue = runSync(
               Effect.gen(function* () {
                 yield* Effect.annotateCurrentSpan({ channel });
@@ -96,6 +193,7 @@ export const make = (ipcMain: DesktopIpcMain): DesktopIpcShape =>
       );
     }),
   });
+};
 
 /**
  * Convenience helpers for creating IPC methods

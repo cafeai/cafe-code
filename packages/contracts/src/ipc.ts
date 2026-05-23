@@ -16,6 +16,8 @@ import type {
   GitResolvePullRequestResult,
   VcsStatusInput,
   VcsStatusResult,
+  VcsWorkingTreeDiffInput,
+  VcsWorkingTreeDiffResult,
   VcsCreateRefResult,
 } from "./git.ts";
 import type { FilesystemBrowseInput, FilesystemBrowseResult } from "./filesystem.ts";
@@ -39,26 +41,14 @@ import type {
   ServerTraceDiagnosticsResult,
   ServerUpsertKeybindingResult,
 } from "./server.ts";
-import type {
-  TerminalClearInput,
-  TerminalCloseInput,
-  TerminalEvent,
-  TerminalOpenInput,
-  TerminalResizeInput,
-  TerminalRestartInput,
-  TerminalSessionSnapshot,
-  TerminalWriteInput,
-} from "./terminal.ts";
 import type { ServerRemoveKeybindingInput, ServerUpsertKeybindingInput } from "./server.ts";
 import * as Schema from "effect/Schema";
 import type {
   ClientOrchestrationCommand,
-  OrchestrationGetFullThreadDiffInput,
-  OrchestrationGetFullThreadDiffResult,
-  OrchestrationGetTurnDiffInput,
-  OrchestrationGetTurnDiffResult,
   OrchestrationShellSnapshot,
   OrchestrationShellStreamItem,
+  ThreadHardDeleteInput,
+  ThreadHardDeleteResult,
   OrchestrationSubscribeThreadInput,
   OrchestrationThreadStreamItem,
 } from "./orchestration.ts";
@@ -68,12 +58,11 @@ import { AdvertisedEndpoint } from "./remoteAccess.ts";
 import { EditorId } from "./editor.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 import type { ClientSettings, ServerSettings, ServerSettingsPatch } from "./settings.ts";
+import { PowerSaveBlockerMode } from "./settings.ts";
 import type {
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
   SourceControlDiscoveryResult,
-  SourceControlPublishRepositoryInput,
-  SourceControlPublishRepositoryResult,
   SourceControlRepositoryInfo,
   SourceControlRepositoryLookupInput,
 } from "./sourceControl.ts";
@@ -271,29 +260,6 @@ export const DesktopSshEnvironmentBootstrapSchema = Schema.Struct({
   remoteServerKind: Schema.optionalKey(Schema.Literals(["external", "managed"])),
 });
 
-export interface DesktopSshPasswordPromptRequest {
-  requestId: string;
-  destination: string;
-  username: string | null;
-  prompt: string;
-  expiresAt: string;
-}
-
-export const DesktopSshPasswordPromptRequestSchema = Schema.Struct({
-  requestId: Schema.String,
-  destination: Schema.String,
-  username: Schema.NullOr(Schema.String),
-  prompt: Schema.String,
-  expiresAt: Schema.String,
-});
-
-export const DesktopSshPasswordPromptCancelledType = "ssh-password-prompt-cancelled" as const;
-
-export const DesktopSshPasswordPromptCancelledResultSchema = Schema.Struct({
-  type: Schema.Literal(DesktopSshPasswordPromptCancelledType),
-  message: Schema.String,
-});
-
 export const DesktopSshEnvironmentEnsureOptionsSchema = Schema.Struct({
   issuePairingToken: Schema.optionalKey(Schema.Boolean),
 });
@@ -303,10 +269,7 @@ export const DesktopSshEnvironmentEnsureInputSchema = Schema.Struct({
   options: Schema.optionalKey(DesktopSshEnvironmentEnsureOptionsSchema),
 });
 
-export const DesktopSshEnvironmentEnsureResultSchema = Schema.Union([
-  DesktopSshEnvironmentBootstrapSchema,
-  DesktopSshPasswordPromptCancelledResultSchema,
-]);
+export const DesktopSshEnvironmentEnsureResultSchema = DesktopSshEnvironmentBootstrapSchema;
 
 export const DesktopSshHttpBaseUrlInputSchema = Schema.Struct({
   httpBaseUrl: Schema.String,
@@ -320,11 +283,6 @@ export const DesktopSshBearerRequestInputSchema = Schema.Struct({
 export const DesktopSshBearerBootstrapInputSchema = Schema.Struct({
   httpBaseUrl: Schema.String,
   credential: Schema.String,
-});
-
-export const DesktopSshPasswordPromptResolutionInputSchema = Schema.Struct({
-  requestId: Schema.String,
-  password: Schema.NullOr(Schema.String),
 });
 
 export const PersistedSavedEnvironmentRecordSchema = Schema.Struct({
@@ -369,11 +327,29 @@ export const PickFolderOptionsSchema = Schema.Struct({
   initialPath: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 
+export const DesktopPowerSaveBlockerStateSchema = Schema.Struct({
+  mode: PowerSaveBlockerMode,
+  chatsRunning: Schema.Boolean,
+});
+export type DesktopPowerSaveBlockerState = typeof DesktopPowerSaveBlockerStateSchema.Type;
+
+export const DesktopDebugEndpointStateSchema = Schema.Struct({
+  enabled: Schema.Boolean,
+  url: Schema.NullOr(Schema.String),
+});
+export type DesktopDebugEndpointState = typeof DesktopDebugEndpointStateSchema.Type;
+
+export const DesktopRendererDebugSnapshotSchema = Schema.Record(Schema.String, Schema.Unknown);
+export type DesktopRendererDebugSnapshot = typeof DesktopRendererDebugSnapshotSchema.Type;
+
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
   getLocalEnvironmentBootstrap: () => DesktopEnvironmentBootstrap | null;
+  getDebugEndpointState: () => Promise<DesktopDebugEndpointState>;
+  publishDebugSnapshot: (snapshot: DesktopRendererDebugSnapshot) => Promise<void>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
+  setPowerSaveBlockerState: (state: DesktopPowerSaveBlockerState) => Promise<void>;
   getSavedEnvironmentRegistry: () => Promise<readonly PersistedSavedEnvironmentRecord[]>;
   setSavedEnvironmentRegistry: (
     records: readonly PersistedSavedEnvironmentRecord[],
@@ -397,8 +373,6 @@ export interface DesktopBridge {
     httpBaseUrl: string,
     bearerToken: string,
   ) => Promise<AuthWebSocketTokenResult>;
-  onSshPasswordPrompt: (listener: (request: DesktopSshPasswordPromptRequest) => void) => () => void;
-  resolveSshPasswordPrompt: (requestId: string, password: string | null) => Promise<void>;
   getServerExposureState: () => Promise<DesktopServerExposureState>;
   setServerExposureMode: (mode: DesktopServerExposureMode) => Promise<DesktopServerExposureState>;
   setTailscaleServeEnabled: (input: {
@@ -414,6 +388,7 @@ export interface DesktopBridge {
     position?: { x: number; y: number },
   ) => Promise<T | null>;
   openExternal: (url: string) => Promise<boolean>;
+  openPath: (path: string) => Promise<boolean>;
   onMenuAction: (listener: (action: string) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
@@ -441,6 +416,7 @@ export interface LocalApi {
   shell: {
     openInEditor: (cwd: string, editor: EditorId) => Promise<void>;
     openExternal: (url: string) => Promise<void>;
+    openPath: (path: string) => Promise<void>;
   };
   contextMenu: {
     show: <T extends string>(
@@ -488,21 +464,12 @@ export interface LocalApi {
  * APIs bound to a specific backend environment connection.
  *
  * These operations must always be routed with explicit environment context.
- * They represent remote stateful capabilities such as orchestration, terminal,
- * project, VCS, and provider operations. In multi-environment mode, each environment gets
+ * They represent remote stateful capabilities such as orchestration, project,
+ * VCS, and provider operations. In multi-environment mode, each environment gets
  * its own instance of this surface, and callers should resolve it by
  * `environmentId` rather than reaching through the local desktop bridge.
  */
 export interface EnvironmentApi {
-  terminal: {
-    open: (input: typeof TerminalOpenInput.Encoded) => Promise<TerminalSessionSnapshot>;
-    write: (input: typeof TerminalWriteInput.Encoded) => Promise<void>;
-    resize: (input: typeof TerminalResizeInput.Encoded) => Promise<void>;
-    clear: (input: typeof TerminalClearInput.Encoded) => Promise<void>;
-    restart: (input: typeof TerminalRestartInput.Encoded) => Promise<TerminalSessionSnapshot>;
-    close: (input: typeof TerminalCloseInput.Encoded) => Promise<void>;
-    onEvent: (callback: (event: TerminalEvent) => void) => () => void;
-  };
   projects: {
     searchEntries: (input: ProjectSearchEntriesInput) => Promise<ProjectSearchEntriesResult>;
     writeFile: (input: ProjectWriteFileInput) => Promise<ProjectWriteFileResult>;
@@ -517,9 +484,6 @@ export interface EnvironmentApi {
     cloneRepository: (
       input: SourceControlCloneRepositoryInput,
     ) => Promise<SourceControlCloneRepositoryResult>;
-    publishRepository: (
-      input: SourceControlPublishRepositoryInput,
-    ) => Promise<SourceControlPublishRepositoryResult>;
   };
   vcs: {
     listRefs: (input: VcsListRefsInput) => Promise<VcsListRefsResult>;
@@ -530,6 +494,7 @@ export interface EnvironmentApi {
     init: (input: VcsInitInput) => Promise<void>;
     pull: (input: VcsPullInput) => Promise<VcsPullResult>;
     refreshStatus: (input: VcsStatusInput) => Promise<VcsStatusResult>;
+    workingTreeDiff: (input: VcsWorkingTreeDiffInput) => Promise<VcsWorkingTreeDiffResult>;
     onStatus: (
       input: VcsStatusInput,
       callback: (status: VcsStatusResult) => void,
@@ -546,11 +511,9 @@ export interface EnvironmentApi {
   };
   orchestration: {
     dispatchCommand: (command: ClientOrchestrationCommand) => Promise<{ sequence: number }>;
-    getTurnDiff: (input: OrchestrationGetTurnDiffInput) => Promise<OrchestrationGetTurnDiffResult>;
-    getFullThreadDiff: (
-      input: OrchestrationGetFullThreadDiffInput,
-    ) => Promise<OrchestrationGetFullThreadDiffResult>;
     getArchivedShellSnapshot: () => Promise<OrchestrationShellSnapshot>;
+    getDeletedShellSnapshot: () => Promise<OrchestrationShellSnapshot>;
+    hardDeleteThread: (input: ThreadHardDeleteInput) => Promise<ThreadHardDeleteResult>;
     subscribeShell: (
       callback: (event: OrchestrationShellStreamItem) => void,
       options?: {

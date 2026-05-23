@@ -43,11 +43,6 @@ import {
   useSavedEnvironmentRegistryStore,
   useSavedEnvironmentRuntimeStore,
 } from "../environments/runtime";
-import {
-  INLINE_TERMINAL_CONTEXT_PLACEHOLDER,
-  removeInlineTerminalContextPlaceholder,
-  type TerminalContextDraft,
-} from "../lib/terminalContext";
 import { isMacPlatform } from "../lib/utils";
 import { __resetLocalApiForTests } from "../localApi";
 import { AppAtomRegistryProvider } from "../rpc/atomRegistry";
@@ -55,7 +50,6 @@ import { getServerConfig } from "../rpc/serverState";
 import { getRouter } from "../router";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import { selectBootstrapCompleteForActiveEnvironment, useStore } from "../store";
-import { useTerminalStateStore } from "../terminalStateStore";
 import { useUiStateStore } from "../uiStateStore";
 import { createAuthenticatedSessionHandlers } from "../../test/authHttpHandlers";
 import { BrowserWsRpcHarness, type NormalizedWsRpcRequestBody } from "../../test/wsRpcHarness";
@@ -205,7 +199,6 @@ function createMockEnvironmentApi(input: {
   dispatchCommand: EnvironmentApi["orchestration"]["dispatchCommand"];
 }): EnvironmentApi {
   return {
-    terminal: {} as EnvironmentApi["terminal"],
     projects: {} as EnvironmentApi["projects"],
     filesystem: {
       browse: input.browse,
@@ -215,15 +208,15 @@ function createMockEnvironmentApi(input: {
     git: {} as EnvironmentApi["git"],
     orchestration: {
       dispatchCommand: input.dispatchCommand,
-      getTurnDiff: (() => {
-        throw new Error("Not implemented in browser test.");
-      }) as EnvironmentApi["orchestration"]["getTurnDiff"],
-      getFullThreadDiff: (() => {
-        throw new Error("Not implemented in browser test.");
-      }) as EnvironmentApi["orchestration"]["getFullThreadDiff"],
       getArchivedShellSnapshot: (() => {
         throw new Error("Not implemented in browser test.");
       }) as EnvironmentApi["orchestration"]["getArchivedShellSnapshot"],
+      getDeletedShellSnapshot: (() => {
+        throw new Error("Not implemented in browser test.");
+      }) as EnvironmentApi["orchestration"]["getDeletedShellSnapshot"],
+      hardDeleteThread: (() => {
+        throw new Error("Not implemented in browser test.");
+      }) as EnvironmentApi["orchestration"]["hardDeleteThread"],
       subscribeShell: (() => () => undefined) as EnvironmentApi["orchestration"]["subscribeShell"],
       subscribeThread: (() => () =>
         undefined) as EnvironmentApi["orchestration"]["subscribeThread"],
@@ -264,25 +257,6 @@ function createAssistantMessage(options: { id: MessageId; text: string; offsetSe
     streaming: false,
     createdAt: isoAt(options.offsetSeconds),
     updatedAt: isoAt(options.offsetSeconds + 1),
-  };
-}
-
-function createTerminalContext(input: {
-  id: string;
-  terminalLabel: string;
-  lineStart: number;
-  lineEnd: number;
-  text: string;
-}): TerminalContextDraft {
-  return {
-    id: input.id,
-    threadId: THREAD_ID,
-    terminalId: `terminal-${input.id}`,
-    terminalLabel: input.terminalLabel,
-    lineStart: input.lineStart,
-    lineEnd: input.lineEnd,
-    text: input.text,
-    createdAt: NOW_ISO,
   };
 }
 
@@ -1052,25 +1026,6 @@ function resolveWsRpc(body: NormalizedWsRpcRequestBody): unknown {
   if (tag === WS_METHODS.shellOpenInEditor) {
     return null;
   }
-  if (tag === WS_METHODS.terminalOpen) {
-    return {
-      threadId: typeof body.threadId === "string" ? body.threadId : THREAD_ID,
-      terminalId: typeof body.terminalId === "string" ? body.terminalId : "default",
-      cwd: typeof body.cwd === "string" ? body.cwd : "/repo/project",
-      worktreePath:
-        typeof body.worktreePath === "string"
-          ? body.worktreePath
-          : body.worktreePath === null
-            ? null
-            : null,
-      status: "running",
-      pid: 123,
-      history: "",
-      exitCode: null,
-      exitSignal: null,
-      updatedAt: NOW_ISO,
-    };
-  }
   return {};
 }
 
@@ -1724,13 +1679,6 @@ describe("ChatView timeline estimator parity (full app)", () => {
       projectOrder: [],
       threadLastVisitedAtById: {},
     });
-    useTerminalStateStore.persist.clearStorage();
-    useTerminalStateStore.setState({
-      terminalStateByThreadKey: {},
-      terminalLaunchContextByThreadKey: {},
-      terminalEventEntriesByKey: {},
-      nextTerminalEventId: 1,
-    });
   });
 
   afterEach(() => {
@@ -1885,74 +1833,6 @@ describe("ChatView timeline estimator parity (full app)", () => {
             cwd: "/repo/project",
             editor: "vscode",
           });
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("does not leak a server worktree path into drawer runtime env when launch context clears it", async () => {
-    const snapshot = createSnapshotForTargetUser({
-      targetMessageId: "msg-user-launch-context-target" as MessageId,
-      targetText: "launch context worktree override",
-    });
-    const targetThread = snapshot.threads.find((thread) => thread.id === THREAD_ID);
-    if (targetThread) {
-      Object.assign(targetThread, {
-        branch: "feature/branch",
-        worktreePath: "/repo/worktrees/feature-branch",
-      });
-    }
-
-    useTerminalStateStore.setState({
-      terminalStateByThreadKey: {
-        [THREAD_KEY]: {
-          terminalOpen: true,
-          terminalHeight: 280,
-          terminalIds: ["default"],
-          runningTerminalIds: [],
-          activeTerminalId: "default",
-          terminalGroups: [{ id: "group-default", terminalIds: ["default"] }],
-          activeTerminalGroupId: "group-default",
-        },
-      },
-      terminalLaunchContextByThreadKey: {
-        [THREAD_KEY]: {
-          cwd: "/repo/project",
-          worktreePath: null,
-        },
-      },
-    });
-
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot,
-    });
-
-    try {
-      await vi.waitFor(
-        () => {
-          const openRequest = wsRequests.find(
-            (request) => request._tag === WS_METHODS.terminalOpen,
-          ) as
-            | {
-                _tag: string;
-                cwd?: string;
-                worktreePath?: string | null;
-                env?: Record<string, string>;
-              }
-            | undefined;
-          expect(openRequest).toMatchObject({
-            _tag: WS_METHODS.terminalOpen,
-            cwd: "/repo/project",
-            worktreePath: null,
-            env: {
-              CAFE_CODE_PROJECT_ROOT: "/repo/project",
-            },
-          });
-          expect(openRequest?.env?.CAFE_CODE_WORKTREE_PATH).toBeUndefined();
         },
         { timeout: 8_000, interval: 16 },
       );
@@ -2166,7 +2046,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
   });
 
   it("falls back to the first installed editor when the stored favorite is unavailable", async () => {
-    localStorage.setItem("t3code:last-editor", JSON.stringify("vscodium"));
+    localStorage.setItem("cafecode:last-editor", JSON.stringify("vscodium"));
     setDraftThreadWithoutWorktree();
 
     const mounted = await mountChatView({
@@ -2203,151 +2083,6 @@ describe("ChatView timeline estimator parity (full app)", () => {
             _tag: WS_METHODS.shellOpenInEditor,
             cwd: "/repo/project",
             editor: "vscode-insiders",
-          });
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("runs project scripts from local draft threads at the project cwd", async () => {
-    useComposerDraftStore.setState({
-      draftThreadsByThreadKey: {
-        [THREAD_KEY]: {
-          threadId: THREAD_ID,
-          environmentId: LOCAL_ENVIRONMENT_ID,
-          projectId: PROJECT_ID,
-          logicalProjectKey: PROJECT_DRAFT_KEY,
-          createdAt: NOW_ISO,
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          branch: null,
-          worktreePath: null,
-          envMode: "local",
-        },
-      },
-      logicalProjectDraftThreadKeyByLogicalProjectKey: {
-        [PROJECT_DRAFT_KEY]: THREAD_KEY,
-      },
-    });
-
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: withProjectScripts(createDraftOnlySnapshot(), [
-        {
-          id: "lint",
-          name: "Lint",
-          command: "bun run lint",
-          icon: "lint",
-          runOnWorktreeCreate: false,
-        },
-      ]),
-    });
-
-    try {
-      const runButton = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("button")).find(
-            (button) => button.title === "Run Lint",
-          ) as HTMLButtonElement | null,
-        "Unable to find Run Lint button.",
-      );
-      runButton.click();
-
-      await vi.waitFor(
-        () => {
-          const openRequest = wsRequests.find(
-            (request) => request._tag === WS_METHODS.terminalOpen,
-          );
-          expect(openRequest).toMatchObject({
-            _tag: WS_METHODS.terminalOpen,
-            threadId: THREAD_ID,
-            cwd: "/repo/project",
-            env: {
-              CAFE_CODE_PROJECT_ROOT: "/repo/project",
-            },
-          });
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-
-      await vi.waitFor(
-        () => {
-          const writeRequest = wsRequests.find(
-            (request) => request._tag === WS_METHODS.terminalWrite,
-          );
-          expect(writeRequest).toMatchObject({
-            _tag: WS_METHODS.terminalWrite,
-            threadId: THREAD_ID,
-            data: "bun run lint\r",
-          });
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("runs project scripts from worktree draft threads at the worktree cwd", async () => {
-    useComposerDraftStore.setState({
-      draftThreadsByThreadKey: {
-        [THREAD_KEY]: {
-          threadId: THREAD_ID,
-          environmentId: LOCAL_ENVIRONMENT_ID,
-          projectId: PROJECT_ID,
-          logicalProjectKey: PROJECT_DRAFT_KEY,
-          createdAt: NOW_ISO,
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          branch: "feature/draft",
-          worktreePath: "/repo/worktrees/feature-draft",
-          envMode: "worktree",
-        },
-      },
-      logicalProjectDraftThreadKeyByLogicalProjectKey: {
-        [PROJECT_DRAFT_KEY]: THREAD_KEY,
-      },
-    });
-
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: withProjectScripts(createDraftOnlySnapshot(), [
-        {
-          id: "test",
-          name: "Test",
-          command: "bun run test",
-          icon: "test",
-          runOnWorktreeCreate: false,
-        },
-      ]),
-    });
-
-    try {
-      const runButton = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("button")).find(
-            (button) => button.title === "Run Test",
-          ) as HTMLButtonElement | null,
-        "Unable to find Run Test button.",
-      );
-      runButton.click();
-
-      await vi.waitFor(
-        () => {
-          const openRequest = wsRequests.find(
-            (request) => request._tag === WS_METHODS.terminalOpen,
-          );
-          expect(openRequest).toMatchObject({
-            _tag: WS_METHODS.terminalOpen,
-            threadId: THREAD_ID,
-            cwd: "/repo/worktrees/feature-draft",
-            env: {
-              CAFE_CODE_PROJECT_ROOT: "/repo/project",
-              CAFE_CODE_WORKTREE_PATH: "/repo/worktrees/feature-draft",
-            },
           });
         },
         { timeout: 8_000, interval: 16 },
@@ -2470,22 +2205,12 @@ describe("ChatView timeline estimator parity (full app)", () => {
         },
         { timeout: 8_000, interval: 16 },
       );
-
-      expect(
-        wsRequests.some(
-          (request) =>
-            request._tag === WS_METHODS.terminalWrite && request.data === "bun install\r",
-        ),
-      ).toBe(false);
     } finally {
       await mounted.cleanup();
     }
   });
 
   it("sends bootstrap turn-starts and waits for server setup on first-send worktree drafts", async () => {
-    useTerminalStateStore.setState({
-      terminalStateByThreadKey: {},
-    });
     useComposerDraftStore.setState({
       draftThreadsByThreadKey: {
         [THREAD_KEY]: {
@@ -2572,14 +2297,6 @@ describe("ChatView timeline estimator parity (full app)", () => {
       expect(wsRequests.some((request) => request._tag === WS_METHODS.vcsCreateWorktree)).toBe(
         false,
       );
-      expect(
-        wsRequests.some(
-          (request) =>
-            request._tag === WS_METHODS.terminalWrite &&
-            request.threadId === THREAD_ID &&
-            request.data === "bun install\r",
-        ),
-      ).toBe(false);
     } finally {
       await mounted.cleanup();
     }
@@ -2987,9 +2704,6 @@ describe("ChatView timeline estimator parity (full app)", () => {
   });
 
   it("shows the send state once bootstrap dispatch is in flight", async () => {
-    useTerminalStateStore.setState({
-      terminalStateByThreadKey: {},
-    });
     useComposerDraftStore.setState({
       draftThreadsByThreadKey: {
         [THREAD_KEY]: {
@@ -3560,162 +3274,6 @@ describe("ChatView timeline estimator parity (full app)", () => {
     }
   });
 
-  it("keeps removed terminal context pills removed when a new one is added", async () => {
-    const removedLabel = "Terminal 1 lines 1-2";
-    const addedLabel = "Terminal 2 lines 9-10";
-    useComposerDraftStore.getState().addTerminalContext(
-      THREAD_REF,
-      createTerminalContext({
-        id: "ctx-removed",
-        terminalLabel: "Terminal 1",
-        lineStart: 1,
-        lineEnd: 2,
-        text: "bun i\nno changes",
-      }),
-    );
-
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createSnapshotForTargetUser({
-        targetMessageId: "msg-user-terminal-pill-backspace" as MessageId,
-        targetText: "terminal pill backspace target",
-      }),
-    });
-
-    try {
-      await vi.waitFor(
-        () => {
-          expect(document.body.textContent).toContain(removedLabel);
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-
-      const store = useComposerDraftStore.getState();
-      const currentPrompt = store.draftsByThreadKey[THREAD_KEY]?.prompt ?? "";
-      const nextPrompt = removeInlineTerminalContextPlaceholder(currentPrompt, 0);
-      store.setPrompt(THREAD_REF, nextPrompt.prompt);
-      store.removeTerminalContext(THREAD_REF, "ctx-removed");
-
-      await vi.waitFor(
-        () => {
-          expect(useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]).toBeUndefined();
-          expect(document.body.textContent).not.toContain(removedLabel);
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-
-      useComposerDraftStore.getState().addTerminalContext(
-        THREAD_REF,
-        createTerminalContext({
-          id: "ctx-added",
-          terminalLabel: "Terminal 2",
-          lineStart: 9,
-          lineEnd: 10,
-          text: "git status\nOn branch main",
-        }),
-      );
-
-      await vi.waitFor(
-        () => {
-          const draft = useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY];
-          expect(draft?.terminalContexts.map((context) => context.id)).toEqual(["ctx-added"]);
-          expect(document.body.textContent).toContain(addedLabel);
-          expect(document.body.textContent).not.toContain(removedLabel);
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("disables send when the composer only contains an expired terminal pill", async () => {
-    const expiredLabel = "Terminal 1 line 4";
-    useComposerDraftStore.getState().addTerminalContext(
-      THREAD_REF,
-      createTerminalContext({
-        id: "ctx-expired-only",
-        terminalLabel: "Terminal 1",
-        lineStart: 4,
-        lineEnd: 4,
-        text: "",
-      }),
-    );
-
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createSnapshotForTargetUser({
-        targetMessageId: "msg-user-expired-pill-disabled" as MessageId,
-        targetText: "expired pill disabled target",
-      }),
-    });
-
-    try {
-      await vi.waitFor(
-        () => {
-          expect(document.body.textContent).toContain(expiredLabel);
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-
-      const sendButton = await waitForSendButton();
-      expect(sendButton.disabled).toBe(true);
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("warns when sending text while omitting expired terminal pills", async () => {
-    const expiredLabel = "Terminal 1 line 4";
-    useComposerDraftStore.getState().addTerminalContext(
-      THREAD_REF,
-      createTerminalContext({
-        id: "ctx-expired-send-warning",
-        terminalLabel: "Terminal 1",
-        lineStart: 4,
-        lineEnd: 4,
-        text: "",
-      }),
-    );
-    useComposerDraftStore
-      .getState()
-      .setPrompt(THREAD_REF, `yoo${INLINE_TERMINAL_CONTEXT_PLACEHOLDER}waddup`);
-
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createSnapshotForTargetUser({
-        targetMessageId: "msg-user-expired-pill-warning" as MessageId,
-        targetText: "expired pill warning target",
-      }),
-    });
-
-    try {
-      await vi.waitFor(
-        () => {
-          expect(document.body.textContent).toContain(expiredLabel);
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-
-      const sendButton = await waitForSendButton();
-      expect(sendButton.disabled).toBe(false);
-      sendButton.click();
-
-      await vi.waitFor(
-        () => {
-          expect(document.body.textContent).toContain(
-            "Expired terminal context omitted from message",
-          );
-          expect(document.body.textContent).not.toContain(expiredLabel);
-          expect(document.body.textContent).toContain("yoowaddup");
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
   it("shows a pointer cursor for the running stop button", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
@@ -3813,7 +3371,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
 
   it("shows the confirm archive action after clicking the archive button", async () => {
     localStorage.setItem(
-      "t3code:client-settings:v1",
+      "cafecode:client-settings:v1",
       JSON.stringify({
         ...DEFAULT_CLIENT_SETTINGS,
         confirmThreadArchive: true,
@@ -3842,7 +3400,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await expect.element(confirmButton).toBeInTheDocument();
       await expect.element(confirmButton).toBeVisible();
     } finally {
-      localStorage.removeItem("t3code:client-settings:v1");
+      localStorage.removeItem("cafecode:client-settings:v1");
       await mounted.cleanup();
     }
   });
@@ -4281,7 +3839,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
               },
               whenAst: {
                 type: "not",
-                node: { type: "identifier", name: "terminalFocus" },
+                node: { type: "identifier", name: "modelPickerOpen" },
               },
             },
             {
@@ -4348,7 +3906,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
               },
               whenAst: {
                 type: "not",
-                node: { type: "identifier", name: "terminalFocus" },
+                node: { type: "identifier", name: "modelPickerOpen" },
               },
             },
           ],
@@ -4391,7 +3949,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
               },
               whenAst: {
                 type: "not",
-                node: { type: "identifier", name: "terminalFocus" },
+                node: { type: "identifier", name: "modelPickerOpen" },
               },
             },
           ],
@@ -4443,7 +4001,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
               },
               whenAst: {
                 type: "not",
-                node: { type: "identifier", name: "terminalFocus" },
+                node: { type: "identifier", name: "modelPickerOpen" },
               },
             },
           ],
@@ -4490,7 +4048,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
               },
               whenAst: {
                 type: "not",
-                node: { type: "identifier", name: "terminalFocus" },
+                node: { type: "identifier", name: "modelPickerOpen" },
               },
             },
           ],
@@ -4601,7 +4159,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
               },
               whenAst: {
                 type: "not",
-                node: { type: "identifier", name: "terminalFocus" },
+                node: { type: "identifier", name: "modelPickerOpen" },
               },
             },
           ],
@@ -5229,7 +4787,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
               },
               whenAst: {
                 type: "not",
-                node: { type: "identifier", name: "terminalFocus" },
+                node: { type: "identifier", name: "modelPickerOpen" },
               },
             },
           ],
@@ -5354,7 +4912,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
               },
               whenAst: {
                 type: "not",
-                node: { type: "identifier", name: "terminalFocus" },
+                node: { type: "identifier", name: "modelPickerOpen" },
               },
             },
           ],
@@ -5403,7 +4961,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
               },
               whenAst: {
                 type: "not",
-                node: { type: "identifier", name: "terminalFocus" },
+                node: { type: "identifier", name: "modelPickerOpen" },
               },
             },
           ],
@@ -5465,7 +5023,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
               },
               whenAst: {
                 type: "not",
-                node: { type: "identifier", name: "terminalFocus" },
+                node: { type: "identifier", name: "modelPickerOpen" },
               },
             },
           ],
@@ -5521,7 +5079,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
               },
               whenAst: {
                 type: "not",
-                node: { type: "identifier", name: "terminalFocus" },
+                node: { type: "identifier", name: "modelPickerOpen" },
               },
             },
           ],
@@ -5568,7 +5126,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
               },
               whenAst: {
                 type: "not",
-                node: { type: "identifier", name: "terminalFocus" },
+                node: { type: "identifier", name: "modelPickerOpen" },
               },
             },
           ],
@@ -6034,7 +5592,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
               },
               whenAst: {
                 type: "not",
-                node: { type: "identifier", name: "terminalFocus" },
+                node: { type: "identifier", name: "modelPickerOpen" },
               },
             },
             {

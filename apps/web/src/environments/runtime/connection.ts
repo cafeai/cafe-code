@@ -4,7 +4,6 @@ import type {
   OrchestrationShellStreamEvent,
   ServerConfig,
   ServerLifecycleWelcomePayload,
-  TerminalEvent,
 } from "@cafecode/contracts";
 import type { KnownEnvironment } from "@cafecode/client-runtime";
 
@@ -29,7 +28,6 @@ interface OrchestrationHandlers {
     snapshot: OrchestrationShellSnapshot,
     environmentId: EnvironmentId,
   ) => void;
-  readonly applyTerminalEvent: (event: TerminalEvent, environmentId: EnvironmentId) => void;
 }
 
 interface EnvironmentConnectionInput extends OrchestrationHandlers {
@@ -143,16 +141,9 @@ export function createEnvironmentConnection(
     },
   );
 
-  const unsubTerminalEvent = input.client.terminal.onEvent(
-    (event: Parameters<Parameters<WsRpcClient["terminal"]["onEvent"]>[0]>[0]) => {
-      input.applyTerminalEvent(event, environmentId);
-    },
-  );
-
   const cleanup = () => {
     disposed = true;
     unsubShell();
-    unsubTerminalEvent();
     unsubLifecycle();
     unsubConfig();
   };

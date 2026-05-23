@@ -96,6 +96,31 @@ describe("tailscale endpoint provider", () => {
     }).pipe(Effect.provide(unusedTailscaleExternalServicesLayer)),
   );
 
+  it.effect("does not spawn tailscale status while Tailscale HTTPS is disabled", () =>
+    Effect.gen(function* () {
+      const endpoints = yield* resolveTailscaleAdvertisedEndpoints({
+        port: 3773,
+        networkInterfaces: {
+          tailscale0: [
+            {
+              address: "100.100.100.100",
+              family: "IPv4",
+              internal: false,
+              netmask: "255.192.0.0",
+              cidr: "100.100.100.100/10",
+              mac: "00:00:00:00:00:00",
+            },
+          ],
+        },
+        serveEnabled: false,
+      });
+      assert.deepEqual(
+        endpoints.map((endpoint) => endpoint.httpBaseUrl),
+        ["http://100.100.100.100:3773/"],
+      );
+    }).pipe(Effect.provide(unusedTailscaleExternalServicesLayer)),
+  );
+
   it.effect(
     "marks the Tailscale HTTPS endpoint available after Serve is enabled and reachable",
     () =>

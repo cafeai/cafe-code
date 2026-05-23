@@ -222,6 +222,15 @@ const readLaunchctlPath: Effect.Effect<
   timeout: LAUNCHCTL_TIMEOUT,
 }).pipe(Effect.map(trimNonEmpty));
 
+const readLaunchctlValue = (
+  name: string,
+): Effect.Effect<Option.Option<string>, never, ChildProcessSpawner.ChildProcessSpawner> =>
+  runCommandOutput({
+    command: "/bin/launchctl",
+    args: ["getenv", name],
+    timeout: LAUNCHCTL_TIMEOUT,
+  }).pipe(Effect.map(trimNonEmpty));
+
 const readWindowsEnvironment = Effect.fn("desktop.shellEnvironment.readWindowsEnvironment")(
   function* (
     names: ReadonlyArray<string>,
@@ -307,8 +316,17 @@ const installPosixEnvironment = Effect.fn("desktop.shellEnvironment.installPosix
     if (Option.isSome(mergedPath)) {
       config.env.PATH = mergedPath.value;
     }
-    if (!config.env.SSH_AUTH_SOCK && shellEnvironment.SSH_AUTH_SOCK) {
-      config.env.SSH_AUTH_SOCK = shellEnvironment.SSH_AUTH_SOCK;
+    if (!config.env.SSH_AUTH_SOCK) {
+      const launchctlSshAuthSock =
+        config.platform === "darwin" && !shellEnvironment.SSH_AUTH_SOCK
+          ? yield* readLaunchctlValue("SSH_AUTH_SOCK")
+          : Option.none<string>();
+      const sshAuthSock = trimNonEmpty(shellEnvironment.SSH_AUTH_SOCK).pipe(
+        Option.orElse(() => launchctlSshAuthSock),
+      );
+      if (Option.isSome(sshAuthSock)) {
+        config.env.SSH_AUTH_SOCK = sshAuthSock.value;
+      }
     }
 
     for (const name of [

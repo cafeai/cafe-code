@@ -48,10 +48,8 @@ export const MODEL_PICKER_KEYBINDING_COMMANDS = [
 export type ModelPickerKeybindingCommand = (typeof MODEL_PICKER_KEYBINDING_COMMANDS)[number];
 
 const STATIC_KEYBINDING_COMMANDS = [
-  "terminal.toggle",
-  "terminal.split",
-  "terminal.new",
-  "terminal.close",
+  "composer.submit",
+  "composer.steer",
   "diff.toggle",
   "commandPalette.toggle",
   "chat.new",

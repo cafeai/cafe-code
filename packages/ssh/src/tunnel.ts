@@ -23,9 +23,8 @@ import { HttpClient, HttpClientRequest } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import {
-  buildSshChildEnvironment,
+  formatSshAgentAuthRequiredMessage,
   type SshAuthOptions,
-  SshPasswordPrompt,
   isSshAuthFailure,
 } from "./auth.ts";
 import {
@@ -34,6 +33,7 @@ import {
   collectProcessOutput,
   getLastNonEmptyOutputLine,
   remoteStateKey,
+  resolveSshIdentityAgent,
   resolveSshTarget,
   runSshCommand,
   targetConnectionKey,
@@ -44,7 +44,6 @@ import {
   SshInvalidTargetError,
   SshLaunchError,
   SshPairingError,
-  SshPasswordPromptError,
   SshReadinessError,
 } from "./errors.ts";
 
@@ -53,7 +52,7 @@ const REMOTE_PORT_SCAN_WINDOW = 200;
 const SSH_READY_TIMEOUT_MS = 20_000;
 const SSH_READY_PROBE_TIMEOUT_MS = 1_000;
 const TUNNEL_SHUTDOWN_TIMEOUT_MS = 2_000;
-const REMOTE_READY_TIMEOUT_MS = 15_000;
+const REMOTE_READY_TIMEOUT_MS = 60_000;
 const REMOTE_REUSE_READY_TIMEOUT_MS = 2_000;
 
 export interface RemoteCafeCodeRunnerOptions {
@@ -84,8 +83,7 @@ type SshEnvironmentEffectContext =
   | FileSystem.FileSystem
   | Path.Path
   | HttpClient.HttpClient
-  | NetService.NetService
-  | SshPasswordPrompt;
+  | NetService.NetService;
 
 type SshEnvironmentEffectError =
   | SshCommandError
@@ -93,7 +91,6 @@ type SshEnvironmentEffectError =
   | SshLaunchError
   | SshPairingError
   | SshReadinessError
-  | SshPasswordPromptError
   | NetService.NetError;
 
 function makeSshTunnelCancelledError(target: DesktopSshEnvironmentTarget): SshCommandError {
@@ -130,11 +127,6 @@ interface SshAuthOperationInput<T> {
   readonly operation: (
     authOptions: SshAuthOptions,
   ) => Effect.Effect<T, SshEnvironmentEffectError, SshEnvironmentEffectContext>;
-}
-
-interface SshAuthAttemptInput<T> extends SshAuthOperationInput<T> {
-  readonly promptCount: number;
-  readonly authSecret: string | null;
 }
 
 export interface SshEnvironmentManagerShape {
@@ -193,6 +185,13 @@ const decodeRemoteLaunchOutput = (stdout: string) =>
 
 const decodeRemotePairingOutput = (stdout: string) =>
   decodeRemoteJsonOutput(stdout, decodeRemotePairingResult);
+
+export const REMOTE_LOGIN_SHELL_BOOTSTRAP_COMMAND =
+  'sh -lc \'shell="${SHELL:-/bin/sh}"; case "$shell" in */bash|*/zsh|*/fish|*/ksh|*/mksh) if [ -x "$shell" ]; then exec "$shell" -l -c "sh -s"; fi ;; esac; exec sh -s\'';
+
+export function remoteLoginShellCommandArgs(): string[] {
+  return [REMOTE_LOGIN_SHELL_BOOTSTRAP_COMMAND];
+}
 
 const remoteNodeEngineCheckMain = function remoteNodeEngineCheckMain() {
   const range = process.argv[2] || "";
@@ -444,7 +443,7 @@ ensure_remote_node_path || true
 CAFE_CODE_NODE_SCRIPT_PATH=@@CAFE_CODE_NODE_SCRIPT_PATH@@
 if [ -n "$CAFE_CODE_NODE_SCRIPT_PATH" ]; then
   if ! command -v node >/dev/null 2>&1; then
-    printf 'Remote host is missing node on PATH. Install Node or configure a supported version manager for non-interactive shells.\\n' >&2
+    printf 'Remote host is missing node after login-shell PATH setup. Install Node or configure a supported version manager for login shells.\\n' >&2
     exit 1
   fi
   exec node "$CAFE_CODE_NODE_SCRIPT_PATH" "$@"
@@ -458,22 +457,16 @@ fi
 if command -v npm >/dev/null 2>&1; then
   exec npm exec --yes @@CAFE_CODE_PACKAGE_SPEC@@ -- "$@"
 fi
-printf 'Remote host is missing the Cafe Code CLI and could not install @@CAFE_CODE_PACKAGE_SPEC@@ because node/npm/npx are unavailable on PATH. Install Node or configure a supported version manager for non-interactive shells.\\n' >&2
+printf 'Remote host is missing the Cafe Code CLI and could not install @@CAFE_CODE_PACKAGE_SPEC@@ because node/npm/npx are unavailable after login-shell PATH setup. Install Node or configure a supported version manager for login shells.\\n' >&2
 exit 1
 `;
 
 export const REMOTE_LAUNCH_SCRIPT = `set -eu
 @@CAFE_CODE_NODE_ENV_SCRIPT@@
-STATE_KEY="$1"
+STATE_KEY=@@CAFE_CODE_STATE_KEY@@
 DEFAULT_SERVER_HOME="\${CAFE_CODE_HOME:-}"
 if [ -z "$DEFAULT_SERVER_HOME" ]; then
-  if [ -d "$HOME/.cafecode" ]; then
-    DEFAULT_SERVER_HOME="$HOME/.cafecode"
-  elif [ -d "$HOME/.t3" ]; then
-    DEFAULT_SERVER_HOME="$HOME/.t3"
-  else
-    DEFAULT_SERVER_HOME="$HOME/.cafecode"
-  fi
+  DEFAULT_SERVER_HOME="$HOME/.cafe-code"
 fi
 STATE_DIR="$DEFAULT_SERVER_HOME/ssh-launch/$STATE_KEY"
 DEFAULT_RUNTIME_FILE="$DEFAULT_SERVER_HOME/userdata/server-runtime.json"
@@ -498,7 +491,7 @@ fi
 mv "$RUNNER_NEXT" "$RUNNER_FILE"
 chmod 700 "$RUNNER_FILE"
 if ! ensure_remote_node_path; then
-  printf 'Remote host is missing node on PATH. Install Node or configure a supported version manager for non-interactive shells.\\n' >&2
+  printf 'Remote host is missing node after login-shell PATH setup. Install Node or configure a supported version manager for login shells.\\n' >&2
   exit 1
 fi
 pick_port() {
@@ -518,6 +511,20 @@ wait_for_pid_exit() {
     WAIT_COUNT=$((WAIT_COUNT + 1))
     sleep 0.1
   done
+}
+wait_managed_ready() {
+  READY_TIMEOUT_MS="$1"
+  READY_TIMEOUT_SECONDS=$(( (READY_TIMEOUT_MS + 999) / 1000 ))
+  READY_DEADLINE=$(( $(date +%s) + READY_TIMEOUT_SECONDS ))
+  while [ "$(date +%s)" -le "$READY_DEADLINE" ]; do
+    if wait_ready "1000"; then
+      return 0
+    fi
+    if ! kill -0 "$REMOTE_PID" 2>/dev/null; then
+      return 2
+    fi
+  done
+  return 1
 }
 resolve_default_runtime_port() {
   node - "$DEFAULT_RUNTIME_FILE" <<'NODE'
@@ -614,8 +621,15 @@ if [ -z "$REMOTE_PORT" ]; then
   printf '%s\\n' "$REMOTE_PID" >"$PID_FILE"
   printf '%s\\n' "$REMOTE_PORT" >"$PORT_FILE"
   printf 'managed\\n' >"$MANAGED_FILE"
-  if ! wait_ready "@@CAFE_CODE_READY_TIMEOUT_MS@@"; then
-    printf 'Remote Cafe Code server did not become ready on 127.0.0.1:%s.\\n' "$REMOTE_PORT" >&2
+  if wait_managed_ready "@@CAFE_CODE_READY_TIMEOUT_MS@@"; then
+    :
+  else
+    READY_STATUS="$?"
+    if [ "$READY_STATUS" -eq 2 ]; then
+      printf 'Remote Cafe Code server exited before becoming ready on 127.0.0.1:%s.\\n' "$REMOTE_PORT" >&2
+    else
+      printf 'Remote Cafe Code server did not become ready on 127.0.0.1:%s.\\n' "$REMOTE_PORT" >&2
+    fi
     tail -n 80 "$LOG_FILE" >&2 2>/dev/null || true
     kill "$REMOTE_PID" 2>/dev/null || true
     wait_for_pid_exit "$REMOTE_PID"
@@ -629,13 +643,7 @@ printf '{"remotePort":%s,"serverKind":"%s"}\\n' "$REMOTE_PORT" "\${REMOTE_MANAGE
 export const REMOTE_PAIRING_SCRIPT = `set -eu
 DEFAULT_SERVER_HOME="\${CAFE_CODE_HOME:-}"
 if [ -z "$DEFAULT_SERVER_HOME" ]; then
-  if [ -d "$HOME/.cafecode" ]; then
-    DEFAULT_SERVER_HOME="$HOME/.cafecode"
-  elif [ -d "$HOME/.t3" ]; then
-    DEFAULT_SERVER_HOME="$HOME/.t3"
-  else
-    DEFAULT_SERVER_HOME="$HOME/.cafecode"
-  fi
+  DEFAULT_SERVER_HOME="$HOME/.cafe-code"
 fi
 STATE_DIR="$DEFAULT_SERVER_HOME/ssh-launch/@@CAFE_CODE_STATE_KEY@@"
 RUNNER_FILE="$STATE_DIR/run-cafe-code.sh"
@@ -651,13 +659,7 @@ PAIRING_BASE_DIR="$DEFAULT_SERVER_HOME"
 export const REMOTE_STOP_SCRIPT = `set -eu
 DEFAULT_SERVER_HOME="\${CAFE_CODE_HOME:-}"
 if [ -z "$DEFAULT_SERVER_HOME" ]; then
-  if [ -d "$HOME/.cafecode" ]; then
-    DEFAULT_SERVER_HOME="$HOME/.cafecode"
-  elif [ -d "$HOME/.t3" ]; then
-    DEFAULT_SERVER_HOME="$HOME/.t3"
-  else
-    DEFAULT_SERVER_HOME="$HOME/.cafecode"
-  fi
+  DEFAULT_SERVER_HOME="$HOME/.cafe-code"
 fi
 STATE_DIR="$DEFAULT_SERVER_HOME/ssh-launch/@@CAFE_CODE_STATE_KEY@@"
 PID_FILE="$STATE_DIR/pid"
@@ -680,13 +682,7 @@ printf '{"stopped":true}\\n'
 const REMOTE_LOG_TAIL_SCRIPT = `set -eu
 DEFAULT_SERVER_HOME="\${CAFE_CODE_HOME:-}"
 if [ -z "$DEFAULT_SERVER_HOME" ]; then
-  if [ -d "$HOME/.cafecode" ]; then
-    DEFAULT_SERVER_HOME="$HOME/.cafecode"
-  elif [ -d "$HOME/.t3" ]; then
-    DEFAULT_SERVER_HOME="$HOME/.t3"
-  else
-    DEFAULT_SERVER_HOME="$HOME/.cafecode"
-  fi
+  DEFAULT_SERVER_HOME="$HOME/.cafe-code"
 fi
 STATE_DIR="$DEFAULT_SERVER_HOME/ssh-launch/@@CAFE_CODE_STATE_KEY@@"
 LOG_FILE="$STATE_DIR/server.log"
@@ -696,7 +692,7 @@ fi
 `;
 
 export function buildRemoteCafeCodeRunnerScript(input?: RemoteCafeCodeRunnerOptions): string {
-  const packageSpec = shellSingleQuote(input?.packageSpec?.trim() || "cafe-code@latest");
+  const packageSpec = shellSingleQuote(input?.packageSpec?.trim() || "@cafeai/cafe-code@latest");
   const nodeScriptPath = input?.nodeScriptPath?.trim() || "";
   return stripTrailingNewlines(
     applyScriptPlaceholders(REMOTE_RUNNER_SCRIPT, {
@@ -716,8 +712,12 @@ function buildRemoteNodeEnvScript(input?: RemoteCafeCodeRunnerOptions): string {
   );
 }
 
-export function buildRemoteLaunchScript(input?: RemoteCafeCodeRunnerOptions): string {
+export function buildRemoteLaunchScript(
+  input?: RemoteCafeCodeRunnerOptions,
+  stateKey = "cafecode",
+): string {
   return applyScriptPlaceholders(REMOTE_LAUNCH_SCRIPT, {
+    CAFE_CODE_STATE_KEY: shellSingleQuote(stateKey),
     CAFE_CODE_NODE_ENV_SCRIPT: buildRemoteNodeEnvScript(input),
     CAFE_CODE_RUNNER_SCRIPT: stripTrailingNewlines(buildRemoteCafeCodeRunnerScript(input)),
     CAFE_CODE_PICK_PORT_SCRIPT: stripTrailingNewlines(REMOTE_PICK_PORT_SCRIPT),
@@ -768,11 +768,9 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
       stateKey: remoteStateKey(target),
     });
     const result = yield* runSshCommand(target, {
-      remoteCommandArgs: ["sh", "-s", "--", remoteStateKey(target)],
-      stdin: buildRemoteLaunchScript(runner),
-      ...(input?.authSecret === undefined ? {} : { authSecret: input.authSecret }),
+      remoteCommandArgs: remoteLoginShellCommandArgs(),
+      stdin: buildRemoteLaunchScript(runner, remoteStateKey(target)),
       ...(input?.batchMode === undefined ? {} : { batchMode: input.batchMode }),
-      ...(input?.interactiveAuth === undefined ? {} : { interactiveAuth: input.interactiveAuth }),
     });
     if (!getLastNonEmptyOutputLine(result.stdout)) {
       return yield* new SshLaunchError({
@@ -825,11 +823,9 @@ export const issueRemotePairingToken = Effect.fn("ssh/tunnel.issueRemotePairingT
     stateKey: remoteStateKey(target),
   });
   const result = yield* runSshCommand(target, {
-    remoteCommandArgs: ["sh", "-s"],
+    remoteCommandArgs: remoteLoginShellCommandArgs(),
     stdin: buildRemotePairingScript(target, runner),
-    ...(input?.authSecret === undefined ? {} : { authSecret: input.authSecret }),
     ...(input?.batchMode === undefined ? {} : { batchMode: input.batchMode }),
-    ...(input?.interactiveAuth === undefined ? {} : { interactiveAuth: input.interactiveAuth }),
   });
   if (!getLastNonEmptyOutputLine(result.stdout)) {
     return yield* new SshPairingError({
@@ -875,11 +871,9 @@ export const stopRemoteServer = Effect.fn("ssh/tunnel.stopRemoteServer")(functio
     stateKey: remoteStateKey(target),
   });
   yield* runSshCommand(target, {
-    remoteCommandArgs: ["sh", "-s"],
+    remoteCommandArgs: remoteLoginShellCommandArgs(),
     stdin: buildRemoteStopScript(target),
-    ...(input?.authSecret === undefined ? {} : { authSecret: input.authSecret }),
     ...(input?.batchMode === undefined ? {} : { batchMode: input.batchMode }),
-    ...(input?.interactiveAuth === undefined ? {} : { interactiveAuth: input.interactiveAuth }),
   });
   yield* Effect.logInfo("ssh.remoteServer.stop.succeeded", {
     ...sshTargetLogFields(target),
@@ -896,12 +890,10 @@ const readRemoteServerLogTail = Effect.fn("ssh/tunnel.readRemoteServerLogTail")(
   ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
 > {
   const result = yield* runSshCommand(target, {
-    remoteCommandArgs: ["sh", "-s"],
+    remoteCommandArgs: remoteLoginShellCommandArgs(),
     stdin: buildRemoteLogTailScript(target),
     timeoutMs: 10_000,
-    ...(input?.authSecret === undefined ? {} : { authSecret: input.authSecret }),
     ...(input?.batchMode === undefined ? {} : { batchMode: input.batchMode }),
-    ...(input?.interactiveAuth === undefined ? {} : { interactiveAuth: input.interactiveAuth }),
   });
   return result.stdout.trim();
 });
@@ -1141,28 +1133,12 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
   | Scope.Scope
 > {
   const hostSpec = yield* buildSshHostSpecEffect(input.resolvedTarget);
-  const childEnvironment = yield* buildSshChildEnvironment({
-    ...(input.authOptions.authSecret === undefined
-      ? {}
-      : { authSecret: input.authOptions.authSecret }),
-    ...(input.authOptions.interactiveAuth === undefined
-      ? {}
-      : { interactiveAuth: input.authOptions.interactiveAuth }),
-  }).pipe(
-    Effect.mapError(
-      (cause) =>
-        new SshCommandError({
-          command: ["ssh"],
-          exitCode: null,
-          stderr: "",
-          message: "Failed to prepare SSH authentication helpers.",
-          cause,
-        }),
-    ),
-  );
+  const childEnvironment = { ...process.env };
+  const identityAgent = resolveSshIdentityAgent(childEnvironment);
   const args = [
     ...baseSshArgs(input.resolvedTarget, {
-      batchMode: input.authOptions.batchMode ?? "no",
+      batchMode: input.authOptions.batchMode ?? "yes",
+      identityAgent,
     }),
     "-o",
     "ExitOnForwardFailure=yes",
@@ -1351,7 +1327,6 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     string,
     Deferred.Deferred<SshTunnelEntry, SshEnvironmentEffectError>
   >();
-  const authSecrets = new Map<string, string>();
 
   const closeTunnelEntry = Effect.fn("ssh/tunnel.closeTunnelEntry")(function* (
     entry: SshTunnelEntry,
@@ -1393,115 +1368,36 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     ),
   );
 
-  const promptForPassword = Effect.fn("ssh/tunnel.promptForPassword")(function* (
-    target: DesktopSshEnvironmentTarget,
-    attempt: number,
-  ): Effect.fn.Return<string, SshInvalidTargetError | SshPasswordPromptError, SshPasswordPrompt> {
-    const promptService = yield* SshPasswordPrompt;
-    const hostSpec = yield* buildSshHostSpecEffect(target);
-    if (!promptService.isAvailable) {
-      yield* Effect.logWarning("ssh.auth.passwordPrompt.unavailable", {
-        ...sshTargetLogFields(target),
-        attempt,
-      });
-      return yield* new SshPasswordPromptError({
-        message: `SSH authentication failed for ${hostSpec}.`,
-      });
-    }
-
-    yield* Effect.logInfo("ssh.auth.passwordPrompt.request", {
-      ...sshTargetLogFields(target),
-      attempt,
-    });
-    const password = yield* promptService.request({
-      attempt,
-      destination: target.alias.trim() || target.hostname.trim(),
-      username: target.username,
-      prompt: `Enter the SSH password for ${hostSpec}.`,
-    });
-    if (password === null) {
-      yield* Effect.logWarning("ssh.auth.passwordPrompt.cancelled", {
-        ...sshTargetLogFields(target),
-        attempt,
-      });
-      return yield* new SshPasswordPromptError({
-        message: `SSH authentication cancelled for ${hostSpec}.`,
-      });
-    }
-    yield* Effect.logInfo("ssh.auth.passwordPrompt.received", {
-      ...sshTargetLogFields(target),
-      attempt,
-    });
-    return password;
-  });
-
-  const handleSshAuthFailure = Effect.fn("ssh/tunnel.runWithSshAuthAttempt.handleFailure")(
-    function* <T>(
-      input: SshAuthAttemptInput<T> & {
-        readonly error: SshEnvironmentEffectError;
-      },
-    ): Effect.fn.Return<T, SshEnvironmentEffectError, SshEnvironmentEffectContext> {
-      if (!isSshAuthFailure(input.error)) {
-        return yield* input.error;
-      }
-
-      yield* Effect.logWarning("ssh.auth.failed", {
-        ...sshTargetLogFields(input.target),
-        key: input.key,
-        promptCount: input.promptCount,
-        cause: input.error,
-      });
-      const promptService = yield* SshPasswordPrompt;
-      if (!promptService.isAvailable) {
-        return yield* input.error;
-      }
-      if (input.authSecret !== null) {
-        authSecrets.delete(input.key);
-      }
-      if (input.promptCount >= 2) {
-        return yield* input.error;
-      }
-
-      const nextPromptCount = input.promptCount + 1;
-      const nextAuthSecret = yield* promptForPassword(input.target, nextPromptCount);
-      authSecrets.set(input.key, nextAuthSecret);
-      return yield* runWithSshAuthAttempt({
-        ...input,
-        promptCount: nextPromptCount,
-        authSecret: nextAuthSecret,
-      });
-    },
-  );
-
-  const runWithSshAuthAttempt = Effect.fn("ssh/tunnel.runWithSshAuthAttempt")(function* <T>(
-    input: SshAuthAttemptInput<T>,
-  ): Effect.fn.Return<T, SshEnvironmentEffectError, SshEnvironmentEffectContext> {
-    const promptService = yield* SshPasswordPrompt;
-    const authOptions =
-      input.authSecret === null
-        ? {
-            batchMode: promptService.isAvailable ? ("yes" as const) : ("no" as const),
-            interactiveAuth: !promptService.isAvailable,
-          }
-        : {
-            authSecret: input.authSecret,
-            batchMode: "no" as const,
-            interactiveAuth: true,
-          };
-
-    return yield* input
-      .operation(authOptions)
-      .pipe(Effect.catch((error) => handleSshAuthFailure({ ...input, error })));
-  });
-
   const runWithSshAuth = Effect.fn("ssh/tunnel.runWithSshAuth")(function* <T>(
     input: SshAuthOperationInput<T>,
   ): Effect.fn.Return<T, SshEnvironmentEffectError, SshEnvironmentEffectContext> {
-    return yield* runWithSshAuthAttempt({
-      ...input,
-      promptCount: 0,
-      authSecret: authSecrets.get(input.key) ?? null,
-    });
+    return yield* input.operation({ batchMode: "yes" }).pipe(
+      Effect.catch((error) =>
+        Effect.gen(function* () {
+          if (!isSshAuthFailure(error)) {
+            return yield* error;
+          }
+          const fallbackDestination = input.target.username
+            ? `${input.target.username}@${input.target.alias || input.target.hostname}`
+            : input.target.alias || input.target.hostname;
+          const hostSpec = yield* buildSshHostSpecEffect(input.target).pipe(
+            Effect.catch(() => Effect.succeed(fallbackDestination)),
+          );
+          yield* Effect.logWarning("ssh.auth.agentKeyRequired", {
+            ...sshTargetLogFields(input.target),
+            key: input.key,
+            cause: error,
+          });
+          return yield* new SshCommandError({
+            command: error instanceof SshCommandError ? error.command : ["ssh"],
+            exitCode: error instanceof SshCommandError ? error.exitCode : null,
+            stderr: error instanceof SshCommandError ? error.stderr : "",
+            message: formatSshAgentAuthRequiredMessage(hostSpec),
+            cause: error,
+          });
+        }),
+      ),
+    );
   });
 
   const createTunnelEntry = Effect.fn("ssh/tunnel.ensureTunnelEntry.create")(function* (input: {
@@ -1573,26 +1469,13 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           remotePort: tunnelEntry.remotePort,
         });
         tunnels.delete(tunnelEntry.key);
-        const authSecret = authSecrets.get(tunnelEntry.key) ?? null;
         yield* Effect.all(
           [
             tunnelEntry.process.kill({
               killSignal: "SIGTERM",
               forceKillAfter: TUNNEL_SHUTDOWN_TIMEOUT_MS,
             }),
-            stopRemoteServer(
-              tunnelEntry.target,
-              authSecret === null
-                ? {
-                    batchMode: "yes",
-                    interactiveAuth: false,
-                  }
-                : {
-                    authSecret,
-                    batchMode: "no",
-                    interactiveAuth: true,
-                  },
-            ).pipe(
+            stopRemoteServer(tunnelEntry.target, { batchMode: "yes" }).pipe(
               Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawnerService),
               Effect.provideService(FileSystem.FileSystem, fileSystemService),
               Effect.provideService(Path.Path, pathService),

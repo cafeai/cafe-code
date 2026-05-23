@@ -13,7 +13,6 @@ import {
 import * as Config from "effect/Config";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as Hash from "effect/Hash";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
@@ -32,16 +31,7 @@ const DEV_PORT_PROBE_HOSTS = ["127.0.0.1", "0.0.0.0", "::1", "::"] as const;
 
 export const DEFAULT_CAFE_CODE_HOME = Effect.gen(function* () {
   const path = yield* Path.Path;
-  const fileSystem = yield* FileSystem.FileSystem;
-  const cafeHome = path.join(NodeOS.homedir(), ".cafecode");
-  const legacyHome = path.join(NodeOS.homedir(), ".t3");
-  if (yield* fileSystem.exists(cafeHome).pipe(Effect.orElseSucceed(() => false))) {
-    return cafeHome;
-  }
-  if (yield* fileSystem.exists(legacyHome).pipe(Effect.orElseSucceed(() => false))) {
-    return legacyHome;
-  }
-  return cafeHome;
+  return path.join(NodeOS.homedir(), ".cafe-code");
 });
 
 const MODE_ARGS = {
@@ -51,10 +41,10 @@ const MODE_ARGS = {
     "--ui=tui",
     "--filter=@cafecode/contracts",
     "--filter=@cafecode/web",
-    "--filter=cafe-code",
+    "--filter=@cafeai/cafe-code",
     "--parallel",
   ],
-  "dev:server": ["run", "dev", "--filter=cafe-code"],
+  "dev:server": ["run", "dev", "--filter=@cafeai/cafe-code"],
   "dev:web": ["run", "dev", "--filter=@cafecode/web"],
   "dev:desktop": [
     "run",
@@ -124,9 +114,7 @@ export function resolveOffset(config: {
   return { offset, source: `hashed CAFE_CODE_DEV_INSTANCE=${seed}` };
 }
 
-function resolveBaseDir(
-  baseDir: string | undefined,
-): Effect.Effect<string, never, Path.Path | FileSystem.FileSystem> {
+function resolveBaseDir(baseDir: string | undefined): Effect.Effect<string, never, Path.Path> {
   return Effect.gen(function* () {
     const path = yield* Path.Path;
     const configured = baseDir?.trim();
@@ -165,11 +153,7 @@ export function createDevRunnerEnv({
   host,
   port,
   devUrl,
-}: CreateDevRunnerEnvInput): Effect.Effect<
-  NodeJS.ProcessEnv,
-  never,
-  Path.Path | FileSystem.FileSystem
-> {
+}: CreateDevRunnerEnvInput): Effect.Effect<NodeJS.ProcessEnv, never, Path.Path> {
   return Effect.gen(function* () {
     const serverPort = port ?? BASE_SERVER_PORT + serverOffset;
     const webPort = BASE_WEB_PORT + webOffset;

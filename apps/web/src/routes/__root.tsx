@@ -7,13 +7,12 @@ import {
   useLocation,
   useNavigate,
 } from "@tanstack/react-router";
-import { useEffect, useEffectEvent, useRef } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { QueryClient, useQueryClient } from "@tanstack/react-query";
 
 import { APP_DISPLAY_NAME } from "../branding";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
 import { CommandPalette } from "../components/CommandPalette";
-import { SshPasswordPromptDialog } from "../components/desktop/SshPasswordPromptDialog";
 import { ProviderUpdateLaunchNotification } from "../components/ProviderUpdateLaunchNotification";
 import {
   SlowRpcAckToastCoordinator,
@@ -43,7 +42,7 @@ import {
   useServerConfigUpdatedSubscription,
   useServerWelcomeSubscription,
 } from "../rpc/serverState";
-import { useStore } from "../store";
+import { selectAnyThreadRunning, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { syncBrowserChromeTheme } from "../hooks/useTheme";
 import {
@@ -52,6 +51,7 @@ import {
   startEnvironmentConnectionService,
 } from "../environments/runtime";
 import { configureClientTracing } from "../observability/clientTracing";
+import { startCafeDocumentVisibilitySync } from "../documentVisibility";
 import {
   ensurePrimaryEnvironmentReady,
   getPrimaryKnownEnvironment,
@@ -82,6 +82,7 @@ function RootRouteView() {
   const pathname = useLocation({ select: (location) => location.pathname });
   const { authGateState } = Route.useRouteContext();
   const primaryEnvironmentAuthenticated = authGateState.status === "authenticated";
+  const [shutdownOverlayVisible, setShutdownOverlayVisible] = useState(false);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -92,12 +93,43 @@ function RootRouteView() {
     };
   }, [pathname]);
 
+  useEffect(() => startCafeDocumentVisibilitySync(), []);
+
+  useEffect(() => {
+    const onMenuAction = window.desktopBridge?.onMenuAction;
+    if (typeof onMenuAction !== "function") {
+      return;
+    }
+
+    const unsubscribe = onMenuAction((action) => {
+      if (action === "desktop-shutdown-started") {
+        setShutdownOverlayVisible(true);
+      }
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, []);
+
+  const shutdownOverlay = shutdownOverlayVisible ? <DesktopShutdownOverlay /> : null;
+
   if (pathname === "/pair") {
-    return <Outlet />;
+    return (
+      <>
+        <Outlet />
+        {shutdownOverlay}
+      </>
+    );
   }
 
   if (authGateState.status !== "authenticated") {
-    return <Outlet />;
+    return (
+      <>
+        <Outlet />
+        {shutdownOverlay}
+      </>
+    );
   }
 
   const appShell = (
@@ -114,7 +146,7 @@ function RootRouteView() {
         {primaryEnvironmentAuthenticated ? <AuthenticatedTracingBootstrap /> : null}
         {primaryEnvironmentAuthenticated ? <ServerStateBootstrap /> : null}
         <EnvironmentConnectionManagerBootstrap />
-        <SshPasswordPromptDialog />
+        <PowerSaveBlockerSync />
         {primaryEnvironmentAuthenticated ? <EventRouter /> : null}
         {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
         {primaryEnvironmentAuthenticated ? <WebSocketConnectionCoordinator /> : null}
@@ -124,8 +156,39 @@ function RootRouteView() {
         ) : (
           appShell
         )}
+        {shutdownOverlay}
       </AnchoredToastProvider>
     </ToastProvider>
+  );
+}
+
+function DesktopShutdownOverlay() {
+  return (
+    <div
+      aria-live="assertive"
+      aria-modal="true"
+      className="cafe-shutdown-overlay fixed inset-0 z-[1000] flex items-center justify-center px-6 text-foreground"
+      role="dialog"
+    >
+      <div className="cafe-shutdown-panel relative flex min-w-0 flex-col items-center gap-5 rounded-2xl px-8 py-7 text-center shadow-2xl">
+        <div aria-hidden="true" className="cafe-shutdown-spinner">
+          <span />
+          <span />
+          <span />
+        </div>
+        <div className="grid gap-1">
+          <div className="flex items-center justify-center gap-2 text-sm font-semibold tracking-normal">
+            <span>See ya later...</span>
+            <span aria-hidden="true" className="cafe-shutdown-heart">
+              💙
+            </span>
+          </div>
+          <div className="max-w-56 text-xs leading-5 text-muted-foreground">
+            Saving your progress before Cafe Code takes a nap.
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -226,6 +289,24 @@ function EnvironmentConnectionManagerBootstrap() {
   useEffect(() => {
     return startEnvironmentConnectionService(queryClient);
   }, [queryClient]);
+
+  return null;
+}
+
+function PowerSaveBlockerSync() {
+  const mode = useSettings((settings) => settings.powerSaveBlockerMode);
+  const chatsRunning = useStore(selectAnyThreadRunning);
+
+  useEffect(() => {
+    const setPowerSaveBlockerState = window.desktopBridge?.setPowerSaveBlockerState;
+    if (typeof setPowerSaveBlockerState !== "function") {
+      return;
+    }
+
+    void setPowerSaveBlockerState({ mode, chatsRunning }).catch((error) => {
+      console.error("[POWER_SAVE_BLOCKER] failed to sync state", error);
+    });
+  }, [chatsRunning, mode]);
 
   return null;
 }

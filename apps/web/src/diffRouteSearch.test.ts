@@ -6,13 +6,11 @@ describe("parseDiffRouteSearch", () => {
   it("parses valid diff search values", () => {
     const parsed = parseDiffRouteSearch({
       diff: "1",
-      diffTurnId: "turn-1",
       diffFilePath: "src/app.ts",
     });
 
     expect(parsed).toEqual({
       diff: "1",
-      diffTurnId: "turn-1",
       diffFilePath: "src/app.ts",
     });
   });
@@ -21,25 +19,21 @@ describe("parseDiffRouteSearch", () => {
     expect(
       parseDiffRouteSearch({
         diff: 1,
-        diffTurnId: "turn-1",
       }),
     ).toEqual({
       diff: "1",
-      diffTurnId: "turn-1",
     });
 
     expect(
       parseDiffRouteSearch({
         diff: true,
-        diffTurnId: "turn-1",
       }),
     ).toEqual({
       diff: "1",
-      diffTurnId: "turn-1",
     });
   });
 
-  it("drops turn and file values when diff is closed", () => {
+  it("drops file values when diff is closed", () => {
     const parsed = parseDiffRouteSearch({
       diff: "0",
       diffTurnId: "turn-1",
@@ -49,7 +43,7 @@ describe("parseDiffRouteSearch", () => {
     expect(parsed).toEqual({});
   });
 
-  it("drops file value when turn is not selected", () => {
+  it("parses file value without a turn selection", () => {
     const parsed = parseDiffRouteSearch({
       diff: "1",
       diffFilePath: "src/app.ts",
@@ -57,6 +51,7 @@ describe("parseDiffRouteSearch", () => {
 
     expect(parsed).toEqual({
       diff: "1",
+      diffFilePath: "src/app.ts",
     });
   });
 

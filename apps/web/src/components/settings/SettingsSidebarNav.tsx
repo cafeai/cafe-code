@@ -7,6 +7,7 @@ import {
   KeyboardIcon,
   Link2Icon,
   Settings2Icon,
+  Trash2Icon,
 } from "lucide-react";
 import { useCanGoBack, useNavigate } from "@tanstack/react-router";
 
@@ -27,7 +28,8 @@ export type SettingsSectionPath =
   | "/settings/providers"
   | "/settings/source-control"
   | "/settings/connections"
-  | "/settings/archived";
+  | "/settings/archived"
+  | "/settings/recently-deleted";
 
 export const SETTINGS_NAV_ITEMS: ReadonlyArray<{
   label: string;
@@ -40,6 +42,7 @@ export const SETTINGS_NAV_ITEMS: ReadonlyArray<{
   { label: "Source Control", to: "/settings/source-control", icon: GitBranchIcon },
   { label: "Connections", to: "/settings/connections", icon: Link2Icon },
   { label: "Archive", to: "/settings/archived", icon: ArchiveIcon },
+  { label: "Recently Deleted", to: "/settings/recently-deleted", icon: Trash2Icon },
 ];
 
 export function SettingsSidebarNav({ pathname }: { pathname: string }) {

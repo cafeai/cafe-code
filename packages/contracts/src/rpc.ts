@@ -10,7 +10,6 @@ import {
   FilesystemBrowseError,
 } from "./filesystem.ts";
 import {
-  GitActionProgressEvent,
   VcsSwitchRefInput,
   VcsSwitchRefResult,
   GitCommandError,
@@ -29,21 +28,18 @@ import {
   VcsPullResult,
   VcsRemoveWorktreeInput,
   GitResolvePullRequestResult,
-  GitRunStackedActionInput,
   VcsStatusInput,
   VcsStatusResult,
   VcsStatusStreamEvent,
+  VcsWorkingTreeDiffInput,
+  VcsWorkingTreeDiffResult,
 } from "./git.ts";
 import { KeybindingsConfigError } from "./keybindings.ts";
 import {
   ClientOrchestrationCommand,
   ORCHESTRATION_WS_METHODS,
   OrchestrationDispatchCommandError,
-  OrchestrationGetFullThreadDiffError,
-  OrchestrationGetFullThreadDiffInput,
   OrchestrationGetSnapshotError,
-  OrchestrationGetTurnDiffError,
-  OrchestrationGetTurnDiffInput,
   OrchestrationReplayEventsError,
   OrchestrationReplayEventsInput,
   OrchestrationRpcSchemas,
@@ -57,17 +53,6 @@ import {
   ProjectWriteFileInput,
   ProjectWriteFileResult,
 } from "./project.ts";
-import {
-  TerminalClearInput,
-  TerminalCloseInput,
-  TerminalError,
-  TerminalEvent,
-  TerminalOpenInput,
-  TerminalResizeInput,
-  TerminalRestartInput,
-  TerminalSessionSnapshot,
-  TerminalWriteInput,
-} from "./terminal.ts";
 import {
   ServerConfigStreamEvent,
   ServerConfig,
@@ -91,8 +76,6 @@ import {
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
   SourceControlDiscoveryResult,
-  SourceControlPublishRepositoryInput,
-  SourceControlPublishRepositoryResult,
   SourceControlRepositoryError,
   SourceControlRepositoryInfo,
   SourceControlRepositoryLookupInput,
@@ -116,6 +99,7 @@ export const WS_METHODS = {
   // VCS methods
   vcsPull: "vcs.pull",
   vcsRefreshStatus: "vcs.refreshStatus",
+  vcsWorkingTreeDiff: "vcs.workingTreeDiff",
   vcsListRefs: "vcs.listRefs",
   vcsCreateWorktree: "vcs.createWorktree",
   vcsRemoveWorktree: "vcs.removeWorktree",
@@ -124,17 +108,8 @@ export const WS_METHODS = {
   vcsInit: "vcs.init",
 
   // Git workflow methods
-  gitRunStackedAction: "git.runStackedAction",
   gitResolvePullRequest: "git.resolvePullRequest",
   gitPreparePullRequestThread: "git.preparePullRequestThread",
-
-  // Terminal methods
-  terminalOpen: "terminal.open",
-  terminalWrite: "terminal.write",
-  terminalResize: "terminal.resize",
-  terminalClear: "terminal.clear",
-  terminalRestart: "terminal.restart",
-  terminalClose: "terminal.close",
 
   // Server meta
   serverGetConfig: "server.getConfig",
@@ -153,11 +128,9 @@ export const WS_METHODS = {
   // Source control methods
   sourceControlLookupRepository: "sourceControl.lookupRepository",
   sourceControlCloneRepository: "sourceControl.cloneRepository",
-  sourceControlPublishRepository: "sourceControl.publishRepository",
 
   // Streaming subscriptions
   subscribeVcsStatus: "subscribeVcsStatus",
-  subscribeTerminalEvents: "subscribeTerminalEvents",
   subscribeServerConfig: "subscribeServerConfig",
   subscribeServerLifecycle: "subscribeServerLifecycle",
   subscribeAuthAccess: "subscribeAuthAccess",
@@ -255,15 +228,6 @@ export const WsSourceControlCloneRepositoryRpc = Rpc.make(WS_METHODS.sourceContr
   error: SourceControlRepositoryError,
 });
 
-export const WsSourceControlPublishRepositoryRpc = Rpc.make(
-  WS_METHODS.sourceControlPublishRepository,
-  {
-    payload: SourceControlPublishRepositoryInput,
-    success: SourceControlPublishRepositoryResult,
-    error: SourceControlRepositoryError,
-  },
-);
-
 export const WsProjectsSearchEntriesRpc = Rpc.make(WS_METHODS.projectsSearchEntries, {
   payload: ProjectSearchEntriesInput,
   success: ProjectSearchEntriesResult,
@@ -306,11 +270,10 @@ export const WsVcsRefreshStatusRpc = Rpc.make(WS_METHODS.vcsRefreshStatus, {
   error: GitManagerServiceError,
 });
 
-export const WsGitRunStackedActionRpc = Rpc.make(WS_METHODS.gitRunStackedAction, {
-  payload: GitRunStackedActionInput,
-  success: GitActionProgressEvent,
+export const WsVcsWorkingTreeDiffRpc = Rpc.make(WS_METHODS.vcsWorkingTreeDiff, {
+  payload: VcsWorkingTreeDiffInput,
+  success: VcsWorkingTreeDiffResult,
   error: GitManagerServiceError,
-  stream: true,
 });
 
 export const WsGitResolvePullRequestRpc = Rpc.make(WS_METHODS.gitResolvePullRequest, {
@@ -359,59 +322,12 @@ export const WsVcsInitRpc = Rpc.make(WS_METHODS.vcsInit, {
   error: VcsError,
 });
 
-export const WsTerminalOpenRpc = Rpc.make(WS_METHODS.terminalOpen, {
-  payload: TerminalOpenInput,
-  success: TerminalSessionSnapshot,
-  error: TerminalError,
-});
-
-export const WsTerminalWriteRpc = Rpc.make(WS_METHODS.terminalWrite, {
-  payload: TerminalWriteInput,
-  error: TerminalError,
-});
-
-export const WsTerminalResizeRpc = Rpc.make(WS_METHODS.terminalResize, {
-  payload: TerminalResizeInput,
-  error: TerminalError,
-});
-
-export const WsTerminalClearRpc = Rpc.make(WS_METHODS.terminalClear, {
-  payload: TerminalClearInput,
-  error: TerminalError,
-});
-
-export const WsTerminalRestartRpc = Rpc.make(WS_METHODS.terminalRestart, {
-  payload: TerminalRestartInput,
-  success: TerminalSessionSnapshot,
-  error: TerminalError,
-});
-
-export const WsTerminalCloseRpc = Rpc.make(WS_METHODS.terminalClose, {
-  payload: TerminalCloseInput,
-  error: TerminalError,
-});
-
 export const WsOrchestrationDispatchCommandRpc = Rpc.make(
   ORCHESTRATION_WS_METHODS.dispatchCommand,
   {
     payload: ClientOrchestrationCommand,
     success: OrchestrationRpcSchemas.dispatchCommand.output,
     error: OrchestrationDispatchCommandError,
-  },
-);
-
-export const WsOrchestrationGetTurnDiffRpc = Rpc.make(ORCHESTRATION_WS_METHODS.getTurnDiff, {
-  payload: OrchestrationGetTurnDiffInput,
-  success: OrchestrationRpcSchemas.getTurnDiff.output,
-  error: OrchestrationGetTurnDiffError,
-});
-
-export const WsOrchestrationGetFullThreadDiffRpc = Rpc.make(
-  ORCHESTRATION_WS_METHODS.getFullThreadDiff,
-  {
-    payload: OrchestrationGetFullThreadDiffInput,
-    success: OrchestrationRpcSchemas.getFullThreadDiff.output,
-    error: OrchestrationGetFullThreadDiffError,
   },
 );
 
@@ -426,6 +342,24 @@ export const WsOrchestrationGetArchivedShellSnapshotRpc = Rpc.make(
   {
     payload: OrchestrationRpcSchemas.getArchivedShellSnapshot.input,
     success: OrchestrationRpcSchemas.getArchivedShellSnapshot.output,
+    error: OrchestrationGetSnapshotError,
+  },
+);
+
+export const WsOrchestrationGetDeletedShellSnapshotRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.getDeletedShellSnapshot,
+  {
+    payload: OrchestrationRpcSchemas.getDeletedShellSnapshot.input,
+    success: OrchestrationRpcSchemas.getDeletedShellSnapshot.output,
+    error: OrchestrationGetSnapshotError,
+  },
+);
+
+export const WsOrchestrationHardDeleteThreadRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.hardDeleteThread,
+  {
+    payload: OrchestrationRpcSchemas.hardDeleteThread.input,
+    success: OrchestrationRpcSchemas.hardDeleteThread.output,
     error: OrchestrationGetSnapshotError,
   },
 );
@@ -446,12 +380,6 @@ export const WsOrchestrationSubscribeThreadRpc = Rpc.make(
     stream: true,
   },
 );
-
-export const WsSubscribeTerminalEventsRpc = Rpc.make(WS_METHODS.subscribeTerminalEvents, {
-  payload: Schema.Struct({}),
-  success: TerminalEvent,
-  stream: true,
-});
 
 export const WsSubscribeServerConfigRpc = Rpc.make(WS_METHODS.subscribeServerConfig, {
   payload: Schema.Struct({}),
@@ -487,7 +415,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerSignalProcessRpc,
   WsSourceControlLookupRepositoryRpc,
   WsSourceControlCloneRepositoryRpc,
-  WsSourceControlPublishRepositoryRpc,
   WsProjectsSearchEntriesRpc,
   WsProjectsWriteFileRpc,
   WsShellOpenInEditorRpc,
@@ -495,7 +422,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeVcsStatusRpc,
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,
-  WsGitRunStackedActionRpc,
+  WsVcsWorkingTreeDiffRpc,
   WsGitResolvePullRequestRpc,
   WsGitPreparePullRequestThreadRpc,
   WsVcsListRefsRpc,
@@ -504,21 +431,14 @@ export const WsRpcGroup = RpcGroup.make(
   WsVcsCreateRefRpc,
   WsVcsSwitchRefRpc,
   WsVcsInitRpc,
-  WsTerminalOpenRpc,
-  WsTerminalWriteRpc,
-  WsTerminalResizeRpc,
-  WsTerminalClearRpc,
-  WsTerminalRestartRpc,
-  WsTerminalCloseRpc,
-  WsSubscribeTerminalEventsRpc,
   WsSubscribeServerConfigRpc,
   WsSubscribeServerLifecycleRpc,
   WsSubscribeAuthAccessRpc,
   WsOrchestrationDispatchCommandRpc,
-  WsOrchestrationGetTurnDiffRpc,
-  WsOrchestrationGetFullThreadDiffRpc,
   WsOrchestrationReplayEventsRpc,
   WsOrchestrationGetArchivedShellSnapshotRpc,
+  WsOrchestrationGetDeletedShellSnapshotRpc,
+  WsOrchestrationHardDeleteThreadRpc,
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,
 );

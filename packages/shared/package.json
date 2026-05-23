@@ -56,6 +56,10 @@
       "types": "./src/toolActivity.ts",
       "import": "./src/toolActivity.ts"
     },
+    "./activityPayloadSanitizer": {
+      "types": "./src/activityPayloadSanitizer.ts",
+      "import": "./src/activityPayloadSanitizer.ts"
+    },
     "./Struct": {
       "types": "./src/Struct.ts",
       "import": "./src/Struct.ts"

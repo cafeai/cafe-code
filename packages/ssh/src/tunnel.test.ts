@@ -12,7 +12,6 @@ import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-import { SshPasswordPrompt } from "./auth.ts";
 import {
   buildRemoteLaunchScript,
   buildRemotePairingScript,
@@ -21,6 +20,8 @@ import {
   describeReadinessCause,
   issueRemotePairingToken,
   launchOrReuseRemoteServer,
+  remoteLoginShellCommandArgs,
+  REMOTE_LOGIN_SHELL_BOOTSTRAP_COMMAND,
   REMOTE_PICK_PORT_SCRIPT,
   SshEnvironmentManager,
   waitForHttpReady,
@@ -94,9 +95,9 @@ describe("ssh tunnel scripts", () => {
 
     assert.include(script, "CAFE_CODE_NODE_SCRIPT_PATH=''");
     assert.include(script, 'exec cafe-code "$@"');
-    assert.include(script, "exec npx --yes 'cafe-code@latest' \"$@\"");
-    assert.include(script, "exec npm exec --yes 'cafe-code@latest' -- \"$@\"");
-    assert.include(script, "could not install 'cafe-code@latest'");
+    assert.include(script, "exec npx --yes '@cafeai/cafe-code@latest' \"$@\"");
+    assert.include(script, "exec npm exec --yes '@cafeai/cafe-code@latest' -- \"$@\"");
+    assert.include(script, "could not install '@cafeai/cafe-code@latest'");
     assert.include(script, 'prepend_path_if_dir "$HOME/.local/bin"');
     assert.include(script, `CAFE_CODE_NODE_ENGINE_RANGE='${TEST_NODE_ENGINE_RANGE}'`);
     assert.include(script, "remote_node_satisfies_engine()");
@@ -113,6 +114,12 @@ describe("ssh tunnel scripts", () => {
     assert.notInclude(script, "ensure $NVM_DIR/nvm.sh is available");
   });
 
+  it("builds remote command args that initialize the user's login shell first", () => {
+    assert.deepEqual(remoteLoginShellCommandArgs(), [REMOTE_LOGIN_SHELL_BOOTSTRAP_COMMAND]);
+    assert.include(REMOTE_LOGIN_SHELL_BOOTSTRAP_COMMAND, 'exec "$shell" -l -c "sh -s"');
+    assert.include(REMOTE_LOGIN_SHELL_BOOTSTRAP_COMMAND, "exec sh -s");
+  });
+
   it("does not hard-code a remote node engine range", () => {
     const script = buildRemoteCafeCodeRunnerScript();
 
@@ -122,15 +129,21 @@ describe("ssh tunnel scripts", () => {
 
   it("shell-quotes package specs in the remote Cafe Code runner", () => {
     const script = buildRemoteCafeCodeRunnerScript({
-      packageSpec: "cafe-code@nightly; touch /tmp/cafe-code-owned",
+      packageSpec: "@cafeai/cafe-code@nightly; touch /tmp/cafe-code-owned",
     });
 
-    assert.include(script, "exec npx --yes 'cafe-code@nightly; touch /tmp/cafe-code-owned' \"$@\"");
     assert.include(
       script,
-      "exec npm exec --yes 'cafe-code@nightly; touch /tmp/cafe-code-owned' -- \"$@\"",
+      "exec npx --yes '@cafeai/cafe-code@nightly; touch /tmp/cafe-code-owned' \"$@\"",
     );
-    assert.notInclude(script, "exec npx --yes cafe-code@nightly; touch /tmp/cafe-code-owned");
+    assert.include(
+      script,
+      "exec npm exec --yes '@cafeai/cafe-code@nightly; touch /tmp/cafe-code-owned' -- \"$@\"",
+    );
+    assert.notInclude(
+      script,
+      "exec npx --yes @cafeai/cafe-code@nightly; touch /tmp/cafe-code-owned",
+    );
   });
 
   it("builds the remote Cafe Code runner with a node script override", () => {
@@ -160,6 +173,7 @@ describe("ssh tunnel scripts", () => {
     assert.include(buildRemoteLaunchScript(), "RUNNER_CHANGED=1");
     assert.include(buildRemoteLaunchScript(), "ensure_remote_node_path()");
     assert.include(buildRemoteLaunchScript(), "if ! ensure_remote_node_path; then");
+    assert.include(buildRemoteLaunchScript(), "STATE_KEY='cafecode'");
     assert.include(
       buildRemoteLaunchScript({ nodeEngineRange: TEST_NODE_ENGINE_RANGE }),
       `CAFE_CODE_NODE_ENGINE_RANGE='${TEST_NODE_ENGINE_RANGE}'`,
@@ -170,23 +184,33 @@ describe("ssh tunnel scripts", () => {
     );
     assert.include(buildRemoteLaunchScript(), 'kill "$REMOTE_PID" 2>/dev/null || true');
     assert.include(buildRemoteLaunchScript(), "wait_ready");
+    assert.include(buildRemoteLaunchScript(), "wait_managed_ready");
+    assert.include(buildRemoteLaunchScript(), 'wait_managed_ready "60000"');
+    assert.include(
+      buildRemoteLaunchScript(),
+      "Remote Cafe Code server exited before becoming ready",
+    );
     assert.include(buildRemoteLaunchScript(), '"$RUNNER_FILE" serve --host 127.0.0.1');
     assert.include(buildRemoteLaunchScript(), '--base-dir "$DEFAULT_SERVER_HOME"');
+    assert.include(buildRemoteLaunchScript(), 'DEFAULT_SERVER_HOME="$HOME/.cafe-code"');
+    assert.notInclude(buildRemoteLaunchScript(), "$HOME/.t3");
     assert.notInclude(buildRemoteLaunchScript(), "server-home");
     assert.include(buildRemoteLaunchScript(), "Remote Cafe Code server did not become ready");
     assert.include(
-      buildRemoteLaunchScript({ packageSpec: "cafe-code@nightly" }),
-      "cafe-code@nightly",
+      buildRemoteLaunchScript({ packageSpec: "@cafeai/cafe-code@nightly" }),
+      "@cafeai/cafe-code@nightly",
     );
     assert.include(
       buildRemotePairingScript(target),
       '"$RUNNER_FILE" auth pairing create --base-dir "$PAIRING_BASE_DIR" --json',
     );
     assert.include(buildRemotePairingScript(target), 'PAIRING_BASE_DIR="$DEFAULT_SERVER_HOME"');
+    assert.include(buildRemotePairingScript(target), 'DEFAULT_SERVER_HOME="$HOME/.cafe-code"');
+    assert.notInclude(buildRemotePairingScript(target), "$HOME/.t3");
     assert.notInclude(buildRemotePairingScript(target), "server-home");
     assert.include(
-      buildRemotePairingScript(target, { packageSpec: "cafe-code@nightly" }),
-      "cafe-code@nightly",
+      buildRemotePairingScript(target, { packageSpec: "@cafeai/cafe-code@nightly" }),
+      "@cafeai/cafe-code@nightly",
     );
     assert.include(
       buildRemoteStopScript(target),
@@ -349,6 +373,7 @@ describe("ssh tunnel scripts", () => {
     const spawnedCommands: Array<ReadonlyArray<string>> = [];
     let tunnelKillCount = 0;
     let stopCommandCount = 0;
+    let remoteScriptCommandCount = 0;
     const spawner = ChildProcessSpawner.make((command) =>
       Effect.sync(() => {
         const args = commandArgs(command);
@@ -358,7 +383,14 @@ describe("ssh tunnel scripts", () => {
             tunnelKillCount += 1;
           });
         }
-        if (args.includes("sh") && args.includes("--")) {
+        if (args.includes(REMOTE_LOGIN_SHELL_BOOTSTRAP_COMMAND)) {
+          remoteScriptCommandCount += 1;
+          if (remoteScriptCommandCount === 2) {
+            stopCommandCount += 1;
+            return makeSuccessfulProcess('{"stopped":true}\n');
+          }
+          assert.include(args, "-o");
+          assert.include(args, "BatchMode=yes");
           return makeSuccessfulProcess('{"remotePort":3773}\n');
         }
         if (args.includes("sh")) {
@@ -373,7 +405,6 @@ describe("ssh tunnel scripts", () => {
       Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
       Layer.succeed(HttpClient.HttpClient, testHttpClient),
       Layer.succeed(NetService.NetService, testNetService),
-      SshPasswordPrompt.disabledLayer,
       SshEnvironmentManager.layer(),
     );
     const target = {

@@ -1,9 +1,4 @@
-import type {
-  AuthClientMetadata,
-  AuthClientSession,
-  AuthPairingLink,
-  AuthSessionId,
-} from "@cafecode/contracts";
+import type * as AuthContracts from "@cafecode/contracts/auth";
 import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -24,12 +19,12 @@ export interface IssuedPairingLink {
 }
 
 export interface IssuedBearerSession {
-  readonly sessionId: AuthSessionId;
+  readonly sessionId: AuthContracts.AuthSessionId;
   readonly token: string;
   readonly method: "bearer-session-token";
   readonly role: SessionRole;
   readonly subject: string;
-  readonly client: AuthClientMetadata;
+  readonly client: AuthContracts.AuthClientMetadata;
   readonly expiresAt: DateTime.Utc;
 }
 
@@ -48,7 +43,7 @@ export interface AuthControlPlaneShape {
   readonly listPairingLinks: (input?: {
     readonly role?: SessionRole;
     readonly excludeSubjects?: ReadonlyArray<string>;
-  }) => Effect.Effect<ReadonlyArray<AuthPairingLink>, AuthControlPlaneError>;
+  }) => Effect.Effect<ReadonlyArray<AuthContracts.AuthPairingLink>, AuthControlPlaneError>;
   readonly revokePairingLink: (id: string) => Effect.Effect<boolean, AuthControlPlaneError>;
   readonly issueSession: (input?: {
     readonly ttl?: Duration.Duration;
@@ -57,14 +52,14 @@ export interface AuthControlPlaneShape {
     readonly label?: string;
   }) => Effect.Effect<IssuedBearerSession, AuthControlPlaneError>;
   readonly listSessions: () => Effect.Effect<
-    ReadonlyArray<AuthClientSession>,
+    ReadonlyArray<AuthContracts.AuthClientSession>,
     AuthControlPlaneError
   >;
   readonly revokeSession: (
-    sessionId: AuthSessionId,
+    sessionId: AuthContracts.AuthSessionId,
   ) => Effect.Effect<boolean, AuthControlPlaneError>;
   readonly revokeOtherSessionsExcept: (
-    sessionId: AuthSessionId,
+    sessionId: AuthContracts.AuthSessionId,
   ) => Effect.Effect<number, AuthControlPlaneError>;
 }
 

@@ -23,7 +23,6 @@ import {
   fetchSshEnvironmentDescriptor,
   fetchSshSessionState,
   issueSshWebSocketToken,
-  resolveSshPasswordPrompt,
 } from "./methods/sshEnvironment.ts";
 import {
   checkForUpdate,
@@ -32,11 +31,14 @@ import {
   installUpdate,
   setUpdateChannel,
 } from "./methods/updates.ts";
+import { setPowerSaveBlockerState } from "./methods/powerSaveBlocker.ts";
+import { getDebugEndpointState, publishDebugSnapshot } from "./methods/debug.ts";
 import {
   confirm,
   getAppBranding,
   getLocalEnvironmentBootstrap,
   openExternal,
+  openPath,
   pickFolder,
   setTheme,
   showContextMenu,
@@ -48,8 +50,12 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
   yield* ipc.handleSync(getAppBranding);
   yield* ipc.handleSync(getLocalEnvironmentBootstrap);
 
+  yield* ipc.handle(getDebugEndpointState);
+  yield* ipc.handle(publishDebugSnapshot);
+
   yield* ipc.handle(getClientSettings);
   yield* ipc.handle(setClientSettings);
+  yield* ipc.handle(setPowerSaveBlockerState);
   yield* ipc.handle(getSavedEnvironmentRegistry);
   yield* ipc.handle(setSavedEnvironmentRegistry);
   yield* ipc.handle(getSavedEnvironmentSecret);
@@ -63,7 +69,6 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
   yield* ipc.handle(bootstrapSshBearerSession);
   yield* ipc.handle(fetchSshSessionState);
   yield* ipc.handle(issueSshWebSocketToken);
-  yield* ipc.handle(resolveSshPasswordPrompt);
 
   yield* ipc.handle(getServerExposureState);
   yield* ipc.handle(setServerExposureMode);
@@ -75,6 +80,7 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
   yield* ipc.handle(setTheme);
   yield* ipc.handle(showContextMenu);
   yield* ipc.handle(openExternal);
+  yield* ipc.handle(openPath);
 
   yield* ipc.handle(getUpdateState);
   yield* ipc.handle(setUpdateChannel);

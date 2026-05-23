@@ -207,6 +207,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     provider,
     capabilities: {
       sessionModelSwitch: "in-session",
+      liveSteer: "unsupported",
     },
     startSession,
     sendTurn,
@@ -1225,6 +1226,47 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect("persists resume cursors emitted by runtime lifecycle events", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+      const threadId = asThreadId("thread-runtime-resume-cursor");
+      const session = yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: claudeAgentInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* advanceTestClock(50);
+
+      const resumeCursor = {
+        threadId,
+        resume: "550e8400-e29b-41d4-a716-446655440000",
+        resumeSessionAt: "assistant-runtime-resume",
+        turnCount: 1,
+      };
+      routing.claude.emit({
+        type: "turn.completed",
+        eventId: asEventId("evt-runtime-resume-cursor"),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        createdAt: "2026-01-01T00:00:10.000Z",
+        threadId: session.threadId,
+        turnId: asTurnId("turn-runtime-resume-cursor"),
+        payload: {
+          state: "completed",
+          resumeCursor,
+        },
+      });
+      yield* advanceTestClock(50);
+
+      const persisted = yield* runtimeRepository.getByThreadId({ threadId: session.threadId });
+      assert.equal(Option.isSome(persisted), true);
+      if (Option.isSome(persisted)) {
+        assert.deepEqual(persisted.value.resumeCursor, resumeCursor);
+      }
+    }),
+  );
+
   it.effect("reuses persisted resume cursor when startSession is called after a restart", () =>
     Effect.gen(function* () {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-provider-service-start-"));
@@ -1400,6 +1442,51 @@ routing.layer("ProviderServiceLive routing", (it) => {
 
 const fanout = makeProviderServiceLayer();
 fanout.layer("ProviderServiceLive fanout", (it) => {
+  it.effect("persists stopped runtime state when an adapter session exits", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+      const threadId = asThreadId("thread-session-exited");
+      const session = yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      yield* provider.sendTurn({
+        threadId: session.threadId,
+        input: "before exit",
+        attachments: [],
+      });
+      yield* advanceTestClock(50);
+
+      fanout.codex.emit({
+        type: "session.exited",
+        eventId: asEventId("evt-session-exited"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:10.000Z",
+        threadId: session.threadId,
+        payload: {
+          reason: "Codex App Server exited with code 1.",
+        },
+      });
+      yield* advanceTestClock(50);
+
+      const persisted = yield* runtimeRepository.getByThreadId({ threadId: session.threadId });
+      assert.equal(Option.isSome(persisted), true);
+      if (Option.isNone(persisted)) {
+        return;
+      }
+
+      assert.equal(persisted.value.status, "stopped");
+      const runtimePayload = persisted.value.runtimePayload as Record<string, unknown>;
+      assert.equal(runtimePayload.activeTurnId, null);
+      assert.equal(runtimePayload.lastRuntimeEvent, "session.exited");
+      assert.equal(runtimePayload.lastRuntimeEventAt, "2026-01-01T00:00:10.000Z");
+    }),
+  );
+
   it.effect("fans out adapter turn completion events", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;

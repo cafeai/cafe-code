@@ -59,7 +59,7 @@ const knownGitStatusKeys = new Set<string>();
 const gitStatusRefreshInFlight = new Map<string, Promise<VcsStatusResult>>();
 const gitStatusLastRefreshAtByKey = new Map<string, number>();
 
-const GIT_STATUS_REFRESH_DEBOUNCE_MS = 1_000;
+const GIT_STATUS_REFRESH_DEBOUNCE_MS = 30_000;
 
 const gitStatusStateAtom = Atom.family((key: string) => {
   knownGitStatusKeys.add(key);

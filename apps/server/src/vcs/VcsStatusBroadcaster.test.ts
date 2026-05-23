@@ -310,6 +310,69 @@ describe("VcsStatusBroadcaster", () => {
     }).pipe(Effect.provide(makeTestLayer(state)));
   });
 
+  it.effect("defaults streamed status to an occasional remote refresh", () => {
+    const state = {
+      currentLocalStatus: baseLocalStatus,
+      currentRemoteStatus: baseRemoteStatus,
+      localStatusCalls: 0,
+      remoteStatusCalls: 0,
+      localInvalidationCalls: 0,
+      remoteInvalidationCalls: 0,
+    };
+
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      const remoteUpdated = yield* Deferred.make<VcsStatusStreamEvent>();
+      yield* Stream.runForEach(broadcaster.streamStatus({ cwd: "/repo" }), (event) =>
+        event._tag === "remoteUpdated"
+          ? Deferred.succeed(remoteUpdated, event).pipe(Effect.ignore)
+          : Effect.void,
+      ).pipe(Effect.forkScoped);
+
+      assert.deepStrictEqual(yield* Deferred.await(remoteUpdated), {
+        _tag: "remoteUpdated",
+        remote: baseRemoteStatus,
+      } satisfies VcsStatusStreamEvent);
+      assert.equal(state.localStatusCalls, 1);
+      assert.equal(state.remoteStatusCalls, 1);
+      assert.equal(state.localInvalidationCalls, 0);
+      assert.equal(state.remoteInvalidationCalls, 1);
+    }).pipe(Effect.provide(makeTestLayer(state)));
+  });
+
+  it.effect("starts automatic remote refreshes only for positive intervals", () => {
+    const state = {
+      currentLocalStatus: baseLocalStatus,
+      currentRemoteStatus: baseRemoteStatus,
+      localStatusCalls: 0,
+      remoteStatusCalls: 0,
+      localInvalidationCalls: 0,
+      remoteInvalidationCalls: 0,
+    };
+
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      const remoteUpdated = yield* Deferred.make<VcsStatusStreamEvent>();
+      yield* Stream.runForEach(
+        broadcaster.streamStatus(
+          { cwd: "/repo" },
+          { automaticRemoteRefreshInterval: Effect.succeed(Duration.minutes(5)) },
+        ),
+        (event) =>
+          event._tag === "remoteUpdated"
+            ? Deferred.succeed(remoteUpdated, event).pipe(Effect.ignore)
+            : Effect.void,
+      ).pipe(Effect.forkScoped);
+
+      assert.deepStrictEqual(yield* Deferred.await(remoteUpdated), {
+        _tag: "remoteUpdated",
+        remote: baseRemoteStatus,
+      } satisfies VcsStatusStreamEvent);
+      assert.equal(state.remoteStatusCalls, 1);
+      assert.equal(state.remoteInvalidationCalls, 1);
+    }).pipe(Effect.provide(makeTestLayer(state)));
+  });
+
   it("backs off remote refresh failures exponentially and honors larger configured intervals", () => {
     assert.equal(
       Duration.toMillis(VcsStatusBroadcaster.remoteRefreshFailureDelay(1, Duration.seconds(1))),
@@ -329,6 +392,25 @@ describe("VcsStatusBroadcaster", () => {
     );
     assert.equal(
       Duration.toMillis(VcsStatusBroadcaster.remoteRefreshFailureDelay(20, Duration.seconds(1))),
+      900_000,
+    );
+  });
+
+  it("slows successful remote polling down when status reads are expensive", () => {
+    assert.equal(
+      Duration.toMillis(VcsStatusBroadcaster.remoteRefreshSuccessDelay(500, Duration.minutes(5))),
+      300_000,
+    );
+    assert.equal(
+      Duration.toMillis(
+        VcsStatusBroadcaster.remoteRefreshSuccessDelay(10_000, Duration.seconds(5)),
+      ),
+      50_000,
+    );
+    assert.equal(
+      Duration.toMillis(
+        VcsStatusBroadcaster.remoteRefreshSuccessDelay(600_000, Duration.seconds(5)),
+      ),
       900_000,
     );
   });

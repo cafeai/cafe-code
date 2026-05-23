@@ -1,4 +1,4 @@
-import { AuthClientMetadataDeviceType, AuthSessionId } from "@cafecode/contracts";
+import { AuthClientMetadataDeviceType, AuthSessionId } from "@cafecode/contracts/auth";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Context from "effect/Context";

@@ -1,4 +1,5 @@
 import {
+  type CheckpointRef,
   CommandId,
   EventId,
   MessageId,
@@ -34,6 +35,7 @@ import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { WorkspaceEntries } from "../../workspace/Services/WorkspaceEntries.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+const CHECKPOINT_REFS_RETAINED_PER_THREAD = 3;
 
 type ReactorInput =
   | {
@@ -196,6 +198,62 @@ const make = Effect.gen(function* () {
   // Shared tail for both capture paths: creates the git checkpoint ref, diffs
   // it against the previous turn, then dispatches the domain events to update
   // the orchestration read model.
+  const pruneOldCheckpointRefs = Effect.fn("CheckpointReactor.pruneOldCheckpointRefs")(
+    function* (input: {
+      readonly threadId: ThreadId;
+      readonly cwd: string;
+      readonly currentTurnCount: number;
+      readonly checkpoints: ReadonlyArray<{
+        readonly checkpointTurnCount: number;
+        readonly checkpointRef: CheckpointRef;
+      }>;
+    }) {
+      const checkpointCandidates = [
+        ...input.checkpoints,
+        {
+          checkpointTurnCount: 0,
+          checkpointRef: checkpointRefForThreadTurn(input.threadId, 0),
+        },
+      ];
+      const retainedTurnCounts = new Set(
+        [
+          ...checkpointCandidates.map((checkpoint) => checkpoint.checkpointTurnCount),
+          input.currentTurnCount,
+        ]
+          .toSorted((left, right) => right - left)
+          .slice(0, CHECKPOINT_REFS_RETAINED_PER_THREAD),
+      );
+      const checkpointRefsToDelete = [
+        ...new Set(
+          checkpointCandidates
+            .filter((checkpoint) => !retainedTurnCounts.has(checkpoint.checkpointTurnCount))
+            .map((checkpoint) => checkpoint.checkpointRef),
+        ),
+      ];
+
+      if (checkpointRefsToDelete.length === 0) {
+        return;
+      }
+
+      yield* checkpointStore
+        .deleteCheckpointRefs({
+          cwd: input.cwd,
+          checkpointRefs: checkpointRefsToDelete,
+        })
+        .pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("failed to prune old checkpoint refs", {
+              threadId: input.threadId,
+              cwd: input.cwd,
+              retainedTurnCounts: [...retainedTurnCounts],
+              checkpointRefsToDelete,
+              detail: error.message,
+            }),
+          ),
+        );
+    },
+  );
+
   const captureAndDispatchCheckpoint = Effect.fn("captureAndDispatchCheckpoint")(function* (input: {
     readonly threadId: ThreadId;
     readonly turnId: TurnId;
@@ -204,6 +262,10 @@ const make = Effect.gen(function* () {
         readonly id: MessageId;
         readonly role: string;
         readonly turnId: TurnId | null;
+      }>;
+      readonly checkpoints: ReadonlyArray<{
+        readonly checkpointTurnCount: number;
+        readonly checkpointRef: CheckpointRef;
       }>;
     };
     readonly cwd: string;
@@ -326,6 +388,13 @@ const make = Effect.gen(function* () {
         createdAt: input.createdAt,
       },
       createdAt: input.createdAt,
+    });
+
+    yield* pruneOldCheckpointRefs({
+      threadId: input.threadId,
+      cwd: input.cwd,
+      currentTurnCount: input.turnCount,
+      checkpoints: input.thread.checkpoints,
     });
   });
 

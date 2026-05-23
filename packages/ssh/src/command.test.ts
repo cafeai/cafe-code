@@ -15,6 +15,7 @@ import {
   getLastNonEmptyOutputLine,
   parseSshResolveOutput,
   resolveRemoteCafeCodeCliPackageSpec,
+  resolveSshIdentityAgent,
   runSshCommand,
 } from "./command.ts";
 
@@ -61,7 +62,40 @@ describe("ssh command", () => {
     }),
   );
 
-  it.effect("builds interactive ssh args without forcing batch mode", () =>
+  it.effect("builds agent-only ssh args by default", () =>
+    Effect.sync(() => {
+      assert.deepEqual(
+        baseSshArgs({
+          alias: "devbox",
+          hostname: "devbox.example.com",
+          username: "julius",
+          port: 2222,
+        }),
+        [
+          "-o",
+          "BatchMode=yes",
+          "-o",
+          "ConnectTimeout=10",
+          "-o",
+          "ConnectionAttempts=1",
+          "-o",
+          "NumberOfPasswordPrompts=0",
+          "-o",
+          "PasswordAuthentication=no",
+          "-o",
+          "KbdInteractiveAuthentication=no",
+          "-o",
+          "PreferredAuthentications=publickey",
+          "-o",
+          "PubkeyAuthentication=yes",
+          "-p",
+          "2222",
+        ],
+      );
+    }),
+  );
+
+  it.effect("pins OpenSSH to a validated identity agent socket when provided", () =>
     Effect.sync(() => {
       assert.deepEqual(
         baseSshArgs(
@@ -71,9 +105,49 @@ describe("ssh command", () => {
             username: "julius",
             port: 2222,
           },
-          { batchMode: "no" },
+          { identityAgent: "/tmp/cafe-code-agent.sock" },
         ),
-        ["-o", "BatchMode=no", "-o", "ConnectTimeout=10", "-p", "2222"],
+        [
+          "-o",
+          "BatchMode=yes",
+          "-o",
+          "ConnectTimeout=10",
+          "-o",
+          "ConnectionAttempts=1",
+          "-o",
+          "NumberOfPasswordPrompts=0",
+          "-o",
+          "PasswordAuthentication=no",
+          "-o",
+          "KbdInteractiveAuthentication=no",
+          "-o",
+          "PreferredAuthentications=publickey",
+          "-o",
+          "PubkeyAuthentication=yes",
+          "-o",
+          "IdentityAgent=/tmp/cafe-code-agent.sock",
+          "-p",
+          "2222",
+        ],
+      );
+    }),
+  );
+
+  it.effect("does not expose malformed SSH_AUTH_SOCK values as IdentityAgent options", () =>
+    Effect.sync(() => {
+      assert.isNull(resolveSshIdentityAgent({ SSH_AUTH_SOCK: "/tmp/bad\nsock" }));
+      assert.isNull(resolveSshIdentityAgent({ SSH_AUTH_SOCK: "relative-agent.sock" }));
+      assert.notInclude(
+        baseSshArgs(
+          {
+            alias: "devbox",
+            hostname: "devbox.example.com",
+            username: "julius",
+            port: 2222,
+          },
+          { identityAgent: "/tmp/bad\nsock" },
+        ),
+        "IdentityAgent=/tmp/bad\nsock",
       );
     }),
   );
@@ -85,14 +159,14 @@ describe("ssh command", () => {
           appVersion: "0.0.17",
           updateChannel: "latest",
         }),
-        "cafe-code@0.0.17",
+        "@cafeai/cafe-code@0.0.17",
       );
       assert.equal(
         resolveRemoteCafeCodeCliPackageSpec({
           appVersion: "0.0.17-nightly.20260415.44",
           updateChannel: "nightly",
         }),
-        "cafe-code@0.0.17-nightly.20260415.44",
+        "@cafeai/cafe-code@0.0.17-nightly.20260415.44",
       );
       assert.equal(
         resolveRemoteCafeCodeCliPackageSpec({
@@ -100,7 +174,7 @@ describe("ssh command", () => {
           updateChannel: "nightly",
           isDevelopment: true,
         }),
-        "cafe-code@nightly",
+        "@cafeai/cafe-code@nightly",
       );
       assert.equal(
         resolveRemoteCafeCodeCliPackageSpec({
@@ -108,7 +182,7 @@ describe("ssh command", () => {
           updateChannel: "latest",
           isDevelopment: true,
         }),
-        "cafe-code@nightly",
+        "@cafeai/cafe-code@nightly",
       );
     }),
   );

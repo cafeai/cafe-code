@@ -1,7 +1,0 @@
-{
-  "description": "T3 Code fork: TypeScript/Bun monorepo for a web GUI around coding agents, with server, web, desktop, contracts, and shared packages.",
-  "initialised_at": "2026-05-21",
-  "name": "cafe-code",
-  "selene_version": "0.1.0",
-  "template": "library"
-}

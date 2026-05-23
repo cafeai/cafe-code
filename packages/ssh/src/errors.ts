@@ -39,8 +39,3 @@ export class SshReadinessError extends Data.TaggedError("SshReadinessError")<{
   readonly message: string;
   readonly cause?: unknown;
 }> {}
-
-export class SshPasswordPromptError extends Data.TaggedError("SshPasswordPromptError")<{
-  readonly message: string;
-  readonly cause?: unknown;
-}> {}

@@ -13,6 +13,7 @@ import {
   ListProjectionThreadActivitiesInput,
   ProjectionThreadActivity,
   ProjectionThreadActivityRepository,
+  ProjectionUserInputActivityAccountingRow,
   type ProjectionThreadActivityRepositoryShape,
 } from "../Services/ProjectionThreadActivities.ts";
 
@@ -22,6 +23,13 @@ const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
     sequence: Schema.NullOr(NonNegativeInt),
   }),
 );
+
+const ProjectionUserInputActivityAccountingDbRowSchema =
+  ProjectionUserInputActivityAccountingRow.mapFields(
+    Struct.assign({
+      payload: Schema.fromJsonString(Schema.Unknown),
+    }),
+  );
 
 function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: string) {
   return (cause: unknown) =>
@@ -97,6 +105,29 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
       `,
   });
 
+  const listProjectionUserInputAccountingRows = SqlSchema.findAll({
+    Request: ListProjectionThreadActivitiesInput,
+    Result: ProjectionUserInputActivityAccountingDbRowSchema,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT
+          activity_id AS "activityId",
+          kind,
+          payload_json AS "payload",
+          created_at AS "createdAt"
+        FROM projection_thread_activities
+        WHERE thread_id = ${threadId}
+          AND kind IN (
+            'user-input.requested',
+            'user-input.resolved',
+            'provider.user-input.respond.failed'
+          )
+        ORDER BY
+          created_at ASC,
+          activity_id ASC
+      `,
+  });
+
   const deleteProjectionThreadActivityRows = SqlSchema.void({
     Request: DeleteProjectionThreadActivitiesInput,
     execute: ({ threadId }) =>
@@ -139,6 +170,17 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
       ),
     );
 
+  const listUserInputAccountingByThreadId: ProjectionThreadActivityRepositoryShape["listUserInputAccountingByThreadId"] =
+    (input) =>
+      listProjectionUserInputAccountingRows(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionThreadActivityRepository.listUserInputAccountingByThreadId:query",
+            "ProjectionThreadActivityRepository.listUserInputAccountingByThreadId:decodeRows",
+          ),
+        ),
+      );
+
   const deleteByThreadId: ProjectionThreadActivityRepositoryShape["deleteByThreadId"] = (input) =>
     deleteProjectionThreadActivityRows(input).pipe(
       Effect.mapError(
@@ -149,6 +191,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
   return {
     upsert,
     listByThreadId,
+    listUserInputAccountingByThreadId,
     deleteByThreadId,
   } satisfies ProjectionThreadActivityRepositoryShape;
 });

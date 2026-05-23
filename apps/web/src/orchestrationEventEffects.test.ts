@@ -40,7 +40,7 @@ function makeEvent<T extends OrchestrationEvent["type"]>(
 }
 
 describe("deriveOrchestrationBatchEffects", () => {
-  it("targets draft promotion and terminal cleanup from thread lifecycle events", () => {
+  it("targets draft promotion cleanup from thread lifecycle events", () => {
     const createdThreadId = ThreadId.make("thread-created");
     const deletedThreadId = ThreadId.make("thread-deleted");
     const archivedThreadId = ThreadId.make("thread-archived");

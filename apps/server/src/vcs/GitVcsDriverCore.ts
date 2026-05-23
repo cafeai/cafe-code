@@ -37,11 +37,14 @@ const PREPARED_COMMIT_PATCH_MAX_OUTPUT_BYTES = 49_000;
 const RANGE_COMMIT_SUMMARY_MAX_OUTPUT_BYTES = 19_000;
 const RANGE_DIFF_SUMMARY_MAX_OUTPUT_BYTES = 19_000;
 const RANGE_DIFF_PATCH_MAX_OUTPUT_BYTES = 59_000;
-const STATUS_UPSTREAM_REFRESH_INTERVAL = Duration.seconds(15);
-const STATUS_UPSTREAM_REFRESH_TIMEOUT = Duration.seconds(5);
-const STATUS_UPSTREAM_REFRESH_FAILURE_COOLDOWN = Duration.seconds(5);
+const WORKING_TREE_DIFF_MAX_OUTPUT_BYTES = 10_000_000;
+const STATUS_UPSTREAM_REFRESH_INTERVAL = Duration.minutes(1);
+const STATUS_UPSTREAM_REFRESH_TIMEOUT = Duration.seconds(2);
+const STATUS_UPSTREAM_REFRESH_FAILURE_COOLDOWN = Duration.minutes(5);
 const STATUS_UPSTREAM_REFRESH_CACHE_CAPACITY = 2_048;
 const STATUS_UPSTREAM_REFRESH_ENV = Object.freeze({
+  GCM_INTERACTIVE: "never",
+  GIT_TERMINAL_PROMPT: "0",
   SSH_ASKPASS_REQUIRE: "never",
 } satisfies NodeJS.ProcessEnv);
 const DEFAULT_BASE_BRANCH_CANDIDATES = ["main", "master"] as const;
@@ -610,6 +613,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const path = yield* Path.Path;
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const { worktreesDir } = yield* ServerConfig;
+  const statusUpstreamFetchSemaphore = yield* Semaphore.make(1);
 
   const executeRaw: GitVcsDriver.GitVcsDriverShape["execute"] = Effect.fnUntraced(
     function* (input) {
@@ -869,16 +873,18 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   ): Effect.Effect<void, GitCommandError> => {
     const fetchCwd =
       path.basename(gitCommonDir) === ".git" ? path.dirname(gitCommonDir) : gitCommonDir;
-    return executeGit(
-      "GitVcsDriver.fetchRemoteForStatus",
-      fetchCwd,
-      ["--git-dir", gitCommonDir, "fetch", "--quiet", "--no-tags", remoteName],
-      {
-        allowNonZeroExit: true,
-        env: STATUS_UPSTREAM_REFRESH_ENV,
-        timeoutMs: Duration.toMillis(STATUS_UPSTREAM_REFRESH_TIMEOUT),
-      },
-    ).pipe(Effect.asVoid);
+    return statusUpstreamFetchSemaphore.withPermit(
+      executeGit(
+        "GitVcsDriver.fetchRemoteForStatus",
+        fetchCwd,
+        ["--git-dir", gitCommonDir, "fetch", "--quiet", "--no-tags", remoteName],
+        {
+          allowNonZeroExit: true,
+          env: STATUS_UPSTREAM_REFRESH_ENV,
+          timeoutMs: Duration.toMillis(STATUS_UPSTREAM_REFRESH_TIMEOUT),
+        },
+      ).pipe(Effect.asVoid),
+    );
   };
 
   const resolveGitCommonDir = Effect.fn("resolveGitCommonDir")(function* (cwd: string) {
@@ -1630,6 +1636,51 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     };
   });
 
+  const workingTreeDiff: GitVcsDriver.GitVcsDriverShape["workingTreeDiff"] = Effect.fn(
+    "workingTreeDiff",
+  )(function* (cwd, options) {
+    const headResult = yield* executeGit(
+      "GitVcsDriver.workingTreeDiff.resolveHead",
+      cwd,
+      ["rev-parse", "--verify", "--quiet", "HEAD"],
+      {
+        allowNonZeroExit: true,
+        maxOutputBytes: 64 * 1024,
+      },
+    );
+    const hasHead = headResult.exitCode === 0;
+    const result = yield* executeGit(
+      "GitVcsDriver.workingTreeDiff.diff",
+      cwd,
+      [
+        "diff",
+        "--patch",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--minimal",
+        ...(options?.ignoreWhitespace ? ["--ignore-all-space"] : []),
+        ...(hasHead ? ["HEAD"] : []),
+        "--",
+        ".",
+      ],
+      {
+        allowNonZeroExit: true,
+        maxOutputBytes: WORKING_TREE_DIFF_MAX_OUTPUT_BYTES,
+        appendTruncationMarker: true,
+      },
+    );
+    if (result.exitCode !== 0) {
+      return yield* createGitCommandError(
+        "GitVcsDriver.workingTreeDiff.diff",
+        cwd,
+        ["diff", "--patch", hasHead ? "HEAD" : "--", "."],
+        result.stderr.trim() || "git diff failed",
+      );
+    }
+    return result.stdout;
+  });
+
   const readConfigValue: GitVcsDriver.GitVcsDriverShape["readConfigValue"] = (cwd, key) =>
     runGitStdout("GitVcsDriver.readConfigValue", cwd, ["config", "--get", key], true).pipe(
       Effect.map((stdout) => stdout.trim()),
@@ -2124,6 +2175,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     pushCurrentBranch,
     pullCurrentBranch,
     readRangeContext,
+    workingTreeDiff,
     readConfigValue,
     listRefs,
     createWorktree,

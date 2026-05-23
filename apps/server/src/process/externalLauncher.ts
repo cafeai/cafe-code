@@ -297,6 +297,23 @@ export const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
   return { command: fileManagerCommandForPlatform(platform), args: [input.cwd] };
 });
 
+export function resolveEditorProcessLaunch(
+  launch: EditorLaunch,
+  _platform: NodeJS.Platform = process.platform,
+): ProcessLaunch {
+  return {
+    command: launch.command,
+    args: [...launch.args],
+    options: {
+      detached: true,
+      shell: false,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    },
+  };
+}
+
 const launchAndUnref = Effect.fn("externalLauncher.launchAndUnref")(function* (
   launch: ProcessLaunch,
   errorMessage: string,
@@ -327,21 +344,7 @@ export const launchEditorProcess = Effect.fn("externalLauncher.launchEditorProce
     });
   }
 
-  const isWin32 = process.platform === "win32";
-  yield* launchAndUnref(
-    {
-      command: launch.command,
-      args: isWin32 ? launch.args.map((arg) => `"${arg}"`) : [...launch.args],
-      options: {
-        detached: true,
-        shell: isWin32,
-        stdin: "ignore",
-        stdout: "ignore",
-        stderr: "ignore",
-      },
-    },
-    "failed to spawn detached process",
-  );
+  yield* launchAndUnref(resolveEditorProcessLaunch(launch), "failed to spawn detached process");
 });
 
 const make = Effect.gen(function* () {

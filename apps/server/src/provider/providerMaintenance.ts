@@ -108,13 +108,18 @@ export function makeManualOnlyProviderMaintenanceCapabilities(input: {
   });
 }
 
+function resolveNpmGlobalUpdateExecutable(platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? "npm.cmd" : "npm";
+}
+
 function makeNpmGlobalProviderMaintenanceCapabilities(
   definition: PackageManagedProviderMaintenanceDefinition,
+  options?: ProviderMaintenanceCapabilityResolutionOptions,
 ): ProviderMaintenanceCapabilities {
   return makeProviderMaintenanceCapabilities({
     provider: definition.provider,
     packageName: definition.npmPackageName,
-    updateExecutable: "npm",
+    updateExecutable: resolveNpmGlobalUpdateExecutable(options?.platform),
     updateArgs: ["install", "-g", `${definition.npmPackageName}@latest`],
     updateLockKey: "npm-global",
   });
@@ -247,7 +252,7 @@ export function resolvePackageManagedProviderMaintenance(
 ): ProviderMaintenanceCapabilities {
   const binaryPath = nonEmptyString(options?.binaryPath);
   if (!binaryPath) {
-    return makeNpmGlobalProviderMaintenanceCapabilities(definition);
+    return makeNpmGlobalProviderMaintenanceCapabilities(definition, options);
   }
 
   const resolvedCommandPath =
@@ -269,7 +274,7 @@ export function resolvePackageManagedProviderMaintenance(
     ) {
       return (
         makeNativeProviderMaintenanceCapabilities(definition) ??
-        makeNpmGlobalProviderMaintenanceCapabilities(definition)
+        makeNpmGlobalProviderMaintenanceCapabilities(definition, options)
       );
     }
     if (commandPaths.some(isVitePlusGlobalCommandPath)) {
@@ -282,7 +287,7 @@ export function resolvePackageManagedProviderMaintenance(
       return makePnpmGlobalProviderMaintenanceCapabilities(definition);
     }
     if (commandPaths.some(isNpmGlobalCommandPath)) {
-      return makeNpmGlobalProviderMaintenanceCapabilities(definition);
+      return makeNpmGlobalProviderMaintenanceCapabilities(definition, options);
     }
     if (commandPaths.some(isHomebrewCommandPath)) {
       return makeHomebrewProviderMaintenanceCapabilities(definition);
@@ -290,7 +295,7 @@ export function resolvePackageManagedProviderMaintenance(
   }
 
   if (!hasPathSeparator(binaryPath)) {
-    return makeNpmGlobalProviderMaintenanceCapabilities(definition);
+    return makeNpmGlobalProviderMaintenanceCapabilities(definition, options);
   }
 
   return makeManualOnlyProviderMaintenanceCapabilities({

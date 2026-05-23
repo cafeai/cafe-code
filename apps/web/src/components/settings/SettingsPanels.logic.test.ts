@@ -1,12 +1,16 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ThreadId,
   type ProviderInstanceConfig,
 } from "@cafecode/contracts";
 import { describe, expect, it } from "vitest";
 import {
+  buildEmptyRecycleBinConfirmationMessage,
   buildProviderInstanceUpdatePatch,
+  collectRecentlyDeletedThreadRefs,
   formatDiagnosticsDescription,
 } from "./SettingsPanels.logic";
 
@@ -100,5 +104,35 @@ describe("buildProviderInstanceUpdatePatch", () => {
 
     expect(patch.providerInstances?.[instanceId]).toEqual(nextInstance);
     expect(patch.providers).toBeUndefined();
+  });
+});
+
+describe("collectRecentlyDeletedThreadRefs", () => {
+  it("flattens deleted thread groups into scoped thread refs", () => {
+    const environmentOne = EnvironmentId.make("env-one");
+    const environmentTwo = EnvironmentId.make("env-two");
+
+    expect(
+      collectRecentlyDeletedThreadRefs([
+        {
+          project: { environmentId: environmentOne },
+          threads: [
+            { id: ThreadId.make("thread-a") },
+            { id: ThreadId.make("thread-b"), environmentId: environmentTwo },
+          ],
+        },
+      ]),
+    ).toEqual([
+      { environmentId: environmentOne, threadId: ThreadId.make("thread-a") },
+      { environmentId: environmentTwo, threadId: ThreadId.make("thread-b") },
+    ]);
+  });
+});
+
+describe("buildEmptyRecycleBinConfirmationMessage", () => {
+  it("formats singular and plural permanent-delete prompts", () => {
+    expect(buildEmptyRecycleBinConfirmationMessage(1)).toContain("Delete 1 thread forever?");
+    expect(buildEmptyRecycleBinConfirmationMessage(3)).toContain("Delete 3 threads forever?");
+    expect(buildEmptyRecycleBinConfirmationMessage(3)).toContain("This cannot be undone.");
   });
 });

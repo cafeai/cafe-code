@@ -38,6 +38,15 @@ export const ListProjectionThreadActivitiesInput = Schema.Struct({
 });
 export type ListProjectionThreadActivitiesInput = typeof ListProjectionThreadActivitiesInput.Type;
 
+export const ProjectionUserInputActivityAccountingRow = Schema.Struct({
+  activityId: EventId,
+  kind: Schema.String,
+  payload: Schema.Unknown,
+  createdAt: IsoDateTime,
+});
+export type ProjectionUserInputActivityAccountingRow =
+  typeof ProjectionUserInputActivityAccountingRow.Type;
+
 export const DeleteProjectionThreadActivitiesInput = Schema.Struct({
   threadId: ThreadId,
 });
@@ -66,6 +75,20 @@ export interface ProjectionThreadActivityRepositoryShape {
   readonly listByThreadId: (
     input: ListProjectionThreadActivitiesInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadActivity>, ProjectionRepositoryError>;
+
+  /**
+   * List only activity rows that can affect pending user-input accounting.
+   *
+   * This intentionally avoids loading full tool activity history while still
+   * preserving the set-based request accounting semantics used by thread shell
+   * summaries.
+   */
+  readonly listUserInputAccountingByThreadId: (
+    input: ListProjectionThreadActivitiesInput,
+  ) => Effect.Effect<
+    ReadonlyArray<ProjectionUserInputActivityAccountingRow>,
+    ProjectionRepositoryError
+  >;
 
   /**
    * Delete projected thread activity rows by thread.

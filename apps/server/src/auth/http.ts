@@ -5,7 +5,7 @@ import {
   AuthRevokeClientSessionInput,
   AuthRevokePairingLinkInput,
   type AuthWebSocketTokenResult,
-} from "@cafecode/contracts";
+} from "@cafecode/contracts/auth";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";

@@ -6,8 +6,6 @@ import {
   DesktopSshEnvironmentEnsureResultSchema,
   DesktopSshEnvironmentTargetSchema,
   DesktopSshHttpBaseUrlInputSchema,
-  DesktopSshPasswordPromptCancelledType,
-  DesktopSshPasswordPromptResolutionInputSchema,
   ExecutionEnvironmentDescriptor,
   AuthBearerBootstrapResult,
   AuthSessionState,
@@ -19,7 +17,6 @@ import * as Schema from "effect/Schema";
 import * as IpcChannels from "../channels.ts";
 import { makeIpcMethod } from "../DesktopIpc.ts";
 import * as DesktopSshEnvironment from "../../ssh/DesktopSshEnvironment.ts";
-import * as DesktopSshPasswordPrompts from "../../ssh/DesktopSshPasswordPrompts.ts";
 import * as DesktopSshRemoteApi from "../../ssh/DesktopSshRemoteApi.ts";
 
 export const discoverSshHosts = makeIpcMethod({
@@ -41,16 +38,7 @@ export const ensureSshEnvironment = makeIpcMethod({
     options,
   }) {
     const sshEnvironment = yield* DesktopSshEnvironment.DesktopSshEnvironment;
-    return yield* sshEnvironment.ensureEnvironment(target, options).pipe(
-      Effect.catch((error) =>
-        DesktopSshEnvironment.isDesktopSshPasswordPromptCancellation(error)
-          ? Effect.succeed({
-              type: DesktopSshPasswordPromptCancelledType,
-              message: error.message,
-            })
-          : Effect.fail(error),
-      ),
-    );
+    return yield* sshEnvironment.ensureEnvironment(target, options);
   }),
 });
 
@@ -110,18 +98,5 @@ export const issueSshWebSocketToken = makeIpcMethod({
   }) {
     const remoteApi = yield* DesktopSshRemoteApi.DesktopSshRemoteApi;
     return yield* remoteApi.issueWebSocketToken({ httpBaseUrl, bearerToken });
-  }),
-});
-
-export const resolveSshPasswordPrompt = makeIpcMethod({
-  channel: IpcChannels.RESOLVE_SSH_PASSWORD_PROMPT_CHANNEL,
-  payload: DesktopSshPasswordPromptResolutionInputSchema,
-  result: Schema.Void,
-  handler: Effect.fn("desktop.ipc.sshEnvironment.resolvePasswordPrompt")(function* ({
-    requestId,
-    password,
-  }) {
-    const prompts = yield* DesktopSshPasswordPrompts.DesktopSshPasswordPrompts;
-    yield* prompts.resolve({ requestId, password });
   }),
 });

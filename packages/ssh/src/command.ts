@@ -3,18 +3,26 @@ import * as Crypto from "node:crypto";
 import type { DesktopSshEnvironmentTarget, DesktopUpdateChannel } from "@cafecode/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
-import * as Path from "effect/Path";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-import { buildSshChildEnvironment, type SshAuthOptions } from "./auth.ts";
+import type { SshAuthOptions } from "./auth.ts";
 import { SshCommandError, SshInvalidTargetError } from "./errors.ts";
 
 const PUBLISHABLE_CAFE_CODE_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
 const DEFAULT_SSH_COMMAND_TIMEOUT_MS = 60_000;
+const AGENT_ONLY_SSH_OPTIONS = [
+  "BatchMode=yes",
+  "ConnectTimeout=10",
+  "ConnectionAttempts=1",
+  "NumberOfPasswordPrompts=0",
+  "PasswordAuthentication=no",
+  "KbdInteractiveAuthentication=no",
+  "PreferredAuthentications=publickey",
+  "PubkeyAuthentication=yes",
+] as const;
 
 const encoder = new TextEncoder();
 
@@ -28,6 +36,28 @@ export interface RunSshCommandOptions extends SshAuthOptions {
   readonly remoteCommandArgs?: ReadonlyArray<string>;
   readonly stdin?: string;
   readonly timeoutMs?: number;
+}
+
+function normalizeIdentityAgentPath(value: string | null | undefined): string | null {
+  const trimmed = value?.trim() ?? "";
+  if (
+    trimmed.length === 0 ||
+    !trimmed.startsWith("/") ||
+    trimmed.includes("\0") ||
+    /[\r\n]/u.test(trimmed)
+  ) {
+    return null;
+  }
+  return trimmed;
+}
+
+export function resolveSshIdentityAgent(env: NodeJS.ProcessEnv = process.env): string | null {
+  if (process.platform === "win32") {
+    return null;
+  }
+
+  const socketPath = normalizeIdentityAgentPath(env.SSH_AUTH_SOCK);
+  return socketPath;
 }
 
 export function parseSshResolveOutput(alias: string, stdout: string): DesktopSshEnvironmentTarget {
@@ -86,13 +116,19 @@ export const buildSshHostSpecEffect = (
 
 export function baseSshArgs(
   target: DesktopSshEnvironmentTarget,
-  input?: { readonly batchMode?: "yes" | "no" },
+  input?: { readonly batchMode?: "yes" | "no"; readonly identityAgent?: string | null },
 ): string[] {
+  const options =
+    input?.batchMode === "no"
+      ? AGENT_ONLY_SSH_OPTIONS.map((option) =>
+          option === "BatchMode=yes" ? "BatchMode=no" : option,
+        )
+      : AGENT_ONLY_SSH_OPTIONS;
+  const identityAgent = normalizeIdentityAgentPath(input?.identityAgent);
+
   return [
-    "-o",
-    `BatchMode=${input?.batchMode ?? "no"}`,
-    "-o",
-    "ConnectTimeout=10",
+    ...options.flatMap((option) => ["-o", option]),
+    ...(identityAgent === null ? [] : ["-o", `IdentityAgent=${identityAgent}`]),
     ...(target.port !== null ? ["-p", String(target.port)] : []),
   ];
 }
@@ -143,27 +179,15 @@ const runSshCommandInScope = Effect.fn("ssh/command.runSshCommand.inScope")(func
 ): Effect.fn.Return<
   SshCommandResult,
   SshCommandError | SshInvalidTargetError,
-  ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
+  ChildProcessSpawner.ChildProcessSpawner
 > {
   const hostSpec = yield* buildSshHostSpecEffect(target);
-  const environment = yield* buildSshChildEnvironment({
-    ...(input.interactiveAuth === undefined ? {} : { interactiveAuth: input.interactiveAuth }),
-    ...(input.authSecret === undefined ? {} : { authSecret: input.authSecret }),
-  }).pipe(
-    Effect.mapError(
-      (cause) =>
-        new SshCommandError({
-          command: ["ssh"],
-          exitCode: null,
-          stderr: "",
-          message: "Failed to prepare SSH authentication helpers.",
-          cause,
-        }),
-    ),
-  );
+  const environment = { ...process.env };
+  const identityAgent = resolveSshIdentityAgent(environment);
   const args = [
     ...baseSshArgs(target, {
-      batchMode: input.batchMode ?? (input.interactiveAuth ? "no" : "yes"),
+      batchMode: input.batchMode ?? "yes",
+      identityAgent,
     }),
     ...(input.preHostArgs ?? []),
     hostSpec,
@@ -256,7 +280,7 @@ export const runSshCommand = Effect.fn("ssh/command.runSshCommand")(function* (
 ): Effect.fn.Return<
   SshCommandResult,
   SshCommandError | SshInvalidTargetError,
-  ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
+  ChildProcessSpawner.ChildProcessSpawner
 > {
   return yield* Effect.scopedWith((commandScope) =>
     runSshCommandInScope(target, input, commandScope),
@@ -291,7 +315,7 @@ export const resolveSshTarget = Effect.fn("ssh/command.resolveSshTarget")(functi
 ): Effect.fn.Return<
   DesktopSshEnvironmentTarget,
   SshCommandError | SshInvalidTargetError,
-  ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
+  ChildProcessSpawner.ChildProcessSpawner
 > {
   const trimmedAlias = alias.trim();
   if (trimmedAlias.length === 0) {
@@ -332,12 +356,14 @@ export function resolveRemoteCafeCodeCliPackageSpec(input: {
 }): string {
   const appVersion = input.appVersion.trim();
   if (!input.isDevelopment && PUBLISHABLE_CAFE_CODE_VERSION_PATTERN.test(appVersion)) {
-    return `cafe-code@${appVersion}`;
+    return `@cafeai/cafe-code@${appVersion}`;
   }
 
   if (input.isDevelopment) {
-    return "cafe-code@nightly";
+    return "@cafeai/cafe-code@nightly";
   }
 
-  return input.updateChannel === "nightly" ? "cafe-code@nightly" : "cafe-code@latest";
+  return input.updateChannel === "nightly"
+    ? "@cafeai/cafe-code@nightly"
+    : "@cafeai/cafe-code@latest";
 }

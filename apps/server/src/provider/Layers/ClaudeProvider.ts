@@ -14,7 +14,6 @@ import * as Result from "effect/Result";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import {
   createModelCapabilities,
-  getModelSelectionStringOptionValue,
   getProviderOptionCurrentValue,
   getProviderOptionDescriptors,
 } from "@cafecode/shared/model";
@@ -218,6 +217,34 @@ export function resolveClaudeEffort(
   return typeof value === "string" ? value : undefined;
 }
 
+export function resolveClaudeContextWindowOption(
+  modelSelection: ModelSelection | null | undefined,
+): "200k" | "1m" | undefined {
+  const caps = getClaudeModelCapabilities(modelSelection?.model);
+  const descriptors = getProviderOptionDescriptors({
+    caps,
+    selections: modelSelection?.options,
+  });
+  const contextWindowDescriptor = descriptors.find(
+    (descriptor) => descriptor.id === "contextWindow",
+  );
+  const value = getProviderOptionCurrentValue(contextWindowDescriptor);
+  return value === "200k" || value === "1m" ? value : undefined;
+}
+
+export function resolveClaudeSelectedContextWindowTokens(
+  modelSelection: ModelSelection | null | undefined,
+): number | undefined {
+  switch (resolveClaudeContextWindowOption(modelSelection)) {
+    case "200k":
+      return 200_000;
+    case "1m":
+      return 1_000_000;
+    default:
+      return undefined;
+  }
+}
+
 /**
  * Normalize a resolved Claude effort value into one suitable for the Claude
  * CLI's `--effort` flag.
@@ -239,7 +266,7 @@ export function normalizeClaudeCliEffort(effort: string | null | undefined): str
 }
 
 export function resolveClaudeApiModelId(modelSelection: ModelSelection): string {
-  switch (getModelSelectionStringOptionValue(modelSelection, "contextWindow")) {
+  switch (resolveClaudeContextWindowOption(modelSelection)) {
     case "1m":
       return `${modelSelection.model}[1m]`;
     default:

@@ -461,6 +461,75 @@ describe("incremental orchestration updates", () => {
     expect(localEnvironmentStateOf(next).bootstrapComplete).toBe(false);
   });
 
+  it("moves thread state between project indexes on thread meta project updates", () => {
+    const targetProjectId = ProjectId.make("project-2");
+    const thread = makeThread({
+      messages: [
+        {
+          id: MessageId.make("message-1"),
+          role: "user",
+          text: "keep me",
+          createdAt: "2026-02-13T00:00:01.000Z",
+          streaming: false,
+        },
+      ],
+    });
+    const initialState = makeState(thread);
+    const initialEnvironment = localEnvironmentStateOf(initialState);
+    const sourceProject = initialEnvironment.projectById[thread.projectId]!;
+    const state = withActiveEnvironmentState({
+      ...initialEnvironment,
+      projectIds: [...initialEnvironment.projectIds, targetProjectId],
+      projectById: {
+        ...initialEnvironment.projectById,
+        [targetProjectId]: {
+          ...sourceProject,
+          id: targetProjectId,
+          name: "Project 2",
+          cwd: "/tmp/project-2",
+        },
+      },
+      sidebarThreadSummaryById: {
+        [thread.id]: {
+          id: thread.id,
+          environmentId: thread.environmentId,
+          projectId: thread.projectId,
+          title: thread.title,
+          interactionMode: thread.interactionMode,
+          session: thread.session,
+          createdAt: thread.createdAt,
+          archivedAt: thread.archivedAt,
+          updatedAt: thread.updatedAt,
+          latestTurn: thread.latestTurn,
+          branch: thread.branch,
+          worktreePath: thread.worktreePath,
+          latestUserMessageAt: null,
+          hasPendingApprovals: false,
+          hasPendingUserInput: false,
+          hasActionableProposedPlan: false,
+        },
+      },
+    });
+
+    const next = applyOrchestrationEvent(
+      state,
+      makeEvent("thread.meta-updated", {
+        threadId: thread.id,
+        projectId: targetProjectId,
+        updatedAt: "2026-02-27T00:00:01.000Z",
+      }),
+      localEnvironmentId,
+    );
+
+    const nextEnvironment = localEnvironmentStateOf(next);
+    expect(nextEnvironment.threadIdsByProjectId[thread.projectId]).toBeUndefined();
+    expect(nextEnvironment.threadIdsByProjectId[targetProjectId]).toEqual([thread.id]);
+    expect(nextEnvironment.sidebarThreadSummaryById[thread.id]?.projectId).toBe(targetProjectId);
+    expect(
+      selectThreadByRef(next, scopeThreadRef(localEnvironmentId, thread.id))?.messages,
+    ).toEqual(thread.messages);
+  });
+
   it("preserves state identity for no-op project and thread deletes", () => {
     const thread = makeThread();
     const state = makeState(thread);
