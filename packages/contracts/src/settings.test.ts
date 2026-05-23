@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 import {
   ClientSettingsPatch,
   ClientSettingsSchema,
+  DEFAULT_APP_ACCENT_COLOR,
   DEFAULT_CLIENT_SETTINGS,
   DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
   DEFAULT_POWER_SAVE_BLOCKER_MODE,
@@ -26,9 +27,11 @@ describe("client settings", () => {
     );
     expect(DEFAULT_CLIENT_SETTINGS.showSidebarMascot).toBe(DEFAULT_SHOW_SIDEBAR_MASCOT);
     expect(DEFAULT_CLIENT_SETTINGS.themeAccentColor).toBe(DEFAULT_THEME_ACCENT_COLOR);
+    expect(DEFAULT_CLIENT_SETTINGS.appAccentColor).toBe(DEFAULT_APP_ACCENT_COLOR);
     expect(decodeClientSettings({}).continueBackgroundAnimations).toBe(false);
     expect(decodeClientSettings({}).showSidebarMascot).toBe(true);
     expect(decodeClientSettings({}).themeAccentColor).toBe("");
+    expect(decodeClientSettings({}).appAccentColor).toBe("");
   });
 
   it("accepts only supported power-save blocker modes in patches", () => {
@@ -44,11 +47,13 @@ describe("client settings", () => {
         continueBackgroundAnimations: true,
         showSidebarMascot: false,
         themeAccentColor: "  #16a34a  ",
+        appAccentColor: "  #dc2626  ",
       }),
     ).toEqual({
       continueBackgroundAnimations: true,
       showSidebarMascot: false,
       themeAccentColor: "#16a34a",
+      appAccentColor: "#dc2626",
     });
   });
 });

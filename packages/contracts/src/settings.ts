@@ -24,6 +24,7 @@ export const DEFAULT_POWER_SAVE_BLOCKER_MODE: PowerSaveBlockerMode = "off";
 
 export const DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS = false;
 export const DEFAULT_SHOW_SIDEBAR_MASCOT = true;
+export const DEFAULT_APP_ACCENT_COLOR = "";
 export const DEFAULT_THEME_ACCENT_COLOR = "";
 
 export const SidebarProjectSortOrder = Schema.Literals(["updated_at", "created_at", "manual"]);
@@ -69,6 +70,9 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   themeAccentColor: TrimmedString.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_THEME_ACCENT_COLOR)),
+  ),
+  appAccentColor: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_APP_ACCENT_COLOR)),
   ),
   defaultEditor: DefaultEditorSelection.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_DEFAULT_EDITOR)),
@@ -511,6 +515,7 @@ export const ClientSettingsPatch = Schema.Struct({
   continueBackgroundAnimations: Schema.optionalKey(Schema.Boolean),
   showSidebarMascot: Schema.optionalKey(Schema.Boolean),
   themeAccentColor: Schema.optionalKey(TrimmedString),
+  appAccentColor: Schema.optionalKey(TrimmedString),
   defaultEditor: Schema.optionalKey(DefaultEditorSelection),
   favorites: Schema.optionalKey(
     Schema.Array(

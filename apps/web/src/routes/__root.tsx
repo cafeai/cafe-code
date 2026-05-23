@@ -45,7 +45,7 @@ import {
 import { selectAnyThreadRunning, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { syncBrowserChromeTheme } from "../hooks/useTheme";
-import { applyThemeAccentColor } from "../themeAccent";
+import { applyAppAccentColor, applySidebarAccentColor } from "../themeAccent";
 import {
   ensureEnvironmentConnectionBootstrapped,
   getPrimaryEnvironmentConnection,
@@ -318,17 +318,25 @@ function PowerSaveBlockerSync() {
 }
 
 function AppearanceSettingsSync() {
-  const themeAccentColor = useSettings((settings) => settings.themeAccentColor);
+  const appAccentColor = useSettings((settings) => settings.appAccentColor);
+  const sidebarAccentColor = useSettings((settings) => settings.themeAccentColor);
   const continueBackgroundAnimations = useSettings(
     (settings) => settings.continueBackgroundAnimations,
   );
 
   useEffect(() => {
-    applyThemeAccentColor(themeAccentColor);
+    applyAppAccentColor(appAccentColor);
     return () => {
-      applyThemeAccentColor(undefined);
+      applyAppAccentColor(undefined);
     };
-  }, [themeAccentColor]);
+  }, [appAccentColor]);
+
+  useEffect(() => {
+    applySidebarAccentColor(sidebarAccentColor);
+    return () => {
+      applySidebarAccentColor(undefined);
+    };
+  }, [sidebarAccentColor]);
 
   useEffect(() => {
     applyCafeBackgroundAnimations(continueBackgroundAnimations);

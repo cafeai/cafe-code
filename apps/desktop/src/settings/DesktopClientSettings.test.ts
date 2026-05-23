@@ -21,6 +21,7 @@ const clientSettings: ClientSettings = {
   continueBackgroundAnimations: false,
   showSidebarMascot: true,
   themeAccentColor: "",
+  appAccentColor: "",
   defaultEditor: "system-default",
   favorites: [],
   providerModelPreferences: {},

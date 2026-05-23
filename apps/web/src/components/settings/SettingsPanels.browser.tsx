@@ -777,18 +777,31 @@ describe("GeneralSettingsPanel observability", () => {
       </AppAtomRegistryProvider>,
     );
 
+    const setColorInput = (ariaLabel: string, value: string) => {
+      const input = document.querySelector(
+        `input[aria-label="${ariaLabel}"]`,
+      ) as HTMLInputElement | null;
+      expect(input).not.toBeNull();
+      const inputValueSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      inputValueSetter?.call(input, value);
+      input!.dispatchEvent(new Event("input", { bubbles: true }));
+      input!.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    };
+
     await expect.element(page.getByText("Accent color")).toBeInTheDocument();
-    const accentInput = document.querySelector(
-      'input[aria-label="Animated sidebar accent color"]',
-    ) as HTMLInputElement | null;
-    expect(accentInput).not.toBeNull();
-    const inputValueSetter = Object.getOwnPropertyDescriptor(
-      HTMLInputElement.prototype,
-      "value",
-    )?.set;
-    inputValueSetter?.call(accentInput, "#16a34a");
-    accentInput!.dispatchEvent(new Event("input", { bubbles: true }));
-    accentInput!.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    setColorInput("App accent color", "#dc2626");
+
+    await vi.waitFor(() => {
+      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ appAccentColor: "#dc2626" }),
+      );
+    });
+
+    await expect.element(page.getByText("Sidebar color")).toBeInTheDocument();
+    setColorInput("Animated sidebar color", "#16a34a");
 
     await vi.waitFor(() => {
       expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(

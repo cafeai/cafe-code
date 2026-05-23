@@ -22,6 +22,7 @@ import {
 import { scopeThreadRef } from "@cafecode/client-runtime";
 import {
   DEFAULT_UNIFIED_SETTINGS,
+  DEFAULT_APP_ACCENT_COLOR,
   DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
   DEFAULT_SHOW_SIDEBAR_MASCOT,
   DEFAULT_THEME_ACCENT_COLOR,
@@ -99,7 +100,7 @@ import {
   useServerProviders,
 } from "../../rpc/serverState";
 import { resolveEditorOpenOptions, type EditorOpenOption } from "../../editorOpenOptions";
-import { normalizeThemeAccentColor } from "../../themeAccent";
+import { normalizeAccentColor } from "../../themeAccent";
 
 const THEME_OPTIONS = [
   {
@@ -115,7 +116,8 @@ const THEME_OPTIONS = [
     label: "Dark",
   },
 ] as const;
-const DEFAULT_THEME_ACCENT_PICKER_COLOR = "#48cfff";
+const DEFAULT_APP_ACCENT_PICKER_COLOR = "#2563eb";
+const DEFAULT_SIDEBAR_ACCENT_PICKER_COLOR = "#48cfff";
 
 const TIMESTAMP_FORMAT_LABELS = {
   locale: "System default",
@@ -209,13 +211,16 @@ function AboutVersionTitle() {
   );
 }
 
-function ThemeAccentColorPicker(props: {
+function ColorWheelPicker(props: {
   readonly value: string;
+  readonly defaultPickerColor: string;
+  readonly emptyValue: string;
+  readonly ariaLabel: string;
   readonly onCommit: (value: string) => void;
 }) {
   const [draft, setDraft] = useState(props.value);
   const [isEditing, setIsEditing] = useState(false);
-  const draftColor = normalizeThemeAccentColor(draft);
+  const draftColor = normalizeAccentColor(draft);
 
   useEffect(() => {
     if (isEditing) return;
@@ -224,7 +229,7 @@ function ThemeAccentColorPicker(props: {
 
   const commitDraft = () => {
     setIsEditing(false);
-    props.onCommit(draftColor ?? DEFAULT_THEME_ACCENT_COLOR);
+    props.onCommit(draftColor ?? props.emptyValue);
   };
 
   return (
@@ -246,7 +251,7 @@ function ThemeAccentColorPicker(props: {
         </span>
         <input
           type="color"
-          value={draftColor ?? DEFAULT_THEME_ACCENT_PICKER_COLOR}
+          value={draftColor ?? props.defaultPickerColor}
           onFocus={() => setIsEditing(true)}
           onInput={(event) => {
             setIsEditing(true);
@@ -257,7 +262,7 @@ function ThemeAccentColorPicker(props: {
             setDraft(event.currentTarget.value);
           }}
           onBlur={commitDraft}
-          aria-label="Animated sidebar accent color"
+          aria-label={props.ariaLabel}
           className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
         />
       </label>
@@ -500,8 +505,11 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.showSidebarMascot !== DEFAULT_UNIFIED_SETTINGS.showSidebarMascot
         ? ["Sidebar mascot"]
         : []),
+      ...(settings.appAccentColor !== DEFAULT_UNIFIED_SETTINGS.appAccentColor
+        ? ["Accent color"]
+        : []),
       ...(settings.themeAccentColor !== DEFAULT_UNIFIED_SETTINGS.themeAccentColor
-        ? ["Sidebar accent color"]
+        ? ["Sidebar color"]
         : []),
       ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
         ? ["Time format"]
@@ -553,6 +561,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.diffIgnoreWhitespace,
       settings.diffWordWrap,
       settings.defaultEditor,
+      settings.appAccentColor,
       settings.showSidebarMascot,
       settings.themeAccentColor,
       settings.automaticGitFetchInterval,
@@ -577,6 +586,7 @@ export function useSettingsRestore(onRestored?: () => void) {
     updateSettings({
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
       continueBackgroundAnimations: DEFAULT_UNIFIED_SETTINGS.continueBackgroundAnimations,
+      appAccentColor: DEFAULT_UNIFIED_SETTINGS.appAccentColor,
       showSidebarMascot: DEFAULT_UNIFIED_SETTINGS.showSidebarMascot,
       themeAccentColor: DEFAULT_UNIFIED_SETTINGS.themeAccentColor,
       defaultEditor: DEFAULT_UNIFIED_SETTINGS.defaultEditor,
@@ -689,11 +699,37 @@ export function GeneralSettingsPanel() {
 
         <SettingsRow
           title="Accent color"
+          description="Choose the primary color used for buttons, focused controls, and rings."
+          resetAction={
+            settings.appAccentColor !== DEFAULT_UNIFIED_SETTINGS.appAccentColor ? (
+              <SettingResetButton
+                label="accent color"
+                onClick={() =>
+                  updateSettings({
+                    appAccentColor: DEFAULT_APP_ACCENT_COLOR,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <ColorWheelPicker
+              value={settings.appAccentColor}
+              defaultPickerColor={DEFAULT_APP_ACCENT_PICKER_COLOR}
+              emptyValue={DEFAULT_APP_ACCENT_COLOR}
+              ariaLabel="App accent color"
+              onCommit={(value) => updateSettings({ appAccentColor: value })}
+            />
+          }
+        />
+
+        <SettingsRow
+          title="Sidebar color"
           description="Choose the color used by the animated sidebar stars and glow."
           resetAction={
             settings.themeAccentColor !== DEFAULT_UNIFIED_SETTINGS.themeAccentColor ? (
               <SettingResetButton
-                label="accent color"
+                label="sidebar color"
                 onClick={() =>
                   updateSettings({
                     themeAccentColor: DEFAULT_THEME_ACCENT_COLOR,
@@ -703,8 +739,11 @@ export function GeneralSettingsPanel() {
             ) : null
           }
           control={
-            <ThemeAccentColorPicker
+            <ColorWheelPicker
               value={settings.themeAccentColor}
+              defaultPickerColor={DEFAULT_SIDEBAR_ACCENT_PICKER_COLOR}
+              emptyValue={DEFAULT_THEME_ACCENT_COLOR}
+              ariaLabel="Animated sidebar color"
               onCommit={(value) => updateSettings({ themeAccentColor: value })}
             />
           }
