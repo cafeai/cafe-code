@@ -213,4 +213,19 @@ describe("markdown file link workspace policy", () => {
       isPathInsideWorkspace("/Users/julius/project/file.ts:4:2", "/Users/julius/project"),
     ).toBe(true);
   });
+
+  it("treats configured additional directories as direct-open workspace paths", () => {
+    expect(
+      isPathInsideWorkspace("/Users/julius/docs/README.md", "/Users/julius/project", [
+        "/Users/julius/docs",
+      ]),
+    ).toBe(true);
+    expect(
+      resolveMarkdownFileLinkMeta("file:///Users/julius/docs/README.md", "/Users/julius/project", [
+        "/Users/julius/docs",
+      ]),
+    ).toMatchObject({
+      openPolicy: "direct",
+    });
+  });
 });

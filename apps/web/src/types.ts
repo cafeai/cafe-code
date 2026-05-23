@@ -78,6 +78,7 @@ export interface Project {
   environmentId: EnvironmentId;
   name: string;
   cwd: string;
+  additionalWorkspaceRoots?: string[];
   repositoryIdentity?: RepositoryIdentity | null;
   defaultModelSelection: ModelSelection | null;
   createdAt?: string | undefined;

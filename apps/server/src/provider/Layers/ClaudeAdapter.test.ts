@@ -380,6 +380,31 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("forwards cwd and additional directories into claude query options", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        cwd: "/tmp/project",
+        additionalDirectories: ["/tmp/docs", "/tmp/tools"],
+        runtimeMode: "full-access",
+      });
+
+      const createInput = harness.getLastCreateQueryInput();
+      assert.deepEqual(createInput?.options.additionalDirectories, [
+        "/tmp/project",
+        "/tmp/docs",
+        "/tmp/tools",
+      ]);
+      assert.deepEqual(session.additionalDirectories, ["/tmp/docs", "/tmp/tools"]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("runs Claude SDK sessions with the configured Claude HOME", () => {
     const harness = makeHarness({ claudeConfig: { homePath: "~/.claude-work" } });
     return Effect.gen(function* () {

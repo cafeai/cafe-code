@@ -67,6 +67,7 @@ import { useServerAvailableEditors } from "../../rpc/serverState";
 interface TimelineRowSharedState {
   timestampFormat: TimestampFormat;
   markdownCwd: string | undefined;
+  additionalWorkspaceRoots: ReadonlyArray<string>;
   workspaceRoot: string | undefined;
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   activeThreadEnvironmentId: EnvironmentId;
@@ -131,6 +132,7 @@ interface MessagesTimelineProps {
   onImageExpand: (preview: ExpandedImagePreview) => void;
   activeThreadEnvironmentId: EnvironmentId;
   markdownCwd: string | undefined;
+  additionalWorkspaceRoots?: ReadonlyArray<string>;
   timestampFormat: TimestampFormat;
   workspaceRoot: string | undefined;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
@@ -156,6 +158,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onImageExpand,
   activeThreadEnvironmentId,
   markdownCwd,
+  additionalWorkspaceRoots = [],
   timestampFormat,
   workspaceRoot,
   skills = EMPTY_TIMELINE_SKILLS,
@@ -228,6 +231,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     () => ({
       timestampFormat,
       markdownCwd,
+      additionalWorkspaceRoots,
       workspaceRoot,
       skills,
       activeThreadEnvironmentId,
@@ -237,6 +241,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [
       timestampFormat,
       markdownCwd,
+      additionalWorkspaceRoots,
       workspaceRoot,
       skills,
       activeThreadEnvironmentId,
@@ -425,6 +430,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
         <ChatMarkdown
           text={messageText}
           cwd={ctx.markdownCwd}
+          additionalWorkspaceRoots={ctx.additionalWorkspaceRoots}
           isStreaming={Boolean(row.message.streaming)}
           skills={ctx.skills}
         />

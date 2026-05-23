@@ -4,9 +4,11 @@ import {
   ChevronRightIcon,
   CloudIcon,
   FolderPlusIcon,
+  PlusIcon,
   SearchIcon,
   SettingsIcon,
   SquarePenIcon,
+  Trash2Icon,
   TriangleAlertIcon,
 } from "lucide-react";
 import {
@@ -208,6 +210,17 @@ const SIDEBAR_LIST_ANIMATION_OPTIONS = {
 } as const;
 const SIDEBAR_BRAND_ICON_SRC = "/cafe-code-sidebar-icon.png";
 const EMPTY_THREAD_JUMP_LABELS = new Map<string, string>();
+const PATH_SEPARATOR_REGEX = /[/\\]+/g;
+
+function normalizePathForComparison(pathValue: string): string {
+  return pathValue.trim().replace(PATH_SEPARATOR_REGEX, "/").replace(/\/+$/, "");
+}
+
+function pathContainsPath(parentPath: string, childPath: string): boolean {
+  const parent = normalizePathForComparison(parentPath);
+  const child = normalizePathForComparison(childPath);
+  return child.startsWith(`${parent}/`);
+}
 const PROJECT_GROUPING_MODE_LABELS: Record<SidebarProjectGroupingMode, string> = {
   repository: "Group by repository",
   repository_path: "Group by repository path",
@@ -1055,6 +1068,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const [projectGroupingSelection, setProjectGroupingSelection] = useState<
     SidebarProjectGroupingMode | "inherit"
   >("inherit");
+  const [additionalDirectoriesTarget, setAdditionalDirectoriesTarget] =
+    useState<SidebarProjectGroupMember | null>(null);
+  const [additionalDirectoriesDraft, setAdditionalDirectoriesDraft] = useState<string[]>([]);
+  const [additionalDirectoryInput, setAdditionalDirectoryInput] = useState("");
+  const [additionalDirectoriesError, setAdditionalDirectoriesError] = useState<string | null>(null);
+  const [additionalDirectoriesSubmitting, setAdditionalDirectoriesSubmitting] = useState(false);
   const [threadMoveTarget, setThreadMoveTarget] = useState<SidebarThreadSummary | null>(null);
   const [threadMoveProjectId, setThreadMoveProjectId] = useState<ProjectId | null>(null);
   const [threadMoveSubmitting, setThreadMoveSubmitting] = useState(false);
@@ -1265,6 +1284,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     setProjectRenameTitle(member.name);
   }, []);
 
+  const openAdditionalDirectoriesDialog = useCallback((member: SidebarProjectGroupMember) => {
+    setAdditionalDirectoriesTarget(member);
+    setAdditionalDirectoriesDraft([...(member.additionalWorkspaceRoots ?? [])]);
+    setAdditionalDirectoryInput("");
+    setAdditionalDirectoriesError(null);
+  }, []);
+
   const openProjectGroupingDialog = useCallback(
     (member: SidebarProjectGroupMember) => {
       const overrideKey = deriveProjectGroupingOverrideKey(member);
@@ -1423,7 +1449,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
         const actionHandlers = new Map<string, () => Promise<void> | void>();
         const makeLeaf = (
-          action: "rename" | "grouping" | "copy-path" | "delete",
+          action: "rename" | "directories" | "grouping" | "copy-path" | "delete",
           member: SidebarProjectGroupMember,
           options?: {
             destructive?: boolean;
@@ -1435,6 +1461,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             switch (action) {
               case "rename":
                 openProjectRenameDialog(member);
+                return;
+              case "directories":
+                openAdditionalDirectoriesDialog(member);
                 return;
               case "grouping":
                 openProjectGroupingDialog(member);
@@ -1456,7 +1485,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         };
 
         const buildTargetedItem = (
-          action: "rename" | "grouping" | "copy-path" | "delete",
+          action: "rename" | "directories" | "grouping" | "copy-path" | "delete",
           label: string,
           options?: {
             destructive?: boolean;
@@ -1489,6 +1518,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         const clicked = await api.contextMenu.show(
           [
             buildTargetedItem("rename", "Rename project"),
+            buildTargetedItem("directories", "Configure additional directories…"),
             buildTargetedItem("grouping", "Project grouping…"),
             buildTargetedItem("copy-path", "Copy Project Path"),
             buildTargetedItem("delete", "Remove project", {
@@ -1511,6 +1541,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     [
       copyPathToClipboard,
       handleRemoveProject,
+      openAdditionalDirectoriesDialog,
       openProjectGroupingDialog,
       openProjectRenameDialog,
       project.groupedProjectCount,
@@ -1846,6 +1877,83 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     setProjectGroupingSelection("inherit");
   }, []);
 
+  const closeAdditionalDirectoriesDialog = useCallback(() => {
+    if (additionalDirectoriesSubmitting) {
+      return;
+    }
+    setAdditionalDirectoriesTarget(null);
+    setAdditionalDirectoriesDraft([]);
+    setAdditionalDirectoryInput("");
+    setAdditionalDirectoriesError(null);
+  }, [additionalDirectoriesSubmitting]);
+
+  const addAdditionalDirectoryDraft = useCallback((pathValue: string) => {
+    const trimmed = pathValue.trim();
+    if (trimmed.length === 0) {
+      return;
+    }
+    setAdditionalDirectoriesDraft((current) =>
+      current.some(
+        (entry) => normalizePathForComparison(entry) === normalizePathForComparison(trimmed),
+      )
+        ? current
+        : [...current, trimmed],
+    );
+    setAdditionalDirectoryInput("");
+    setAdditionalDirectoriesError(null);
+  }, []);
+
+  const browseAdditionalDirectory = useCallback(async () => {
+    if (!additionalDirectoriesTarget) {
+      return;
+    }
+    const api = readLocalApi();
+    if (!api) {
+      return;
+    }
+    const selectedPath = await api.dialogs.pickFolder({
+      initialPath: additionalDirectoriesTarget.cwd,
+    });
+    if (selectedPath) {
+      addAdditionalDirectoryDraft(selectedPath);
+    }
+  }, [addAdditionalDirectoryDraft, additionalDirectoriesTarget]);
+
+  const removeAdditionalDirectoryDraft = useCallback((indexToRemove: number) => {
+    setAdditionalDirectoriesDraft((current) =>
+      current.filter((_, index) => index !== indexToRemove),
+    );
+  }, []);
+
+  const submitAdditionalDirectories = useCallback(async () => {
+    if (!additionalDirectoriesTarget) {
+      return;
+    }
+    const api = readEnvironmentApi(additionalDirectoriesTarget.environmentId);
+    if (!api) {
+      setAdditionalDirectoriesError("Project API unavailable.");
+      return;
+    }
+
+    setAdditionalDirectoriesSubmitting(true);
+    setAdditionalDirectoriesError(null);
+    try {
+      await api.orchestration.dispatchCommand({
+        type: "project.meta.update",
+        commandId: newCommandId(),
+        projectId: additionalDirectoriesTarget.id,
+        additionalWorkspaceRoots: additionalDirectoriesDraft,
+      });
+      setAdditionalDirectoriesTarget(null);
+      setAdditionalDirectoriesDraft([]);
+      setAdditionalDirectoryInput("");
+    } catch (error) {
+      setAdditionalDirectoriesError(error instanceof Error ? error.message : "An error occurred.");
+    } finally {
+      setAdditionalDirectoriesSubmitting(false);
+    }
+  }, [additionalDirectoriesDraft, additionalDirectoriesTarget]);
+
   const closeThreadMoveDialog = useCallback(() => {
     setThreadMoveTarget(null);
     setThreadMoveProjectId(null);
@@ -2057,6 +2165,14 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     ],
   );
 
+  const additionalDirectoryWarnings = additionalDirectoriesDraft.flatMap((candidate, index) =>
+    additionalDirectoriesDraft.some(
+      (other, otherIndex) => otherIndex !== index && pathContainsPath(other, candidate),
+    )
+      ? [`${candidate} is inside another configured directory.`]
+      : [],
+  );
+
   return (
     <>
       <div className="group/project-header relative">
@@ -2232,6 +2348,126 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
               Cancel
             </Button>
             <Button onClick={() => void submitProjectRename()}>Save</Button>
+          </DialogFooter>
+        </DialogPopup>
+      </Dialog>
+
+      <Dialog
+        open={additionalDirectoriesTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeAdditionalDirectoriesDialog();
+          }
+        }}
+      >
+        <DialogPopup className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Additional directories</DialogTitle>
+            <DialogDescription>
+              {additionalDirectoriesTarget
+                ? `Configure directories available to agents for ${additionalDirectoriesTarget.cwd}.`
+                : "Configure directories available to agents."}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogPanel className="space-y-4">
+            <div className="grid gap-1.5">
+              <span className="text-xs font-medium text-foreground">Primary directory</span>
+              <div className="min-h-9 overflow-hidden rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                <span className="block truncate">{additionalDirectoriesTarget?.cwd ?? ""}</span>
+              </div>
+            </div>
+
+            <div className="grid gap-2">
+              <span className="text-xs font-medium text-foreground">Additional directories</span>
+              {additionalDirectoriesDraft.length > 0 ? (
+                <div className="grid gap-2">
+                  {additionalDirectoriesDraft.map((directory, index) => (
+                    <div key={directory} className="flex min-w-0 items-center gap-2">
+                      <div className="min-w-0 flex-1 rounded-md border bg-background px-3 py-2 text-xs">
+                        <span className="block truncate">{directory}</span>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        aria-label={`Remove ${directory}`}
+                        onClick={() => removeAdditionalDirectoryDraft(index)}
+                      >
+                        <Trash2Icon className="size-4" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="rounded-md border border-dashed px-3 py-4 text-xs text-muted-foreground">
+                  No additional directories configured.
+                </p>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Input
+                aria-label="Additional directory path"
+                value={additionalDirectoryInput}
+                placeholder="Absolute path"
+                onChange={(event) => setAdditionalDirectoryInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    addAdditionalDirectoryDraft(additionalDirectoryInput);
+                  }
+                }}
+              />
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => addAdditionalDirectoryDraft(additionalDirectoryInput)}
+                >
+                  <PlusIcon className="size-4" />
+                  Add
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => void browseAdditionalDirectory()}
+                >
+                  <FolderPlusIcon className="size-4" />
+                  Browse
+                </Button>
+              </div>
+            </div>
+
+            {additionalDirectoryWarnings.length > 0 ? (
+              <Alert>
+                <TriangleAlertIcon className="size-4" />
+                <AlertTitle>Redundant directories</AlertTitle>
+                <AlertDescription>{additionalDirectoryWarnings.join(" ")}</AlertDescription>
+              </Alert>
+            ) : null}
+
+            {additionalDirectoriesError ? (
+              <Alert variant="error">
+                <TriangleAlertIcon className="size-4" />
+                <AlertTitle>Unable to save directories</AlertTitle>
+                <AlertDescription>{additionalDirectoriesError}</AlertDescription>
+              </Alert>
+            ) : null}
+          </DialogPanel>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={closeAdditionalDirectoriesDialog}
+              disabled={additionalDirectoriesSubmitting}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void submitAdditionalDirectories()}
+              disabled={additionalDirectoriesSubmitting}
+            >
+              Save
+            </Button>
           </DialogFooter>
         </DialogPopup>
       </Dialog>

@@ -129,6 +129,7 @@ function toRuntimePayloadFromSession(
 ): Record<string, unknown> {
   return {
     cwd: session.cwd ?? null,
+    additionalDirectories: session.additionalDirectories ?? [],
     model: session.model ?? null,
     activeTurnId: session.activeTurnId ?? null,
     lastError: session.lastError ?? null,
@@ -160,6 +161,23 @@ function readPersistedCwd(
   if (typeof rawCwd !== "string") return undefined;
   const trimmed = rawCwd.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function readPersistedAdditionalDirectories(
+  runtimePayload: ProviderRuntimeBinding["runtimePayload"],
+): ReadonlyArray<string> | undefined {
+  if (!runtimePayload || typeof runtimePayload !== "object" || Array.isArray(runtimePayload)) {
+    return undefined;
+  }
+  const rawDirectories =
+    "additionalDirectories" in runtimePayload ? runtimePayload.additionalDirectories : undefined;
+  if (!Array.isArray(rawDirectories)) {
+    return undefined;
+  }
+  const directories = rawDirectories.filter(
+    (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
+  );
+  return directories.length > 0 ? directories : [];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -502,6 +520,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       }
 
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
+      const persistedAdditionalDirectories = readPersistedAdditionalDirectories(
+        input.binding.runtimePayload,
+      );
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
 
       const resumed = yield* adapter.startSession({
@@ -509,6 +530,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         provider: input.binding.provider,
         providerInstanceId: bindingInstanceId,
         ...(persistedCwd ? { cwd: persistedCwd } : {}),
+        ...(persistedAdditionalDirectories !== undefined
+          ? { additionalDirectories: persistedAdditionalDirectories }
+          : {}),
         ...(persistedModelSelection ? { modelSelection: persistedModelSelection } : {}),
         ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
         runtimeMode: input.binding.runtimeMode ?? "full-access",
@@ -673,6 +697,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           (persistedBinding?.providerInstanceId === resolvedInstanceId
             ? readPersistedCwd(persistedBinding.runtimePayload)
             : undefined);
+        const effectiveAdditionalDirectories =
+          input.additionalDirectories ??
+          (persistedBinding?.providerInstanceId === resolvedInstanceId
+            ? readPersistedAdditionalDirectories(persistedBinding.runtimePayload)
+            : undefined);
         yield* Effect.annotateCurrentSpan({
           "provider.kind": resolvedProvider,
           "provider.resume_cursor.source":
@@ -691,12 +720,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                 ? "persisted"
                 : "none",
           "provider.cwd.effective": effectiveCwd ?? "",
+          "provider.additional_directories.count": effectiveAdditionalDirectories?.length ?? 0,
         });
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
         const session = yield* adapter.startSession({
           ...input,
           providerInstanceId: resolvedInstanceId,
           ...(effectiveCwd !== undefined ? { cwd: effectiveCwd } : {}),
+          ...(effectiveAdditionalDirectories !== undefined
+            ? { additionalDirectories: effectiveAdditionalDirectories }
+            : {}),
           ...(effectiveResumeCursor !== undefined ? { resumeCursor: effectiveResumeCursor } : {}),
         });
 
@@ -709,6 +742,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         const sessionWithInstance = {
           ...session,
           providerInstanceId: resolvedInstanceId,
+          ...(effectiveAdditionalDirectories !== undefined
+            ? { additionalDirectories: effectiveAdditionalDirectories }
+            : {}),
         };
 
         yield* stopStaleSessionsForThread({

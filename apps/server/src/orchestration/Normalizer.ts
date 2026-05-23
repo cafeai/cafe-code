@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import {
   type ClientOrchestrationCommand,
@@ -12,6 +13,7 @@ import { createAttachmentId, resolveAttachmentPath } from "../attachmentStore.ts
 import { ServerConfig } from "../config.ts";
 import { parseBase64DataUrl } from "../imageMime.ts";
 import { WorkspacePaths } from "../workspace/Services/WorkspacePaths.ts";
+import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 
 export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
   Effect.gen(function* () {
@@ -19,6 +21,7 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
     const path = yield* Path.Path;
     const serverConfig = yield* ServerConfig;
     const workspacePaths = yield* WorkspacePaths;
+    const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
 
     const normalizeProjectWorkspaceRoot = (workspaceRoot: string) =>
       workspacePaths.normalizeWorkspaceRoot(workspaceRoot).pipe(
@@ -47,21 +50,93 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
           ),
         );
 
+    const isSamePath = (left: string, right: string) => {
+      const relative = path.relative(left, right);
+      return relative.length === 0;
+    };
+
+    const normalizeAdditionalWorkspaceRoots = (
+      roots: ReadonlyArray<string> | undefined,
+      primaryWorkspaceRoot: string | undefined,
+    ) =>
+      Effect.gen(function* () {
+        if (roots === undefined) {
+          return undefined;
+        }
+
+        const normalizedRoots = yield* Effect.forEach(roots, normalizeProjectWorkspaceRoot, {
+          concurrency: 4,
+        });
+        const uniqueRoots: string[] = [];
+        for (const normalizedRoot of normalizedRoots) {
+          if (
+            primaryWorkspaceRoot !== undefined &&
+            isSamePath(normalizedRoot, primaryWorkspaceRoot)
+          ) {
+            continue;
+          }
+          if (!uniqueRoots.some((existingRoot) => isSamePath(existingRoot, normalizedRoot))) {
+            uniqueRoots.push(normalizedRoot);
+          }
+        }
+        return uniqueRoots;
+      });
+
     if (command.type === "project.create") {
+      const workspaceRoot = yield* normalizeProjectWorkspaceRootForCreate(
+        command.workspaceRoot,
+        command.createWorkspaceRootIfMissing,
+      );
       return {
         ...command,
-        workspaceRoot: yield* normalizeProjectWorkspaceRootForCreate(
-          command.workspaceRoot,
-          command.createWorkspaceRootIfMissing,
-        ),
+        workspaceRoot,
+        ...(command.additionalWorkspaceRoots !== undefined
+          ? {
+              additionalWorkspaceRoots: yield* normalizeAdditionalWorkspaceRoots(
+                command.additionalWorkspaceRoots,
+                workspaceRoot,
+              ),
+            }
+          : {}),
         createWorkspaceRootIfMissing: command.createWorkspaceRootIfMissing === true,
       } satisfies OrchestrationCommand;
     }
 
-    if (command.type === "project.meta.update" && command.workspaceRoot !== undefined) {
+    if (
+      command.type === "project.meta.update" &&
+      (command.workspaceRoot !== undefined || command.additionalWorkspaceRoots !== undefined)
+    ) {
+      const workspaceRoot =
+        command.workspaceRoot !== undefined
+          ? yield* normalizeProjectWorkspaceRoot(command.workspaceRoot)
+          : Option.match(
+              yield* projectionSnapshotQuery.getProjectShellById(command.projectId).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationDispatchCommandError({
+                      message: "Failed to load project before updating additional directories.",
+                      cause,
+                    }),
+                ),
+              ),
+              {
+                onNone: () => undefined,
+                onSome: (project) => project.workspaceRoot,
+              },
+            );
       return {
         ...command,
-        workspaceRoot: yield* normalizeProjectWorkspaceRoot(command.workspaceRoot),
+        ...(command.workspaceRoot !== undefined && workspaceRoot !== undefined
+          ? { workspaceRoot }
+          : {}),
+        ...(command.additionalWorkspaceRoots !== undefined
+          ? {
+              additionalWorkspaceRoots: yield* normalizeAdditionalWorkspaceRoots(
+                command.additionalWorkspaceRoots,
+                workspaceRoot,
+              ),
+            }
+          : {}),
       } satisfies OrchestrationCommand;
     }
 

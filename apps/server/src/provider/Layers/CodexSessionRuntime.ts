@@ -102,6 +102,7 @@ export interface CodexSessionRuntimeOptions {
   readonly runtimeMode: RuntimeMode;
   readonly model?: string;
   readonly serviceTier?: CodexServiceTier | undefined;
+  readonly additionalDirectories?: ReadonlyArray<string> | undefined;
   readonly resumeCursor?: CodexResumeCursor;
 }
 
@@ -115,6 +116,7 @@ export interface CodexSessionRuntimeSendTurnInput {
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort | undefined;
   readonly interactionMode?: ProviderInteractionMode;
+  readonly additionalDirectories?: ReadonlyArray<string> | undefined;
 }
 
 export interface CodexThreadTurnSnapshot {
@@ -287,12 +289,24 @@ function buildThreadStartParams(input: {
   readonly runtimeMode: RuntimeMode;
   readonly model: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
+  readonly additionalDirectories?: ReadonlyArray<string> | undefined;
 }): EffectCodexSchema.V2ThreadStartParams {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
+  const workspaceWriteConfig =
+    input.runtimeMode === "auto-accept-edits" && input.additionalDirectories?.length
+      ? {
+          config: {
+            sandbox_workspace_write: {
+              writable_roots: input.additionalDirectories,
+            },
+          },
+        }
+      : {};
   return {
     cwd: input.cwd,
     approvalPolicy: config.approvalPolicy,
     sandbox: config.sandbox,
+    ...workspaceWriteConfig,
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
   };
@@ -300,6 +314,7 @@ function buildThreadStartParams(input: {
 
 function runtimeModeToTurnSandboxPolicy(
   input: RuntimeMode,
+  additionalDirectories: ReadonlyArray<string> = [],
 ): EffectCodexSchema.V2TurnStartParams__SandboxPolicy {
   switch (input) {
     case "approval-required":
@@ -309,6 +324,7 @@ function runtimeModeToTurnSandboxPolicy(
     case "auto-accept-edits":
       return {
         type: "workspaceWrite",
+        ...(additionalDirectories.length > 0 ? { writableRoots: additionalDirectories } : {}),
       };
     case "full-access":
     default:
@@ -352,6 +368,7 @@ export function buildTurnStartParams(input: {
   readonly serviceTier?: CodexServiceTier;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
   readonly interactionMode?: ProviderInteractionMode;
+  readonly additionalDirectories?: ReadonlyArray<string> | undefined;
 }): Effect.Effect<
   CodexTurnStartParamsWithCollaborationMode,
   CodexErrors.CodexAppServerProtocolParseError
@@ -378,7 +395,10 @@ export function buildTurnStartParams(input: {
     threadId: input.threadId,
     input: turnInput,
     approvalPolicy: config.approvalPolicy,
-    sandboxPolicy: runtimeModeToTurnSandboxPolicy(input.runtimeMode),
+    sandboxPolicy: runtimeModeToTurnSandboxPolicy(
+      input.runtimeMode,
+      input.additionalDirectories ?? [],
+    ),
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
@@ -437,6 +457,7 @@ export const openCodexThread = (input: {
   readonly requestedModel: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
   readonly resumeThreadId: string | undefined;
+  readonly additionalDirectories?: ReadonlyArray<string> | undefined;
 }): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
   const startParams = buildThreadStartParams({
@@ -444,6 +465,7 @@ export const openCodexThread = (input: {
     runtimeMode: input.runtimeMode,
     model: input.requestedModel,
     serviceTier: input.serviceTier,
+    additionalDirectories: input.additionalDirectories,
   });
 
   if (resumeThreadId === undefined) {
@@ -754,6 +776,9 @@ export const makeCodexSessionRuntime = (
       status: "connecting",
       runtimeMode: options.runtimeMode,
       cwd: options.cwd,
+      ...(options.additionalDirectories !== undefined
+        ? { additionalDirectories: options.additionalDirectories }
+        : {}),
       ...(options.model ? { model: options.model } : {}),
       threadId: options.threadId,
       ...(options.resumeCursor !== undefined ? { resumeCursor: options.resumeCursor } : {}),
@@ -1191,6 +1216,7 @@ export const makeCodexSessionRuntime = (
         cwd: options.cwd,
         requestedModel,
         serviceTier: options.serviceTier,
+        additionalDirectories: options.additionalDirectories,
         resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
       });
 
@@ -1199,6 +1225,9 @@ export const makeCodexSessionRuntime = (
         ...(yield* Ref.get(sessionRef)),
         status: "ready",
         cwd: opened.cwd,
+        ...(options.additionalDirectories !== undefined
+          ? { additionalDirectories: options.additionalDirectories }
+          : {}),
         model: opened.model,
         resumeCursor: { threadId: providerThreadId },
         updatedAt: yield* nowIso,
@@ -1253,6 +1282,8 @@ export const makeCodexSessionRuntime = (
             ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
             ...(input.effort ? { effort: input.effort } : {}),
             ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
+            additionalDirectories:
+              input.additionalDirectories ?? options.additionalDirectories ?? [],
           });
           const rawResponse = yield* client.raw.request("turn/start", params);
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(

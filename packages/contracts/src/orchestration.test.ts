@@ -55,6 +55,7 @@ it.effect("trims branded ids and command string fields at decode boundaries", ()
       projectId: " project-1 ",
       title: " Project Title ",
       workspaceRoot: " /tmp/workspace ",
+      additionalWorkspaceRoots: [" /tmp/docs ", " /tmp/tools "],
       defaultModelSelection: {
         provider: "codex",
         model: " gpt-5.2 ",
@@ -65,6 +66,7 @@ it.effect("trims branded ids and command string fields at decode boundaries", ()
     assert.strictEqual(parsed.projectId, "project-1");
     assert.strictEqual(parsed.title, "Project Title");
     assert.strictEqual(parsed.workspaceRoot, "/tmp/workspace");
+    assert.deepStrictEqual(parsed.additionalWorkspaceRoots, ["/tmp/docs", "/tmp/tools"]);
     assert.strictEqual(parsed.createWorkspaceRootIfMissing, undefined);
     assert.deepStrictEqual(parsed.defaultModelSelection, {
       instanceId: ProviderInstanceId.make("codex"),
@@ -104,6 +106,23 @@ it.effect("decodes historical project.created payloads with a default provider",
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
     assert.strictEqual(parsed.defaultModelSelection?.instanceId, "codex");
+    assert.strictEqual(parsed.additionalWorkspaceRoots, undefined);
+  }),
+);
+
+it.effect("decodes populated project additional workspace roots", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeProjectCreatedPayload({
+      projectId: "project-1",
+      title: "Project Title",
+      workspaceRoot: "/tmp/workspace",
+      additionalWorkspaceRoots: ["/tmp/docs", " /tmp/tools "],
+      defaultModelSelection: null,
+      scripts: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.deepStrictEqual(parsed.additionalWorkspaceRoots, ["/tmp/docs", "/tmp/tools"]);
   }),
 );
 
@@ -111,6 +130,7 @@ it.effect("decodes project.meta-updated payloads with explicit default provider"
   Effect.gen(function* () {
     const parsed = yield* decodeProjectMetaUpdatedPayload({
       projectId: "project-1",
+      additionalWorkspaceRoots: [" /tmp/docs "],
       defaultModelSelection: {
         provider: "claudeAgent",
         model: "claude-opus-4-6",
@@ -118,6 +138,7 @@ it.effect("decodes project.meta-updated payloads with explicit default provider"
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
     assert.strictEqual(parsed.defaultModelSelection?.instanceId, "claudeAgent");
+    assert.deepStrictEqual(parsed.additionalWorkspaceRoots, ["/tmp/docs"]);
   }),
 );
 

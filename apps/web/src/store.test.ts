@@ -583,6 +583,7 @@ describe("incremental orchestration updates", () => {
         projectId: recreatedProjectId,
         title: "Project Recreated",
         workspaceRoot: "/tmp/project",
+        additionalWorkspaceRoots: [],
         defaultModelSelection: {
           instanceId: ProviderInstanceId.make("codex"),
           model: DEFAULT_MODEL,
@@ -846,7 +847,7 @@ describe("incremental orchestration updates", () => {
     );
 
     expect(threadsOf(next)[0]?.session?.status).toBe("running");
-    expect(threadsOf(next)[0]?.latestTurn?.state).toBe("completed");
+    expect(threadsOf(next)[0]?.latestTurn?.state).toBe("running");
     expect(threadsOf(next)[0]?.messages).toHaveLength(1);
   });
 
