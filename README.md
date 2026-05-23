@@ -121,6 +121,25 @@ bun run test
 
 Do not run `bun test`; this repo uses `bun run test`.
 
+### Local Arch Package
+
+Build a local pacman package from the Linux AppImage artifact:
+
+```bash
+bun install
+bun run dist:arch:local
+sudo pacman -U release/arch/cafe-code-*.pkg.tar.zst
+```
+
+To build and install in one step:
+
+```bash
+bun run dist:arch:local -- --install
+```
+
+This is intentionally local packaging only. It does not create AUR metadata or
+publish anything.
+
 ## 日本語でちゅ
 
 Cafe Code は、Codex とか Claude とお話するための、
