@@ -175,6 +175,129 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
   );
 });
 
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-thread-move-")))(
+  "OrchestrationProjectionPipeline",
+  (it) => {
+    it.effect("persists moved thread project ids from thread meta updates", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const now = "2026-01-01T00:00:00.000Z";
+        const movedAt = "2026-01-01T00:00:01.000Z";
+
+        yield* eventStore.append({
+          type: "project.created",
+          eventId: EventId.make("evt-move-project-source"),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make("project-source"),
+          occurredAt: now,
+          commandId: CommandId.make("cmd-move-project-source"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-move-project-source"),
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make("project-source"),
+            title: "Source",
+            workspaceRoot: "/tmp/source",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* eventStore.append({
+          type: "project.created",
+          eventId: EventId.make("evt-move-project-target"),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make("project-target"),
+          occurredAt: now,
+          commandId: CommandId.make("cmd-move-project-target"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-move-project-target"),
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make("project-target"),
+            title: "Target",
+            workspaceRoot: "/tmp/target",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.created",
+          eventId: EventId.make("evt-move-thread-create"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-move"),
+          occurredAt: now,
+          commandId: CommandId.make("cmd-move-thread-create"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-move-thread-create"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-move"),
+            projectId: ProjectId.make("project-source"),
+            title: "Move Me",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.meta-updated",
+          eventId: EventId.make("evt-move-thread-meta"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-move"),
+          occurredAt: movedAt,
+          commandId: CommandId.make("cmd-move-thread-meta"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-move-thread-meta"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-move"),
+            projectId: ProjectId.make("project-target"),
+            updatedAt: movedAt,
+          },
+        });
+
+        yield* projectionPipeline.bootstrap;
+
+        const rows = yield* sql<{
+          readonly threadId: string;
+          readonly projectId: string;
+          readonly title: string;
+          readonly updatedAt: string;
+        }>`
+          SELECT
+            thread_id AS "threadId",
+            project_id AS "projectId",
+            title,
+            updated_at AS "updatedAt"
+          FROM projection_threads
+          WHERE thread_id = ${"thread-move"}
+        `;
+        assert.deepEqual(rows, [
+          {
+            threadId: "thread-move",
+            projectId: "project-target",
+            title: "Move Me",
+            updatedAt: movedAt,
+          },
+        ]);
+      }),
+    );
+  },
+);
+
 it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-base-")))(
   "OrchestrationProjectionPipeline",
   (it) => {

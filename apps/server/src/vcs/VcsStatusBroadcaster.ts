@@ -1,4 +1,5 @@
 import * as Context from "effect/Context";
+import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -23,9 +24,11 @@ import { mergeGitStatusParts } from "@cafecode/shared/git";
 
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 
-const DEFAULT_VCS_STATUS_REFRESH_INTERVAL = Duration.seconds(30);
+const DEFAULT_VCS_STATUS_REFRESH_INTERVAL = Duration.minutes(5);
+const DISABLED_REMOTE_REFRESH_RECHECK_INTERVAL = Duration.minutes(5);
 const VCS_STATUS_REFRESH_FAILURE_BASE_DELAY = Duration.seconds(30);
 const VCS_STATUS_REFRESH_FAILURE_MAX_DELAY = Duration.minutes(15);
+const VCS_STATUS_REFRESH_SLOW_CALL_MULTIPLIER = 5;
 
 interface VcsStatusChange {
   readonly cwd: string;
@@ -63,6 +66,19 @@ export function remoteRefreshFailureDelay(
     VCS_STATUS_REFRESH_FAILURE_MAX_DELAY,
   );
   return Duration.max(configuredInterval, cappedBackoff);
+}
+
+export function remoteRefreshSuccessDelay(
+  elapsedMs: number,
+  configuredInterval: Duration.Duration,
+) {
+  const slowCallDelay = Duration.millis(
+    Math.max(0, elapsedMs * VCS_STATUS_REFRESH_SLOW_CALL_MULTIPLIER),
+  );
+  return Duration.max(
+    configuredInterval,
+    Duration.min(slowCallDelay, VCS_STATUS_REFRESH_FAILURE_MAX_DELAY),
+  );
 }
 
 export interface VcsStatusBroadcasterShape {
@@ -262,24 +278,34 @@ export const layer = Layer.effect(
         const consecutiveFailuresRef = yield* Ref.make(0);
         const refreshRemoteStatusIfEnabled = Effect.gen(function* () {
           const configuredInterval = yield* automaticRemoteRefreshInterval;
-          const activeInterval = Duration.isZero(configuredInterval)
-            ? DEFAULT_VCS_STATUS_REFRESH_INTERVAL
-            : configuredInterval;
           if (Duration.isZero(configuredInterval)) {
-            return activeInterval;
+            return DISABLED_REMOTE_REFRESH_RECHECK_INTERVAL;
           }
 
+          const startedAtMs = yield* Clock.currentTimeMillis;
           const exit = yield* refreshRemoteStatus(cwd).pipe(Effect.exit);
+          const elapsedMs = Math.max(0, (yield* Clock.currentTimeMillis) - startedAtMs);
           if (Exit.isSuccess(exit)) {
             yield* Ref.set(consecutiveFailuresRef, 0);
-            return activeInterval;
+            const nextDelay = remoteRefreshSuccessDelay(elapsedMs, configuredInterval);
+            if (Duration.toMillis(nextDelay) > Duration.toMillis(configuredInterval)) {
+              yield* Effect.logDebug("VCS remote status refresh was slow; delaying next poll", {
+                cwd,
+                elapsedMs,
+                nextDelayMs: Duration.toMillis(nextDelay),
+              });
+            }
+            return nextDelay;
           }
 
           const consecutiveFailures = yield* Ref.updateAndGet(
             consecutiveFailuresRef,
             (count) => count + 1,
           );
-          const nextDelay = remoteRefreshFailureDelay(consecutiveFailures, activeInterval);
+          const nextDelay = Duration.max(
+            remoteRefreshFailureDelay(consecutiveFailures, configuredInterval),
+            remoteRefreshSuccessDelay(elapsedMs, configuredInterval),
+          );
           yield* Effect.logWarning("VCS remote status refresh failed", {
             cwd,
             detail: exit.cause.toString(),
@@ -364,13 +390,17 @@ export const layer = Layer.effect(
           const subscription = yield* PubSub.subscribe(changesPubSub);
           const initialLocal = yield* getOrLoadLocalStatus(cwd);
           const initialRemote = (yield* getCachedStatus(cwd))?.remote?.value ?? null;
-          yield* retainRemotePoller(
-            cwd,
+          const automaticRemoteRefreshInterval =
             options?.automaticRemoteRefreshInterval ??
-              Effect.succeed(DEFAULT_VCS_STATUS_REFRESH_INTERVAL),
-          );
+            Effect.succeed(DEFAULT_VCS_STATUS_REFRESH_INTERVAL);
+          const shouldStartRemotePoller = !Duration.isZero(yield* automaticRemoteRefreshInterval);
+          if (shouldStartRemotePoller) {
+            yield* retainRemotePoller(cwd, automaticRemoteRefreshInterval);
+          }
 
-          const release = releaseRemotePoller(cwd).pipe(Effect.ignore, Effect.asVoid);
+          const release = shouldStartRemotePoller
+            ? releaseRemotePoller(cwd).pipe(Effect.ignore, Effect.asVoid)
+            : Effect.void;
 
           return Stream.concat(
             Stream.make({

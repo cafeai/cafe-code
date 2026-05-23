@@ -1,7 +1,0 @@
-{
-  "approved_at": "2026-05-21T00:22:21.159773+00:00",
-  "burst": 1,
-  "note": "User approved Burst 001 to proceed from the adjudicated Cafe Code rename design plan through the full Selene burst lifecycle.",
-  "plan_path": ".selene/bursts/001/design/agreed_plan.md",
-  "plan_sha256": "40ec1156936fd7d13b2922a251b250f6623f30450a7b6d9890da47de4b8dec76"
-}

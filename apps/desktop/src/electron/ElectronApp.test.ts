@@ -1,12 +1,14 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import { beforeEach, vi } from "vitest";
+import desktopPackageJson from "../../package.json" with { type: "json" };
 
 const {
   appendSwitchMock,
   exitMock,
   getAppPathMock,
   getVersionMock,
+  isPackagedState,
   onMock,
   quitMock,
   relaunchMock,
@@ -23,6 +25,7 @@ const {
   exitMock: vi.fn(),
   getAppPathMock: vi.fn(() => "/app"),
   getVersionMock: vi.fn(() => "1.2.3"),
+  isPackagedState: { current: true },
   onMock: vi.fn(),
   quitMock: vi.fn(),
   relaunchMock: vi.fn(),
@@ -46,7 +49,9 @@ vi.mock("electron", () => ({
     },
     getAppPath: getAppPathMock,
     getVersion: getVersionMock,
-    isPackaged: true,
+    get isPackaged() {
+      return isPackagedState.current;
+    },
     name: "Cafe Code",
     on: onMock,
     quit: quitMock,
@@ -74,6 +79,9 @@ describe("ElectronApp", () => {
     relaunchMock.mockClear();
     removeListenerMock.mockClear();
     setPathMock.mockClear();
+    getVersionMock.mockClear();
+    getAppPathMock.mockClear();
+    isPackagedState.current = true;
   });
 
   it.effect("reads app metadata through the service", () =>
@@ -104,6 +112,19 @@ describe("ElectronApp", () => {
 
       assert.deepEqual(onMock.mock.calls, [["activate", listener]]);
       assert.deepEqual(removeListenerMock.mock.calls, [["activate", listener]]);
+    }).pipe(Effect.provide(ElectronApp.layer)),
+  );
+
+  it.effect("uses package metadata for unpackaged Electron starts", () =>
+    Effect.gen(function* () {
+      isPackagedState.current = false;
+
+      const electronApp = yield* ElectronApp.ElectronApp;
+      const metadata = yield* electronApp.metadata;
+
+      assert.equal(metadata.appVersion, desktopPackageJson.version);
+      assert.isFalse(metadata.isPackaged);
+      assert.deepEqual(getVersionMock.mock.calls, []);
     }).pipe(Effect.provide(ElectronApp.layer)),
   );
 });

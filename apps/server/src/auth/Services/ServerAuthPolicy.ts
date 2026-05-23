@@ -1,4 +1,4 @@
-import type { ServerAuthDescriptor } from "@cafecode/contracts";
+import type { ServerAuthDescriptor } from "@cafecode/contracts/auth";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 

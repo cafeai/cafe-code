@@ -4,9 +4,11 @@ import { page } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
-const { openInPreferredEditorMock, readLocalApiMock } = vi.hoisted(() => ({
+const { confirmMock, openInPreferredEditorMock, readLocalApiMock } = vi.hoisted(() => ({
+  confirmMock: vi.fn(async () => true),
   openInPreferredEditorMock: vi.fn(async () => "vscode"),
   readLocalApiMock: vi.fn(() => ({
+    dialogs: { confirm: confirmMock },
     server: { getConfig: vi.fn(async () => ({ availableEditors: ["vscode"] })) },
     shell: { openInEditor: vi.fn(async () => undefined) },
   })),
@@ -23,10 +25,11 @@ vi.mock("../localApi", () => ({
   readLocalApi: readLocalApiMock,
 }));
 
-import ChatMarkdown from "./ChatMarkdown";
+import ChatMarkdown, { sanitizeHighlightedCodeHtml } from "./ChatMarkdown";
 
 describe("ChatMarkdown", () => {
   afterEach(() => {
+    confirmMock.mockClear();
     openInPreferredEditorMock.mockClear();
     readLocalApiMock.mockClear();
     localStorage.clear();
@@ -37,7 +40,10 @@ describe("ChatMarkdown", () => {
     const filePath =
       "/Users/yashsingh/p/sco/claude-code-extract/src/utils/permissions/PermissionRule.ts";
     const screen = await render(
-      <ChatMarkdown text={`[PermissionRule.ts](file://${filePath})`} cwd="/repo/project" />,
+      <ChatMarkdown
+        text={`[PermissionRule.ts](file://${filePath})`}
+        cwd="/Users/yashsingh/p/sco/claude-code-extract"
+      />,
     );
 
     try {
@@ -59,7 +65,10 @@ describe("ChatMarkdown", () => {
     const filePath =
       "/Users/yashsingh/p/sco/claude-code-extract/src/utils/permissions/PermissionRule.ts";
     const screen = await render(
-      <ChatMarkdown text={`[PermissionRule.ts:1](file://${filePath}#L1)`} cwd="/repo/project" />,
+      <ChatMarkdown
+        text={`[PermissionRule.ts:1](file://${filePath}#L1)`}
+        cwd="/Users/yashsingh/p/sco/claude-code-extract"
+      />,
     );
 
     try {
@@ -81,7 +90,10 @@ describe("ChatMarkdown", () => {
     const filePath =
       "/Users/yashsingh/p/sco/claude-code-extract/src/utils/permissions/PermissionRule.ts";
     const screen = await render(
-      <ChatMarkdown text={`[PermissionRule.ts](file://${filePath}#L1C7)`} cwd="/repo/project" />,
+      <ChatMarkdown
+        text={`[PermissionRule.ts](file://${filePath}#L1C7)`}
+        cwd="/Users/yashsingh/p/sco/claude-code-extract"
+      />,
     );
 
     try {
@@ -108,7 +120,7 @@ describe("ChatMarkdown", () => {
     const screen = await render(
       <ChatMarkdown
         text={`See [MessagesTimeline.tsx](file://${firstPath}) and [MessagesTimeline.tsx](file://${secondPath}).`}
-        cwd="/repo/project"
+        cwd="/Users/yashsingh/p/t3code"
       />,
     );
 
@@ -137,5 +149,56 @@ describe("ChatMarkdown", () => {
     } finally {
       await screen.unmount();
     }
+  });
+
+  it("asks before opening markdown file links outside the workspace", async () => {
+    confirmMock.mockResolvedValueOnce(false);
+    const screen = await render(
+      <ChatMarkdown text="[hosts](file:///private/etc/hosts)" cwd="/Users/yashsingh/p/t3code" />,
+    );
+
+    try {
+      const link = page.getByRole("link", { name: "hosts" });
+      await expect.element(link).toBeInTheDocument();
+      await expect.element(link).toHaveAttribute("data-open-policy", "confirm");
+
+      await link.click();
+
+      await vi.waitFor(() => {
+        expect(confirmMock).toHaveBeenCalledWith(expect.stringContaining("/private/etc/hosts"));
+      });
+      expect(openInPreferredEditorMock).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("sanitizes hostile highlighted code markup before HTML insertion", () => {
+    const sanitized = sanitizeHighlightedCodeHtml(`
+      <pre class="shiki" onclick="alert(1)" data-extra="drop">
+        <code>
+          <span class="line">
+            <span style="color:#fff;background-image:url(javascript:alert(1))" onmouseover="alert(1)">
+              safe text
+            </span>
+            <script>alert(1)</script>
+            <svg onload="alert(1)"><a href="javascript:alert(1)">bad</a></svg>
+            <span class="safe-token" style="color:#00c8d7">token</span>
+          </span>
+        </code>
+      </pre>
+    `);
+
+    const container = document.createElement("div");
+    container.innerHTML = sanitized;
+
+    expect(container.querySelector("script")).toBeNull();
+    expect(container.querySelector("svg")).toBeNull();
+    expect(container.querySelector("a")).toBeNull();
+    expect(container.querySelector("[onclick],[onmouseover],[onload]")).toBeNull();
+    expect(container.querySelector("[data-extra]")).toBeNull();
+    expect(container.innerHTML).not.toContain("javascript:");
+    expect(container.textContent).toContain("safe text");
+    expect(container.textContent).toContain("token");
   });
 });

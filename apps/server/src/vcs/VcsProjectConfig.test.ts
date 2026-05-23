@@ -19,10 +19,10 @@ describe("VcsProjectConfig", () => {
         const config = yield* VcsProjectConfig.VcsProjectConfig;
         const kind = yield* config.resolveKind({
           cwd: "/repo",
-          requestedKind: "jj",
+          requestedKind: "git",
         });
 
-        assert.equal(kind, "jj");
+        assert.equal(kind, "git");
       }),
     );
   });
@@ -42,13 +42,13 @@ describe("VcsProjectConfig", () => {
         yield* fileSystem.writeFileString(
           path.join(configDir, "vcs.json"),
           // @effect-diagnostics-next-line preferSchemaOverJson:off
-          JSON.stringify({ vcs: { kind: "jj" } }),
+          JSON.stringify({ vcs: { kind: "git" } }),
         );
 
         const config = yield* VcsProjectConfig.VcsProjectConfig;
         const kind = yield* config.resolveKind({ cwd: nested });
 
-        assert.equal(kind, "jj");
+        assert.equal(kind, "git");
       }),
     );
   });
@@ -68,13 +68,39 @@ describe("VcsProjectConfig", () => {
         yield* fileSystem.writeFileString(
           path.join(configDir, "vcs.json"),
           // @effect-diagnostics-next-line preferSchemaOverJson:off
+          JSON.stringify({ vcs: { kind: "git" } }),
+        );
+
+        const config = yield* VcsProjectConfig.VcsProjectConfig;
+        const kind = yield* config.resolveKind({ cwd: nested });
+
+        assert.equal(kind, "git");
+      }),
+    );
+  });
+
+  it.layer(TestLayer)("ignores unsupported VCS config values", (it) => {
+    it.effect("falls back to auto", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "cafecode-vcs-config-test-",
+        });
+        const configDir = path.join(root, ".cafecode");
+        const nested = path.join(root, "packages", "app");
+        yield* fileSystem.makeDirectory(configDir, { recursive: true });
+        yield* fileSystem.makeDirectory(nested, { recursive: true });
+        yield* fileSystem.writeFileString(
+          path.join(configDir, "vcs.json"),
+          // @effect-diagnostics-next-line preferSchemaOverJson:off
           JSON.stringify({ vcs: { kind: "jj" } }),
         );
 
         const config = yield* VcsProjectConfig.VcsProjectConfig;
         const kind = yield* config.resolveKind({ cwd: nested });
 
-        assert.equal(kind, "jj");
+        assert.equal(kind, "auto");
       }),
     );
   });

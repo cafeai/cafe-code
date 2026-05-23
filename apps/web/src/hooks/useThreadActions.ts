@@ -10,6 +10,7 @@ import { useNewThreadHandler } from "./useHandleNewThread";
 import { ensureEnvironmentApi, readEnvironmentApi } from "../environmentApi";
 import { invalidateGitQueries } from "../lib/gitReactQuery";
 import { refreshArchivedThreadsForEnvironment } from "../lib/archivedThreadsState";
+import { refreshDeletedThreadsForEnvironment } from "../lib/deletedThreadsState";
 import { newCommandId } from "../lib/utils";
 import { readLocalApi } from "../localApi";
 import {
@@ -18,7 +19,6 @@ import {
   selectThreadsForEnvironment,
   useStore,
 } from "../store";
-import { useTerminalStateStore } from "../terminalStateStore";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
@@ -31,7 +31,6 @@ export function useThreadActions() {
   const clearProjectDraftThreadById = useComposerDraftStore(
     (store) => store.clearProjectDraftThreadById,
   );
-  const clearTerminalState = useTerminalStateStore((state) => state.clearTerminalState);
   const router = useRouter();
   const { handleNewThread } = useNewThreadHandler();
   // Keep a ref so archiveThread can call handleNewThread without appearing in
@@ -100,6 +99,49 @@ export function useThreadActions() {
     refreshArchivedThreadsForEnvironment(target.environmentId);
   }, []);
 
+  const restoreThread = useCallback(async (target: ScopedThreadRef) => {
+    const api = readEnvironmentApi(target.environmentId);
+    if (!api) return;
+    await api.orchestration.dispatchCommand({
+      type: "thread.restore",
+      commandId: newCommandId(),
+      threadId: target.threadId,
+    });
+    refreshDeletedThreadsForEnvironment(target.environmentId);
+  }, []);
+
+  const hardDeleteThread = useCallback(
+    async (
+      target: ScopedThreadRef,
+      opts: { readonly confirm?: boolean; readonly refresh?: boolean } = {},
+    ) => {
+      const api = readEnvironmentApi(target.environmentId);
+      if (!api) return;
+      if (opts.confirm !== false) {
+        const localApi = readLocalApi();
+        if (!localApi) return;
+        const confirmed = await localApi.dialogs.confirm(
+          [
+            "Delete this thread forever?",
+            "This removes local chat history, activity, provider session mappings, attachments, and checkpoint metadata.",
+            "",
+            "This cannot be undone.",
+          ].join("\n"),
+        );
+        if (!confirmed) {
+          return;
+        }
+      }
+
+      await api.orchestration.hardDeleteThread({ threadId: target.threadId });
+      clearComposerDraftForThread(target);
+      if (opts.refresh !== false) {
+        refreshDeletedThreadsForEnvironment(target.environmentId);
+      }
+    },
+    [clearComposerDraftForThread],
+  );
+
   const deleteThread = useCallback(
     async (target: ScopedThreadRef, opts: { deletedThreadKeys?: ReadonlySet<string> } = {}) => {
       const api = readEnvironmentApi(target.environmentId);
@@ -113,6 +155,7 @@ export function useThreadActions() {
           threadId: target.threadId,
         });
         refreshArchivedThreadsForEnvironment(target.environmentId);
+        refreshDeletedThreadsForEnvironment(target.environmentId);
         return;
       }
       const { thread, threadRef } = resolved;
@@ -167,12 +210,6 @@ export function useThreadActions() {
           .catch(() => undefined);
       }
 
-      try {
-        await api.terminal.close({ threadId: threadRef.threadId, deleteHistory: true });
-      } catch {
-        // Terminal may already be closed.
-      }
-
       const deletedThreadIds = deletedIds ?? new Set<ThreadId>();
       const currentRouteThreadRef = getCurrentRouteThreadRef();
       const shouldNavigateToFallback =
@@ -190,12 +227,12 @@ export function useThreadActions() {
         threadId: threadRef.threadId,
       });
       refreshArchivedThreadsForEnvironment(threadRef.environmentId);
+      refreshDeletedThreadsForEnvironment(threadRef.environmentId);
       clearComposerDraftForThread(threadRef);
       clearProjectDraftThreadById(
         scopeProjectRef(threadRef.environmentId, thread.projectId),
         threadRef,
       );
-      clearTerminalState(threadRef);
 
       if (shouldNavigateToFallback) {
         if (fallbackThreadId) {
@@ -252,7 +289,6 @@ export function useThreadActions() {
     [
       clearComposerDraftForThread,
       clearProjectDraftThreadById,
-      clearTerminalState,
       getCurrentRouteThreadRef,
       router,
       queryClient,
@@ -272,8 +308,8 @@ export function useThreadActions() {
         const title = resolved?.thread.title ?? "this thread";
         const confirmed = await localApi.dialogs.confirm(
           [
-            `Delete thread "${title}"?`,
-            "This permanently clears conversation history for this thread.",
+            `Move thread "${title}" to the Recycle Bin?`,
+            "You can review it later in Settings > Recently Deleted.",
           ].join("\n"),
         );
         if (!confirmed) {
@@ -289,7 +325,9 @@ export function useThreadActions() {
   return {
     archiveThread,
     unarchiveThread,
+    restoreThread,
     deleteThread,
     confirmAndDeleteThread,
+    hardDeleteThread,
   };
 }

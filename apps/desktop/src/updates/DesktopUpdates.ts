@@ -43,6 +43,11 @@ import {
 
 const AUTO_UPDATE_STARTUP_DELAY = "15 seconds";
 const AUTO_UPDATE_POLL_INTERVAL = "4 minutes";
+const DESKTOP_UPDATES_DISABLED_REASON = "Update checks are disabled in this Cafe Code build.";
+
+function areDesktopUpdatesDisabledInThisBuild(): boolean {
+  return true;
+}
 
 const AppUpdateYmlConfig = Schema.Record(Schema.String, Schema.String);
 type AppUpdateYmlConfig = typeof AppUpdateYmlConfig.Type;
@@ -166,6 +171,10 @@ function getAutoUpdateDisabledReason(args: {
   disabledByEnv: boolean;
   hasUpdateFeedConfig: boolean;
 }): string | null {
+  if (areDesktopUpdatesDisabledInThisBuild()) {
+    return DESKTOP_UPDATES_DISABLED_REASON;
+  }
+
   if (!args.hasUpdateFeedConfig) {
     return "Automatic updates are not available because no update feed is configured.";
   }
@@ -538,6 +547,13 @@ const make = Effect.gen(function* () {
       const appUpdateYmlConfig = yield* readAppUpdateYml;
       yield* Ref.set(appUpdateYmlConfigRef, appUpdateYmlConfig);
 
+      const settings = yield* desktopSettings.get;
+      const enabled = yield* shouldEnableAutoUpdates;
+      yield* setState(createBaseUpdateState(settings.updateChannel, enabled, environment));
+      if (!enabled) {
+        return;
+      }
+
       if (config.mockUpdates) {
         yield* electronUpdater.setFeedURL({
           provider: "generic",
@@ -545,12 +561,6 @@ const make = Effect.gen(function* () {
         } as ElectronUpdater.ElectronUpdaterFeedUrl);
       }
 
-      const settings = yield* desktopSettings.get;
-      const enabled = yield* shouldEnableAutoUpdates;
-      yield* setState(createBaseUpdateState(settings.updateChannel, enabled, environment));
-      if (!enabled) {
-        return;
-      }
       yield* Ref.set(updaterConfiguredRef, true);
 
       yield* electronUpdater.setAutoDownload(false);

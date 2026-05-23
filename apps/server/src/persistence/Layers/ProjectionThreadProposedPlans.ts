@@ -6,6 +6,7 @@ import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import { toPersistenceSqlError } from "../Errors.ts";
 import {
   DeleteProjectionThreadProposedPlansInput,
+  GetLatestProjectionThreadProposedPlanInput,
   ListProjectionThreadProposedPlansInput,
   ProjectionThreadProposedPlan,
   ProjectionThreadProposedPlanRepository,
@@ -69,6 +70,47 @@ const makeProjectionThreadProposedPlanRepository = Effect.gen(function* () {
     `,
   });
 
+  const getLatestProjectionThreadProposedPlanRow = SqlSchema.findOneOption({
+    Request: GetLatestProjectionThreadProposedPlanInput,
+    Result: ProjectionThreadProposedPlan,
+    execute: ({ threadId, turnId }) => {
+      if (turnId !== undefined && turnId !== null) {
+        return sql`
+          SELECT
+            plan_id AS "planId",
+            thread_id AS "threadId",
+            turn_id AS "turnId",
+            plan_markdown AS "planMarkdown",
+            implemented_at AS "implementedAt",
+            implementation_thread_id AS "implementationThreadId",
+            created_at AS "createdAt",
+            updated_at AS "updatedAt"
+          FROM projection_thread_proposed_plans
+          WHERE thread_id = ${threadId}
+            AND turn_id = ${turnId}
+          ORDER BY updated_at DESC, plan_id DESC
+          LIMIT 1
+        `;
+      }
+
+      return sql`
+        SELECT
+          plan_id AS "planId",
+          thread_id AS "threadId",
+          turn_id AS "turnId",
+          plan_markdown AS "planMarkdown",
+          implemented_at AS "implementedAt",
+          implementation_thread_id AS "implementationThreadId",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
+        FROM projection_thread_proposed_plans
+        WHERE thread_id = ${threadId}
+        ORDER BY updated_at DESC, plan_id DESC
+        LIMIT 1
+      `;
+    },
+  });
+
   const deleteProjectionThreadProposedPlanRows = SqlSchema.void({
     Request: DeleteProjectionThreadProposedPlansInput,
     execute: ({ threadId }) => sql`
@@ -89,6 +131,15 @@ const makeProjectionThreadProposedPlanRepository = Effect.gen(function* () {
       ),
     );
 
+  const getLatestByThreadId: ProjectionThreadProposedPlanRepositoryShape["getLatestByThreadId"] = (
+    input,
+  ) =>
+    getLatestProjectionThreadProposedPlanRow(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlError("ProjectionThreadProposedPlanRepository.getLatestByThreadId:query"),
+      ),
+    );
+
   const deleteByThreadId: ProjectionThreadProposedPlanRepositoryShape["deleteByThreadId"] = (
     input,
   ) =>
@@ -101,6 +152,7 @@ const makeProjectionThreadProposedPlanRepository = Effect.gen(function* () {
   return {
     upsert,
     listByThreadId,
+    getLatestByThreadId,
     deleteByThreadId,
   } satisfies ProjectionThreadProposedPlanRepositoryShape;
 });

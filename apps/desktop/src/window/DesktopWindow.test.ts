@@ -17,6 +17,7 @@ import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
+import * as DesktopIpc from "../ipc/DesktopIpc.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
 
 const environmentInput = {
@@ -98,6 +99,7 @@ const electronMenuLayer = Layer.succeed(ElectronMenu.ElectronMenu, {
 
 const electronShellLayer = Layer.succeed(ElectronShell.ElectronShell, {
   openExternal: () => Effect.succeed(true),
+  openPath: () => Effect.succeed(true),
   copyText: () => Effect.void,
 } satisfies ElectronShell.ElectronShellShape);
 
@@ -106,6 +108,12 @@ const electronThemeLayer = Layer.succeed(ElectronTheme.ElectronTheme, {
   setSource: () => Effect.void,
   onUpdated: () => Effect.void,
 } satisfies ElectronTheme.ElectronThemeShape);
+
+const desktopIpcLayer = Layer.succeed(DesktopIpc.DesktopIpc, {
+  trustWebContents: () => Effect.void,
+  handle: () => Effect.void,
+  handleSync: () => Effect.void,
+} satisfies DesktopIpc.DesktopIpcShape);
 
 const desktopEnvironmentLayer = DesktopEnvironment.layer(environmentInput).pipe(
   Layer.provide(
@@ -148,6 +156,7 @@ function makeTestLayer(input: {
         electronShellLayer,
         electronThemeLayer,
         electronWindowLayer,
+        desktopIpcLayer,
       ),
     ),
   );

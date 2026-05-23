@@ -12,12 +12,10 @@ import { type EnvironmentState, useStore } from "../store";
 import { type Thread } from "../types";
 
 import {
-  MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
-  buildExpiredTerminalContextToastCopy,
   createLocalDispatchSnapshot,
   deriveComposerSendState,
   hasServerAcknowledgedLocalDispatch,
-  reconcileMountedTerminalThreadIds,
+  resolveFollowUpQueuePhase,
   resolveSendEnvMode,
   shouldWriteThreadErrorToCurrentServerThread,
   waitForStartedServerThread,
@@ -26,67 +24,24 @@ import {
 const localEnvironmentId = EnvironmentId.make("environment-local");
 
 describe("deriveComposerSendState", () => {
-  it("treats expired terminal pills as non-sendable content", () => {
+  it("ignores stale inline context placeholders when deciding sendability", () => {
     const state = deriveComposerSendState({
       prompt: "\uFFFC",
       imageCount: 0,
-      terminalContexts: [
-        {
-          id: "ctx-expired",
-          threadId: ThreadId.make("thread-1"),
-          terminalId: "default",
-          terminalLabel: "Terminal 1",
-          lineStart: 4,
-          lineEnd: 4,
-          text: "",
-          createdAt: "2026-03-17T12:52:29.000Z",
-        },
-      ],
     });
 
     expect(state.trimmedPrompt).toBe("");
-    expect(state.sendableTerminalContexts).toEqual([]);
-    expect(state.expiredTerminalContextCount).toBe(1);
     expect(state.hasSendableContent).toBe(false);
   });
 
-  it("keeps text sendable while excluding expired terminal pills", () => {
+  it("keeps text and images sendable", () => {
     const state = deriveComposerSendState({
       prompt: `yoo \uFFFC waddup`,
-      imageCount: 0,
-      terminalContexts: [
-        {
-          id: "ctx-expired",
-          threadId: ThreadId.make("thread-1"),
-          terminalId: "default",
-          terminalLabel: "Terminal 1",
-          lineStart: 4,
-          lineEnd: 4,
-          text: "",
-          createdAt: "2026-03-17T12:52:29.000Z",
-        },
-      ],
+      imageCount: 1,
     });
 
     expect(state.trimmedPrompt).toBe("yoo  waddup");
-    expect(state.expiredTerminalContextCount).toBe(1);
     expect(state.hasSendableContent).toBe(true);
-  });
-});
-
-describe("buildExpiredTerminalContextToastCopy", () => {
-  it("formats clear empty-state guidance", () => {
-    expect(buildExpiredTerminalContextToastCopy(1, "empty")).toEqual({
-      title: "Expired terminal context won't be sent",
-      description: "Remove it or re-add it to include terminal output.",
-    });
-  });
-
-  it("formats omission guidance for sent messages", () => {
-    expect(buildExpiredTerminalContextToastCopy(2, "omitted")).toEqual({
-      title: "Expired terminal contexts omitted from message",
-      description: "Re-add it if you want that terminal output included.",
-    });
   });
 });
 
@@ -101,84 +56,41 @@ describe("resolveSendEnvMode", () => {
   });
 });
 
-describe("reconcileMountedTerminalThreadIds", () => {
-  it("keeps previously mounted open threads and adds the active open thread", () => {
+describe("resolveFollowUpQueuePhase", () => {
+  it("treats a completed active turn as ready even when the session status is still running", () => {
+    const turnId = TurnId.make("turn-completed");
+
     expect(
-      reconcileMountedTerminalThreadIds({
-        currentThreadIds: [ThreadId.make("thread-hidden"), ThreadId.make("thread-stale")],
-        openThreadIds: [ThreadId.make("thread-hidden"), ThreadId.make("thread-active")],
-        activeThreadId: ThreadId.make("thread-active"),
-        activeThreadTerminalOpen: true,
+      resolveFollowUpQueuePhase({
+        phase: "running",
+        latestTurn: {
+          turnId,
+          state: "completed",
+          requestedAt: "2026-03-29T00:01:00.000Z",
+          startedAt: "2026-03-29T00:01:01.000Z",
+          completedAt: "2026-03-29T00:01:30.000Z",
+          assistantMessageId: null,
+        },
+        activeTurnId: turnId,
       }),
-    ).toEqual([ThreadId.make("thread-hidden"), ThreadId.make("thread-active")]);
+    ).toBe("ready");
   });
 
-  it("drops mounted threads once their terminal drawer is no longer open", () => {
+  it("trusts visible turn completion even when the provider active turn id is stale", () => {
     expect(
-      reconcileMountedTerminalThreadIds({
-        currentThreadIds: [ThreadId.make("thread-closed")],
-        openThreadIds: [],
-        activeThreadId: ThreadId.make("thread-closed"),
-        activeThreadTerminalOpen: false,
+      resolveFollowUpQueuePhase({
+        phase: "running",
+        latestTurn: {
+          turnId: TurnId.make("turn-completed"),
+          state: "completed",
+          requestedAt: "2026-03-29T00:01:00.000Z",
+          startedAt: "2026-03-29T00:01:01.000Z",
+          completedAt: "2026-03-29T00:01:30.000Z",
+          assistantMessageId: null,
+        },
+        activeTurnId: TurnId.make("stale-provider-turn"),
       }),
-    ).toEqual([]);
-  });
-
-  it("keeps only the most recently active hidden terminal threads", () => {
-    expect(
-      reconcileMountedTerminalThreadIds({
-        currentThreadIds: [
-          ThreadId.make("thread-1"),
-          ThreadId.make("thread-2"),
-          ThreadId.make("thread-3"),
-        ],
-        openThreadIds: [
-          ThreadId.make("thread-1"),
-          ThreadId.make("thread-2"),
-          ThreadId.make("thread-3"),
-          ThreadId.make("thread-4"),
-        ],
-        activeThreadId: ThreadId.make("thread-4"),
-        activeThreadTerminalOpen: true,
-        maxHiddenThreadCount: 2,
-      }),
-    ).toEqual([ThreadId.make("thread-2"), ThreadId.make("thread-3"), ThreadId.make("thread-4")]);
-  });
-
-  it("moves the active thread to the end so it is treated as most recently used", () => {
-    expect(
-      reconcileMountedTerminalThreadIds({
-        currentThreadIds: [
-          ThreadId.make("thread-a"),
-          ThreadId.make("thread-b"),
-          ThreadId.make("thread-c"),
-        ],
-        openThreadIds: [
-          ThreadId.make("thread-a"),
-          ThreadId.make("thread-b"),
-          ThreadId.make("thread-c"),
-        ],
-        activeThreadId: ThreadId.make("thread-a"),
-        activeThreadTerminalOpen: true,
-        maxHiddenThreadCount: 2,
-      }),
-    ).toEqual([ThreadId.make("thread-b"), ThreadId.make("thread-c"), ThreadId.make("thread-a")]);
-  });
-
-  it("defaults to the hidden mounted terminal cap", () => {
-    const currentThreadIds = Array.from(
-      { length: MAX_HIDDEN_MOUNTED_TERMINAL_THREADS + 2 },
-      (_, index) => ThreadId.make(`thread-${index + 1}`),
-    );
-
-    expect(
-      reconcileMountedTerminalThreadIds({
-        currentThreadIds,
-        openThreadIds: currentThreadIds,
-        activeThreadId: null,
-        activeThreadTerminalOpen: false,
-      }),
-    ).toEqual(currentThreadIds.slice(-MAX_HIDDEN_MOUNTED_TERMINAL_THREADS));
+    ).toBe("ready");
   });
 });
 
@@ -542,6 +454,41 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
           ...previousSession,
           updatedAt: "2026-03-29T00:01:30.000Z",
         },
+        hasPendingApproval: false,
+        hasPendingUserInput: false,
+        threadError: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("clears local dispatch when the latest turn settled after dispatch even if fields already match", () => {
+    const completedLatestTurn = {
+      ...previousLatestTurn,
+      turnId: TurnId.make("turn-2"),
+      requestedAt: "2026-03-29T00:01:00.000Z",
+      startedAt: "2026-03-29T00:01:01.000Z",
+      completedAt: "2026-03-29T00:01:30.000Z",
+    };
+    const completedSession = {
+      ...previousSession,
+      updatedAt: "2026-03-29T00:01:30.000Z",
+    };
+
+    expect(
+      hasServerAcknowledgedLocalDispatch({
+        localDispatch: {
+          startedAt: "2026-03-29T00:01:10.000Z",
+          preparingWorktree: false,
+          latestTurnTurnId: completedLatestTurn.turnId,
+          latestTurnRequestedAt: completedLatestTurn.requestedAt,
+          latestTurnStartedAt: completedLatestTurn.startedAt,
+          latestTurnCompletedAt: completedLatestTurn.completedAt,
+          sessionOrchestrationStatus: completedSession.orchestrationStatus,
+          sessionUpdatedAt: completedSession.updatedAt,
+        },
+        phase: "ready",
+        latestTurn: completedLatestTurn,
+        session: completedSession,
         hasPendingApproval: false,
         hasPendingUserInput: false,
         threadError: null,

@@ -13,9 +13,9 @@ export interface VersionMismatch {
   readonly hint: string;
 }
 
-export const VERSION_MISMATCH_DISMISSALS_STORAGE_KEY = "cafecode:version-mismatch-dismissals:v1";
+export const VERSION_MISMATCH_DISMISSALS_STORAGE_KEY = "cafe-code:version-mismatch-dismissals:v1";
 export const LEGACY_VERSION_MISMATCH_DISMISSALS_STORAGE_KEY =
-  "t3code:version-mismatch-dismissals:v1";
+  "cafecode:version-mismatch-dismissals:v1";
 
 const VersionMismatchDismissalsSchema = Schema.Struct({
   keys: Schema.Array(Schema.String),

@@ -152,6 +152,8 @@ it.layer(TestLayer)("CheckpointStoreLive", (it) => {
             "",
           ].join("\n"),
         );
+        yield* git(tmp, ["add", "Component.tsx"]);
+        yield* git(tmp, ["commit", "-m", "add component"]);
         yield* checkpointStore.captureCheckpoint({
           cwd: tmp,
           checkpointRef: fromCheckpointRef,
@@ -200,6 +202,40 @@ it.layer(TestLayer)("CheckpointStoreLive", (it) => {
         expect(whitespaceIgnoredDiff).toContain("+        <div>");
         expect(whitespaceIgnoredDiff).not.toContain("-      <h1>Title</h1>");
         expect(whitespaceIgnoredDiff).not.toContain("+          <h1>Title</h1>");
+      }),
+    );
+
+    it.effect("does not capture untracked files into hidden checkpoint refs", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const checkpointStore = yield* CheckpointStore;
+        const threadId = ThreadId.make("thread-checkpoint-store-untracked");
+        const fromCheckpointRef = checkpointRefForThreadTurn(threadId, 0);
+        const toCheckpointRef = checkpointRefForThreadTurn(threadId, 1);
+
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef: fromCheckpointRef,
+        });
+        yield* writeTextFile(path.join(tmp, "README.md"), "# test\n\ntracked change\n");
+        yield* writeTextFile(path.join(tmp, "UNTRACKED_SECRET.txt"), "super secret token\n");
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef: toCheckpointRef,
+        });
+
+        const diff = yield* checkpointStore.diffCheckpoints({
+          cwd: tmp,
+          fromCheckpointRef,
+          toCheckpointRef,
+          ignoreWhitespace: false,
+        });
+
+        expect(diff).toContain("diff --git a/README.md b/README.md");
+        expect(diff).toContain("+tracked change");
+        expect(diff).not.toContain("UNTRACKED_SECRET");
+        expect(diff).not.toContain("super secret token");
       }),
     );
   });

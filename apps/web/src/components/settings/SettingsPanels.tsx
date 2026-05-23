@@ -1,4 +1,11 @@
-import { ArchiveIcon, ArchiveX, LoaderIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
+import {
+  ArchiveIcon,
+  ArchiveX,
+  LoaderIcon,
+  PlusIcon,
+  RefreshCwIcon,
+  Trash2Icon,
+} from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useCallback, useMemo, useRef, useState } from "react";
@@ -12,7 +19,11 @@ import {
   type ScopedThreadRef,
 } from "@cafecode/contracts";
 import { scopeThreadRef } from "@cafecode/client-runtime";
-import { DEFAULT_UNIFIED_SETTINGS } from "@cafecode/contracts/settings";
+import {
+  DEFAULT_UNIFIED_SETTINGS,
+  type DefaultEditorSelection,
+  type PowerSaveBlockerMode,
+} from "@cafecode/contracts/settings";
 import { createModelSelection } from "@cafecode/shared/model";
 import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
@@ -46,6 +57,7 @@ import { ensureLocalApi, readLocalApi } from "../../localApi";
 import { useShallow } from "zustand/react/shallow";
 import { selectProjectsAcrossEnvironments, useStore } from "../../store";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
+import { useDeletedThreadSnapshots } from "../../lib/deletedThreadsState";
 import { formatRelativeTime, formatRelativeTimeLabel } from "../../timestampFormat";
 import { Button } from "../ui/button";
 import { DraftInput } from "../ui/draft-input";
@@ -64,7 +76,9 @@ import {
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { DRIVER_OPTIONS, getDriverOption } from "./providerDriverMeta";
 import {
+  buildEmptyRecycleBinConfirmationMessage,
   buildProviderInstanceUpdatePatch,
+  collectRecentlyDeletedThreadRefs,
   formatDiagnosticsDescription,
 } from "./SettingsPanels.logic";
 import {
@@ -75,7 +89,12 @@ import {
   useRelativeTimeTick,
 } from "./settingsLayout";
 import { ProjectFavicon } from "../ProjectFavicon";
-import { useServerObservability, useServerProviders } from "../../rpc/serverState";
+import {
+  useServerAvailableEditors,
+  useServerObservability,
+  useServerProviders,
+} from "../../rpc/serverState";
+import { resolveEditorOpenOptions, type EditorOpenOption } from "../../editorOpenOptions";
 
 const THEME_OPTIONS = [
   {
@@ -98,7 +117,40 @@ const TIMESTAMP_FORMAT_LABELS = {
   "24-hour": "24-hour",
 } as const;
 
+const DEFAULT_EDITOR_SYSTEM_VALUE = "system-default" satisfies DefaultEditorSelection;
+
+const POWER_SAVE_BLOCKER_LABELS = {
+  off: "Off",
+  "during-chats": "During chats",
+  always: "Always",
+} as const satisfies Record<PowerSaveBlockerMode, string>;
+
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
+const DESKTOP_UPDATES_DISABLED_IN_THIS_BUILD = true;
+const DESKTOP_UPDATES_DISABLED_COPY = "Update checks are disabled in this Cafe Code build.";
+
+function DefaultEditorOptionLabel({
+  Icon,
+  label,
+  testId,
+}: {
+  readonly Icon?: EditorOpenOption["Icon"] | undefined;
+  readonly label: string;
+  readonly testId?: string;
+}) {
+  return (
+    <span className="flex min-w-0 items-center gap-2" data-testid={testId}>
+      {Icon ? (
+        <Icon
+          aria-hidden="true"
+          className="size-4 shrink-0 text-muted-foreground sm:size-3.5"
+          data-testid={testId ? `${testId}-icon` : undefined}
+        />
+      ) : null}
+      <span className="truncate">{label}</span>
+    </span>
+  );
+}
 
 function withoutProviderInstanceKey<V>(
   record: Readonly<Record<ProviderInstanceId, V>> | undefined,
@@ -162,6 +214,10 @@ function AboutVersionSection() {
 
   const handleUpdateChannelChange = useCallback(
     (channel: DesktopUpdateChannel) => {
+      if (DESKTOP_UPDATES_DISABLED_IN_THIS_BUILD) {
+        return;
+      }
+
       const bridge = window.desktopBridge;
       if (
         !bridge ||
@@ -194,6 +250,10 @@ function AboutVersionSection() {
   );
 
   const handleButtonClick = useCallback(() => {
+    if (DESKTOP_UPDATES_DISABLED_IN_THIS_BUILD) {
+      return;
+    }
+
     const bridge = window.desktopBridge;
     if (!bridge) return;
 
@@ -269,11 +329,16 @@ function AboutVersionSection() {
   }, [queryClient, updateState]);
 
   const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
-  const buttonTooltip = updateState ? getDesktopUpdateButtonTooltip(updateState) : null;
+  const buttonTooltip = DESKTOP_UPDATES_DISABLED_IN_THIS_BUILD
+    ? DESKTOP_UPDATES_DISABLED_COPY
+    : updateState
+      ? getDesktopUpdateButtonTooltip(updateState)
+      : null;
   const buttonDisabled =
-    action === "none"
+    DESKTOP_UPDATES_DISABLED_IN_THIS_BUILD ||
+    (action === "none"
       ? !canCheckForUpdate(updateState)
-      : isDesktopUpdateButtonDisabled(updateState);
+      : isDesktopUpdateButtonDisabled(updateState));
 
   const actionLabel: Record<string, string> = { download: "Download", install: "Install" };
   const statusLabel: Record<string, string> = {
@@ -281,10 +346,12 @@ function AboutVersionSection() {
     downloading: "Downloading…",
     "up-to-date": "Up to Date",
   };
-  const buttonLabel =
-    actionLabel[action] ?? statusLabel[updateState?.status ?? ""] ?? "Check for Updates";
-  const description =
-    action === "download" || action === "install"
+  const buttonLabel = DESKTOP_UPDATES_DISABLED_IN_THIS_BUILD
+    ? "Check for Updates"
+    : (actionLabel[action] ?? statusLabel[updateState?.status ?? ""] ?? "Check for Updates");
+  const description = DESKTOP_UPDATES_DISABLED_IN_THIS_BUILD
+    ? DESKTOP_UPDATES_DISABLED_COPY
+    : action === "download" || action === "install"
       ? "Update available."
       : "Current version of the application.";
 
@@ -314,7 +381,11 @@ function AboutVersionSection() {
       {hasDesktopBridge ? (
         <SettingsRow
           title="Update track"
-          description="Stable follows full releases. Nightly follows the nightly desktop channel and can switch back to stable immediately."
+          description={
+            DESKTOP_UPDATES_DISABLED_IN_THIS_BUILD
+              ? "Update tracks are disabled until Cafe Code has an update feed."
+              : "Stable follows full releases. Nightly follows the nightly desktop channel and can switch back to stable immediately."
+          }
           control={
             <Select
               value={selectedUpdateChannel}
@@ -325,7 +396,7 @@ function AboutVersionSection() {
               <SelectTrigger
                 className="w-full sm:w-40"
                 aria-label="Update track"
-                disabled={isChangingUpdateChannel}
+                disabled={DESKTOP_UPDATES_DISABLED_IN_THIS_BUILD || isChangingUpdateChannel}
               >
                 <SelectValue>
                   {selectedUpdateChannel === "nightly" ? "Nightly" : "Stable"}
@@ -362,6 +433,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(theme !== "system" ? ["Theme"] : []),
       ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
         ? ["Time format"]
+        : []),
+      ...(settings.defaultEditor !== DEFAULT_UNIFIED_SETTINGS.defaultEditor
+        ? ["Default editor"]
         : []),
       ...(settings.sidebarThreadPreviewCount !== DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount
         ? ["Visible threads"]
@@ -405,6 +479,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.defaultThreadEnvMode,
       settings.diffIgnoreWhitespace,
       settings.diffWordWrap,
+      settings.defaultEditor,
       settings.automaticGitFetchInterval,
       settings.enableAssistantStreaming,
       settings.sidebarThreadPreviewCount,
@@ -426,6 +501,7 @@ export function useSettingsRestore(onRestored?: () => void) {
     setTheme("system");
     updateSettings({
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
+      defaultEditor: DEFAULT_UNIFIED_SETTINGS.defaultEditor,
       diffWordWrap: DEFAULT_UNIFIED_SETTINGS.diffWordWrap,
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
       sidebarThreadPreviewCount: DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount,
@@ -453,6 +529,7 @@ export function GeneralSettingsPanel() {
   const { updateSettings } = useUpdateSettings();
   const observability = useServerObservability();
   const serverProviders = useServerProviders();
+  const availableEditors = useServerAvailableEditors();
   const diagnosticsDescription = formatDiagnosticsDescription({
     localTracingEnabled: observability?.localTracingEnabled ?? false,
     otlpTracesEnabled: observability?.otlpTracesEnabled ?? false,
@@ -483,6 +560,18 @@ export function GeneralSettingsPanel() {
     settings.textGenerationModelSelection ?? null,
     DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection ?? null,
   );
+  const editorOptions = useMemo(
+    () => resolveEditorOpenOptions(navigator.platform, availableEditors),
+    [availableEditors],
+  );
+  const defaultEditorOption =
+    settings.defaultEditor === DEFAULT_EDITOR_SYSTEM_VALUE
+      ? null
+      : (editorOptions.find((option) => option.value === settings.defaultEditor) ?? null);
+  const defaultEditorLabel =
+    settings.defaultEditor === DEFAULT_EDITOR_SYSTEM_VALUE
+      ? "System default"
+      : (defaultEditorOption?.label ?? "System default");
 
   return (
     <SettingsPageContainer>
@@ -556,6 +645,107 @@ export function GeneralSettingsPanel() {
                 </SelectItem>
                 <SelectItem hideIndicator value="24-hour">
                   {TIMESTAMP_FORMAT_LABELS["24-hour"]}
+                </SelectItem>
+              </SelectPopup>
+            </Select>
+          }
+        />
+
+        <SettingsRow
+          title="Default editor"
+          description="Choose how file links open from chats and activity."
+          resetAction={
+            settings.defaultEditor !== DEFAULT_UNIFIED_SETTINGS.defaultEditor ? (
+              <SettingResetButton
+                label="default editor"
+                onClick={() =>
+                  updateSettings({
+                    defaultEditor: DEFAULT_UNIFIED_SETTINGS.defaultEditor,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={settings.defaultEditor}
+              onValueChange={(value) => {
+                if (
+                  value === DEFAULT_EDITOR_SYSTEM_VALUE ||
+                  editorOptions.some((option) => option.value === value)
+                ) {
+                  updateSettings({ defaultEditor: value as DefaultEditorSelection });
+                }
+              }}
+            >
+              <SelectTrigger className="w-full sm:w-48" aria-label="Default editor">
+                <SelectValue>
+                  <DefaultEditorOptionLabel
+                    Icon={defaultEditorOption?.Icon}
+                    label={defaultEditorLabel}
+                    testId="default-editor-selected-option"
+                  />
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value={DEFAULT_EDITOR_SYSTEM_VALUE}>
+                  <DefaultEditorOptionLabel
+                    label="System default"
+                    testId="default-editor-option-system-default"
+                  />
+                </SelectItem>
+                {editorOptions.map((option) => (
+                  <SelectItem hideIndicator key={option.value} value={option.value}>
+                    <DefaultEditorOptionLabel
+                      Icon={option.Icon}
+                      label={option.label}
+                      testId={`default-editor-option-${option.value}`}
+                    />
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          }
+        />
+
+        <SettingsRow
+          title="Keep awake"
+          description="Prevent your computer and screen from sleeping while Cafe Code is working."
+          resetAction={
+            settings.powerSaveBlockerMode !== DEFAULT_UNIFIED_SETTINGS.powerSaveBlockerMode ? (
+              <SettingResetButton
+                label="keep awake"
+                onClick={() =>
+                  updateSettings({
+                    powerSaveBlockerMode: DEFAULT_UNIFIED_SETTINGS.powerSaveBlockerMode,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={settings.powerSaveBlockerMode}
+              onValueChange={(value) => {
+                if (value === "off" || value === "during-chats" || value === "always") {
+                  updateSettings({ powerSaveBlockerMode: value });
+                }
+              }}
+            >
+              <SelectTrigger className="w-full sm:w-44" aria-label="Keep awake">
+                <SelectValue>
+                  {POWER_SAVE_BLOCKER_LABELS[settings.powerSaveBlockerMode]}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value="off">
+                  {POWER_SAVE_BLOCKER_LABELS.off}
+                </SelectItem>
+                <SelectItem hideIndicator value="during-chats">
+                  {POWER_SAVE_BLOCKER_LABELS["during-chats"]}
+                </SelectItem>
+                <SelectItem hideIndicator value="always">
+                  {POWER_SAVE_BLOCKER_LABELS.always}
                 </SelectItem>
               </SelectPopup>
             </Select>
@@ -1363,7 +1553,7 @@ export function ArchivedThreadsPanel() {
       const clicked = await api.contextMenu.show(
         [
           { id: "unarchive", label: "Unarchive" },
-          { id: "delete", label: "Delete", destructive: true },
+          { id: "delete", label: "Move to Recycle Bin", destructive: true },
         ],
         position,
       );
@@ -1470,6 +1660,247 @@ export function ArchivedThreadsPanel() {
                     <ArchiveX className="size-3.5" />
                     <span>Unarchive</span>
                   </Button>
+                }
+              />
+            ))}
+          </SettingsSection>
+        ))
+      )}
+    </SettingsPageContainer>
+  );
+}
+
+export function RecentlyDeletedThreadsPanel() {
+  const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
+  const { restoreThread, hardDeleteThread } = useThreadActions();
+  const [isEmptyingRecycleBin, setIsEmptyingRecycleBin] = useState(false);
+  const environmentIds = useMemo(
+    () => [...new Set(projects.map((project) => project.environmentId))],
+    [projects],
+  );
+  const {
+    snapshots: deletedSnapshots,
+    error: deletedError,
+    isLoading: isLoadingDeleted,
+    refresh: refreshDeletedThreads,
+  } = useDeletedThreadSnapshots(environmentIds);
+
+  const deletedGroups = useMemo(() => {
+    const projectsByEnvironmentAndId = new Map(
+      deletedSnapshots.flatMap(({ environmentId, snapshot }) =>
+        snapshot.projects.map(
+          (project) =>
+            [
+              `${environmentId}:${project.id}`,
+              {
+                id: project.id,
+                environmentId,
+                name: project.title,
+                cwd: project.workspaceRoot,
+              },
+            ] as const,
+        ),
+      ),
+    );
+    const threads = deletedSnapshots.flatMap(({ environmentId, snapshot }) =>
+      snapshot.threads.map((thread) => ({
+        ...thread,
+        environmentId,
+      })),
+    );
+
+    return [...projectsByEnvironmentAndId.values()]
+      .map((project) => ({
+        project,
+        threads: threads
+          .filter(
+            (thread) =>
+              thread.projectId === project.id && thread.environmentId === project.environmentId,
+          )
+          .toSorted((left, right) => {
+            const leftKey = left.deletedAt ?? left.updatedAt;
+            const rightKey = right.deletedAt ?? right.updatedAt;
+            return rightKey.localeCompare(leftKey) || right.id.localeCompare(left.id);
+          }),
+      }))
+      .filter((group) => group.threads.length > 0);
+  }, [deletedSnapshots]);
+  const deletedThreadRefs = useMemo(
+    () => collectRecentlyDeletedThreadRefs(deletedGroups),
+    [deletedGroups],
+  );
+
+  const handleDeletedThreadContextMenu = useCallback(
+    async (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
+      const api = readLocalApi();
+      if (!api) return;
+      const clicked = await api.contextMenu.show(
+        [
+          { id: "restore", label: "Restore" },
+          { id: "delete-forever", label: "Delete Forever", destructive: true },
+        ],
+        position,
+      );
+
+      if (clicked === "restore") {
+        try {
+          await restoreThread(threadRef);
+          refreshDeletedThreads();
+        } catch (error) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Failed to restore thread",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+        return;
+      }
+
+      if (clicked === "delete-forever") {
+        try {
+          await hardDeleteThread(threadRef);
+          refreshDeletedThreads();
+        } catch (error) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Failed to delete thread",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+      }
+    },
+    [hardDeleteThread, refreshDeletedThreads, restoreThread],
+  );
+  const handleEmptyRecycleBin = useCallback(async () => {
+    if (deletedThreadRefs.length === 0 || isEmptyingRecycleBin) {
+      return;
+    }
+
+    const api = readLocalApi();
+    if (!api) return;
+
+    const confirmed = await api.dialogs.confirm(
+      buildEmptyRecycleBinConfirmationMessage(deletedThreadRefs.length),
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setIsEmptyingRecycleBin(true);
+    const failures: string[] = [];
+    let deletedCount = 0;
+    try {
+      for (const threadRef of deletedThreadRefs) {
+        try {
+          await hardDeleteThread(threadRef, { confirm: false, refresh: false });
+          deletedCount += 1;
+        } catch (error) {
+          failures.push(error instanceof Error ? error.message : "Unknown deletion error.");
+        }
+      }
+      refreshDeletedThreads();
+      if (failures.length > 0) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Failed to empty Recycle Bin",
+            description: `Deleted ${deletedCount} of ${deletedThreadRefs.length} threads. ${failures[0]}`,
+          }),
+        );
+        return;
+      }
+      toastManager.add(
+        stackedThreadToast({
+          type: "success",
+          title: "Recycle Bin emptied",
+          description:
+            deletedCount === 1
+              ? "Deleted 1 thread forever."
+              : `Deleted ${deletedCount} threads forever.`,
+        }),
+      );
+    } finally {
+      setIsEmptyingRecycleBin(false);
+    }
+  }, [deletedThreadRefs, hardDeleteThread, isEmptyingRecycleBin, refreshDeletedThreads]);
+  const emptyRecycleBinAction =
+    deletedThreadRefs.length > 0 ? (
+      <Button
+        type="button"
+        variant="destructive-outline"
+        size="xs"
+        className="gap-1.5"
+        disabled={isLoadingDeleted || isEmptyingRecycleBin}
+        onClick={() => void handleEmptyRecycleBin()}
+      >
+        {isEmptyingRecycleBin ? (
+          <LoaderIcon className="size-3.5 animate-spin" />
+        ) : (
+          <Trash2Icon className="size-3.5" />
+        )}
+        <span>Empty Recycle Bin</span>
+      </Button>
+    ) : null;
+
+  return (
+    <SettingsPageContainer>
+      {deletedGroups.length === 0 ? (
+        <SettingsSection title="Recently Deleted">
+          <SettingsRow
+            title={
+              <span className="inline-flex items-center gap-2">
+                {isLoadingDeleted ? (
+                  <LoaderIcon className="size-3.5 animate-spin text-muted-foreground" />
+                ) : (
+                  <Trash2Icon className="size-3.5 text-muted-foreground" />
+                )}
+                {isLoadingDeleted
+                  ? "Loading recently deleted threads"
+                  : deletedError
+                    ? "Could not load recently deleted threads"
+                    : "No recently deleted threads"}
+              </span>
+            }
+            description={
+              isLoadingDeleted
+                ? "Checking connected environments."
+                : (deletedError ?? "Threads moved to the Recycle Bin will appear here.")
+            }
+          />
+        </SettingsSection>
+      ) : (
+        deletedGroups.map(({ project, threads: projectThreads }, index) => (
+          <SettingsSection
+            key={project.id}
+            title={project.name}
+            icon={<ProjectFavicon environmentId={project.environmentId} cwd={project.cwd} />}
+            headerAction={index === 0 ? emptyRecycleBinAction : null}
+          >
+            {projectThreads.map((thread) => (
+              <SettingsRow
+                key={thread.id}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  void handleDeletedThreadContextMenu(
+                    scopeThreadRef(thread.environmentId, thread.id),
+                    {
+                      x: event.clientX,
+                      y: event.clientY,
+                    },
+                  );
+                }}
+                title={thread.title}
+                description={
+                  <>
+                    Moved to Recycle Bin{" "}
+                    {formatRelativeTimeLabel(thread.deletedAt ?? thread.updatedAt)}
+                    {" \u00b7 Created "}
+                    {formatRelativeTimeLabel(thread.createdAt)}
+                  </>
                 }
               />
             ))}

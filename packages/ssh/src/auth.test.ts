@@ -1,15 +1,8 @@
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
-import * as Path from "effect/Path";
 
-import {
-  buildSshAskpassHelperDescriptor,
-  buildSshChildEnvironment,
-  isSshAuthFailure,
-} from "./auth.ts";
+import { formatSshAgentAuthRequiredMessage, isSshAuthFailure } from "./auth.ts";
 
 describe("ssh auth", () => {
   it.effect("detects ssh auth failures from common permission denied messages", () =>
@@ -28,44 +21,14 @@ describe("ssh auth", () => {
     }),
   );
 
-  it.effect("creates askpass env for cached password prompts", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ssh-askpass-test-" });
-      const env = yield* buildSshChildEnvironment({
-        authSecret: "super-secret",
-        interactiveAuth: true,
-        askpassDirectory: directory,
-        platform: "linux",
-        baseEnv: {},
-      });
-
-      const askpassPath = path.join(directory, "ssh-askpass.sh");
-      assert.equal(env.SSH_ASKPASS, askpassPath);
-      assert.equal(env.SSH_ASKPASS_REQUIRE, "force");
-      assert.equal(env.CAFE_CODE_SSH_AUTH_SECRET, "super-secret");
-      assert.equal(env.DISPLAY, "cafecode");
-      assert.equal(yield* fs.exists(askpassPath), true);
-      assert.include(
-        yield* fs.readFileString(askpassPath),
-        'printf "%s\\n" "$CAFE_CODE_SSH_AUTH_SECRET"',
-      );
-    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
-  );
-
-  it.effect("builds a windows askpass launcher pair", () =>
-    Effect.gen(function* () {
-      const descriptor = yield* buildSshAskpassHelperDescriptor({
-        directory: "C:\\temp\\cafecode-ssh-askpass",
-        platform: "win32",
-      }).pipe(Effect.provide(NodeServices.layer));
-
-      assert.equal(descriptor.launcherPath, "C:\\temp\\cafecode-ssh-askpass\\ssh-askpass.cmd");
-      assert.deepEqual(
-        descriptor.files.map((file) => file.path.split("\\").at(-1)),
-        ["ssh-askpass.cmd", "ssh-askpass.ps1"],
-      );
-    }),
-  );
+  it("formats the agent-only SSH auth error", () => {
+    assert.equal(
+      formatSshAgentAuthRequiredMessage("julius@devbox"),
+      [
+        "SSH authentication failed for julius@devbox.",
+        "Cafe Code requires SSH agent/key authentication.",
+        "Load an unlocked key into ssh-agent and verify OpenSSH can connect without a password prompt.",
+      ].join(" "),
+    );
+  });
 });

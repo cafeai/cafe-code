@@ -74,6 +74,10 @@ const highlightedCodeCache = new LRUCache<string>(
   MAX_HIGHLIGHT_CACHE_MEMORY_BYTES,
 );
 const highlighterPromiseCache = new Map<string, Promise<DiffsHighlighter>>();
+const SHIKI_ALLOWED_TAGS = new Set(["pre", "code", "span"]);
+const SHIKI_ALLOWED_ATTRIBUTES = new Set(["class", "style", "tabindex"]);
+const UNSAFE_STYLE_VALUE_PATTERN = /(?:url\s*\(|expression\s*\(|@import)/i;
+const UNSAFE_CLASS_VALUE_PATTERN = /[<>"'`=]/;
 
 function extractFenceLanguage(className: string | undefined): string {
   const match = className?.match(CODE_FENCE_LANGUAGE_REGEX);
@@ -123,6 +127,58 @@ function createHighlightCacheKey(code: string, language: string, themeName: Diff
 
 function estimateHighlightedSize(html: string, code: string): number {
   return Math.max(html.length * 2, code.length * 3);
+}
+
+function escapeHtmlText(input: string): string {
+  return input
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function isSafeShikiAttribute(name: string, value: string): boolean {
+  const normalizedName = name.toLowerCase();
+  if (!SHIKI_ALLOWED_ATTRIBUTES.has(normalizedName)) {
+    return false;
+  }
+
+  switch (normalizedName) {
+    case "class":
+      return !UNSAFE_CLASS_VALUE_PATTERN.test(value);
+    case "style":
+      return !UNSAFE_STYLE_VALUE_PATTERN.test(value);
+    case "tabindex":
+      return /^-?\d+$/.test(value);
+    default:
+      return false;
+  }
+}
+
+export function sanitizeHighlightedCodeHtml(html: string): string {
+  if (typeof document === "undefined") {
+    return escapeHtmlText(html);
+  }
+
+  const template = document.createElement("template");
+  template.innerHTML = html;
+
+  for (const element of Array.from(template.content.querySelectorAll("*"))) {
+    const tagName = element.tagName.toLowerCase();
+    if (!SHIKI_ALLOWED_TAGS.has(tagName)) {
+      element.replaceWith(document.createTextNode(element.textContent ?? ""));
+      continue;
+    }
+
+    for (const attribute of Array.from(element.attributes)) {
+      if (!isSafeShikiAttribute(attribute.name, attribute.value)) {
+        element.removeAttribute(attribute.name);
+      }
+    }
+  }
+
+  return template.innerHTML;
 }
 
 function getHighlighterPromise(language: string): Promise<DiffsHighlighter> {
@@ -215,7 +271,7 @@ function SuspenseShikiCodeBlock({
     return (
       <div
         className="chat-markdown-shiki"
-        dangerouslySetInnerHTML={{ __html: cachedHighlightedHtml }}
+        dangerouslySetInnerHTML={{ __html: sanitizeHighlightedCodeHtml(cachedHighlightedHtml) }}
       />
     );
   }
@@ -260,19 +316,26 @@ function UncachedShikiCodeBlock({
       return highlighter.codeToHtml(code, { lang: "text", theme: themeName });
     }
   }, [code, highlighter, language, themeName]);
+  const safeHighlightedHtml = useMemo(
+    () => sanitizeHighlightedCodeHtml(highlightedHtml),
+    [highlightedHtml],
+  );
 
   useEffect(() => {
     if (!isStreaming) {
       highlightedCodeCache.set(
         cacheKey,
-        highlightedHtml,
-        estimateHighlightedSize(highlightedHtml, code),
+        safeHighlightedHtml,
+        estimateHighlightedSize(safeHighlightedHtml, code),
       );
     }
-  }, [cacheKey, code, highlightedHtml, isStreaming]);
+  }, [cacheKey, code, safeHighlightedHtml, isStreaming]);
 
   return (
-    <div className="chat-markdown-shiki" dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
+    <div
+      className="chat-markdown-shiki"
+      dangerouslySetInnerHTML={{ __html: safeHighlightedHtml }}
+    />
   );
 }
 
@@ -282,6 +345,7 @@ interface MarkdownFileLinkProps {
   displayPath: string;
   filePath: string;
   label: string;
+  openPolicy: "direct" | "confirm";
   theme: "light" | "dark";
   className?: string | undefined;
 }
@@ -373,6 +437,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   displayPath,
   filePath,
   label,
+  openPolicy,
   theme,
   className,
 }: MarkdownFileLinkProps) {
@@ -386,7 +451,18 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       return;
     }
 
-    void openInPreferredEditor(api, targetPath).catch((error) => {
+    void (async () => {
+      if (openPolicy === "confirm") {
+        const confirmed = await api.dialogs.confirm(
+          `This file is outside the current workspace:\n\n${targetPath}\n\nOpen it anyway?`,
+        );
+        if (!confirmed) {
+          return;
+        }
+      }
+
+      await openInPreferredEditor(api, targetPath);
+    })().catch((error) => {
       toastManager.add(
         stackedThreadToast({
           type: "error",
@@ -395,7 +471,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         }),
       );
     });
-  }, [targetPath]);
+  }, [openPolicy, targetPath]);
 
   const handleCopy = useCallback((value: string, title: string) => {
     if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
@@ -468,6 +544,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
           <a
             href={href}
             className={cn(MARKDOWN_FILE_LINK_CLASS_NAME, className)}
+            data-open-policy={openPolicy}
             onClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
@@ -491,6 +568,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       >
         <div className="markdown-file-link-tooltip-scroll overflow-x-auto whitespace-nowrap">
           {displayPath}
+          {openPolicy === "confirm" ? " (outside workspace)" : ""}
         </div>
       </TooltipPopup>
     </Tooltip>
@@ -507,6 +585,7 @@ function areMarkdownFileLinkPropsEqual(
     previous.displayPath === next.displayPath &&
     previous.filePath === next.filePath &&
     previous.label === next.label &&
+    previous.openPolicy === next.openPolicy &&
     previous.theme === next.theme &&
     previous.className === next.className
   );
@@ -575,6 +654,7 @@ function ChatMarkdown({
             displayPath={fileLinkMeta.displayPath}
             filePath={fileLinkMeta.filePath}
             label={labelParts.join(" · ")}
+            openPolicy={fileLinkMeta.openPolicy}
             theme={resolvedTheme}
             className={props.className}
           />

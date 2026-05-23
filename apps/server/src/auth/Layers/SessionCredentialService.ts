@@ -2,7 +2,7 @@ import {
   AuthSessionId,
   type AuthClientMetadata,
   type AuthClientSession,
-} from "@cafecode/contracts";
+} from "@cafecode/contracts/auth";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";

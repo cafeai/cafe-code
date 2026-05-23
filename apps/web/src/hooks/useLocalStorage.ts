@@ -89,8 +89,8 @@ export const removeLocalStorageItemWithLegacy = (key: string, legacyKeys: readon
   }
 };
 
-const LOCAL_STORAGE_CHANGE_EVENT = "cafecode:local_storage_change";
-const LEGACY_LOCAL_STORAGE_CHANGE_EVENT = "t3code:local_storage_change";
+const LOCAL_STORAGE_CHANGE_EVENT = "cafe-code:local_storage_change";
+const LEGACY_LOCAL_STORAGE_CHANGE_EVENT = "cafecode:local_storage_change";
 const EMPTY_LEGACY_STORAGE_KEYS: readonly string[] = [];
 
 interface LocalStorageChangeDetail {

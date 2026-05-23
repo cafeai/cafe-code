@@ -136,5 +136,67 @@ it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
         expect(escapedStat).toBeNull();
       }),
     );
+
+    it.effect("rejects writes through symlinked directories outside the workspace root", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const outside = yield* makeTempDir;
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+
+        yield* fileSystem.symlink(outside, path.join(cwd, "linked"));
+
+        const error = yield* workspaceFileSystem
+          .writeFile({
+            cwd,
+            relativePath: "linked/nested/escape.md",
+            contents: "# nope\n",
+          })
+          .pipe(Effect.flip);
+
+        expect(error.message).toContain(
+          "Workspace file path must be relative to the project root: linked/nested/escape.md",
+        );
+
+        const escapedFileStat = yield* fileSystem
+          .stat(path.join(outside, "nested", "escape.md"))
+          .pipe(Effect.catch(() => Effect.succeed(null)));
+        const escapedDirectoryStat = yield* fileSystem
+          .stat(path.join(outside, "nested"))
+          .pipe(Effect.catch(() => Effect.succeed(null)));
+        expect(escapedFileStat).toBeNull();
+        expect(escapedDirectoryStat).toBeNull();
+      }),
+    );
+
+    it.effect("rejects writes to symlinked files outside the workspace root", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const outside = yield* makeTempDir;
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const outsideFile = path.join(outside, "escape.md");
+
+        yield* fileSystem.writeFileString(outsideFile, "original\n");
+        yield* fileSystem.symlink(outsideFile, path.join(cwd, "escape.md"));
+
+        const error = yield* workspaceFileSystem
+          .writeFile({
+            cwd,
+            relativePath: "escape.md",
+            contents: "modified\n",
+          })
+          .pipe(Effect.flip);
+
+        expect(error.message).toContain(
+          "Workspace file path must be relative to the project root: escape.md",
+        );
+
+        const outsideContents = yield* fileSystem.readFileString(outsideFile).pipe(Effect.orDie);
+        expect(outsideContents).toBe("original\n");
+      }),
+    );
   });
 });

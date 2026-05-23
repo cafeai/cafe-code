@@ -372,7 +372,7 @@ describe("WsTransport", () => {
 
     const requestPromise = transport.request((client) =>
       client[WS_METHODS.serverUpsertKeybinding]({
-        command: "terminal.toggle",
+        command: "commandPalette.toggle",
         key: "ctrl+k",
       }),
     );
@@ -499,7 +499,7 @@ describe("WsTransport", () => {
 
     const requestPromise = transport.request((client) =>
       client[WS_METHODS.serverUpsertKeybinding]({
-        command: "terminal.toggle",
+        command: "commandPalette.toggle",
         key: "ctrl+k",
       }),
     );
@@ -555,7 +555,7 @@ describe("WsTransport", () => {
 
     const requestPromise = transport.request((client) =>
       client[WS_METHODS.serverUpsertKeybinding]({
-        command: "terminal.toggle",
+        command: "commandPalette.toggle",
         key: "ctrl+k",
       }),
     );
@@ -603,7 +603,7 @@ describe("WsTransport", () => {
 
     const requestPromise = transport.request((client) =>
       client[WS_METHODS.serverUpsertKeybinding]({
-        command: "terminal.toggle",
+        command: "commandPalette.toggle",
         key: "ctrl+k",
       }),
     );
@@ -629,7 +629,7 @@ describe("WsTransport", () => {
       _tag: "Request",
       tag: WS_METHODS.serverUpsertKeybinding,
       payload: {
-        command: "terminal.toggle",
+        command: "commandPalette.toggle",
         key: "ctrl+k",
       },
     });
@@ -1077,69 +1077,6 @@ describe("WsTransport", () => {
 
     unsubscribeA();
     unsubscribeB();
-    await transport.dispose();
-  });
-
-  it("streams finite request events without re-subscribing", async () => {
-    const transport = createTransport("ws://localhost:3020");
-    const listener = vi.fn();
-
-    await waitFor(() => {
-      expect(sockets).toHaveLength(1);
-    });
-    const socket = getSocket();
-    socket.open();
-
-    const requestPromise = transport.requestStream(
-      (client) =>
-        client[WS_METHODS.gitRunStackedAction]({
-          actionId: "action-1",
-          cwd: "/repo",
-          action: "commit",
-        }),
-      listener,
-    );
-
-    await waitFor(() => {
-      expect(socket.sent).toHaveLength(1);
-    });
-
-    const requestMessage = JSON.parse(socket.sent[0] ?? "{}") as { id: string };
-    const progressEvent = {
-      actionId: "action-1",
-      cwd: "/repo",
-      action: "commit",
-      kind: "phase_started",
-      phase: "commit",
-      label: "Committing...",
-    } as const;
-
-    socket.serverMessage(
-      JSON.stringify({
-        _tag: "Chunk",
-        requestId: requestMessage.id,
-        values: [progressEvent],
-      }),
-    );
-    socket.serverMessage(
-      JSON.stringify({
-        _tag: "Exit",
-        requestId: requestMessage.id,
-        exit: {
-          _tag: "Success",
-          value: null,
-        },
-      }),
-    );
-
-    await expect(requestPromise).resolves.toBeUndefined();
-    expect(listener).toHaveBeenCalledWith(progressEvent);
-    expect(
-      socket.sent.filter((message) => {
-        const parsed = JSON.parse(message) as { _tag?: string; tag?: string };
-        return parsed._tag === "Request" && parsed.tag === WS_METHODS.gitRunStackedAction;
-      }),
-    ).toHaveLength(1);
     await transport.dispose();
   });
 

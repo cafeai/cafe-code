@@ -6,8 +6,8 @@ type ThemeSnapshot = {
   systemDark: boolean;
 };
 
-const STORAGE_KEY = "cafecode:theme";
-const LEGACY_STORAGE_KEY = "t3code:theme";
+const STORAGE_KEY = "cafe-code:theme";
+const LEGACY_STORAGE_KEY = "cafecode:theme";
 const MEDIA_QUERY = "(prefers-color-scheme: dark)";
 const DEFAULT_THEME_SNAPSHOT: ThemeSnapshot = {
   theme: "system",

@@ -11,7 +11,6 @@ import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
-import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
@@ -36,6 +35,8 @@ const DEFAULT_BACKEND_READINESS_TIMEOUT = Duration.minutes(1);
 const DEFAULT_BACKEND_READINESS_INTERVAL = Duration.millis(100);
 const DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT = Duration.seconds(1);
 const DEFAULT_BACKEND_TERMINATE_GRACE = Duration.seconds(2);
+const DEFAULT_BACKEND_HEALTH_CHECK_INTERVAL = Duration.seconds(15);
+const DEFAULT_BACKEND_HEALTH_FAILURE_THRESHOLD = 3;
 const BACKEND_READINESS_PATH = CAFE_CODE_ENVIRONMENT_ENDPOINT_PATH;
 
 type BackendProcessLayerServices = ChildProcessSpawner.ChildProcessSpawner | HttpClient.HttpClient;
@@ -86,13 +87,25 @@ class BackendProcessSpawnError extends Data.TaggedError("BackendProcessSpawnErro
   }
 }
 
+class BackendHealthCheckFailedError extends Data.TaggedError("BackendHealthCheckFailedError")<{
+  readonly url: URL;
+  readonly consecutiveFailures: number;
+}> {
+  override get message() {
+    return `Backend health check failed ${this.consecutiveFailures} consecutive times at ${this.url.href}.`;
+  }
+}
+
 type BackendProcessError = BackendProcessBootstrapEncodeError | BackendProcessSpawnError;
 
 interface RunBackendProcessOptions extends DesktopBackendStartConfig {
   readonly readinessTimeout?: Duration.Duration;
+  readonly healthCheckInterval?: Duration.Duration;
+  readonly healthFailureThreshold?: number;
   readonly onStarted?: (pid: number) => Effect.Effect<void>;
   readonly onReady?: () => Effect.Effect<void>;
   readonly onReadinessFailure?: (error: BackendTimeoutError) => Effect.Effect<void>;
+  readonly onHealthFailure?: (error: BackendHealthCheckFailedError) => Effect.Effect<void>;
   readonly onOutput?: (
     streamName: BackendProcessOutputStream,
     chunk: Uint8Array,
@@ -165,34 +178,96 @@ const calculateRestartDelay = (attempt: number): Duration.Duration =>
 const closeRun = (
   run: ActiveBackendRun,
   options?: { readonly timeout?: Duration.Duration },
-): Effect.Effect<void> => {
+): Effect.Effect<"closed" | "timed-out"> => {
   const waitForFiber = Option.match(run.fiber, {
     onNone: () => Effect.void,
     onSome: (fiber) => Fiber.await(fiber).pipe(Effect.asVoid),
   });
   const close = Scope.close(run.scope, Exit.void).pipe(Effect.andThen(waitForFiber));
 
-  return (
-    options?.timeout ? close.pipe(Effect.timeoutOption(options.timeout), Effect.asVoid) : close
-  ).pipe(Effect.ignore);
+  const timeout = options?.timeout;
+  if (!timeout) {
+    return close.pipe(Effect.as("closed" as const));
+  }
+
+  return Effect.gen(function* () {
+    const closeFiber = yield* Effect.forkDetach(close);
+    return yield* Effect.race(
+      Fiber.await(closeFiber).pipe(Effect.as("closed" as const)),
+      Effect.sleep(timeout).pipe(Effect.as("timed-out" as const)),
+    );
+  });
 };
+
+const readinessUrlFor = (baseUrl: URL): URL => new URL(BACKEND_READINESS_PATH, baseUrl);
+
+const checkHttpReadyOnce = Effect.fn("desktop.backendManager.checkHttpReadyOnce")(function* (
+  baseUrl: URL,
+): Effect.fn.Return<boolean, never, HttpClient.HttpClient> {
+  const readinessUrl = readinessUrlFor(baseUrl);
+  const client = (yield* HttpClient.HttpClient).pipe(
+    HttpClient.filterStatusOk,
+    HttpClient.transformResponse(Effect.timeout(DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT)),
+  );
+
+  return yield* client.get(readinessUrl).pipe(
+    Effect.timeout(DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT),
+    Effect.as(true),
+    Effect.catch(() => Effect.succeed(false)),
+  );
+});
 
 const waitForHttpReady = Effect.fn("desktop.backendManager.waitForHttpReady")(function* (
   baseUrl: URL,
   timeout: Duration.Duration,
 ): Effect.fn.Return<void, BackendTimeoutError, HttpClient.HttpClient> {
-  const readinessUrl = new URL(BACKEND_READINESS_PATH, baseUrl);
-  const client = (yield* HttpClient.HttpClient).pipe(
-    HttpClient.filterStatusOk,
-    HttpClient.transformResponse(Effect.timeout(DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT)),
-    HttpClient.retry(Schedule.spaced(DEFAULT_BACKEND_READINESS_INTERVAL)),
-  );
-
-  yield* client.get(readinessUrl).pipe(
-    Effect.asVoid,
+  const readinessUrl = readinessUrlFor(baseUrl);
+  yield* Effect.gen(function* () {
+    while (true) {
+      if (yield* checkHttpReadyOnce(baseUrl)) {
+        return;
+      }
+      yield* Effect.sleep(DEFAULT_BACKEND_READINESS_INTERVAL);
+    }
+  }).pipe(
     Effect.timeout(timeout),
     Effect.mapError(() => new BackendTimeoutError({ url: readinessUrl })),
   );
+});
+
+const monitorHttpHealth = Effect.fn("desktop.backendManager.monitorHttpHealth")(function* (
+  baseUrl: URL,
+  interval: Duration.Duration,
+  failureThreshold: number,
+  onFailure: (error: BackendHealthCheckFailedError) => Effect.Effect<void>,
+): Effect.fn.Return<void, never, HttpClient.HttpClient> {
+  const readinessUrl = readinessUrlFor(baseUrl);
+  let consecutiveFailures = 0;
+
+  while (true) {
+    yield* Effect.sleep(interval);
+    const healthy = yield* checkHttpReadyOnce(baseUrl);
+    if (healthy) {
+      consecutiveFailures = 0;
+      continue;
+    }
+
+    consecutiveFailures += 1;
+    yield* Effect.logWarning("desktop.backend.health-check.failed", {
+      url: readinessUrl.href,
+      consecutiveFailures,
+      failureThreshold,
+    });
+    if (consecutiveFailures >= failureThreshold) {
+      yield* onFailure(
+        new BackendHealthCheckFailedError({
+          url: readinessUrl,
+          consecutiveFailures,
+        }),
+      ).pipe(Effect.ignore);
+      return;
+    }
+  }
 });
 
 function describeProcessExit(
@@ -230,6 +305,7 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
   options: RunBackendProcessOptions,
 ): Effect.fn.Return<BackendProcessExit, BackendProcessError, BackendProcessRunRequirements> {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const processScope = yield* Scope.Scope;
   const bootstrapJson = yield* encodeBootstrapJson(options.bootstrap).pipe(
     Effect.mapError((cause) => new BackendProcessBootstrapEncodeError({ cause })),
   );
@@ -266,12 +342,28 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     yield* drainBackendOutput("stdout", handle.stdout, onOutput).pipe(Effect.forkScoped);
     yield* drainBackendOutput("stderr", handle.stderr, onOutput).pipe(Effect.forkScoped);
   }
+  const healthFailureThreshold = Math.max(
+    1,
+    Math.trunc(options.healthFailureThreshold ?? DEFAULT_BACKEND_HEALTH_FAILURE_THRESHOLD),
+  );
+  const healthCheckInterval = options.healthCheckInterval ?? DEFAULT_BACKEND_HEALTH_CHECK_INTERVAL;
   yield* waitForHttpReady(
     options.httpBaseUrl,
     options.readinessTimeout ?? DEFAULT_BACKEND_READINESS_TIMEOUT,
   ).pipe(
     Effect.tap(() => options.onReady?.() ?? Effect.void),
-    Effect.catch((error) => options.onReadinessFailure?.(error) ?? Effect.void),
+    Effect.tap(() =>
+      monitorHttpHealth(options.httpBaseUrl, healthCheckInterval, healthFailureThreshold, (error) =>
+        (options.onHealthFailure?.(error) ?? Effect.void).pipe(
+          Effect.andThen(handle.kill().pipe(Effect.ignore)),
+        ),
+      ).pipe(Effect.forkIn(processScope)),
+    ),
+    Effect.catch((error) =>
+      (options.onReadinessFailure?.(error) ?? Effect.void).pipe(
+        Effect.andThen(handle.kill().pipe(Effect.ignore)),
+      ),
+    ),
     Effect.forkScoped,
   );
 
@@ -470,6 +562,10 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
             logBackendManagerWarning("backend readiness check failed during bootstrap", {
               error: error.message,
             }),
+          onHealthFailure: (error) =>
+            logBackendManagerWarning("backend health check failed; terminating backend", {
+              error: error.message,
+            }),
           onOutput: (streamName, chunk) => backendOutputLog.writeOutputChunk(streamName, chunk),
         }).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -580,7 +676,19 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
     });
     yield* Option.match(active, {
       onNone: () => Effect.void,
-      onSome: (run) => closeRun(run, options),
+      onSome: (run) =>
+        Effect.gen(function* () {
+          const result = yield* closeRun(run, options);
+          if (result !== "timed-out" || !options?.timeout) {
+            return;
+          }
+
+          yield* logBackendManagerWarning("backend close timed out during stop", {
+            runId: run.id,
+            timeoutMs: Duration.toMillis(options.timeout),
+            ...(Option.isSome(run.pid) ? { pid: run.pid.value } : {}),
+          });
+        }),
     });
   });
 

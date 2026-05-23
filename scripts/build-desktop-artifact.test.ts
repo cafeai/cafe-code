@@ -40,6 +40,15 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     });
   });
 
+  it("uses one picture-derived application icon across desktop release channels", () => {
+    assert.equal(BRAND_ASSET_PATHS.productionMacIconPng, BRAND_ASSET_PATHS.appIconDesktopPng);
+    assert.equal(BRAND_ASSET_PATHS.productionLinuxIconPng, BRAND_ASSET_PATHS.appIconDesktopPng);
+    assert.equal(BRAND_ASSET_PATHS.productionWindowsIconIco, BRAND_ASSET_PATHS.appIconWindowsIco);
+    assert.equal(BRAND_ASSET_PATHS.nightlyMacIconPng, BRAND_ASSET_PATHS.appIconDesktopPng);
+    assert.equal(BRAND_ASSET_PATHS.nightlyLinuxIconPng, BRAND_ASSET_PATHS.appIconDesktopPng);
+    assert.equal(BRAND_ASSET_PATHS.nightlyWindowsIconIco, BRAND_ASSET_PATHS.appIconWindowsIco);
+  });
+
   it("omits bundled workspace packages from staged desktop dependencies", () => {
     assert.deepStrictEqual(
       resolveDesktopRuntimeDependencies(

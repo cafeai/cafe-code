@@ -305,7 +305,11 @@ function formatDesktopSshConnectionError(error: unknown): string {
     "",
   );
   const withoutTaggedErrorPrefix = withoutIpcPrefix.replace(/^Ssh[A-Za-z]+Error:\s*/u, "");
-  return withoutTaggedErrorPrefix.trim() || fallback;
+  const message = withoutTaggedErrorPrefix.trim();
+  if (/permission denied|authentication failed|too many authentication failures/iu.test(message)) {
+    return "SSH authentication failed. Cafe Code requires SSH agent/key authentication; load an unlocked key into ssh-agent and verify OpenSSH can connect without a password prompt.";
+  }
+  return message || fallback;
 }
 
 /** Direct row in the card – same pattern as the Provider / ACP-agent list rows. */
@@ -2138,6 +2142,10 @@ export function ConnectionsSettings() {
   const renderSshFields = () => (
     <div className="space-y-4">
       <div className="space-y-3">
+        <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs leading-5 text-muted-foreground">
+          SSH remote environments require OpenSSH agent/key authentication. Load an unlocked key in
+          ssh-agent first; Cafe Code will not ask for or store SSH passwords.
+        </div>
         <label className="block">
           <span className="mb-1.5 block text-xs font-medium text-foreground">
             SSH host or alias

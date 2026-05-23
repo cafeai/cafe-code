@@ -24,12 +24,17 @@ import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 
 export type ProviderSessionModelSwitchMode = "in-session" | "unsupported";
+export type ProviderLiveSteerSupport = "supported" | "unsupported";
 
 export interface ProviderAdapterCapabilities {
   /**
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
+  /**
+   * Declares whether the adapter accepts user guidance while a turn is already running.
+   */
+  readonly liveSteer: ProviderLiveSteerSupport;
 }
 
 export interface ProviderThreadTurnSnapshot {

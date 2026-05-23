@@ -190,6 +190,13 @@ describe("OrchestrationEngine", () => {
               threads: [],
               updatedAt: projectionSnapshot.updatedAt,
             }),
+          getDeletedShellSnapshot: () =>
+            Effect.succeed({
+              snapshotSequence: projectionSnapshot.snapshotSequence,
+              projects: [],
+              threads: [],
+              updatedAt: projectionSnapshot.updatedAt,
+            }),
           getSnapshotSequence: () =>
             Effect.succeed({ snapshotSequence: projectionSnapshot.snapshotSequence }),
           getCounts: () => Effect.succeed({ projectCount: 1, threadCount: 1 }),
@@ -197,7 +204,6 @@ describe("OrchestrationEngine", () => {
           getProjectShellById: () => Effect.succeed(Option.none()),
           getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
           getThreadCheckpointContext: () => Effect.succeed(Option.none()),
-          getFullThreadDiffContext: () => Effect.succeed(Option.none()),
           getThreadShellById: () => Effect.succeed(Option.none()),
           getThreadDetailById: () => Effect.succeed(Option.none()),
         }),

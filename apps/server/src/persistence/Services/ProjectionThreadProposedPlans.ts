@@ -5,6 +5,7 @@ import {
   TrimmedNonEmptyString,
   TurnId,
 } from "@cafecode/contracts";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
@@ -29,6 +30,13 @@ export const ListProjectionThreadProposedPlansInput = Schema.Struct({
 export type ListProjectionThreadProposedPlansInput =
   typeof ListProjectionThreadProposedPlansInput.Type;
 
+export const GetLatestProjectionThreadProposedPlanInput = Schema.Struct({
+  threadId: ThreadId,
+  turnId: Schema.optional(Schema.NullOr(TurnId)),
+});
+export type GetLatestProjectionThreadProposedPlanInput =
+  typeof GetLatestProjectionThreadProposedPlanInput.Type;
+
 export const DeleteProjectionThreadProposedPlansInput = Schema.Struct({
   threadId: ThreadId,
 });
@@ -42,6 +50,9 @@ export interface ProjectionThreadProposedPlanRepositoryShape {
   readonly listByThreadId: (
     input: ListProjectionThreadProposedPlansInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadProposedPlan>, ProjectionRepositoryError>;
+  readonly getLatestByThreadId: (
+    input: GetLatestProjectionThreadProposedPlanInput,
+  ) => Effect.Effect<Option.Option<ProjectionThreadProposedPlan>, ProjectionRepositoryError>;
   readonly deleteByThreadId: (
     input: DeleteProjectionThreadProposedPlansInput,
   ) => Effect.Effect<void, ProjectionRepositoryError>;

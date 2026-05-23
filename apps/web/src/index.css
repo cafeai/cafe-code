@@ -189,6 +189,528 @@ body::after {
   background-size: 256px 256px;
 }
 
+@keyframes cafe-sidebar-star-drift {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 0, 0);
+  }
+  4% {
+    opacity: var(--cafe-sidebar-star-opacity);
+    transform: translate3d(-2px, -4px, 0);
+  }
+  96% {
+    opacity: var(--cafe-sidebar-star-opacity);
+    transform: translate3d(-40px, -92px, 0);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(-42px, -96px, 0);
+  }
+}
+
+@keyframes cafe-sidebar-nebula-drift {
+  0% {
+    opacity: 0.34;
+    transform: translate3d(-2%, 1%, 0) scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: translate3d(2%, -1%, 0) scale(1.04);
+  }
+  100% {
+    opacity: 0.38;
+    transform: translate3d(1%, 2%, 0) scale(1.02);
+  }
+}
+
+.cafe-thread-sidebar [data-slot="sidebar-inner"] {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  background:
+    radial-gradient(120% 90% at 50% -8%, rgba(68, 190, 218, 0.16), transparent 42%),
+    radial-gradient(95% 75% at 18% 105%, rgba(126, 137, 151, 0.14), transparent 46%),
+    color-mix(in srgb, var(--card) 96%, #e5edf3);
+}
+
+.cafe-thread-sidebar [data-slot="sidebar-inner"]::before,
+.cafe-thread-sidebar [data-slot="sidebar-inner"]::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.cafe-thread-sidebar [data-slot="sidebar-inner"]::before {
+  --cafe-sidebar-star-opacity: 0.86;
+
+  inset: -34% -48%;
+  background-image:
+    radial-gradient(circle at 18px 28px, rgba(22, 32, 46, 0.76) 0 1px, transparent 1.45px),
+    radial-gradient(circle at 84px 118px, rgba(0, 88, 120, 0.74) 0 1.1px, transparent 1.65px),
+    radial-gradient(circle at 132px 64px, rgba(43, 56, 73, 0.72) 0 0.8px, transparent 1.35px),
+    radial-gradient(circle at 226px 192px, rgba(0, 105, 138, 0.72) 0 1.15px, transparent 1.75px),
+    radial-gradient(circle at 304px 42px, rgba(32, 45, 61, 0.64) 0 0.7px, transparent 1.25px);
+  background-position:
+    0 0,
+    34px 18px,
+    72px 48px,
+    18px 96px,
+    116px 34px;
+  background-size:
+    156px 218px,
+    244px 312px,
+    318px 386px,
+    402px 514px,
+    496px 620px;
+  opacity: var(--cafe-sidebar-star-opacity);
+  animation: cafe-sidebar-star-drift 60s linear infinite;
+  will-change: transform, opacity;
+}
+
+.cafe-thread-sidebar [data-slot="sidebar-inner"]::after {
+  inset: -18% -28%;
+  background:
+    radial-gradient(ellipse at 16% 24%, rgba(16, 184, 214, 0.18), transparent 36%),
+    radial-gradient(ellipse at 82% 80%, rgba(132, 142, 156, 0.18), transparent 38%),
+    radial-gradient(ellipse at 72% 12%, rgba(94, 109, 126, 0.08), transparent 34%),
+    linear-gradient(132deg, transparent 20%, rgba(76, 176, 205, 0.1) 48%, transparent 70%);
+  opacity: 0.42;
+  animation: cafe-sidebar-nebula-drift 23.333s ease-in-out infinite alternate;
+  will-change: transform, opacity;
+}
+
+.dark .cafe-thread-sidebar [data-slot="sidebar-inner"] {
+  background:
+    radial-gradient(120% 90% at 50% -8%, rgba(72, 207, 255, 0.16), transparent 42%),
+    radial-gradient(95% 75% at 18% 105%, rgba(166, 176, 188, 0.14), transparent 46%), #101011;
+}
+
+.dark .cafe-thread-sidebar [data-slot="sidebar-inner"]::before {
+  --cafe-sidebar-star-opacity: 0.44;
+
+  background-image:
+    radial-gradient(circle at 18px 28px, rgba(255, 255, 255, 0.82) 0 1px, transparent 1.45px),
+    radial-gradient(circle at 84px 118px, rgba(109, 236, 255, 0.8) 0 1.1px, transparent 1.65px),
+    radial-gradient(circle at 132px 64px, rgba(176, 184, 196, 0.62) 0 0.8px, transparent 1.35px),
+    radial-gradient(circle at 226px 192px, rgba(84, 204, 232, 0.7) 0 1.15px, transparent 1.75px),
+    radial-gradient(circle at 304px 42px, rgba(214, 221, 230, 0.48) 0 0.7px, transparent 1.25px);
+}
+
+.dark .cafe-thread-sidebar [data-slot="sidebar-inner"]::after {
+  background:
+    radial-gradient(ellipse at 16% 24%, rgba(40, 214, 255, 0.2), transparent 36%),
+    radial-gradient(ellipse at 82% 80%, rgba(168, 178, 190, 0.18), transparent 38%),
+    radial-gradient(ellipse at 72% 12%, rgba(218, 225, 234, 0.08), transparent 34%),
+    linear-gradient(132deg, transparent 20%, rgba(109, 236, 255, 0.08) 48%, transparent 70%);
+  opacity: 0.46;
+  mix-blend-mode: screen;
+}
+
+.cafe-thread-sidebar [data-slot="sidebar-header"],
+.cafe-thread-sidebar [data-slot="sidebar-content"],
+.cafe-thread-sidebar [data-slot="sidebar-separator"],
+.cafe-thread-sidebar [data-slot="sidebar-footer"] {
+  position: relative;
+  z-index: 1;
+}
+
+.cafe-thread-sidebar [data-slot="sidebar-menu-button"],
+.cafe-thread-sidebar [data-slot="sidebar-menu-sub-button"] {
+  transition-property: background-color, color, box-shadow, opacity;
+}
+
+.thread-status-dot-shell {
+  inline-size: 0;
+  margin-inline-end: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition:
+    inline-size 170ms ease,
+    margin-inline-end 170ms ease,
+    opacity 140ms ease;
+}
+
+.thread-status-dot-shell[data-visible="true"] {
+  inline-size: 0.375rem;
+  margin-inline-end: 0.125rem;
+  opacity: 1;
+}
+
+.thread-status-dot-shell[data-compact="true"][data-visible="true"] {
+  inline-size: 0.875rem;
+  margin-inline-end: 0.25rem;
+}
+
+.thread-status-dot {
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+
+.thread-status-dot-shell[data-visible="true"] .thread-status-dot {
+  opacity: 1;
+}
+
+.dark .cafe-thread-sidebar [data-slot="sidebar-menu-button"]:hover,
+.dark .cafe-thread-sidebar [data-slot="sidebar-menu-sub-button"]:hover {
+  background-color: rgba(255, 255, 255, 0.065);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.025);
+}
+
+.dark .cafe-thread-sidebar [data-slot="sidebar-menu-button"][data-active="true"],
+.dark .cafe-thread-sidebar [data-slot="sidebar-menu-sub-button"][data-active="true"] {
+  background:
+    linear-gradient(90deg, rgba(72, 207, 255, 0.08), transparent 62%), rgba(255, 255, 255, 0.078);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.035),
+    0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.dark .cafe-thread-sidebar [data-slot="sidebar-menu-button"][data-active="true"]:hover,
+.dark .cafe-thread-sidebar [data-slot="sidebar-menu-sub-button"][data-active="true"]:hover {
+  background:
+    linear-gradient(90deg, rgba(72, 207, 255, 0.1), transparent 62%), rgba(255, 255, 255, 0.09);
+}
+
+html[data-cafe-visibility="hidden"] .cafe-thread-sidebar [data-slot="sidebar-inner"]::before,
+html[data-cafe-visibility="hidden"] .cafe-thread-sidebar [data-slot="sidebar-inner"]::after {
+  animation-play-state: paused;
+}
+
+.cafe-followup-queue {
+  background:
+    radial-gradient(110% 140% at 12% -20%, rgba(68, 190, 218, 0.2), transparent 46%),
+    radial-gradient(100% 120% at 100% 130%, rgba(126, 137, 151, 0.2), transparent 50%),
+    color-mix(in srgb, var(--card) 76%, transparent);
+}
+
+.cafe-followup-queue::before,
+.cafe-followup-queue::after {
+  content: "";
+  position: absolute;
+  inset: -65% -28%;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.cafe-followup-queue::before {
+  --cafe-sidebar-star-opacity: 0.82;
+
+  background-image:
+    radial-gradient(circle at 18px 28px, rgba(22, 32, 46, 0.86) 0 1.25px, transparent 1.8px),
+    radial-gradient(circle at 84px 118px, rgba(0, 88, 120, 0.84) 0 1.35px, transparent 1.95px),
+    radial-gradient(circle at 132px 64px, rgba(43, 56, 73, 0.76) 0 1px, transparent 1.6px),
+    radial-gradient(circle at 226px 192px, rgba(0, 105, 138, 0.82) 0 1.4px, transparent 2px);
+  background-position:
+    0 0,
+    34px 18px,
+    72px 48px,
+    18px 96px;
+  background-size:
+    156px 218px,
+    244px 312px,
+    318px 386px,
+    402px 514px;
+  opacity: var(--cafe-sidebar-star-opacity);
+  animation: cafe-sidebar-star-drift 60s linear infinite;
+}
+
+.cafe-followup-queue::after {
+  background:
+    radial-gradient(ellipse at 16% 24%, rgba(16, 184, 214, 0.26), transparent 36%),
+    radial-gradient(ellipse at 82% 80%, rgba(132, 142, 156, 0.22), transparent 38%),
+    linear-gradient(132deg, transparent 20%, rgba(76, 176, 205, 0.14) 48%, transparent 70%);
+  opacity: 0.5;
+  animation: cafe-sidebar-nebula-drift 23.333s ease-in-out infinite alternate;
+}
+
+.dark .cafe-followup-queue {
+  background:
+    radial-gradient(110% 140% at 12% -20%, rgba(72, 207, 255, 0.23), transparent 46%),
+    radial-gradient(100% 120% at 100% 130%, rgba(166, 176, 188, 0.19), transparent 50%),
+    color-mix(in srgb, var(--card) 72%, transparent);
+}
+
+.dark .cafe-followup-queue::before {
+  --cafe-sidebar-star-opacity: 0.58;
+
+  background-image:
+    radial-gradient(circle at 18px 28px, rgba(255, 255, 255, 0.9) 0 1.25px, transparent 1.8px),
+    radial-gradient(circle at 84px 118px, rgba(109, 236, 255, 0.9) 0 1.35px, transparent 1.95px),
+    radial-gradient(circle at 132px 64px, rgba(176, 184, 196, 0.72) 0 1px, transparent 1.6px),
+    radial-gradient(circle at 226px 192px, rgba(84, 204, 232, 0.84) 0 1.4px, transparent 2px);
+}
+
+.dark .cafe-followup-queue::after {
+  background:
+    radial-gradient(ellipse at 16% 24%, rgba(40, 214, 255, 0.26), transparent 36%),
+    radial-gradient(ellipse at 82% 80%, rgba(168, 178, 190, 0.22), transparent 38%),
+    linear-gradient(132deg, transparent 20%, rgba(109, 236, 255, 0.12) 48%, transparent 70%);
+  opacity: 0.58;
+  mix-blend-mode: screen;
+}
+
+.cafe-followup-steer-button {
+  color: color-mix(in srgb, rgb(43 56 73) 74%, var(--muted-foreground));
+}
+
+.cafe-followup-steer-button:hover {
+  color: rgb(0 105 138);
+  background-color: rgba(68, 190, 218, 0.08);
+}
+
+.dark .cafe-followup-steer-button {
+  color: rgba(176, 184, 196, 0.74);
+}
+
+.dark .cafe-followup-steer-button:hover {
+  color: rgb(109, 236, 255);
+  background-color: rgba(109, 236, 255, 0.08);
+}
+
+html[data-cafe-visibility="hidden"] .cafe-followup-queue::before,
+html[data-cafe-visibility="hidden"] .cafe-followup-queue::after,
+html[data-cafe-window-focus="blurred"] .cafe-thread-sidebar [data-slot="sidebar-inner"]::before,
+html[data-cafe-window-focus="blurred"] .cafe-thread-sidebar [data-slot="sidebar-inner"]::after,
+html[data-cafe-window-focus="blurred"] .cafe-followup-queue::before,
+html[data-cafe-window-focus="blurred"] .cafe-followup-queue::after {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cafe-thread-sidebar [data-slot="sidebar-inner"]::before,
+  .cafe-thread-sidebar [data-slot="sidebar-inner"]::after,
+  .cafe-followup-queue::before,
+  .cafe-followup-queue::after {
+    animation: none;
+  }
+}
+
+@keyframes cafe-shutdown-star-drift {
+  from {
+    transform: translate3d(0, 0, 0) rotate(0deg);
+  }
+  to {
+    transform: translate3d(-58px, -76px, 0) rotate(0.001deg);
+  }
+}
+
+@keyframes cafe-shutdown-nebula-drift {
+  0% {
+    opacity: 0.5;
+    transform: translate3d(-1.5%, 1%, 0) scale(1);
+  }
+  50% {
+    opacity: 0.72;
+    transform: translate3d(1.5%, -1.5%, 0) scale(1.04);
+  }
+  100% {
+    opacity: 0.56;
+    transform: translate3d(1%, 1.5%, 0) scale(1.02);
+  }
+}
+
+@keyframes cafe-shutdown-spinner-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes cafe-shutdown-spinner-pulse {
+  0%,
+  100% {
+    opacity: 0.58;
+    transform: scale(0.9);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+}
+
+@keyframes cafe-shutdown-heart-glow {
+  0%,
+  100% {
+    text-shadow:
+      0 0 8px rgba(51, 213, 242, 0.42),
+      0 0 18px rgba(51, 213, 242, 0.18);
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    text-shadow:
+      0 0 12px rgba(51, 213, 242, 0.72),
+      0 0 28px rgba(51, 213, 242, 0.34);
+    transform: translateY(-0.5px) scale(1.08);
+  }
+}
+
+.cafe-shutdown-overlay {
+  isolation: isolate;
+  overflow: hidden;
+  background:
+    radial-gradient(90% 78% at 50% 12%, rgba(51, 213, 242, 0.16), transparent 54%),
+    radial-gradient(80% 74% at 22% 86%, rgba(135, 145, 160, 0.16), transparent 50%),
+    rgba(237, 241, 245, 0.78);
+  backdrop-filter: blur(20px) saturate(0.86);
+}
+
+.cafe-shutdown-overlay::before,
+.cafe-shutdown-overlay::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.cafe-shutdown-overlay::before {
+  inset: -26% -20%;
+  background-image:
+    radial-gradient(circle at 18px 28px, rgba(71, 83, 98, 0.38) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 84px 118px, rgba(0, 166, 205, 0.36) 0 1.1px, transparent 1.7px),
+    radial-gradient(circle at 132px 64px, rgba(143, 154, 168, 0.38) 0 0.85px, transparent 1.4px),
+    radial-gradient(circle at 226px 192px, rgba(39, 190, 220, 0.34) 0 1.2px, transparent 1.8px),
+    radial-gradient(circle at 304px 42px, rgba(91, 104, 120, 0.26) 0 0.75px, transparent 1.3px);
+  background-position:
+    0 0,
+    34px 18px,
+    72px 48px,
+    18px 96px,
+    116px 34px;
+  background-size:
+    156px 218px,
+    244px 312px,
+    318px 386px,
+    402px 514px,
+    496px 620px;
+  opacity: 0.5;
+  animation: cafe-shutdown-star-drift 44s linear infinite;
+  will-change: transform;
+}
+
+.cafe-shutdown-overlay::after {
+  inset: -18% -16%;
+  background:
+    radial-gradient(ellipse at 28% 30%, rgba(39, 206, 236, 0.2), transparent 34%),
+    radial-gradient(ellipse at 74% 72%, rgba(129, 140, 155, 0.18), transparent 40%),
+    radial-gradient(ellipse at 68% 16%, rgba(216, 226, 236, 0.3), transparent 34%),
+    linear-gradient(132deg, transparent 24%, rgba(52, 196, 224, 0.12) 52%, transparent 74%);
+  opacity: 0.58;
+  animation: cafe-shutdown-nebula-drift 18s ease-in-out infinite alternate;
+  will-change: transform, opacity;
+}
+
+.cafe-shutdown-panel {
+  z-index: 1;
+  width: min(19rem, calc(100vw - 3rem));
+  border: 1px solid rgba(121, 134, 150, 0.24);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(246, 249, 252, 0.72)),
+    rgba(246, 249, 252, 0.82);
+  box-shadow:
+    0 28px 84px rgba(47, 57, 70, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.68);
+  backdrop-filter: blur(22px) saturate(1.04);
+}
+
+.cafe-shutdown-spinner {
+  position: relative;
+  display: grid;
+  width: 4rem;
+  height: 4rem;
+  place-items: center;
+  filter: drop-shadow(0 0 14px rgba(51, 213, 242, 0.22));
+}
+
+.cafe-shutdown-spinner::before {
+  content: "";
+  position: absolute;
+  width: 1.05rem;
+  height: 1.05rem;
+  border-radius: 999px;
+  background: radial-gradient(circle, #f7fdff 0 22%, #33d5f2 42%, rgba(51, 213, 242, 0) 74%);
+  animation: cafe-shutdown-spinner-pulse 1.7s ease-in-out infinite;
+}
+
+.cafe-shutdown-spinner span {
+  position: absolute;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  animation: cafe-shutdown-spinner-spin 1.4s cubic-bezier(0.62, 0.04, 0.36, 1) infinite;
+}
+
+.cafe-shutdown-spinner span:nth-child(1) {
+  inset: 0;
+  border-top-color: rgba(51, 213, 242, 0.95);
+  border-right-color: rgba(145, 154, 168, 0.58);
+}
+
+.cafe-shutdown-spinner span:nth-child(2) {
+  inset: 0.45rem;
+  border-bottom-color: rgba(51, 213, 242, 0.74);
+  border-left-color: rgba(111, 123, 140, 0.48);
+  animation-duration: 1.95s;
+  animation-direction: reverse;
+}
+
+.cafe-shutdown-spinner span:nth-child(3) {
+  inset: 0.95rem;
+  border-top-color: rgba(151, 161, 174, 0.58);
+  border-right-color: rgba(51, 213, 242, 0.5);
+  animation-duration: 2.55s;
+}
+
+.cafe-shutdown-heart {
+  color: #33d5f2;
+  line-height: 1;
+  animation: cafe-shutdown-heart-glow 2s ease-in-out infinite;
+}
+
+.dark .cafe-shutdown-overlay {
+  background:
+    radial-gradient(92% 80% at 50% 12%, rgba(51, 213, 242, 0.18), transparent 56%),
+    radial-gradient(82% 76% at 20% 86%, rgba(162, 170, 181, 0.14), transparent 52%),
+    rgba(11, 12, 14, 0.82);
+}
+
+.dark .cafe-shutdown-overlay::before {
+  background-image:
+    radial-gradient(circle at 18px 28px, rgba(255, 255, 255, 0.82) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 84px 118px, rgba(112, 233, 255, 0.78) 0 1.1px, transparent 1.7px),
+    radial-gradient(circle at 132px 64px, rgba(184, 192, 204, 0.62) 0 0.85px, transparent 1.4px),
+    radial-gradient(circle at 226px 192px, rgba(75, 211, 238, 0.68) 0 1.2px, transparent 1.8px),
+    radial-gradient(circle at 304px 42px, rgba(220, 226, 235, 0.48) 0 0.75px, transparent 1.3px);
+  opacity: 0.48;
+}
+
+.dark .cafe-shutdown-overlay::after {
+  background:
+    radial-gradient(ellipse at 28% 30%, rgba(39, 206, 236, 0.22), transparent 34%),
+    radial-gradient(ellipse at 74% 72%, rgba(172, 181, 192, 0.16), transparent 40%),
+    radial-gradient(ellipse at 68% 16%, rgba(215, 225, 235, 0.09), transparent 34%),
+    linear-gradient(132deg, transparent 24%, rgba(112, 233, 255, 0.1) 52%, transparent 74%);
+  opacity: 0.62;
+  mix-blend-mode: screen;
+}
+
+.dark .cafe-shutdown-panel {
+  border-color: rgba(235, 241, 248, 0.11);
+  background:
+    linear-gradient(180deg, rgba(33, 34, 37, 0.78), rgba(20, 21, 23, 0.7)), rgba(17, 18, 20, 0.78);
+  box-shadow:
+    0 30px 90px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cafe-shutdown-overlay::before,
+  .cafe-shutdown-overlay::after,
+  .cafe-shutdown-spinner::before,
+  .cafe-shutdown-spinner span,
+  .cafe-shutdown-heart {
+    animation: none;
+  }
+}
+
 pre,
 code {
   font-family: "SF Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
@@ -241,20 +763,6 @@ code {
 
 .turn-chip-strip::-webkit-scrollbar {
   display: none;
-}
-
-/* Terminal drawer scrollbar parity with chat */
-.thread-terminal-drawer .xterm .xterm-scrollable-element > .scrollbar.vertical {
-  width: 6px !important;
-}
-
-.thread-terminal-drawer .xterm .xterm-scrollable-element > .scrollbar > .slider {
-  border-radius: 3px;
-}
-
-.thread-terminal-drawer .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider {
-  width: 6px !important;
-  left: 0 !important;
 }
 
 /* Reasoning select -- clickable label surface */

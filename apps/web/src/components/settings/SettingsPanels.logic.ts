@@ -1,8 +1,11 @@
 import type {
+  EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceConfig,
   ProviderInstanceId,
+  ScopedThreadRef,
   ServerSettings,
+  ThreadId,
   UnifiedSettings,
 } from "@cafecode/contracts";
 import { DEFAULT_UNIFIED_SETTINGS } from "@cafecode/contracts/settings";
@@ -88,4 +91,35 @@ export function buildProviderInstanceUpdatePatch(input: {
       ? { textGenerationModelSelection: input.textGenerationModelSelection }
       : {}),
   };
+}
+
+export type RecentlyDeletedThreadGroupForBulkAction = {
+  readonly project: {
+    readonly environmentId: EnvironmentId;
+  };
+  readonly threads: ReadonlyArray<{
+    readonly id: ThreadId;
+    readonly environmentId?: EnvironmentId | undefined;
+  }>;
+};
+
+export function collectRecentlyDeletedThreadRefs(
+  groups: ReadonlyArray<RecentlyDeletedThreadGroupForBulkAction>,
+): ReadonlyArray<ScopedThreadRef> {
+  return groups.flatMap((group) =>
+    group.threads.map((thread) => ({
+      environmentId: thread.environmentId ?? group.project.environmentId,
+      threadId: thread.id,
+    })),
+  );
+}
+
+export function buildEmptyRecycleBinConfirmationMessage(threadCount: number): string {
+  const threadLabel = threadCount === 1 ? "thread" : "threads";
+  return [
+    `Delete ${threadCount} ${threadLabel} forever?`,
+    "This removes local chat history, activity, provider session mappings, attachments, and checkpoint metadata for every thread in the Recycle Bin.",
+    "",
+    "This cannot be undone.",
+  ].join("\n");
 }

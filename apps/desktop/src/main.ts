@@ -21,6 +21,7 @@ import * as ElectronMenu from "./electron/ElectronMenu.ts";
 import * as ElectronProtocol from "./electron/ElectronProtocol.ts";
 import * as DesktopSecretStorage from "./electron/ElectronSafeStorage.ts";
 import * as ElectronShell from "./electron/ElectronShell.ts";
+import * as ElectronPowerSaveBlocker from "./electron/ElectronPowerSaveBlocker.ts";
 import * as ElectronTheme from "./electron/ElectronTheme.ts";
 import * as ElectronUpdater from "./electron/ElectronUpdater.ts";
 import * as ElectronWindow from "./electron/ElectronWindow.ts";
@@ -33,13 +34,13 @@ import * as DesktopBackendManager from "./backend/DesktopBackendManager.ts";
 import * as DesktopEnvironment from "./app/DesktopEnvironment.ts";
 import * as DesktopLifecycle from "./app/DesktopLifecycle.ts";
 import * as DesktopObservability from "./app/DesktopObservability.ts";
+import * as DesktopPowerSaveBlocker from "./app/DesktopPowerSaveBlocker.ts";
 import * as DesktopServerExposure from "./backend/DesktopServerExposure.ts";
 import * as DesktopClientSettings from "./settings/DesktopClientSettings.ts";
 import * as DesktopSavedEnvironments from "./settings/DesktopSavedEnvironments.ts";
 import * as DesktopAppSettings from "./settings/DesktopAppSettings.ts";
 import * as DesktopShellEnvironment from "./shell/DesktopShellEnvironment.ts";
 import * as DesktopSshEnvironment from "./ssh/DesktopSshEnvironment.ts";
-import * as DesktopSshPasswordPrompts from "./ssh/DesktopSshPasswordPrompts.ts";
 import * as DesktopSshRemoteApi from "./ssh/DesktopSshRemoteApi.ts";
 import * as DesktopState from "./app/DesktopState.ts";
 import * as DesktopUpdates from "./updates/DesktopUpdates.ts";
@@ -100,6 +101,7 @@ const electronLayer = Layer.mergeAll(
   ElectronProtocol.layer,
   DesktopSecretStorage.layer,
   ElectronShell.layer,
+  ElectronPowerSaveBlocker.layer,
   ElectronTheme.layer,
   ElectronUpdater.layer,
   ElectronWindow.layer,
@@ -114,11 +116,10 @@ const desktopFoundationLayer = Layer.mergeAll(
   DesktopSavedEnvironments.layer,
   DesktopAssets.layer,
   DesktopObservability.layer,
+  DesktopPowerSaveBlocker.layer,
 ).pipe(Layer.provideMerge(desktopEnvironmentLayer));
 
-const desktopSshLayer = Layer.mergeAll(desktopSshEnvironmentLayer, DesktopSshRemoteApi.layer).pipe(
-  Layer.provideMerge(DesktopSshPasswordPrompts.layer()),
-);
+const desktopSshLayer = Layer.mergeAll(desktopSshEnvironmentLayer, DesktopSshRemoteApi.layer);
 
 const desktopServerExposureLayer = DesktopServerExposure.layer.pipe(
   Layer.provideMerge(DesktopServerExposure.networkInterfacesLayer),

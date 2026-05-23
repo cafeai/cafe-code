@@ -7,8 +7,9 @@ import {
   useLocalStorage,
 } from "./hooks/useLocalStorage";
 
-export const PROVIDER_UPDATE_DISMISSALS_STORAGE_KEY = "cafecode:provider-update-dismissals:v1";
-export const LEGACY_PROVIDER_UPDATE_DISMISSALS_STORAGE_KEY = "t3code:provider-update-dismissals:v1";
+export const PROVIDER_UPDATE_DISMISSALS_STORAGE_KEY = "cafe-code:provider-update-dismissals:v1";
+export const LEGACY_PROVIDER_UPDATE_DISMISSALS_STORAGE_KEY =
+  "cafecode:provider-update-dismissals:v1";
 
 const ProviderUpdateDismissalsSchema = Schema.Struct({
   keys: Schema.Array(Schema.String),

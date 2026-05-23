@@ -79,7 +79,6 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
    * model set but are free to diverge via customModels).
    */
   modelOptionsByInstance: ReadonlyMap<ProviderInstanceId, ReadonlyArray<ModelEsque>>;
-  terminalOpen: boolean;
   onRequestClose?: () => void;
   onInstanceModelChange: (instanceId: ProviderInstanceId, model: string) => void;
 }) {
@@ -416,11 +415,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   const modelJumpShortcutContext = useMemo(
     () =>
       ({
-        terminalFocus: false,
-        terminalOpen: props.terminalOpen,
         modelPickerOpen: true,
       }) as const,
-    [props.terminalOpen],
+    [],
   );
   const modelJumpLabelByKey = useMemo((): ReadonlyMap<string, string> => {
     if (modelJumpCommandByKey.size === 0) {

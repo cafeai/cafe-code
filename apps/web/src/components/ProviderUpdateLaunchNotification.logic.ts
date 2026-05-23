@@ -362,7 +362,7 @@ function getUpdateFinishedAt(provider: ServerProvider): string | null {
   return provider.updateState?.finishedAt ?? null;
 }
 
-function isRecentTerminalProvider(
+function isRecentCompletedProviderUpdate(
   provider: ServerProvider,
   visibleAfterIso: string | undefined,
 ): boolean {
@@ -414,17 +414,17 @@ export function getProviderUpdateSidebarPillView(
     };
   }
 
-  const recentTerminalProviders = dedupedProviders.filter((provider) =>
-    isRecentTerminalProvider(provider, options?.visibleAfterIso),
+  const recentCompletedProviders = dedupedProviders.filter((provider) =>
+    isRecentCompletedProviderUpdate(provider, options?.visibleAfterIso),
   );
-  const terminalCandidates: ProviderUpdateSidebarPillView[] = [];
+  const completedUpdateCandidates: ProviderUpdateSidebarPillView[] = [];
 
-  const failedProviders = recentTerminalProviders.filter(
+  const failedProviders = recentCompletedProviders.filter(
     (provider) => provider.updateState?.status === "failed",
   );
   if (failedProviders.length > 0) {
     const failedProvider = failedProviders[0]!;
-    terminalCandidates.push({
+    completedUpdateCandidates.push({
       key: `failed:${failedProviders
         .map(
           (provider) =>
@@ -442,14 +442,14 @@ export function getProviderUpdateSidebarPillView(
     });
   }
 
-  const unchangedProviders = recentTerminalProviders.filter(
+  const unchangedProviders = recentCompletedProviders.filter(
     (provider) => provider.updateState?.status === "unchanged",
   );
   if (unchangedProviders.length > 0) {
     const unchangedProvider = unchangedProviders[0]!;
     const unchangedProviderName =
       PROVIDER_DISPLAY_NAMES[unchangedProvider.driver] ?? unchangedProvider.driver;
-    terminalCandidates.push({
+    completedUpdateCandidates.push({
       key: `unchanged:${unchangedProviders
         .map(
           (provider) =>
@@ -469,12 +469,12 @@ export function getProviderUpdateSidebarPillView(
     });
   }
 
-  const succeededProviders = recentTerminalProviders.filter(
+  const succeededProviders = recentCompletedProviders.filter(
     (provider) => provider.updateState?.status === "succeeded",
   );
   if (succeededProviders.length > 0) {
     const succeededProvider = succeededProviders[0]!;
-    terminalCandidates.push({
+    completedUpdateCandidates.push({
       key: `succeeded:${succeededProviders
         .map(
           (provider) =>
@@ -493,7 +493,7 @@ export function getProviderUpdateSidebarPillView(
   }
 
   return (
-    terminalCandidates
+    completedUpdateCandidates
       .toSorted((left, right) => {
         const leftProviders =
           left.tone === "error"

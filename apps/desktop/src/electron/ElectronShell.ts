@@ -22,6 +22,7 @@ export function parseSafeExternalUrl(rawUrl: unknown): Option.Option<string> {
 
 export interface ElectronShellShape {
   readonly openExternal: (rawUrl: unknown) => Effect.Effect<boolean>;
+  readonly openPath: (rawPath: unknown) => Effect.Effect<boolean>;
   readonly copyText: (text: string) => Effect.Effect<void>;
 }
 
@@ -41,6 +42,15 @@ const make = ElectronShell.of({
           ),
         ),
     }),
+  openPath: (rawPath) =>
+    typeof rawPath !== "string" || rawPath.length === 0 || rawPath.includes("\0")
+      ? Effect.succeed(false)
+      : Effect.promise(() =>
+          Electron.shell.openPath(rawPath).then(
+            (errorMessage) => errorMessage.length === 0,
+            () => false,
+          ),
+        ),
   copyText: (text) =>
     Effect.sync(() => {
       Electron.clipboard.writeText(text);

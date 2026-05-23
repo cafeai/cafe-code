@@ -1,4 +1,8 @@
-import type { AuthClientMetadata, AuthClientSession, AuthPairingLink } from "@cafecode/contracts";
+import type {
+  AuthClientMetadata,
+  AuthClientSession,
+  AuthPairingLink,
+} from "@cafecode/contracts/auth";
 import * as DateTime from "effect/DateTime";
 
 import type { IssuedBearerSession, IssuedPairingLink } from "./auth/Services/AuthControlPlane.ts";

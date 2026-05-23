@@ -1278,6 +1278,9 @@ function applyEnvironmentOrchestrationEvent(
     case "thread.deleted":
       return removeThreadState(state, event.payload.threadId);
 
+    case "thread.restored":
+      return state;
+
     case "thread.archived":
       return updateThreadState(state, event.payload.threadId, (thread) => ({
         ...thread,
@@ -1292,9 +1295,10 @@ function applyEnvironmentOrchestrationEvent(
         updatedAt: event.payload.updatedAt,
       }));
 
-    case "thread.meta-updated":
-      return updateThreadState(state, event.payload.threadId, (thread) => ({
+    case "thread.meta-updated": {
+      const nextState = updateThreadState(state, event.payload.threadId, (thread) => ({
         ...thread,
+        ...(event.payload.projectId !== undefined ? { projectId: event.payload.projectId } : {}),
         ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
         ...(event.payload.modelSelection !== undefined
           ? { modelSelection: normalizeModelSelection(event.payload.modelSelection) }
@@ -1305,6 +1309,30 @@ function applyEnvironmentOrchestrationEvent(
           : {}),
         updatedAt: event.payload.updatedAt,
       }));
+      const currentSummary = nextState.sidebarThreadSummaryById[event.payload.threadId];
+      if (!currentSummary) {
+        return nextState;
+      }
+      const nextSummary: SidebarThreadSummary = {
+        ...currentSummary,
+        ...(event.payload.projectId !== undefined ? { projectId: event.payload.projectId } : {}),
+        ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
+        ...(event.payload.branch !== undefined ? { branch: event.payload.branch } : {}),
+        ...(event.payload.worktreePath !== undefined
+          ? { worktreePath: event.payload.worktreePath }
+          : {}),
+        updatedAt: event.payload.updatedAt,
+      };
+      return sidebarThreadSummariesEqual(currentSummary, nextSummary)
+        ? nextState
+        : {
+            ...nextState,
+            sidebarThreadSummaryById: {
+              ...nextState.sidebarThreadSummaryById,
+              [event.payload.threadId]: nextSummary,
+            },
+          };
+    }
 
     case "thread.runtime-mode-set":
       return updateThreadState(state, event.payload.threadId, (thread) => ({
@@ -1411,32 +1439,41 @@ function applyEnvironmentOrchestrationEvent(
           event.payload.role === "assistant" &&
           event.payload.turnId !== null &&
           (thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId)
-            ? buildLatestTurn({
-                previous: thread.latestTurn,
-                turnId: event.payload.turnId,
-                state: event.payload.streaming
-                  ? "running"
-                  : thread.latestTurn?.state === "interrupted"
-                    ? "interrupted"
-                    : thread.latestTurn?.state === "error"
-                      ? "error"
-                      : "completed",
-                requestedAt:
-                  thread.latestTurn?.turnId === event.payload.turnId
-                    ? thread.latestTurn.requestedAt
-                    : event.payload.createdAt,
-                startedAt:
-                  thread.latestTurn?.turnId === event.payload.turnId
-                    ? (thread.latestTurn.startedAt ?? event.payload.createdAt)
-                    : event.payload.createdAt,
-                sourceProposedPlan: thread.pendingSourceProposedPlan,
-                completedAt: event.payload.streaming
-                  ? thread.latestTurn?.turnId === event.payload.turnId
-                    ? (thread.latestTurn.completedAt ?? null)
-                    : null
-                  : event.payload.updatedAt,
-                assistantMessageId: event.payload.messageId,
-              })
+            ? (() => {
+                const sessionIsStillRunningThisTurn =
+                  thread.session?.orchestrationStatus === "running" &&
+                  thread.session.activeTurnId === event.payload.turnId;
+                const shouldHoldTurnOpen = event.payload.streaming || sessionIsStillRunningThisTurn;
+                return buildLatestTurn({
+                  previous: thread.latestTurn,
+                  turnId: event.payload.turnId,
+                  state: shouldHoldTurnOpen
+                    ? thread.latestTurn?.state === "error" ||
+                      thread.latestTurn?.state === "interrupted"
+                      ? thread.latestTurn.state
+                      : "running"
+                    : thread.latestTurn?.state === "interrupted"
+                      ? "interrupted"
+                      : thread.latestTurn?.state === "error"
+                        ? "error"
+                        : "completed",
+                  requestedAt:
+                    thread.latestTurn?.turnId === event.payload.turnId
+                      ? thread.latestTurn.requestedAt
+                      : event.payload.createdAt,
+                  startedAt:
+                    thread.latestTurn?.turnId === event.payload.turnId
+                      ? (thread.latestTurn.startedAt ?? event.payload.createdAt)
+                      : event.payload.createdAt,
+                  sourceProposedPlan: thread.pendingSourceProposedPlan,
+                  completedAt: shouldHoldTurnOpen
+                    ? thread.latestTurn?.turnId === event.payload.turnId
+                      ? (thread.latestTurn.completedAt ?? null)
+                      : null
+                    : event.payload.updatedAt,
+                  assistantMessageId: event.payload.messageId,
+                });
+              })()
             : thread.latestTurn;
         return {
           ...thread,
@@ -1542,16 +1579,31 @@ function applyEnvironmentOrchestrationEvent(
           .slice(-MAX_THREAD_CHECKPOINTS);
         const latestTurn =
           thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId
-            ? buildLatestTurn({
-                previous: thread.latestTurn,
-                turnId: event.payload.turnId,
-                state: checkpointStatusToLatestTurnState(event.payload.status),
-                requestedAt: thread.latestTurn?.requestedAt ?? event.payload.completedAt,
-                startedAt: thread.latestTurn?.startedAt ?? event.payload.completedAt,
-                completedAt: event.payload.completedAt,
-                assistantMessageId: event.payload.assistantMessageId,
-                sourceProposedPlan: thread.pendingSourceProposedPlan,
-              })
+            ? (() => {
+                const shouldHoldTurnOpen =
+                  event.payload.status !== "error" &&
+                  ((thread.session?.activeTurnId === event.payload.turnId &&
+                    thread.session.orchestrationStatus !== "error" &&
+                    thread.session.orchestrationStatus !== "interrupted" &&
+                    thread.session.orchestrationStatus !== "stopped") ||
+                    (thread.latestTurn?.turnId === event.payload.turnId &&
+                      thread.latestTurn.state === "running" &&
+                      thread.latestTurn.completedAt === null));
+                return buildLatestTurn({
+                  previous: thread.latestTurn,
+                  turnId: event.payload.turnId,
+                  state: shouldHoldTurnOpen
+                    ? "running"
+                    : checkpointStatusToLatestTurnState(event.payload.status),
+                  requestedAt: thread.latestTurn?.requestedAt ?? event.payload.completedAt,
+                  startedAt: thread.latestTurn?.startedAt ?? event.payload.completedAt,
+                  completedAt: shouldHoldTurnOpen
+                    ? (thread.latestTurn?.completedAt ?? null)
+                    : event.payload.completedAt,
+                  assistantMessageId: event.payload.assistantMessageId,
+                  sourceProposedPlan: thread.pendingSourceProposedPlan,
+                });
+              })()
             : thread.latestTurn;
         return {
           ...thread,
@@ -1770,6 +1822,30 @@ export function selectSidebarThreadsAcrossEnvironments(state: AppState): Sidebar
       return thread && thread.environmentId === environmentId ? [thread] : [];
     }),
   );
+}
+
+export function selectAnyThreadRunning(state: AppState): boolean {
+  for (const [, environmentState] of getEnvironmentEntries(state)) {
+    for (const threadId of environmentState.threadIds) {
+      const session =
+        environmentState.threadSessionById[threadId] ??
+        environmentState.sidebarThreadSummaryById[threadId]?.session ??
+        null;
+      if (session?.status === "running" || session?.orchestrationStatus === "running") {
+        return true;
+      }
+
+      const latestTurn =
+        environmentState.threadTurnStateById[threadId]?.latestTurn ??
+        environmentState.sidebarThreadSummaryById[threadId]?.latestTurn ??
+        null;
+      if (latestTurn?.state === "running") {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 export function selectSidebarThreadsForProjectRef(

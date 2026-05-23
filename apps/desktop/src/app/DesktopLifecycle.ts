@@ -1,5 +1,6 @@
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
@@ -11,9 +12,11 @@ import type * as Electron from "electron";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopObservability from "./DesktopObservability.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
+import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as DesktopState from "./DesktopState.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
+import * as IpcChannels from "../ipc/channels.ts";
 
 export interface DesktopShutdownShape {
   readonly request: Effect.Effect<void>;
@@ -52,7 +55,8 @@ export type DesktopLifecycleRuntimeServices =
   | DesktopState.DesktopState
   | DesktopWindow.DesktopWindow
   | ElectronApp.ElectronApp
-  | ElectronTheme.ElectronTheme;
+  | ElectronTheme.ElectronTheme
+  | ElectronWindow.ElectronWindow;
 
 export interface DesktopLifecycleShape {
   readonly relaunch: (
@@ -67,6 +71,8 @@ export class DesktopLifecycle extends Context.Service<DesktopLifecycle, DesktopL
 
 const { logInfo: logLifecycleInfo, logError: logLifecycleError } =
   DesktopObservability.makeComponentLogger("desktop-lifecycle");
+
+export const DESKTOP_SHUTDOWN_OVERLAY_MINIMUM_DWELL = Duration.seconds(3);
 
 function addScopedListener<Args extends ReadonlyArray<unknown>>(
   target: unknown,
@@ -97,10 +103,24 @@ const requestDesktopShutdownAndWait = Effect.fn("desktop.lifecycle.requestShutdo
   },
 );
 
+const requestDesktopShutdownAndWaitAfterOverlay = Effect.fn(
+  "desktop.lifecycle.requestShutdownAndWaitAfterOverlay",
+)(function* (): Effect.fn.Return<void, never, DesktopShutdown> {
+  const shutdown = yield* DesktopShutdown;
+  yield* shutdown.request;
+  yield* Effect.all(
+    [shutdown.awaitComplete, Effect.sleep(DESKTOP_SHUTDOWN_OVERLAY_MINIMUM_DWELL)],
+    {
+      concurrency: "unbounded",
+    },
+  ).pipe(Effect.asVoid);
+});
+
 function handleBeforeQuit(
   event: Electron.Event,
   runEffect: <A, E>(effect: Effect.Effect<A, E, DesktopLifecycleRuntimeServices>) => Promise<A>,
   allowQuit: () => boolean,
+  beginShutdown: () => boolean,
   markQuitAllowed: () => void,
 ): void {
   if (allowQuit()) {
@@ -115,12 +135,18 @@ function handleBeforeQuit(
   }
 
   event.preventDefault();
+  if (!beginShutdown()) {
+    return;
+  }
+
   void runEffect(
     Effect.gen(function* () {
       const state = yield* DesktopState.DesktopState;
+      const electronWindow = yield* ElectronWindow.ElectronWindow;
       yield* Ref.set(state.quitting, true);
       yield* logLifecycleInfo("before-quit received");
-      yield* requestDesktopShutdownAndWait();
+      yield* electronWindow.sendAll(IpcChannels.MENU_ACTION_CHANNEL, "desktop-shutdown-started");
+      yield* requestDesktopShutdownAndWaitAfterOverlay();
     }).pipe(Effect.withSpan("desktop.lifecycle.beforeQuit")),
   ).finally(() => {
     markQuitAllowed();
@@ -190,6 +216,7 @@ export const layer = Layer.succeed(
       const context = yield* Effect.context<DesktopLifecycleRuntimeServices>();
       const runEffect = Effect.runPromiseWith(context);
       let quitAllowed = false;
+      let shutdownInProgress = false;
       yield* electronTheme.onUpdated(() => {
         void runEffect(
           desktopWindow.syncAppearance.pipe(Effect.withSpan("desktop.lifecycle.themeUpdated")),
@@ -200,6 +227,13 @@ export const layer = Layer.succeed(
           event,
           runEffect,
           () => quitAllowed,
+          () => {
+            if (shutdownInProgress) {
+              return false;
+            }
+            shutdownInProgress = true;
+            return true;
+          },
           () => {
             quitAllowed = true;
           },

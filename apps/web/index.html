@@ -18,8 +18,8 @@
         const themeColorMeta = document.querySelector('meta[name="theme-color"]');
         try {
           const storedTheme =
-            window.localStorage.getItem("cafecode:theme") ||
-            window.localStorage.getItem("t3code:theme");
+            window.localStorage.getItem("cafe-code:theme") ||
+            window.localStorage.getItem("cafecode:theme");
           const theme =
             storedTheme === "light" || storedTheme === "dark" || storedTheme === "system"
               ? storedTheme

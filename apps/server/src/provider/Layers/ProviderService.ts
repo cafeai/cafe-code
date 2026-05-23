@@ -19,6 +19,8 @@ import {
   ProviderSendTurnInput,
   ProviderSessionStartInput,
   ProviderStopSessionInput,
+  type TurnId,
+  type ProviderSessionRuntimeStatus,
   type ProviderInstanceId,
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
@@ -160,6 +162,81 @@ function readPersistedCwd(
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function runtimeStatusFromEvent(
+  event: ProviderRuntimeEvent,
+): ProviderSessionRuntimeStatus | undefined {
+  const payload: Record<string, unknown> = isRecord(event.payload) ? event.payload : {};
+  const state = typeof payload.state === "string" ? payload.state : undefined;
+
+  switch (event.type) {
+    case "session.state.changed":
+      if (state === "starting") return "starting";
+      if (state === "error") return "error";
+      return "running";
+    case "session.started":
+    case "thread.started":
+    case "turn.started":
+      return "running";
+    case "turn.completed":
+      return state === "failed" ? "error" : "running";
+    case "turn.aborted":
+      return "running";
+    case "session.exited":
+      return "stopped";
+    case "runtime.error":
+      return "error";
+    default:
+      return undefined;
+  }
+}
+
+function runtimeActiveTurnIdFromEvent(event: ProviderRuntimeEvent): TurnId | null | undefined {
+  switch (event.type) {
+    case "turn.started":
+      return event.turnId ?? null;
+    case "turn.completed":
+    case "turn.aborted":
+    case "session.exited":
+      return null;
+    case "runtime.error":
+      return event.turnId ?? null;
+    default:
+      return undefined;
+  }
+}
+
+function runtimeLastErrorFromEvent(event: ProviderRuntimeEvent): string | null | undefined {
+  const payload: Record<string, unknown> = isRecord(event.payload) ? event.payload : {};
+  switch (event.type) {
+    case "session.state.changed":
+      if (payload.state !== "error") return undefined;
+      return typeof payload.reason === "string" && payload.reason.trim().length > 0
+        ? payload.reason
+        : "Provider session error";
+    case "turn.completed":
+      if (payload.state !== "failed") return null;
+      return typeof payload.errorMessage === "string" && payload.errorMessage.trim().length > 0
+        ? payload.errorMessage
+        : "Turn failed";
+    case "turn.aborted":
+      return typeof payload.reason === "string" && payload.reason.trim().length > 0
+        ? payload.reason
+        : "Turn aborted";
+    case "runtime.error":
+      return typeof payload.message === "string" && payload.message.trim().length > 0
+        ? payload.message
+        : "Provider runtime error";
+    case "session.exited":
+      return null;
+    default:
+      return undefined;
+  }
+}
+
 const dieOnMissingBindingInstanceId = (
   operation: string,
   payload: {
@@ -276,12 +353,56 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   ): Effect.Effect<void> =>
     Effect.sync(() => correlateRuntimeEventWithInstance(source, event)).pipe(
       Effect.flatMap((canonicalEvent) =>
-        increment(providerRuntimeEventsTotal, {
-          provider: canonicalEvent.provider,
-          eventType: canonicalEvent.type,
-        }).pipe(Effect.andThen(publishRuntimeEvent(canonicalEvent))),
+        persistRuntimeLifecycleEvent(canonicalEvent).pipe(
+          Effect.andThen(
+            increment(providerRuntimeEventsTotal, {
+              provider: canonicalEvent.provider,
+              eventType: canonicalEvent.type,
+            }),
+          ),
+          Effect.andThen(publishRuntimeEvent(canonicalEvent)),
+        ),
       ),
     );
+
+  const persistRuntimeLifecycleEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> => {
+    const status = runtimeStatusFromEvent(event);
+    if (status === undefined || event.providerInstanceId === undefined) {
+      return Effect.void;
+    }
+
+    const activeTurnId = runtimeActiveTurnIdFromEvent(event);
+    const lastError = runtimeLastErrorFromEvent(event);
+    const resumeCursor =
+      event.payload && typeof event.payload === "object" && "resumeCursor" in event.payload
+        ? (event.payload as { readonly resumeCursor?: unknown }).resumeCursor
+        : undefined;
+    return directory
+      .upsert({
+        threadId: event.threadId,
+        provider: event.provider,
+        providerInstanceId: event.providerInstanceId,
+        status,
+        ...(resumeCursor !== undefined ? { resumeCursor } : {}),
+        runtimePayload: {
+          ...(activeTurnId !== undefined ? { activeTurnId } : {}),
+          ...(lastError !== undefined ? { lastError } : {}),
+          lastRuntimeEvent: event.type,
+          lastRuntimeEventAt: event.createdAt,
+        },
+      })
+      .pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("provider.runtime.lifecycle-persist-failed", {
+            threadId: event.threadId,
+            provider: event.provider,
+            providerInstanceId: event.providerInstanceId,
+            eventType: event.type,
+            cause,
+          }),
+        ),
+      );
+  };
 
   // `subscribedAdapters` is our source-of-truth for "which instance adapters
   // are currently wired into the runtime event bus". It both tracks the set

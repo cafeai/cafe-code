@@ -40,11 +40,14 @@ function createLocalStorageStub(): Storage {
 
 function getTestWindow(): Window & typeof globalThis {
   const localStorage = createLocalStorageStub();
+  const sessionStorage = createLocalStorageStub();
   const testWindow = {
     localStorage,
+    sessionStorage,
   } as Window & typeof globalThis;
   vi.stubGlobal("window", testWindow);
   vi.stubGlobal("localStorage", localStorage);
+  vi.stubGlobal("sessionStorage", sessionStorage);
   return testWindow;
 }
 
@@ -92,10 +95,11 @@ describe("clientPersistenceStorage", () => {
     ).toBeNull();
   });
 
-  it("stores browser secrets inline with the saved environment record", async () => {
+  it("stores browser secrets in sessionStorage without writing bearer material to localStorage", async () => {
     const testWindow = getTestWindow();
     const {
       SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
+      SAVED_ENVIRONMENT_SESSION_SECRETS_STORAGE_KEY,
       readBrowserSavedEnvironmentRegistry,
       readBrowserSavedEnvironmentSecret,
       writeBrowserSavedEnvironmentRegistry,
@@ -112,12 +116,15 @@ describe("clientPersistenceStorage", () => {
       JSON.parse(testWindow.localStorage.getItem(SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY)!),
     ).toEqual({
       version: 1,
-      records: [
-        {
-          ...savedRegistryRecord,
-          bearerToken: "bearer-token",
-        },
-      ],
+      records: [savedRegistryRecord],
+    });
+    expect(
+      JSON.parse(testWindow.sessionStorage.getItem(SAVED_ENVIRONMENT_SESSION_SECRETS_STORAGE_KEY)!),
+    ).toEqual({
+      version: 1,
+      secrets: {
+        [testEnvironmentId]: "bearer-token",
+      },
     });
   });
 });

@@ -111,7 +111,8 @@ function createProviderServiceHarness(
     respondToUserInput: () => unsupported(),
     stopSession: () => unsupported(),
     listSessions,
-    getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
+    getCapabilities: () =>
+      Effect.succeed({ sessionModelSwitch: "in-session", liveSteer: "unsupported" }),
     getInstanceInfo: (instanceId) =>
       Effect.succeed({
         instanceId,
@@ -413,6 +414,7 @@ describe("CheckpointReactor", () => {
       provider,
       cwd,
       drain,
+      checkpointStore,
     };
   }
 
@@ -490,6 +492,72 @@ describe("CheckpointReactor", () => {
         "README.md",
       ),
     ).toBe("v2\n");
+  });
+
+  it("prunes old hidden checkpoint refs after capturing a new turn", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const threadId = ThreadId.make("thread-1");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.checkpointStore.captureCheckpoint({
+        cwd: harness.cwd,
+        checkpointRef: checkpointRefForThreadTurn(threadId, 0),
+      }),
+    );
+
+    for (const turnCount of [1, 2, 3] as const) {
+      fs.writeFileSync(path.join(harness.cwd, "README.md"), `v${turnCount + 1}\n`, "utf8");
+      const checkpointRef = checkpointRefForThreadTurn(threadId, turnCount);
+      await Effect.runPromise(
+        harness.checkpointStore.captureCheckpoint({
+          cwd: harness.cwd,
+          checkpointRef,
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.diff.complete",
+          commandId: CommandId.make(`cmd-seed-diff-${turnCount}`),
+          threadId,
+          turnId: asTurnId(`turn-${turnCount}`),
+          completedAt: createdAt,
+          checkpointRef,
+          status: "ready",
+          files: [],
+          checkpointTurnCount: turnCount,
+          createdAt,
+        }),
+      );
+    }
+    await waitForThread(harness.readModel, (entry) =>
+      entry.checkpoints.some((checkpoint) => checkpoint.checkpointTurnCount === 3),
+    );
+
+    fs.writeFileSync(path.join(harness.cwd, "README.md"), "v5\n", "utf8");
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make("evt-turn-completed-prune"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId,
+      turnId: asTurnId("turn-4"),
+      payload: { state: "completed" },
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.latestTurn?.turnId === "turn-4" &&
+        entry.checkpoints.some((checkpoint) => checkpoint.checkpointTurnCount === 4),
+    );
+    await harness.drain();
+
+    expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 0))).toBe(false);
+    expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 1))).toBe(false);
+    expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 2))).toBe(true);
+    expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 3))).toBe(true);
+    expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 4))).toBe(true);
   });
 
   it("refreshes local git status state on turn completion using the session cwd", async () => {

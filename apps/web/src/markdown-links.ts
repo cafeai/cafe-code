@@ -1,5 +1,5 @@
 import { formatWorkspaceRelativePath } from "./filePathDisplay";
-import { resolvePathLinkTarget, splitPathAndPosition } from "./terminal-links";
+import { resolvePathLinkTarget, splitPathAndPosition } from "./path-links";
 
 const WINDOWS_DRIVE_PATH_PATTERN = /^[A-Za-z]:[\\/]/;
 const WINDOWS_UNC_PATH_PATTERN = /^\\\\/;
@@ -27,6 +27,7 @@ export interface MarkdownFileLinkMeta {
   targetPath: string;
   displayPath: string;
   basename: string;
+  openPolicy: "direct" | "confirm";
   line?: number;
   column?: number;
 }
@@ -124,6 +125,31 @@ function isRelativePath(path: string): boolean {
   );
 }
 
+function stripTrailingSeparators(path: string): string {
+  return path.replace(/[\\/]+$/g, "");
+}
+
+function normalizePathForWorkspaceComparison(path: string): string {
+  const normalized = stripTrailingSeparators(normalizeWindowsDrivePath(path).replaceAll("\\", "/"));
+  return WINDOWS_DRIVE_PATH_PATTERN.test(normalized) || normalized.startsWith("//")
+    ? normalized.toLowerCase()
+    : normalized;
+}
+
+export function isPathInsideWorkspace(targetPath: string, cwd: string | undefined): boolean {
+  if (!cwd) {
+    return false;
+  }
+
+  const target = normalizePathForWorkspaceComparison(splitPathAndPosition(targetPath).path);
+  const workspace = normalizePathForWorkspaceComparison(splitPathAndPosition(cwd).path);
+  if (target.length === 0 || workspace.length === 0) {
+    return false;
+  }
+
+  return target === workspace || target.startsWith(`${workspace}/`);
+}
+
 function hasExternalScheme(path: string): boolean {
   const match = path.match(EXTERNAL_SCHEME_PATTERN);
   if (!match) return false;
@@ -192,6 +218,7 @@ export function resolveMarkdownFileLinkMeta(
     targetPath,
     displayPath: formatWorkspaceRelativePath(targetPath, cwd),
     basename: basenameOfPath(path),
+    openPolicy: isPathInsideWorkspace(targetPath, cwd) ? "direct" : "confirm",
     ...(lineNumber !== undefined ? { line: lineNumber } : {}),
     ...(columnNumber !== undefined ? { column: columnNumber } : {}),
   };

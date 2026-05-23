@@ -105,7 +105,8 @@ function createProviderServiceHarness() {
     respondToUserInput: () => unsupported(),
     stopSession: () => unsupported(),
     listSessions: () => Effect.succeed([...runtimeSessions]),
-    getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
+    getCapabilities: () =>
+      Effect.succeed({ sessionModelSwitch: "in-session", liveSteer: "unsupported" }),
     getInstanceInfo: (instanceId) => {
       const driverKind = ProviderDriverKind.make(String(instanceId));
       return Effect.succeed({
@@ -792,6 +793,101 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  it("separates assistant item streams that overlap within one provider turn", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: false } });
+    const now = "2026-01-01T00:00:00.000Z";
+    const turnId = asTurnId("turn-overlapping-assistant-items");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-overlapping-items"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+    });
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-overlapping-item-a-delta"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("item-overlap-a"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "first assistant item",
+      },
+    });
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-overlapping-item-b-delta"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("item-overlap-b"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "second assistant item",
+      },
+    });
+
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-overlapping-item-a-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("item-overlap-a"),
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+      },
+    });
+
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-overlapping-item-b-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("item-overlap-b"),
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+      },
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.messages.some(
+          (message: ProviderRuntimeTestMessage) =>
+            message.id === "assistant:item-overlap-a" &&
+            message.text === "first assistant item" &&
+            !message.streaming,
+        ) &&
+        entry.messages.some(
+          (message: ProviderRuntimeTestMessage) =>
+            message.id === "assistant:item-overlap-b" &&
+            message.text === "second assistant item" &&
+            !message.streaming,
+        ),
+    );
+
+    expect(
+      thread.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.text === "first assistant itemsecond assistant item",
+      ),
+    ).toBe(false);
+  });
+
   it("preserves completed tool metadata on projected tool activities", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -845,7 +941,7 @@ describe("ProviderRuntimeIngestion", () => {
     expect(payload?.detail).toBeUndefined();
     expect(data?.toolCallId).toBe("tool-read-1");
     expect(data?.kind).toBe("read");
-    expect(rawOutput?.content).toBe('import * as Effect from "effect/Effect"\n');
+    expect(rawOutput?.content).toMatch(/^\[content omitted: \d+ chars, \d+ lines\]$/);
   });
 
   it("normalizes command execution activities to ran-command summaries", async () => {
@@ -1533,8 +1629,8 @@ describe("ProviderRuntimeIngestion", () => {
     expect(proposedPlan?.planMarkdown).toBe("## Buffered plan\n\n- first\n- second");
   });
 
-  it("buffers assistant deltas by default until completion", async () => {
-    const harness = await createHarness();
+  it("buffers assistant deltas when assistant streaming is disabled", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: false } });
     const now = "2026-01-01T00:00:00.000Z";
 
     harness.emit({
@@ -1602,7 +1698,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("flushes and completes buffered assistant text when an approval request opens", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: false } });
     const now = "2026-01-01T00:00:00.000Z";
 
     harness.emit({
@@ -1662,7 +1758,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("flushes and completes buffered assistant text when user input is requested", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: false } });
     const now = "2026-01-01T00:00:00.000Z";
 
     harness.emit({
@@ -1729,7 +1825,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("does not create assistant segments for whitespace-only buffered text at approval boundaries", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: false } });
     const startedAt = "2026-03-28T06:28:00.000Z";
     const pausedAt = "2026-03-28T06:28:01.000Z";
 
@@ -1789,7 +1885,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("starts a new buffered assistant message segment after approval and completes without duplication", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: false } });
     const startedAt = "2026-03-28T06:07:00.000Z";
     const pausedAt = "2026-03-28T06:07:01.000Z";
     const resumedAt = "2026-03-28T06:07:02.000Z";
@@ -2120,7 +2216,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("spills oversized buffered deltas and still finalizes full assistant text", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: false } });
     const now = "2026-01-01T00:00:00.000Z";
     const oversizedText = "x".repeat(40_000);
 
@@ -2266,6 +2362,177 @@ describe("ProviderRuntimeIngestion", () => {
     expect(completionEvents).toHaveLength(1);
   });
 
+  it("keeps a turn running after assistant message completion until provider thread idle", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("turn-provider-idle");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-provider-idle"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId,
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.latestTurn?.state === "running" && thread.session?.status === "running",
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-assistant-delta-provider-idle"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("item-provider-idle"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "I am still working.",
+      },
+    });
+
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-assistant-completed-provider-idle"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("item-provider-idle"),
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+      },
+    });
+
+    const stillRunning = await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.latestTurn?.turnId === turnId &&
+        thread.latestTurn.state === "running" &&
+        thread.latestTurn.completedAt === null &&
+        thread.session?.status === "running" &&
+        thread.session.activeTurnId === turnId &&
+        thread.messages.some(
+          (message: ProviderRuntimeTestMessage) =>
+            message.id === "assistant:item-provider-idle" && !message.streaming,
+        ),
+    );
+    expect(stillRunning.latestTurn?.state).toBe("running");
+    expect(stillRunning.latestTurn?.completedAt).toBeNull();
+    expect(stillRunning.session?.status).toBe("running");
+
+    harness.emit({
+      type: "thread.state.changed",
+      eventId: asEventId("evt-thread-idle-provider-idle"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId: asThreadId("thread-1"),
+      payload: {
+        state: "idle",
+      },
+    });
+
+    const readyAfterIdle = await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.latestTurn?.turnId === turnId &&
+        thread.latestTurn.state === "running" &&
+        thread.session?.status === "ready" &&
+        thread.session.activeTurnId === turnId,
+    );
+    expect(readyAfterIdle.session?.status).toBe("ready");
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-provider-idle"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:04.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId,
+      payload: {
+        state: "completed",
+      },
+    });
+
+    const completed = await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.latestTurn?.turnId === turnId &&
+        thread.latestTurn.state === "completed" &&
+        thread.latestTurn.completedAt === "2026-01-01T00:00:04.000Z" &&
+        thread.session?.status === "ready",
+    );
+    expect(completed.latestTurn?.state).toBe("completed");
+  });
+
+  it("reopens active turn state when provider content arrives after a stale idle transition", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("turn-reopen-after-idle");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-reopen-after-idle"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId,
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.latestTurn?.state === "running" &&
+        thread.session?.status === "running" &&
+        thread.session.activeTurnId === turnId,
+    );
+
+    harness.emit({
+      type: "thread.state.changed",
+      eventId: asEventId("evt-thread-idle-reopen-after-idle"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId: asThreadId("thread-1"),
+      payload: {
+        state: "idle",
+      },
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "ready" && thread.session.activeTurnId === turnId,
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-content-reopen-after-idle"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("item-reopen-after-idle"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "Still streaming.",
+      },
+    });
+
+    const reopened = await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.latestTurn?.turnId === turnId &&
+        thread.latestTurn.state === "running" &&
+        thread.latestTurn.completedAt === null &&
+        thread.session?.status === "running" &&
+        thread.session.activeTurnId === turnId,
+    );
+    expect(reopened.session?.status).toBe("running");
+    expect(reopened.latestTurn?.state).toBe("running");
+  });
+
   it("maps canonical request events into approval activities with requestKind", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -2390,7 +2657,7 @@ describe("ProviderRuntimeIngestion", () => {
     expect(activityPayload?.message).toBe("runtime activity exploded");
   });
 
-  it("keeps the session running when a runtime.warning arrives during an active turn", async () => {
+  it("keeps the session running and suppresses transient retry warnings during an active turn", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
@@ -2418,20 +2685,25 @@ describe("ProviderRuntimeIngestion", () => {
         },
       },
     });
+    await harness.drain();
 
     const thread = await waitForThread(
       harness.readModel,
       (entry) =>
         entry.session?.status === "running" &&
         entry.session?.activeTurnId === "turn-warning" &&
-        entry.activities.some(
-          (activity: ProviderRuntimeTestActivity) =>
-            activity.id === "evt-warning-runtime" && activity.kind === "runtime.warning",
+        !entry.activities.some(
+          (activity: ProviderRuntimeTestActivity) => activity.id === "evt-warning-runtime",
         ),
     );
     expect(thread.session?.status).toBe("running");
     expect(thread.session?.activeTurnId).toBe("turn-warning");
     expect(thread.session?.lastError).toBeNull();
+    expect(
+      thread.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-warning-runtime",
+      ),
+    ).toBe(false);
   });
 
   it("maps session/thread lifecycle and item.started into session/activity projections", async () => {

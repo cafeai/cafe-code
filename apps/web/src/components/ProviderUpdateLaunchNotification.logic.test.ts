@@ -595,7 +595,7 @@ describe("provider update launch notification logic", () => {
     });
   });
 
-  it("does not show sidebar terminal states from before the current app session", () => {
+  it("does not show sidebar update states from before the current app session", () => {
     expect(
       getProviderUpdateSidebarPillView(
         [

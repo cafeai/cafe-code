@@ -1,4 +1,4 @@
-import type { AuthPairingLink, ServerAuthBootstrapMethod } from "@cafecode/contracts";
+import type { AuthPairingLink, ServerAuthBootstrapMethod } from "@cafecode/contracts/auth";
 import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";

@@ -6,24 +6,13 @@ export interface ProjectSetupScriptRunnerResultNoScript {
   readonly status: "no-script";
 }
 
-export interface ProjectSetupScriptRunnerResultStarted {
-  readonly status: "started";
-  readonly scriptId: string;
-  readonly scriptName: string;
-  readonly terminalId: string;
-  readonly cwd: string;
-}
-
-export type ProjectSetupScriptRunnerResult =
-  | ProjectSetupScriptRunnerResultNoScript
-  | ProjectSetupScriptRunnerResultStarted;
+export type ProjectSetupScriptRunnerResult = ProjectSetupScriptRunnerResultNoScript;
 
 export interface ProjectSetupScriptRunnerInput {
   readonly threadId: string;
   readonly projectId?: string;
   readonly projectCwd?: string;
   readonly worktreePath: string;
-  readonly preferredTerminalId?: string;
 }
 
 export class ProjectSetupScriptRunnerError extends Data.TaggedError(

@@ -7,7 +7,6 @@ import * as Option from "effect/Option";
 import type * as Electron from "electron";
 
 import * as DesktopObservability from "../app/DesktopObservability.ts";
-import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
@@ -95,10 +94,11 @@ const handleCheckForUpdatesMenuClick: Effect.Effect<
 }).pipe(Effect.withSpan("desktop.menu.handleCheckForUpdatesClick"));
 
 const make = Effect.gen(function* () {
-  const electronApp = yield* ElectronApp.ElectronApp;
   const electronMenu = yield* ElectronMenu.ElectronMenu;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
-  const appName = yield* electronApp.name;
+  const updates = yield* DesktopUpdates.DesktopUpdates;
+  const updatesDisabledReason = yield* updates.disabledReason;
+  const updatesMenuEnabled = Option.isNone(updatesDisabledReason);
   const context = yield* Effect.context<DesktopApplicationMenuRuntimeServices>();
   const runPromise = Effect.runPromiseWith(context);
 
@@ -131,11 +131,12 @@ const make = Effect.gen(function* () {
 
     if (environment.platform === "darwin") {
       template.push({
-        label: appName,
+        label: environment.branding.baseName,
         submenu: [
           { role: "about" },
           {
             label: "Check for Updates...",
+            enabled: updatesMenuEnabled,
             click: checkForUpdatesClick,
           },
           { type: "separator" },
@@ -195,6 +196,7 @@ const make = Effect.gen(function* () {
         submenu: [
           {
             label: "Check for Updates...",
+            enabled: updatesMenuEnabled,
             click: checkForUpdatesClick,
           },
         ],

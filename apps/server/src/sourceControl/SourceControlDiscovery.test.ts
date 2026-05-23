@@ -50,7 +50,7 @@ const processOutput = (
   stderrTruncated: false,
 });
 
-it.effect("reports implemented tools separately from locally available executables", () => {
+it.effect("reports available version control systems separately from hosting providers", () => {
   const processMock = {
     run: (input: VcsProcess.VcsProcessInput) => {
       if (input.command === "git") {
@@ -110,13 +110,9 @@ Logged in to github.com account juliusmarminge (keyring)
     assert.deepStrictEqual(
       result.versionControlSystems.map((item) => ({
         kind: item.kind,
-        implemented: item.implemented,
         status: item.status,
       })),
-      [
-        { kind: "git", implemented: true, status: "available" },
-        { kind: "jj", implemented: false, status: "missing" },
-      ],
+      [{ kind: "git", status: "available" }],
     );
     assert.deepStrictEqual(
       result.sourceControlProviders.map((item) => ({

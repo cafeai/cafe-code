@@ -1,8 +1,5 @@
-import { TurnId } from "@cafecode/contracts";
-
 export interface DiffRouteSearch {
   diff?: "1" | undefined;
-  diffTurnId?: TurnId | undefined;
   diffFilePath?: string | undefined;
 }
 
@@ -27,13 +24,10 @@ export function stripDiffSearchParams<T extends Record<string, unknown>>(
 
 export function parseDiffRouteSearch(search: Record<string, unknown>): DiffRouteSearch {
   const diff = isDiffOpenValue(search.diff) ? "1" : undefined;
-  const diffTurnIdRaw = diff ? normalizeSearchString(search.diffTurnId) : undefined;
-  const diffTurnId = diffTurnIdRaw ? TurnId.make(diffTurnIdRaw) : undefined;
-  const diffFilePath = diff && diffTurnId ? normalizeSearchString(search.diffFilePath) : undefined;
+  const diffFilePath = diff ? normalizeSearchString(search.diffFilePath) : undefined;
 
   return {
     ...(diff ? { diff } : {}),
-    ...(diffTurnId ? { diffTurnId } : {}),
     ...(diffFilePath ? { diffFilePath } : {}),
   };
 }

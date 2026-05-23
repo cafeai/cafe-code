@@ -72,6 +72,7 @@ import {
   getClaudeModelCapabilities,
   normalizeClaudeCliEffort,
   resolveClaudeApiModelId,
+  resolveClaudeSelectedContextWindowTokens,
   resolveClaudeEffort,
 } from "./ClaudeProvider.ts";
 import {
@@ -166,7 +167,10 @@ interface ClaudeSessionContext {
   readonly startedAt: string;
   readonly basePermissionMode: PermissionMode | undefined;
   currentApiModelId: string | undefined;
+  selectedContextWindowTokens: number | undefined;
   resumeSessionId: string | undefined;
+  resumeCursorDurable: boolean;
+  resumeBaseTurnCount: number;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
   readonly turns: Array<{
@@ -431,6 +435,204 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
       : {}),
   };
 }
+
+function isDurableClaudeResumeState(
+  resumeState: ClaudeResumeState | undefined,
+): resumeState is ClaudeResumeState & { readonly resume: string } {
+  if (!resumeState?.resume) {
+    return false;
+  }
+  return Boolean(resumeState.resumeSessionAt) || (resumeState.turnCount ?? 0) > 0;
+}
+
+function claudeProjectDirectoryName(path: Path.Path, cwd: string): string {
+  return path.resolve(cwd).replaceAll(path.sep, "-");
+}
+
+function resolveClaudeConfigDirectory(path: Path.Path, env: NodeJS.ProcessEnv): string {
+  const configDir = env.CLAUDE_CONFIG_DIR?.trim();
+  if (configDir) {
+    return path.resolve(configDir);
+  }
+  const homePath = env.HOME?.trim();
+  return homePath ? path.join(path.resolve(homePath), ".claude") : path.resolve(".claude");
+}
+
+function pathExists(
+  fileSystem: FileSystem.FileSystem,
+  filePath: string,
+): Effect.Effect<boolean, never> {
+  return fileSystem.exists(filePath).pipe(Effect.catch(() => Effect.succeed(false)));
+}
+
+function copyRegularFileIfMissing(input: {
+  readonly fileSystem: FileSystem.FileSystem;
+  readonly path: Path.Path;
+  readonly sourcePath: string;
+  readonly targetPath: string;
+}): Effect.Effect<boolean, never> {
+  return Effect.gen(function* () {
+    if (yield* pathExists(input.fileSystem, input.targetPath)) {
+      return false;
+    }
+    const sourceInfo = yield* input.fileSystem
+      .stat(input.sourcePath)
+      .pipe(Effect.catch(() => Effect.succeed(null)));
+    if (sourceInfo?.type !== "File") {
+      return false;
+    }
+    yield* input.fileSystem
+      .makeDirectory(input.path.dirname(input.targetPath), { recursive: true })
+      .pipe(Effect.catch(() => Effect.void));
+    return yield* input.fileSystem
+      .copy(input.sourcePath, input.targetPath, {
+        overwrite: false,
+        preserveTimestamps: true,
+      })
+      .pipe(
+        Effect.as(true),
+        Effect.catch(() => Effect.succeed(false)),
+      );
+  });
+}
+
+function copyDirectoryIfMissing(input: {
+  readonly fileSystem: FileSystem.FileSystem;
+  readonly path: Path.Path;
+  readonly sourcePath: string;
+  readonly targetPath: string;
+}): Effect.Effect<boolean, never> {
+  return Effect.gen(function* () {
+    if (yield* pathExists(input.fileSystem, input.targetPath)) {
+      return false;
+    }
+    const sourceInfo = yield* input.fileSystem
+      .stat(input.sourcePath)
+      .pipe(Effect.catch(() => Effect.succeed(null)));
+    if (sourceInfo?.type !== "Directory") {
+      return false;
+    }
+    yield* input.fileSystem
+      .makeDirectory(input.path.dirname(input.targetPath), { recursive: true })
+      .pipe(Effect.catch(() => Effect.void));
+    return yield* input.fileSystem
+      .copy(input.sourcePath, input.targetPath, {
+        overwrite: false,
+        preserveTimestamps: true,
+      })
+      .pipe(
+        Effect.as(true),
+        Effect.catch(() => Effect.succeed(false)),
+      );
+  });
+}
+
+function isDirectory(
+  fileSystem: FileSystem.FileSystem,
+  filePath: string,
+): Effect.Effect<boolean, never> {
+  return fileSystem.stat(filePath).pipe(
+    Effect.map((info) => info.type === "Directory"),
+    Effect.catch(() => Effect.succeed(false)),
+  );
+}
+
+const ensureClaudeResumeArtifactsForCwd = Effect.fn(
+  "ClaudeAdapter.ensureClaudeResumeArtifactsForCwd",
+)(function* (input: {
+  readonly fileSystem: FileSystem.FileSystem;
+  readonly path: Path.Path;
+  readonly env: NodeJS.ProcessEnv;
+  readonly cwd: string | undefined;
+  readonly resumeSessionId: string | undefined;
+}): Effect.fn.Return<void, never> {
+  if (!input.cwd || !input.resumeSessionId) {
+    return;
+  }
+
+  const { fileSystem, path } = input;
+  const resumeSessionId = input.resumeSessionId;
+  const projectsDirectory = path.join(resolveClaudeConfigDirectory(path, input.env), "projects");
+  if (!(yield* pathExists(fileSystem, projectsDirectory))) {
+    return;
+  }
+
+  const targetProjectDirectory = path.join(
+    projectsDirectory,
+    claudeProjectDirectoryName(path, input.cwd),
+  );
+  const targetSessionFile = path.join(targetProjectDirectory, `${resumeSessionId}.jsonl`);
+  const targetSessionDirectory = path.join(targetProjectDirectory, resumeSessionId);
+
+  const result = yield* Effect.gen(function* () {
+    const targetSessionFileExists = yield* pathExists(fileSystem, targetSessionFile);
+    const targetSessionDirectoryExists = yield* pathExists(fileSystem, targetSessionDirectory);
+    if (targetSessionFileExists && targetSessionDirectoryExists) {
+      return undefined;
+    }
+
+    const projectEntries = yield* fileSystem.readDirectory(projectsDirectory);
+    for (const entryName of projectEntries) {
+      const sourceProjectDirectory = path.join(projectsDirectory, entryName);
+      if (sourceProjectDirectory === targetProjectDirectory) {
+        continue;
+      }
+      if (!(yield* isDirectory(fileSystem, sourceProjectDirectory))) {
+        continue;
+      }
+
+      const sourceSessionFile = path.join(sourceProjectDirectory, `${resumeSessionId}.jsonl`);
+      const sourceSessionDirectory = path.join(sourceProjectDirectory, resumeSessionId);
+      const sourceSessionFileExists = yield* pathExists(fileSystem, sourceSessionFile);
+      const sourceSessionDirectoryExists = yield* pathExists(fileSystem, sourceSessionDirectory);
+      if (!sourceSessionFileExists && !sourceSessionDirectoryExists) {
+        continue;
+      }
+
+      const copiedFile = sourceSessionFileExists
+        ? yield* copyRegularFileIfMissing({
+            fileSystem,
+            path,
+            sourcePath: sourceSessionFile,
+            targetPath: targetSessionFile,
+          })
+        : false;
+      const copiedDirectory = sourceSessionDirectoryExists
+        ? yield* copyDirectoryIfMissing({
+            fileSystem,
+            path,
+            sourcePath: sourceSessionDirectory,
+            targetPath: targetSessionDirectory,
+          })
+        : false;
+      if (!copiedFile && !copiedDirectory) {
+        return undefined;
+      }
+
+      return { copiedFile, copiedDirectory, sourceProjectDirectory, targetProjectDirectory };
+    }
+    return undefined;
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Effect.logWarning("claude.resume.artifacts.copy-failed", {
+        sessionId: input.resumeSessionId,
+        cwd: input.cwd,
+        cause: Cause.pretty(cause),
+      }).pipe(Effect.as(undefined)),
+    ),
+  );
+
+  if (!result) {
+    return;
+  }
+  yield* Effect.logInfo("claude.resume.artifacts.copied-for-cwd", {
+    sessionId: input.resumeSessionId,
+    sourceProjectDirectory: result.sourceProjectDirectory,
+    targetProjectDirectory: result.targetProjectDirectory,
+    copiedFile: result.copiedFile,
+    copiedDirectory: result.copiedDirectory,
+  });
+});
 
 function classifyToolItemType(toolName: string): CanonicalItemType {
   const normalized = toolName.toLowerCase();
@@ -1092,12 +1294,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   ) {
     const threadId = context.session.threadId;
     if (!threadId) return;
+    if (!context.resumeCursorDurable) return;
 
     const resumeCursor = {
       threadId,
       ...(context.resumeSessionId ? { resume: context.resumeSessionId } : {}),
       ...(context.lastAssistantUuid ? { resumeSessionAt: context.lastAssistantUuid } : {}),
-      turnCount: context.turns.length,
+      turnCount: context.resumeBaseTurnCount + context.turns.length,
     };
 
     context.session = {
@@ -1426,8 +1629,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     result?: SDKResultMessage,
   ) {
     const resultContextWindow = maxClaudeContextWindowFromModelUsage(result?.modelUsage);
-    if (resultContextWindow !== undefined) {
-      context.lastKnownContextWindow = resultContextWindow;
+    const effectiveContextWindow =
+      context.selectedContextWindowTokens ?? resultContextWindow ?? context.lastKnownContextWindow;
+    if (effectiveContextWindow !== undefined) {
+      context.lastKnownContextWindow = effectiveContextWindow;
     }
 
     // The SDK result.usage contains *accumulated* totals across all API calls
@@ -1435,14 +1640,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // This does NOT represent the current context window size.
     // Instead, use the last known context-window-accurate usage from task_progress
     // events and treat the accumulated total as totalProcessedTokens.
-    const accumulatedSnapshot = normalizeClaudeTokenUsage(
-      result?.usage,
-      resultContextWindow ?? context.lastKnownContextWindow,
-    );
+    const accumulatedSnapshot = normalizeClaudeTokenUsage(result?.usage, effectiveContextWindow);
     const accumulatedTotalProcessedTokens =
       accumulatedSnapshot?.totalProcessedTokens ?? accumulatedSnapshot?.usedTokens;
     const lastGoodUsage = context.lastKnownTokenUsage;
-    const maxTokens = resultContextWindow ?? context.lastKnownContextWindow;
+    const maxTokens = effectiveContextWindow;
     const usageSnapshot: ThreadTokenUsageSnapshot | undefined = lastGoodUsage
       ? {
           ...lastGoodUsage,
@@ -1485,6 +1687,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         threadId: context.session.threadId,
         payload: {
           state: status,
+          ...(context.session.resumeCursor !== undefined
+            ? { resumeCursor: context.session.resumeCursor }
+            : {}),
           ...(result?.stop_reason !== undefined ? { stopReason: result.stop_reason } : {}),
           ...(result?.usage ? { usage: result.usage } : {}),
           ...(result?.modelUsage ? { modelUsage: result.modelUsage } : {}),
@@ -1544,6 +1749,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       id: turnState.turnId,
       items: [...turnState.items],
     });
+    context.resumeCursorDurable = true;
+    yield* updateResumeCursor(context);
 
     if (usageSnapshot) {
       const usageStamp = yield* makeEventStamp();
@@ -1571,6 +1778,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       turnId: turnState.turnId,
       payload: {
         state: status,
+        ...(context.session.resumeCursor !== undefined
+          ? { resumeCursor: context.session.resumeCursor }
+          : {}),
         ...(result?.stop_reason !== undefined ? { stopReason: result.stop_reason } : {}),
         ...(result?.usage ? { usage: result.usage } : {}),
         ...(result?.modelUsage ? { modelUsage: result.modelUsage } : {}),
@@ -2166,7 +2376,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         if (message.usage) {
           const normalizedUsage = normalizeClaudeTokenUsage(
             message.usage,
-            context.lastKnownContextWindow,
+            context.selectedContextWindowTokens ?? context.lastKnownContextWindow,
           );
           if (normalizedUsage) {
             context.lastKnownTokenUsage = normalizedUsage;
@@ -2198,7 +2408,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         if (message.usage) {
           const normalizedUsage = normalizeClaudeTokenUsage(
             message.usage,
-            context.lastKnownContextWindow,
+            context.selectedContextWindowTokens ?? context.lastKnownContextWindow,
           );
           if (normalizedUsage) {
             context.lastKnownTokenUsage = normalizedUsage;
@@ -2550,11 +2760,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
       const startedAt = yield* nowIso;
       const resumeState = readClaudeResumeState(input.resumeCursor);
+      const durableResumeState = isDurableClaudeResumeState(resumeState) ? resumeState : undefined;
       const threadId = input.threadId;
-      const existingResumeSessionId = resumeState?.resume;
+      const existingResumeSessionId = durableResumeState?.resume;
       const newSessionId =
         existingResumeSessionId === undefined ? yield* Random.nextUUIDv4 : undefined;
       const sessionId = existingResumeSessionId ?? newSessionId;
+      const resumeBaseTurnCount = durableResumeState?.turnCount ?? 0;
 
       const runtimeContext = yield* Effect.context<never>();
       const runFork = Effect.runForkWith(runtimeContext);
@@ -2873,6 +3085,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const caps = getClaudeModelCapabilities(modelSelection?.model);
       const descriptors = getProviderOptionDescriptors({ caps });
       const apiModelId = modelSelection ? resolveClaudeApiModelId(modelSelection) : undefined;
+      const selectedContextWindowTokens = resolveClaudeSelectedContextWindowTokens(modelSelection);
       const rawEffort = getModelSelectionStringOptionValue(modelSelection, "effort");
       const effort = resolveClaudeEffort(caps, rawEffort) ?? null;
       const fastModeSupported = descriptors.some(
@@ -2930,10 +3143,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "provider.runtime_mode": input.runtimeMode,
         "claude.resume.source":
           existingResumeSessionId !== undefined ? "resume-session" : "generated-session",
-        "claude.resume.thread_id": resumeState?.threadId ?? "",
+        "claude.resume.thread_id": durableResumeState?.threadId ?? "",
         "claude.resume.session_id": existingResumeSessionId ?? "",
-        "claude.resume.session_at": resumeState?.resumeSessionAt ?? "",
-        "claude.resume.turn_count": resumeState?.turnCount ?? -1,
+        "claude.resume.session_at": durableResumeState?.resumeSessionAt ?? "",
+        "claude.resume.turn_count": durableResumeState?.turnCount ?? -1,
         "claude.query.cwd": input.cwd ?? "",
         "claude.query.model": apiModelId ?? "",
         "claude.query.effort": effectiveEffort ?? "",
@@ -2947,6 +3160,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.settings_json": encodeJsonStringForDiagnostics(settings) ?? "",
         "claude.query.extra_args_json": encodeJsonStringForDiagnostics(extraArgs) ?? "",
         "claude.query.path_to_executable": claudeBinaryPath,
+      });
+
+      yield* ensureClaudeResumeArtifactsForCwd({
+        fileSystem,
+        path,
+        env: claudeEnvironment,
+        cwd: input.cwd,
+        resumeSessionId: existingResumeSessionId,
       });
 
       const queryRuntime = yield* Effect.try({
@@ -2964,6 +3185,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           }),
       });
 
+      const initialResumeCursor =
+        existingResumeSessionId !== undefined
+          ? {
+              ...(threadId ? { threadId } : {}),
+              resume: existingResumeSessionId,
+              ...(durableResumeState?.resumeSessionAt
+                ? { resumeSessionAt: durableResumeState.resumeSessionAt }
+                : {}),
+              turnCount: resumeBaseTurnCount,
+            }
+          : undefined;
       const session: ProviderSession = {
         threadId,
         provider: PROVIDER,
@@ -2973,12 +3205,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(modelSelection?.model ? { model: modelSelection.model } : {}),
         ...(threadId ? { threadId } : {}),
-        resumeCursor: {
-          ...(threadId ? { threadId } : {}),
-          ...(sessionId ? { resume: sessionId } : {}),
-          ...(resumeState?.resumeSessionAt ? { resumeSessionAt: resumeState.resumeSessionAt } : {}),
-          turnCount: resumeState?.turnCount ?? 0,
-        },
+        ...(initialResumeCursor !== undefined ? { resumeCursor: initialResumeCursor } : {}),
         createdAt: startedAt,
         updatedAt: startedAt,
       };
@@ -2991,15 +3218,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         startedAt,
         basePermissionMode: permissionMode,
         currentApiModelId: apiModelId,
+        selectedContextWindowTokens,
         resumeSessionId: sessionId,
+        resumeCursorDurable: existingResumeSessionId !== undefined,
+        resumeBaseTurnCount,
         pendingApprovals,
         pendingUserInputs,
         turns: [],
         inFlightTools,
         turnState: undefined,
-        lastKnownContextWindow: undefined,
+        lastKnownContextWindow: selectedContextWindowTokens,
         lastKnownTokenUsage: undefined,
-        lastAssistantUuid: resumeState?.resumeSessionAt,
+        lastAssistantUuid: durableResumeState?.resumeSessionAt,
         lastThreadStartedId: undefined,
         stopped: false,
       };
@@ -3091,12 +3321,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     if (modelSelection?.model) {
       const apiModelId = resolveClaudeApiModelId(modelSelection);
+      const selectedContextWindowTokens = resolveClaudeSelectedContextWindowTokens(modelSelection);
       if (context.currentApiModelId !== apiModelId) {
         yield* Effect.tryPromise({
           try: () => context.query.setModel(apiModelId),
           catch: (cause) => toRequestError(input.threadId, "turn/setModel", cause),
         });
         context.currentApiModelId = apiModelId;
+      }
+      context.selectedContextWindowTokens = selectedContextWindowTokens;
+      if (selectedContextWindowTokens !== undefined) {
+        context.lastKnownContextWindow = selectedContextWindowTokens;
       }
       context.session = {
         ...context.session,
@@ -3276,6 +3511,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     provider: PROVIDER,
     capabilities: {
       sessionModelSwitch: "in-session",
+      liveSteer: "unsupported",
     },
     startSession,
     sendTurn,

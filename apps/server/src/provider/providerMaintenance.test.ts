@@ -201,6 +201,31 @@ describe("providerMaintenance", () => {
       }),
   );
 
+  it("uses a Windows command shim for npm-managed provider updates on Windows", () => {
+    expect(
+      packageToolUpdate.resolve({
+        binaryPath: "package-tool",
+        platform: "win32",
+        env: {
+          PATH: "",
+          PATHEXT: ".COM;.EXE;.BAT;.CMD",
+        },
+      }),
+    ).toEqual({
+      provider: driver("packageTool"),
+      packageName: "@example/package-tool",
+      update: {
+        command: "npm.cmd install -g @example/package-tool@latest",
+
+        executable: "npm.cmd",
+
+        args: ["install", "-g", "@example/package-tool@latest"],
+
+        lockKey: "npm-global",
+      },
+    });
+  });
+
   it.effect(
     "switches package-managed providers to pnpm updates when the resolved binary lives in pnpm's global bin",
     () =>

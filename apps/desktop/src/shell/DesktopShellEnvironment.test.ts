@@ -160,25 +160,66 @@ describe("DesktopShellEnvironment", () => {
     }),
   );
 
+  it.effect("falls back to launchctl SSH_AUTH_SOCK on macOS when login shell omits it", () =>
+    Effect.gen(function* () {
+      const env: NodeJS.ProcessEnv = {
+        SHELL: "/bin/zsh",
+        PATH: "/usr/bin",
+      };
+      const commands: ChildProcess.Command[] = [];
+
+      yield* runShellEnvironment({
+        env,
+        platform: "darwin",
+        handler: (command) => {
+          commands.push(command);
+          if (command._tag !== "StandardCommand") return "";
+          if (command.command === "/bin/launchctl") {
+            return command.args.includes("SSH_AUTH_SOCK") ? "/tmp/launchctl-agent.sock" : "";
+          }
+          return envOutput({ PATH: "/opt/homebrew/bin:/usr/bin" });
+        },
+      });
+
+      assert.equal(env.PATH, "/opt/homebrew/bin:/usr/bin");
+      assert.equal(env.SSH_AUTH_SOCK, "/tmp/launchctl-agent.sock");
+      const capturedCommands: string[][] = [];
+      for (const command of commands) {
+        if (command._tag !== "StandardCommand") continue;
+        capturedCommands.push([command.command].concat(command.args));
+      }
+      assert.deepEqual(capturedCommands, [
+        ["/bin/zsh", "-ilc", commands[0]?._tag === "StandardCommand" ? commands[0].args[1] : ""],
+        ["/bin/launchctl", "getenv", "SSH_AUTH_SOCK"],
+      ]);
+    }),
+  );
+
   it.effect("falls back to launchctl PATH on macOS when shell probing does not return one", () =>
     Effect.gen(function* () {
       const env: NodeJS.ProcessEnv = {
         SHELL: "/opt/homebrew/bin/nu",
         PATH: "/usr/bin",
       };
-      const commands: string[] = [];
+      const commands: string[][] = [];
 
       yield* runShellEnvironment({
         env,
         platform: "darwin",
         handler: (command) => {
           if (command._tag !== "StandardCommand") return "";
-          commands.push(command.command);
-          return command.command === "/bin/launchctl" ? "/opt/homebrew/bin:/usr/bin" : "";
+          commands.push([command.command, ...command.args]);
+          if (command.command !== "/bin/launchctl") return "";
+          return command.args.includes("PATH") ? "/opt/homebrew/bin:/usr/bin" : "";
         },
       });
 
-      assert.deepEqual(commands, ["/opt/homebrew/bin/nu", "/bin/zsh", "/bin/launchctl"]);
+      assert.equal(commands[0]?.[0], "/opt/homebrew/bin/nu");
+      assert.equal(commands[1]?.[0], "/bin/zsh");
+      assert.deepEqual(commands.slice(2), [
+        ["/bin/launchctl", "getenv", "PATH"],
+        ["/bin/launchctl", "getenv", "SSH_AUTH_SOCK"],
+      ]);
       assert.equal(env.PATH, "/opt/homebrew/bin:/usr/bin");
     }),
   );

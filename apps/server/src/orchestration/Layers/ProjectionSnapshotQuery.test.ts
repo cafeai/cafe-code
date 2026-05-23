@@ -356,12 +356,12 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           ],
           session: {
             threadId: ThreadId.make("thread-1"),
-            status: "running",
+            status: "ready",
             providerName: "codex",
             runtimeMode: "approval-required",
-            activeTurnId: asTurnId("turn-1"),
+            activeTurnId: null,
             lastError: null,
-            updatedAt: "2026-02-24T00:00:07.000Z",
+            updatedAt: "2026-02-24T00:00:08.000Z",
           },
         },
       ]);
@@ -419,14 +419,15 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           createdAt: "2026-02-24T00:00:02.000Z",
           updatedAt: "2026-02-24T00:00:03.000Z",
           archivedAt: null,
+          deletedAt: null,
           session: {
             threadId: ThreadId.make("thread-1"),
-            status: "running",
+            status: "ready",
             providerName: "codex",
             runtimeMode: "approval-required",
-            activeTurnId: asTurnId("turn-1"),
+            activeTurnId: null,
             lastError: null,
-            updatedAt: "2026-02-24T00:00:07.000Z",
+            updatedAt: "2026-02-24T00:00:08.000Z",
           },
           latestUserMessageAt: "2026-02-24T00:00:04.000Z",
           hasPendingApprovals: true,
@@ -533,19 +534,38 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             '2026-04-06T00:00:05.000Z',
             '2026-04-06T00:00:06.000Z',
             NULL
+          ),
+          (
+            'thread-deleted',
+            'project-archive-test',
+            'Deleted Thread',
+            '{"provider":"codex","model":"gpt-5-codex"}',
+            'full-access',
+            'default',
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            0,
+            0,
+            0,
+            '2026-04-06T00:00:07.000Z',
+            '2026-04-06T00:00:08.000Z',
+            NULL,
+            '2026-04-06T00:00:09.000Z'
           )
       `;
 
       yield* sql`
         INSERT INTO projection_state (projector, last_applied_sequence, updated_at)
         VALUES
-          (${ORCHESTRATION_PROJECTOR_NAMES.projects}, 4, '2026-04-06T00:00:07.000Z'),
-          (${ORCHESTRATION_PROJECTOR_NAMES.threads}, 4, '2026-04-06T00:00:07.000Z'),
-          (${ORCHESTRATION_PROJECTOR_NAMES.threadMessages}, 4, '2026-04-06T00:00:07.000Z'),
-          (${ORCHESTRATION_PROJECTOR_NAMES.threadProposedPlans}, 4, '2026-04-06T00:00:07.000Z'),
-          (${ORCHESTRATION_PROJECTOR_NAMES.threadActivities}, 4, '2026-04-06T00:00:07.000Z'),
-          (${ORCHESTRATION_PROJECTOR_NAMES.threadSessions}, 4, '2026-04-06T00:00:07.000Z'),
-          (${ORCHESTRATION_PROJECTOR_NAMES.checkpoints}, 4, '2026-04-06T00:00:07.000Z')
+          (${ORCHESTRATION_PROJECTOR_NAMES.projects}, 4, '2026-04-06T00:00:10.000Z'),
+          (${ORCHESTRATION_PROJECTOR_NAMES.threads}, 4, '2026-04-06T00:00:10.000Z'),
+          (${ORCHESTRATION_PROJECTOR_NAMES.threadMessages}, 4, '2026-04-06T00:00:10.000Z'),
+          (${ORCHESTRATION_PROJECTOR_NAMES.threadProposedPlans}, 4, '2026-04-06T00:00:10.000Z'),
+          (${ORCHESTRATION_PROJECTOR_NAMES.threadActivities}, 4, '2026-04-06T00:00:10.000Z'),
+          (${ORCHESTRATION_PROJECTOR_NAMES.threadSessions}, 4, '2026-04-06T00:00:10.000Z'),
+          (${ORCHESTRATION_PROJECTOR_NAMES.checkpoints}, 4, '2026-04-06T00:00:10.000Z')
       `;
 
       const shellSnapshot = yield* snapshotQuery.getShellSnapshot();
@@ -560,6 +580,13 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         [ThreadId.make("thread-archived")],
       );
       assert.equal(archivedShellSnapshot.threads[0]?.archivedAt, "2026-04-06T00:00:06.000Z");
+
+      const deletedShellSnapshot = yield* snapshotQuery.getDeletedShellSnapshot();
+      assert.deepEqual(
+        deletedShellSnapshot.threads.map((thread) => thread.id),
+        [ThreadId.make("thread-deleted")],
+      );
+      assert.equal(deletedShellSnapshot.threads[0]?.deletedAt, "2026-04-06T00:00:09.000Z");
     }),
   );
 
@@ -811,6 +838,22 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             'checkpoint-b',
             'ready',
             '[]'
+          ),
+          (
+            'thread-context',
+            'turn-incomplete',
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            'running',
+            '2026-03-02T00:00:06.000Z',
+            '2026-03-02T00:00:06.000Z',
+            NULL,
+            3,
+            'checkpoint-incomplete',
+            'ready',
+            '[]'
           )
       `;
 
@@ -845,6 +888,15 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             },
           ],
         });
+      }
+
+      const detail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-context"));
+      assert.equal(detail._tag, "Some");
+      if (detail._tag === "Some") {
+        assert.deepEqual(
+          detail.value.checkpoints.map((checkpoint) => checkpoint.checkpointTurnCount),
+          [1, 2],
+        );
       }
     }),
   );

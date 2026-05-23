@@ -1,7 +1,4 @@
 import {
-  type GitActionProgressEvent,
-  type GitRunStackedActionInput,
-  type GitRunStackedActionResult,
   type VcsStatusResult,
   type VcsStatusStreamEvent,
   type LocalApi,
@@ -49,23 +46,10 @@ type RpcInputStreamMethod<TTag extends RpcTag> =
       ) => () => void
     : never;
 
-interface GitRunStackedActionOptions {
-  readonly onProgress?: (event: GitActionProgressEvent) => void;
-}
-
 export interface WsRpcClient {
   readonly dispose: () => Promise<void>;
   readonly reconnect: () => Promise<void>;
   readonly isHeartbeatFresh: () => boolean;
-  readonly terminal: {
-    readonly open: RpcUnaryMethod<typeof WS_METHODS.terminalOpen>;
-    readonly write: RpcUnaryMethod<typeof WS_METHODS.terminalWrite>;
-    readonly resize: RpcUnaryMethod<typeof WS_METHODS.terminalResize>;
-    readonly clear: RpcUnaryMethod<typeof WS_METHODS.terminalClear>;
-    readonly restart: RpcUnaryMethod<typeof WS_METHODS.terminalRestart>;
-    readonly close: RpcUnaryMethod<typeof WS_METHODS.terminalClose>;
-    readonly onEvent: RpcStreamMethod<typeof WS_METHODS.subscribeTerminalEvents>;
-  };
   readonly projects: {
     readonly searchEntries: RpcUnaryMethod<typeof WS_METHODS.projectsSearchEntries>;
     readonly writeFile: RpcUnaryMethod<typeof WS_METHODS.projectsWriteFile>;
@@ -76,7 +60,6 @@ export interface WsRpcClient {
   readonly sourceControl: {
     readonly lookupRepository: RpcUnaryMethod<typeof WS_METHODS.sourceControlLookupRepository>;
     readonly cloneRepository: RpcUnaryMethod<typeof WS_METHODS.sourceControlCloneRepository>;
-    readonly publishRepository: RpcUnaryMethod<typeof WS_METHODS.sourceControlPublishRepository>;
   };
   readonly shell: {
     readonly openInEditor: (input: {
@@ -87,6 +70,7 @@ export interface WsRpcClient {
   readonly vcs: {
     readonly pull: RpcUnaryMethod<typeof WS_METHODS.vcsPull>;
     readonly refreshStatus: RpcUnaryMethod<typeof WS_METHODS.vcsRefreshStatus>;
+    readonly workingTreeDiff: RpcUnaryMethod<typeof WS_METHODS.vcsWorkingTreeDiff>;
     readonly onStatus: (
       input: RpcInput<typeof WS_METHODS.subscribeVcsStatus>,
       listener: (status: VcsStatusResult) => void,
@@ -99,14 +83,7 @@ export interface WsRpcClient {
     readonly switchRef: RpcUnaryMethod<typeof WS_METHODS.vcsSwitchRef>;
     readonly init: RpcUnaryMethod<typeof WS_METHODS.vcsInit>;
   };
-  /**
-   * Git-specific workflows. Local repository mechanics live under `vcs`.
-   */
   readonly git: {
-    readonly runStackedAction: (
-      input: GitRunStackedActionInput,
-      options?: GitRunStackedActionOptions,
-    ) => Promise<GitRunStackedActionResult>;
     readonly resolvePullRequest: RpcUnaryMethod<typeof WS_METHODS.gitResolvePullRequest>;
     readonly preparePullRequestThread: RpcUnaryMethod<
       typeof WS_METHODS.gitPreparePullRequestThread
@@ -145,11 +122,13 @@ export interface WsRpcClient {
   };
   readonly orchestration: {
     readonly dispatchCommand: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.dispatchCommand>;
-    readonly getTurnDiff: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.getTurnDiff>;
-    readonly getFullThreadDiff: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.getFullThreadDiff>;
     readonly getArchivedShellSnapshot: RpcUnaryNoArgMethod<
       typeof ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot
     >;
+    readonly getDeletedShellSnapshot: RpcUnaryNoArgMethod<
+      typeof ORCHESTRATION_WS_METHODS.getDeletedShellSnapshot
+    >;
+    readonly hardDeleteThread: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.hardDeleteThread>;
     readonly subscribeShell: RpcStreamMethod<typeof ORCHESTRATION_WS_METHODS.subscribeShell>;
     readonly subscribeThread: RpcInputStreamMethod<typeof ORCHESTRATION_WS_METHODS.subscribeThread>;
   };
@@ -163,19 +142,6 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
       await transport.reconnect();
     },
     isHeartbeatFresh: () => transport.isHeartbeatFresh(),
-    terminal: {
-      open: (input) => transport.request((client) => client[WS_METHODS.terminalOpen](input)),
-      write: (input) => transport.request((client) => client[WS_METHODS.terminalWrite](input)),
-      resize: (input) => transport.request((client) => client[WS_METHODS.terminalResize](input)),
-      clear: (input) => transport.request((client) => client[WS_METHODS.terminalClear](input)),
-      restart: (input) => transport.request((client) => client[WS_METHODS.terminalRestart](input)),
-      close: (input) => transport.request((client) => client[WS_METHODS.terminalClose](input)),
-      onEvent: (listener, options) =>
-        transport.subscribe((client) => client[WS_METHODS.subscribeTerminalEvents]({}), listener, {
-          ...options,
-          tag: WS_METHODS.subscribeTerminalEvents,
-        }),
-    },
     projects: {
       searchEntries: (input) =>
         transport.request((client) => client[WS_METHODS.projectsSearchEntries](input)),
@@ -190,8 +156,6 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         transport.request((client) => client[WS_METHODS.sourceControlLookupRepository](input)),
       cloneRepository: (input) =>
         transport.request((client) => client[WS_METHODS.sourceControlCloneRepository](input)),
-      publishRepository: (input) =>
-        transport.request((client) => client[WS_METHODS.sourceControlPublishRepository](input)),
     },
     shell: {
       openInEditor: (input) =>
@@ -201,6 +165,8 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
       pull: (input) => transport.request((client) => client[WS_METHODS.vcsPull](input)),
       refreshStatus: (input) =>
         transport.request((client) => client[WS_METHODS.vcsRefreshStatus](input)),
+      workingTreeDiff: (input) =>
+        transport.request((client) => client[WS_METHODS.vcsWorkingTreeDiff](input)),
       onStatus: (input, listener, options) => {
         let current: VcsStatusResult | null = null;
         return transport.subscribe(
@@ -222,25 +188,6 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
       init: (input) => transport.request((client) => client[WS_METHODS.vcsInit](input)),
     },
     git: {
-      runStackedAction: async (input, options) => {
-        let result: GitRunStackedActionResult | null = null;
-
-        await transport.requestStream(
-          (client) => client[WS_METHODS.gitRunStackedAction](input),
-          (event) => {
-            options?.onProgress?.(event);
-            if (event.kind === "action_finished") {
-              result = event.result;
-            }
-          },
-        );
-
-        if (result) {
-          return result;
-        }
-
-        throw new Error("Git action stream completed without a final result.");
-      },
       resolvePullRequest: (input) =>
         transport.request((client) => client[WS_METHODS.gitResolvePullRequest](input)),
       preparePullRequestThread: (input) =>
@@ -298,14 +245,14 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
     orchestration: {
       dispatchCommand: (input) =>
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.dispatchCommand](input)),
-      getTurnDiff: (input) =>
-        transport.request((client) => client[ORCHESTRATION_WS_METHODS.getTurnDiff](input)),
-      getFullThreadDiff: (input) =>
-        transport.request((client) => client[ORCHESTRATION_WS_METHODS.getFullThreadDiff](input)),
       getArchivedShellSnapshot: () =>
         transport.request((client) =>
           client[ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot]({}),
         ),
+      getDeletedShellSnapshot: () =>
+        transport.request((client) => client[ORCHESTRATION_WS_METHODS.getDeletedShellSnapshot]({})),
+      hardDeleteThread: (input) =>
+        transport.request((client) => client[ORCHESTRATION_WS_METHODS.hardDeleteThread](input)),
       subscribeShell: (listener, options) =>
         transport.subscribe(
           (client) => client[ORCHESTRATION_WS_METHODS.subscribeShell]({}),

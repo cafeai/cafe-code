@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  isPathInsideWorkspace,
   resolveMarkdownFileLinkMeta,
   resolveMarkdownFileLinkTarget,
   rewriteMarkdownFileUriHref,
@@ -116,5 +117,100 @@ describe("resolveMarkdownFileLinkTarget", () => {
 
   it("does not treat app routes as file links", () => {
     expect(resolveMarkdownFileLinkTarget("/chat/settings")).toBeNull();
+  });
+});
+
+describe("markdown file link workspace policy", () => {
+  it("allows direct opens for POSIX paths inside the workspace", () => {
+    expect(
+      resolveMarkdownFileLinkMeta("/Users/julius/project/src/main.ts#L42", "/Users/julius/project"),
+    ).toMatchObject({
+      targetPath: "/Users/julius/project/src/main.ts:42",
+      openPolicy: "direct",
+    });
+  });
+
+  it("requires confirmation for POSIX paths outside the workspace", () => {
+    expect(resolveMarkdownFileLinkMeta("/etc/passwd", "/Users/julius/project")).toMatchObject({
+      targetPath: "/etc/passwd",
+      openPolicy: "confirm",
+    });
+    expect(resolveMarkdownFileLinkMeta("/tmp/output.log", "/Users/julius/project")).toMatchObject({
+      targetPath: "/tmp/output.log",
+      openPolicy: "confirm",
+    });
+  });
+
+  it("handles macOS volume paths by workspace containment", () => {
+    expect(
+      resolveMarkdownFileLinkMeta("/Volumes/Data/project/src/main.ts", "/Volumes/Data/project"),
+    ).toMatchObject({
+      openPolicy: "direct",
+    });
+    expect(
+      resolveMarkdownFileLinkMeta("/Volumes/Secrets/key.txt", "/Volumes/Data/project"),
+    ).toMatchObject({
+      openPolicy: "confirm",
+    });
+  });
+
+  it("handles Windows drive and UNC workspace containment", () => {
+    expect(
+      resolveMarkdownFileLinkMeta("C:/Users/mike/project/src/main.ts", "C:/Users/mike/project"),
+    ).toMatchObject({
+      openPolicy: "direct",
+    });
+    expect(
+      resolveMarkdownFileLinkMeta("C:/Users/mike/other/secret.txt", "C:/Users/mike/project"),
+    ).toMatchObject({
+      openPolicy: "confirm",
+    });
+    expect(
+      resolveMarkdownFileLinkMeta(
+        "\\\\server\\share\\project\\src\\main.ts",
+        "\\\\server\\share\\project",
+      ),
+    ).toMatchObject({
+      openPolicy: "direct",
+    });
+    expect(
+      resolveMarkdownFileLinkMeta(
+        "\\\\server\\share\\other\\secret.txt",
+        "\\\\server\\share\\project",
+      ),
+    ).toMatchObject({
+      openPolicy: "confirm",
+    });
+  });
+
+  it("treats relative and file URL links according to the resolved workspace path", () => {
+    expect(resolveMarkdownFileLinkMeta("src/main.ts", "/Users/julius/project")).toMatchObject({
+      targetPath: "/Users/julius/project/src/main.ts",
+      openPolicy: "direct",
+    });
+    expect(
+      resolveMarkdownFileLinkMeta(
+        "file:///Users/julius/project/src/main.ts",
+        "/Users/julius/project",
+      ),
+    ).toMatchObject({
+      targetPath: "/Users/julius/project/src/main.ts",
+      openPolicy: "direct",
+    });
+    expect(
+      resolveMarkdownFileLinkMeta("file:///private/etc/hosts", "/Users/julius/project"),
+    ).toMatchObject({
+      targetPath: "/private/etc/hosts",
+      openPolicy: "confirm",
+    });
+  });
+
+  it("uses exact path boundaries for workspace checks", () => {
+    expect(isPathInsideWorkspace("/Users/julius/projected/file.ts", "/Users/julius/project")).toBe(
+      false,
+    );
+    expect(
+      isPathInsideWorkspace("/Users/julius/project/file.ts:4:2", "/Users/julius/project"),
+    ).toBe(true);
   });
 });

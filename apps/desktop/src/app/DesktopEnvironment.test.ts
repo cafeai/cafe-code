@@ -65,6 +65,10 @@ describe("DesktopEnvironment", () => {
       assert.equal(environment.appRoot, "/repo");
       assert.equal(environment.backendEntryPath, "/repo/apps/server/dist/bin.mjs");
       assert.equal(environment.backendCwd, "/repo");
+      assert.equal(
+        environment.developmentDockIconPath,
+        "/repo/assets/app-icon/cafe-code-app-icon-1024.png",
+      );
       assert.equal(environment.appUserModelId, "com.cafeai.cafecode.dev");
       assert.equal(environment.linuxWmClass, "cafecode-dev");
       assert.deepEqual(
@@ -92,6 +96,15 @@ describe("DesktopEnvironment", () => {
       assert.equal(environment.stateDir, "/tmp/t3/userdata");
       assert.equal(environment.logDir, "/tmp/t3/userdata/logs");
       assert.equal(environment.serverSettingsPath, "/tmp/t3/userdata/settings.json");
+    }),
+  );
+
+  it.effect("defaults Cafe Code state to ~/.cafe-code", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment();
+
+      assert.equal(environment.baseDir, "/Users/alice/.cafe-code");
+      assert.equal(environment.stateDir, "/Users/alice/.cafe-code/userdata");
     }),
   );
 

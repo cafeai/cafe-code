@@ -7,6 +7,7 @@ import type {
   ServerProviderSlashCommand,
   ServerProviderModel,
   ServerProviderState,
+  ServerProviderRuntimeCapabilities,
 } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as Data from "effect/Data";
@@ -199,6 +200,7 @@ export function buildServerProvider(input: {
   models: ReadonlyArray<ServerProviderModel>;
   slashCommands?: ReadonlyArray<ServerProviderSlashCommand>;
   skills?: ReadonlyArray<ServerProviderSkill>;
+  runtimeCapabilities?: ServerProviderRuntimeCapabilities;
   probe: ProviderProbeResult;
 }): ServerProviderDraft {
   const versionAdvisory = input.driver
@@ -224,6 +226,7 @@ export function buildServerProvider(input: {
     models: input.models,
     slashCommands: [...(input.slashCommands ?? [])],
     skills: [...(input.skills ?? [])],
+    runtimeCapabilities: input.runtimeCapabilities ?? { liveSteer: "unsupported" },
     ...(versionAdvisory ? { versionAdvisory } : {}),
   };
 }

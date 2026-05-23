@@ -6,11 +6,10 @@ import * as Schema from "effect/Schema";
 import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
+  ClientOrchestrationCommand,
   ModelSelection,
   OrchestrationCommand,
   OrchestrationEvent,
-  OrchestrationGetFullThreadDiffInput,
-  OrchestrationGetTurnDiffInput,
   OrchestrationLatestTurn,
   ProjectCreatedPayload,
   ProjectMetaUpdatedPayload,
@@ -20,14 +19,10 @@ import {
   ThreadMetaUpdatedPayload,
   ThreadTurnStartCommand,
   ThreadCreatedPayload,
-  ThreadTurnDiff,
   ThreadTurnStartRequestedPayload,
 } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
-const decodeTurnDiffInput = Schema.decodeUnknownEffect(OrchestrationGetTurnDiffInput);
-const decodeFullThreadDiffInput = Schema.decodeUnknownEffect(OrchestrationGetFullThreadDiffInput);
-const decodeThreadTurnDiff = Schema.decodeUnknownEffect(ThreadTurnDiff);
 const decodeProjectCreateCommand = Schema.decodeUnknownEffect(ProjectCreateCommand);
 const decodeProjectCreatedPayload = Schema.decodeUnknownEffect(ProjectCreatedPayload);
 const decodeProjectMetaUpdatedPayload = Schema.decodeUnknownEffect(ProjectMetaUpdatedPayload);
@@ -48,70 +43,9 @@ function getOptionValue(
 }
 const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPayload);
 const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationCommand);
+const decodeClientOrchestrationCommand = Schema.decodeUnknownEffect(ClientOrchestrationCommand);
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
-
-it.effect("parses turn diff input when fromTurnCount <= toTurnCount", () =>
-  Effect.gen(function* () {
-    const parsed = yield* decodeTurnDiffInput({
-      threadId: "thread-1",
-      fromTurnCount: 1,
-      toTurnCount: 2,
-    });
-    assert.strictEqual(parsed.fromTurnCount, 1);
-    assert.strictEqual(parsed.toTurnCount, 2);
-  }),
-);
-
-it.effect("parses turn diff input with whitespace ignoring enabled", () =>
-  Effect.gen(function* () {
-    const parsed = yield* decodeTurnDiffInput({
-      threadId: "thread-1",
-      fromTurnCount: 1,
-      toTurnCount: 2,
-      ignoreWhitespace: true,
-    });
-    assert.strictEqual(parsed.ignoreWhitespace, true);
-  }),
-);
-
-it.effect("parses full thread diff input with whitespace ignoring enabled", () =>
-  Effect.gen(function* () {
-    const parsed = yield* decodeFullThreadDiffInput({
-      threadId: "thread-1",
-      toTurnCount: 2,
-      ignoreWhitespace: true,
-    });
-    assert.strictEqual(parsed.ignoreWhitespace, true);
-  }),
-);
-
-it.effect("rejects turn diff input when fromTurnCount > toTurnCount", () =>
-  Effect.gen(function* () {
-    const result = yield* Effect.exit(
-      decodeTurnDiffInput({
-        threadId: "thread-1",
-        fromTurnCount: 3,
-        toTurnCount: 2,
-      }),
-    );
-    assert.strictEqual(result._tag, "Failure");
-  }),
-);
-
-it.effect("rejects thread turn diff when fromTurnCount > toTurnCount", () =>
-  Effect.gen(function* () {
-    const result = yield* Effect.exit(
-      decodeThreadTurnDiff({
-        threadId: "thread-1",
-        fromTurnCount: 3,
-        toTurnCount: 2,
-        diff: "patch",
-      }),
-    );
-    assert.strictEqual(result._tag, "Failure");
-  }),
-);
 
 it.effect("trims branded ids and command string fields at decode boundaries", () =>
   Effect.gen(function* () {
@@ -248,6 +182,55 @@ it.effect("preserves explicit provider and runtime mode in thread.turn.start", (
   }),
 );
 
+it.effect("decodes thread.turn.steer for client upload and normalized command payloads", () =>
+  Effect.gen(function* () {
+    const clientParsed = yield* decodeClientOrchestrationCommand({
+      type: "thread.turn.steer",
+      commandId: "cmd-steer-1",
+      threadId: "thread-1",
+      message: {
+        messageId: "msg-steer-1",
+        role: "user",
+        text: "adjust course",
+        attachments: [
+          {
+            type: "image",
+            name: "screen.png",
+            mimeType: "image/png",
+            sizeBytes: 16,
+            dataUrl: "data:image/png;base64,AAAA",
+          },
+        ],
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(clientParsed.type, "thread.turn.steer");
+    assert.strictEqual(clientParsed.message.attachments[0]?.type, "image");
+
+    const normalizedParsed = yield* decodeOrchestrationCommand({
+      type: "thread.turn.steer",
+      commandId: "cmd-steer-2",
+      threadId: "thread-1",
+      message: {
+        messageId: "msg-steer-2",
+        role: "user",
+        text: "adjust course",
+        attachments: [
+          {
+            type: "image",
+            id: "thread-1-att-1",
+            name: "screen.png",
+            mimeType: "image/png",
+            sizeBytes: 16,
+          },
+        ],
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(normalizedParsed.type, "thread.turn.steer");
+  }),
+);
+
 it.effect("accepts bootstrap metadata in thread.turn.start", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeThreadTurnStartCommand({
@@ -322,6 +305,26 @@ it.effect("decodes thread.meta-updated payloads with explicit provider", () =>
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
     assert.strictEqual(parsed.modelSelection?.instanceId, "claudeAgent");
+  }),
+);
+
+it.effect("decodes thread project moves through thread meta updates", () =>
+  Effect.gen(function* () {
+    const command = yield* decodeOrchestrationCommand({
+      type: "thread.meta.update",
+      commandId: "cmd-move-thread",
+      threadId: "thread-1",
+      projectId: "project-2",
+    });
+    assert.strictEqual(command.type, "thread.meta.update");
+    assert.strictEqual(command.projectId, "project-2");
+
+    const payload = yield* decodeThreadMetaUpdatedPayload({
+      threadId: "thread-1",
+      projectId: "project-2",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(payload.projectId, "project-2");
   }),
 );
 

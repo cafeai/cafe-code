@@ -16,6 +16,7 @@ import {
 import * as NetService from "@cafecode/shared/Net";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { deriveServerPaths } from "../config.ts";
+import { resolveBaseDir } from "../os-jank.ts";
 import { resolveServerConfig } from "./config.ts";
 
 const encodeDesktopBootstrap = Schema.encodeEffect(Schema.fromJsonString(DesktopBackendBootstrap));
@@ -55,6 +56,15 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     const { fd } = yield* fs.open(filePath, { flag: "r" });
     return fd;
   });
+
+  it.effect("defaults Cafe Code home to ~/.cafe-code", () =>
+    Effect.gen(function* () {
+      const { join } = yield* Path.Path;
+
+      expect(yield* resolveBaseDir(undefined)).toBe(join(NodeOS.homedir(), ".cafe-code"));
+      expect(yield* resolveBaseDir("")).toBe(join(NodeOS.homedir(), ".cafe-code"));
+    }),
+  );
 
   it.effect("falls back to effect/config values when flags are omitted", () =>
     Effect.gen(function* () {
@@ -369,7 +379,6 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         resolved.stateDir,
         resolved.logsDir,
         resolved.providerLogsDir,
-        resolved.terminalLogsDir,
         resolved.attachmentsDir,
         resolved.worktreesDir,
         path.dirname(resolved.serverLogPath),

@@ -33,17 +33,17 @@ describe("makeKeyedCoalescingWorker", () => {
             }),
         });
 
-        yield* worker.enqueue("terminal-1", "first");
+        yield* worker.enqueue("worker-1", "first");
         yield* Deferred.await(firstStarted);
 
         const drained = yield* Deferred.make<void>();
         yield* Effect.forkChild(
           worker
-            .drainKey("terminal-1")
+            .drainKey("worker-1")
             .pipe(Effect.tap(() => Deferred.succeed(drained, undefined).pipe(Effect.orDie))),
         );
 
-        yield* worker.enqueue("terminal-1", "second");
+        yield* worker.enqueue("worker-1", "second");
         yield* Deferred.succeed(releaseFirst, undefined);
         yield* Deferred.await(secondStarted);
 
@@ -52,7 +52,7 @@ describe("makeKeyedCoalescingWorker", () => {
         yield* Deferred.succeed(releaseSecond, undefined);
         yield* Deferred.await(drained);
 
-        expect(processed).toEqual(["terminal-1:first", "terminal-1:second"]);
+        expect(processed).toEqual(["worker-1:first", "worker-1:second"]);
       }),
     ),
   );
@@ -83,14 +83,14 @@ describe("makeKeyedCoalescingWorker", () => {
             }),
         });
 
-        yield* worker.enqueue("terminal-1", "first");
+        yield* worker.enqueue("worker-1", "first");
         yield* Deferred.await(firstStarted);
-        yield* worker.enqueue("terminal-1", "second");
+        yield* worker.enqueue("worker-1", "second");
         yield* Deferred.succeed(releaseFailure, undefined);
         yield* Deferred.await(secondProcessed);
-        yield* worker.drainKey("terminal-1");
+        yield* worker.drainKey("worker-1");
 
-        expect(processed).toEqual(["terminal-1:first", "terminal-1:second"]);
+        expect(processed).toEqual(["worker-1:first", "worker-1:second"]);
       }),
     ),
   );

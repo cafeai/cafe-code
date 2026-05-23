@@ -6,8 +6,8 @@ import {
 } from "./hooks/useLocalStorage";
 import { useMemo } from "react";
 
-const LAST_EDITOR_KEY = "cafecode:last-editor";
-const LEGACY_LAST_EDITOR_KEY = "t3code:last-editor";
+const LAST_EDITOR_KEY = "cafe-code:last-editor";
+const LEGACY_LAST_EDITOR_KEY = "cafecode:last-editor";
 
 export function usePreferredEditor(availableEditors: ReadonlyArray<EditorId>) {
   const [lastEditor, setLastEditor] = useLocalStorage(LAST_EDITOR_KEY, null, EditorId, [

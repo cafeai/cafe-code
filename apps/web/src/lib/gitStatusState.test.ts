@@ -106,7 +106,6 @@ function createRegisteredGitStatusClient(environmentId: EnvironmentId) {
       init: vi.fn(async () => undefined),
     },
     git: {
-      runStackedAction: vi.fn(async () => ({}) as any),
       resolvePullRequest: vi.fn(async () => undefined),
       preparePullRequestThread: vi.fn(async () => undefined),
     },
@@ -126,8 +125,6 @@ function createRegisteredGitStatusClient(environmentId: EnvironmentId) {
     },
     orchestration: {
       dispatchCommand: vi.fn(async () => undefined),
-      getTurnDiff: vi.fn(async () => undefined),
-      getFullThreadDiff: vi.fn(async () => undefined),
       subscribeShell: vi.fn(() => () => undefined),
       subscribeThread: vi.fn(() => () => undefined),
     },

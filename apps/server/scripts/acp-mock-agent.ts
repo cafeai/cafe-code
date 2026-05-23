@@ -411,7 +411,7 @@ const program = Effect.gen(function* () {
             status: "completed",
             rawOutput: {
               exitCode: 0,
-              stdout: '{ "name": "cafe-code" }',
+              stdout: '{ "name": "@cafeai/cafe-code" }',
               stderr: "",
             },
           },

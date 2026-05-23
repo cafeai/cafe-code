@@ -1720,6 +1720,76 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("uses the selected Claude context window over conflicting model usage metadata", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const modelSelection = createModelSelection(
+        ProviderInstanceId.make("claudeAgent"),
+        "claude-opus-4-7",
+        [{ id: "contextWindow", value: "200k" }],
+      );
+
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 7).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection,
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "hello",
+        modelSelection,
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        duration_ms: 1234,
+        duration_api_ms: 1200,
+        num_turns: 1,
+        result: "done",
+        stop_reason: "end_turn",
+        session_id: "sdk-session-result-usage-selected-window",
+        usage: {
+          total_tokens: 250000,
+        },
+        modelUsage: {
+          "claude-opus-4-7[1m]": {
+            contextWindow: 1000000,
+            maxOutputTokens: 64000,
+          },
+        },
+      } as unknown as SDKMessage);
+      harness.query.finish();
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const usageEvent = runtimeEvents.find((event) => event.type === "thread.token-usage.updated");
+      assert.equal(usageEvent?.type, "thread.token-usage.updated");
+      if (usageEvent?.type === "thread.token-usage.updated") {
+        assert.deepEqual(usageEvent.payload, {
+          usage: {
+            usedTokens: 200000,
+            lastUsedTokens: 200000,
+            totalProcessedTokens: 250000,
+            maxTokens: 200000,
+          },
+        });
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect(
     "preserves oversized Claude result totals after task progress snapshots are recorded",
     () => {
@@ -2736,7 +2806,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("uses an app-generated Claude session id for fresh sessions", () => {
+  it.effect("uses an app-generated Claude session id without persisting a zero-turn cursor", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -2748,20 +2818,108 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const createInput = harness.getLastCreateQueryInput();
-      const sessionResumeCursor = session.resumeCursor as {
-        threadId?: string;
-        resume?: string;
-        turnCount?: number;
-      };
-      assert.equal(sessionResumeCursor.threadId, THREAD_ID);
-      assert.equal(typeof sessionResumeCursor.resume, "string");
-      assert.equal(sessionResumeCursor.turnCount, 0);
+      assert.equal(session.resumeCursor, undefined);
       assert.match(
-        sessionResumeCursor.resume ?? "",
+        String(createInput?.options.sessionId ?? ""),
         /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
       );
       assert.equal(createInput?.options.resume, undefined);
-      assert.equal(createInput?.options.sessionId, sessionResumeCursor.resume);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("ignores stale zero-turn Claude resume cursors on startup", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const session = yield* adapter.startSession({
+        threadId: RESUME_THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        resumeCursor: {
+          threadId: RESUME_THREAD_ID,
+          resume: "550e8400-e29b-41d4-a716-446655440000",
+          turnCount: 0,
+        },
+        runtimeMode: "full-access",
+      });
+
+      const createInput = harness.getLastCreateQueryInput();
+      assert.equal(session.resumeCursor, undefined);
+      assert.equal(createInput?.options.resume, undefined);
+      assert.match(
+        String(createInput?.options.sessionId ?? ""),
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("emits a durable Claude resume cursor after the first completed turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        attachments: [],
+      });
+
+      const completedFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runHead, Effect.forkChild);
+      const sessionId = String(harness.getLastCreateQueryInput()?.options.sessionId);
+
+      harness.query.emit({
+        type: "assistant",
+        session_id: sessionId,
+        uuid: "assistant-first-turn",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-first-turn",
+          content: [{ type: "text", text: "Hi" }],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: sessionId,
+        uuid: "result-first-turn",
+      } as unknown as SDKMessage);
+
+      const completed = yield* Fiber.join(completedFiber);
+      assert.equal(completed._tag, "Some");
+      if (completed._tag !== "Some" || completed.value.type !== "turn.completed") {
+        return;
+      }
+      const payload = completed.value.payload as {
+        readonly resumeCursor?: {
+          readonly threadId?: string;
+          readonly resume?: string;
+          readonly resumeSessionAt?: string;
+          readonly turnCount?: number;
+        };
+      };
+      assert.equal(payload.resumeCursor?.threadId, THREAD_ID);
+      assert.equal(payload.resumeCursor?.resume, sessionId);
+      assert.equal(payload.resumeCursor?.resumeSessionAt, "assistant-first-turn");
+      assert.equal(payload.resumeCursor?.turnCount, 1);
+
+      const activeSessions = yield* adapter.listSessions();
+      assert.deepEqual(activeSessions[0]?.resumeCursor, payload.resumeCursor);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

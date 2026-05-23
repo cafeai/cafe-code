@@ -7,16 +7,16 @@
       "outputs": ["dist-electron/**"],
     },
     "dev": {
-      "dependsOn": ["cafe-code#build"],
+      "dependsOn": ["@cafeai/cafe-code#build"],
       "persistent": true,
     },
     "start": {
-      "dependsOn": ["build", "@cafecode/web#build", "cafe-code#build"],
+      "dependsOn": ["build", "@cafecode/web#build", "@cafeai/cafe-code#build"],
       "cache": false,
       "persistent": true,
     },
     "smoke-test": {
-      "dependsOn": ["build", "@cafecode/web#build", "cafe-code#build"],
+      "dependsOn": ["build", "@cafecode/web#build", "@cafeai/cafe-code#build"],
       "cache": false,
       "outputs": [],
     },

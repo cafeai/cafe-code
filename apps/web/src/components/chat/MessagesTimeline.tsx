@@ -1,5 +1,6 @@
 import {
   type EnvironmentId,
+  type EditorId,
   type MessageId,
   type ServerProviderSkill,
   type TurnId,
@@ -17,8 +18,6 @@ import {
 } from "react";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { deriveTimelineEntries, formatElapsed } from "../../session-logic";
-import { type TurnDiffSummary } from "../../types";
-import { summarizeTurnDiffStats } from "../../lib/turnDiffTree";
 import ChatMarkdown from "../ChatMarkdown";
 import {
   BotIcon,
@@ -37,8 +36,6 @@ import {
 import { Button } from "../ui/button";
 import { buildExpandedImagePreview, ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ProposedPlanCard } from "./ProposedPlanCard";
-import { ChangedFilesTree } from "./ChangedFilesTree";
-import { DiffStatLabel, hasNonZeroStat } from "./DiffStatLabel";
 import { MessageCopyButton } from "./MessageCopyButton";
 import {
   computeStableMessagesTimelineRows,
@@ -49,24 +46,16 @@ import {
   type StableMessagesTimelineRowsState,
   type MessagesTimelineRow,
 } from "./MessagesTimeline.logic";
-import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import {
-  deriveDisplayedUserMessageState,
-  type ParsedTerminalContextEntry,
-} from "~/lib/terminalContext";
 import { cn } from "~/lib/utils";
-import { useUiStateStore } from "~/uiStateStore";
-import { type TimestampFormat } from "@cafecode/contracts/settings";
+import { type DefaultEditorSelection, type TimestampFormat } from "@cafecode/contracts/settings";
 import { formatTimestamp } from "../../timestampFormat";
 
-import {
-  buildInlineTerminalContextText,
-  formatInlineTerminalContextLabel,
-  textContainsInlineTerminalContextLabels,
-} from "./userMessageTerminalContexts";
 import { SkillInlineText } from "./SkillInlineText";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
+import { readLocalApi } from "../../localApi";
+import { useSettings } from "../../hooks/useSettings";
+import { useServerAvailableEditors } from "../../rpc/serverState";
 
 // ---------------------------------------------------------------------------
 // Context — shared state consumed by every row component via Context.
@@ -77,15 +66,12 @@ import { formatWorkspaceRelativePath } from "../../filePathDisplay";
 
 interface TimelineRowSharedState {
   timestampFormat: TimestampFormat;
-  routeThreadKey: string;
   markdownCwd: string | undefined;
-  resolvedTheme: "light" | "dark";
   workspaceRoot: string | undefined;
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   activeThreadEnvironmentId: EnvironmentId;
   onRevertUserMessage: (messageId: MessageId) => void;
   onImageExpand: (preview: ExpandedImagePreview) => void;
-  onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
 }
 
 interface TimelineRowActivityState {
@@ -98,6 +84,33 @@ const TimelineRowActivityCtx = createContext<TimelineRowActivityState>(null!);
 const TIMELINE_LIST_HEADER = <div className="h-3 sm:h-4" />;
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+const TIMELINE_AT_END_TOLERANCE_PX = 96;
+
+export function isTimelineScrolledToEnd(state: {
+  readonly isAtEnd: boolean;
+  readonly contentLength?: number;
+  readonly scroll?: number;
+  readonly scrollLength?: number;
+}): boolean {
+  if (state.isAtEnd) {
+    return true;
+  }
+
+  const { contentLength, scroll, scrollLength } = state;
+  if (
+    typeof contentLength !== "number" ||
+    typeof scroll !== "number" ||
+    typeof scrollLength !== "number" ||
+    !Number.isFinite(contentLength) ||
+    !Number.isFinite(scroll) ||
+    !Number.isFinite(scrollLength)
+  ) {
+    return false;
+  }
+
+  const remainingScrollDistance = Math.max(0, contentLength - scroll - scrollLength);
+  return remainingScrollDistance <= TIMELINE_AT_END_TOLERANCE_PX;
+}
 
 // ---------------------------------------------------------------------------
 // Props (public API)
@@ -112,16 +125,12 @@ interface MessagesTimelineProps {
   timelineEntries: ReturnType<typeof deriveTimelineEntries>;
   completionDividerBeforeEntryId: string | null;
   completionSummary: string | null;
-  turnDiffSummaryByAssistantMessageId: Map<MessageId, TurnDiffSummary>;
-  routeThreadKey: string;
-  onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
   onRevertUserMessage: (messageId: MessageId) => void;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   activeThreadEnvironmentId: EnvironmentId;
   markdownCwd: string | undefined;
-  resolvedTheme: "light" | "dark";
   timestampFormat: TimestampFormat;
   workspaceRoot: string | undefined;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
@@ -141,16 +150,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   timelineEntries,
   completionDividerBeforeEntryId,
   completionSummary,
-  turnDiffSummaryByAssistantMessageId,
-  routeThreadKey,
-  onOpenTurnDiff,
   revertTurnCountByUserMessageId,
   onRevertUserMessage,
   isRevertingCheckpoint,
   onImageExpand,
   activeThreadEnvironmentId,
   markdownCwd,
-  resolvedTheme,
   timestampFormat,
   workspaceRoot,
   skills = EMPTY_TIMELINE_SKILLS,
@@ -166,7 +171,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         activeTurnInProgress,
         activeTurnId: activeTurnId ?? null,
         activeTurnStartedAt,
-        turnDiffSummaryByAssistantMessageId,
         revertTurnCountByUserMessageId,
       }),
     [
@@ -177,7 +181,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeTurnInProgress,
       activeTurnId,
       activeTurnStartedAt,
-      turnDiffSummaryByAssistantMessageId,
       revertTurnCountByUserMessageId,
     ],
   );
@@ -186,7 +189,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const handleScroll = useCallback(() => {
     const state = listRef.current?.getState?.();
     if (state) {
-      onIsAtEndChange(state.isAtEnd);
+      onIsAtEndChange(isTimelineScrolledToEnd(state));
     }
   }, [listRef, onIsAtEndChange]);
 
@@ -208,30 +211,37 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     };
   }, [listRef, onIsAtEndChange, rows.length]);
 
+  useEffect(() => {
+    const frameId = window.requestAnimationFrame(() => {
+      const state = listRef.current?.getState?.();
+      if (state && isTimelineScrolledToEnd(state)) {
+        onIsAtEndChange(true);
+      }
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [listRef, onIsAtEndChange, rows]);
+
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
       timestampFormat,
-      routeThreadKey,
       markdownCwd,
-      resolvedTheme,
       workspaceRoot,
       skills,
       activeThreadEnvironmentId,
       onRevertUserMessage,
       onImageExpand,
-      onOpenTurnDiff,
     }),
     [
       timestampFormat,
-      routeThreadKey,
       markdownCwd,
-      resolvedTheme,
       workspaceRoot,
       skills,
       activeThreadEnvironmentId,
       onRevertUserMessage,
       onImageExpand,
-      onOpenTurnDiff,
     ],
   );
   const activityState = useMemo<TimelineRowActivityState>(
@@ -325,8 +335,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
 function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
   const userImages = row.message.attachments ?? [];
-  const displayedUserMessage = deriveDisplayedUserMessageState(row.message.text);
-  const terminalContexts = displayedUserMessage.contexts;
+  const copyText = row.message.text.trim().length > 0 ? row.message.text : null;
   const canRevertAgentWork = typeof row.revertTurnCount === "number";
 
   return (
@@ -366,15 +375,12 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           </div>
         )}
         <CollapsibleUserMessageBody
-          text={displayedUserMessage.visibleText}
-          terminalContexts={terminalContexts}
+          text={row.message.text}
           skills={ctx.skills}
           footer={
             <>
               <div className="flex items-center gap-1.5 opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover:opacity-100">
-                {displayedUserMessage.copyText && (
-                  <MessageCopyButton text={displayedUserMessage.copyText} />
-                )}
+                {copyText && <MessageCopyButton text={copyText} />}
                 {canRevertAgentWork && <RevertUserMessageButton messageId={row.message.id} />}
               </div>
               <p className="text-right text-xs text-muted-foreground/50">
@@ -421,12 +427,6 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
           cwd={ctx.markdownCwd}
           isStreaming={Boolean(row.message.streaming)}
           skills={ctx.skills}
-        />
-        <AssistantChangedFilesSection
-          turnSummary={row.assistantTurnDiffSummary}
-          routeThreadKey={ctx.routeThreadKey}
-          resolvedTheme={ctx.resolvedTheme}
-          onOpenTurnDiff={ctx.onOpenTurnDiff}
         />
         <div className="mt-1.5 flex items-center gap-2">
           <p className="text-[10px] text-muted-foreground/30">
@@ -475,7 +475,7 @@ function AssistantCopyButton({ row }: { row: Extract<TimelineRow, { kind: "messa
   }
 
   return (
-    <div className="flex items-center opacity-0 transition-opacity duration-200  group-hover/assistant:opacity-100">
+    <div className="flex items-center opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/assistant:opacity-100">
       <MessageCopyButton
         text={assistantCopyState.text ?? ""}
         size="icon-xs"
@@ -641,114 +641,9 @@ const WorkGroupSection = memo(function WorkGroupSection({
   );
 });
 
-/** Subscribes directly to the UI state store for expand/collapse state,
- *  so toggling re-renders only this component — not the entire list. */
-const AssistantChangedFilesSection = memo(function AssistantChangedFilesSection({
-  turnSummary,
-  routeThreadKey,
-  resolvedTheme,
-  onOpenTurnDiff,
-}: {
-  turnSummary: TurnDiffSummary | undefined;
-  routeThreadKey: string;
-  resolvedTheme: "light" | "dark";
-  onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
-}) {
-  if (!turnSummary) return null;
-  const checkpointFiles = turnSummary.files;
-  if (checkpointFiles.length === 0) return null;
-
-  return (
-    <AssistantChangedFilesSectionInner
-      turnSummary={turnSummary}
-      checkpointFiles={checkpointFiles}
-      routeThreadKey={routeThreadKey}
-      resolvedTheme={resolvedTheme}
-      onOpenTurnDiff={onOpenTurnDiff}
-    />
-  );
-});
-
-/** Inner component that only mounts when there are actual changed files,
- *  so the store subscription is unconditional (no hooks after early return). */
-function AssistantChangedFilesSectionInner({
-  turnSummary,
-  checkpointFiles,
-  routeThreadKey,
-  resolvedTheme,
-  onOpenTurnDiff,
-}: {
-  turnSummary: TurnDiffSummary;
-  checkpointFiles: TurnDiffSummary["files"];
-  routeThreadKey: string;
-  resolvedTheme: "light" | "dark";
-  onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
-}) {
-  const allDirectoriesExpanded = useUiStateStore(
-    (store) => store.threadChangedFilesExpandedById[routeThreadKey]?.[turnSummary.turnId] ?? true,
-  );
-  const setExpanded = useUiStateStore((store) => store.setThreadChangedFilesExpanded);
-  const summaryStat = summarizeTurnDiffStats(checkpointFiles);
-  const changedFileCountLabel = String(checkpointFiles.length);
-
-  return (
-    <div className="mt-2 rounded-lg border border-border/80 bg-card/45 p-2.5">
-      <div className="sticky top-2 z-10 mb-1.5 flex items-center justify-between gap-2 bg-[color-mix(in_srgb,var(--card)_45%,var(--background))] before:absolute before:inset-x-0 before:-top-2 before:h-2 before:bg-[color-mix(in_srgb,var(--card)_45%,var(--background))] before:content-['']">
-        <p className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground/65">
-          <span>Changed files ({changedFileCountLabel})</span>
-          {hasNonZeroStat(summaryStat) && (
-            <>
-              <span className="mx-1">•</span>
-              <DiffStatLabel additions={summaryStat.additions} deletions={summaryStat.deletions} />
-            </>
-          )}
-        </p>
-        <div className="flex items-center gap-1.5">
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            data-scroll-anchor-ignore
-            onClick={() => setExpanded(routeThreadKey, turnSummary.turnId, !allDirectoriesExpanded)}
-          >
-            {allDirectoriesExpanded ? "Collapse all" : "Expand all"}
-          </Button>
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            onClick={() => onOpenTurnDiff(turnSummary.turnId, checkpointFiles[0]?.path)}
-          >
-            View diff
-          </Button>
-        </div>
-      </div>
-      <ChangedFilesTree
-        key={`changed-files-tree:${turnSummary.turnId}`}
-        turnId={turnSummary.turnId}
-        files={checkpointFiles}
-        allDirectoriesExpanded={allDirectoriesExpanded}
-        resolvedTheme={resolvedTheme}
-        onOpenTurnDiff={onOpenTurnDiff}
-      />
-    </div>
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Leaf components
 // ---------------------------------------------------------------------------
-
-const UserMessageTerminalContextInlineLabel = memo(
-  function UserMessageTerminalContextInlineLabel(props: { context: ParsedTerminalContextEntry }) {
-    const tooltipText =
-      props.context.body.length > 0
-        ? `${props.context.header}\n${props.context.body}`
-        : props.context.header;
-
-    return <TerminalContextInlineChip label={props.context.header} tooltipText={tooltipText} />;
-  },
-);
 
 const MAX_COLLAPSED_USER_MESSAGE_LINES = 8;
 const MAX_COLLAPSED_USER_MESSAGE_LENGTH = 600;
@@ -768,12 +663,11 @@ function shouldCollapseUserMessage(text: string): boolean {
 
 const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(props: {
   text: string;
-  terminalContexts: ParsedTerminalContextEntry[];
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   footer?: ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const hasVisibleBody = props.text.trim().length > 0 || props.terminalContexts.length > 0;
+  const hasVisibleBody = props.text.trim().length > 0;
   const canCollapse = hasVisibleBody && shouldCollapseUserMessage(props.text);
   const isCollapsed = canCollapse && !expanded;
 
@@ -795,11 +689,7 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
               : undefined
           }
         >
-          <UserMessageBody
-            text={props.text}
-            terminalContexts={props.terminalContexts}
-            skills={props.skills}
-          />
+          <UserMessageBody text={props.text} skills={props.skills} />
         </div>
       ) : null}
       {canCollapse || props.footer ? (
@@ -834,91 +724,8 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
 
 const UserMessageBody = memo(function UserMessageBody(props: {
   text: string;
-  terminalContexts: ParsedTerminalContextEntry[];
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
 }) {
-  if (props.terminalContexts.length > 0) {
-    const hasEmbeddedInlineLabels = textContainsInlineTerminalContextLabels(
-      props.text,
-      props.terminalContexts,
-    );
-    const inlinePrefix = buildInlineTerminalContextText(props.terminalContexts);
-    const inlineNodes: ReactNode[] = [];
-
-    if (hasEmbeddedInlineLabels) {
-      let cursor = 0;
-
-      for (const context of props.terminalContexts) {
-        const label = formatInlineTerminalContextLabel(context.header);
-        const matchIndex = props.text.indexOf(label, cursor);
-        if (matchIndex === -1) {
-          inlineNodes.length = 0;
-          break;
-        }
-        if (matchIndex > cursor) {
-          inlineNodes.push(
-            <span key={`user-terminal-context-inline-before:${context.header}:${cursor}`}>
-              <SkillInlineText text={props.text.slice(cursor, matchIndex)} skills={props.skills} />
-            </span>,
-          );
-        }
-        inlineNodes.push(
-          <UserMessageTerminalContextInlineLabel
-            key={`user-terminal-context-inline:${context.header}`}
-            context={context}
-          />,
-        );
-        cursor = matchIndex + label.length;
-      }
-
-      if (inlineNodes.length > 0) {
-        if (cursor < props.text.length) {
-          inlineNodes.push(
-            <span key={`user-message-terminal-context-inline-rest:${cursor}`}>
-              <SkillInlineText text={props.text.slice(cursor)} skills={props.skills} />
-            </span>,
-          );
-        }
-
-        return (
-          <div className="whitespace-pre-wrap wrap-break-word text-sm leading-relaxed text-foreground">
-            {inlineNodes}
-          </div>
-        );
-      }
-    }
-
-    for (const context of props.terminalContexts) {
-      inlineNodes.push(
-        <UserMessageTerminalContextInlineLabel
-          key={`user-terminal-context-inline:${context.header}`}
-          context={context}
-        />,
-      );
-      inlineNodes.push(
-        <span key={`user-terminal-context-inline-space:${context.header}`} aria-hidden="true">
-          {" "}
-        </span>,
-      );
-    }
-
-    if (props.text.length > 0) {
-      inlineNodes.push(
-        <span key="user-message-terminal-context-inline-text">
-          <SkillInlineText text={props.text} skills={props.skills} />
-        </span>,
-      );
-    } else if (inlinePrefix.length === 0) {
-      return null;
-    }
-
-    return (
-      <div className="whitespace-pre-wrap wrap-break-word text-sm leading-relaxed text-foreground">
-        {inlineNodes}
-      </div>
-    );
-  }
-
   if (props.text.length === 0) {
     return null;
   }
@@ -1092,6 +899,135 @@ function capitalizePhrase(value: string): string {
   return `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}`;
 }
 
+function normalizePathForOpen(path: string): string | null {
+  if (path.includes("\0") || isTruncatedOpenPath(path) || /^[a-z][a-z0-9+.-]*:/iu.test(path)) {
+    return null;
+  }
+  const normalized = path.replaceAll("\\", "/");
+  const absolute = normalized.startsWith("/");
+  const output: string[] = [];
+  for (const part of normalized.split("/")) {
+    if (part.length === 0 || part === ".") {
+      continue;
+    }
+    if (part === "..") {
+      if (output.length === 0) {
+        return null;
+      }
+      output.pop();
+      continue;
+    }
+    output.push(part);
+  }
+  return `${absolute ? "/" : ""}${output.join("/")}`;
+}
+
+function isTruncatedOpenPath(path: string): boolean {
+  const trimmed = path.trim();
+  return trimmed.includes("…") || trimmed.includes("[truncated]") || trimmed.includes("...");
+}
+
+export function resolveWorkspaceFilePath(
+  filePath: string,
+  workspaceRoot: string | undefined,
+): string | null {
+  const normalizedFilePath = normalizePathForOpen(filePath);
+  if (!normalizedFilePath) {
+    return null;
+  }
+  const normalizedWorkspaceRoot = workspaceRoot ? normalizePathForOpen(workspaceRoot) : null;
+  if (!normalizedWorkspaceRoot) {
+    return normalizedFilePath.startsWith("/") ? normalizedFilePath : null;
+  }
+
+  const absolutePath = normalizedFilePath.startsWith("/")
+    ? normalizedFilePath
+    : normalizePathForOpen(`${normalizedWorkspaceRoot}/${normalizedFilePath}`);
+  if (!absolutePath) {
+    return null;
+  }
+  if (
+    absolutePath !== normalizedWorkspaceRoot &&
+    !absolutePath.startsWith(`${normalizedWorkspaceRoot}/`)
+  ) {
+    return null;
+  }
+  return absolutePath;
+}
+
+export function resolveFileOpenEditor(
+  defaultEditor: DefaultEditorSelection,
+  availableEditors: ReadonlyArray<EditorId>,
+): EditorId | null {
+  if (defaultEditor === "system-default") {
+    return null;
+  }
+  return availableEditors.includes(defaultEditor) ? defaultEditor : null;
+}
+
+function openFileWithPreferredEditor(input: {
+  readonly filePath: string;
+  readonly workspaceRoot: string | undefined;
+  readonly defaultEditor: DefaultEditorSelection;
+  readonly availableEditors: ReadonlyArray<EditorId>;
+}) {
+  const absolutePath = resolveWorkspaceFilePath(input.filePath, input.workspaceRoot);
+  if (!absolutePath) {
+    return;
+  }
+  const api = readLocalApi();
+  if (!api) {
+    return;
+  }
+  const editor = resolveFileOpenEditor(input.defaultEditor, input.availableEditors);
+  const opened = editor
+    ? api.shell.openInEditor(absolutePath, editor)
+    : api.shell.openPath(absolutePath);
+  void opened.catch((error: unknown) => {
+    console.warn("Failed to open file", error);
+  });
+}
+
+const COMMAND_PATH_STRIP_PATTERN = /^[`'"[(<]+|[`'"\])>,;]+$/g;
+const COMMAND_PATH_TOKEN_REJECT_PATTERN = /[{}"]/u;
+
+function isOpenableCommandPathToken(token: string): boolean {
+  if (COMMAND_PATH_TOKEN_REJECT_PATTERN.test(token) || isTruncatedOpenPath(token)) {
+    return false;
+  }
+  const colonIndex = token.indexOf(":");
+  if (colonIndex >= 0 && !/^[a-zA-Z]:[\\/]/u.test(token)) {
+    return false;
+  }
+  return true;
+}
+
+export function extractOpenablePathTokens(
+  text: string,
+  workspaceRoot: string | undefined,
+): ReadonlyArray<string> {
+  const seen = new Set<string>();
+  const paths: string[] = [];
+  for (const rawToken of text.split(/\s+/u)) {
+    const token = rawToken.trim().replace(COMMAND_PATH_STRIP_PATTERN, "");
+    if (!token || token.startsWith("-") || !isOpenableCommandPathToken(token)) {
+      continue;
+    }
+    if (!token.includes("/") && !token.startsWith(".")) {
+      continue;
+    }
+    if (resolveWorkspaceFilePath(token, workspaceRoot) === null) {
+      continue;
+    }
+    if (seen.has(token)) {
+      continue;
+    }
+    seen.add(token);
+    paths.push(token);
+  }
+  return paths.slice(0, 4);
+}
+
 function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
   if (!workEntry.toolTitle) {
     return capitalizePhrase(normalizeCompactToolLabel(workEntry.label));
@@ -1104,6 +1040,8 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   workspaceRoot: string | undefined;
 }) {
   const { workEntry, workspaceRoot } = props;
+  const defaultEditor = useSettings((settings) => settings.defaultEditor);
+  const availableEditors = useServerAvailableEditors();
   const iconConfig = workToneIcon(workEntry.tone);
   const EntryIcon = workEntryIcon(workEntry);
   const heading = toolWorkEntryHeading(workEntry);
@@ -1118,9 +1056,30 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   const displayText = preview ? `${heading} - ${preview}` : heading;
   const hasChangedFiles = (workEntry.changedFiles?.length ?? 0) > 0;
   const previewIsChangedFiles = hasChangedFiles && !workEntry.command && !workEntry.detail;
-
-  return (
-    <div className="rounded-lg px-1 py-1">
+  const primaryChangedFile = workEntry.changedFiles?.[0] ?? null;
+  const canOpenPrimaryChangedFile =
+    primaryChangedFile !== null &&
+    resolveWorkspaceFilePath(primaryChangedFile, workspaceRoot) !== null;
+  const openResolvedFile = useCallback(
+    (filePath: string) =>
+      openFileWithPreferredEditor({
+        filePath,
+        workspaceRoot,
+        defaultEditor,
+        availableEditors,
+      }),
+    [availableEditors, defaultEditor, workspaceRoot],
+  );
+  const commandPathTokens = useMemo(
+    () =>
+      extractOpenablePathTokens(
+        [workEntry.command, rawCommand, workEntry.detail].filter(Boolean).join(" "),
+        workspaceRoot,
+      ),
+    [rawCommand, workEntry.command, workEntry.detail, workspaceRoot],
+  );
+  const rowContent = (
+    <>
       <div className="flex items-center gap-2 transition-[opacity,translate] duration-200">
         <span
           className={cn("flex size-5 shrink-0 items-center justify-center", iconConfig.className)}
@@ -1147,7 +1106,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                       closeDelay={0}
                       delay={75}
                       render={
-                        <span className="max-w-full cursor-default text-muted-foreground/55 transition-colors hover:text-muted-foreground/75 focus-visible:text-muted-foreground/75">
+                        <span className="max-w-full cursor-default text-muted-foreground/55 transition-colors hover:text-muted-foreground/75 hover:underline focus-visible:text-muted-foreground/75 focus-visible:underline group-hover/file-open:underline group-focus-visible/file-open:underline underline-offset-2">
                           {" "}
                           - {preview}
                         </span>
@@ -1183,7 +1142,12 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                   <span className={cn("text-foreground/80", workToneClass(workEntry.tone))}>
                     {heading}
                   </span>
-                  {preview && <span className="text-muted-foreground/55"> - {preview}</span>}
+                  {preview && (
+                    <span className="text-muted-foreground/55 group-hover/file-open:underline group-focus-visible/file-open:underline underline-offset-2">
+                      {" "}
+                      - {preview}
+                    </span>
+                  )}
                 </p>
               </TooltipTrigger>
               <TooltipPopup className="max-w-[min(720px,calc(100vw-2rem))]">
@@ -1199,14 +1163,27 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
         <div className="mt-1 flex flex-wrap gap-1 pl-6">
           {workEntry.changedFiles?.slice(0, 4).map((filePath) => {
             const displayPath = formatWorkspaceRelativePath(filePath, workspaceRoot);
+            const canOpenFile = resolveWorkspaceFilePath(filePath, workspaceRoot) !== null;
             return (
-              <span
+              <button
                 key={`${workEntry.id}:${filePath}`}
-                className="rounded-md border border-border/55 bg-background/75 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground/75"
-                title={displayPath}
+                data-work-log-path-pill="changed-file"
+                className={cn(
+                  "max-w-full rounded-md border border-border/55 bg-background/75 px-1.5 py-0.5 text-left font-mono text-[10px] text-muted-foreground/75 break-words",
+                  canOpenFile
+                    ? "cursor-pointer transition-colors hover:border-primary/45 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/45 focus-visible:underline underline-offset-2"
+                    : "cursor-default",
+                )}
+                disabled={!canOpenFile}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  openResolvedFile(filePath);
+                }}
+                title={canOpenFile ? `Open ${displayPath}` : displayPath}
+                type="button"
               >
                 {displayPath}
-              </span>
+              </button>
             );
           })}
           {(workEntry.changedFiles?.length ?? 0) > 4 && (
@@ -1216,6 +1193,43 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
           )}
         </div>
       )}
-    </div>
+      {commandPathTokens.length > 0 && (
+        <div className="mt-1 flex flex-wrap gap-1 pl-6">
+          {commandPathTokens.map((filePath) => {
+            const displayPath = formatWorkspaceRelativePath(filePath, workspaceRoot);
+            return (
+              <button
+                key={`${workEntry.id}:command-path:${filePath}`}
+                data-work-log-path-pill="command-token"
+                className="max-w-full rounded-md border border-border/55 bg-background/75 px-1.5 py-0.5 text-left font-mono text-[10px] text-muted-foreground/75 break-words cursor-pointer transition-colors hover:border-primary/45 hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/45 focus-visible:underline underline-offset-2"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  openResolvedFile(filePath);
+                }}
+                title={`Open ${displayPath}`}
+                type="button"
+              >
+                {displayPath}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </>
   );
+
+  if (canOpenPrimaryChangedFile && previewIsChangedFiles) {
+    return (
+      <button
+        className="group/file-open block w-full rounded-lg px-1 py-1 text-left transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/35"
+        onClick={() => openResolvedFile(primaryChangedFile)}
+        title={`Open ${formatWorkspaceRelativePath(primaryChangedFile, workspaceRoot)}`}
+        type="button"
+      >
+        {rowContent}
+      </button>
+    );
+  }
+
+  return <div className="rounded-lg px-1 py-1">{rowContent}</div>;
 });

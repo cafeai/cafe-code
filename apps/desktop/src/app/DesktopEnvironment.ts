@@ -7,7 +7,6 @@ import type {
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -138,13 +137,8 @@ function resolveDesktopRuntimeInfo(input: {
 
 const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
   input: MakeDesktopEnvironmentInput,
-): Effect.fn.Return<
-  DesktopEnvironmentShape,
-  Config.ConfigError,
-  Path.Path | FileSystem.FileSystem
-> {
+): Effect.fn.Return<DesktopEnvironmentShape, Config.ConfigError, Path.Path> {
   const path = yield* Path.Path;
-  const fileSystem = yield* FileSystem.FileSystem;
   const config = yield* DesktopConfig.DesktopConfig;
   const homeDirectory = input.homeDirectory;
   const devServerUrl = config.devServerUrl;
@@ -159,18 +153,7 @@ const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
         : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
   const baseDir = yield* Option.match(config.cafeCodeHome, {
     onSome: (value) => Effect.succeed(value),
-    onNone: () =>
-      Effect.gen(function* () {
-        const cafeHome = path.join(homeDirectory, ".cafecode");
-        const legacyHome = path.join(homeDirectory, ".t3");
-        if (yield* fileSystem.exists(cafeHome).pipe(Effect.orElseSucceed(() => false))) {
-          return cafeHome;
-        }
-        if (yield* fileSystem.exists(legacyHome).pipe(Effect.orElseSucceed(() => false))) {
-          return legacyHome;
-        }
-        return cafeHome;
-      }),
+    onNone: () => Effect.succeed(path.join(homeDirectory, ".cafe-code")),
   });
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
@@ -181,7 +164,7 @@ const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
   const displayName = branding.displayName;
   const stateDir = path.join(baseDir, isDevelopment ? "dev" : "userdata");
   const userDataDirName = isDevelopment ? "cafecode-dev" : "cafecode";
-  const legacyUserDataDirName = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)";
+  const legacyUserDataDirName = isDevelopment ? "Cafe Code (Dev)" : "Cafe Code (Alpha)";
   const resourcesPath = input.resourcesPath;
 
   return DesktopEnvironment.of({
@@ -261,7 +244,12 @@ const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
       path.join(resourcesPath, "resources", fileName),
       path.join(resourcesPath, fileName),
     ],
-    developmentDockIconPath: path.join(rootDir, "assets", "dev", "blueprint-macos-1024.png"),
+    developmentDockIconPath: path.join(
+      rootDir,
+      "assets",
+      "app-icon",
+      "cafe-code-app-icon-1024.png",
+    ),
   });
 });
 

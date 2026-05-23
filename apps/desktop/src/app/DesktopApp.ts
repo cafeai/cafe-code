@@ -1,5 +1,6 @@
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Random from "effect/Random";
@@ -21,10 +22,12 @@ import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopShellEnvironment from "../shell/DesktopShellEnvironment.ts";
 import * as DesktopState from "./DesktopState.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
+import * as DesktopDebugServer from "../debug/DesktopDebugServer.ts";
 
 const DEFAULT_DESKTOP_BACKEND_PORT = 3773;
 const MAX_TCP_PORT = 65_535;
 const DESKTOP_BACKEND_PORT_PROBE_HOSTS = ["127.0.0.1", "0.0.0.0", "::"] as const;
+const DESKTOP_SHUTDOWN_BACKEND_STOP_TIMEOUT = Duration.seconds(5);
 
 const makeDesktopRunId = Random.nextUUIDv4.pipe(
   Effect.map((value) => value.replaceAll("-", "").slice(0, 12)),
@@ -136,6 +139,7 @@ const bootstrap = Effect.gen(function* () {
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
   const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
   yield* logBootstrapInfo("bootstrap start");
+  yield* DesktopDebugServer.start;
 
   if (environment.isDevelopment && Option.isNone(environment.configuredBackendPort)) {
     return yield* new DesktopDevelopmentBackendPortRequiredError();
@@ -229,7 +233,9 @@ const scopedProgram = Effect.scoped(
     const backendManager = yield* DesktopBackendManager.DesktopBackendManager;
 
     yield* Effect.addFinalizer(() =>
-      backendManager.stop().pipe(Effect.ensuring(shutdown.markComplete)),
+      backendManager
+        .stop({ timeout: DESKTOP_SHUTDOWN_BACKEND_STOP_TIMEOUT })
+        .pipe(Effect.ensuring(shutdown.markComplete)),
     );
 
     yield* startup;

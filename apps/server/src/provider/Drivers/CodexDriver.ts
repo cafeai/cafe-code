@@ -97,6 +97,7 @@ const withInstanceIdentity =
     ...(input.displayName ? { displayName: input.displayName } : {}),
     ...(input.accentColor ? { accentColor: input.accentColor } : {}),
     continuation: { groupKey: input.continuationGroupKey },
+    runtimeCapabilities: { ...snapshot.runtimeCapabilities, liveSteer: "supported" },
   });
 
 export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {

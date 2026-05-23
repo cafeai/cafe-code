@@ -18,8 +18,10 @@ const clientSettings: ClientSettings = {
   dismissedProviderUpdateNotificationKeys: [],
   diffIgnoreWhitespace: true,
   diffWordWrap: true,
+  defaultEditor: "system-default",
   favorites: [],
   providerModelPreferences: {},
+  powerSaveBlockerMode: "off",
   sidebarProjectGroupingMode: "repository_path",
   sidebarProjectGroupingOverrides: {
     "environment-1:/tmp/project-a": "separate",

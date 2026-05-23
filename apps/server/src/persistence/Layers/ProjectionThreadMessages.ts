@@ -5,7 +5,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
-import { ChatAttachment } from "@cafecode/contracts";
+import { ChatAttachment, IsoDateTime } from "@cafecode/contracts";
 
 import { toPersistenceSqlError } from "../Errors.ts";
 import {
@@ -42,6 +42,9 @@ function toProjectionThreadMessage(
 
 const makeProjectionThreadMessageRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const LatestUserMessageAtRow = Schema.Struct({
+    latestUserMessageAt: IsoDateTime,
+  });
 
   const upsertProjectionThreadMessageRow = SqlSchema.void({
     Request: ProjectionThreadMessage,
@@ -71,16 +74,16 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
             (
               SELECT attachments_json
               FROM projection_thread_messages
-              WHERE message_id = ${row.messageId}
+              WHERE thread_id = ${row.threadId}
+                AND message_id = ${row.messageId}
             )
           ),
           ${row.isStreaming ? 1 : 0},
           ${row.createdAt},
           ${row.updatedAt}
         )
-        ON CONFLICT (message_id)
+        ON CONFLICT (thread_id, message_id)
         DO UPDATE SET
-          thread_id = excluded.thread_id,
           turn_id = excluded.turn_id,
           role = excluded.role,
           text = excluded.text,
@@ -137,6 +140,20 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
       `,
   });
 
+  const getLatestUserMessageAtRow = SqlSchema.findOneOption({
+    Request: ListProjectionThreadMessagesInput,
+    Result: LatestUserMessageAtRow,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT created_at AS "latestUserMessageAt"
+        FROM projection_thread_messages
+        WHERE thread_id = ${threadId}
+          AND role = 'user'
+        ORDER BY created_at DESC, message_id DESC
+        LIMIT 1
+      `,
+  });
+
   const deleteProjectionThreadMessageRows = SqlSchema.void({
     Request: DeleteProjectionThreadMessagesInput,
     execute: ({ threadId }) =>
@@ -167,6 +184,17 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
       Effect.map((rows) => rows.map(toProjectionThreadMessage)),
     );
 
+  const getLatestUserMessageAtByThreadId: ProjectionThreadMessageRepositoryShape["getLatestUserMessageAtByThreadId"] =
+    (input) =>
+      getLatestUserMessageAtRow(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlError(
+            "ProjectionThreadMessageRepository.getLatestUserMessageAtByThreadId:query",
+          ),
+        ),
+        Effect.map(Option.map((row) => row.latestUserMessageAt)),
+      );
+
   const deleteByThreadId: ProjectionThreadMessageRepositoryShape["deleteByThreadId"] = (input) =>
     deleteProjectionThreadMessageRows(input).pipe(
       Effect.mapError(
@@ -178,6 +206,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
     upsert,
     getByMessageId,
     listByThreadId,
+    getLatestUserMessageAtByThreadId,
     deleteByThreadId,
   } satisfies ProjectionThreadMessageRepositoryShape;
 });
