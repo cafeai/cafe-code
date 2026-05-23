@@ -2,26 +2,15 @@
 
 ![Cafe Code desktop screenshot](./docs/images/cafe-code-desktop.png)
 
-_Cafe Code is tiny.
-It does not want to become your IDE,
-your terminal,
-your project manager,
-or your new little tax burden._
+_Cafe Code is very small, barely does a thing at all. Chat goes in and chat comes out, soft and sweet, without a shout._
 
-Cafe Code is a minimal desktop GUI for coding agents like Codex and Claude. It
-is a fork of [T3 Code](https://github.com/pingdotgg/t3code), rebuilt into a
-smaller, crankier, cuter app for people who mostly want one thing:
+Cafe Code is a tiny desktop GUI for coding agents. It is a fork of [T3 Code](https://github.com/pingdotgg/t3code), with a basket of bug fixes, a little sweep-up, and some very opinionated trimming for people who want the agent chat and not much else.
 
-type prompt, get work done, keep moving.
+It is meant to stay light, calm, and out of the way — not freeze, drag, or get all sleepy like so many other clients do.
 
-T3 Code said it wanted to be minimal. Cafe Code takes that personally.
+T3 Code said it wanted to be minimal. Cafe Code went even smaller.
 
-No terminal drawer. No fake IDE. No hosted web app. No giant control room full
-of buttons that look important. If you want a console, use a real console. If
-you want to inspect code, open it in VS Code.
-
-Cafe Code is the quiet little window where the agent chats, works, and gets out
-of your way.
+No terminal drawer. No pretend IDE. No giant dashboard wearing a useful-looking hat. If you want a console, use a real console. If you want to inspect code, open it in VS Code.
 
 <p align="center">
   <img src="./docs/images/cafe-code-character.png" alt="Cafe Code character" width="360" />
@@ -134,8 +123,8 @@ Do not run `bun test`; this repo uses `bun run test`.
 
 ## 日本語でちゅ
 
-Cafe Code は、Codex とか Claude にコードをお願いするための、
-ちいさいデスクトップアプリだよ。
+Cafe Code は、Codex とか Claude とお話するための、
+ちいさめデスクトップアプリだわ。
 
 T3 Code から fork して、
 バグ直して、重いところ軽くして、
