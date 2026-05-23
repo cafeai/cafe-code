@@ -82,11 +82,14 @@ const applyPublishIconOverrides = Effect.fn("applyPublishIconOverrides")(functio
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
   const backups: PublishIconBackup[] = [];
+  const backupDir = yield* fs.makeTempDirectoryScoped({
+    prefix: "cafecode-publish-icons-",
+  });
 
-  for (const override of PUBLISH_ICON_OVERRIDES) {
+  for (const [index, override] of PUBLISH_ICON_OVERRIDES.entries()) {
     const sourcePath = path.join(repoRoot, override.sourceRelativePath);
     const targetPath = path.join(serverDir, override.targetRelativePath);
-    const backupPath = `${targetPath}.publish-bak`;
+    const backupPath = path.join(backupDir, `${index}-${path.basename(targetPath)}`);
 
     if (!(yield* fs.exists(sourcePath))) {
       return yield* new CliError({

@@ -18,11 +18,11 @@
   "license": "AGPL-3.0-or-later",
   "repository": {
     "type": "git",
-    "url": "https://github.com/cafeai/cafe-code",
+    "url": "git+https://github.com/cafeai/cafe-code.git",
     "directory": "apps/server"
   },
   "bin": {
-    "cafe-code": "./dist/bin.mjs"
+    "cafe-code": "dist/bin.mjs"
   },
   "files": [
     "dist",
