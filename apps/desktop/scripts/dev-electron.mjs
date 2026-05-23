@@ -38,6 +38,7 @@ await waitForResources({
 
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
+childEnv.CAFE_CODE_DESKTOP_DEV = "true";
 
 let shuttingDown = false;
 let restartTimer = null;

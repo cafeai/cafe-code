@@ -2,6 +2,8 @@
 
 ![Cafe Code desktop screenshot](./docs/images/cafe-code-desktop.png)
 
+Made in Japan with love.
+
 _Cafe Code is very small, barely does a thing at all. Chat goes in and chat comes out, soft and sweet, without a shout._
 
 Cafe Code is a tiny desktop GUI for coding agents. It is a fork of [T3 Code](https://github.com/pingdotgg/t3code), with a basket of bug fixes, a little sweep-up, and some very opinionated trimming for people who want the agent chat and not much else.
@@ -36,6 +38,7 @@ dashboard, a project-management suite, or a museum of buttons, no.
 
 This is the practical working list. It will probably get cleaned up later.
 
+- Numerous bug fixes.
 - Rebranded the app around Cafe Code.
 - Moved local app data into `~/.cafe-code`.
 - Removed the in-app terminal drawer and terminal UI.

@@ -101,7 +101,9 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         assertEnvValue(env, "CAFE_CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD", "0");
         assertEnvValue(env, "CAFE_CODE_LOG_WS_EVENTS", "1");
         assertEnvValue(env, "CAFE_CODE_HOST", "0.0.0.0");
+        assertEnvValue(env, "CAFE_CODE_DESKTOP_DEV", undefined);
         assert.equal(env.VITE_DEV_SERVER_URL, "http://localhost:7331/");
+        assertEnvValue(env, "CAFE_CODE_DEV_URL", "http://localhost:7331/");
       }),
     );
 
@@ -197,6 +199,8 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         assertEnvValue(env, "CAFE_CODE_HOME", path.resolve("/tmp/my-t3"));
         assert.equal(env.PORT, "5733");
         assert.equal(env.VITE_DEV_SERVER_URL, "http://127.0.0.1:5733");
+        assertEnvValue(env, "CAFE_CODE_DEV_URL", "http://127.0.0.1:5733");
+        assertEnvValue(env, "CAFE_CODE_DESKTOP_DEV", "true");
         assert.equal(env.HOST, "127.0.0.1");
         assertEnvValue(env, "CAFE_CODE_PORT", "4222");
         assert.equal(env.VITE_HTTP_URL, "http://127.0.0.1:4222");

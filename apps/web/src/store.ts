@@ -1440,10 +1440,7 @@ function applyEnvironmentOrchestrationEvent(
           event.payload.turnId !== null &&
           (thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId)
             ? (() => {
-                const sessionIsStillRunningThisTurn =
-                  thread.session?.orchestrationStatus === "running" &&
-                  thread.session.activeTurnId === event.payload.turnId;
-                const shouldHoldTurnOpen = event.payload.streaming || sessionIsStillRunningThisTurn;
+                const shouldHoldTurnOpen = event.payload.streaming;
                 return buildLatestTurn({
                   previous: thread.latestTurn,
                   turnId: event.payload.turnId,
@@ -1580,26 +1577,13 @@ function applyEnvironmentOrchestrationEvent(
         const latestTurn =
           thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId
             ? (() => {
-                const shouldHoldTurnOpen =
-                  event.payload.status !== "error" &&
-                  ((thread.session?.activeTurnId === event.payload.turnId &&
-                    thread.session.orchestrationStatus !== "error" &&
-                    thread.session.orchestrationStatus !== "interrupted" &&
-                    thread.session.orchestrationStatus !== "stopped") ||
-                    (thread.latestTurn?.turnId === event.payload.turnId &&
-                      thread.latestTurn.state === "running" &&
-                      thread.latestTurn.completedAt === null));
                 return buildLatestTurn({
                   previous: thread.latestTurn,
                   turnId: event.payload.turnId,
-                  state: shouldHoldTurnOpen
-                    ? "running"
-                    : checkpointStatusToLatestTurnState(event.payload.status),
+                  state: checkpointStatusToLatestTurnState(event.payload.status),
                   requestedAt: thread.latestTurn?.requestedAt ?? event.payload.completedAt,
                   startedAt: thread.latestTurn?.startedAt ?? event.payload.completedAt,
-                  completedAt: shouldHoldTurnOpen
-                    ? (thread.latestTurn?.completedAt ?? null)
-                    : event.payload.completedAt,
+                  completedAt: event.payload.completedAt,
                   assistantMessageId: event.payload.assistantMessageId,
                   sourceProposedPlan: thread.pendingSourceProposedPlan,
                 });

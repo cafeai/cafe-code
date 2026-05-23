@@ -113,6 +113,9 @@ describe("DesktopBackendConfiguration", () => {
         assert.isUndefined(first.env.CAFE_CODE_PORT);
         assert.isUndefined(first.env.CAFE_CODE_MODE);
         assert.isUndefined(first.env.CAFE_CODE_DESKTOP_LAN_HOST);
+        assert.isUndefined(first.env.CAFE_CODE_DESKTOP_DEV);
+        assert.isUndefined(first.env.CAFE_CODE_DEV_URL);
+        assert.isUndefined(first.env.VITE_DEV_SERVER_URL);
 
         assert.equal(first.bootstrap.mode, "desktop");
         assert.equal(first.bootstrap.noBrowser, true);
