@@ -766,6 +766,55 @@ describe("GeneralSettingsPanel observability", () => {
     });
   });
 
+  it("persists appearance preferences from General settings", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <GeneralSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByText("Accent color")).toBeInTheDocument();
+    const accentInput = document.querySelector(
+      'input[aria-label="Animated sidebar accent color"]',
+    ) as HTMLInputElement | null;
+    expect(accentInput).not.toBeNull();
+    const inputValueSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    inputValueSetter?.call(accentInput, "#16a34a");
+    accentInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    accentInput!.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+
+    await vi.waitFor(() => {
+      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ themeAccentColor: "#16a34a" }),
+      );
+    });
+
+    await expect.element(page.getByText("Sidebar mascot")).toBeInTheDocument();
+    await page.getByLabelText("Show sidebar mascot").click();
+
+    await vi.waitFor(() => {
+      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ showSidebarMascot: false }),
+      );
+    });
+
+    await expect.element(page.getByText("Background animations")).toBeInTheDocument();
+    await page.getByLabelText("Keep animations running in background").click();
+
+    await vi.waitFor(() => {
+      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ continueBackgroundAnimations: true }),
+      );
+    });
+  });
+
   it("shows detected editor icons in the General default editor selector", async () => {
     const platformSpy = vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
     const desktopBridge = createDesktopBridgeStub();

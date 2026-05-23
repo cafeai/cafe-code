@@ -1,8 +1,10 @@
 export const CAFE_DOCUMENT_VISIBILITY_ATTRIBUTE = "data-cafe-visibility";
 export const CAFE_WINDOW_FOCUS_ATTRIBUTE = "data-cafe-window-focus";
+export const CAFE_BACKGROUND_ANIMATIONS_ATTRIBUTE = "data-cafe-background-animations";
 
 export type CafeDocumentVisibility = "hidden" | "visible";
 export type CafeWindowFocus = "blurred" | "focused";
+export type CafeBackgroundAnimations = "paused" | "running";
 
 type CafeVisibilityListener = () => void;
 type CafeWindowFocusListener = () => void;
@@ -48,6 +50,21 @@ export function applyCafeWindowFocus(
   const focus = readCafeWindowFocus(documentRef);
   documentRef.documentElement.setAttribute(CAFE_WINDOW_FOCUS_ATTRIBUTE, focus);
   return focus;
+}
+
+export function applyCafeBackgroundAnimations(
+  continueBackgroundAnimations: boolean,
+  documentRef: Pick<CafeVisibilityDocument, "documentElement"> = document,
+): CafeBackgroundAnimations {
+  const mode = continueBackgroundAnimations ? "running" : "paused";
+  documentRef.documentElement.setAttribute(CAFE_BACKGROUND_ANIMATIONS_ATTRIBUTE, mode);
+  return mode;
+}
+
+export function clearCafeBackgroundAnimations(
+  documentRef: Pick<CafeVisibilityDocument, "documentElement"> = document,
+): void {
+  documentRef.documentElement.removeAttribute(CAFE_BACKGROUND_ANIMATIONS_ATTRIBUTE);
 }
 
 export function startCafeDocumentVisibilitySync(

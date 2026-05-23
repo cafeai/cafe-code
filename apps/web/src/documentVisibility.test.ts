@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  applyCafeBackgroundAnimations,
+  CAFE_BACKGROUND_ANIMATIONS_ATTRIBUTE,
   CAFE_DOCUMENT_VISIBILITY_ATTRIBUTE,
   CAFE_WINDOW_FOCUS_ATTRIBUTE,
+  clearCafeBackgroundAnimations,
   readCafeDocumentVisibility,
   readCafeWindowFocus,
   startCafeDocumentVisibilitySync,
@@ -122,5 +125,24 @@ describe("documentVisibility", () => {
     expect(fake.getVisibilityAttribute()).toBeNull();
     fake.setFocused(false);
     expect(fake.getFocusAttribute()).toBeNull();
+  });
+
+  it("maps the background animation setting into a document attribute", () => {
+    const fake = makeVisibilityDocument("visible");
+
+    expect(applyCafeBackgroundAnimations(false, fake.document)).toBe("paused");
+    expect(fake.document.documentElement.getAttribute(CAFE_BACKGROUND_ANIMATIONS_ATTRIBUTE)).toBe(
+      "paused",
+    );
+
+    expect(applyCafeBackgroundAnimations(true, fake.document)).toBe("running");
+    expect(fake.document.documentElement.getAttribute(CAFE_BACKGROUND_ANIMATIONS_ATTRIBUTE)).toBe(
+      "running",
+    );
+
+    clearCafeBackgroundAnimations(fake.document);
+    expect(fake.document.documentElement.getAttribute(CAFE_BACKGROUND_ANIMATIONS_ATTRIBUTE)).toBe(
+      null,
+    );
   });
 });

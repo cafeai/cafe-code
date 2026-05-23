@@ -2,13 +2,14 @@ import {
   ArchiveIcon,
   ArchiveX,
   LoaderIcon,
+  PaletteIcon,
   PlusIcon,
   RefreshCwIcon,
   Trash2Icon,
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   defaultInstanceIdForDriver,
   type DesktopUpdateChannel,
@@ -21,6 +22,9 @@ import {
 import { scopeThreadRef } from "@cafecode/client-runtime";
 import {
   DEFAULT_UNIFIED_SETTINGS,
+  DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
+  DEFAULT_SHOW_SIDEBAR_MASCOT,
+  DEFAULT_THEME_ACCENT_COLOR,
   type DefaultEditorSelection,
   type PowerSaveBlockerMode,
 } from "@cafecode/contracts/settings";
@@ -95,6 +99,7 @@ import {
   useServerProviders,
 } from "../../rpc/serverState";
 import { resolveEditorOpenOptions, type EditorOpenOption } from "../../editorOpenOptions";
+import { normalizeThemeAccentColor } from "../../themeAccent";
 
 const THEME_OPTIONS = [
   {
@@ -110,6 +115,7 @@ const THEME_OPTIONS = [
     label: "Dark",
   },
 ] as const;
+const DEFAULT_THEME_ACCENT_PICKER_COLOR = "#48cfff";
 
 const TIMESTAMP_FORMAT_LABELS = {
   locale: "System default",
@@ -200,6 +206,62 @@ function AboutVersionTitle() {
       <span>Version</span>
       <code className="text-[11px] font-medium text-muted-foreground">{APP_VERSION}</code>
     </span>
+  );
+}
+
+function ThemeAccentColorPicker(props: {
+  readonly value: string;
+  readonly onCommit: (value: string) => void;
+}) {
+  const [draft, setDraft] = useState(props.value);
+  const [isEditing, setIsEditing] = useState(false);
+  const draftColor = normalizeThemeAccentColor(draft);
+
+  useEffect(() => {
+    if (isEditing) return;
+    setDraft(props.value);
+  }, [isEditing, props.value]);
+
+  const commitDraft = () => {
+    setIsEditing(false);
+    props.onCommit(draftColor ?? DEFAULT_THEME_ACCENT_COLOR);
+  };
+
+  return (
+    <div className="flex min-w-0 items-center justify-end">
+      <label className="group relative inline-flex h-8 w-10 cursor-pointer items-center justify-center rounded-md border border-input bg-background shadow-xs transition-colors hover:bg-accent focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-1 focus-within:ring-offset-background">
+        <span
+          className="pointer-events-none absolute inset-0 rounded-[inherit] opacity-0 transition-opacity group-hover:opacity-100"
+          style={{
+            backgroundColor: draftColor ?? "transparent",
+          }}
+        />
+        <span className="pointer-events-none relative flex size-6 items-center justify-center rounded-full bg-[conic-gradient(from_40deg,#ef4444,#f97316,#facc15,#22c55e,#06b6d4,#3b82f6,#8b5cf6,#ef4444)] shadow-inner shadow-black/15">
+          <span className="absolute inset-1 rounded-full bg-background/92" />
+          <PaletteIcon
+            className="relative size-3.5 text-foreground/78"
+            strokeWidth={2.2}
+            aria-hidden="true"
+          />
+        </span>
+        <input
+          type="color"
+          value={draftColor ?? DEFAULT_THEME_ACCENT_PICKER_COLOR}
+          onFocus={() => setIsEditing(true)}
+          onInput={(event) => {
+            setIsEditing(true);
+            setDraft(event.currentTarget.value);
+          }}
+          onChange={(event) => {
+            setIsEditing(true);
+            setDraft(event.currentTarget.value);
+          }}
+          onBlur={commitDraft}
+          aria-label="Animated sidebar accent color"
+          className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+        />
+      </label>
+    </div>
   );
 }
 
@@ -431,6 +493,16 @@ export function useSettingsRestore(onRestored?: () => void) {
   const changedSettingLabels = useMemo(
     () => [
       ...(theme !== "system" ? ["Theme"] : []),
+      ...(settings.continueBackgroundAnimations !==
+      DEFAULT_UNIFIED_SETTINGS.continueBackgroundAnimations
+        ? ["Background animations"]
+        : []),
+      ...(settings.showSidebarMascot !== DEFAULT_UNIFIED_SETTINGS.showSidebarMascot
+        ? ["Sidebar mascot"]
+        : []),
+      ...(settings.themeAccentColor !== DEFAULT_UNIFIED_SETTINGS.themeAccentColor
+        ? ["Sidebar accent color"]
+        : []),
       ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
         ? ["Time format"]
         : []),
@@ -475,11 +547,14 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.autoOpenPlanSidebar,
       settings.confirmThreadArchive,
       settings.confirmThreadDelete,
+      settings.continueBackgroundAnimations,
       settings.addProjectBaseDirectory,
       settings.defaultThreadEnvMode,
       settings.diffIgnoreWhitespace,
       settings.diffWordWrap,
       settings.defaultEditor,
+      settings.showSidebarMascot,
+      settings.themeAccentColor,
       settings.automaticGitFetchInterval,
       settings.enableAssistantStreaming,
       settings.sidebarThreadPreviewCount,
@@ -501,6 +576,9 @@ export function useSettingsRestore(onRestored?: () => void) {
     setTheme("system");
     updateSettings({
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
+      continueBackgroundAnimations: DEFAULT_UNIFIED_SETTINGS.continueBackgroundAnimations,
+      showSidebarMascot: DEFAULT_UNIFIED_SETTINGS.showSidebarMascot,
+      themeAccentColor: DEFAULT_UNIFIED_SETTINGS.themeAccentColor,
       defaultEditor: DEFAULT_UNIFIED_SETTINGS.defaultEditor,
       diffWordWrap: DEFAULT_UNIFIED_SETTINGS.diffWordWrap,
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
@@ -606,6 +684,80 @@ export function GeneralSettingsPanel() {
                 ))}
               </SelectPopup>
             </Select>
+          }
+        />
+
+        <SettingsRow
+          title="Accent color"
+          description="Choose the color used by the animated sidebar stars and glow."
+          resetAction={
+            settings.themeAccentColor !== DEFAULT_UNIFIED_SETTINGS.themeAccentColor ? (
+              <SettingResetButton
+                label="accent color"
+                onClick={() =>
+                  updateSettings({
+                    themeAccentColor: DEFAULT_THEME_ACCENT_COLOR,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <ThemeAccentColorPicker
+              value={settings.themeAccentColor}
+              onCommit={(value) => updateSettings({ themeAccentColor: value })}
+            />
+          }
+        />
+
+        <SettingsRow
+          title="Sidebar mascot"
+          description="Show the Cafe Code mascot and attribution link at the bottom of the sidebar."
+          resetAction={
+            settings.showSidebarMascot !== DEFAULT_UNIFIED_SETTINGS.showSidebarMascot ? (
+              <SettingResetButton
+                label="sidebar mascot"
+                onClick={() =>
+                  updateSettings({
+                    showSidebarMascot: DEFAULT_SHOW_SIDEBAR_MASCOT,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.showSidebarMascot}
+              onCheckedChange={(checked) => updateSettings({ showSidebarMascot: Boolean(checked) })}
+              aria-label="Show sidebar mascot"
+            />
+          }
+        />
+
+        <SettingsRow
+          title="Background animations"
+          description="Keep decorative animations running when Cafe Code is hidden or unfocused."
+          resetAction={
+            settings.continueBackgroundAnimations !==
+            DEFAULT_UNIFIED_SETTINGS.continueBackgroundAnimations ? (
+              <SettingResetButton
+                label="background animations"
+                onClick={() =>
+                  updateSettings({
+                    continueBackgroundAnimations: DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.continueBackgroundAnimations}
+              onCheckedChange={(checked) =>
+                updateSettings({ continueBackgroundAnimations: Boolean(checked) })
+              }
+              aria-label="Keep animations running in background"
+            />
           }
         />
 
