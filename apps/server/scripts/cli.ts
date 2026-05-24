@@ -76,6 +76,55 @@ interface PublishIconBackup {
   readonly backupPath: string;
 }
 
+interface PreparedPublishPackage {
+  readonly iconBackups: ReadonlyArray<PublishIconBackup>;
+  readonly stagedDesktopRuntimePath: string;
+  readonly packageJsonPath: string;
+  readonly backupPath: string;
+}
+
+const disallowedPublishProtocols = ["catalog:", "workspace:"] as const;
+
+function collectDisallowedPublishDependencySpecs(
+  packageJson: unknown,
+): ReadonlyArray<{ readonly section: string; readonly name: string; readonly spec: string }> {
+  if (!packageJson || typeof packageJson !== "object") {
+    return [];
+  }
+
+  const manifest = packageJson as Record<string, unknown>;
+  const sections = [
+    "dependencies",
+    "optionalDependencies",
+    "peerDependencies",
+    "devDependencies",
+    "overrides",
+  ];
+  const disallowed: Array<{
+    readonly section: string;
+    readonly name: string;
+    readonly spec: string;
+  }> = [];
+
+  for (const section of sections) {
+    const dependencies = manifest[section];
+    if (!dependencies || typeof dependencies !== "object" || Array.isArray(dependencies)) {
+      continue;
+    }
+
+    for (const [name, spec] of Object.entries(dependencies)) {
+      if (
+        typeof spec === "string" &&
+        disallowedPublishProtocols.some((protocol) => spec.startsWith(protocol))
+      ) {
+        disallowed.push({ section, name, spec });
+      }
+    }
+  }
+
+  return disallowed;
+}
+
 const applyPublishIconOverrides = Effect.fn("applyPublishIconOverrides")(function* (
   repoRoot: string,
   serverDir: string,
@@ -124,6 +173,29 @@ const restorePublishIconOverrides = Effect.fn("restorePublishIconOverrides")(fun
   }
 });
 
+const copyServerDistRuntimeFiles = Effect.fn("copyServerDistRuntimeFiles")(function* (
+  serverDist: string,
+  targetDist: string,
+) {
+  const path = yield* Path.Path;
+  const fs = yield* FileSystem.FileSystem;
+  const entries = yield* fs.readDirectory(serverDist, { recursive: false });
+
+  for (const entry of entries) {
+    if (entry === "apps" || entry === "client") {
+      continue;
+    }
+
+    const sourcePath = path.join(serverDist, entry);
+    const sourceInfo = yield* fs.stat(sourcePath).pipe(Effect.catch(() => Effect.succeed(null)));
+    if (sourceInfo?.type !== "File") {
+      continue;
+    }
+
+    yield* fs.copyFile(sourcePath, path.join(targetDist, entry));
+  }
+});
+
 const stagePublishedDesktopRuntime = Effect.fn("stagePublishedDesktopRuntime")(function* (
   repoRoot: string,
   serverDir: string,
@@ -158,13 +230,7 @@ const stagePublishedDesktopRuntime = Effect.fn("stagePublishedDesktopRuntime")(f
   yield* fs.makeDirectory(path.join(stagedServerRoot, "dist"), { recursive: true });
   yield* fs.makeDirectory(stagedDesktopRoot, { recursive: true });
 
-  yield* fs.copyFile(path.join(serverDist, "bin.mjs"), path.join(stagedServerRoot, "dist/bin.mjs"));
-  if (yield* fs.exists(path.join(serverDist, "bin.mjs.map"))) {
-    yield* fs.copyFile(
-      path.join(serverDist, "bin.mjs.map"),
-      path.join(stagedServerRoot, "dist/bin.mjs.map"),
-    );
-  }
+  yield* copyServerDistRuntimeFiles(serverDist, path.join(stagedServerRoot, "dist"));
   yield* fs.copy(path.join(serverDist, "client"), path.join(stagedServerRoot, "dist/client"), {
     overwrite: true,
     preserveTimestamps: true,
@@ -208,6 +274,166 @@ const cleanupPublishedDesktopRuntime = Effect.fn("cleanupPublishedDesktopRuntime
 ) {
   const fs = yield* FileSystem.FileSystem;
   yield* fs.remove(stageRoot, { recursive: true, force: true }).pipe(Effect.ignore);
+});
+
+const assertPublishBuildAssets = Effect.fn("assertPublishBuildAssets")(function* (
+  serverDir: string,
+) {
+  const path = yield* Path.Path;
+  const fs = yield* FileSystem.FileSystem;
+
+  for (const relPath of ["dist/bin.mjs", "dist/launcher.mjs", "dist/client/index.html"]) {
+    const abs = path.join(serverDir, relPath);
+    if (!(yield* fs.exists(abs))) {
+      return yield* new CliError({
+        message: `Missing build asset: ${abs}. Run the build subcommand first.`,
+      });
+    }
+  }
+});
+
+const assertLocalServerBundleImportsPresent = Effect.fn("assertLocalServerBundleImportsPresent")(
+  function* (serverBundlePath: string) {
+    const path = yield* Path.Path;
+    const fs = yield* FileSystem.FileSystem;
+    const bundleSource = yield* fs.readFileString(serverBundlePath);
+    const importPattern = /(?:from\s*["']|import\(\s*["'])\.\/([^"']+\.mjs)["']/g;
+    const importSpecs = new Set<string>();
+
+    for (const match of bundleSource.matchAll(importPattern)) {
+      const spec = match[1];
+      if (spec !== undefined) {
+        importSpecs.add(spec);
+      }
+    }
+
+    for (const spec of importSpecs) {
+      const importedPath = path.join(path.dirname(serverBundlePath), spec);
+      if (!(yield* fs.exists(importedPath))) {
+        return yield* new CliError({
+          message: `Package is missing server bundle dependency '${path.basename(serverBundlePath)} -> ${spec}'. Run 'node scripts/cli.ts publish' or 'node scripts/cli.ts pack' instead of npm directly.`,
+        });
+      }
+    }
+  },
+);
+
+const assertPublishPrepared = Effect.fn("assertPublishPrepared")(function* (serverDir: string) {
+  const path = yield* Path.Path;
+  const fs = yield* FileSystem.FileSystem;
+  const packageJsonPath = path.join(serverDir, "package.json");
+  const packageJson = yield* fs
+    .readFileString(packageJsonPath)
+    .pipe(Effect.flatMap(Schema.decodeUnknownEffect(PackageJsonPrettyJson)));
+  const disallowed = collectDisallowedPublishDependencySpecs(packageJson);
+
+  if (disallowed.length > 0) {
+    const preview = disallowed
+      .slice(0, 5)
+      .map((entry) => `${entry.section}.${entry.name}=${entry.spec}`)
+      .join(", ");
+    const suffix = disallowed.length > 5 ? ` (+${disallowed.length - 5} more)` : "";
+    return yield* new CliError({
+      message: `Package manifest is not prepared for npm publish: ${preview}${suffix}. Run 'node scripts/cli.ts publish' or 'node scripts/cli.ts pack' instead of npm directly.`,
+    });
+  }
+
+  for (const relPath of [
+    "dist/bin.mjs",
+    "dist/launcher.mjs",
+    "dist/client/index.html",
+    "dist/apps/server/dist/bin.mjs",
+    "dist/apps/server/dist/client/index.html",
+    "dist/apps/desktop/dist-electron/main.cjs",
+    "dist/apps/desktop/scripts/start-electron.mjs",
+    "dist/apps/desktop/resources/icon.icns",
+  ]) {
+    const abs = path.join(serverDir, relPath);
+    if (!(yield* fs.exists(abs))) {
+      return yield* new CliError({
+        message: `Package is missing staged npm runtime asset '${relPath}'. Run 'node scripts/cli.ts publish' or 'node scripts/cli.ts pack' instead of npm directly.`,
+      });
+    }
+  }
+
+  yield* assertLocalServerBundleImportsPresent(
+    path.join(serverDir, "dist/apps/server/dist/bin.mjs"),
+  );
+});
+
+const preparePublishPackage = Effect.fn("preparePublishPackage")(function* (
+  repoRoot: string,
+  serverDir: string,
+  version: string,
+) {
+  const path = yield* Path.Path;
+  const fs = yield* FileSystem.FileSystem;
+  const packageJsonPath = path.join(serverDir, "package.json");
+  const backupDir = yield* fs.makeTempDirectoryScoped({
+    prefix: "cafecode-publish-package-",
+  });
+  const backupPath = path.join(backupDir, "package.json.original");
+  const pkg: PackageJson = {
+    name: serverPackageJson.name,
+    description: serverPackageJson.description,
+    license: serverPackageJson.license,
+    homepage: serverPackageJson.homepage,
+    bugs: serverPackageJson.bugs,
+    repository: serverPackageJson.repository,
+    keywords: serverPackageJson.keywords,
+    bin: serverPackageJson.bin,
+    type: serverPackageJson.type,
+    version,
+    engines: serverPackageJson.engines,
+    files: serverPackageJson.files,
+    publishConfig: serverPackageJson.publishConfig,
+    dependencies: resolveCatalogDependencies(
+      serverPackageJson.dependencies,
+      rootPackageJson.workspaces.catalog,
+      "apps/server",
+    ),
+    overrides: resolveCatalogDependencies(
+      rootPackageJson.overrides,
+      rootPackageJson.workspaces.catalog,
+      "apps/server",
+    ),
+  };
+
+  const original = yield* fs.readFileString(packageJsonPath);
+  const packageJsonString = yield* encodePackageJson(pkg);
+  yield* fs.writeFileString(backupPath, original);
+  yield* fs.writeFileString(packageJsonPath, `${packageJsonString}\n`);
+  yield* Effect.log("[cli] Prepared package.json for publish");
+
+  const iconBackups = yield* applyPublishIconOverrides(repoRoot, serverDir);
+  const stagedDesktopRuntimePath = yield* stagePublishedDesktopRuntime(
+    repoRoot,
+    serverDir,
+    version,
+  );
+  yield* assertPublishPrepared(serverDir);
+
+  return {
+    iconBackups,
+    stagedDesktopRuntimePath,
+    packageJsonPath,
+    backupPath,
+  } satisfies PreparedPublishPackage;
+});
+
+const restorePublishPackage = Effect.fn("restorePublishPackage")(function* (
+  resource: PreparedPublishPackage,
+  verbose: boolean,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  yield* cleanupPublishedDesktopRuntime(resource.stagedDesktopRuntimePath);
+  yield* restorePublishIconOverrides(resource.iconBackups).pipe(
+    Effect.catch((error) =>
+      Effect.logError(`[cli] Failed to restore publish icon overrides: ${String(error)}`),
+    ),
+  );
+  yield* fs.copyFile(resource.backupPath, resource.packageJsonPath);
+  if (verbose) yield* Effect.log("[cli] Restored original package.json");
 });
 
 const applyDevelopmentIconOverrides = Effect.fn("applyDevelopmentIconOverrides")(function* (
@@ -295,65 +521,16 @@ const publishCmd = Command.make(
   (config) =>
     Effect.gen(function* () {
       const path = yield* Path.Path;
-      const fs = yield* FileSystem.FileSystem;
       const repoRoot = yield* RepoRoot;
       const serverDir = path.join(repoRoot, "apps/server");
-      const packageJsonPath = path.join(serverDir, "package.json");
-      const backupPath = `${packageJsonPath}.bak`;
 
-      // Assert build assets exist
-      for (const relPath of ["dist/bin.mjs", "dist/launcher.mjs", "dist/client/index.html"]) {
-        const abs = path.join(serverDir, relPath);
-        if (!(yield* fs.exists(abs))) {
-          return yield* new CliError({
-            message: `Missing build asset: ${abs}. Run the build subcommand first.`,
-          });
-        }
-      }
+      yield* assertPublishBuildAssets(serverDir);
 
       yield* Effect.acquireUseRelease(
         // Acquire: backup package.json, resolve catalog dependencies, and strip devDependencies/scripts
         Effect.gen(function* () {
           const version = Option.getOrElse(config.appVersion, () => serverPackageJson.version);
-          const pkg: PackageJson = {
-            name: serverPackageJson.name,
-            description: serverPackageJson.description,
-            license: serverPackageJson.license,
-            homepage: serverPackageJson.homepage,
-            bugs: serverPackageJson.bugs,
-            repository: serverPackageJson.repository,
-            keywords: serverPackageJson.keywords,
-            bin: serverPackageJson.bin,
-            type: serverPackageJson.type,
-            version,
-            engines: serverPackageJson.engines,
-            files: serverPackageJson.files,
-            publishConfig: serverPackageJson.publishConfig,
-            dependencies: resolveCatalogDependencies(
-              serverPackageJson.dependencies,
-              rootPackageJson.workspaces.catalog,
-              "apps/server",
-            ),
-            overrides: resolveCatalogDependencies(
-              rootPackageJson.overrides,
-              rootPackageJson.workspaces.catalog,
-              "apps/server",
-            ),
-          };
-
-          const original = yield* fs.readFileString(packageJsonPath);
-          const packageJsonString = yield* encodePackageJson(pkg);
-          yield* fs.writeFileString(backupPath, original);
-          yield* fs.writeFileString(packageJsonPath, `${packageJsonString}\n`);
-          yield* Effect.log("[cli] Prepared package.json for publish");
-
-          const iconBackups = yield* applyPublishIconOverrides(repoRoot, serverDir);
-          const stagedDesktopRuntimePath = yield* stagePublishedDesktopRuntime(
-            repoRoot,
-            serverDir,
-            version,
-          );
-          return { iconBackups, stagedDesktopRuntimePath };
+          return yield* preparePublishPackage(repoRoot, serverDir, version);
         }),
         // Use: npm publish
         () =>
@@ -374,23 +551,63 @@ const publishCmd = Command.make(
             );
           }),
         // Release: restore
-        (resource: {
-          readonly iconBackups: ReadonlyArray<PublishIconBackup>;
-          readonly stagedDesktopRuntimePath: string;
-        }) =>
-          Effect.gen(function* () {
-            yield* cleanupPublishedDesktopRuntime(resource.stagedDesktopRuntimePath);
-            yield* restorePublishIconOverrides(resource.iconBackups).pipe(
-              Effect.catch((error) =>
-                Effect.logError(`[cli] Failed to restore publish icon overrides: ${String(error)}`),
-              ),
-            );
-            yield* fs.rename(backupPath, packageJsonPath);
-            if (config.verbose) yield* Effect.log("[cli] Restored original package.json");
-          }),
+        (resource) => restorePublishPackage(resource, config.verbose),
       );
     }),
 ).pipe(Command.withDescription("Publish the server package to npm."));
+
+const packCmd = Command.make(
+  "pack",
+  {
+    appVersion: Flag.string("app-version").pipe(Flag.optional),
+    packDestination: Flag.string("pack-destination").pipe(Flag.optional),
+    verbose: Flag.boolean("verbose").pipe(Flag.withDefault(false)),
+  },
+  (config) =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const repoRoot = yield* RepoRoot;
+      const serverDir = path.join(repoRoot, "apps/server");
+      const packDestination = Option.getOrElse(config.packDestination, () => serverDir);
+
+      yield* assertPublishBuildAssets(serverDir);
+      yield* fs.makeDirectory(packDestination, { recursive: true });
+
+      yield* Effect.acquireUseRelease(
+        Effect.gen(function* () {
+          const version = Option.getOrElse(config.appVersion, () => serverPackageJson.version);
+          return yield* preparePublishPackage(repoRoot, serverDir, version);
+        }),
+        () =>
+          Effect.gen(function* () {
+            const args = ["pack", "--pack-destination", packDestination];
+            yield* Effect.log(`[cli] Running: npm ${args.join(" ")}`);
+            yield* runCommand(
+              ChildProcess.make("npm", args, {
+                cwd: serverDir,
+                stdout: "inherit",
+                stderr: "inherit",
+                shell: process.platform === "win32",
+              }),
+            );
+          }),
+        (resource) => restorePublishPackage(resource, config.verbose),
+      );
+    }),
+).pipe(Command.withDescription("Prepare and pack the npm package into a local tarball."));
+
+const assertPublishPreparedCmd = Command.make("assert-publish-prepared").pipe(
+  Command.withDescription("Fail unless the server package is staged for npm packing."),
+  Command.withHandler(() =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const repoRoot = yield* RepoRoot;
+      const serverDir = path.join(repoRoot, "apps/server");
+      yield* assertPublishPrepared(serverDir);
+    }),
+  ),
+);
 
 // ---------------------------------------------------------------------------
 // root command
@@ -398,7 +615,7 @@ const publishCmd = Command.make(
 
 const cli = Command.make("cli").pipe(
   Command.withDescription("Cafe Code server build & publish CLI."),
-  Command.withSubcommands([buildCmd, publishCmd]),
+  Command.withSubcommands([buildCmd, publishCmd, packCmd, assertPublishPreparedCmd]),
 );
 
 Command.run(cli, { version: "0.0.0" }).pipe(

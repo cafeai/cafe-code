@@ -19,6 +19,10 @@ vi.mock("@legendapp/list/react", async () => {
     renderItem: (args: { item: { id: string } }) => React.ReactNode;
     ListHeaderComponent?: React.ReactNode;
     ListFooterComponent?: React.ReactNode;
+    onWheel?: React.WheelEventHandler<HTMLDivElement>;
+    onTouchMove?: React.TouchEventHandler<HTMLDivElement>;
+    onPointerDown?: React.PointerEventHandler<HTMLDivElement>;
+    onKeyDown?: React.KeyboardEventHandler<HTMLDivElement>;
     ref?: React.Ref<LegendListRef>;
   }) {
     React.useImperativeHandle(
@@ -31,7 +35,13 @@ vi.mock("@legendapp/list/react", async () => {
     );
 
     return (
-      <div data-testid="legend-list">
+      <div
+        data-testid="legend-list"
+        onKeyDown={props.onKeyDown}
+        onPointerDown={props.onPointerDown}
+        onTouchMove={props.onTouchMove}
+        onWheel={props.onWheel}
+      >
         {props.ListHeaderComponent}
         {props.data.map((item) => (
           <div key={props.keyExtractor(item)}>{props.renderItem({ item })}</div>
@@ -66,6 +76,7 @@ function buildProps() {
     timestampFormat: "24-hour" as const,
     workspaceRoot: undefined,
     onIsAtEndChange: vi.fn(),
+    onUserScrollIntent: vi.fn(),
   };
 }
 
@@ -170,6 +181,65 @@ describe("MessagesTimeline", () => {
       expect(props.onIsAtEndChange).toHaveBeenCalledWith(true);
       expect(scrollToEndSpy).toHaveBeenCalledWith({ animated: false });
       expect(requestAnimationFrameSpy).toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("snaps to the bottom when timeline rows are already present on first render", async () => {
+    const requestAnimationFrameSpy = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback: FrameRequestCallback) => {
+        callback(0);
+        return 1;
+      });
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+
+    const props = buildProps();
+    const screen = await render(
+      <MessagesTimeline
+        {...props}
+        timelineEntries={[
+          {
+            id: "work-1",
+            kind: "work",
+            createdAt: "2026-04-13T12:00:00.000Z",
+            entry: {
+              id: "work-1",
+              createdAt: "2026-04-13T12:00:00.000Z",
+              label: "thinking",
+              detail: "Inspecting repository state",
+              tone: "thinking",
+            },
+          },
+        ]}
+      />,
+    );
+
+    try {
+      await expect.element(page.getByText("Thinking - Inspecting repository state")).toBeVisible();
+      expect(props.onIsAtEndChange).toHaveBeenCalledWith(true);
+      expect(scrollToEndSpy).toHaveBeenCalledWith({ animated: false });
+      expect(requestAnimationFrameSpy).toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("reports explicit wheel scrolling as user scroll intent", async () => {
+    const props = buildProps();
+    const screen = await render(
+      <MessagesTimeline
+        {...props}
+        timelineEntries={[buildUserTimelineEntry("keep position when I intentionally scroll")]}
+      />,
+    );
+
+    try {
+      const list = document.querySelector("[data-testid='legend-list']");
+      list?.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
+
+      expect(props.onUserScrollIntent).toHaveBeenCalled();
     } finally {
       await screen.unmount();
     }

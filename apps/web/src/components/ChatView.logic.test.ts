@@ -63,12 +63,24 @@ describe("shouldPinTimelineToEndForLocalMessage", () => {
       shouldPinTimelineToEndForLocalMessage({
         lastKnownAtEnd: true,
         currentlyNearEnd: false,
+        userScrollIntentSinceReset: true,
       }),
     ).toBe(false);
     expect(
       shouldPinTimelineToEndForLocalMessage({
         lastKnownAtEnd: false,
         currentlyNearEnd: true,
+        userScrollIntentSinceReset: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("ignores stale non-end measurements until the user scrolls the timeline", () => {
+    expect(
+      shouldPinTimelineToEndForLocalMessage({
+        lastKnownAtEnd: false,
+        currentlyNearEnd: false,
+        userScrollIntentSinceReset: false,
       }),
     ).toBe(true);
   });
@@ -78,12 +90,14 @@ describe("shouldPinTimelineToEndForLocalMessage", () => {
       shouldPinTimelineToEndForLocalMessage({
         lastKnownAtEnd: true,
         currentlyNearEnd: null,
+        userScrollIntentSinceReset: true,
       }),
     ).toBe(true);
     expect(
       shouldPinTimelineToEndForLocalMessage({
         lastKnownAtEnd: false,
         currentlyNearEnd: null,
+        userScrollIntentSinceReset: true,
       }),
     ).toBe(false);
   });

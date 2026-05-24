@@ -1138,6 +1138,7 @@ export default function ChatView(props: ChatViewProps) {
   const [pendingServerThreadBranch, setPendingServerThreadBranch] = useState<string | null>();
   const legendListRef = useRef<LegendListRef | null>(null);
   const isAtEndRef = useRef(true);
+  const timelineUserScrollIntentSinceResetRef = useRef(false);
   const attachmentPreviewHandoffByMessageIdRef = useRef<Record<string, string[]>>({});
   const attachmentPreviewPromotionInFlightByMessageIdRef = useRef<Record<string, true>>({});
   const sendInFlightRef = useRef(false);
@@ -2846,6 +2847,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   const hideScrollToBottom = useCallback(() => {
     isAtEndRef.current = true;
+    timelineUserScrollIntentSinceResetRef.current = false;
     showScrollDebouncer.current.cancel();
     setShowScrollToBottom(false);
   }, []);
@@ -2865,6 +2867,7 @@ export default function ChatView(props: ChatViewProps) {
       !shouldPinTimelineToEndForLocalMessage({
         lastKnownAtEnd: isAtEndRef.current,
         currentlyNearEnd,
+        userScrollIntentSinceReset: timelineUserScrollIntentSinceResetRef.current,
       })
     ) {
       isAtEndRef.current = false;
@@ -2881,10 +2884,19 @@ export default function ChatView(props: ChatViewProps) {
       });
     });
   }, [hideScrollToBottom]);
+  const onTimelineUserScrollIntent = useCallback(() => {
+    timelineUserScrollIntentSinceResetRef.current = true;
+  }, []);
   const onIsAtEndChange = useCallback(
     (isAtEnd: boolean) => {
       if (isAtEnd) {
         hideScrollToBottom();
+        return;
+      }
+
+      if (!timelineUserScrollIntentSinceResetRef.current) {
+        showScrollDebouncer.current.cancel();
+        setShowScrollToBottom(false);
         return;
       }
 
@@ -2898,6 +2910,7 @@ export default function ChatView(props: ChatViewProps) {
   useEffect(() => {
     setPullRequestDialogState(null);
     isAtEndRef.current = true;
+    timelineUserScrollIntentSinceResetRef.current = false;
     showScrollDebouncer.current.cancel();
     setShowScrollToBottom(false);
     if (planSidebarOpenOnNextThreadRef.current) {
@@ -4551,6 +4564,7 @@ export default function ChatView(props: ChatViewProps) {
               workspaceRoot={activeWorkspaceRoot}
               skills={activeProviderStatus?.skills ?? EMPTY_PROVIDER_SKILLS}
               onIsAtEndChange={onIsAtEndChange}
+              onUserScrollIntent={onTimelineUserScrollIntent}
             />
 
             {/* scroll to bottom pill — shown when user has scrolled away from the bottom */}

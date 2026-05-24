@@ -1,6 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -66,6 +66,25 @@ export function buildDesktopLaunchEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
   delete childEnv.VITE_DEV_SERVER_URL;
   delete childEnv.CAFE_CODE_DEV_URL;
   return childEnv;
+}
+
+function resolveExecutableUrl(filePath: string): string {
+  try {
+    return pathToFileURL(realpathSync(filePath)).href;
+  } catch {
+    return pathToFileURL(filePath).href;
+  }
+}
+
+export function isCliEntrypoint(
+  entrypoint: string | undefined,
+  moduleUrl = import.meta.url,
+): boolean {
+  if (entrypoint === undefined) {
+    return false;
+  }
+
+  return moduleUrl === resolveExecutableUrl(entrypoint);
 }
 
 function printHelp() {
@@ -145,11 +164,7 @@ export function runLauncher(args: readonly string[]) {
 }
 
 function isDirectCliExecution() {
-  const entrypoint = process.argv[1];
-  if (entrypoint === undefined) {
-    return false;
-  }
-  return import.meta.url === pathToFileURL(entrypoint).href;
+  return isCliEntrypoint(process.argv[1]);
 }
 
 if (isDirectCliExecution()) {

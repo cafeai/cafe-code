@@ -14,6 +14,8 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
@@ -138,6 +140,7 @@ interface MessagesTimelineProps {
   workspaceRoot: string | undefined;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   onIsAtEndChange: (isAtEnd: boolean) => void;
+  onUserScrollIntent: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +167,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   workspaceRoot,
   skills = EMPTY_TIMELINE_SKILLS,
   onIsAtEndChange,
+  onUserScrollIntent,
 }: MessagesTimelineProps) {
   const rawRows = useMemo(
     () =>
@@ -196,8 +200,40 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onIsAtEndChange(isTimelineScrolledToEnd(state));
     }
   }, [listRef, onIsAtEndChange]);
+  const handleUserScrollIntent = useCallback(() => {
+    onUserScrollIntent();
+  }, [onUserScrollIntent]);
+  const handlePointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLElement>) => {
+      const bounds = event.currentTarget.getBoundingClientRect();
+      const scrollbarIntentPx = 24;
+      if (
+        event.clientX >= bounds.right - scrollbarIntentPx ||
+        event.clientY >= bounds.bottom - scrollbarIntentPx
+      ) {
+        onUserScrollIntent();
+      }
+    },
+    [onUserScrollIntent],
+  );
+  const handleKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLElement>) => {
+      if (
+        event.key === "ArrowUp" ||
+        event.key === "ArrowDown" ||
+        event.key === "PageUp" ||
+        event.key === "PageDown" ||
+        event.key === "Home" ||
+        event.key === "End" ||
+        event.key === " "
+      ) {
+        onUserScrollIntent();
+      }
+    },
+    [onUserScrollIntent],
+  );
 
-  const previousRowCountRef = useRef(rows.length);
+  const previousRowCountRef = useRef(0);
   useEffect(() => {
     const previousRowCount = previousRowCountRef.current;
     previousRowCountRef.current = rows.length;
@@ -207,11 +243,26 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     }
 
     onIsAtEndChange(true);
-    const frameId = window.requestAnimationFrame(() => {
-      void listRef.current?.scrollToEnd?.({ animated: false });
-    });
+    let cancelled = false;
+    let attempts = 0;
+    const frameIds: number[] = [];
+    const scheduleScroll = () => {
+      const frameId = window.requestAnimationFrame(() => {
+        if (cancelled) return;
+        attempts += 1;
+        void listRef.current?.scrollToEnd?.({ animated: false });
+        if (attempts < 3) {
+          scheduleScroll();
+        }
+      });
+      frameIds.push(frameId);
+    };
+    scheduleScroll();
     return () => {
-      window.cancelAnimationFrame(frameId);
+      cancelled = true;
+      for (const frameId of frameIds) {
+        window.cancelAnimationFrame(frameId);
+      }
     };
   }, [listRef, onIsAtEndChange, rows.length]);
 
@@ -293,6 +344,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           maintainScrollAtEndThreshold={TIMELINE_MAINTAIN_SCROLL_AT_END_THRESHOLD}
           maintainVisibleContentPosition
           onScroll={handleScroll}
+          onWheel={handleUserScrollIntent}
+          onTouchMove={handleUserScrollIntent}
+          onPointerDown={handlePointerDown}
+          onKeyDown={handleKeyDown}
           className="h-full overflow-x-hidden overscroll-y-contain px-3 sm:px-5"
           ListHeaderComponent={TIMELINE_LIST_HEADER}
           ListFooterComponent={TIMELINE_LIST_FOOTER}

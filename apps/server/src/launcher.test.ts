@@ -1,7 +1,13 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import { mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
 import { assert, describe, it } from "@effect/vitest";
 
 import packageJson from "../package.json" with { type: "json" };
-import { buildDesktopLaunchEnv, resolveLaunchAction } from "./launcher.ts";
+import { buildDesktopLaunchEnv, isCliEntrypoint, resolveLaunchAction } from "./launcher.ts";
 
 describe("launcher", () => {
   it("configures the default npm bin to launch the desktop app", () => {
@@ -15,6 +21,22 @@ describe("launcher", () => {
       type: "desktop",
       args: ["--cafe-debug"],
     });
+  });
+
+  it("recognizes npm bin symlinks as direct launcher execution", () => {
+    const launcherPath = fileURLToPath(new URL("./launcher.ts", import.meta.url));
+    const testDir = mkdtempSync(join(tmpdir(), "cafe-code-launcher-"));
+    const symlinkPath = join(testDir, "cafe-code");
+
+    try {
+      symlinkSync(launcherPath, symlinkPath);
+      assert.equal(
+        isCliEntrypoint(symlinkPath, pathToFileURL(realpathSync(launcherPath)).href),
+        true,
+      );
+    } finally {
+      rmSync(testDir, { force: true, recursive: true });
+    }
   });
 
   it("routes server-only usage explicitly", () => {

@@ -71,7 +71,16 @@ export function shouldWriteThreadErrorToCurrentServerThread(input: {
 export function shouldPinTimelineToEndForLocalMessage(input: {
   readonly lastKnownAtEnd: boolean;
   readonly currentlyNearEnd: boolean | null;
+  readonly userScrollIntentSinceReset: boolean;
 }): boolean {
+  if (input.currentlyNearEnd === true) {
+    return true;
+  }
+
+  if (!input.userScrollIntentSinceReset) {
+    return true;
+  }
+
   return input.currentlyNearEnd ?? input.lastKnownAtEnd;
 }
 

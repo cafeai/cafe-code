@@ -1,6 +1,6 @@
 {
   "name": "@cafeai/cafe-code",
-  "version": "0.0.27",
+  "version": "0.0.28",
   "description": "A minimal AI chat harness for coding agents.",
   "keywords": [
     "agent",
@@ -37,6 +37,8 @@
     "dev": "node --watch src/bin.ts",
     "build": "node scripts/cli.ts build",
     "build:bundle": "tsdown",
+    "prepack": "node scripts/cli.ts assert-publish-prepared",
+    "prepublishOnly": "node scripts/cli.ts assert-publish-prepared",
     "start": "node dist/bin.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
