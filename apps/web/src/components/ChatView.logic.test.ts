@@ -17,6 +17,7 @@ import {
   hasServerAcknowledgedLocalDispatch,
   resolveFollowUpQueuePhase,
   resolveSendEnvMode,
+  shouldPinTimelineToEndForLocalMessage,
   shouldWriteThreadErrorToCurrentServerThread,
   waitForStartedServerThread,
 } from "./ChatView.logic";
@@ -53,6 +54,38 @@ describe("resolveSendEnvMode", () => {
   it("forces local mode for non-git repositories", () => {
     expect(resolveSendEnvMode({ requestedEnvMode: "worktree", isGitRepo: false })).toBe("local");
     expect(resolveSendEnvMode({ requestedEnvMode: "local", isGitRepo: false })).toBe("local");
+  });
+});
+
+describe("shouldPinTimelineToEndForLocalMessage", () => {
+  it("uses the current list state when available", () => {
+    expect(
+      shouldPinTimelineToEndForLocalMessage({
+        lastKnownAtEnd: true,
+        currentlyNearEnd: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldPinTimelineToEndForLocalMessage({
+        lastKnownAtEnd: false,
+        currentlyNearEnd: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("falls back to the last known state before LegendList is ready", () => {
+    expect(
+      shouldPinTimelineToEndForLocalMessage({
+        lastKnownAtEnd: true,
+        currentlyNearEnd: null,
+      }),
+    ).toBe(true);
+    expect(
+      shouldPinTimelineToEndForLocalMessage({
+        lastKnownAtEnd: false,
+        currentlyNearEnd: null,
+      }),
+    ).toBe(false);
   });
 });
 

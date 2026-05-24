@@ -133,7 +133,7 @@ import {
 } from "./chat/followUpQueue";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
-import { MessagesTimeline } from "./chat/MessagesTimeline";
+import { isTimelineScrolledToEnd, MessagesTimeline } from "./chat/MessagesTimeline";
 import { ChatHeader } from "./chat/ChatHeader";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { NoActiveThreadState } from "./NoActiveThreadState";
@@ -156,6 +156,7 @@ import {
   resolveSendEnvMode,
   revokeBlobPreviewUrl,
   revokeUserMessagePreviewUrls,
+  shouldPinTimelineToEndForLocalMessage,
   shouldWriteThreadErrorToCurrentServerThread,
   waitForStartedServerThread,
 } from "./ChatView.logic";
@@ -2858,6 +2859,19 @@ export default function ChatView(props: ChatViewProps) {
     [hideScrollToBottom],
   );
   const pinTimelineToEndForLocalMessage = useCallback(() => {
+    const state = legendListRef.current?.getState?.();
+    const currentlyNearEnd = state ? isTimelineScrolledToEnd(state) : null;
+    if (
+      !shouldPinTimelineToEndForLocalMessage({
+        lastKnownAtEnd: isAtEndRef.current,
+        currentlyNearEnd,
+      })
+    ) {
+      isAtEndRef.current = false;
+      showScrollDebouncer.current.maybeExecute();
+      return;
+    }
+
     hideScrollToBottom();
     void legendListRef.current?.scrollToEnd?.({ animated: false });
     window.requestAnimationFrame(() => {

@@ -139,7 +139,7 @@ describe("MessagesTimeline file open helpers", () => {
       isTimelineScrolledToEnd({
         isAtEnd: false,
         contentLength: 2_000,
-        scroll: 1_420,
+        scroll: 820,
         scrollLength: 500,
       }),
     ).toBe(true);
@@ -147,7 +147,7 @@ describe("MessagesTimeline file open helpers", () => {
       isTimelineScrolledToEnd({
         isAtEnd: false,
         contentLength: 2_000,
-        scroll: 1_100,
+        scroll: 720,
         scrollLength: 500,
       }),
     ).toBe(false);

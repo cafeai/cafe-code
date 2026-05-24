@@ -85,7 +85,8 @@ const TimelineRowActivityCtx = createContext<TimelineRowActivityState>(null!);
 const TIMELINE_LIST_HEADER = <div className="h-3 sm:h-4" />;
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
-const TIMELINE_AT_END_TOLERANCE_PX = 360;
+const TIMELINE_AT_END_TOLERANCE_PX = 720;
+const TIMELINE_MAINTAIN_SCROLL_AT_END_THRESHOLD = 0.9;
 
 export function isTimelineScrolledToEnd(state: {
   readonly isAtEnd: boolean;
@@ -289,7 +290,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           estimatedItemSize={90}
           initialScrollAtEnd
           maintainScrollAtEnd
-          maintainScrollAtEndThreshold={0.45}
+          maintainScrollAtEndThreshold={TIMELINE_MAINTAIN_SCROLL_AT_END_THRESHOLD}
           maintainVisibleContentPosition
           onScroll={handleScroll}
           className="h-full overflow-x-hidden overscroll-y-contain px-3 sm:px-5"

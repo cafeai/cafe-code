@@ -68,6 +68,13 @@ export function shouldWriteThreadErrorToCurrentServerThread(input: {
   );
 }
 
+export function shouldPinTimelineToEndForLocalMessage(input: {
+  readonly lastKnownAtEnd: boolean;
+  readonly currentlyNearEnd: boolean | null;
+}): boolean {
+  return input.currentlyNearEnd ?? input.lastKnownAtEnd;
+}
+
 export function revokeBlobPreviewUrl(previewUrl: string | undefined): void {
   if (!previewUrl || typeof URL === "undefined" || !previewUrl.startsWith("blob:")) {
     return;
