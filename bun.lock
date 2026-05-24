@@ -17,7 +17,7 @@
     },
     "apps/desktop": {
       "name": "@cafecode/desktop",
-      "version": "0.0.25",
+      "version": "0.0.27",
       "dependencies": {
         "@cafecode/contracts": "workspace:*",
         "@cafecode/shared": "workspace:*",
@@ -39,7 +39,7 @@
     },
     "apps/server": {
       "name": "@cafeai/cafe-code",
-      "version": "0.0.25",
+      "version": "0.0.27",
       "bin": {
         "cafe-code": "./dist/bin.mjs",
       },
@@ -73,7 +73,7 @@
     },
     "apps/web": {
       "name": "@cafecode/web",
-      "version": "0.0.25",
+      "version": "0.0.27",
       "dependencies": {
         "@base-ui/react": "^1.4.1",
         "@cafecode/client-runtime": "workspace:*",
@@ -154,7 +154,7 @@
     },
     "packages/contracts": {
       "name": "@cafecode/contracts",
-      "version": "0.0.25",
+      "version": "0.0.27",
       "dependencies": {
         "effect": "catalog:",
       },
