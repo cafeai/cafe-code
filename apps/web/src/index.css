@@ -112,6 +112,7 @@
   --success-foreground: var(--color-emerald-700);
   --warning: var(--color-amber-500);
   --warning-foreground: var(--color-amber-700);
+  --cafe-sidebar-accent: #44beda;
 
   @variant dark {
     color-scheme: dark;
@@ -141,6 +142,7 @@
     --success-foreground: var(--color-emerald-400);
     --warning: var(--color-amber-500);
     --warning-foreground: var(--color-amber-400);
+    --cafe-sidebar-accent: #48cfff;
   }
 }
 
@@ -228,7 +230,11 @@ body::after {
   isolation: isolate;
   overflow: hidden;
   background:
-    radial-gradient(120% 90% at 50% -8%, rgba(68, 190, 218, 0.16), transparent 42%),
+    radial-gradient(
+      120% 90% at 50% -8%,
+      color-mix(in srgb, var(--cafe-sidebar-accent) 16%, transparent),
+      transparent 42%
+    ),
     radial-gradient(95% 75% at 18% 105%, rgba(126, 137, 151, 0.14), transparent 46%),
     color-mix(in srgb, var(--card) 96%, #e5edf3);
 }
@@ -247,9 +253,17 @@ body::after {
   inset: -34% -48%;
   background-image:
     radial-gradient(circle at 18px 28px, rgba(22, 32, 46, 0.76) 0 1px, transparent 1.45px),
-    radial-gradient(circle at 84px 118px, rgba(0, 88, 120, 0.74) 0 1.1px, transparent 1.65px),
+    radial-gradient(
+      circle at 84px 118px,
+      color-mix(in srgb, var(--cafe-sidebar-accent) 74%, #00364a) 0 1.1px,
+      transparent 1.65px
+    ),
     radial-gradient(circle at 132px 64px, rgba(43, 56, 73, 0.72) 0 0.8px, transparent 1.35px),
-    radial-gradient(circle at 226px 192px, rgba(0, 105, 138, 0.72) 0 1.15px, transparent 1.75px),
+    radial-gradient(
+      circle at 226px 192px,
+      color-mix(in srgb, var(--cafe-sidebar-accent) 72%, #004358) 0 1.15px,
+      transparent 1.75px
+    ),
     radial-gradient(circle at 304px 42px, rgba(32, 45, 61, 0.64) 0 0.7px, transparent 1.25px);
   background-position:
     0 0,
@@ -271,10 +285,19 @@ body::after {
 .cafe-thread-sidebar [data-slot="sidebar-inner"]::after {
   inset: -18% -28%;
   background:
-    radial-gradient(ellipse at 16% 24%, rgba(16, 184, 214, 0.18), transparent 36%),
+    radial-gradient(
+      ellipse at 16% 24%,
+      color-mix(in srgb, var(--cafe-sidebar-accent) 18%, transparent),
+      transparent 36%
+    ),
     radial-gradient(ellipse at 82% 80%, rgba(132, 142, 156, 0.18), transparent 38%),
     radial-gradient(ellipse at 72% 12%, rgba(94, 109, 126, 0.08), transparent 34%),
-    linear-gradient(132deg, transparent 20%, rgba(76, 176, 205, 0.1) 48%, transparent 70%);
+    linear-gradient(
+      132deg,
+      transparent 20%,
+      color-mix(in srgb, var(--cafe-sidebar-accent) 10%, transparent) 48%,
+      transparent 70%
+    );
   opacity: 0.42;
   animation: cafe-sidebar-nebula-drift 23.333s ease-in-out infinite alternate;
   will-change: transform, opacity;
@@ -282,7 +305,11 @@ body::after {
 
 .dark .cafe-thread-sidebar [data-slot="sidebar-inner"] {
   background:
-    radial-gradient(120% 90% at 50% -8%, rgba(72, 207, 255, 0.16), transparent 42%),
+    radial-gradient(
+      120% 90% at 50% -8%,
+      color-mix(in srgb, var(--cafe-sidebar-accent) 16%, transparent),
+      transparent 42%
+    ),
     radial-gradient(95% 75% at 18% 105%, rgba(166, 176, 188, 0.14), transparent 46%), #101011;
 }
 
@@ -291,18 +318,35 @@ body::after {
 
   background-image:
     radial-gradient(circle at 18px 28px, rgba(255, 255, 255, 0.82) 0 1px, transparent 1.45px),
-    radial-gradient(circle at 84px 118px, rgba(109, 236, 255, 0.8) 0 1.1px, transparent 1.65px),
+    radial-gradient(
+      circle at 84px 118px,
+      color-mix(in srgb, var(--cafe-sidebar-accent) 80%, white) 0 1.1px,
+      transparent 1.65px
+    ),
     radial-gradient(circle at 132px 64px, rgba(176, 184, 196, 0.62) 0 0.8px, transparent 1.35px),
-    radial-gradient(circle at 226px 192px, rgba(84, 204, 232, 0.7) 0 1.15px, transparent 1.75px),
+    radial-gradient(
+      circle at 226px 192px,
+      color-mix(in srgb, var(--cafe-sidebar-accent) 70%, white) 0 1.15px,
+      transparent 1.75px
+    ),
     radial-gradient(circle at 304px 42px, rgba(214, 221, 230, 0.48) 0 0.7px, transparent 1.25px);
 }
 
 .dark .cafe-thread-sidebar [data-slot="sidebar-inner"]::after {
   background:
-    radial-gradient(ellipse at 16% 24%, rgba(40, 214, 255, 0.2), transparent 36%),
+    radial-gradient(
+      ellipse at 16% 24%,
+      color-mix(in srgb, var(--cafe-sidebar-accent) 20%, transparent),
+      transparent 36%
+    ),
     radial-gradient(ellipse at 82% 80%, rgba(168, 178, 190, 0.18), transparent 38%),
     radial-gradient(ellipse at 72% 12%, rgba(218, 225, 234, 0.08), transparent 34%),
-    linear-gradient(132deg, transparent 20%, rgba(109, 236, 255, 0.08) 48%, transparent 70%);
+    linear-gradient(
+      132deg,
+      transparent 20%,
+      color-mix(in srgb, var(--cafe-sidebar-accent) 8%, transparent) 48%,
+      transparent 70%
+    );
   opacity: 0.46;
   mix-blend-mode: screen;
 }
@@ -370,11 +414,6 @@ body::after {
 .dark .cafe-thread-sidebar [data-slot="sidebar-menu-sub-button"][data-active="true"]:hover {
   background:
     linear-gradient(90deg, rgba(72, 207, 255, 0.1), transparent 62%), rgba(255, 255, 255, 0.09);
-}
-
-html[data-cafe-visibility="hidden"] .cafe-thread-sidebar [data-slot="sidebar-inner"]::before,
-html[data-cafe-visibility="hidden"] .cafe-thread-sidebar [data-slot="sidebar-inner"]::after {
-  animation-play-state: paused;
 }
 
 .cafe-followup-queue {
@@ -468,12 +507,26 @@ html[data-cafe-visibility="hidden"] .cafe-thread-sidebar [data-slot="sidebar-inn
   background-color: rgba(109, 236, 255, 0.08);
 }
 
-html[data-cafe-visibility="hidden"] .cafe-followup-queue::before,
-html[data-cafe-visibility="hidden"] .cafe-followup-queue::after,
-html[data-cafe-window-focus="blurred"] .cafe-thread-sidebar [data-slot="sidebar-inner"]::before,
-html[data-cafe-window-focus="blurred"] .cafe-thread-sidebar [data-slot="sidebar-inner"]::after,
-html[data-cafe-window-focus="blurred"] .cafe-followup-queue::before,
-html[data-cafe-window-focus="blurred"] .cafe-followup-queue::after {
+html[data-cafe-background-animations="paused"][data-cafe-visibility="hidden"]
+  .cafe-thread-sidebar
+  [data-slot="sidebar-inner"]::before,
+html[data-cafe-background-animations="paused"][data-cafe-visibility="hidden"]
+  .cafe-thread-sidebar
+  [data-slot="sidebar-inner"]::after,
+html[data-cafe-background-animations="paused"][data-cafe-visibility="hidden"]
+  .cafe-followup-queue::before,
+html[data-cafe-background-animations="paused"][data-cafe-visibility="hidden"]
+  .cafe-followup-queue::after,
+html[data-cafe-background-animations="paused"][data-cafe-window-focus="blurred"]
+  .cafe-thread-sidebar
+  [data-slot="sidebar-inner"]::before,
+html[data-cafe-background-animations="paused"][data-cafe-window-focus="blurred"]
+  .cafe-thread-sidebar
+  [data-slot="sidebar-inner"]::after,
+html[data-cafe-background-animations="paused"][data-cafe-window-focus="blurred"]
+  .cafe-followup-queue::before,
+html[data-cafe-background-animations="paused"][data-cafe-window-focus="blurred"]
+  .cafe-followup-queue::after {
   animation-play-state: paused;
 }
 

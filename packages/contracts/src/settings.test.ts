@@ -4,8 +4,12 @@ import * as Schema from "effect/Schema";
 import {
   ClientSettingsPatch,
   ClientSettingsSchema,
+  DEFAULT_APP_ACCENT_COLOR,
   DEFAULT_CLIENT_SETTINGS,
+  DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
   DEFAULT_POWER_SAVE_BLOCKER_MODE,
+  DEFAULT_SHOW_SIDEBAR_MASCOT,
+  DEFAULT_THEME_ACCENT_COLOR,
 } from "./settings.ts";
 
 const decodeClientSettings = Schema.decodeSync(ClientSettingsSchema);
@@ -17,10 +21,39 @@ describe("client settings", () => {
     expect(decodeClientSettings({}).powerSaveBlockerMode).toBe("off");
   });
 
+  it("defaults appearance preferences", () => {
+    expect(DEFAULT_CLIENT_SETTINGS.continueBackgroundAnimations).toBe(
+      DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
+    );
+    expect(DEFAULT_CLIENT_SETTINGS.showSidebarMascot).toBe(DEFAULT_SHOW_SIDEBAR_MASCOT);
+    expect(DEFAULT_CLIENT_SETTINGS.themeAccentColor).toBe(DEFAULT_THEME_ACCENT_COLOR);
+    expect(DEFAULT_CLIENT_SETTINGS.appAccentColor).toBe(DEFAULT_APP_ACCENT_COLOR);
+    expect(decodeClientSettings({}).continueBackgroundAnimations).toBe(false);
+    expect(decodeClientSettings({}).showSidebarMascot).toBe(true);
+    expect(decodeClientSettings({}).themeAccentColor).toBe("");
+    expect(decodeClientSettings({}).appAccentColor).toBe("");
+  });
+
   it("accepts only supported power-save blocker modes in patches", () => {
     expect(decodeClientSettingsPatch({ powerSaveBlockerMode: "during-chats" })).toEqual({
       powerSaveBlockerMode: "during-chats",
     });
     expect(() => decodeClientSettingsPatch({ powerSaveBlockerMode: "caffeinate" })).toThrow();
+  });
+
+  it("trims appearance color patches", () => {
+    expect(
+      decodeClientSettingsPatch({
+        continueBackgroundAnimations: true,
+        showSidebarMascot: false,
+        themeAccentColor: "  #16a34a  ",
+        appAccentColor: "  #dc2626  ",
+      }),
+    ).toEqual({
+      continueBackgroundAnimations: true,
+      showSidebarMascot: false,
+      themeAccentColor: "#16a34a",
+      appAccentColor: "#dc2626",
+    });
   });
 });

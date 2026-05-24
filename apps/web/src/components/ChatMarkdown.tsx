@@ -60,6 +60,7 @@ class CodeHighlightErrorBoundary extends React.Component<
 interface ChatMarkdownProps {
   text: string;
   cwd: string | undefined;
+  additionalWorkspaceRoots?: ReadonlyArray<string>;
   isStreaming?: boolean;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
 }
@@ -594,6 +595,7 @@ function areMarkdownFileLinkPropsEqual(
 function ChatMarkdown({
   text,
   cwd,
+  additionalWorkspaceRoots = [],
   isStreaming = false,
   skills = EMPTY_MARKDOWN_SKILLS,
 }: ChatMarkdownProps) {
@@ -607,13 +609,13 @@ function ChatMarkdown({
     for (const href of extractMarkdownLinkHrefs(text)) {
       const normalizedHref = normalizeMarkdownLinkHrefKey(href);
       if (metaByHref.has(normalizedHref)) continue;
-      const meta = resolveMarkdownFileLinkMeta(normalizedHref, cwd);
+      const meta = resolveMarkdownFileLinkMeta(normalizedHref, cwd, additionalWorkspaceRoots);
       if (meta) {
         metaByHref.set(normalizedHref, meta);
       }
     }
     return metaByHref;
-  }, [cwd, text]);
+  }, [additionalWorkspaceRoots, cwd, text]);
   const fileLinkParentSuffixByPath = useMemo(() => {
     const filePaths = [...markdownFileLinkMetaByHref.values()].map((meta) => meta.filePath);
     return buildFileLinkParentSuffixByPath(filePaths);

@@ -136,18 +136,30 @@ function normalizePathForWorkspaceComparison(path: string): string {
     : normalized;
 }
 
-export function isPathInsideWorkspace(targetPath: string, cwd: string | undefined): boolean {
-  if (!cwd) {
+export function isPathInsideWorkspace(
+  targetPath: string,
+  cwd: string | undefined,
+  additionalWorkspaceRoots: ReadonlyArray<string> = [],
+): boolean {
+  const workspaceRoots = [cwd, ...additionalWorkspaceRoots].filter(
+    (root): root is string => typeof root === "string" && root.trim().length > 0,
+  );
+  if (workspaceRoots.length === 0) {
     return false;
   }
 
   const target = normalizePathForWorkspaceComparison(splitPathAndPosition(targetPath).path);
-  const workspace = normalizePathForWorkspaceComparison(splitPathAndPosition(cwd).path);
-  if (target.length === 0 || workspace.length === 0) {
+  if (target.length === 0) {
     return false;
   }
 
-  return target === workspace || target.startsWith(`${workspace}/`);
+  return workspaceRoots.some((root) => {
+    const workspace = normalizePathForWorkspaceComparison(splitPathAndPosition(root).path);
+    if (workspace.length === 0) {
+      return false;
+    }
+    return target === workspace || target.startsWith(`${workspace}/`);
+  });
 }
 
 function hasExternalScheme(path: string): boolean {
@@ -203,6 +215,7 @@ function basenameOfPath(path: string): string {
 export function resolveMarkdownFileLinkMeta(
   href: string | undefined,
   cwd?: string,
+  additionalWorkspaceRoots: ReadonlyArray<string> = [],
 ): MarkdownFileLinkMeta | null {
   const targetPath = resolveMarkdownFileLinkTarget(href, cwd);
   if (!targetPath) return null;
@@ -218,7 +231,9 @@ export function resolveMarkdownFileLinkMeta(
     targetPath,
     displayPath: formatWorkspaceRelativePath(targetPath, cwd),
     basename: basenameOfPath(path),
-    openPolicy: isPathInsideWorkspace(targetPath, cwd) ? "direct" : "confirm",
+    openPolicy: isPathInsideWorkspace(targetPath, cwd, additionalWorkspaceRoots)
+      ? "direct"
+      : "confirm",
     ...(lineNumber !== undefined ? { line: lineNumber } : {}),
     ...(columnNumber !== undefined ? { column: columnNumber } : {}),
   };

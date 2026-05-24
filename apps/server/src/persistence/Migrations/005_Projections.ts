@@ -9,6 +9,7 @@ export default Effect.gen(function* () {
       project_id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
       workspace_root TEXT NOT NULL,
+      additional_workspace_roots_json TEXT NOT NULL DEFAULT '[]',
       default_model TEXT,
       scripts_json TEXT NOT NULL,
       created_at TEXT NOT NULL,

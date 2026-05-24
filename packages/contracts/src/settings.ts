@@ -22,6 +22,11 @@ export const PowerSaveBlockerMode = Schema.Literals(["off", "during-chats", "alw
 export type PowerSaveBlockerMode = typeof PowerSaveBlockerMode.Type;
 export const DEFAULT_POWER_SAVE_BLOCKER_MODE: PowerSaveBlockerMode = "off";
 
+export const DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS = false;
+export const DEFAULT_SHOW_SIDEBAR_MASCOT = true;
+export const DEFAULT_APP_ACCENT_COLOR = "";
+export const DEFAULT_THEME_ACCENT_COLOR = "";
+
 export const SidebarProjectSortOrder = Schema.Literals(["updated_at", "created_at", "manual"]);
 export type SidebarProjectSortOrder = typeof SidebarProjectSortOrder.Type;
 export const DEFAULT_SIDEBAR_PROJECT_SORT_ORDER: SidebarProjectSortOrder = "updated_at";
@@ -57,6 +62,18 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   diffIgnoreWhitespace: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   diffWordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  continueBackgroundAnimations: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS)),
+  ),
+  showSidebarMascot: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SHOW_SIDEBAR_MASCOT)),
+  ),
+  themeAccentColor: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_THEME_ACCENT_COLOR)),
+  ),
+  appAccentColor: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_APP_ACCENT_COLOR)),
+  ),
   defaultEditor: DefaultEditorSelection.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_DEFAULT_EDITOR)),
   ),
@@ -495,6 +512,10 @@ export const ClientSettingsPatch = Schema.Struct({
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   diffWordWrap: Schema.optionalKey(Schema.Boolean),
+  continueBackgroundAnimations: Schema.optionalKey(Schema.Boolean),
+  showSidebarMascot: Schema.optionalKey(Schema.Boolean),
+  themeAccentColor: Schema.optionalKey(TrimmedString),
+  appAccentColor: Schema.optionalKey(TrimmedString),
   defaultEditor: Schema.optionalKey(DefaultEditorSelection),
   favorites: Schema.optionalKey(
     Schema.Array(

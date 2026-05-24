@@ -37,3 +37,44 @@ export function resolveThreadWorkspaceCwd(input: {
 
   return input.projects.find((project) => project.id === input.thread.projectId)?.workspaceRoot;
 }
+
+function normalizeComparablePath(value: string): string {
+  return value.replaceAll("\\", "/").replace(/\/+$/, "");
+}
+
+function isSamePath(left: string, right: string): boolean {
+  return normalizeComparablePath(left) === normalizeComparablePath(right);
+}
+
+export function resolveThreadWorkspaceDirectories(input: {
+  readonly thread: {
+    readonly projectId: ProjectId;
+    readonly worktreePath: string | null;
+  };
+  readonly projects: ReadonlyArray<{
+    readonly id: ProjectId;
+    readonly workspaceRoot: string;
+    readonly additionalWorkspaceRoots?: ReadonlyArray<string> | undefined;
+  }>;
+}): {
+  readonly cwd: string | undefined;
+  readonly additionalDirectories: ReadonlyArray<string>;
+} {
+  const project = input.projects.find((candidate) => candidate.id === input.thread.projectId);
+  const cwd = resolveThreadWorkspaceCwd(input);
+  if (!project || !cwd) {
+    return { cwd, additionalDirectories: [] };
+  }
+
+  const additionalDirectories: string[] = [];
+  for (const root of project.additionalWorkspaceRoots ?? []) {
+    if (isSamePath(root, cwd)) {
+      continue;
+    }
+    if (!additionalDirectories.some((existingRoot) => isSamePath(existingRoot, root))) {
+      additionalDirectories.push(root);
+    }
+  }
+
+  return { cwd, additionalDirectories };
+}

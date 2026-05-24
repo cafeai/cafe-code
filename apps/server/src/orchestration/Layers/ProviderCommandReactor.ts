@@ -31,7 +31,10 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@cafecode/shared/DrainableWorker";
 
-import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
+import {
+  resolveThreadWorkspaceCwd,
+  resolveThreadWorkspaceDirectories,
+} from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
@@ -84,6 +87,18 @@ function mapProviderSessionStatusToOrchestrationStatus(
     default:
       return "ready";
   }
+}
+
+function areStringArraysEqual(
+  left: ReadonlyArray<string> | undefined,
+  right: ReadonlyArray<string> | undefined,
+): boolean {
+  const normalizedLeft = left ?? [];
+  const normalizedRight = right ?? [];
+  return (
+    normalizedLeft.length === normalizedRight.length &&
+    normalizedLeft.every((entry, index) => entry === normalizedRight[index])
+  );
 }
 
 const turnStartKeyForEvent = (event: ProviderIntentEvent): string =>
@@ -472,10 +487,12 @@ const make = Effect.gen(function* () {
       }
     }
     const project = options?.project ?? (yield* resolveProject(thread.projectId));
-    const effectiveCwd = resolveThreadWorkspaceCwd({
+    const workspaceDirectories = resolveThreadWorkspaceDirectories({
       thread,
       projects: project ? [project] : [],
     });
+    const effectiveCwd = workspaceDirectories.cwd;
+    const effectiveAdditionalDirectories = workspaceDirectories.additionalDirectories;
 
     const startProviderSession = (input?: {
       readonly resumeCursor?: unknown;
@@ -486,6 +503,9 @@ const make = Effect.gen(function* () {
         ...(preferredProvider ? { provider: preferredProvider } : {}),
         providerInstanceId: desiredInstanceId,
         ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
+        ...(effectiveAdditionalDirectories.length > 0
+          ? { additionalDirectories: effectiveAdditionalDirectories }
+          : {}),
         modelSelection: desiredModelSelection,
         ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
         runtimeMode: desiredRuntimeMode,
@@ -525,6 +545,10 @@ const make = Effect.gen(function* () {
     if (existingSessionThreadId && activeSession !== undefined) {
       const runtimeModeChanged = thread.runtimeMode !== thread.session?.runtimeMode;
       const cwdChanged = effectiveCwd !== activeSession?.cwd;
+      const additionalDirectoriesChanged = !areStringArraysEqual(
+        effectiveAdditionalDirectories,
+        activeSession?.additionalDirectories,
+      );
       const sessionModelSwitch = (yield* providerService.getCapabilities(desiredInstanceId))
         .sessionModelSwitch;
       const modelChanged =
@@ -543,6 +567,7 @@ const make = Effect.gen(function* () {
       if (
         !runtimeModeChanged &&
         !cwdChanged &&
+        !additionalDirectoriesChanged &&
         !instanceChanged &&
         !shouldRestartForModelChange &&
         !shouldRestartForModelSelectionChange
@@ -566,6 +591,9 @@ const make = Effect.gen(function* () {
         previousCwd: activeSession?.cwd,
         desiredCwd: effectiveCwd,
         cwdChanged,
+        previousAdditionalDirectories: activeSession?.additionalDirectories ?? [],
+        desiredAdditionalDirectories: effectiveAdditionalDirectories,
+        additionalDirectoriesChanged,
         modelChanged,
         instanceChanged,
         shouldRestartForModelChange,
@@ -582,6 +610,7 @@ const make = Effect.gen(function* () {
         provider: restartedSession.provider,
         runtimeMode: restartedSession.runtimeMode,
         cwd: restartedSession.cwd,
+        additionalDirectories: restartedSession.additionalDirectories,
       });
       yield* bindSessionToThread(restartedSession);
       return restartedSession;

@@ -147,6 +147,22 @@ describe("buildTurnStartParams", () => {
       ],
     });
   });
+
+  it("includes additional directories as workspace-write writable roots", () => {
+    const params = Effect.runSync(
+      buildTurnStartParams({
+        threadId: "provider-thread-1",
+        runtimeMode: "auto-accept-edits",
+        prompt: "Implement it",
+        additionalDirectories: ["/tmp/docs", "/tmp/tools"],
+      }),
+    );
+
+    assert.deepStrictEqual(params.sandboxPolicy, {
+      type: "workspaceWrite",
+      writableRoots: ["/tmp/docs", "/tmp/tools"],
+    });
+  });
 });
 
 describe("isRecoverableThreadResumeError", () => {

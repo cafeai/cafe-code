@@ -766,6 +766,68 @@ describe("GeneralSettingsPanel observability", () => {
     });
   });
 
+  it("persists appearance preferences from General settings", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <GeneralSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    const setColorInput = (ariaLabel: string, value: string) => {
+      const input = document.querySelector(
+        `input[aria-label="${ariaLabel}"]`,
+      ) as HTMLInputElement | null;
+      expect(input).not.toBeNull();
+      const inputValueSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      inputValueSetter?.call(input, value);
+      input!.dispatchEvent(new Event("input", { bubbles: true }));
+      input!.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    };
+
+    await expect.element(page.getByText("Accent color")).toBeInTheDocument();
+    setColorInput("App accent color", "#dc2626");
+
+    await vi.waitFor(() => {
+      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ appAccentColor: "#dc2626" }),
+      );
+    });
+
+    await expect.element(page.getByText("Sidebar color")).toBeInTheDocument();
+    setColorInput("Animated sidebar color", "#16a34a");
+
+    await vi.waitFor(() => {
+      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ themeAccentColor: "#16a34a" }),
+      );
+    });
+
+    await expect.element(page.getByText("Sidebar mascot")).toBeInTheDocument();
+    await page.getByLabelText("Show sidebar mascot").click();
+
+    await vi.waitFor(() => {
+      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ showSidebarMascot: false }),
+      );
+    });
+
+    await expect.element(page.getByText("Background animations")).toBeInTheDocument();
+    await page.getByLabelText("Keep animations running in background").click();
+
+    await vi.waitFor(() => {
+      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ continueBackgroundAnimations: true }),
+      );
+    });
+  });
+
   it("shows detected editor icons in the General default editor selector", async () => {
     const platformSpy = vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
     const desktopBridge = createDesktopBridgeStub();

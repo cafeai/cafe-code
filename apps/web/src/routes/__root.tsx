@@ -45,13 +45,18 @@ import {
 import { selectAnyThreadRunning, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { syncBrowserChromeTheme } from "../hooks/useTheme";
+import { applyAppAccentColor, applySidebarAccentColor } from "../themeAccent";
 import {
   ensureEnvironmentConnectionBootstrapped,
   getPrimaryEnvironmentConnection,
   startEnvironmentConnectionService,
 } from "../environments/runtime";
 import { configureClientTracing } from "../observability/clientTracing";
-import { startCafeDocumentVisibilitySync } from "../documentVisibility";
+import {
+  applyCafeBackgroundAnimations,
+  clearCafeBackgroundAnimations,
+  startCafeDocumentVisibilitySync,
+} from "../documentVisibility";
 import {
   ensurePrimaryEnvironmentReady,
   getPrimaryKnownEnvironment,
@@ -146,6 +151,7 @@ function RootRouteView() {
         {primaryEnvironmentAuthenticated ? <AuthenticatedTracingBootstrap /> : null}
         {primaryEnvironmentAuthenticated ? <ServerStateBootstrap /> : null}
         <EnvironmentConnectionManagerBootstrap />
+        <AppearanceSettingsSync />
         <PowerSaveBlockerSync />
         {primaryEnvironmentAuthenticated ? <EventRouter /> : null}
         {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
@@ -307,6 +313,37 @@ function PowerSaveBlockerSync() {
       console.error("[POWER_SAVE_BLOCKER] failed to sync state", error);
     });
   }, [chatsRunning, mode]);
+
+  return null;
+}
+
+function AppearanceSettingsSync() {
+  const appAccentColor = useSettings((settings) => settings.appAccentColor);
+  const sidebarAccentColor = useSettings((settings) => settings.themeAccentColor);
+  const continueBackgroundAnimations = useSettings(
+    (settings) => settings.continueBackgroundAnimations,
+  );
+
+  useEffect(() => {
+    applyAppAccentColor(appAccentColor);
+    return () => {
+      applyAppAccentColor(undefined);
+    };
+  }, [appAccentColor]);
+
+  useEffect(() => {
+    applySidebarAccentColor(sidebarAccentColor);
+    return () => {
+      applySidebarAccentColor(undefined);
+    };
+  }, [sidebarAccentColor]);
+
+  useEffect(() => {
+    applyCafeBackgroundAnimations(continueBackgroundAnimations);
+    return () => {
+      clearCafeBackgroundAnimations();
+    };
+  }, [continueBackgroundAnimations]);
 
   return null;
 }

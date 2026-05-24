@@ -2627,6 +2627,7 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
         projectId: ProjectId.make("project-scripts"),
         title: "Scripts Project",
         workspaceRoot: "/tmp/project-scripts",
+        additionalWorkspaceRoots: ["/tmp/project-docs"],
         defaultModelSelection: {
           instanceId: ProviderInstanceId.make("codex"),
           model: "gpt-5-codex",
@@ -2638,6 +2639,7 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
         type: "project.meta.update",
         commandId: CommandId.make("cmd-scripts-project-update"),
         projectId: ProjectId.make("project-scripts"),
+        additionalWorkspaceRoots: ["/tmp/project-docs", "/tmp/project-tools"],
         scripts: [
           {
             id: "script-1",
@@ -2654,10 +2656,12 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
       });
 
       const projectRows = yield* sql<{
+        readonly additionalWorkspaceRoots: string;
         readonly scriptsJson: string;
         readonly defaultModelSelection: string;
       }>`
         SELECT
+          additional_workspace_roots_json AS "additionalWorkspaceRoots",
           scripts_json AS "scriptsJson",
           default_model_selection_json AS "defaultModelSelection"
         FROM projection_projects
@@ -2665,6 +2669,7 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
       `;
       assert.deepEqual(projectRows, [
         {
+          additionalWorkspaceRoots: '["/tmp/project-docs","/tmp/project-tools"]',
           scriptsJson:
             '[{"id":"script-1","name":"Build","command":"bun run build","icon":"build","runOnWorktreeCreate":false}]',
           defaultModelSelection: '{"instanceId":"codex","model":"gpt-5"}',

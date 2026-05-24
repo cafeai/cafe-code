@@ -28,6 +28,7 @@ const watchedDirectories = [
 const forcedShutdownTimeoutMs = 1_500;
 const restartDebounceMs = 120;
 const childTreeGracePeriodMs = 1_200;
+const isolateAppProcessGroup = process.platform !== "win32";
 
 await waitForResources({
   baseDir: desktopDir,
@@ -43,6 +44,7 @@ childEnv.CAFE_CODE_DESKTOP_DEV = "true";
 let shuttingDown = false;
 let restartTimer = null;
 let currentApp = null;
+let stoppingApp = null;
 let restartQueue = Promise.resolve();
 const expectedExits = new WeakSet();
 const watchers = [];
@@ -52,6 +54,13 @@ function killChildTreeByPid(pid, signal) {
     return;
   }
 
+  if (isolateAppProcessGroup) {
+    try {
+      process.kill(-pid, signal);
+    } catch {
+      // Ignore races with processes that already exited.
+    }
+  }
   spawnSync("pkill", [`-${signal}`, "-P", String(pid)], { stdio: "ignore" });
 }
 
@@ -74,6 +83,7 @@ function startApp() {
     {
       cwd: desktopDir,
       env: childEnv,
+      detached: isolateAppProcessGroup,
       stdio: "inherit",
     },
   );
@@ -109,6 +119,7 @@ async function stopApp() {
   }
 
   currentApp = null;
+  stoppingApp = app;
   expectedExits.add(app);
 
   await new Promise((resolve) => {
@@ -120,12 +131,14 @@ async function stopApp() {
       }
 
       settled = true;
+      if (stoppingApp === app) {
+        stoppingApp = null;
+      }
       resolve();
     };
 
     app.once("exit", finish);
     app.kill("SIGTERM");
-    killChildTreeByPid(app.pid, "TERM");
 
     setTimeout(() => {
       if (settled) {
@@ -188,8 +201,35 @@ function killChildTree(signal) {
   spawnSync("pkill", [`-${signal}`, "-P", String(process.pid)], { stdio: "ignore" });
 }
 
+function forceShutdown(exitCode) {
+  if (restartTimer) {
+    clearTimeout(restartTimer);
+    restartTimer = null;
+  }
+
+  for (const watcher of watchers) {
+    watcher.close();
+  }
+
+  if (currentApp) {
+    killChildTreeByPid(currentApp.pid, "KILL");
+    currentApp.kill("SIGKILL");
+  }
+  if (stoppingApp) {
+    killChildTreeByPid(stoppingApp.pid, "KILL");
+    stoppingApp.kill("SIGKILL");
+  }
+
+  killChildTree("KILL");
+  process.exit(exitCode);
+}
+
 async function shutdown(exitCode) {
-  if (shuttingDown) return;
+  if (shuttingDown) {
+    forceShutdown(exitCode);
+    return;
+  }
+
   shuttingDown = true;
 
   if (restartTimer) {
@@ -215,12 +255,12 @@ startWatchers();
 cleanupStaleDevApps();
 startApp();
 
-process.once("SIGINT", () => {
+process.on("SIGINT", () => {
   void shutdown(130);
 });
-process.once("SIGTERM", () => {
+process.on("SIGTERM", () => {
   void shutdown(143);
 });
-process.once("SIGHUP", () => {
+process.on("SIGHUP", () => {
   void shutdown(129);
 });
