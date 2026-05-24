@@ -1,6 +1,7 @@
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -102,7 +103,7 @@ interface RunBackendProcessOptions extends DesktopBackendStartConfig {
   readonly readinessTimeout?: Duration.Duration;
   readonly healthCheckInterval?: Duration.Duration;
   readonly healthFailureThreshold?: number;
-  readonly onStarted?: (pid: number) => Effect.Effect<void>;
+  readonly onStarted?: (pid: number, terminate: Effect.Effect<void>) => Effect.Effect<void>;
   readonly onReady?: () => Effect.Effect<void>;
   readonly onReadinessFailure?: (error: BackendTimeoutError) => Effect.Effect<void>;
   readonly onHealthFailure?: (error: BackendHealthCheckFailedError) => Effect.Effect<void>;
@@ -137,9 +138,11 @@ const { logWarning: logBackendManagerWarning, logError: logBackendManagerError }
 
 interface ActiveBackendRun {
   readonly id: number;
-  readonly scope: Scope.Closeable;
+  readonly closeScope: Effect.Effect<void>;
   readonly fiber: Option.Option<Fiber.Fiber<void, never>>;
   readonly pid: Option.Option<number>;
+  readonly terminate: Option.Option<Effect.Effect<void>>;
+  readonly exited: Deferred.Deferred<void>;
 }
 
 interface BackendManagerState {
@@ -175,20 +178,57 @@ const withActiveRun =
 const calculateRestartDelay = (attempt: number): Duration.Duration =>
   Duration.min(Duration.times(INITIAL_RESTART_DELAY, 2 ** attempt), MAX_RESTART_DELAY);
 
+const signalBackendPid = (run: ActiveBackendRun, signal: NodeJS.Signals): Effect.Effect<void> =>
+  Option.match(run.pid, {
+    onNone: () => Effect.void,
+    onSome: (pid) =>
+      Effect.sync(() => {
+        try {
+          process.kill(pid, signal);
+        } catch {
+          // Ignore races with backend processes that already exited.
+        }
+      }),
+  });
+
 const closeRun = (
   run: ActiveBackendRun,
   options?: { readonly timeout?: Duration.Duration },
 ): Effect.Effect<"closed" | "timed-out"> => {
+  const terminate = Option.match(run.terminate, {
+    onNone: () => Effect.void,
+    onSome: (kill) => kill,
+  });
   const waitForFiber = Option.match(run.fiber, {
     onNone: () => Effect.void,
     onSome: (fiber) => Fiber.await(fiber).pipe(Effect.asVoid),
   });
-  const close = Scope.close(run.scope, Exit.void).pipe(Effect.andThen(waitForFiber));
 
   const timeout = options?.timeout;
   if (!timeout) {
+    const close = Effect.gen(function* () {
+      if (Option.isNone(run.terminate)) {
+        yield* run.closeScope;
+      } else {
+        yield* terminate;
+      }
+      yield* waitForFiber;
+    });
     return close.pipe(Effect.as("closed" as const));
   }
+
+  const close = Effect.gen(function* () {
+    if (Option.isNone(run.terminate)) {
+      yield* run.closeScope.pipe(Effect.ignore, Effect.forkDetach);
+    }
+    yield* signalBackendPid(run, "SIGTERM");
+    yield* terminate.pipe(Effect.ignore, Effect.forkDetach);
+    yield* Effect.sleep(Duration.min(timeout, Duration.seconds(1))).pipe(
+      Effect.andThen(signalBackendPid(run, "SIGKILL")),
+      Effect.forkDetach,
+    );
+    yield* Deferred.await(run.exited);
+  });
 
   return Effect.gen(function* () {
     const closeFiber = yield* Effect.forkDetach(close);
@@ -337,7 +377,8 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     .spawn(command)
     .pipe(Effect.mapError((cause) => new BackendProcessSpawnError({ cause })));
 
-  yield* options.onStarted?.(handle.pid) ?? Effect.void;
+  const terminate = handle.kill().pipe(Effect.ignore);
+  yield* options.onStarted?.(handle.pid, terminate) ?? Effect.void;
   if (options.captureOutput) {
     yield* drainBackendOutput("stdout", handle.stdout, onOutput).pipe(Effect.forkScoped);
     yield* drainBackendOutput("stderr", handle.stderr, onOutput).pipe(Effect.forkScoped);
@@ -441,15 +482,24 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
         }
 
         const runScope = yield* Scope.make("sequential");
+        const runScopeClosed = yield* Ref.make(false);
+        const closeRunScope = Ref.getAndSet(runScopeClosed, true).pipe(
+          Effect.flatMap((wasClosed) =>
+            wasClosed ? Effect.void : Scope.close(runScope, Exit.void).pipe(Effect.asVoid),
+          ),
+        );
+        const exited = yield* Deferred.make<void>();
         const runId = yield* Ref.modify(state, (latest) => [
           latest.nextRunId,
           {
             ...latest,
             active: Option.some({
               id: latest.nextRunId,
-              scope: runScope,
+              closeScope: closeRunScope,
               fiber: Option.none(),
               pid: Option.none(),
+              terminate: Option.none(),
+              exited,
             } satisfies ActiveBackendRun),
             nextRunId: latest.nextRunId + 1,
           },
@@ -519,10 +569,11 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
 
         const program = runBackendProcess({
           ...config,
-          onStarted: Effect.fn("desktop.backendManager.onStarted")(function* (pid) {
+          onStarted: Effect.fn("desktop.backendManager.onStarted")(function* (pid, terminate) {
             yield* updateActiveRun(runId, (run) => ({
               ...run,
               pid: Option.some(pid),
+              terminate: Option.some(terminate),
             }));
             yield* backendOutputLog.writeSessionBoundary({
               phase: "START",
@@ -572,10 +623,12 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
           Effect.provideService(HttpClient.HttpClient, httpClient),
           Scope.provide(runScope),
           Effect.matchEffect({
-            onFailure: (error) => finalizeRun(error.message),
-            onSuccess: (exit) => finalizeRun(exit.reason),
+            onFailure: (error) =>
+              Deferred.succeed(exited, undefined).pipe(Effect.andThen(finalizeRun(error.message))),
+            onSuccess: (exit) =>
+              Deferred.succeed(exited, undefined).pipe(Effect.andThen(finalizeRun(exit.reason))),
           }),
-          Effect.ensuring(Scope.close(runScope, Exit.void).pipe(Effect.ignore)),
+          Effect.ensuring(closeRunScope.pipe(Effect.ignore)),
         );
 
         const fiber = yield* Effect.forkIn(program, parentScope);
