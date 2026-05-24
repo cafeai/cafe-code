@@ -17,11 +17,14 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import { normalizeModelSlug } from "@cafecode/shared/model";
+import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
@@ -54,6 +57,14 @@ const BENIGN_ERROR_LOG_SNIPPETS = [
   "state db record_discrepancy: find_thread_path_by_id_str_in_subdir, falling_back",
 ];
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
+const CODEX_SNAPSHOT_BACKFILL_TURN_LIMIT = 1;
+const CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS = [
+  "2 seconds",
+  "10 seconds",
+  "30 seconds",
+  "60 seconds",
+] as const;
+const CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT = "10 seconds" as const;
 const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
   "not found",
   "missing thread",
@@ -85,12 +96,63 @@ const decodeCodexTurnStartParamsWithCollaborationMode = Schema.decodeUnknownEffe
 export type CodexTurnStartParamsWithCollaborationMode =
   typeof CodexTurnStartParamsWithCollaborationMode.Type;
 const formatSchemaIssue = SchemaIssue.makeFormatterDefault();
+const CODEX_HTTP_FALLBACK_PROVIDER_ID = "cafecode-openai-http";
 
 export type CodexResumeCursor = typeof CodexResumeCursorSchema.Type;
 type CodexServiceTier = NonNullable<EffectCodexSchema.V2ThreadStartParams["serviceTier"]>;
 type CodexThreadItem =
   | EffectCodexSchema.V2ThreadReadResponse["thread"]["turns"][number]["items"][number]
   | EffectCodexSchema.V2ThreadRollbackResponse["thread"]["turns"][number]["items"][number];
+type CodexSnapshotThreadItem = CodexThreadItem;
+type CodexSnapshotTurn = {
+  readonly completedAt?: number | null;
+  readonly durationMs?: number | null;
+  readonly error?: { readonly message: string } | null;
+  readonly id: string;
+  readonly items: ReadonlyArray<CodexSnapshotThreadItem>;
+  readonly itemsView?: "notLoaded" | "summary" | "full";
+  readonly startedAt?: number | null;
+  readonly status: "completed" | "interrupted" | "failed" | "inProgress";
+};
+type CodexSnapshotThread = {
+  readonly id: string;
+  readonly turns: ReadonlyArray<CodexSnapshotTurn>;
+};
+
+export interface CodexTransportPolicy {
+  readonly responsesWebsockets: "auto" | "disabled";
+  readonly reason?: string;
+  readonly observedAt?: string;
+}
+
+export function buildCodexAppServerArgs(
+  transportPolicy: CodexTransportPolicy | undefined,
+): ReadonlyArray<string> {
+  if (transportPolicy?.responsesWebsockets !== "disabled") {
+    return ["app-server"];
+  }
+
+  // Codex's built-in `openai` provider cannot be overridden by config. A
+  // Cafe-scoped provider id lets us keep ChatGPT/OpenAI auth and Responses API
+  // behavior while turning off only the unstable Responses WebSocket transport.
+  return [
+    "app-server",
+    "-c",
+    `model_provider="${CODEX_HTTP_FALLBACK_PROVIDER_ID}"`,
+    "-c",
+    `model_providers.${CODEX_HTTP_FALLBACK_PROVIDER_ID}.name="OpenAI"`,
+    "-c",
+    `model_providers.${CODEX_HTTP_FALLBACK_PROVIDER_ID}.wire_api="responses"`,
+    "-c",
+    `model_providers.${CODEX_HTTP_FALLBACK_PROVIDER_ID}.requires_openai_auth=true`,
+    "-c",
+    `model_providers.${CODEX_HTTP_FALLBACK_PROVIDER_ID}.env_http_headers.OpenAI-Organization="OPENAI_ORGANIZATION"`,
+    "-c",
+    `model_providers.${CODEX_HTTP_FALLBACK_PROVIDER_ID}.env_http_headers.OpenAI-Project="OPENAI_PROJECT"`,
+    "-c",
+    `model_providers.${CODEX_HTTP_FALLBACK_PROVIDER_ID}.supports_websockets=false`,
+  ];
+}
 
 export interface CodexSessionRuntimeOptions {
   readonly threadId: ThreadId;
@@ -98,6 +160,7 @@ export interface CodexSessionRuntimeOptions {
   readonly binaryPath: string;
   readonly homePath?: string;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly transportPolicy?: CodexTransportPolicy;
   readonly cwd: string;
   readonly runtimeMode: RuntimeMode;
   readonly model?: string;
@@ -226,18 +289,41 @@ interface PendingUserInput {
   readonly answers: Deferred.Deferred<ProviderUserInputAnswers>;
 }
 
-type CodexServerNotification = {
-  readonly [M in CodexRpc.ServerNotificationMethod]: {
-    readonly method: M;
-    readonly params: CodexRpc.ServerNotificationParamsByMethod[M];
-  };
-}[CodexRpc.ServerNotificationMethod];
+interface CodexTurnStartObservation {
+  readonly providerThreadId: string;
+  readonly turnId: TurnId;
+  readonly requestedAt: string;
+  readonly acknowledgedAt: string;
+  readonly ackLatencyMs: number;
+  readonly promptByteLength: number;
+  readonly attachmentCount: number;
+  readonly model: string | undefined;
+  readonly effort: string | undefined;
+  readonly interactionMode: ProviderInteractionMode | undefined;
+  readonly serviceTier: string | undefined;
+  readonly additionalDirectoryCount: number;
+  readonly firstNotificationAt: string | undefined;
+  readonly firstNotificationMethod: string | undefined;
+  readonly firstTurnEventAt: string | undefined;
+  readonly firstTurnEventMethod: string | undefined;
+  readonly lastNotificationAt: string | undefined;
+  readonly lastNotificationMethod: string | undefined;
+  readonly backfillAttemptCount: number;
+  readonly noTurnEventWarningCount: number;
+  readonly lastBackfillAt: string | undefined;
+  readonly lastBackfillTurnFound: boolean | undefined;
+  readonly lastBackfillTurnStatus: string | undefined;
+  readonly lastBackfillItemCount: number | undefined;
+  readonly lastBackfillItemsView: string | null | undefined;
+}
 
-function makeCodexServerNotification<M extends CodexRpc.ServerNotificationMethod>(
-  method: M,
-  params: CodexRpc.ServerNotificationParamsByMethod[M],
-): CodexServerNotification {
-  return { method, params } as CodexServerNotification;
+type CodexServerNotification = {
+  readonly method: string;
+  readonly params: unknown;
+};
+
+function makeCodexServerNotification(method: string, params: unknown): CodexServerNotification {
+  return { method, params };
 }
 
 function normalizeCodexModelSlug(
@@ -417,7 +503,7 @@ function classifyCodexStderrLine(rawLine: string): { readonly message: string } 
   const match = line.match(CODEX_STDERR_LOG_REGEX);
   if (match) {
     const level = match[1];
-    if (level && level !== "ERROR") {
+    if (level && level !== "WARN" && level !== "ERROR") {
       return null;
     }
     if (BENIGN_ERROR_LOG_SNIPPETS.some((snippet) => line.includes(snippet))) {
@@ -493,7 +579,10 @@ export const openCodexThread = (input: {
 function readNotificationThreadId(notification: CodexServerNotification): string | undefined {
   switch (notification.method) {
     case "thread/started":
-      return notification.params.thread.id;
+      return (
+        readNotificationNestedString(notification, "thread", "id") ??
+        readNotificationParamString(notification, "threadId")
+      );
     case "error":
     case "thread/status/changed":
     case "thread/archived":
@@ -532,7 +621,7 @@ function readNotificationThreadId(notification: CodexServerNotification): string
     case "thread/realtime/sdp":
     case "thread/realtime/error":
     case "thread/realtime/closed":
-      return notification.params.threadId;
+      return readNotificationParamString(notification, "threadId");
     default:
       return undefined;
   }
@@ -551,18 +640,18 @@ function readRouteFields(notification: CodexServerNotification): {
     case "turn/started":
     case "turn/completed":
       return {
-        turnId: TurnId.make(notification.params.turn.id),
+        turnId: readNotificationTurnId(notification),
         itemId: undefined,
       };
     case "error":
       return {
-        turnId: TurnId.make(notification.params.turnId),
+        turnId: readNotificationTurnId(notification),
         itemId: undefined,
       };
     case "turn/diff/updated":
     case "turn/plan/updated":
       return {
-        turnId: TurnId.make(notification.params.turnId),
+        turnId: readNotificationTurnId(notification),
         itemId: undefined,
       };
     case "serverRequest/resolved":
@@ -573,8 +662,8 @@ function readRouteFields(notification: CodexServerNotification): {
     case "item/started":
     case "item/completed":
       return {
-        turnId: TurnId.make(notification.params.turnId),
-        itemId: ProviderItemId.make(notification.params.item.id),
+        turnId: readNotificationTurnId(notification),
+        itemId: readNotificationItemId(notification),
       };
     case "item/agentMessage/delta":
     case "item/plan/delta":
@@ -586,8 +675,8 @@ function readRouteFields(notification: CodexServerNotification): {
     case "item/reasoning/summaryPartAdded":
     case "item/reasoning/textDelta":
       return {
-        turnId: TurnId.make(notification.params.turnId),
-        itemId: ProviderItemId.make(notification.params.itemId),
+        turnId: readNotificationTurnId(notification),
+        itemId: readNotificationItemId(notification),
       };
     default:
       return {
@@ -610,18 +699,22 @@ function rememberCollabReceiverTurns(
     return;
   }
 
-  if (notification.params.item.type !== "collabAgentToolCall") {
+  const params = readRecord(notification.params);
+  const item = params ? readRecord(params.item) : undefined;
+  if (item?.type !== "collabAgentToolCall") {
     return;
   }
 
-  for (const receiverThreadId of notification.params.item.receiverThreadIds) {
+  const receiverThreadIds = Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds : [];
+  for (const receiverThreadId of receiverThreadIds) {
+    if (typeof receiverThreadId !== "string") {
+      continue;
+    }
     collabReceiverTurns.set(receiverThreadId, parentTurnId);
   }
 }
 
-function shouldSuppressChildConversationNotification(
-  method: CodexRpc.ServerNotificationMethod,
-): boolean {
+function shouldSuppressChildConversationNotification(method: string): boolean {
   return (
     method === "thread/started" ||
     method === "thread/status/changed" ||
@@ -688,6 +781,72 @@ function currentProviderThreadId(session: ProviderSession): string | undefined {
   return readResumeCursorThreadId(session.resumeCursor);
 }
 
+function turnObservationKey(turnId: TurnId): string {
+  return String(turnId);
+}
+
+function readRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function readNotificationParamString(
+  notification: CodexServerNotification,
+  field: string,
+): string | undefined {
+  const params = readRecord(notification.params);
+  return params ? readString(params[field]) : undefined;
+}
+
+function readNotificationNestedString(
+  notification: CodexServerNotification,
+  field: string,
+  nestedField: string,
+): string | undefined {
+  const params = readRecord(notification.params);
+  const nested = params ? readRecord(params[field]) : undefined;
+  return nested ? readString(nested[nestedField]) : undefined;
+}
+
+function readNotificationParamBoolean(
+  notification: CodexServerNotification,
+  field: string,
+): boolean | undefined {
+  const params = readRecord(notification.params);
+  const value = params?.[field];
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function readNotificationTurnId(notification: CodexServerNotification): TurnId | undefined {
+  const turnId =
+    readNotificationParamString(notification, "turnId") ??
+    readNotificationNestedString(notification, "turn", "id");
+  return turnId ? TurnId.make(turnId) : undefined;
+}
+
+function readNotificationItemId(notification: CodexServerNotification): ProviderItemId | undefined {
+  const itemId =
+    readNotificationParamString(notification, "itemId") ??
+    readNotificationNestedString(notification, "item", "id");
+  return itemId ? ProviderItemId.make(itemId) : undefined;
+}
+
+function readNotificationTurnStatus(notification: CodexServerNotification): string | undefined {
+  return readNotificationNestedString(notification, "turn", "status");
+}
+
+function readNotificationErrorMessage(notification: CodexServerNotification): string | undefined {
+  return (
+    readNotificationNestedString(notification, "error", "message") ??
+    readNotificationParamString(notification, "message")
+  );
+}
+
 function updateSession(
   sessionRef: Ref.Ref<ProviderSession>,
   updates: Partial<ProviderSession>,
@@ -714,6 +873,176 @@ function parseThreadSnapshot(
   };
 }
 
+function timestampSecondsToIso(timestampSeconds: number | null | undefined): string | undefined {
+  if (timestampSeconds === null || timestampSeconds === undefined) {
+    return undefined;
+  }
+  if (!Number.isFinite(timestampSeconds) || timestampSeconds < 0) {
+    return undefined;
+  }
+  return DateTime.formatIso(DateTime.makeUnsafe(timestampSeconds * 1_000));
+}
+
+function timestampSecondsToMillis(
+  timestampSeconds: number | null | undefined,
+  fallbackIso: string,
+): number {
+  if (timestampSeconds === null || timestampSeconds === undefined) {
+    return DateTime.toEpochMillis(DateTime.makeUnsafe(fallbackIso));
+  }
+  if (!Number.isFinite(timestampSeconds) || timestampSeconds < 0) {
+    return DateTime.toEpochMillis(DateTime.makeUnsafe(fallbackIso));
+  }
+  return Math.trunc(timestampSeconds * 1_000);
+}
+
+function snapshotEventId(parts: ReadonlyArray<string>): EventId {
+  return EventId.make(["codex-snapshot", ...parts].join(":"));
+}
+
+function isBackfillableSnapshotItem(
+  item: CodexSnapshotThreadItem,
+): item is Extract<CodexSnapshotThreadItem, { readonly type: "agentMessage" | "plan" }> {
+  switch (item.type) {
+    case "agentMessage":
+      return item.text.trim().length > 0;
+    case "plan":
+      return item.text.trim().length > 0;
+    default:
+      return false;
+  }
+}
+
+function hasBackfillableSnapshotItem(turn: CodexSnapshotTurn): boolean {
+  return turn.items.some(isBackfillableSnapshotItem);
+}
+
+function selectSnapshotTurns(input: {
+  readonly turns: ReadonlyArray<CodexSnapshotTurn>;
+  readonly focusTurnId?: TurnId;
+  readonly turnLimit: number;
+}): ReadonlyArray<CodexSnapshotTurn> {
+  if (input.focusTurnId) {
+    return input.turns.filter((turn) => turn.id === input.focusTurnId);
+  }
+
+  if (input.turns.length <= input.turnLimit) {
+    return input.turns;
+  }
+
+  return input.turns.slice(-input.turnLimit);
+}
+
+function providerEventBase(input: {
+  readonly id: EventId;
+  readonly threadId: ThreadId;
+  readonly providerInstanceId?: ProviderInstanceId;
+  readonly createdAt: string;
+  readonly method: string;
+  readonly turnId?: TurnId;
+  readonly itemId?: ProviderItemId;
+  readonly payload: unknown;
+}): ProviderEvent {
+  return {
+    id: input.id,
+    kind: "notification",
+    provider: PROVIDER,
+    ...(input.providerInstanceId ? { providerInstanceId: input.providerInstanceId } : {}),
+    threadId: input.threadId,
+    createdAt: input.createdAt,
+    method: input.method,
+    ...(input.turnId ? { turnId: input.turnId } : {}),
+    ...(input.itemId ? { itemId: input.itemId } : {}),
+    payload: input.payload,
+  };
+}
+
+export function buildCodexThreadSnapshotBackfillEvents(input: {
+  readonly threadId: ThreadId;
+  readonly providerInstanceId?: ProviderInstanceId;
+  readonly providerThread: CodexSnapshotThread;
+  readonly createdAt: string;
+  readonly reason: "session-start" | "session-resume" | "send-turn-follow-up";
+  readonly focusTurnId?: TurnId;
+  readonly turnLimit?: number;
+}): ReadonlyArray<ProviderEvent> {
+  const selectedTurns = selectSnapshotTurns({
+    turns: input.providerThread.turns,
+    ...(input.focusTurnId ? { focusTurnId: input.focusTurnId } : {}),
+    turnLimit: input.turnLimit ?? CODEX_SNAPSHOT_BACKFILL_TURN_LIMIT,
+  });
+  const events: ProviderEvent[] = [];
+
+  for (const turn of selectedTurns) {
+    const turnId = TurnId.make(turn.id);
+    const startedAt = timestampSecondsToIso(turn.startedAt) ?? input.createdAt;
+    const completedAt = timestampSecondsToIso(turn.completedAt) ?? input.createdAt;
+    events.push(
+      providerEventBase({
+        id: snapshotEventId([input.reason, input.providerThread.id, turn.id, "turn-started"]),
+        threadId: input.threadId,
+        ...(input.providerInstanceId ? { providerInstanceId: input.providerInstanceId } : {}),
+        createdAt: startedAt,
+        method: "turn/started",
+        turnId,
+        payload: {
+          threadId: input.providerThread.id,
+          turn,
+        } satisfies EffectCodexSchema.V2TurnStartedNotification,
+      }),
+    );
+
+    for (const item of turn.items) {
+      if (!isBackfillableSnapshotItem(item)) {
+        continue;
+      }
+      const itemId = ProviderItemId.make(item.id);
+      events.push(
+        providerEventBase({
+          id: snapshotEventId([
+            input.reason,
+            input.providerThread.id,
+            turn.id,
+            item.id,
+            "item-completed",
+          ]),
+          threadId: input.threadId,
+          ...(input.providerInstanceId ? { providerInstanceId: input.providerInstanceId } : {}),
+          createdAt: completedAt,
+          method: "item/completed",
+          turnId,
+          itemId,
+          payload: {
+            completedAtMs: timestampSecondsToMillis(turn.completedAt, completedAt),
+            threadId: input.providerThread.id,
+            turnId: turn.id,
+            item,
+          } satisfies EffectCodexSchema.V2ItemCompletedNotification,
+        }),
+      );
+    }
+
+    if (turn.status !== "inProgress") {
+      events.push(
+        providerEventBase({
+          id: snapshotEventId([input.reason, input.providerThread.id, turn.id, "turn-completed"]),
+          threadId: input.threadId,
+          ...(input.providerInstanceId ? { providerInstanceId: input.providerInstanceId } : {}),
+          createdAt: completedAt,
+          method: "turn/completed",
+          turnId,
+          payload: {
+            threadId: input.providerThread.id,
+            turn,
+          } satisfies EffectCodexSchema.V2TurnCompletedNotification,
+        }),
+      );
+    }
+  }
+
+  return events;
+}
+
 export const makeCodexSessionRuntime = (
   options: CodexSessionRuntimeOptions,
 ): Effect.Effect<
@@ -730,6 +1059,8 @@ export const makeCodexSessionRuntime = (
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
     const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
     const closedRef = yield* Ref.make(false);
+    const snapshotBackfillEventIdsRef = yield* Ref.make(new Set<string>());
+    const turnStartObservationsRef = yield* Ref.make(new Map<string, CodexTurnStartObservation>());
 
     // `~` is not shell-expanded when env vars are set via
     // `child_process.spawn`; `expandHomePath` lets a configured
@@ -739,9 +1070,10 @@ export const makeCodexSessionRuntime = (
       ...(options.environment ?? process.env),
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
     };
+    const appServerArgs = buildCodexAppServerArgs(options.transportPolicy);
     const child = yield* spawner
       .spawn(
-        ChildProcess.make(options.binaryPath, ["app-server"], {
+        ChildProcess.make(options.binaryPath, appServerArgs, {
           cwd: options.cwd,
           env,
           forceKillAfter: CODEX_APP_SERVER_FORCE_KILL_AFTER,
@@ -753,16 +1085,22 @@ export const makeCodexSessionRuntime = (
         Effect.mapError(
           (cause) =>
             new CodexErrors.CodexAppServerSpawnError({
-              command: `${options.binaryPath} app-server`,
+              command: `${options.binaryPath} ${appServerArgs.join(" ")}`,
               cause,
             }),
         ),
       );
 
-    const clientContext = yield* CodexClient.layerChildProcess(child).pipe(
-      Layer.build,
-      Effect.provideService(Scope.Scope, runtimeScope),
-    );
+    const clientContext = yield* CodexClient.layerChildProcess(child, {
+      logger: (event) =>
+        Effect.logWarning("codex.app-server.protocol.diagnostic", {
+          threadId: options.threadId,
+          providerInstanceId: options.providerInstanceId ?? PROVIDER,
+          direction: event.direction,
+          stage: event.stage,
+          payload: event.payload,
+        }),
+    }).pipe(Layer.build, Effect.provideService(Scope.Scope, runtimeScope));
     const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
       Effect.provide(clientContext),
     );
@@ -807,6 +1145,352 @@ export const makeCodexSessionRuntime = (
         message,
       });
 
+    const recordTurnStartObservation = (observation: CodexTurnStartObservation) =>
+      Ref.update(turnStartObservationsRef, (current) => {
+        const next = new Map(current);
+        next.set(turnObservationKey(observation.turnId), observation);
+        while (next.size > 50) {
+          const oldestKey = next.keys().next().value;
+          if (oldestKey === undefined) {
+            break;
+          }
+          next.delete(oldestKey);
+        }
+        return next;
+      });
+
+    const updateTurnStartObservation = (
+      turnId: TurnId,
+      update: (observation: CodexTurnStartObservation) => CodexTurnStartObservation,
+    ) =>
+      Ref.update(turnStartObservationsRef, (current) => {
+        const key = turnObservationKey(turnId);
+        const existing = current.get(key);
+        if (!existing) {
+          return current;
+        }
+        const next = new Map(current);
+        next.set(key, update(existing));
+        return next;
+      });
+
+    const readTurnStartObservation = (turnId: TurnId) =>
+      Ref.get(turnStartObservationsRef).pipe(
+        Effect.map((observations) => observations.get(turnObservationKey(turnId))),
+      );
+
+    const markTurnStartBackfillAttempt = (turnId: TurnId) =>
+      Ref.modify(turnStartObservationsRef, (current) => {
+        const key = turnObservationKey(turnId);
+        const existing = current.get(key);
+        if (!existing) {
+          return [undefined, current] as const;
+        }
+        const nextObservation = {
+          ...existing,
+          backfillAttemptCount: existing.backfillAttemptCount + 1,
+        };
+        const next = new Map(current);
+        next.set(key, nextObservation);
+        return [nextObservation, next] as const;
+      });
+
+    const markTurnStartBackfillResult = (input: {
+      readonly turnId: TurnId;
+      readonly observedAt: string;
+      readonly turn: CodexSnapshotTurn | null;
+    }) =>
+      updateTurnStartObservation(input.turnId, (observation) => ({
+        ...observation,
+        lastBackfillAt: input.observedAt,
+        lastBackfillTurnFound: input.turn !== null,
+        lastBackfillTurnStatus: input.turn?.status,
+        lastBackfillItemCount: input.turn?.items.length,
+        lastBackfillItemsView: input.turn?.itemsView ?? null,
+      }));
+
+    const markTurnStartNotification = (
+      notification: CodexServerNotification,
+      routeTurnId: TurnId | undefined,
+    ) =>
+      Effect.gen(function* () {
+        const session = yield* Ref.get(sessionRef);
+        const activeTurnId = routeTurnId ?? session.activeTurnId;
+        if (!activeTurnId) {
+          return;
+        }
+
+        const observedAt = yield* nowIso;
+        const method = notification.method;
+        const isTurnEvent =
+          routeTurnId !== undefined ||
+          method === "turn/started" ||
+          method === "turn/completed" ||
+          method === "turn/plan/updated" ||
+          method === "turn/diff/updated";
+
+        yield* updateTurnStartObservation(activeTurnId, (observation) => ({
+          ...observation,
+          firstNotificationAt: observation.firstNotificationAt ?? observedAt,
+          firstNotificationMethod: observation.firstNotificationMethod ?? method,
+          ...(isTurnEvent
+            ? {
+                firstTurnEventAt: observation.firstTurnEventAt ?? observedAt,
+                firstTurnEventMethod: observation.firstTurnEventMethod ?? method,
+              }
+            : {}),
+          lastNotificationAt: observedAt,
+          lastNotificationMethod: method,
+        }));
+      });
+
+    const markTurnStartNoTurnEventWarning = (turnId: TurnId) =>
+      Ref.modify(turnStartObservationsRef, (current) => {
+        const key = turnObservationKey(turnId);
+        const existing = current.get(key);
+        if (!existing || existing.firstTurnEventAt !== undefined) {
+          return [undefined, current] as const;
+        }
+        const nextObservation = {
+          ...existing,
+          noTurnEventWarningCount: existing.noTurnEventWarningCount + 1,
+        };
+        const next = new Map(current);
+        next.set(key, nextObservation);
+        return [nextObservation, next] as const;
+      });
+
+    const emitTurnStartNoRuntimeEventWarning = (input: {
+      readonly providerThreadId: string;
+      readonly turnId: TurnId;
+      readonly delay: (typeof CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS)[number];
+    }) =>
+      Effect.gen(function* () {
+        const observation = yield* markTurnStartNoTurnEventWarning(input.turnId);
+        if (!observation) {
+          return;
+        }
+
+        yield* Effect.logWarning("codex.turnStart.noRuntimeEventYet", {
+          threadId: options.threadId,
+          providerInstanceId: options.providerInstanceId ?? PROVIDER,
+          providerThreadId: input.providerThreadId,
+          turnId: input.turnId,
+          elapsedDelay: input.delay,
+          acknowledgedAt: observation.acknowledgedAt,
+          ackLatencyMs: observation.ackLatencyMs,
+          firstNotificationMethod: observation.firstNotificationMethod ?? null,
+          firstTurnEventMethod: observation.firstTurnEventMethod ?? null,
+          lastNotificationMethod: observation.lastNotificationMethod ?? null,
+          backfillAttemptCount: observation.backfillAttemptCount,
+        });
+        yield* emitEvent({
+          kind: "notification",
+          threadId: options.threadId,
+          method: "codex.turnStart/noRuntimeEventYet",
+          turnId: input.turnId,
+          message: "Codex app-server accepted turn/start but has not emitted a turn event yet.",
+          payload: {
+            providerThreadId: input.providerThreadId,
+            turnId: input.turnId,
+            elapsedDelay: input.delay,
+            requestedAt: observation.requestedAt,
+            acknowledgedAt: observation.acknowledgedAt,
+            ackLatencyMs: observation.ackLatencyMs,
+            promptByteLength: observation.promptByteLength,
+            attachmentCount: observation.attachmentCount,
+            model: observation.model ?? null,
+            effort: observation.effort ?? null,
+            interactionMode: observation.interactionMode ?? null,
+            serviceTier: observation.serviceTier ?? null,
+            additionalDirectoryCount: observation.additionalDirectoryCount,
+            firstNotificationAt: observation.firstNotificationAt ?? null,
+            firstNotificationMethod: observation.firstNotificationMethod ?? null,
+            firstTurnEventAt: observation.firstTurnEventAt ?? null,
+            firstTurnEventMethod: observation.firstTurnEventMethod ?? null,
+            lastNotificationAt: observation.lastNotificationAt ?? null,
+            lastNotificationMethod: observation.lastNotificationMethod ?? null,
+            backfillAttemptCount: observation.backfillAttemptCount,
+            noTurnEventWarningCount: observation.noTurnEventWarningCount,
+            lastBackfillAt: observation.lastBackfillAt ?? null,
+            lastBackfillTurnFound: observation.lastBackfillTurnFound ?? null,
+            lastBackfillTurnStatus: observation.lastBackfillTurnStatus ?? null,
+            lastBackfillItemCount: observation.lastBackfillItemCount ?? null,
+            lastBackfillItemsView: observation.lastBackfillItemsView ?? null,
+            semantics:
+              "turn/start is an acknowledgement; turn/started must arrive later from the app-server listener.",
+          },
+        });
+      });
+    const emitSnapshotBackfillEvents = (input: {
+      readonly providerThread: CodexSnapshotThread;
+      readonly reason: "session-start" | "session-resume" | "send-turn-follow-up";
+      readonly focusTurnId?: TurnId;
+    }) =>
+      Effect.gen(function* () {
+        const builtEvents = buildCodexThreadSnapshotBackfillEvents({
+          threadId: options.threadId,
+          ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
+          providerThread: input.providerThread,
+          createdAt: yield* nowIso,
+          reason: input.reason,
+          ...(input.focusTurnId ? { focusTurnId: input.focusTurnId } : {}),
+        });
+        if (builtEvents.length === 0) {
+          return;
+        }
+
+        const seenIds = yield* Ref.get(snapshotBackfillEventIdsRef);
+        const unseenEvents = builtEvents.filter((event) => !seenIds.has(event.id));
+        if (unseenEvents.length === 0) {
+          return;
+        }
+        yield* Ref.update(snapshotBackfillEventIdsRef, (current) => {
+          const next = new Set(current);
+          for (const event of unseenEvents) {
+            next.add(event.id);
+          }
+          return next;
+        });
+        yield* Effect.logInfo("codex.snapshot.backfill.emitted", {
+          threadId: options.threadId,
+          providerThreadId: input.providerThread.id,
+          reason: input.reason,
+          focusTurnId: input.focusTurnId,
+          eventCount: unseenEvents.length,
+        });
+        yield* Queue.offerAll(events, unseenEvents).pipe(Effect.asVoid);
+      });
+
+    const readAndBackfillSnapshot = (input: {
+      readonly providerThreadId: string;
+      readonly focusTurnId: TurnId;
+    }) =>
+      Effect.logInfo("codex.snapshot.backfill.read-attempt", {
+        threadId: options.threadId,
+        providerThreadId: input.providerThreadId,
+        focusTurnId: input.focusTurnId,
+        timeout: CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT,
+      }).pipe(
+        Effect.andThen(
+          client
+            .request("thread/read", {
+              threadId: input.providerThreadId,
+              includeTurns: true,
+            })
+            .pipe(Effect.timeoutOption(CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT)),
+        ),
+        Effect.flatMap(
+          Option.match({
+            onNone: () =>
+              nowIso.pipe(
+                Effect.flatMap((observedAt) =>
+                  markTurnStartBackfillResult({
+                    turnId: input.focusTurnId,
+                    observedAt,
+                    turn: null,
+                  }),
+                ),
+                Effect.andThen(
+                  Effect.logWarning("codex.snapshot.backfill.read-timeout", {
+                    threadId: options.threadId,
+                    providerThreadId: input.providerThreadId,
+                    focusTurnId: input.focusTurnId,
+                    timeout: CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT,
+                  }),
+                ),
+                Effect.as(null),
+              ),
+            onSome: (response) => {
+              const turn = response.thread.turns.find((entry) => entry.id === input.focusTurnId);
+              return nowIso.pipe(
+                Effect.flatMap((observedAt) =>
+                  markTurnStartBackfillResult({
+                    turnId: input.focusTurnId,
+                    observedAt,
+                    turn: turn ?? null,
+                  }),
+                ),
+                Effect.andThen(
+                  emitSnapshotBackfillEvents({
+                    providerThread: response.thread,
+                    reason: "send-turn-follow-up",
+                    focusTurnId: input.focusTurnId,
+                  }),
+                ),
+                Effect.andThen(
+                  Effect.logInfo("codex.snapshot.backfill.read-result", {
+                    threadId: options.threadId,
+                    providerThreadId: input.providerThreadId,
+                    focusTurnId: input.focusTurnId,
+                    turnFound: turn !== undefined,
+                    turnStatus: turn?.status ?? null,
+                    itemCount: turn?.items.length ?? 0,
+                    itemsView: turn?.itemsView ?? null,
+                  }),
+                ),
+                Effect.as(turn ?? null),
+              );
+            },
+          }),
+        ),
+        Effect.catch((cause) =>
+          nowIso.pipe(
+            Effect.flatMap((observedAt) =>
+              markTurnStartBackfillResult({
+                turnId: input.focusTurnId,
+                observedAt,
+                turn: null,
+              }),
+            ),
+            Effect.andThen(
+              Effect.logWarning("codex.snapshot.backfill.read-failed", {
+                threadId: options.threadId,
+                providerThreadId: input.providerThreadId,
+                focusTurnId: input.focusTurnId,
+                cause: cause.message,
+              }),
+            ),
+            Effect.as(null),
+          ),
+        ),
+      );
+
+    const scheduleSendTurnSnapshotBackfill = (input: {
+      readonly providerThreadId: string;
+      readonly turnId: TurnId;
+    }) =>
+      Effect.gen(function* () {
+        for (const delay of CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS) {
+          yield* Effect.sleep(delay);
+          if (yield* Ref.get(closedRef)) {
+            return;
+          }
+
+          const session = yield* Ref.get(sessionRef);
+          if (session.activeTurnId !== input.turnId || session.status !== "running") {
+            return;
+          }
+
+          const observation = yield* readTurnStartObservation(input.turnId);
+          if (!observation?.firstTurnEventAt) {
+            yield* emitTurnStartNoRuntimeEventWarning({
+              providerThreadId: input.providerThreadId,
+              turnId: input.turnId,
+              delay,
+            });
+          }
+          yield* markTurnStartBackfillAttempt(input.turnId);
+          const turn = yield* readAndBackfillSnapshot({
+            providerThreadId: input.providerThreadId,
+            focusTurnId: input.turnId,
+          });
+          if (turn && turn.status !== "inProgress" && hasBackfillableSnapshotItem(turn)) {
+            return;
+          }
+        }
+      }).pipe(Effect.forkIn(runtimeScope), Effect.asVoid);
+
     const settlePendingApprovals = (decision: ProviderApprovalDecision) =>
       Ref.get(pendingApprovalsRef).pipe(
         Effect.flatMap((pendingApprovals) =>
@@ -831,10 +1515,83 @@ export const makeCodexSessionRuntime = (
         ),
       );
 
+    const currentSessionProviderThreadId = Effect.map(Ref.get(sessionRef), currentProviderThreadId);
+
+    const notificationBelongsToCurrentSession = (notification: CodexServerNotification) =>
+      currentSessionProviderThreadId.pipe(
+        Effect.map((providerThreadId) => {
+          const notificationThreadId = readNotificationThreadId(notification);
+          return (
+            !providerThreadId || !notificationThreadId || notificationThreadId === providerThreadId
+          );
+        }),
+      );
+
+    const reconcileRawNotificationSessionState = (notification: CodexServerNotification) =>
+      Effect.gen(function* () {
+        if (!(yield* notificationBelongsToCurrentSession(notification))) {
+          return;
+        }
+
+        switch (notification.method) {
+          case "thread/started": {
+            const providerThreadId = readNotificationThreadId(notification);
+            if (providerThreadId) {
+              yield* updateSession(sessionRef, {
+                resumeCursor: { threadId: providerThreadId },
+              });
+            }
+            return;
+          }
+          case "turn/started": {
+            const turnId = readNotificationTurnId(notification);
+            yield* updateSession(sessionRef, {
+              status: "running",
+              ...(turnId ? { activeTurnId: turnId } : {}),
+            });
+            return;
+          }
+          case "turn/completed": {
+            const turnStatus = readNotificationTurnStatus(notification);
+            const errorMessage =
+              turnStatus === "failed" ? readNotificationErrorMessage(notification) : undefined;
+            yield* updateSession(sessionRef, {
+              status: turnStatus === "failed" ? "error" : "ready",
+              activeTurnId: undefined,
+              ...(errorMessage ? { lastError: errorMessage } : {}),
+            });
+            return;
+          }
+          case "error": {
+            const errorMessage = readNotificationErrorMessage(notification);
+            const willRetry = readNotificationParamBoolean(notification, "willRetry");
+            yield* updateSession(sessionRef, {
+              status: willRetry ? "running" : "error",
+              ...(errorMessage ? { lastError: errorMessage } : {}),
+            });
+            return;
+          }
+          default:
+            return;
+        }
+      });
+
     const handleRawNotification = (notification: CodexServerNotification) =>
       Effect.gen(function* () {
+        yield* reconcileRawNotificationSessionState(notification).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("codex.raw.notification.session-reconcile.failed", {
+              threadId: options.threadId,
+              providerInstanceId: options.providerInstanceId ?? PROVIDER,
+              method: notification.method,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        );
+
         const payload = notification.params;
         const route = readRouteFields(notification);
+        yield* markTurnStartNotification(notification, route.turnId);
         const collabReceiverTurns = yield* Ref.get(collabReceiverTurnsRef);
         const childParentTurnId = (() => {
           const providerConversationId = readNotificationThreadId(notification);
@@ -855,10 +1612,14 @@ export const makeCodexSessionRuntime = (
         let itemId = route.itemId;
 
         if (notification.method === "serverRequest/resolved") {
+          const notificationParams = readRecord(notification.params);
+          const rawRequestIdValue = notificationParams?.requestId;
           const rawRequestId =
-            typeof notification.params.requestId === "string"
-              ? notification.params.requestId
-              : String(notification.params.requestId);
+            typeof rawRequestIdValue === "string"
+              ? rawRequestIdValue
+              : rawRequestIdValue === undefined
+                ? ""
+                : String(rawRequestIdValue);
           const correlation = rawRequestId
             ? (yield* Ref.get(approvalCorrelationsRef)).get(rawRequestId)
             : undefined;
@@ -885,13 +1646,11 @@ export const makeCodexSessionRuntime = (
           ...(requestId ? { requestId } : {}),
           ...(requestKind ? { requestKind } : {}),
           ...(notification.method === "item/agentMessage/delta"
-            ? { textDelta: notification.params.delta }
+            ? { textDelta: readNotificationParamString(notification, "delta") ?? "" }
             : {}),
           ...(payload !== undefined ? { payload } : {}),
         });
       });
-
-    const currentSessionProviderThreadId = Effect.map(Ref.get(sessionRef), currentProviderThreadId);
 
     yield* client.handleServerNotification("thread/started", (payload) =>
       currentSessionProviderThreadId.pipe(
@@ -1122,23 +1881,49 @@ export const makeCodexSessionRuntime = (
       Effect.fail(CodexErrors.CodexAppServerRequestError.methodNotFound(method)),
     );
 
-    const registerServerNotification = <M extends CodexRpc.ServerNotificationMethod>(method: M) =>
-      client.handleServerNotification(method, (params) =>
-        Queue.offer(serverNotifications, makeCodexServerNotification(method, params)).pipe(
-          Effect.asVoid,
-        ),
-      );
-
-    yield* Effect.forEach(
-      Object.values(
-        CodexRpc.SERVER_NOTIFICATION_METHODS,
-      ) as ReadonlyArray<CodexRpc.ServerNotificationMethod>,
-      registerServerNotification,
-      { concurrency: 1, discard: true },
+    yield* client.raw.notifications.pipe(
+      Stream.runForEach((notification) =>
+        Queue.offer(
+          serverNotifications,
+          makeCodexServerNotification(notification.method, notification.params),
+        ).pipe(Effect.asVoid),
+      ),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("codex.raw.notification.stream.failed", {
+          threadId: options.threadId,
+          providerInstanceId: options.providerInstanceId ?? PROVIDER,
+          cause: Cause.pretty(cause),
+        }),
+      ),
+      Effect.forkIn(runtimeScope),
     );
 
     yield* Stream.fromQueue(serverNotifications).pipe(
-      Stream.runForEach(handleRawNotification),
+      Stream.runForEach((notification) =>
+        handleRawNotification(notification).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("codex.raw.notification.projection.failed", {
+              threadId: options.threadId,
+              providerInstanceId: options.providerInstanceId ?? PROVIDER,
+              method: notification.method,
+              cause: Cause.pretty(cause),
+            }).pipe(
+              Effect.andThen(
+                emitEvent({
+                  kind: "error",
+                  threadId: options.threadId,
+                  method: "codex.rawNotification/projectionFailed",
+                  message: "Codex notification projection failed",
+                  payload: {
+                    method: notification.method,
+                    cause: Cause.pretty(cause),
+                  },
+                }).pipe(Effect.catchCause(() => Effect.void)),
+              ),
+            ),
+          ),
+        ),
+      ),
       Effect.forkIn(runtimeScope),
     );
 
@@ -1204,6 +1989,22 @@ export const makeCodexSessionRuntime = (
 
     const start = Effect.fn("CodexSessionRuntime.start")(function* () {
       yield* emitSessionEvent("session/connecting", "Starting Codex App Server session.");
+      if (options.transportPolicy?.responsesWebsockets === "disabled") {
+        yield* emitEvent({
+          kind: "notification",
+          threadId: options.threadId,
+          method: "codex.transportPolicy/applied",
+          message: "Codex Responses WebSocket transport disabled; using HTTP Responses transport.",
+          payload: {
+            responsesWebsockets: "disabled",
+            reason: options.transportPolicy.reason ?? null,
+            observedAt: options.transportPolicy.observedAt ?? null,
+            providerId: CODEX_HTTP_FALLBACK_PROVIDER_ID,
+            semantics:
+              "Cafe Code preserves Codex's official WebSocket-to-HTTP fallback decision across Cafe restarts.",
+          },
+        });
+      }
       yield* client.request("initialize", buildCodexInitializeParams());
       yield* client.notify("initialized", undefined);
 
@@ -1234,6 +2035,10 @@ export const makeCodexSessionRuntime = (
       } satisfies ProviderSession;
       yield* Ref.set(sessionRef, session);
       yield* emitSessionEvent("session/ready", "Codex App Server session ready.");
+      yield* emitSnapshotBackfillEvents({
+        providerThread: opened.thread,
+        reason: readResumeCursorThreadId(options.resumeCursor) ? "session-resume" : "session-start",
+      });
       return session;
     });
 
@@ -1273,6 +2078,8 @@ export const makeCodexSessionRuntime = (
           const normalizedModel = normalizeCodexModelSlug(
             input.model ?? (yield* Ref.get(sessionRef)).model,
           );
+          const effectiveAdditionalDirectories =
+            input.additionalDirectories ?? options.additionalDirectories ?? [];
           const params = yield* buildTurnStartParams({
             threadId: providerThreadId,
             runtimeMode: options.runtimeMode,
@@ -1282,21 +2089,81 @@ export const makeCodexSessionRuntime = (
             ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
             ...(input.effort ? { effort: input.effort } : {}),
             ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
-            additionalDirectories:
-              input.additionalDirectories ?? options.additionalDirectories ?? [],
+            additionalDirectories: effectiveAdditionalDirectories,
           });
+          const turnStartRequestedAt = yield* nowIso;
+          const turnStartRequestedAtMs = yield* Clock.currentTimeMillis;
           const rawResponse = yield* client.raw.request("turn/start", params);
+          const turnStartAcknowledgedAt = yield* nowIso;
+          const turnStartAcknowledgedAtMs = yield* Clock.currentTimeMillis;
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
             Effect.mapError((error) =>
               toProtocolParseError("Invalid turn/start response payload", error),
             ),
           );
           const turnId = TurnId.make(response.turn.id);
+          yield* recordTurnStartObservation({
+            providerThreadId,
+            turnId,
+            requestedAt: turnStartRequestedAt,
+            acknowledgedAt: turnStartAcknowledgedAt,
+            ackLatencyMs: Math.max(0, turnStartAcknowledgedAtMs - turnStartRequestedAtMs),
+            promptByteLength: Buffer.byteLength(input.input ?? "", "utf8"),
+            attachmentCount: input.attachments?.length ?? 0,
+            model: normalizedModel,
+            effort: input.effort,
+            interactionMode: input.interactionMode,
+            serviceTier: input.serviceTier,
+            additionalDirectoryCount: effectiveAdditionalDirectories.length,
+            firstNotificationAt: undefined,
+            firstNotificationMethod: undefined,
+            firstTurnEventAt: undefined,
+            firstTurnEventMethod: undefined,
+            lastNotificationAt: undefined,
+            lastNotificationMethod: undefined,
+            backfillAttemptCount: 0,
+            noTurnEventWarningCount: 0,
+            lastBackfillAt: undefined,
+            lastBackfillTurnFound: undefined,
+            lastBackfillTurnStatus: undefined,
+            lastBackfillItemCount: undefined,
+            lastBackfillItemsView: undefined,
+          });
+          const turnStartDiagnostics = {
+            providerThreadId,
+            turnId,
+            requestedAt: turnStartRequestedAt,
+            acknowledgedAt: turnStartAcknowledgedAt,
+            ackLatencyMs: Math.max(0, turnStartAcknowledgedAtMs - turnStartRequestedAtMs),
+            promptByteLength: Buffer.byteLength(input.input ?? "", "utf8"),
+            attachmentCount: input.attachments?.length ?? 0,
+            model: normalizedModel ?? null,
+            effort: input.effort ?? null,
+            interactionMode: input.interactionMode ?? null,
+            serviceTier: input.serviceTier ?? null,
+            additionalDirectoryCount: effectiveAdditionalDirectories.length,
+            semantics:
+              "turn/start is an acknowledgement; turn/started must arrive later from the app-server listener.",
+          };
+          yield* Effect.logInfo("codex.turnStart.accepted", {
+            threadId: options.threadId,
+            providerInstanceId: options.providerInstanceId ?? PROVIDER,
+            ...turnStartDiagnostics,
+          });
+          yield* emitEvent({
+            kind: "notification",
+            threadId: options.threadId,
+            method: "codex.turnStart/accepted",
+            turnId,
+            message: "Codex app-server accepted turn/start.",
+            payload: turnStartDiagnostics,
+          });
           yield* updateSession(sessionRef, {
             status: "running",
             activeTurnId: turnId,
             ...(normalizedModel ? { model: normalizedModel } : {}),
           });
+          yield* scheduleSendTurnSnapshotBackfill({ providerThreadId, turnId });
           const resumedProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
           return {
             threadId: options.threadId,

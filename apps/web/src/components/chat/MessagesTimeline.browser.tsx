@@ -65,7 +65,7 @@ function buildProps() {
     activeTurnId: null,
     activeTurnStartedAt: null,
     listRef: createRef<LegendListRef | null>(),
-    completionDividerBeforeEntryId: null,
+    completionDividerAfterEntryId: null,
     completionSummary: null,
     revertTurnCountByUserMessageId: new Map(),
     onRevertUserMessage: vi.fn(),
@@ -75,6 +75,7 @@ function buildProps() {
     markdownCwd: undefined,
     timestampFormat: "24-hour" as const,
     workspaceRoot: undefined,
+    stickToEndRevision: 0,
     onIsAtEndChange: vi.fn(),
     onUserScrollIntent: vi.fn(),
   };
@@ -218,6 +219,51 @@ describe("MessagesTimeline", () => {
 
     try {
       await expect.element(page.getByText("Thinking - Inspecting repository state")).toBeVisible();
+      expect(props.onIsAtEndChange).toHaveBeenCalledWith(true);
+      expect(scrollToEndSpy).toHaveBeenCalledWith({ animated: false });
+      expect(requestAnimationFrameSpy).toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("pins appended local messages to the bottom after the submit signal", async () => {
+    const requestAnimationFrameSpy = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback: FrameRequestCallback) => {
+        callback(0);
+        return 1;
+      });
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+
+    const props = buildProps();
+    const firstEntry = buildUserTimelineEntry("existing conversation tail");
+    const screen = await render(
+      <MessagesTimeline {...props} timelineEntries={[firstEntry]} stickToEndRevision={0} />,
+    );
+
+    try {
+      scrollToEndSpy.mockClear();
+      const nextEntry = {
+        ...buildUserTimelineEntry("new local prompt submitted from the bottom"),
+        id: "entry-2",
+        message: {
+          ...buildUserTimelineEntry("new local prompt submitted from the bottom").message,
+          id: "message-2" as never,
+        },
+      };
+
+      await screen.rerender(
+        <MessagesTimeline
+          {...props}
+          timelineEntries={[firstEntry, nextEntry]}
+          stickToEndRevision={1}
+        />,
+      );
+
+      await expect
+        .element(page.getByText("new local prompt submitted from the bottom"))
+        .toBeVisible();
       expect(props.onIsAtEndChange).toHaveBeenCalledWith(true);
       expect(scrollToEndSpy).toHaveBeenCalledWith({ animated: false });
       expect(requestAnimationFrameSpy).toHaveBeenCalled();

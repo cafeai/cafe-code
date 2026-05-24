@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off
 /**
  * CodexAdapterLive - Scoped live implementation for the Codex provider adapter.
  *
@@ -7,6 +8,9 @@
  *
  * @module CodexAdapterLive
  */
+import * as Crypto from "node:crypto";
+import * as NodeFs from "node:fs";
+
 import {
   type CanonicalItemType,
   type CanonicalRequestType,
@@ -23,12 +27,17 @@ import {
   ProviderApprovalDecision,
   ThreadId,
   ProviderSendTurnInput,
+  RuntimeTaskId,
 } from "@cafecode/contracts";
+import * as Data from "effect/Data";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -59,6 +68,7 @@ import {
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeShape,
+  type CodexTransportPolicy,
 } from "./CodexSessionRuntime.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
@@ -69,6 +79,16 @@ const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 
 const PROVIDER = ProviderDriverKind.make("codex");
+const CODEX_TRANSPORT_POLICY_FILENAME = "codex-transport-policy.json";
+const CODEX_WEBSOCKET_FALLBACK_REASON = "responses_websocket_stream_disconnected";
+
+class CodexTransportPolicyFileError extends Data.TaggedError("CodexTransportPolicyFileError")<{
+  readonly cause: unknown;
+}> {
+  override get message(): string {
+    return this.cause instanceof Error ? this.cause.message : String(this.cause);
+  }
+}
 
 export interface CodexAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
@@ -89,6 +109,12 @@ interface CodexAdapterSessionContext {
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
   readonly eventFiber: Fiber.Fiber<void, never>;
+  readonly transportPolicyApplied: boolean;
+  pendingTransportPolicyRetirement?: {
+    readonly fallbackEventId: string;
+    readonly observedAt: string;
+    readonly reason: string;
+  };
   stopped: boolean;
 }
 
@@ -151,6 +177,220 @@ const FATAL_CODEX_STDERR_SNIPPETS = ["failed to connect to websocket"];
 function isFatalCodexProcessStderrMessage(message: string): boolean {
   const normalized = message.toLowerCase();
   return FATAL_CODEX_STDERR_SNIPPETS.some((snippet) => normalized.includes(snippet));
+}
+
+interface CodexTransportPolicyEntry {
+  readonly responsesWebsockets: CodexTransportPolicy["responsesWebsockets"];
+  readonly reason?: string;
+  readonly observedAt?: string;
+  readonly source?: string;
+  readonly lastEventId?: string;
+  readonly lastThreadId?: string;
+  readonly lastTurnId?: string;
+  readonly failureCount?: number;
+}
+
+interface CodexTransportPolicyFile {
+  readonly version: 1;
+  readonly instances: Record<string, CodexTransportPolicyEntry>;
+}
+
+function readRecordValue(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function readStringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function readPayloadMessage(event: ProviderEvent): string | undefined {
+  const payload = readRecordValue(event.payload);
+  const error = readRecordValue(payload?.error);
+  return (
+    readStringValue(event.message) ??
+    readStringValue(payload?.message) ??
+    readStringValue(error?.message)
+  );
+}
+
+function readPayloadAdditionalDetails(event: ProviderEvent): string | undefined {
+  const payload = readRecordValue(event.payload);
+  const error = readRecordValue(payload?.error);
+  return (
+    readStringValue(payload?.additionalDetails) ??
+    readStringValue(error?.additionalDetails) ??
+    readStringValue(error?.details)
+  );
+}
+
+function containsNormalized(value: string | undefined, needle: string): boolean {
+  return value?.toLowerCase().includes(needle.toLowerCase()) ?? false;
+}
+
+function isCodexResponsesWebsocketFallbackEvent(event: ProviderEvent): boolean {
+  const message = readPayloadMessage(event);
+  const additionalDetails = readPayloadAdditionalDetails(event);
+  const combined = [message, additionalDetails].filter(Boolean).join("\n");
+
+  // Match upstream Codex exactly: retry notifications such as
+  // "Reconnecting... 5/5" are not the transport decision. Codex only switches a
+  // session to HTTP after its fallback branch activates and emits the
+  // WebSockets-to-HTTPS/HTTP warning. Cafe only persists that official decision.
+  return (
+    containsNormalized(combined, "falling back from websockets to https transport") ||
+    containsNormalized(combined, "falling back to http")
+  );
+}
+
+function isCodexTurnTerminalEvent(event: ProviderEvent): boolean {
+  return event.method === "turn/completed" || event.method === "turn/aborted";
+}
+
+function codexTransportPolicyKey(input: {
+  readonly instanceId: ProviderInstanceId;
+  readonly binaryPath: string;
+  readonly homePath?: string;
+}): string {
+  // The key intentionally avoids user prompts and thread content. It binds the
+  // decision to the exact provider instance + Codex binary + CODEX_HOME so one
+  // local Codex identity cannot silently change another identity's transport.
+  return JSON.stringify({
+    instanceId: input.instanceId,
+    binaryPath: input.binaryPath,
+    homePath: input.homePath ?? "",
+  });
+}
+
+function parseCodexTransportPolicyFile(value: unknown): CodexTransportPolicyFile | undefined {
+  const record = readRecordValue(value);
+  const instancesRecord = readRecordValue(record?.instances);
+  if (record?.version !== 1 || !instancesRecord) {
+    return undefined;
+  }
+
+  const instances: Record<string, CodexTransportPolicyEntry> = {};
+  for (const [key, rawEntry] of Object.entries(instancesRecord)) {
+    const entry = readRecordValue(rawEntry);
+    if (
+      !entry ||
+      (entry.responsesWebsockets !== "auto" && entry.responsesWebsockets !== "disabled")
+    ) {
+      continue;
+    }
+    const reason = readStringValue(entry.reason);
+    const observedAt = readStringValue(entry.observedAt);
+    const source = readStringValue(entry.source);
+    const lastEventId = readStringValue(entry.lastEventId);
+    const lastThreadId = readStringValue(entry.lastThreadId);
+    const lastTurnId = readStringValue(entry.lastTurnId);
+    const failureCount =
+      typeof entry.failureCount === "number" && Number.isFinite(entry.failureCount)
+        ? Math.max(0, Math.floor(entry.failureCount))
+        : undefined;
+    const parsedEntry = {
+      responsesWebsockets: entry.responsesWebsockets,
+      ...(reason ? { reason } : {}),
+      ...(observedAt ? { observedAt } : {}),
+      ...(source ? { source } : {}),
+      ...(lastEventId ? { lastEventId } : {}),
+      ...(lastThreadId ? { lastThreadId } : {}),
+      ...(lastTurnId ? { lastTurnId } : {}),
+      ...(failureCount !== undefined ? { failureCount } : {}),
+    } satisfies CodexTransportPolicyEntry;
+    instances[key] = parsedEntry;
+  }
+  return { version: 1, instances };
+}
+
+function toRuntimeTransportPolicy(
+  entry: CodexTransportPolicyEntry | undefined,
+): CodexTransportPolicy | undefined {
+  if (entry?.responsesWebsockets !== "disabled") {
+    return undefined;
+  }
+  return {
+    responsesWebsockets: "disabled",
+    ...(entry.reason ? { reason: entry.reason } : {}),
+    ...(entry.observedAt ? { observedAt: entry.observedAt } : {}),
+  };
+}
+
+const loadCodexTransportPolicy = Effect.fn("loadCodexTransportPolicy")(function* (
+  filePath: string,
+  key: string,
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  if (!(yield* fileSystem.exists(filePath).pipe(Effect.orElseSucceed(() => false)))) {
+    return undefined;
+  }
+  const loaded = yield* fileSystem.readFileString(filePath).pipe(
+    Effect.flatMap((contents) =>
+      Effect.try({
+        try: () => parseCodexTransportPolicyFile(JSON.parse(contents)),
+        catch: (cause) => new CodexTransportPolicyFileError({ cause }),
+      }),
+    ),
+    Effect.catch((cause) =>
+      Effect.logWarning("codex.transportPolicy.loadFailed", {
+        filePath,
+        detail: cause instanceof Error ? cause.message : String(cause),
+      }).pipe(Effect.as(undefined)),
+    ),
+  );
+  return loaded?.instances[key];
+});
+
+function persistCodexTransportPolicy(
+  path: Path.Path,
+  filePath: string,
+  key: string,
+  entry: CodexTransportPolicyEntry,
+): void {
+  const existing = (() => {
+    try {
+      return parseCodexTransportPolicyFile(JSON.parse(NodeFs.readFileSync(filePath, "utf8")));
+    } catch {
+      return undefined;
+    }
+  })();
+  const next: CodexTransportPolicyFile = {
+    version: 1,
+    instances: {
+      ...existing?.instances,
+      [key]: entry,
+    },
+  };
+
+  const targetDirectory = path.dirname(filePath);
+  const tempFileId = Crypto.randomUUID();
+  const tempPath = path.join(targetDirectory, `${path.basename(filePath)}.${tempFileId}.tmp`);
+
+  try {
+    NodeFs.mkdirSync(targetDirectory, { recursive: true });
+    NodeFs.writeFileSync(tempPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    // This file is not a secret, but it influences process launch behavior.
+    // Keep it user-private so other local users cannot force a transport mode.
+    try {
+      NodeFs.chmodSync(tempPath, 0o600);
+    } catch {
+      // Best-effort on filesystems that do not support POSIX modes.
+    }
+    NodeFs.renameSync(tempPath, filePath);
+    try {
+      NodeFs.chmodSync(filePath, 0o600);
+    } catch {
+      // Best-effort on filesystems that do not support POSIX modes.
+    }
+  } catch (error) {
+    try {
+      NodeFs.rmSync(tempPath, { force: true });
+    } catch {
+      // Ignore cleanup failures; the original write failure is more useful.
+    }
+    throw error;
+  }
 }
 
 function normalizeCodexTokenUsage(
@@ -1253,6 +1493,65 @@ function mapToRuntimeEvents(
     ];
   }
 
+  if (event.method === "codex.turnStart/noRuntimeEventYet") {
+    return [
+      {
+        type: "runtime.warning",
+        ...runtimeEventBase(event, canonicalThreadId),
+        payload: {
+          message:
+            event.message ??
+            "Codex app-server accepted turn/start but has not emitted a turn event yet.",
+          ...(event.payload !== undefined ? { detail: event.payload } : {}),
+        },
+      },
+    ];
+  }
+
+  if (event.method === "codex.turnStart/accepted") {
+    return [
+      {
+        type: "task.progress",
+        ...runtimeEventBase(event, canonicalThreadId),
+        payload: {
+          taskId: RuntimeTaskId.make(`codex-turn-start:${event.turnId ?? event.id}`),
+          description: event.message ?? "Codex app-server accepted turn/start.",
+          ...(event.payload !== undefined ? { usage: event.payload } : {}),
+        },
+      },
+    ];
+  }
+
+  if (event.method === "codex.transportPolicy/applied") {
+    return [
+      {
+        type: "task.progress",
+        ...runtimeEventBase(event, canonicalThreadId),
+        payload: {
+          taskId: RuntimeTaskId.make(`codex-transport-policy:${event.id}`),
+          description:
+            event.message ??
+            "Codex app-server started with Responses WebSockets disabled after fallback.",
+          ...(event.payload !== undefined ? { usage: event.payload } : {}),
+        },
+      },
+    ];
+  }
+
+  if (event.method === "warning") {
+    const message = readPayloadMessage(event) ?? "Codex runtime warning";
+    return [
+      {
+        type: "runtime.warning",
+        ...runtimeEventBase(event, canonicalThreadId),
+        payload: {
+          message,
+          ...(event.payload !== undefined ? { detail: event.payload } : {}),
+        },
+      },
+    ];
+  }
+
   if (event.method === "process/stderr") {
     const message = event.message ?? "Codex process stderr";
     const isFatal = isFatalCodexProcessStderrMessage(message);
@@ -1348,8 +1647,22 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 ) {
   const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("codex");
   const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const serverConfig = yield* Effect.service(ServerConfig);
+  const transportPolicyPath = path.join(serverConfig.stateDir, CODEX_TRANSPORT_POLICY_FILENAME);
+  const transportPolicyKey = codexTransportPolicyKey({
+    instanceId: boundInstanceId,
+    binaryPath: codexConfig.binaryPath,
+    ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
+  });
+  const initialTransportPolicy = yield* loadCodexTransportPolicy(
+    transportPolicyPath,
+    transportPolicyKey,
+  );
+  const transportPolicyRef = yield* Ref.make<CodexTransportPolicyEntry | undefined>(
+    initialTransportPolicy,
+  );
   const nativeEventLogger =
     options?.nativeEventLogger ??
     (options?.nativeEventLogPath !== undefined
@@ -1362,9 +1675,72 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
   const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
 
-  const retireExitedSession = Effect.fn("CodexAdapter.retireExitedSession")(function* (
+  const disableResponsesWebsocketsFromEvent = (event: ProviderEvent): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      const observedAt = DateTime.formatIso(yield* DateTime.now);
+      const previous = yield* Ref.get(transportPolicyRef);
+      const next: CodexTransportPolicyEntry = {
+        responsesWebsockets: "disabled",
+        reason: CODEX_WEBSOCKET_FALLBACK_REASON,
+        observedAt,
+        source: "codex.app-server",
+        lastEventId: event.id,
+        lastThreadId: event.threadId,
+        ...(event.turnId ? { lastTurnId: event.turnId } : {}),
+        failureCount: (previous?.failureCount ?? 0) + 1,
+      };
+
+      yield* Ref.set(transportPolicyRef, next);
+      yield* Effect.try({
+        try: () => persistCodexTransportPolicy(path, transportPolicyPath, transportPolicyKey, next),
+        catch: (cause) => new CodexTransportPolicyFileError({ cause }),
+      }).pipe(
+        Effect.tap(() =>
+          Effect.logWarning("codex.transportPolicy.responsesWebsocketsDisabled", {
+            instanceId: boundInstanceId,
+            reason: next.reason,
+            observedAt,
+            threadId: event.threadId,
+            turnId: event.turnId,
+            eventId: event.id,
+          }),
+        ),
+        Effect.catch((cause) =>
+          Effect.logWarning("codex.transportPolicy.persistFailed", {
+            instanceId: boundInstanceId,
+            filePath: transportPolicyPath,
+            detail: cause.message,
+          }),
+        ),
+      );
+
+      const session = sessions.get(event.threadId);
+      if (session && !session.stopped && !session.transportPolicyApplied) {
+        // Codex should switch this in-flight app-server session to HTTP after
+        // emitting the official fallback warning, but older already-running
+        // sessions can still surface later reconnect warnings. Retiring only
+        // after the terminal turn event preserves the current response while
+        // making the next provider turn resume under Cafe's persisted
+        // `supports_websockets = false` launch policy.
+        session.pendingTransportPolicyRetirement = {
+          fallbackEventId: event.id,
+          observedAt,
+          reason: next.reason ?? CODEX_WEBSOCKET_FALLBACK_REASON,
+        };
+        yield* Effect.logWarning("codex.transportPolicy.sessionRetirePending", {
+          instanceId: boundInstanceId,
+          threadId: event.threadId,
+          turnId: event.turnId,
+          eventId: event.id,
+          reason: session.pendingTransportPolicyRetirement.reason,
+        });
+      }
+    });
+
+  const retireSession = Effect.fn("CodexAdapter.retireSession")(function* (
     threadId: ThreadId,
     reason: string,
+    diagnosticName: string,
   ) {
     const session = sessions.get(threadId);
     if (!session || session.stopped) {
@@ -1373,7 +1749,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 
     session.stopped = true;
     sessions.delete(threadId);
-    yield* Effect.logWarning("codex.session.retired-after-runtime-exit", {
+    yield* Effect.logWarning(diagnosticName, {
       threadId,
       reason,
     });
@@ -1384,6 +1760,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       Effect.yieldNow.pipe(Effect.andThen(Fiber.interrupt(session.eventFiber).pipe(Effect.ignore))),
     );
   });
+
+  const retireExitedSession = (threadId: ThreadId, reason: string): Effect.Effect<void> =>
+    retireSession(threadId, reason, "codex.session.retired-after-runtime-exit");
+
+  const retireSessionAfterTransportFallback = (
+    threadId: ThreadId,
+    reason: string,
+  ): Effect.Effect<void> =>
+    retireSession(threadId, reason, "codex.session.retired-after-transport-fallback");
 
   const startSession: CodexAdapterShape["startSession"] = (input) =>
     Effect.scoped(
@@ -1401,6 +1786,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           yield* Effect.suspend(() => stopSessionInternal(existing));
         }
 
+        const currentTransportPolicy = toRuntimeTransportPolicy(yield* Ref.get(transportPolicyRef));
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
@@ -1421,6 +1807,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ...(input.modelSelection?.instanceId === boundInstanceId &&
           getModelSelectionBooleanOptionValue(input.modelSelection, "fastMode") === true
             ? { serviceTier: "fast" }
+            : {}),
+          ...(currentTransportPolicy !== undefined
+            ? { transportPolicy: currentTransportPolicy }
             : {}),
         };
         const sessionScope = yield* Scope.make("sequential");
@@ -1456,7 +1845,21 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               });
               return;
             }
+            if (isCodexResponsesWebsocketFallbackEvent(event)) {
+              yield* disableResponsesWebsocketsFromEvent(event);
+            }
             yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
+            if (isCodexTurnTerminalEvent(event)) {
+              const session = sessions.get(event.threadId);
+              const pendingRetirement = session?.pendingTransportPolicyRetirement;
+              if (session && !session.stopped && pendingRetirement !== undefined) {
+                yield* retireSessionAfterTransportFallback(
+                  event.threadId,
+                  `Codex Responses WebSocket fallback was observed at ${pendingRetirement.observedAt}; restarting future turns with HTTP Responses transport. Fallback event: ${pendingRetirement.fallbackEventId}.`,
+                );
+                return;
+              }
+            }
             if (event.method === "session/exited" || event.method === "session/closed") {
               yield* retireExitedSession(
                 event.threadId,
@@ -1464,7 +1867,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               );
             }
           }),
-        ).pipe(Effect.forkChild);
+        ).pipe(
+          // This bridge is the only path from the Codex runtime's native
+          // event queue into the provider daemon journal. It must be owned by
+          // the durable session scope, not by the short-lived `startSession`
+          // caller scope, otherwise a session can accept `turn/start` and then
+          // silently strand every later assistant/token/tool event in the
+          // runtime queue.
+          Effect.forkIn(sessionScope),
+        );
 
         const started = yield* runtime.start().pipe(
           Effect.mapError(
@@ -1490,6 +1901,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           scope: sessionScope,
           runtime,
           eventFiber,
+          transportPolicyApplied: currentTransportPolicy?.responsesWebsockets === "disabled",
           stopped: false,
         });
         sessionScopeTransferred = true;

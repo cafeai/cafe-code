@@ -107,5 +107,12 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     sourcemap: buildSourcemap,
+    chunkSizeWarningLimit: 3500,
+    rolldownOptions: {
+      checks: {
+        invalidAnnotation: false,
+        pluginTimings: false,
+      },
+    },
   },
 });

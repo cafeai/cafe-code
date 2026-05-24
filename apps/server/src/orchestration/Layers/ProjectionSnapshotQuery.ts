@@ -73,6 +73,7 @@ const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
     attachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
   }),
 );
+type ProjectionThreadMessageDbRow = Schema.Schema.Type<typeof ProjectionThreadMessageDbRowSchema>;
 const ProjectionThreadProposedPlanDbRowSchema = ProjectionThreadProposedPlan;
 const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
@@ -265,6 +266,56 @@ function mapSessionRowForThread(
   latestTurn: OrchestrationLatestTurn | null | undefined,
 ): OrchestrationSession {
   return reconcileSessionWithLatestTurn(mapSessionRow(row), latestTurn);
+}
+
+function codexSnapshotAssistantMessageKey(row: ProjectionThreadMessageDbRow): string | undefined {
+  const text = row.text.trim();
+  if (
+    row.role !== "assistant" ||
+    row.turnId === null ||
+    row.isStreaming !== 0 ||
+    text.length === 0 ||
+    (row.attachments?.length ?? 0) > 0
+  ) {
+    return undefined;
+  }
+  return [row.threadId, row.turnId, text].join("\u0000");
+}
+
+function isCodexSnapshotAssistantItemMessageId(messageId: MessageId): boolean {
+  return /^assistant:item-\d+$/.test(String(messageId));
+}
+
+function dedupeCodexSnapshotAssistantMessages(
+  rows: ReadonlyArray<ProjectionThreadMessageDbRow>,
+): ReadonlyArray<ProjectionThreadMessageDbRow> {
+  const liveAssistantMessageKeys = new Set<string>();
+  for (const row of rows) {
+    if (isCodexSnapshotAssistantItemMessageId(row.messageId)) {
+      continue;
+    }
+    const key = codexSnapshotAssistantMessageKey(row);
+    if (key) {
+      liveAssistantMessageKeys.add(key);
+    }
+  }
+
+  const retainedSnapshotKeys = new Set<string>();
+  return rows.filter((row) => {
+    const key = codexSnapshotAssistantMessageKey(row);
+    if (!key || !isCodexSnapshotAssistantItemMessageId(row.messageId)) {
+      return true;
+    }
+    // Codex delayed snapshot backfill is reconciliation data. When the live
+    // stream has already produced the same assistant text for the same turn,
+    // keep the live message and suppress the snapshot-only item row so old
+    // projections do not show duplicated assistant bubbles.
+    if (liveAssistantMessageKeys.has(key) || retainedSnapshotKeys.has(key)) {
+      return false;
+    }
+    retainedSnapshotKeys.add(key);
+    return true;
+  });
 }
 
 function mapProjectShellRow(
@@ -1163,6 +1214,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 
               for (const row of messageRows) {
                 updatedAt = maxIso(updatedAt, row.updatedAt);
+              }
+
+              for (const row of dedupeCodexSnapshotAssistantMessages(messageRows)) {
                 const threadMessages = messagesByThread.get(row.threadId) ?? [];
                 threadMessages.push({
                   id: row.messageId,
@@ -2229,7 +2283,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         updatedAt: threadRow.value.updatedAt,
         archivedAt: threadRow.value.archivedAt,
         deletedAt: null,
-        messages: messageRows.map((row) => {
+        messages: dedupeCodexSnapshotAssistantMessages(messageRows).map((row) => {
           const message = {
             id: row.messageId,
             role: row.role,

@@ -51,6 +51,11 @@ import Migration0035 from "./Migrations/035_ReconcileActiveTurnSessionStatus.ts"
 import Migration0036 from "./Migrations/036_ProjectionThreadActivityRecentIndex.ts";
 import Migration0037 from "./Migrations/037_ReconcileCompletedLatestTurnPostCompletionEvents.ts";
 import Migration0038 from "./Migrations/038_ProjectionProjectsAdditionalWorkspaceRoots.ts";
+import Migration0039 from "./Migrations/039_ReconcileLatestTurnPostCompletionEvents.ts";
+import Migration0040 from "./Migrations/040_ProviderDaemonDurability.ts";
+import Migration0041 from "./Migrations/041_ProviderSupervisorFoundation.ts";
+import Migration0042 from "./Migrations/042_ProviderDaemonEventJournalOwnerKey.ts";
+import Migration0043 from "./Migrations/043_ReconcileTerminalActiveThreadSessions.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -101,6 +106,11 @@ export const migrationEntries = [
   [36, "ProjectionThreadActivityRecentIndex", Migration0036],
   [37, "ReconcileCompletedLatestTurnPostCompletionEvents", Migration0037],
   [38, "ProjectionProjectsAdditionalWorkspaceRoots", Migration0038],
+  [39, "ReconcileLatestTurnPostCompletionEvents", Migration0039],
+  [40, "ProviderDaemonDurability", Migration0040],
+  [41, "ProviderSupervisorFoundation", Migration0041],
+  [42, "ProviderDaemonEventJournalOwnerKey", Migration0042],
+  [43, "ReconcileTerminalActiveThreadSessions", Migration0043],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

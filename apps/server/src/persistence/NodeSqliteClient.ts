@@ -40,6 +40,7 @@ export interface SqliteClientConfig {
   readonly filename: string;
   readonly readonly?: boolean | undefined;
   readonly allowExtension?: boolean | undefined;
+  readonly busyTimeoutMs?: number | undefined;
   readonly prepareCacheSize?: number | undefined;
   readonly prepareCacheTTL?: Duration.Input | undefined;
   readonly spanAttributes?: Record<string, unknown> | undefined;
@@ -74,6 +75,16 @@ const checkNodeSqliteCompat = () => {
   return Effect.void;
 };
 
+function normalizeBusyTimeoutMs(value: number | undefined): number {
+  if (value === undefined) {
+    return 0;
+  }
+  if (!Number.isFinite(value) || value <= 0) {
+    return 0;
+  }
+  return Math.min(60_000, Math.trunc(value));
+}
+
 const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
   options: SqliteClientConfig,
   openDatabase: () => DatabaseSync,
@@ -92,6 +103,10 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
       scope,
       Effect.sync(() => db.close()),
     );
+    const busyTimeoutMs = normalizeBusyTimeoutMs(options.busyTimeoutMs);
+    if (busyTimeoutMs > 0) {
+      db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
+    }
 
     const statementReaderCache = new WeakMap<StatementSync, boolean>();
     const hasRows = (statement: StatementSync): boolean => {

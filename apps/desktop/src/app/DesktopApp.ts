@@ -14,6 +14,7 @@ import { installDesktopIpcHandlers } from "../ipc/DesktopIpcHandlers.ts";
 import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
 import * as DesktopApplicationMenu from "../window/DesktopApplicationMenu.ts";
 import * as DesktopBackendManager from "../backend/DesktopBackendManager.ts";
+import * as DesktopProviderDaemonManager from "../backend/DesktopProviderDaemonManager.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopLifecycle from "./DesktopLifecycle.ts";
 import * as DesktopObservability from "./DesktopObservability.ts";
@@ -134,6 +135,7 @@ const fatalStartupCause = <E>(stage: string, cause: Cause.Cause<E>) =>
 
 const bootstrap = Effect.gen(function* () {
   const backendManager = yield* DesktopBackendManager.DesktopBackendManager;
+  const providerDaemonManager = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
   const state = yield* DesktopState.DesktopState;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
@@ -167,6 +169,10 @@ const bootstrap = Effect.gen(function* () {
   const backendConfig = yield* serverExposure.backendConfig;
   yield* logBootstrapInfo("bootstrap resolved backend endpoint", {
     baseUrl: backendConfig.httpBaseUrl.href,
+  });
+  const providerDaemon = yield* providerDaemonManager.ensureRunning;
+  yield* logBootstrapInfo("bootstrap provider daemon ready", {
+    endpoint: providerDaemon.httpBaseUrl,
   });
   if (serverExposureState.endpointUrl) {
     yield* logBootstrapInfo("bootstrap enabled network access", {

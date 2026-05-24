@@ -3,10 +3,12 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
+import * as DesktopProviderDaemonManager from "./DesktopProviderDaemonManager.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopServerExposure from "./DesktopServerExposure.ts";
 
@@ -35,6 +37,36 @@ const serverExposureLayer = Layer.succeed(DesktopServerExposure.DesktopServerExp
   setTailscaleServeEnabled: () => Effect.die("unexpected setTailscaleServeEnabled"),
   getAdvertisedEndpoints: Effect.succeed([]),
 } satisfies DesktopServerExposure.DesktopServerExposureShape);
+
+const providerDaemonLayer = Layer.succeed(
+  DesktopProviderDaemonManager.DesktopProviderDaemonManager,
+  {
+    ensureRunning: Effect.succeed({
+      httpBaseUrl: "http://127.0.0.1:3774",
+      token: "provider-daemon-test-token-000000000000000000000000",
+    }),
+    currentConfig: Effect.succeed(Option.none()),
+    refreshHealth: Effect.succeed(Option.none()),
+    snapshot: Effect.succeed({
+      status: "idle",
+      pid: Option.none(),
+      endpoint: Option.none(),
+      adoptedExistingProcess: false,
+      lastHealth: Option.none(),
+      lastError: Option.none(),
+      markerPath: "/tmp/provider-daemon.json",
+      credentialPath: "/tmp/provider-daemon-token.bin",
+      runtimeBuildId: "test-runtime-build-id",
+      lastEnsureRunningDurationMs: Option.none(),
+      lastAdoptionDurationMs: Option.none(),
+      lastSpawnDurationMs: Option.none(),
+      lastHealthRefreshDurationMs: Option.none(),
+      healthRefreshCount: 0,
+      healthRefreshFailureCount: 0,
+    }),
+    stop: Effect.void,
+  } satisfies DesktopProviderDaemonManager.DesktopProviderDaemonManagerShape,
+);
 
 function makeEnvironmentLayer(
   baseDir: string,
@@ -78,6 +110,9 @@ const withHarness = <A, E, R>(
     | FileSystem.FileSystem
     | DesktopBackendConfiguration.DesktopBackendConfiguration
   >,
+  options?: {
+    readonly providerDaemonLayer?: Layer.Layer<DesktopProviderDaemonManager.DesktopProviderDaemonManager>;
+  },
 ) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -89,6 +124,7 @@ const withHarness = <A, E, R>(
       Effect.provide(
         DesktopBackendConfiguration.layer.pipe(
           Layer.provideMerge(serverExposureLayer),
+          Layer.provideMerge(options?.providerDaemonLayer ?? providerDaemonLayer),
           Layer.provideMerge(makeEnvironmentLayer(baseDir)),
         ),
       ),
@@ -169,6 +205,37 @@ describe("DesktopBackendConfiguration", () => {
     ),
   );
 
+  it.effect("includes provider daemon endpoint in desktop bootstrap when configured", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+        const config = yield* configuration.resolve;
+
+        assert.deepEqual(config.bootstrap.providerDaemon, {
+          httpBaseUrl: "http://127.0.0.1:3774",
+          token: "provider-daemon-test-token-000000000000000000000000",
+        });
+      }),
+      {
+        providerDaemonLayer: Layer.succeed(
+          DesktopProviderDaemonManager.DesktopProviderDaemonManager,
+          {
+            ensureRunning: Effect.die("unexpected ensureRunning"),
+            currentConfig: Effect.succeed(
+              Option.some({
+                httpBaseUrl: "http://127.0.0.1:3774",
+                token: "provider-daemon-test-token-000000000000000000000000",
+              }),
+            ),
+            refreshHealth: Effect.succeed(Option.none()),
+            snapshot: Effect.die("unexpected snapshot"),
+            stop: Effect.void,
+          } satisfies DesktopProviderDaemonManager.DesktopProviderDaemonManagerShape,
+        ),
+      },
+    ),
+  );
+
   it.effect("captures backend output in development so child process logs can be persisted", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -184,6 +251,7 @@ describe("DesktopBackendConfiguration", () => {
         Effect.provide(
           DesktopBackendConfiguration.layer.pipe(
             Layer.provideMerge(serverExposureLayer),
+            Layer.provideMerge(providerDaemonLayer),
             Layer.provideMerge(
               makeEnvironmentLayer(baseDir, {
                 isPackaged: false,

@@ -32,6 +32,12 @@ export type MessagesTimelineRow =
       revertTurnCount?: number | undefined;
     }
   | {
+      kind: "completion-divider";
+      id: string;
+      createdAt: string;
+      completionSummary: string | null;
+    }
+  | {
       kind: "proposed-plan";
       id: string;
       createdAt: string;
@@ -84,7 +90,7 @@ export function resolveAssistantMessageCopyState({
 
 export function deriveMessagesTimelineRows(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
-  completionDividerBeforeEntryId: string | null;
+  completionDividerAfterEntryId: string | null;
   completionSummary?: string | null;
   isWorking: boolean;
   activeTurnInProgress?: boolean;
@@ -118,6 +124,17 @@ export function deriveMessagesTimelineRows(input: {
         createdAt: timelineEntry.createdAt,
         groupedEntries,
       });
+      if (
+        input.completionDividerAfterEntryId !== null &&
+        groupedEntries.some((entry) => entry.id === input.completionDividerAfterEntryId)
+      ) {
+        nextRows.push({
+          kind: "completion-divider",
+          id: `completion-divider:${input.completionDividerAfterEntryId}`,
+          createdAt: groupedEntries.at(-1)?.createdAt ?? timelineEntry.createdAt,
+          completionSummary: input.completionSummary ?? null,
+        });
+      }
       index = cursor - 1;
       continue;
     }
@@ -129,6 +146,14 @@ export function deriveMessagesTimelineRows(input: {
         createdAt: timelineEntry.createdAt,
         proposedPlan: timelineEntry.proposedPlan,
       });
+      if (input.completionDividerAfterEntryId === timelineEntry.id) {
+        nextRows.push({
+          kind: "completion-divider",
+          id: `completion-divider:${timelineEntry.id}`,
+          createdAt: timelineEntry.createdAt,
+          completionSummary: input.completionSummary ?? null,
+        });
+      }
       continue;
     }
 
@@ -138,10 +163,6 @@ export function deriveMessagesTimelineRows(input: {
       input.activeTurnId != null &&
       timelineEntry.message.turnId === input.activeTurnId;
 
-    const showCompletionDivider =
-      timelineEntry.message.role === "assistant" &&
-      input.completionDividerBeforeEntryId === timelineEntry.id;
-
     nextRows.push({
       kind: "message",
       id: timelineEntry.id,
@@ -149,8 +170,8 @@ export function deriveMessagesTimelineRows(input: {
       message: timelineEntry.message,
       durationStart:
         durationStartByMessageId.get(timelineEntry.message.id) ?? timelineEntry.message.createdAt,
-      showCompletionDivider,
-      completionSummary: showCompletionDivider ? (input.completionSummary ?? null) : null,
+      showCompletionDivider: false,
+      completionSummary: null,
       showAssistantCopyButton: timelineEntry.message.role === "assistant",
       assistantCopyStreaming: timelineEntry.message.streaming || assistantTurnStillInProgress,
       revertTurnCount:
@@ -158,6 +179,14 @@ export function deriveMessagesTimelineRows(input: {
           ? input.revertTurnCountByUserMessageId.get(timelineEntry.message.id)
           : undefined,
     });
+    if (input.completionDividerAfterEntryId === timelineEntry.id) {
+      nextRows.push({
+        kind: "completion-divider",
+        id: `completion-divider:${timelineEntry.id}`,
+        createdAt: timelineEntry.createdAt,
+        completionSummary: input.completionSummary ?? null,
+      });
+    }
   }
 
   if (input.isWorking) {
@@ -201,6 +230,12 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
 
     case "proposed-plan":
       return a.proposedPlan === (b as typeof a).proposedPlan;
+
+    case "completion-divider":
+      return (
+        a.createdAt === (b as typeof a).createdAt &&
+        a.completionSummary === (b as typeof a).completionSummary
+      );
 
     case "work":
       return Equal.equals(a.groupedEntries, (b as typeof a).groupedEntries);

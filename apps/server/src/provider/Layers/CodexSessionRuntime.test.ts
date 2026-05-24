@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { describe, it } from "vitest";
-import { ThreadId } from "@cafecode/contracts";
+import { ProviderInstanceId, ThreadId, TurnId } from "@cafecode/contracts";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 
@@ -12,11 +12,42 @@ import {
   CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
 } from "../CodexDeveloperInstructions.ts";
 import {
+  buildCodexAppServerArgs,
+  buildCodexThreadSnapshotBackfillEvents,
   buildTurnStartParams,
   isRecoverableThreadResumeError,
   openCodexThread,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+
+describe("buildCodexAppServerArgs", () => {
+  it("uses plain app-server args until a transport fallback policy is active", () => {
+    assert.deepStrictEqual(buildCodexAppServerArgs(undefined), ["app-server"]);
+    assert.deepStrictEqual(buildCodexAppServerArgs({ responsesWebsockets: "auto" }), [
+      "app-server",
+    ]);
+  });
+
+  it("uses a Cafe-scoped OpenAI provider when Responses WebSockets are disabled", () => {
+    assert.deepStrictEqual(buildCodexAppServerArgs({ responsesWebsockets: "disabled" }), [
+      "app-server",
+      "-c",
+      'model_provider="cafecode-openai-http"',
+      "-c",
+      'model_providers.cafecode-openai-http.name="OpenAI"',
+      "-c",
+      'model_providers.cafecode-openai-http.wire_api="responses"',
+      "-c",
+      "model_providers.cafecode-openai-http.requires_openai_auth=true",
+      "-c",
+      'model_providers.cafecode-openai-http.env_http_headers.OpenAI-Organization="OPENAI_ORGANIZATION"',
+      "-c",
+      'model_providers.cafecode-openai-http.env_http_headers.OpenAI-Project="OPENAI_PROJECT"',
+      "-c",
+      "model_providers.cafecode-openai-http.supports_websockets=false",
+    ]);
+  });
+});
 
 function makeThreadOpenResponse(
   threadId: string,
@@ -209,6 +240,146 @@ describe("isRecoverableThreadResumeError", () => {
       ),
       false,
     );
+  });
+});
+
+describe("buildCodexThreadSnapshotBackfillEvents", () => {
+  it("emits normal lifecycle events for the latest assistant snapshot turn", () => {
+    const events = buildCodexThreadSnapshotBackfillEvents({
+      threadId: ThreadId.make("thread-1"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      providerThread: {
+        id: "provider-thread-1",
+        turns: [
+          {
+            id: "turn-old",
+            status: "completed",
+            startedAt: 1_779_000_000,
+            completedAt: 1_779_000_001,
+            items: [
+              {
+                id: "old-message",
+                type: "agentMessage",
+                text: "old response",
+              },
+            ],
+          },
+          {
+            id: "turn-new",
+            status: "interrupted",
+            startedAt: 1_779_000_100,
+            completedAt: null,
+            items: [
+              {
+                id: "new-message",
+                type: "agentMessage",
+                text: "new response",
+              },
+              {
+                id: "empty-message",
+                type: "agentMessage",
+                text: "   ",
+              },
+              {
+                id: "context-1",
+                type: "contextCompaction",
+              },
+            ],
+          },
+        ],
+      },
+      createdAt: "2026-05-24T00:00:00.000Z",
+      reason: "session-resume",
+    });
+
+    assert.deepStrictEqual(
+      events.map((event) => ({
+        id: event.id,
+        method: event.method,
+        turnId: event.turnId,
+        itemId: event.itemId,
+        createdAt: event.createdAt,
+      })),
+      [
+        {
+          id: "codex-snapshot:session-resume:provider-thread-1:turn-new:turn-started",
+          method: "turn/started",
+          turnId: "turn-new",
+          itemId: undefined,
+          createdAt: "2026-05-17T06:41:40.000Z",
+        },
+        {
+          id: "codex-snapshot:session-resume:provider-thread-1:turn-new:new-message:item-completed",
+          method: "item/completed",
+          turnId: "turn-new",
+          itemId: "new-message",
+          createdAt: "2026-05-24T00:00:00.000Z",
+        },
+        {
+          id: "codex-snapshot:session-resume:provider-thread-1:turn-new:turn-completed",
+          method: "turn/completed",
+          turnId: "turn-new",
+          itemId: undefined,
+          createdAt: "2026-05-24T00:00:00.000Z",
+        },
+      ],
+    );
+    assert.deepStrictEqual(events[1]?.payload, {
+      completedAtMs: Date.parse("2026-05-24T00:00:00.000Z"),
+      threadId: "provider-thread-1",
+      turnId: "turn-new",
+      item: {
+        id: "new-message",
+        type: "agentMessage",
+        text: "new response",
+      },
+    });
+  });
+
+  it("can focus a non-latest turn for delayed send-turn snapshot polling", () => {
+    const events = buildCodexThreadSnapshotBackfillEvents({
+      threadId: ThreadId.make("thread-1"),
+      providerThread: {
+        id: "provider-thread-1",
+        turns: [
+          {
+            id: "turn-target",
+            status: "completed",
+            startedAt: 1_779_000_000,
+            completedAt: 1_779_000_010,
+            items: [
+              {
+                id: "target-message",
+                type: "agentMessage",
+                text: "target response",
+              },
+            ],
+          },
+          {
+            id: "turn-latest",
+            status: "completed",
+            startedAt: 1_779_000_020,
+            completedAt: 1_779_000_030,
+            items: [
+              {
+                id: "latest-message",
+                type: "agentMessage",
+                text: "latest response",
+              },
+            ],
+          },
+        ],
+      },
+      createdAt: "2026-05-24T00:00:00.000Z",
+      reason: "send-turn-follow-up",
+      focusTurnId: TurnId.make("turn-target"),
+    });
+
+    assert.deepStrictEqual(
+      events.map((event) => event.turnId),
+      ["turn-target", "turn-target", "turn-target"],
+    );
+    assert.equal(events[1]?.itemId, "target-message");
   });
 });
 

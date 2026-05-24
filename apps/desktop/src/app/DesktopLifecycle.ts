@@ -4,6 +4,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
 
@@ -11,7 +12,9 @@ import type * as Electron from "electron";
 
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopObservability from "./DesktopObservability.ts";
+import * as DesktopProviderDaemonManager from "../backend/DesktopProviderDaemonManager.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
+import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as DesktopState from "./DesktopState.ts";
@@ -54,7 +57,9 @@ export type DesktopLifecycleRuntimeServices =
   | DesktopShutdown
   | DesktopState.DesktopState
   | DesktopWindow.DesktopWindow
+  | DesktopProviderDaemonManager.DesktopProviderDaemonManager
   | ElectronApp.ElectronApp
+  | ElectronDialog.ElectronDialog
   | ElectronTheme.ElectronTheme
   | ElectronWindow.ElectronWindow;
 
@@ -73,6 +78,11 @@ const { logInfo: logLifecycleInfo, logError: logLifecycleError } =
   DesktopObservability.makeComponentLogger("desktop-lifecycle");
 
 export const DESKTOP_SHUTDOWN_OVERLAY_MINIMUM_DWELL = Duration.seconds(3);
+
+type ProviderDaemonQuitAction = "leave-running" | "terminate" | "cancel";
+
+const TERMINATE_PROVIDER_DAEMON_BUTTON_INDEX = 1;
+const CANCEL_PROVIDER_DAEMON_QUIT_BUTTON_INDEX = 2;
 
 function addScopedListener<Args extends ReadonlyArray<unknown>>(
   target: unknown,
@@ -116,11 +126,49 @@ const requestDesktopShutdownAndWaitAfterOverlay = Effect.fn(
   ).pipe(Effect.asVoid);
 });
 
+const resolveProviderDaemonQuitAction = Effect.fn(
+  "desktop.lifecycle.resolveProviderDaemonQuitAction",
+)(function* (): Effect.fn.Return<
+  ProviderDaemonQuitAction,
+  never,
+  DesktopProviderDaemonManager.DesktopProviderDaemonManager | ElectronDialog.ElectronDialog
+> {
+  const providerDaemon = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
+  const electronDialog = yield* ElectronDialog.ElectronDialog;
+  const health = yield* providerDaemon.refreshHealth;
+  if (Option.isNone(health) || health.value.activeSessionCount === 0) {
+    return "leave-running";
+  }
+
+  const activeSessionCount = health.value.activeSessionCount;
+  const result = yield* electronDialog.showMessageBox({
+    type: "question",
+    title: "Provider sessions are still running",
+    message: "Provider sessions are still running",
+    detail: `${activeSessionCount} provider session${
+      activeSessionCount === 1 ? " is" : "s are"
+    } still active. Leave Codex, Claude, and other provider sessions running so Cafe Code can reconnect after restart, or stop them now?`,
+    buttons: ["Leave Running", "Stop Sessions", "Cancel Quit"],
+    defaultId: 0,
+    cancelId: CANCEL_PROVIDER_DAEMON_QUIT_BUTTON_INDEX,
+    noLink: true,
+  });
+
+  if (result.response === CANCEL_PROVIDER_DAEMON_QUIT_BUTTON_INDEX) {
+    return "cancel";
+  }
+  if (result.response === TERMINATE_PROVIDER_DAEMON_BUTTON_INDEX) {
+    return "terminate";
+  }
+  return "leave-running";
+});
+
 function handleBeforeQuit(
   event: Electron.Event,
   runEffect: <A, E>(effect: Effect.Effect<A, E, DesktopLifecycleRuntimeServices>) => Promise<A>,
   allowQuit: () => boolean,
   beginShutdown: () => boolean,
+  cancelShutdown: () => void,
   markQuitAllowed: () => void,
 ): void {
   if (allowQuit()) {
@@ -141,22 +189,48 @@ function handleBeforeQuit(
 
   void runEffect(
     Effect.gen(function* () {
+      const providerDaemon = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
       const state = yield* DesktopState.DesktopState;
       const electronWindow = yield* ElectronWindow.ElectronWindow;
+      const providerDaemonAction = yield* resolveProviderDaemonQuitAction();
+      if (providerDaemonAction === "cancel") {
+        yield* logLifecycleInfo("before-quit cancelled with active provider sessions");
+        return false;
+      }
+
       yield* Ref.set(state.quitting, true);
-      yield* logLifecycleInfo("before-quit received");
+      yield* logLifecycleInfo("before-quit received", {
+        providerDaemonAction,
+      });
       yield* electronWindow.sendAll(IpcChannels.MENU_ACTION_CHANNEL, "desktop-shutdown-started");
       yield* requestDesktopShutdownAndWaitAfterOverlay();
+      if (providerDaemonAction === "terminate") {
+        yield* providerDaemon.stop;
+      }
+      return true;
     }).pipe(Effect.withSpan("desktop.lifecycle.beforeQuit")),
-  ).finally(() => {
-    markQuitAllowed();
-    void runEffect(
-      Effect.gen(function* () {
-        const electronApp = yield* ElectronApp.ElectronApp;
-        yield* electronApp.quit;
-      }).pipe(Effect.withSpan("desktop.lifecycle.quitAfterShutdown")),
-    );
-  });
+  )
+    .then((shouldQuit) => {
+      if (!shouldQuit) {
+        cancelShutdown();
+        return;
+      }
+      markQuitAllowed();
+      void runEffect(
+        Effect.gen(function* () {
+          const electronApp = yield* ElectronApp.ElectronApp;
+          yield* electronApp.quit;
+        }).pipe(Effect.withSpan("desktop.lifecycle.quitAfterShutdown")),
+      );
+    })
+    .catch((error: unknown) => {
+      cancelShutdown();
+      void runEffect(
+        logLifecycleError("before-quit shutdown failed", {
+          cause: Cause.pretty(Cause.die(error)),
+        }),
+      );
+    });
 }
 
 function quitFromSignal(
@@ -233,6 +307,9 @@ export const layer = Layer.succeed(
             }
             shutdownInProgress = true;
             return true;
+          },
+          () => {
+            shutdownInProgress = false;
           },
           () => {
             quitAllowed = true;

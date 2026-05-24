@@ -28,3 +28,16 @@ layer("NodeSqliteClient", (it) => {
     }),
   );
 });
+
+const busyTimeoutLayer = it.layer(SqliteClient.layerMemory({ busyTimeoutMs: 1234 }));
+
+busyTimeoutLayer("NodeSqliteClient busy timeout", (it) => {
+  it.effect("configures sqlite to wait for transient writer locks", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const rows = yield* sql<{ readonly timeout: number }>`PRAGMA busy_timeout`;
+
+      assert.equal(rows[0]?.timeout, 1234);
+    }),
+  );
+});

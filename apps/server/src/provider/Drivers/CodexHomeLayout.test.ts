@@ -8,8 +8,10 @@ import * as Schema from "effect/Schema";
 import { CodexSettings } from "@cafecode/contracts";
 import {
   CodexShadowHomeError,
+  isCodexShadowLocalEntryName,
   materializeCodexShadowHome,
   resolveCodexHomeLayout,
+  shouldShareCodexShadowEntryName,
 } from "./CodexHomeLayout.ts";
 const decodeCodexSettingsValue = Schema.decodeSync(CodexSettings);
 
@@ -82,7 +84,7 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
   });
 
   describe("materializeCodexShadowHome", () => {
-    it.effect("materializes a shadow home with shared state links and private auth", () =>
+    it.effect("materializes a shadow home with shared config/session links and private auth", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
@@ -92,10 +94,19 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
 
         yield* fileSystem.makeDirectory(path.join(sharedHome, "sessions"));
         yield* writeTextFile(path.join(sharedHome, "config.toml"), 'model = "gpt-5-codex"\n');
+        yield* writeTextFile(path.join(sharedHome, "state_5.sqlite"), "shared-state-db");
+        yield* writeTextFile(path.join(sharedHome, "state_5.sqlite-wal"), "shared-state-wal");
+        yield* writeTextFile(path.join(sharedHome, "logs_2.sqlite"), "shared-logs-db");
+        yield* writeTextFile(path.join(sharedHome, "goals_1.sqlite"), "shared-goals-db");
         yield* writeTextFile(path.join(sharedHome, "models_cache.json"), '{"models":["shared"]}\n');
         yield* writeTextFile(path.join(sharedHome, "auth.json"), '{"shared":true}\n');
         yield* fileSystem.makeDirectory(shadowHome, { recursive: true });
         yield* writeTextFile(path.join(shadowHome, "auth.json"), '{"shadow":true}\n');
+        yield* writeTextFile(path.join(shadowHome, "state_5.sqlite"), "shadow-state-db");
+        yield* fileSystem.symlink(
+          path.join(sharedHome, "goals_1.sqlite"),
+          path.join(shadowHome, "goals_1.sqlite"),
+        );
         yield* fileSystem.symlink(
           path.join(sharedHome, "models_cache.json"),
           path.join(shadowHome, "models_cache.json"),
@@ -115,6 +126,17 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
         const modelsCacheExists = yield* fileSystem.exists(
           path.join(shadowHome, "models_cache.json"),
         );
+        const stateLinkResult = yield* fileSystem
+          .readLink(path.join(shadowHome, "state_5.sqlite"))
+          .pipe(Effect.result);
+        const stateContents = yield* fileSystem.readFileString(
+          path.join(shadowHome, "state_5.sqlite"),
+        );
+        const stateWalExists = yield* fileSystem.exists(
+          path.join(shadowHome, "state_5.sqlite-wal"),
+        );
+        const logsDbExists = yield* fileSystem.exists(path.join(shadowHome, "logs_2.sqlite"));
+        const goalsDbExists = yield* fileSystem.exists(path.join(shadowHome, "goals_1.sqlite"));
         const authLinkResult = yield* fileSystem
           .readLink(path.join(shadowHome, "auth.json"))
           .pipe(Effect.result);
@@ -123,12 +145,46 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
         expect(sessionsTarget).toBe(path.join(sharedHome, "sessions"));
         expect(configTarget).toBe(path.join(sharedHome, "config.toml"));
         expect(modelsCacheExists).toBe(false);
+        expect(stateLinkResult._tag).toBe("Failure");
+        expect(stateContents).toBe("shadow-state-db");
+        expect(stateWalExists).toBe(false);
+        expect(logsDbExists).toBe(false);
+        expect(goalsDbExists).toBe(false);
         expect(authLinkResult._tag).toBe("Failure");
         expect(authContents).toContain("shadow");
       }),
     );
 
-    it.effect("accepts Codex-created shadow-local runtime directories", () =>
+    it.effect("copies shared auth into a new shadow home without symlinking it", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const sharedHome = yield* makeTempDir("t3code-codex-shared-");
+        const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+        const shadowHome = path.join(shadowRoot, "shadow");
+
+        yield* writeTextFile(path.join(sharedHome, "auth.json"), '{"shared":true}\n');
+
+        const layout = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({
+            homePath: sharedHome,
+            shadowHomePath: shadowHome,
+          }),
+        );
+
+        yield* materializeCodexShadowHome(layout);
+
+        const authLinkResult = yield* fileSystem
+          .readLink(path.join(shadowHome, "auth.json"))
+          .pipe(Effect.result);
+        const authContents = yield* fileSystem.readFileString(path.join(shadowHome, "auth.json"));
+
+        expect(authLinkResult._tag).toBe("Failure");
+        expect(authContents).toContain("shared");
+      }),
+    );
+
+    it.effect("accepts Codex-created shadow-local runtime directories and databases", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
@@ -140,10 +196,12 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
         yield* fileSystem.makeDirectory(path.join(sharedHome, "memories"));
         yield* fileSystem.makeDirectory(path.join(sharedHome, "tmp"));
         yield* writeTextFile(path.join(sharedHome, "config.toml"), 'model = "gpt-5-codex"\n');
+        yield* writeTextFile(path.join(sharedHome, "logs_2.sqlite-shm"), "shared-shm");
         yield* writeTextFile(path.join(shadowHome, "auth.json"), '{"shadow":true}\n');
         yield* fileSystem.makeDirectory(path.join(shadowHome, "log"), { recursive: true });
         yield* fileSystem.makeDirectory(path.join(shadowHome, "memories"), { recursive: true });
         yield* fileSystem.makeDirectory(path.join(shadowHome, "tmp"), { recursive: true });
+        yield* writeTextFile(path.join(shadowHome, "logs_2.sqlite-shm"), "shadow-shm");
 
         const layout = yield* resolveCodexHomeLayout(
           decodeCodexSettings({
@@ -164,11 +222,19 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
         const tmpLinkResult = yield* fileSystem
           .readLink(path.join(shadowHome, "tmp"))
           .pipe(Effect.result);
+        const logsShmLinkResult = yield* fileSystem
+          .readLink(path.join(shadowHome, "logs_2.sqlite-shm"))
+          .pipe(Effect.result);
+        const logsShmContents = yield* fileSystem.readFileString(
+          path.join(shadowHome, "logs_2.sqlite-shm"),
+        );
 
         expect(configTarget).toBe(path.join(sharedHome, "config.toml"));
         expect(logLinkResult._tag).toBe("Failure");
         expect(memoriesLinkResult._tag).toBe("Failure");
         expect(tmpLinkResult._tag).toBe("Failure");
+        expect(logsShmLinkResult._tag).toBe("Failure");
+        expect(logsShmContents).toBe("shadow-shm");
       }),
     );
 
@@ -209,5 +275,19 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
         expect(error.detail).toContain("already exists and is not a symlink");
       }),
     );
+  });
+
+  describe("entry classification", () => {
+    it("keeps current Codex runtime databases local to the shadow home", () => {
+      expect(isCodexShadowLocalEntryName("state_5.sqlite")).toBe(true);
+      expect(isCodexShadowLocalEntryName("state_5.sqlite-wal")).toBe(true);
+      expect(isCodexShadowLocalEntryName("future_state.sqlite3")).toBe(true);
+      expect(isCodexShadowLocalEntryName("logs_2.sqlite-shm")).toBe(true);
+      expect(isCodexShadowLocalEntryName("goals_1.sqlite-journal")).toBe(true);
+      expect(shouldShareCodexShadowEntryName("state_5.sqlite")).toBe(false);
+      expect(shouldShareCodexShadowEntryName("config.toml")).toBe(true);
+      expect(shouldShareCodexShadowEntryName("sessions")).toBe(true);
+      expect(shouldShareCodexShadowEntryName("auth.json")).toBe(false);
+    });
   });
 });

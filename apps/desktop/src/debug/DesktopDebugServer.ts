@@ -15,7 +15,38 @@ const DEBUG_HOST = "127.0.0.1";
 const DEBUG_PATH = "/debug";
 const DEBUG_SWITCHES = new Set(["--cafe-debug", "--debug"]);
 const RENDERER_SNAPSHOT_HISTORY_LIMIT = 50;
+const PROCESS_DIAGNOSTIC_HISTORY_LIMIT = 50;
 const EVENT_LOOP_MONITOR_INTERVAL_MS = 1_000;
+const PROVIDER_DAEMON_DEBUG_REFRESH_TIMEOUT_MS = 2_000;
+const PROCESS_DIAGNOSTIC_MESSAGE_LIMIT = 4_000;
+const PROCESS_DIAGNOSTIC_STACK_LIMIT = 16_000;
+const KNOWN_SLOW_VALIDATION_TARGETS = [
+  {
+    target: "apps/server/src/git/GitManager.test.ts",
+    lastObservedDurationMs: 163_319,
+    note: "Slow full-suite target observed during detached-supervisor validation.",
+  },
+  {
+    target: "apps/server/src/orchestration/Layers/CheckpointReactor.test.ts",
+    lastObservedDurationMs: 104_792,
+    note: "Slow full-suite target observed during detached-supervisor validation.",
+  },
+  {
+    target: "integration/orchestrationEngine.integration.test.ts",
+    lastObservedDurationMs: 90_876,
+    note: "Slow full-suite target observed during detached-supervisor validation.",
+  },
+  {
+    target: "apps/server/src/vcs/GitVcsDriverCore.test.ts",
+    lastObservedDurationMs: 38_629,
+    note: "Slow full-suite target observed during detached-supervisor validation.",
+  },
+  {
+    target: "apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts",
+    lastObservedDurationMs: 37_665,
+    note: "Slow full-suite target observed during detached-supervisor validation.",
+  },
+] as const;
 
 interface RendererSnapshotHistoryEntry {
   readonly receivedAt: string;
@@ -44,6 +75,16 @@ interface RendererSnapshotHistoryEntry {
   readonly queueLifecycleRedFlags: readonly string[];
 }
 
+interface DesktopProcessDiagnostic {
+  readonly capturedAt: string;
+  readonly kind: "uncaughtException" | "unhandledRejection" | "warning" | "manual";
+  readonly origin: string | null;
+  readonly tag: string;
+  readonly message: string;
+  readonly name: string | null;
+  readonly stack: string | null;
+}
+
 interface DebugServerRuntimeState {
   readonly enabled: boolean;
   readonly launchedAt: string;
@@ -55,8 +96,22 @@ interface DebugServerRuntimeState {
   lastDebugRequestDurationMs: number | null;
   lastDebugResponseBytes: number | null;
   rendererSnapshot: DesktopRendererDebugSnapshot | null;
+  providerDaemonSnapshot: Record<string, unknown> | null;
+  providerDaemonSnapshotRefresher: (() => Promise<void>) | null;
+  providerDaemonSnapshotRefresh: {
+    lastAttemptAt: string | null;
+    lastDurationMs: number | null;
+    lastError: string | null;
+    attemptCount: number;
+    failureCount: number;
+  };
   rendererSnapshotUpdatedAt: string | null;
   rendererSnapshotHistory: RendererSnapshotHistoryEntry[];
+  processDiagnostics: {
+    listenerInstalled: boolean;
+    totalCount: number;
+    recent: DesktopProcessDiagnostic[];
+  };
   eventLoop: {
     interval: ReturnType<typeof setInterval> | null;
     startedAt: string | null;
@@ -94,8 +149,22 @@ const state: DebugServerRuntimeState = {
   lastDebugRequestDurationMs: null,
   lastDebugResponseBytes: null,
   rendererSnapshot: null,
+  providerDaemonSnapshot: null,
+  providerDaemonSnapshotRefresher: null,
+  providerDaemonSnapshotRefresh: {
+    lastAttemptAt: null,
+    lastDurationMs: null,
+    lastError: null,
+    attemptCount: 0,
+    failureCount: 0,
+  },
   rendererSnapshotUpdatedAt: null,
   rendererSnapshotHistory: [],
+  processDiagnostics: {
+    listenerInstalled: false,
+    totalCount: 0,
+    recent: [],
+  },
   eventLoop: {
     interval: null,
     startedAt: null,
@@ -160,6 +229,125 @@ function estimateJsonBytes(value: unknown): number | null {
 
 function roundDebugMs(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function truncateDiagnosticText(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength)}...<truncated>`;
+}
+
+function readErrorRecord(error: unknown): Record<string, unknown> | null {
+  return error !== null && typeof error === "object" ? (error as Record<string, unknown>) : null;
+}
+
+function processDiagnosticString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function recordDesktopProcessDiagnostic(
+  kind: DesktopProcessDiagnostic["kind"],
+  error: unknown,
+  origin: string | null = null,
+): void {
+  const record = readErrorRecord(error);
+  const name =
+    error instanceof Error && error.name.length > 0
+      ? error.name
+      : processDiagnosticString(record?.name);
+  const tag = processDiagnosticString(record?._tag) ?? name ?? typeof error;
+  const message = truncateDiagnosticText(errorMessage(error), PROCESS_DIAGNOSTIC_MESSAGE_LIMIT);
+  const stack =
+    error instanceof Error
+      ? error.stack
+      : (processDiagnosticString(record?.stack) ?? processDiagnosticString(record?.trace));
+
+  state.processDiagnostics.totalCount += 1;
+  state.processDiagnostics.recent.push({
+    capturedAt: new Date().toISOString(),
+    kind,
+    origin,
+    tag,
+    message,
+    name,
+    stack:
+      stack === undefined || stack === null
+        ? null
+        : truncateDiagnosticText(stack, PROCESS_DIAGNOSTIC_STACK_LIMIT),
+  });
+  if (state.processDiagnostics.recent.length > PROCESS_DIAGNOSTIC_HISTORY_LIMIT) {
+    state.processDiagnostics.recent.splice(
+      0,
+      state.processDiagnostics.recent.length - PROCESS_DIAGNOSTIC_HISTORY_LIMIT,
+    );
+  }
+}
+
+function installDesktopProcessDiagnosticListeners(): void {
+  if (state.processDiagnostics.listenerInstalled) {
+    return;
+  }
+  state.processDiagnostics.listenerInstalled = true;
+  process.on("uncaughtExceptionMonitor", (error, origin) => {
+    recordDesktopProcessDiagnostic("uncaughtException", error, origin);
+  });
+  process.on("unhandledRejection", (reason) => {
+    recordDesktopProcessDiagnostic("unhandledRejection", reason);
+  });
+  process.on("warning", (warning) => {
+    recordDesktopProcessDiagnostic("warning", warning, warning.name);
+  });
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutMessage: string,
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+        timeout.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timeout !== null) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+async function refreshProviderDaemonSnapshotForDebugRequest(): Promise<void> {
+  const refresher = state.providerDaemonSnapshotRefresher;
+  if (refresher === null) {
+    return;
+  }
+
+  const refreshStartedAtMs = nodePerformance.now();
+  state.providerDaemonSnapshotRefresh.lastAttemptAt = new Date().toISOString();
+  state.providerDaemonSnapshotRefresh.attemptCount += 1;
+  try {
+    await withTimeout(
+      refresher(),
+      PROVIDER_DAEMON_DEBUG_REFRESH_TIMEOUT_MS,
+      `Provider daemon debug snapshot refresh exceeded ${PROVIDER_DAEMON_DEBUG_REFRESH_TIMEOUT_MS}ms.`,
+    );
+    state.providerDaemonSnapshotRefresh.lastDurationMs = roundDebugMs(
+      nodePerformance.now() - refreshStartedAtMs,
+    );
+    state.providerDaemonSnapshotRefresh.lastError = null;
+  } catch (error) {
+    state.providerDaemonSnapshotRefresh.lastDurationMs = roundDebugMs(
+      nodePerformance.now() - refreshStartedAtMs,
+    );
+    state.providerDaemonSnapshotRefresh.lastError = errorMessage(error);
+    state.providerDaemonSnapshotRefresh.failureCount += 1;
+  }
 }
 
 function readEventLoopSnapshot(): Record<string, unknown> {
@@ -300,6 +488,14 @@ function buildDebugSnapshot(): Record<string, unknown> {
       rendererSnapshotUpdatedAt,
       rendererSnapshotAgeMs,
       rendererSnapshotHistoryLimit: RENDERER_SNAPSHOT_HISTORY_LIMIT,
+      providerDaemonSnapshotRefresh: {
+        timeoutMs: PROVIDER_DAEMON_DEBUG_REFRESH_TIMEOUT_MS,
+        lastAttemptAt: state.providerDaemonSnapshotRefresh.lastAttemptAt,
+        lastDurationMs: state.providerDaemonSnapshotRefresh.lastDurationMs,
+        lastError: state.providerDaemonSnapshotRefresh.lastError,
+        attemptCount: state.providerDaemonSnapshotRefresh.attemptCount,
+        failureCount: state.providerDaemonSnapshotRefresh.failureCount,
+      },
     },
     performance: {
       debugSnapshotBuildDurationMs: null,
@@ -307,6 +503,7 @@ function buildDebugSnapshot(): Record<string, unknown> {
       rendererSnapshotHistoryBytes,
       rendererSnapshotAgeMs,
       eventLoop: readEventLoopSnapshot(),
+      knownSlowValidationTargets: KNOWN_SLOW_VALIDATION_TARGETS,
     },
     process: {
       pid: process.pid,
@@ -324,7 +521,23 @@ function buildDebugSnapshot(): Record<string, unknown> {
         electron: process.versions.electron ?? null,
         chrome: process.versions.chrome ?? null,
       },
+      diagnostics: {
+        listenerInstalled: state.processDiagnostics.listenerInstalled,
+        totalCount: state.processDiagnostics.totalCount,
+        recentLimit: PROCESS_DIAGNOSTIC_HISTORY_LIMIT,
+        recent: state.processDiagnostics.recent,
+      },
     },
+    providerDaemon:
+      state.providerDaemonSnapshot === null
+        ? {
+            available: false,
+            reason: "Provider daemon manager has not published a snapshot yet.",
+          }
+        : {
+            available: true,
+            snapshot: state.providerDaemonSnapshot,
+          },
     renderer:
       state.rendererSnapshot === null
         ? {
@@ -371,10 +584,22 @@ function handleRequest(request: NodeHttp.IncomingMessage, response: NodeHttp.Ser
 
   const requestStartedAtMs = nodePerformance.now();
   state.requestsServed += 1;
-  const responseBytes = writeJson(response, 200, buildDebugSnapshot());
-  state.lastDebugRequestAt = new Date().toISOString();
-  state.lastDebugRequestDurationMs = roundDebugMs(nodePerformance.now() - requestStartedAtMs);
-  state.lastDebugResponseBytes = responseBytes;
+  void (async () => {
+    await refreshProviderDaemonSnapshotForDebugRequest();
+    const responseBytes = writeJson(response, 200, buildDebugSnapshot());
+    state.lastDebugRequestAt = new Date().toISOString();
+    state.lastDebugRequestDurationMs = roundDebugMs(nodePerformance.now() - requestStartedAtMs);
+    state.lastDebugResponseBytes = responseBytes;
+  })().catch((error) => {
+    recordDesktopProcessDiagnostic("manual", error, "debug_snapshot_failed");
+    const responseBytes = writeJson(response, 500, {
+      error: "debug_snapshot_failed",
+      message: errorMessage(error),
+    });
+    state.lastDebugRequestAt = new Date().toISOString();
+    state.lastDebugRequestDurationMs = roundDebugMs(nodePerformance.now() - requestStartedAtMs);
+    state.lastDebugResponseBytes = responseBytes;
+  });
 }
 
 export const getDebugEndpointState = Effect.sync(
@@ -400,11 +625,33 @@ export const publishRendererDebugSnapshot = (
     ];
   });
 
+export const publishProviderDaemonDebugSnapshot = (
+  snapshot: Record<string, unknown>,
+): Effect.Effect<void> =>
+  Effect.sync(() => {
+    if (!state.enabled) {
+      return;
+    }
+    state.providerDaemonSnapshot = {
+      ...snapshot,
+      updatedAt: new Date().toISOString(),
+    };
+  });
+
+export const setProviderDaemonDebugSnapshotRefresher = (
+  refresher: (() => Promise<void>) | null,
+): Effect.Effect<void> =>
+  Effect.sync(() => {
+    state.providerDaemonSnapshotRefresher = refresher;
+  });
+
 const startUnsafe: Effect.Effect<void, DesktopDebugServerStartError, Scope.Scope> = Effect.gen(
   function* () {
     if (!state.enabled || state.server !== null) {
       return;
     }
+
+    installDesktopProcessDiagnosticListeners();
 
     const server = NodeHttp.createServer(handleRequest);
     const port = yield* Effect.tryPromise({

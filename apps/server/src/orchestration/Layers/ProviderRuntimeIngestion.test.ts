@@ -793,6 +793,85 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  it("ignores Codex snapshot backfill assistant completions that duplicate live assistant output", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: false } });
+    const now = "2026-01-01T00:00:00.000Z";
+    const turnId = asTurnId("turn-snapshot-backfill-dedup");
+    const duplicateText = "B214 design is running now under global defaults.";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-snapshot-backfill-dedup"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-live-message-delta-snapshot-backfill-dedup"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("msg_live_1"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: duplicateText,
+      },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-live-message-completed-snapshot-backfill-dedup"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("msg_live_1"),
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+      },
+    });
+
+    await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:msg_live_1" && message.text === duplicateText,
+      ),
+    );
+
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId(
+        "codex-snapshot:send-turn-follow-up:provider-thread-1:turn-snapshot-backfill-dedup:item-6768:item-completed",
+      ),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("item-6768"),
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+        detail: duplicateText,
+      },
+    });
+
+    await harness.drain();
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    const matchingMessages =
+      thread?.messages.filter(
+        (message: ProviderRuntimeTestMessage) =>
+          message.turnId === turnId &&
+          message.role === "assistant" &&
+          message.text === duplicateText,
+      ) ?? [];
+
+    expect(matchingMessages.map((message) => message.id)).toEqual(["assistant:msg_live_1"]);
+  });
+
   it("separates assistant item streams that overlap within one provider turn", async () => {
     const harness = await createHarness({ serverSettings: { enableAssistantStreaming: false } });
     const now = "2026-01-01T00:00:00.000Z";
@@ -2466,6 +2545,115 @@ describe("ProviderRuntimeIngestion", () => {
         thread.session?.status === "ready",
     );
     expect(completed.latestTurn?.state).toBe("completed");
+  });
+
+  it("keeps a running turn open when provider diff metadata arrives before turn completion", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("turn-provider-diff-midturn");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-provider-diff-midturn"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId,
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.latestTurn?.state === "running" &&
+        thread.latestTurn.completedAt === null &&
+        thread.session?.status === "running",
+    );
+
+    harness.emit({
+      type: "turn.diff.updated",
+      eventId: asEventId("evt-turn-diff-provider-diff-midturn"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("item-provider-diff-midturn"),
+      payload: {
+        unifiedDiff: "diff --git a/file.txt b/file.txt\n+hello\n",
+      },
+    });
+
+    const stillRunning = await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.latestTurn?.turnId === turnId &&
+        thread.latestTurn.state === "running" &&
+        thread.latestTurn.completedAt === null &&
+        thread.session?.status === "running" &&
+        thread.session.activeTurnId === turnId,
+    );
+
+    expect(stillRunning.latestTurn?.state).toBe("running");
+    expect(stillRunning.latestTurn?.completedAt).toBeNull();
+  });
+
+  it("reopens a completed latest turn when same-turn provider work continues", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("turn-provider-work-after-completed");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-work-after-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId,
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.latestTurn?.state === "running" && thread.session?.status === "running",
+    );
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-work-after-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId,
+      payload: {
+        state: "completed",
+      },
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.latestTurn?.state === "completed" && thread.session?.status === "ready",
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-content-after-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("item-after-completed"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "Still working.",
+      },
+    });
+
+    const reopened = await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.latestTurn?.turnId === turnId &&
+        thread.latestTurn.state === "running" &&
+        thread.latestTurn.completedAt === null &&
+        thread.session?.status === "running" &&
+        thread.session.activeTurnId === turnId,
+    );
+
+    expect(reopened.latestTurn?.state).toBe("running");
+    expect(reopened.session?.status).toBe("running");
   });
 
   it("reopens active turn state when provider content arrives after a stale idle transition", async () => {

@@ -33,6 +33,7 @@ import {
 import { ProjectionThreadSessionRepository } from "../../persistence/Services/ProjectionThreadSessions.ts";
 import {
   type ProjectionTurn,
+  type ProjectionTurnById,
   ProjectionTurnRepository,
 } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionThreadRepository } from "../../persistence/Services/ProjectionThreads.ts";
@@ -115,6 +116,24 @@ function isStreamingAssistantMessageEvent(event: OrchestrationEvent): boolean {
     event.payload.role === "assistant" &&
     event.payload.streaming
   );
+}
+
+function maxIso(left: string | null, right: string): string {
+  return left !== null && left > right ? left : right;
+}
+
+function isTerminalTurnState(state: ProjectionTurn["state"]): boolean {
+  return state === "completed" || state === "error" || state === "interrupted";
+}
+
+function extendCompletedTurnAt(turn: ProjectionTurnById, observedAt: string): ProjectionTurnById {
+  if (!isTerminalTurnState(turn.state)) {
+    return turn;
+  }
+  return {
+    ...turn,
+    completedAt: maxIso(turn.completedAt, observedAt),
+  };
 }
 
 function doesActivityAffectThreadShellSummary(
@@ -1007,6 +1026,18 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               : {}),
             createdAt: event.payload.activity.createdAt,
           });
+
+          if (event.payload.activity.turnId !== null) {
+            const existingTurn = yield* projectionTurnRepository.getByTurnId({
+              threadId: event.payload.threadId,
+              turnId: event.payload.activity.turnId,
+            });
+            if (Option.isSome(existingTurn) && isTerminalTurnState(existingTurn.value.state)) {
+              yield* projectionTurnRepository.upsertByTurnId(
+                extendCompletedTurnAt(existingTurn.value, event.payload.activity.createdAt),
+              );
+            }
+          }
           return;
 
         case "thread.reverted": {
@@ -1058,6 +1089,42 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           runtimeMode: event.payload.runtimeMode,
           activeTurnId: null,
           lastError: null,
+          updatedAt: event.payload.createdAt,
+        });
+        return;
+      }
+      if (event.type === "thread.turn-interrupt-requested") {
+        const existingSession = yield* projectionThreadSessionRepository.getByThreadId({
+          threadId: event.payload.threadId,
+        });
+        if (Option.isNone(existingSession)) {
+          return;
+        }
+        const interruptedTurnId = event.payload.turnId ?? existingSession.value.activeTurnId;
+        if (interruptedTurnId === null || interruptedTurnId === undefined) {
+          return;
+        }
+        if (
+          existingSession.value.activeTurnId === null &&
+          existingSession.value.status !== "starting" &&
+          existingSession.value.status !== "running"
+        ) {
+          return;
+        }
+        if (
+          existingSession.value.activeTurnId !== null &&
+          existingSession.value.activeTurnId !== interruptedTurnId
+        ) {
+          return;
+        }
+        yield* projectionThreadSessionRepository.upsert({
+          threadId: event.payload.threadId,
+          status: "interrupted",
+          providerName: existingSession.value.providerName,
+          providerInstanceId: existingSession.value.providerInstanceId,
+          runtimeMode: existingSession.value.runtimeMode,
+          activeTurnId: null,
+          lastError: existingSession.value.lastError,
           updatedAt: event.payload.createdAt,
         });
         return;
@@ -1252,7 +1319,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               ...existingTurn.value,
               assistantMessageId: event.payload.messageId,
               state: nextState,
-              completedAt: existingTurn.value.completedAt,
+              completedAt: isTerminalTurnState(nextState)
+                ? maxIso(existingTurn.value.completedAt, event.payload.updatedAt)
+                : existingTurn.value.completedAt,
               startedAt: existingTurn.value.startedAt ?? event.payload.createdAt,
               requestedAt: existingTurn.value.requestedAt ?? event.payload.createdAt,
             });
@@ -1327,17 +1396,24 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           });
 
           if (Option.isSome(existingTurn)) {
+            const keepRunningForMissingProviderDiff =
+              event.payload.status === "missing" &&
+              existingTurn.value.state === "running" &&
+              existingTurn.value.completedAt === null;
+            const completedAt = keepRunningForMissingProviderDiff
+              ? null
+              : maxIso(existingTurn.value.completedAt, event.payload.completedAt);
             yield* projectionTurnRepository.upsertByTurnId({
               ...existingTurn.value,
               assistantMessageId: event.payload.assistantMessageId,
-              state: nextState,
+              state: keepRunningForMissingProviderDiff ? "running" : nextState,
               checkpointTurnCount: event.payload.checkpointTurnCount,
               checkpointRef: event.payload.checkpointRef,
               checkpointStatus: event.payload.status,
               checkpointFiles: event.payload.files,
               startedAt: existingTurn.value.startedAt ?? event.payload.completedAt,
               requestedAt: existingTurn.value.requestedAt ?? event.payload.completedAt,
-              completedAt: event.payload.completedAt,
+              completedAt,
             });
             return;
           }

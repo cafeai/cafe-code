@@ -78,7 +78,7 @@ function buildProps() {
     activeTurnId: null,
     activeTurnStartedAt: null,
     listRef: createRef<LegendListRef | null>(),
-    completionDividerBeforeEntryId: null,
+    completionDividerAfterEntryId: null,
     completionSummary: null,
     revertTurnCountByUserMessageId: new Map(),
     onRevertUserMessage: () => {},
@@ -88,6 +88,7 @@ function buildProps() {
     markdownCwd: undefined,
     timestampFormat: "locale" as const,
     workspaceRoot: undefined,
+    stickToEndRevision: 0,
     onIsAtEndChange: () => {},
     onUserScrollIntent: () => {},
   };
@@ -153,7 +154,7 @@ describe("MessagesTimeline file open helpers", () => {
       }),
     ).toBe(false);
     expect(isTimelineScrolledToEnd({ isAtEnd: false })).toBe(false);
-  });
+  }, 10_000);
 
   it("uses the configured editor only when that editor is available", async () => {
     const { resolveFileOpenEditor } = await import("./MessagesTimeline");

@@ -454,6 +454,7 @@ describe("DesktopBackendManager", () => {
       const starts = yield* Queue.unbounded<number>();
       let startCount = 0;
       let killCount = 0;
+      let readinessRequests = 0;
 
       const spawnerLayer = Layer.succeed(
         ChildProcessSpawner.ChildProcessSpawner,
@@ -475,7 +476,15 @@ describe("DesktopBackendManager", () => {
 
       const managerLayer = makeManagerLayer({
         spawnerLayer,
-        httpClientLayer: httpClientLayer(() => Effect.never),
+        httpClientLayer: httpClientLayer(() =>
+          Effect.sync(() => {
+            readinessRequests += 1;
+          }).pipe(Effect.andThen(Effect.never)),
+        ),
+        config: {
+          ...baseConfig,
+          readinessTimeout: Duration.zero,
+        },
       });
 
       yield* Effect.gen(function* () {
@@ -483,11 +492,30 @@ describe("DesktopBackendManager", () => {
         yield* manager.start;
         assert.equal(yield* Queue.take(starts), 1);
 
-        yield* TestClock.adjust(Duration.seconds(61));
-        yield* Effect.yieldNow;
+        for (let attempts = 0; attempts < 100; attempts += 1) {
+          if (readinessRequests > 0) {
+            break;
+          }
+          yield* Effect.yieldNow;
+        }
+        assert.equal(readinessRequests > 0, true);
+
+        for (let elapsedSeconds = 0; elapsedSeconds < 65; elapsedSeconds += 1) {
+          if (killCount > 0) {
+            break;
+          }
+          yield* TestClock.adjust(Duration.seconds(1));
+          yield* Effect.yieldNow;
+        }
         assert.equal(killCount > 0, true);
 
-        yield* TestClock.adjust(Duration.millis(500));
+        for (let elapsedMs = 0; elapsedMs < 2_000; elapsedMs += 100) {
+          if ((yield* Queue.size(starts)) > 0) {
+            break;
+          }
+          yield* TestClock.adjust(Duration.millis(100));
+          yield* Effect.yieldNow;
+        }
         assert.equal(yield* Queue.take(starts), 2);
       }).pipe(Effect.provide(Layer.merge(TestClock.layer(), managerLayer)));
     }),
@@ -588,6 +616,14 @@ describe("DesktopBackendManager", () => {
         yield* manager.start;
 
         assert.equal(yield* Queue.take(starts), 1);
+
+        let restartScheduled = false;
+        while (!restartScheduled) {
+          restartScheduled = (yield* manager.snapshot).restartScheduled;
+          if (!restartScheduled) {
+            yield* Effect.yieldNow;
+          }
+        }
 
         yield* manager.start;
         assert.equal(yield* Queue.take(starts), 2);

@@ -124,6 +124,18 @@ interface ClaudeTurnState {
   readonly assistantTextBlocks: Map<number, AssistantTextBlockState>;
   readonly assistantTextBlockOrder: Array<AssistantTextBlockState>;
   readonly capturedProposedPlanKeys: Set<string>;
+  sdkMessageCount: number;
+  firstSdkMessageAt?: string;
+  firstSdkMessageType?: string;
+  firstSdkMessageMethod?: string;
+  firstSdkMessageTtftMs?: number;
+  lastSdkMessageAt?: string;
+  lastSdkMessageType?: string;
+  lastSdkMessageMethod?: string;
+  promptQueuedAt?: string;
+  promptTextBytes?: number;
+  promptAttachmentCount?: number;
+  watchdogWarningsEmitted: number;
   nextSyntheticAssistantBlockIndex: number;
 }
 
@@ -159,10 +171,13 @@ interface ToolInFlight {
   readonly lastEmittedInputFingerprint?: string;
 }
 
+type RuntimeFork = <A, E>(effect: Effect.Effect<A, E, never>) => Fiber.Fiber<A, E>;
+
 interface ClaudeSessionContext {
   session: ProviderSession;
   readonly promptQueue: Queue.Queue<PromptQueueItem>;
   readonly query: ClaudeQueryRuntime;
+  readonly runFork: RuntimeFork;
   streamFiber: Fiber.Fiber<void, Error> | undefined;
   readonly startedAt: string;
   readonly basePermissionMode: PermissionMode | undefined;
@@ -793,6 +808,53 @@ const CLAUDE_SETTING_SOURCES = [
   "project",
   "local",
 ] as const satisfies ReadonlyArray<SettingSource>;
+const CLAUDE_TURN_START_WATCHDOG_DELAYS = [
+  "2 seconds",
+  "10 seconds",
+  "30 seconds",
+  "60 seconds",
+] as const;
+const MAX_CLAUDE_STDERR_DIAGNOSTIC_CHARS = 2_000;
+const ANSI_ESCAPE_SEQUENCE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-?]*[ -/]*[@-~]`, "g");
+
+function makeClaudeTurnState(input: {
+  readonly turnId: TurnId;
+  readonly startedAt: string;
+}): ClaudeTurnState {
+  return {
+    turnId: input.turnId,
+    startedAt: input.startedAt,
+    items: [],
+    assistantTextBlocks: new Map(),
+    assistantTextBlockOrder: [],
+    capturedProposedPlanKeys: new Set(),
+    sdkMessageCount: 0,
+    watchdogWarningsEmitted: 0,
+    nextSyntheticAssistantBlockIndex: -1,
+  };
+}
+
+function sanitizeDiagnosticLine(value: string): string {
+  let withoutControlCharacters = "";
+  for (const char of value.replace(ANSI_ESCAPE_SEQUENCE, "")) {
+    const code = char.charCodeAt(0);
+    if ((code >= 0 && code <= 8) || code === 11 || code === 12 || (code >= 14 && code <= 31)) {
+      continue;
+    }
+    if (code === 127) {
+      continue;
+    }
+    withoutControlCharacters += char;
+  }
+  return withoutControlCharacters.trim().slice(0, MAX_CLAUDE_STDERR_DIAGNOSTIC_CHARS);
+}
+
+function splitClaudeStderrLines(data: string): ReadonlyArray<string> {
+  return data
+    .split(/\r?\n/)
+    .map(sanitizeDiagnosticLine)
+    .filter((line) => line.length > 0);
+}
 
 function buildPromptText(
   input: ProviderSendTurnInput,
@@ -1192,6 +1254,13 @@ function sdkNativeItemId(message: SDKMessage): string | undefined {
   return undefined;
 }
 
+function sdkMessageTtftMs(message: SDKMessage): number | undefined {
+  const candidate = (message as { ttft_ms?: unknown }).ttft_ms;
+  return typeof candidate === "number" && Number.isFinite(candidate) && candidate >= 0
+    ? candidate
+    : undefined;
+}
+
 export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   claudeSettings: ClaudeSettings,
   options?: ClaudeAdapterLiveOptions,
@@ -1557,6 +1626,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context: ClaudeSessionContext,
     message: string,
     detail?: unknown,
+    raw?: NonNullable<ProviderRuntimeEvent["raw"]>,
   ) {
     const turnState = context.turnState;
     const stamp = yield* makeEventStamp();
@@ -1572,8 +1642,133 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(detail !== undefined ? { detail } : {}),
       },
       providerRefs: nativeProviderRefs(context),
+      ...(raw ? { raw } : {}),
     });
   });
+
+  const emitClaudeProcessStderr = Effect.fn("emitClaudeProcessStderr")(function* (
+    context: ClaudeSessionContext,
+    line: string,
+  ) {
+    const detail = {
+      line,
+      threadId: context.session.threadId,
+      sessionStatus: context.session.status,
+      ...(context.session.activeTurnId ? { activeTurnId: context.session.activeTurnId } : {}),
+      ...(context.resumeSessionId ? { resumeSessionId: context.resumeSessionId } : {}),
+      ...(context.turnState
+        ? {
+            sdkMessageCount: context.turnState.sdkMessageCount,
+            promptQueuedAt: context.turnState.promptQueuedAt,
+          }
+        : {}),
+    };
+    yield* emitRuntimeWarning(context, "Claude process stderr.", detail, {
+      source: "claude.sdk.message",
+      method: "process/stderr",
+      payload: detail,
+    });
+  });
+
+  const recordTurnSdkMessage = Effect.fn("recordTurnSdkMessage")(function* (
+    context: ClaudeSessionContext,
+    message: SDKMessage,
+  ) {
+    const turnState = context.turnState;
+    if (!turnState) {
+      return;
+    }
+
+    const observedAt = yield* nowIso;
+    const messageType = sdkMessageSubtype(message)
+      ? `${message.type}:${sdkMessageSubtype(message)}`
+      : message.type;
+    const method = sdkNativeMethod(message);
+    const ttftMs = sdkMessageTtftMs(message);
+
+    turnState.sdkMessageCount += 1;
+    if (!turnState.firstSdkMessageAt) {
+      turnState.firstSdkMessageAt = observedAt;
+      turnState.firstSdkMessageType = messageType;
+      turnState.firstSdkMessageMethod = method;
+      if (ttftMs !== undefined) {
+        turnState.firstSdkMessageTtftMs = ttftMs;
+      }
+    }
+    turnState.lastSdkMessageAt = observedAt;
+    turnState.lastSdkMessageType = messageType;
+    turnState.lastSdkMessageMethod = method;
+  });
+
+  const emitClaudeTurnStartStarvationWarning = Effect.fn("emitClaudeTurnStartStarvationWarning")(
+    function* (context: ClaudeSessionContext, turnState: ClaudeTurnState, elapsedLabel: string) {
+      const detail = {
+        provider: PROVIDER,
+        threadId: context.session.threadId,
+        turnId: turnState.turnId,
+        elapsed: elapsedLabel,
+        startedAt: turnState.startedAt,
+        promptQueuedAt: turnState.promptQueuedAt,
+        promptTextBytes: turnState.promptTextBytes,
+        promptAttachmentCount: turnState.promptAttachmentCount,
+        sdkMessageCount: turnState.sdkMessageCount,
+        warningCount: turnState.watchdogWarningsEmitted,
+        sessionStatus: context.session.status,
+        activeTurnId: context.session.activeTurnId,
+        currentApiModelId: context.currentApiModelId,
+        selectedContextWindowTokens: context.selectedContextWindowTokens,
+        basePermissionMode: context.basePermissionMode,
+        resumeSessionId: context.resumeSessionId,
+        resumeCursor: context.session.resumeCursor,
+        streamFiberAlive: context.streamFiber?.pollUnsafe() === undefined,
+      };
+      yield* emitRuntimeWarning(
+        context,
+        `Claude SDK has not emitted any messages ${elapsedLabel} after the user prompt was queued.`,
+        detail,
+        {
+          source: "claude.sdk.message",
+          method: "claude.turnStart/noSdkMessageYet",
+          payload: detail,
+        },
+      );
+    },
+  );
+
+  function scheduleClaudeTurnStartWatchdog(
+    context: ClaudeSessionContext,
+    turnState: ClaudeTurnState,
+  ): void {
+    context.runFork(
+      Effect.gen(function* () {
+        for (const delay of CLAUDE_TURN_START_WATCHDOG_DELAYS) {
+          yield* Effect.sleep(delay);
+          if (
+            context.stopped ||
+            context.turnState !== turnState ||
+            context.session.status !== "running" ||
+            context.session.activeTurnId !== turnState.turnId
+          ) {
+            return;
+          }
+          if (turnState.sdkMessageCount > 0) {
+            return;
+          }
+
+          turnState.watchdogWarningsEmitted += 1;
+          yield* emitClaudeTurnStartStarvationWarning(context, turnState, delay);
+        }
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("claude.turn-start-watchdog.failed", {
+            threadId: context.session.threadId,
+            turnId: turnState.turnId,
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      ),
+    );
+  }
 
   const emitProposedPlanCompleted = Effect.fn("emitProposedPlanCompleted")(function* (
     context: ClaudeSessionContext,
@@ -2177,15 +2372,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (!context.turnState) {
       const turnId = TurnId.make(yield* Random.nextUUIDv4);
       const startedAt = yield* nowIso;
-      context.turnState = {
+      context.turnState = makeClaudeTurnState({
         turnId,
         startedAt,
-        items: [],
-        assistantTextBlocks: new Map(),
-        assistantTextBlockOrder: [],
-        capturedProposedPlanKeys: new Set(),
-        nextSyntheticAssistantBlockIndex: -1,
-      };
+      });
       context.session = {
         ...context.session,
         status: "running",
@@ -2548,6 +2738,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   ) {
     yield* logNativeSdkMessage(context, message);
     yield* ensureThreadId(context, message);
+    yield* recordTurnSdkMessage(context, message);
 
     switch (message.type) {
       case "stream_event":
@@ -3134,9 +3325,39 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           : {}),
         ...(Object.keys(settings).length > 0 ? { settings } : {}),
         ...(existingResumeSessionId ? { resume: existingResumeSessionId } : {}),
+        ...(durableResumeState?.resumeSessionAt
+          ? { resumeSessionAt: durableResumeState.resumeSessionAt }
+          : {}),
         ...(newSessionId ? { sessionId: newSessionId } : {}),
         includePartialMessages: true,
         canUseTool,
+        stderr: (data: string) => {
+          const lines = splitClaudeStderrLines(data);
+          if (lines.length === 0) {
+            return;
+          }
+          runFork(
+            Effect.gen(function* () {
+              const context = yield* Ref.get(contextRef);
+              if (!context) {
+                yield* Effect.logWarning("claude.stderr.before-context", {
+                  lines,
+                });
+                return;
+              }
+              for (const line of lines) {
+                yield* emitClaudeProcessStderr(context, line);
+              }
+            }).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("claude.stderr.emit-failed", {
+                  lines,
+                  cause: Cause.pretty(cause),
+                }),
+              ),
+            ),
+          );
+        },
         env: claudeEnvironment,
         ...(claudeAdditionalDirectories.length > 0
           ? { additionalDirectories: [...claudeAdditionalDirectories] }
@@ -3160,6 +3381,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.permission_mode": permissionMode ?? "",
         "claude.query.allow_dangerously_skip_permissions": permissionMode === "bypassPermissions",
         "claude.query.resume": existingResumeSessionId ?? "",
+        "claude.query.resume_session_at": durableResumeState?.resumeSessionAt ?? "",
         "claude.query.session_id": newSessionId ?? "",
         "claude.query.include_partial_messages": true,
         "claude.query.additional_directories": claudeAdditionalDirectories,
@@ -3224,6 +3446,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         session,
         promptQueue,
         query: queryRuntime,
+        runFork,
         streamFiber: undefined,
         startedAt,
         basePermissionMode: permissionMode,
@@ -3365,16 +3588,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
+    const message = yield* buildUserMessageEffect(input, {
+      fileSystem,
+      attachmentsDir: serverConfig.attachmentsDir,
+      boundInstanceId,
+    });
+
     const turnId = TurnId.make(yield* Random.nextUUIDv4);
-    const turnState: ClaudeTurnState = {
+    const turnState = makeClaudeTurnState({
       turnId,
       startedAt: yield* nowIso,
-      items: [],
-      assistantTextBlocks: new Map(),
-      assistantTextBlockOrder: [],
-      capturedProposedPlanKeys: new Set(),
-      nextSyntheticAssistantBlockIndex: -1,
-    };
+    });
+    turnState.promptTextBytes = Buffer.byteLength(buildPromptText(input, boundInstanceId), "utf8");
+    turnState.promptAttachmentCount = input.attachments?.length ?? 0;
 
     const updatedAt = yield* nowIso;
     context.turnState = turnState;
@@ -3397,16 +3623,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       providerRefs: {},
     });
 
-    const message = yield* buildUserMessageEffect(input, {
-      fileSystem,
-      attachmentsDir: serverConfig.attachmentsDir,
-      boundInstanceId,
-    });
-
     yield* Queue.offer(context.promptQueue, {
       type: "message",
       message,
-    }).pipe(Effect.mapError((cause) => toRequestError(input.threadId, "turn/start", cause)));
+    }).pipe(
+      Effect.mapError((cause) => toRequestError(input.threadId, "turn/start", cause)),
+      Effect.tapError((error) =>
+        completeTurn(context, "failed", toMessage(error, "Failed to queue Claude turn.")),
+      ),
+    );
+    turnState.promptQueuedAt = yield* nowIso;
+    scheduleClaudeTurnStartWatchdog(context, turnState);
 
     return {
       threadId: context.session.threadId,

@@ -12,7 +12,9 @@ export default defineConfig([
     ...shared,
     entry: ["src/main.ts"],
     clean: true,
-    noExternal: (id) => id.startsWith("@cafecode/"),
+    deps: {
+      alwaysBundle: (id) => id.startsWith("@cafecode/"),
+    },
   },
   {
     ...shared,

@@ -127,7 +127,7 @@ interface MessagesTimelineProps {
   activeTurnStartedAt: string | null;
   listRef: React.RefObject<LegendListRef | null>;
   timelineEntries: ReturnType<typeof deriveTimelineEntries>;
-  completionDividerBeforeEntryId: string | null;
+  completionDividerAfterEntryId: string | null;
   completionSummary: string | null;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
   onRevertUserMessage: (messageId: MessageId) => void;
@@ -139,6 +139,7 @@ interface MessagesTimelineProps {
   timestampFormat: TimestampFormat;
   workspaceRoot: string | undefined;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
+  stickToEndRevision: number;
   onIsAtEndChange: (isAtEnd: boolean) => void;
   onUserScrollIntent: () => void;
 }
@@ -154,7 +155,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   activeTurnStartedAt,
   listRef,
   timelineEntries,
-  completionDividerBeforeEntryId,
+  completionDividerAfterEntryId,
   completionSummary,
   revertTurnCountByUserMessageId,
   onRevertUserMessage,
@@ -166,6 +167,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   timestampFormat,
   workspaceRoot,
   skills = EMPTY_TIMELINE_SKILLS,
+  stickToEndRevision,
   onIsAtEndChange,
   onUserScrollIntent,
 }: MessagesTimelineProps) {
@@ -173,7 +175,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     () =>
       deriveMessagesTimelineRows({
         timelineEntries,
-        completionDividerBeforeEntryId,
+        completionDividerAfterEntryId,
         completionSummary,
         isWorking,
         activeTurnInProgress,
@@ -183,7 +185,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       }),
     [
       timelineEntries,
-      completionDividerBeforeEntryId,
+      completionDividerAfterEntryId,
       completionSummary,
       isWorking,
       activeTurnInProgress,
@@ -278,6 +280,46 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       window.cancelAnimationFrame(frameId);
     };
   }, [listRef, onIsAtEndChange, rows]);
+
+  const handledStickToEndRevisionRef = useRef(stickToEndRevision);
+  useEffect(() => {
+    if (stickToEndRevision === handledStickToEndRevisionRef.current || rows.length === 0) {
+      return;
+    }
+
+    handledStickToEndRevisionRef.current = stickToEndRevision;
+    onIsAtEndChange(true);
+
+    let cancelled = false;
+    let attempts = 0;
+    const frameIds: number[] = [];
+    const scheduleScroll = () => {
+      const frameId = window.requestAnimationFrame(() => {
+        if (cancelled) return;
+        attempts += 1;
+        void listRef.current?.scrollToEnd?.({ animated: false });
+        if (attempts < 4) {
+          scheduleScroll();
+        }
+      });
+      frameIds.push(frameId);
+    };
+
+    // LegendList can briefly preserve the previous visible row while React is
+    // committing a locally submitted message and the working indicator. The
+    // submit path already decided that the user was at the bottom, so replay
+    // that decision after the new rows exist instead of letting the virtualizer
+    // settle at the top of the conversation.
+    void listRef.current?.scrollToEnd?.({ animated: false });
+    scheduleScroll();
+
+    return () => {
+      cancelled = true;
+      for (const frameId of frameIds) {
+        window.cancelAnimationFrame(frameId);
+      }
+    };
+  }, [listRef, onIsAtEndChange, rows.length, stickToEndRevision]);
 
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
@@ -383,6 +425,9 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       data-message-role={row.kind === "message" ? row.message.role : undefined}
     >
       {row.kind === "work" ? <WorkGroupSection groupedEntries={row.groupedEntries} /> : null}
+      {row.kind === "completion-divider" ? (
+        <AssistantCompletionDivider completionSummary={row.completionSummary} />
+      ) : null}
       {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
       {row.kind === "message" && row.message.role === "assistant" ? (
         <AssistantTimelineRow row={row} />
@@ -478,38 +523,33 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
   const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
 
   return (
-    <>
-      {row.showCompletionDivider && (
-        <AssistantCompletionDivider completionSummary={row.completionSummary} />
-      )}
-      <div className="min-w-0 px-1 py-0.5">
-        <ChatMarkdown
-          text={messageText}
-          cwd={ctx.markdownCwd}
-          additionalWorkspaceRoots={ctx.additionalWorkspaceRoots}
-          isStreaming={Boolean(row.message.streaming)}
-          skills={ctx.skills}
-        />
-        <div className="mt-1.5 flex items-center gap-2">
-          <p className="text-[10px] text-muted-foreground/30">
-            {row.message.streaming ? (
-              <LiveMessageMeta
-                createdAt={row.message.createdAt}
-                durationStart={row.durationStart}
-                timestampFormat={ctx.timestampFormat}
-              />
-            ) : (
-              formatMessageMeta(
-                row.message.createdAt,
-                formatElapsed(row.durationStart, row.message.completedAt),
-                ctx.timestampFormat,
-              )
-            )}
-          </p>
-          <AssistantCopyButton row={row} />
-        </div>
+    <div className="min-w-0 px-1 py-0.5">
+      <ChatMarkdown
+        text={messageText}
+        cwd={ctx.markdownCwd}
+        additionalWorkspaceRoots={ctx.additionalWorkspaceRoots}
+        isStreaming={Boolean(row.message.streaming)}
+        skills={ctx.skills}
+      />
+      <div className="mt-1.5 flex items-center gap-2">
+        <p className="text-[10px] text-muted-foreground/30">
+          {row.message.streaming ? (
+            <LiveMessageMeta
+              createdAt={row.message.createdAt}
+              durationStart={row.durationStart}
+              timestampFormat={ctx.timestampFormat}
+            />
+          ) : (
+            formatMessageMeta(
+              row.message.createdAt,
+              formatElapsed(row.durationStart, row.message.completedAt),
+              ctx.timestampFormat,
+            )
+          )}
+        </p>
+        <AssistantCopyButton row={row} />
       </div>
-    </>
+    </div>
   );
 }
 

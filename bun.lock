@@ -17,7 +17,7 @@
     },
     "apps/desktop": {
       "name": "@cafecode/desktop",
-      "version": "0.0.28",
+      "version": "0.0.30",
       "dependencies": {
         "@cafecode/contracts": "workspace:*",
         "@cafecode/shared": "workspace:*",
@@ -39,9 +39,10 @@
     },
     "apps/server": {
       "name": "@cafeai/cafe-code",
-      "version": "0.0.28",
+      "version": "0.0.30",
       "bin": {
-        "cafe-code": "./dist/bin.mjs",
+        "cafe-code": "dist/launcher.mjs",
+        "cafe-code-server": "dist/bin.mjs",
       },
       "dependencies": {
         "@anthropic-ai/claude-agent-sdk": "^0.3.148",
@@ -53,6 +54,8 @@
         "@opencode-ai/sdk": "^1.3.15",
         "@pierre/diffs": "catalog:",
         "effect": "catalog:",
+        "electron": "41.5.0",
+        "electron-updater": "^6.6.2",
         "node-pty": "^1.1.0",
       },
       "devDependencies": {
@@ -73,7 +76,7 @@
     },
     "apps/web": {
       "name": "@cafecode/web",
-      "version": "0.0.28",
+      "version": "0.0.30",
       "dependencies": {
         "@base-ui/react": "^1.4.1",
         "@cafecode/client-runtime": "workspace:*",
@@ -154,7 +157,7 @@
     },
     "packages/contracts": {
       "name": "@cafecode/contracts",
-      "version": "0.0.28",
+      "version": "0.0.30",
       "dependencies": {
         "effect": "catalog:",
       },

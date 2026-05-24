@@ -11,6 +11,7 @@ import {
   ProviderInstanceId,
 } from "@cafecode/contracts";
 import {
+  CheckpointRef,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
@@ -492,6 +493,68 @@ describe("CheckpointReactor", () => {
         "README.md",
       ),
     ).toBe("v2\n");
+  });
+
+  it("does not replace a provider diff placeholder while the turn is still running", async () => {
+    const harness = await createHarness({ seedFilesystemCheckpoints: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-placeholder-running");
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-running-placeholder"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: "2026-01-01T00:00:01.000Z",
+        },
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("cmd-running-provider-diff-placeholder"),
+        threadId,
+        turnId,
+        completedAt: "2026-01-01T00:00:02.000Z",
+        checkpointRef: CheckpointRef.make("provider-diff:midturn"),
+        status: "missing",
+        files: [],
+        assistantMessageId: MessageId.make("assistant:placeholder"),
+        checkpointTurnCount: 1,
+        createdAt: "2026-01-01T00:00:02.000Z",
+      }),
+    );
+    await harness.drain();
+
+    const events = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    const turnDiffEvents = events.filter(
+      (event) => event.type === "thread.turn-diff-completed" && event.payload.turnId === turnId,
+    );
+    const snapshot = await harness.readModel();
+    const thread = snapshot.threads.find((entry) => entry.id === threadId);
+    const firstTurnDiffPayload =
+      turnDiffEvents[0]?.type === "thread.turn-diff-completed" ? turnDiffEvents[0].payload : null;
+
+    expect(turnDiffEvents).toHaveLength(1);
+    expect(firstTurnDiffPayload?.status).toBe("missing");
+    expect(thread?.latestTurn).toMatchObject({
+      turnId,
+      state: "running",
+      completedAt: null,
+    });
   });
 
   it("prunes old hidden checkpoint refs after capturing a new turn", async () => {

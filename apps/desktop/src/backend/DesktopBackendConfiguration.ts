@@ -8,6 +8,7 @@ import * as Random from "effect/Random";
 import * as Ref from "effect/Ref";
 
 import * as DesktopBackendManager from "./DesktopBackendManager.ts";
+import * as DesktopProviderDaemonManager from "./DesktopProviderDaemonManager.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopServerExposure from "./DesktopServerExposure.ts";
@@ -107,11 +108,15 @@ const resolveBackendStartConfig = Effect.fn("desktop.backendConfiguration.resolv
   }): Effect.fn.Return<
     DesktopBackendManager.DesktopBackendStartConfig,
     never,
-    DesktopEnvironment.DesktopEnvironment | DesktopServerExposure.DesktopServerExposure
+    | DesktopEnvironment.DesktopEnvironment
+    | DesktopProviderDaemonManager.DesktopProviderDaemonManager
+    | DesktopServerExposure.DesktopServerExposure
   > {
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
+    const providerDaemon = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
     const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
     const backendExposure = yield* serverExposure.backendConfig;
+    const providerDaemonConfig = Option.getOrUndefined(yield* providerDaemon.currentConfig);
 
     return {
       executablePath: process.execPath,
@@ -138,6 +143,7 @@ const resolveBackendStartConfig = Effect.fn("desktop.backendConfiguration.resolv
           onNone: () => ({}),
           onSome: (otlpMetricsUrl) => ({ otlpMetricsUrl }),
         }),
+        ...(providerDaemonConfig ? { providerDaemon: providerDaemonConfig } : {}),
       },
       httpBaseUrl: backendExposure.httpBaseUrl,
       captureOutput: true,
@@ -151,6 +157,7 @@ export const layer = Layer.effect(
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
     const fileSystem = yield* FileSystem.FileSystem;
     const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
+    const providerDaemon = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
     const tokenRef = yield* Ref.make(Option.none<string>());
 
     return DesktopBackendConfiguration.of({
@@ -165,6 +172,10 @@ export const layer = Layer.effect(
           observabilitySettings,
         }).pipe(
           Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
+          Effect.provideService(
+            DesktopProviderDaemonManager.DesktopProviderDaemonManager,
+            providerDaemon,
+          ),
           Effect.provideService(DesktopServerExposure.DesktopServerExposure, serverExposure),
         );
       }).pipe(Effect.withSpan("desktop.backendConfiguration.resolve")),

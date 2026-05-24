@@ -7,8 +7,16 @@ export default defineConfig({
   outDir: "dist",
   sourcemap: true,
   clean: true,
-  noExternal: (id) => internalPackagePrefixes.some((prefix) => id.startsWith(prefix)),
-  inlineOnly: false,
+  deps: {
+    alwaysBundle: (id) => internalPackagePrefixes.some((prefix) => id.startsWith(prefix)),
+    onlyBundle: false,
+  },
+  dts: {
+    eager: true,
+  },
+  checks: {
+    pluginTimings: false,
+  },
   banner: {
     js: "#!/usr/bin/env node\n",
   },

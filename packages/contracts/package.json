@@ -1,6 +1,6 @@
 {
   "name": "@cafecode/contracts",
-  "version": "0.0.28",
+  "version": "0.0.30",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "files": [
@@ -19,6 +19,14 @@
     "./settings": {
       "types": "./src/settings.ts",
       "import": "./src/settings.ts"
+    },
+    "./providerSupervisor": {
+      "types": "./src/providerSupervisor.ts",
+      "import": "./src/providerSupervisor.ts"
+    },
+    "./vcs": {
+      "types": "./src/vcs.ts",
+      "import": "./src/vcs.ts"
     }
   },
   "scripts": {

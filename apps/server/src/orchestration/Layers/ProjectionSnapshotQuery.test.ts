@@ -595,6 +595,145 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("filters duplicate Codex snapshot assistant item messages from thread snapshots", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_thread_messages`;
+
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id,
+          title,
+          workspace_root,
+          default_model_selection_json,
+          scripts_json,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES (
+          'project-codex-snapshot-dedupe',
+          'Codex Snapshot Dedupe',
+          '/tmp/codex-snapshot-dedupe',
+          '{"instanceId":"codex","model":"gpt-5-codex"}',
+          '[]',
+          '2026-05-24T00:00:00.000Z',
+          '2026-05-24T00:00:00.000Z',
+          NULL
+        )
+      `;
+
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id,
+          project_id,
+          title,
+          model_selection_json,
+          runtime_mode,
+          interaction_mode,
+          branch,
+          worktree_path,
+          latest_turn_id,
+          latest_user_message_at,
+          pending_approval_count,
+          pending_user_input_count,
+          has_actionable_proposed_plan,
+          created_at,
+          updated_at,
+          archived_at,
+          deleted_at
+        )
+        VALUES (
+          'thread-codex-snapshot-dedupe',
+          'project-codex-snapshot-dedupe',
+          'Codex Snapshot Dedupe Thread',
+          '{"instanceId":"codex","model":"gpt-5-codex"}',
+          'full-access',
+          'default',
+          NULL,
+          NULL,
+          'turn-codex-snapshot-dedupe',
+          NULL,
+          0,
+          0,
+          0,
+          '2026-05-24T00:00:00.000Z',
+          '2026-05-24T00:00:00.000Z',
+          NULL,
+          NULL
+        )
+      `;
+
+      yield* sql`
+        INSERT INTO projection_thread_messages (
+          message_id,
+          thread_id,
+          turn_id,
+          role,
+          text,
+          is_streaming,
+          created_at,
+          updated_at
+        )
+        VALUES
+          (
+            'assistant:msg_live_1',
+            'thread-codex-snapshot-dedupe',
+            'turn-codex-snapshot-dedupe',
+            'assistant',
+            'duplicate assistant text',
+            0,
+            '2026-05-24T00:00:01.000Z',
+            '2026-05-24T00:00:01.000Z'
+          ),
+          (
+            'assistant:item-6768',
+            'thread-codex-snapshot-dedupe',
+            'turn-codex-snapshot-dedupe',
+            'assistant',
+            'duplicate assistant text',
+            0,
+            '2026-05-24T00:00:02.000Z',
+            '2026-05-24T00:00:02.000Z'
+          ),
+          (
+            'assistant:item-6769',
+            'thread-codex-snapshot-dedupe',
+            'turn-codex-snapshot-dedupe',
+            'assistant',
+            'snapshot-only assistant text',
+            0,
+            '2026-05-24T00:00:03.000Z',
+            '2026-05-24T00:00:03.000Z'
+          )
+      `;
+
+      const snapshot = yield* snapshotQuery.getSnapshot();
+      const snapshotThread = snapshot.threads.find(
+        (thread) => thread.id === ThreadId.make("thread-codex-snapshot-dedupe"),
+      );
+      assert.deepEqual(
+        snapshotThread?.messages.map((message) => message.id),
+        [asMessageId("assistant:msg_live_1"), asMessageId("assistant:item-6769")],
+      );
+
+      const detail = yield* snapshotQuery.getThreadDetailById(
+        ThreadId.make("thread-codex-snapshot-dedupe"),
+      );
+      assert.equal(detail._tag, "Some");
+      if (detail._tag === "Some") {
+        assert.deepEqual(
+          detail.value.messages.map((message) => message.id),
+          [asMessageId("assistant:msg_live_1"), asMessageId("assistant:item-6769")],
+        );
+      }
+    }),
+  );
+
   it.effect(
     "reads targeted project, thread, and count queries without hydrating the full snapshot",
     () =>

@@ -2774,6 +2774,41 @@ describe("ChatView timeline estimator parity (full app)", () => {
     }
   });
 
+  it("locks the composer while the provider session is starting", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-provider-starting" as MessageId,
+        targetText: "provider starting",
+        sessionStatus: "starting",
+      }),
+    });
+
+    try {
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "follow-up while starting");
+      await waitForLayout();
+
+      await vi.waitFor(
+        () => {
+          const editor = document.querySelector<HTMLElement>('[data-testid="composer-editor"]');
+          expect(editor).toBeTruthy();
+          expect(editor?.getAttribute("contenteditable")).toBe("false");
+
+          const connectingButton = document.querySelector<HTMLButtonElement>(
+            'button[aria-label="Connecting"]',
+          );
+          expect(connectingButton).toBeTruthy();
+          expect(connectingButton?.disabled).toBe(true);
+          expect(connectingButton?.querySelector(".animate-spin")).toBeTruthy();
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      await expect.element(page.getByText("Starting Codex...")).toBeVisible();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("toggles plan mode with Shift+Tab only while the composer is focused", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,

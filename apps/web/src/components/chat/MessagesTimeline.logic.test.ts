@@ -250,7 +250,7 @@ describe("deriveMessagesTimelineRows", () => {
           },
         },
       ],
-      completionDividerBeforeEntryId: "assistant-final-entry",
+      completionDividerAfterEntryId: "assistant-final-entry",
       isWorking: false,
       activeTurnStartedAt: null,
       revertTurnCountByUserMessageId: new Map(),
@@ -264,7 +264,10 @@ describe("deriveMessagesTimelineRows", () => {
     expect(assistantRows).toHaveLength(2);
     expect(assistantRows[0]?.showAssistantCopyButton).toBe(true);
     expect(assistantRows[1]?.showAssistantCopyButton).toBe(true);
-    expect(assistantRows[1]?.showCompletionDivider).toBe(true);
+    expect(rows.at(-1)).toMatchObject({
+      kind: "completion-divider",
+      completionSummary: null,
+    });
   });
 
   it("marks only the active assistant turn as streaming for copy controls", () => {
@@ -299,7 +302,7 @@ describe("deriveMessagesTimelineRows", () => {
           },
         },
       ],
-      completionDividerBeforeEntryId: "assistant-two-entry",
+      completionDividerAfterEntryId: "assistant-two-entry",
       completionSummary: "done",
       isWorking: false,
       activeTurnInProgress: true,
@@ -316,7 +319,11 @@ describe("deriveMessagesTimelineRows", () => {
     expect(assistantRows[0]?.assistantCopyStreaming).toBe(false);
     expect(assistantRows[0]?.completionSummary).toBeNull();
     expect(assistantRows[1]?.assistantCopyStreaming).toBe(true);
-    expect(assistantRows[1]?.completionSummary).toBe("done");
+    expect(assistantRows[1]?.completionSummary).toBeNull();
+    expect(rows.at(-1)).toMatchObject({
+      kind: "completion-divider",
+      completionSummary: "done",
+    });
   });
 
   it("projects user revert counts onto the affected rows", () => {
@@ -350,7 +357,7 @@ describe("deriveMessagesTimelineRows", () => {
           },
         },
       ],
-      completionDividerBeforeEntryId: null,
+      completionDividerAfterEntryId: null,
       isWorking: false,
       activeTurnStartedAt: null,
       revertTurnCountByUserMessageId: new Map([["user-1" as never, 1]]),
@@ -398,7 +405,7 @@ describe("computeStableMessagesTimelineRows", () => {
           message: secondUserMessage,
         },
       ],
-      completionDividerBeforeEntryId: null,
+      completionDividerAfterEntryId: null,
       isWorking: false,
       activeTurnStartedAt: null,
       revertTurnCountByUserMessageId: new Map(),
@@ -447,7 +454,7 @@ describe("computeStableMessagesTimelineRows", () => {
             entry: secondWorkEntry,
           },
         ],
-        completionDividerBeforeEntryId: null,
+        completionDividerAfterEntryId: null,
         isWorking: false,
         activeTurnStartedAt: null,
         revertTurnCountByUserMessageId: new Map(),
@@ -501,7 +508,7 @@ describe("computeStableMessagesTimelineRows", () => {
           message: secondUserMessage,
         },
       ],
-      completionDividerBeforeEntryId: null,
+      completionDividerAfterEntryId: null,
       isWorking: false,
       activeTurnStartedAt: null,
       revertTurnCountByUserMessageId: new Map(),

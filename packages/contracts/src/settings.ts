@@ -216,7 +216,7 @@ export const CodexSettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "Shadow home path",
         description:
-          "Account-specific Codex home. Keeps auth.json separate while sharing state from CODEX_HOME.",
+          "Cafe Code Codex runtime home. Shares config/session files while keeping auth and runtime databases isolated.",
         providerSettingsForm: {
           placeholder: "~/.codex-cafecode/personal",
           clearWhenEmpty: "omit",

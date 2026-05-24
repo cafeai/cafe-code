@@ -362,6 +362,8 @@ export const resolveServerConfig = (
       logWebSocketEvents,
       tailscaleServeEnabled,
       tailscaleServePort,
+      providerDaemon: bootstrap?.providerDaemon,
+      providerSupervisor: undefined,
     };
 
     return config;

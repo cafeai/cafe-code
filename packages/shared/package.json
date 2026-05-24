@@ -103,6 +103,10 @@
     "./environmentEndpoint": {
       "types": "./src/environmentEndpoint.ts",
       "import": "./src/environmentEndpoint.ts"
+    },
+    "./providerDaemonHttp": {
+      "types": "./src/providerDaemonHttp.ts",
+      "import": "./src/providerDaemonHttp.ts"
     }
   },
   "scripts": {

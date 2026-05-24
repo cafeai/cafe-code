@@ -7,8 +7,11 @@ import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
 
 import type * as Electron from "electron";
+import type { ProviderDaemonHealth } from "@cafecode/contracts";
 
+import * as DesktopProviderDaemonManager from "../backend/DesktopProviderDaemonManager.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
+import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
@@ -36,10 +39,29 @@ const flushMicrotasks = Effect.gen(function* () {
   yield* Effect.yieldNow;
 });
 
-function makeLifecycleHarness() {
+function makeProviderDaemonHealth(activeSessionCount: number): ProviderDaemonHealth {
+  return {
+    ok: true,
+    mode: "provider-daemon",
+    pid: 12_345,
+    ppid: process.pid,
+    version: "0.0.0-test",
+    startedAt: "1970-01-01T00:00:00.000Z",
+    activeSessionCount,
+    configuredInstanceCount: 2,
+    eventCursor: 0,
+  };
+}
+
+function makeLifecycleHarness(options?: {
+  readonly activeProviderSessionCount?: number;
+  readonly providerDaemonDialogResponse?: number;
+}) {
   let beforeQuitListener: BeforeQuitListener | undefined;
   let quitCount = 0;
   let shutdownOverlayCount = 0;
+  let providerDaemonStopCount = 0;
+  let providerDaemonDialogCount = 0;
 
   return Effect.gen(function* () {
     const overlaySent = yield* Deferred.make<void>();
@@ -90,6 +112,20 @@ function makeLifecycleHarness() {
       syncAllAppearance: () => Effect.void,
     } satisfies ElectronWindow.ElectronWindowShape);
 
+    const electronDialogLayer = Layer.succeed(ElectronDialog.ElectronDialog, {
+      pickFolder: () => Effect.die("unexpected pickFolder"),
+      confirm: () => Effect.die("unexpected confirm"),
+      showMessageBox: () =>
+        Effect.sync(() => {
+          providerDaemonDialogCount += 1;
+          return {
+            response: options?.providerDaemonDialogResponse ?? 0,
+            checkboxChecked: false,
+          };
+        }),
+      showErrorBox: () => Effect.void,
+    } satisfies ElectronDialog.ElectronDialogShape);
+
     const electronThemeLayer = Layer.succeed(ElectronTheme.ElectronTheme, {
       shouldUseDarkColors: Effect.succeed(false),
       setSource: () => Effect.void,
@@ -112,13 +148,30 @@ function makeLifecycleHarness() {
       isDevelopment: false,
     } as DesktopEnvironment.DesktopEnvironmentShape);
 
+    const providerDaemonLayer = Layer.succeed(
+      DesktopProviderDaemonManager.DesktopProviderDaemonManager,
+      {
+        ensureRunning: Effect.die("unexpected ensureRunning"),
+        currentConfig: Effect.succeed(Option.none()),
+        refreshHealth: Effect.succeed(
+          Option.some(makeProviderDaemonHealth(options?.activeProviderSessionCount ?? 0)),
+        ),
+        snapshot: Effect.die("unexpected snapshot"),
+        stop: Effect.sync(() => {
+          providerDaemonStopCount += 1;
+        }),
+      } satisfies DesktopProviderDaemonManager.DesktopProviderDaemonManagerShape,
+    );
+
     const layer = Layer.mergeAll(
       DesktopLifecycle.layer,
       DesktopLifecycle.layerShutdown,
       DesktopState.layer,
       desktopEnvironmentLayer,
       desktopWindowLayer,
+      providerDaemonLayer,
       electronAppLayer,
+      electronDialogLayer,
       electronThemeLayer,
       electronWindowLayer,
       TestClock.layer(),
@@ -130,6 +183,8 @@ function makeLifecycleHarness() {
       getBeforeQuitListener: () => beforeQuitListener,
       getQuitCount: () => quitCount,
       getShutdownOverlayCount: () => shutdownOverlayCount,
+      getProviderDaemonStopCount: () => providerDaemonStopCount,
+      getProviderDaemonDialogCount: () => providerDaemonDialogCount,
     };
   });
 }
@@ -155,6 +210,7 @@ describe("DesktopLifecycle", () => {
         yield* Deferred.await(harness.overlaySent);
         assert.equal(quitEvent.preventDefaultCount(), 1);
         assert.equal(harness.getShutdownOverlayCount(), 1);
+        assert.equal(harness.getProviderDaemonDialogCount(), 0);
 
         yield* shutdown.markComplete;
         yield* TestClock.adjust(Duration.millis(2_999));
@@ -198,6 +254,70 @@ describe("DesktopLifecycle", () => {
         yield* TestClock.adjust(DesktopLifecycle.DESKTOP_SHUTDOWN_OVERLAY_MINIMUM_DWELL);
         yield* flushMicrotasks;
         assert.equal(harness.getQuitCount(), 1);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect("stops the provider daemon when active sessions exist and the user chooses stop", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeLifecycleHarness({
+        activeProviderSessionCount: 2,
+        providerDaemonDialogResponse: 1,
+      });
+
+      yield* Effect.gen(function* () {
+        const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+        const shutdown = yield* DesktopLifecycle.DesktopShutdown;
+        yield* lifecycle.register;
+
+        const beforeQuit = harness.getBeforeQuitListener();
+        assert.isDefined(beforeQuit);
+        if (!beforeQuit) {
+          throw new Error("before-quit listener was not registered.");
+        }
+
+        const quitEvent = makeEvent();
+        beforeQuit(quitEvent.event);
+
+        yield* Deferred.await(harness.overlaySent);
+        assert.equal(quitEvent.preventDefaultCount(), 1);
+        assert.equal(harness.getProviderDaemonDialogCount(), 1);
+
+        yield* shutdown.markComplete;
+        yield* TestClock.adjust(DesktopLifecycle.DESKTOP_SHUTDOWN_OVERLAY_MINIMUM_DWELL);
+        yield* flushMicrotasks;
+        assert.equal(harness.getProviderDaemonStopCount(), 1);
+        assert.equal(harness.getQuitCount(), 1);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect("cancels quit when active provider sessions exist and the user cancels", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeLifecycleHarness({
+        activeProviderSessionCount: 1,
+        providerDaemonDialogResponse: 2,
+      });
+
+      yield* Effect.gen(function* () {
+        const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+        yield* lifecycle.register;
+
+        const beforeQuit = harness.getBeforeQuitListener();
+        assert.isDefined(beforeQuit);
+        if (!beforeQuit) {
+          throw new Error("before-quit listener was not registered.");
+        }
+
+        const quitEvent = makeEvent();
+        beforeQuit(quitEvent.event);
+        yield* flushMicrotasks;
+
+        assert.equal(quitEvent.preventDefaultCount(), 1);
+        assert.equal(harness.getProviderDaemonDialogCount(), 1);
+        assert.equal(harness.getShutdownOverlayCount(), 0);
+        assert.equal(harness.getProviderDaemonStopCount(), 0);
+        assert.equal(harness.getQuitCount(), 0);
       }).pipe(Effect.scoped, Effect.provide(harness.layer));
     }),
   );

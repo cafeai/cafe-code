@@ -490,6 +490,12 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    const latestTurnForPlaceholder =
+      thread.latestTurn?.turnId === turnId ? thread.latestTurn : null;
+    if (thread.session?.activeTurnId === turnId || latestTurnForPlaceholder?.state === "running") {
+      return;
+    }
+
     // If a real checkpoint already exists for this turn, skip.
     if (
       thread.checkpoints.some(
@@ -523,6 +529,62 @@ const make = Effect.gen(function* () {
       status: "ready",
       assistantMessageId: event.payload.assistantMessageId ?? undefined,
       createdAt: event.payload.completedAt,
+    });
+  });
+
+  const captureCheckpointFromSettledLatestTurnPlaceholder = Effect.fn(
+    "captureCheckpointFromSettledLatestTurnPlaceholder",
+  )(function* (event: Extract<OrchestrationEvent, { type: "thread.session-set" }>) {
+    const thread = yield* resolveThreadDetail(event.payload.threadId);
+    if (!thread?.latestTurn) {
+      return;
+    }
+    const latestTurn = thread.latestTurn;
+    if (latestTurn.state === "running" || latestTurn.completedAt === null) {
+      return;
+    }
+
+    const existingPlaceholder = thread.checkpoints.find(
+      (checkpoint) => checkpoint.turnId === latestTurn.turnId && checkpoint.status === "missing",
+    );
+    if (!existingPlaceholder) {
+      return;
+    }
+
+    if (
+      thread.checkpoints.some(
+        (checkpoint) => checkpoint.turnId === latestTurn.turnId && checkpoint.status !== "missing",
+      )
+    ) {
+      return;
+    }
+
+    const projects = yield* resolveThreadProjects(thread.projectId);
+    const checkpointCwd = yield* resolveCheckpointCwd({
+      threadId: thread.id,
+      thread,
+      projects,
+      preferSessionRuntime: true,
+    });
+    if (!checkpointCwd) {
+      return;
+    }
+
+    yield* captureAndDispatchCheckpoint({
+      threadId: thread.id,
+      turnId: latestTurn.turnId,
+      thread,
+      cwd: checkpointCwd,
+      turnCount: existingPlaceholder.checkpointTurnCount,
+      status:
+        latestTurn.state === "error"
+          ? "error"
+          : latestTurn.state === "interrupted"
+            ? "missing"
+            : "ready",
+      assistantMessageId:
+        latestTurn.assistantMessageId ?? existingPlaceholder.assistantMessageId ?? undefined,
+      createdAt: latestTurn.completedAt,
     });
   });
 
@@ -818,6 +880,28 @@ const make = Effect.gen(function* () {
             appendCaptureFailureActivity({
               threadId: event.payload.threadId,
               turnId: event.payload.turnId,
+              detail: error.message,
+              createdAt,
+            }).pipe(Effect.catch(() => Effect.void)),
+          ),
+        ),
+      );
+      return;
+    }
+
+    if (
+      event.type === "thread.session-set" &&
+      (event.payload.session.status === "ready" ||
+        event.payload.session.status === "error" ||
+        event.payload.session.status === "interrupted" ||
+        event.payload.session.status === "stopped")
+    ) {
+      yield* captureCheckpointFromSettledLatestTurnPlaceholder(event).pipe(
+        Effect.catch((error) =>
+          Effect.flatMap(nowIso, (createdAt) =>
+            appendCaptureFailureActivity({
+              threadId: event.payload.threadId,
+              turnId: null,
               detail: error.message,
               createdAt,
             }).pipe(Effect.catch(() => Effect.void)),

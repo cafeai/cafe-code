@@ -1,3 +1,4 @@
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -18,6 +19,14 @@ import {
 import { makeChildStdio, makeTerminationError } from "./_internal/stdio.ts";
 
 const DEFAULT_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
+const MAX_NOTIFICATION_DISPATCH_DIAGNOSTIC_LENGTH = 8_000;
+
+function truncateDiagnostic(input: string): string {
+  if (input.length <= MAX_NOTIFICATION_DISPATCH_DIAGNOSTIC_LENGTH) {
+    return input;
+  }
+  return `${input.slice(0, MAX_NOTIFICATION_DISPATCH_DIAGNOSTIC_LENGTH)}...<truncated>`;
+}
 
 export interface CodexAppServerClientOptions {
   readonly logIncoming?: boolean;
@@ -98,6 +107,41 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     | ((method: string, params: unknown) => Effect.Effect<void, CodexError.CodexAppServerError>)
     | undefined;
 
+  const logNotificationDispatchIssue = (input: {
+    readonly method: string;
+    readonly phase: "decode" | "handler" | "unknown-handler";
+    readonly message: string;
+  }) =>
+    options.logger?.({
+      direction: "incoming",
+      stage: "decode_failed",
+      payload: {
+        detail: `Codex App Server notification ${input.phase} failed`,
+        method: input.method,
+        message: input.message,
+      },
+    }) ?? Effect.void;
+
+  const runNotificationHandlers = (
+    method: string,
+    handlers: ReadonlyArray<ServerNotificationHandler>,
+    payload: unknown,
+  ): Effect.Effect<void> =>
+    Effect.forEach(
+      handlers,
+      (handler) =>
+        handler(payload).pipe(
+          Effect.catchCause((cause) =>
+            logNotificationDispatchIssue({
+              method,
+              phase: "handler",
+              message: truncateDiagnostic(Cause.pretty(cause)),
+            }),
+          ),
+        ),
+      { discard: true },
+    );
+
   const getServerRequestParamSchema = <M extends CodexRpc.ServerRequestMethod>(
     method: M,
   ):
@@ -150,16 +194,34 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
 
     if (schema) {
       return decodeNotificationPayload(notification.method, schema, notification.params).pipe(
-        Effect.flatMap((decoded) =>
-          Effect.forEach(handlers, (handler) => handler(decoded), { discard: true }),
-        ),
-        Effect.catch(() => Effect.void),
+        Effect.matchEffect({
+          onFailure: (error) =>
+            logNotificationDispatchIssue({
+              method: notification.method,
+              phase: "decode",
+              message: error.message,
+            }).pipe(
+              Effect.andThen(
+                // Generated schemas can lag Codex app-server releases. Keep
+                // notification flow alive by giving registered handlers the raw
+                // params instead of dropping the event silently.
+                runNotificationHandlers(notification.method, handlers, notification.params),
+              ),
+            ),
+          onSuccess: (decoded) => runNotificationHandlers(notification.method, handlers, decoded),
+        }),
       );
     }
 
     return unknownNotificationHandler
       ? unknownNotificationHandler(notification.method, notification.params).pipe(
-          Effect.catch(() => Effect.void),
+          Effect.catchCause((cause) =>
+            logNotificationDispatchIssue({
+              method: notification.method,
+              phase: "unknown-handler",
+              message: truncateDiagnostic(Cause.pretty(cause)),
+            }),
+          ),
         )
       : Effect.void;
   };

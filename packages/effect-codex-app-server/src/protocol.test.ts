@@ -1,7 +1,9 @@
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
@@ -182,6 +184,118 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
       }),
   );
 
+  it.effect("keeps draining inbound messages while an onRequest handler is waiting", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        onRequest: () => Effect.never,
+      });
+
+      const notificationDeferred =
+        yield* Deferred.make<CodexProtocol.CodexAppServerIncomingNotification>();
+      yield* transport.incomingNotifications.pipe(
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.flatMap((notifications) =>
+          Deferred.succeed(notificationDeferred, Array.from(notifications)[0]!),
+        ),
+        Effect.forkScoped,
+      );
+
+      const pendingInitialize = yield* transport.request("initialize").pipe(Effect.forkScoped);
+      assert.deepEqual(yield* decodeJson(yield* Queue.take(output)), {
+        id: 1,
+        method: "initialize",
+      });
+
+      yield* Queue.offer(
+        input,
+        encodeJsonl({
+          id: 77,
+          method: "item/tool/requestUserInput",
+          params: {
+            itemId: "item-approval-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+            questions: [],
+          },
+        }),
+      );
+      yield* Queue.offer(
+        input,
+        encodeJsonl({
+          method: "x/after-blocked-request",
+          params: {
+            ok: true,
+          },
+        }),
+      );
+      yield* Queue.offer(
+        input,
+        encodeJsonl({
+          id: 1,
+          result: {
+            userAgent: "mock-codex-app-server",
+          },
+        }),
+      );
+
+      assert.deepEqual(yield* Deferred.await(notificationDeferred), {
+        method: "x/after-blocked-request",
+        params: {
+          ok: true,
+        },
+      });
+      assert.deepEqual(yield* Fiber.join(pendingInitialize), {
+        userAgent: "mock-codex-app-server",
+      });
+    }),
+  );
+
+  it.effect("keeps draining inbound messages while an onNotification handler is waiting", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        onNotification: () => Effect.never,
+      });
+
+      const pendingInitialize = yield* transport.request("initialize").pipe(Effect.forkScoped);
+      assert.deepEqual(yield* decodeJson(yield* Queue.take(output)), {
+        id: 1,
+        method: "initialize",
+      });
+
+      yield* Queue.offer(
+        input,
+        encodeJsonl({
+          method: "x/blocked-notification",
+          params: {
+            ok: true,
+          },
+        }),
+      );
+      yield* Queue.offer(
+        input,
+        encodeJsonl({
+          id: 1,
+          result: {
+            userAgent: "mock-codex-app-server",
+          },
+        }),
+      );
+
+      const result = yield* Fiber.join(pendingInitialize).pipe(Effect.timeoutOption("1 second"));
+      assert.equal(Option.isSome(result), true);
+      if (Option.isSome(result)) {
+        assert.deepEqual(result.value, {
+          userAgent: "mock-codex-app-server",
+        });
+      }
+    }),
+  );
+
   it.effect("surfaces JSON encoding failures as protocol parse errors", () =>
     Effect.gen(function* () {
       const { stdio } = yield* makeInMemoryStdio();
@@ -196,6 +310,73 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
       const circularError = yield* transport.notify("x/test", circular).pipe(Effect.flip);
       assert.instanceOf(circularError, CodexError.CodexAppServerProtocolParseError);
       assert.equal(circularError.detail, "Failed to encode Codex App Server message");
+    }),
+  );
+
+  it.effect("keeps reading notifications after onNotification defects", () =>
+    Effect.gen(function* () {
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const protocolEvents = yield* Ref.make<Array<CodexProtocol.CodexAppServerProtocolLogEvent>>(
+        [],
+      );
+      const goodNotification =
+        yield* Deferred.make<CodexProtocol.CodexAppServerIncomingNotification>();
+      const badDiagnosticLogged = yield* Deferred.make<void>();
+
+      yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        logger: (event) =>
+          Ref.update(protocolEvents, (current) => [...current, event]).pipe(
+            Effect.andThen(() => {
+              const payload =
+                typeof event.payload === "object" && event.payload !== null
+                  ? (event.payload as Record<string, unknown>)
+                  : {};
+              return event.stage === "decode_failed" && payload["method"] === "x/bad"
+                ? Deferred.succeed(badDiagnosticLogged, undefined).pipe(Effect.asVoid)
+                : Effect.void;
+            }),
+          ),
+        onNotification: (notification) =>
+          notification.method === "x/bad"
+            ? Effect.die(new Error("defective notification callback"))
+            : Deferred.succeed(goodNotification, notification).pipe(Effect.asVoid),
+      });
+
+      yield* Queue.offer(
+        input,
+        encodeJsonl({
+          method: "x/bad",
+          params: {
+            secret: "must-not-be-logged",
+          },
+        }),
+      );
+      yield* Queue.offer(
+        input,
+        encodeJsonl({
+          method: "x/good",
+          params: {
+            ok: true,
+          },
+        }),
+      );
+
+      assert.deepEqual(yield* Deferred.await(goodNotification), {
+        method: "x/good",
+        params: {
+          ok: true,
+        },
+      });
+      yield* Deferred.await(badDiagnosticLogged);
+
+      const diagnostics = (yield* Ref.get(protocolEvents)).filter(
+        (event) => event.stage === "decode_failed",
+      );
+      assert.equal(diagnostics.length, 1);
+      const diagnosticPayload = diagnostics[0]?.payload as Record<string, unknown>;
+      assert.equal(diagnosticPayload["method"], "x/bad");
+      assert.equal(String(diagnosticPayload["cause"]).includes("must-not-be-logged"), false);
     }),
   );
 });

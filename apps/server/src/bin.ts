@@ -9,6 +9,7 @@ import packageJson from "../package.json" with { type: "json" };
 import { authCommand } from "./cli/auth.ts";
 import { sharedServerCommandFlags } from "./cli/config.ts";
 import { projectCommand } from "./cli/project.ts";
+import { providerDaemonCommand, providerSupervisorCommand } from "./cli/providerDaemon.ts";
 import { runServerCommand, serveCommand, startCommand } from "./cli/server.ts";
 
 const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
@@ -16,7 +17,14 @@ const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
 export const cli = Command.make("cafe-code", { ...sharedServerCommandFlags }).pipe(
   Command.withDescription("Run the Cafe Code server."),
   Command.withHandler((flags) => runServerCommand(flags)),
-  Command.withSubcommands([startCommand, serveCommand, authCommand, projectCommand]),
+  Command.withSubcommands([
+    startCommand,
+    serveCommand,
+    authCommand,
+    projectCommand,
+    providerDaemonCommand,
+    providerSupervisorCommand,
+  ]),
 );
 
 if (import.meta.main) {

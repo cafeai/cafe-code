@@ -76,6 +76,7 @@ const parserFactory = RpcSerialization.ndJsonRpc();
 export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(function* (
   options: AcpPatchedProtocolOptions,
 ): Effect.fn.Return<AcpPatchedProtocol, never, Scope.Scope> {
+  const protocolScope = yield* Scope.Scope;
   const parser = parserFactory.makeUnsafe();
   const serverQueue = yield* Queue.unbounded<RpcMessage.FromClientEncoded>();
   const clientQueue = yield* Queue.unbounded<RpcMessage.FromServerEncoded>();
@@ -237,7 +238,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
       },
     });
 
-  const handleExtRequest = (message: RpcMessage.RequestEncoded) => {
+  const runExtRequestHandler = (message: RpcMessage.RequestEncoded) => {
     if (!options.onExtRequest) {
       return respondWithError(message.id, AcpError.AcpRequestError.methodNotFound(message.tag));
     }
@@ -248,6 +249,43 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
       }),
     );
   };
+
+  const handleExtRequest = (message: RpcMessage.RequestEncoded) =>
+    // Extension request handlers may wait for user input. Keep the parser/read
+    // loop draining while the eventual response is produced on this scope.
+    runExtRequestHandler(message).pipe(
+      Effect.catchCause((cause) =>
+        logProtocol({
+          direction: "incoming",
+          stage: "decode_failed",
+          payload: {
+            detail: "ACP extension request dispatch failed",
+            method: message.tag,
+            id: message.id,
+            cause: Cause.pretty(cause),
+          },
+        }).pipe(
+          Effect.andThen(
+            respondWithError(message.id, AcpError.AcpRequestError.internalError()).pipe(
+              Effect.catchCause((respondCause) =>
+                logProtocol({
+                  direction: "outgoing",
+                  stage: "decode_failed",
+                  payload: {
+                    detail: "ACP extension request error response failed",
+                    method: message.tag,
+                    id: message.id,
+                    cause: Cause.pretty(respondCause),
+                  },
+                }),
+              ),
+            ),
+          ),
+        ),
+      ),
+      Effect.forkIn(protocolScope),
+      Effect.asVoid,
+    );
 
   const handleRequestEncoded = (message: RpcMessage.RequestEncoded) => {
     if (message.id === "") {
@@ -299,10 +337,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     }
 
     if (!options.serverRequestMethods.has(message.tag)) {
-      return handleExtRequest(message).pipe(
-        Effect.catch(() => respondWithError(message.id, AcpError.AcpRequestError.internalError())),
-        Effect.asVoid,
-      );
+      return handleExtRequest(message);
     }
 
     return Queue.offer(serverQueue, message).pipe(Effect.asVoid);

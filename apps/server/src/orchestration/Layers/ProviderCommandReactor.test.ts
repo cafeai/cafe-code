@@ -526,6 +526,41 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
 
+  it("marks the turn running from sendTurn success when the provider omits turn.started", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-without-provider-started"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-without-provider-started"),
+          role: "user",
+          text: "hello without provider turn started event",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return (
+        thread?.session?.status === "running" &&
+        thread.session.activeTurnId === asTurnId("turn-1") &&
+        thread.latestTurn?.turnId === asTurnId("turn-1") &&
+        thread.latestTurn.state === "running"
+      );
+    });
+
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
   it("generates a thread title on the first turn", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

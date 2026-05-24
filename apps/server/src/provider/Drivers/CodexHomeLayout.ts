@@ -19,17 +19,55 @@ export interface CodexHomeLayout {
 const KNOWN_SHARED_DIRECTORIES = [
   "sessions",
   "archived_sessions",
+  "ambient-suggestions",
   "sqlite",
   "shell_snapshots",
   "worktrees",
   "skills",
   "plugins",
   "cache",
+  "computer-use",
   "logs",
+  "pets",
+  "rules",
+  "vendor_imports",
+] as const;
+
+const KNOWN_SHARED_FILES = [
+  ".codex-global-state.json",
+  ".codex-global-state.json.bak",
+  ".personality_migration",
+  "AGENTS.md",
+  "config.toml",
+  "history.jsonl",
+  "installation_id",
+  "managed_config.toml",
+  "session_index.jsonl",
+  "version.json",
 ] as const;
 
 const PRIVATE_ENTRY_NAMES = new Set(["auth.json", "models_cache.json"]);
-const SHADOW_LOCAL_ENTRY_NAMES = new Set(["log", "memories", "tmp"]);
+const SHADOW_LOCAL_ENTRY_NAMES = new Set([".tmp", "log", "memories", "tmp"]);
+const KNOWN_SHARED_ENTRY_NAMES = new Set<string>([
+  ...KNOWN_SHARED_DIRECTORIES,
+  ...KNOWN_SHARED_FILES,
+]);
+const CODEX_RUNTIME_SQLITE_ENTRY_REGEX =
+  /^[^/]+(?:\.sqlite|\.sqlite3|\.db)(?:-(?:wal|shm|journal))?$/;
+
+export function isCodexShadowLocalEntryName(entryName: string): boolean {
+  return (
+    SHADOW_LOCAL_ENTRY_NAMES.has(entryName) || CODEX_RUNTIME_SQLITE_ENTRY_REGEX.test(entryName)
+  );
+}
+
+export function shouldShareCodexShadowEntryName(entryName: string): boolean {
+  return (
+    KNOWN_SHARED_ENTRY_NAMES.has(entryName) &&
+    !PRIVATE_ENTRY_NAMES.has(entryName) &&
+    !isCodexShadowLocalEntryName(entryName)
+  );
+}
 
 function resolveHomePath(path: Path.Path, value: string | undefined): string {
   const expanded =
@@ -175,6 +213,7 @@ const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (inpu
 
 const ensureShadowAuthIsPrivate = Effect.fn("CodexHomeLayout.ensureShadowAuthIsPrivate")(function* (
   fileSystem: FileSystem.FileSystem,
+  sharedPath: string,
   shadowPath: string,
 ): Effect.fn.Return<void, CodexShadowHomeError, Path.Path> {
   const path = yield* Path.Path;
@@ -185,6 +224,20 @@ const ensureShadowAuthIsPrivate = Effect.fn("CodexHomeLayout.ensureShadowAuthIsP
       detail: `Codex shadow auth file '${authPath}' must be a real file, not a symlink.`,
     });
   }
+  if (state._tag === "NotSymlink") {
+    yield* normalizeShadowHomeError(fileSystem.chmod(authPath, 0o600));
+    return;
+  }
+
+  const sharedAuthPath = path.join(sharedPath, "auth.json");
+  const sharedAuthExists = yield* normalizeShadowHomeError(fileSystem.exists(sharedAuthPath));
+  if (!sharedAuthExists) {
+    return;
+  }
+
+  const authContents = yield* normalizeShadowHomeError(fileSystem.readFileString(sharedAuthPath));
+  yield* normalizeShadowHomeError(fileSystem.writeFileString(authPath, authContents));
+  yield* normalizeShadowHomeError(fileSystem.chmod(authPath, 0o600));
 });
 
 export const materializeCodexShadowHome = Effect.fn("materializeCodexShadowHome")(function* (
@@ -222,21 +275,23 @@ export const materializeCodexShadowHome = Effect.fn("materializeCodexShadowHome"
   );
   const entries = new Set<string>(KNOWN_SHARED_DIRECTORIES);
   for (const entryName of sharedEntryNames) {
-    if (!PRIVATE_ENTRY_NAMES.has(entryName) && !SHADOW_LOCAL_ENTRY_NAMES.has(entryName)) {
+    if (shouldShareCodexShadowEntryName(entryName)) {
       entries.add(entryName);
     }
   }
 
   yield* Effect.forEach(
-    PRIVATE_ENTRY_NAMES,
+    sharedEntryNames,
     (entryName) =>
       entryName === "auth.json"
         ? Effect.void
-        : removePrivateSymlink({
-            fileSystem,
-            shadowPath: effectiveHomePath,
-            entryName,
-          }),
+        : shouldShareCodexShadowEntryName(entryName)
+          ? Effect.void
+          : removePrivateSymlink({
+              fileSystem,
+              shadowPath: effectiveHomePath,
+              entryName,
+            }),
     { discard: true },
   );
 
@@ -256,7 +311,7 @@ export const materializeCodexShadowHome = Effect.fn("materializeCodexShadowHome"
     { discard: true },
   );
 
-  yield* ensureShadowAuthIsPrivate(fileSystem, effectiveHomePath);
+  yield* ensureShadowAuthIsPrivate(fileSystem, layout.sharedHomePath, effectiveHomePath);
 });
 
 export function codexContinuationIdentity(layout: CodexHomeLayout) {

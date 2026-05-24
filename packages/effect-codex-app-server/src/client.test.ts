@@ -1,19 +1,28 @@
+import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Effect from "effect/Effect";
-import * as Ref from "effect/Ref";
+import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
+import * as Schema from "effect/Schema";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 
 import * as CodexClient from "./client.ts";
+import * as CodexError from "./errors.ts";
+import * as Ref from "effect/Ref";
+import * as CodexProtocol from "./protocol.ts";
+import { makeInMemoryStdio } from "./_internal/stdio.ts";
 
 const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
   path.join(import.meta.dirname, "../test/fixtures/codex-app-server-mock-peer.ts"),
 );
+const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const encoder = new TextEncoder();
+const encodeJsonl = (value: unknown) => encoder.encode(`${encodeUnknownJsonString(value)}\n`);
 
 it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
   const makeHandle = () =>
@@ -51,6 +60,9 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
           ),
         );
 
+        yield* client.handleServerNotification("item/agentMessage/delta", () =>
+          Effect.fail(CodexError.CodexAppServerRequestError.internalError("test handler failed")),
+        );
         yield* client.handleServerNotification("item/agentMessage/delta", (payload) =>
           Ref.update(messageDeltas, (current) => [...current, payload]),
         );
@@ -149,6 +161,91 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       }).pipe(Effect.provide(context), Effect.ensuring(Scope.close(scope, Exit.void)));
 
       assert.equal(initialized.userAgent, "mock-codex-app-server");
+    }),
+  );
+
+  it.effect("keeps dispatching notifications after a handler defect", () =>
+    Effect.gen(function* () {
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const protocolEvents = yield* Ref.make<Array<CodexProtocol.CodexAppServerProtocolLogEvent>>(
+        [],
+      );
+      const received = yield* Ref.make<Array<unknown>>([]);
+      const receivedBoth = yield* Deferred.make<ReadonlyArray<unknown>>();
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const client = yield* CodexClient.make(stdio, {
+            logger: (event) => Ref.update(protocolEvents, (current) => [...current, event]),
+          });
+
+          yield* client.handleServerNotification("item/agentMessage/delta", () =>
+            Effect.die(new Error("defective notification handler")),
+          );
+          yield* client.handleServerNotification("item/agentMessage/delta", (payload) =>
+            Ref.update(received, (current) => [...current, payload]).pipe(
+              Effect.flatMap(() => Ref.get(received)),
+              Effect.tap((current) =>
+                current.length >= 2 ? Deferred.succeed(receivedBoth, current) : Effect.void,
+              ),
+              Effect.asVoid,
+            ),
+          );
+
+          yield* Queue.offer(
+            input,
+            encodeJsonl({
+              method: "item/agentMessage/delta",
+              params: {
+                delta: "first",
+                itemId: "item-1",
+                threadId: "thread-1",
+                turnId: "turn-1",
+              },
+            }),
+          );
+          yield* Queue.offer(
+            input,
+            encodeJsonl({
+              method: "item/agentMessage/delta",
+              params: {
+                delta: "second",
+                itemId: "item-2",
+                threadId: "thread-1",
+                turnId: "turn-1",
+              },
+            }),
+          );
+
+          assert.deepEqual(yield* Deferred.await(receivedBoth), [
+            {
+              delta: "first",
+              itemId: "item-1",
+              threadId: "thread-1",
+              turnId: "turn-1",
+            },
+            {
+              delta: "second",
+              itemId: "item-2",
+              threadId: "thread-1",
+              turnId: "turn-1",
+            },
+          ]);
+        }),
+      );
+
+      const diagnosticEvents = (yield* Ref.get(protocolEvents)).filter(
+        (event) => event.stage === "decode_failed",
+      );
+      assert.equal(diagnosticEvents.length, 2);
+      assert.deepEqual(
+        diagnosticEvents.map((event) =>
+          typeof event.payload === "object" && event.payload !== null
+            ? (event.payload as Record<string, unknown>)["method"]
+            : undefined,
+        ),
+        ["item/agentMessage/delta", "item/agentMessage/delta"],
+      );
     }),
   );
 });

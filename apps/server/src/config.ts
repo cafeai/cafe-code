@@ -13,6 +13,7 @@ import * as LogLevel from "effect/LogLevel";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Context from "effect/Context";
+import type { ProviderDaemonClientConfig } from "@cafecode/contracts";
 
 export const DEFAULT_PORT = 3773;
 
@@ -72,6 +73,8 @@ export interface ServerConfigShape extends ServerDerivedPaths {
   readonly logWebSocketEvents: boolean;
   readonly tailscaleServeEnabled: boolean;
   readonly tailscaleServePort: number;
+  readonly providerDaemon?: ProviderDaemonClientConfig | undefined;
+  readonly providerSupervisor?: ProviderDaemonClientConfig | undefined;
 }
 
 export const deriveServerPaths = Effect.fn(function* (
@@ -121,6 +124,7 @@ export const ensureServerDirectories = Effect.fn(function* (derivedPaths: Server
       fs.makeDirectory(derivedPaths.providerStatusCacheDir, { recursive: true }),
       fs.makeDirectory(path.dirname(derivedPaths.anonymousIdPath), { recursive: true }),
       fs.makeDirectory(path.dirname(derivedPaths.serverRuntimeStatePath), { recursive: true }),
+      fs.makeDirectory(derivedPaths.secretsDir, { recursive: true }),
     ],
     { concurrency: "unbounded" },
   );
@@ -165,6 +169,8 @@ export class ServerConfig extends Context.Service<ServerConfig, ServerConfigShap
           logWebSocketEvents: false,
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
+          providerDaemon: undefined,
+          providerSupervisor: undefined,
           port: 0,
           host: undefined,
           desktopBootstrapToken: undefined,

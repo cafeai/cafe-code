@@ -30,7 +30,11 @@ import { deepMerge } from "@cafecode/shared/Struct";
 import { createModelCapabilities } from "@cafecode/shared/model";
 import { applyServerSettingsPatch } from "@cafecode/shared/serverSettings";
 
-import { checkCodexProviderStatus, type CodexAppServerProviderSnapshot } from "./CodexProvider.ts";
+import {
+  checkCodexCliProviderStatus,
+  checkCodexProviderStatus,
+  type CodexAppServerProviderSnapshot,
+} from "./CodexProvider.ts";
 import { checkClaudeProviderStatus } from "./ClaudeProvider.ts";
 import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
@@ -50,12 +54,13 @@ import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.t
 import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 const decodeServerSettings = Schema.decodeSync(ServerSettings);
+const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodedDefaultServerSettings = encodeServerSettings(DEFAULT_SERVER_SETTINGS);
 
 const defaultClaudeSettings: ClaudeSettings = Schema.decodeSync(ClaudeSettings)({});
-const defaultCodexSettings: CodexSettings = Schema.decodeSync(CodexSettings)({});
-const disabledCodexSettings: CodexSettings = Schema.decodeSync(CodexSettings)({
+const defaultCodexSettings: CodexSettings = decodeCodexSettings({});
+const disabledCodexSettings: CodexSettings = decodeCodexSettings({
   enabled: false,
 });
 
@@ -967,16 +972,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
       );
 
       // This test intentionally avoids `mockCommandSpawnerLayer` so the real
-      // `probeCodexAppServerProvider` path runs — including the full
-      // `codex app-server` RPC handshake via `CodexClient.layerCommand`.
+      // Codex driver status path runs through the production spawner.
       // We point `binaryPath` at a name that cannot exist on any machine so
-      // the real `ChildProcessSpawner` deterministically returns ENOENT; the
-      // probe wraps that as `CodexAppServerSpawnError` and
-      // `checkCodexProviderStatus` turns it into the user-visible "not
-      // installed" error snapshot. If the aggregator's `syncLiveSources`
-      // breaks — the `codex_personal`-never-probes bug we are guarding
-      // against — that snapshot never lands in `getProviders` and the
-      // assertions below fail.
+      // the real `ChildProcessSpawner` deterministically returns ENOENT.
+      // If the aggregator's `syncLiveSources` breaks — the
+      // `codex_personal`-never-probes bug we are guarding against — that
+      // snapshot never lands in `getProviders` and the assertions below fail.
       it.effect("propagates real Codex probe failures to the aggregator at boot", () =>
         Effect.gen(function* () {
           const missingBinary = `t3code_codex_missing_`;
@@ -1322,6 +1323,104 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           assert.strictEqual(status.status, "disabled");
           assert.strictEqual(status.installed, false);
           assert.strictEqual(status.message, "Codex is disabled in Cafe Code settings.");
+        }),
+      );
+    });
+
+    describe("checkCodexCliProviderStatus", () => {
+      it.effect("uses the Codex CLI login status path for lightweight provider status", () =>
+        Effect.gen(function* () {
+          const status = yield* checkCodexCliProviderStatus(defaultCodexSettings).pipe(
+            Effect.provide(
+              mockSpawnerLayer((args) => {
+                const joined = args.join(" ");
+                if (joined === "--version") {
+                  return { stdout: "codex-cli 0.133.0\n", stderr: "", code: 0 };
+                }
+                if (joined === "login status") {
+                  return { stdout: "", stderr: "Logged in using ChatGPT\n", code: 0 };
+                }
+                throw new Error(`Unexpected args: ${joined}`);
+              }),
+            ),
+          );
+
+          assert.strictEqual(status.status, "ready");
+          assert.strictEqual(status.installed, true);
+          assert.strictEqual(status.version, "0.133.0");
+          assert.strictEqual(status.auth.status, "authenticated");
+          assert.strictEqual(status.auth.type, "chatgpt");
+          assert.strictEqual(status.auth.label, "ChatGPT Subscription");
+          assert.deepStrictEqual(
+            status.models.map((model) => model.slug),
+            [
+              "gpt-5.5",
+              "gpt-5.4",
+              "gpt-5.4-mini",
+              "gpt-5.3-codex",
+              "gpt-5.3-codex-spark",
+              "gpt-5.2",
+            ],
+          );
+          assert.deepStrictEqual(status.skills, []);
+        }),
+      );
+
+      it.effect("passes the effective CODEX_HOME to every Codex CLI status command", () =>
+        Effect.gen(function* () {
+          const { layer, commands } = recordingMockSpawnerLayer((args) => {
+            const joined = args.join(" ");
+            if (joined === "--version") {
+              return { stdout: "codex-cli 0.133.0\n", stderr: "", code: 0 };
+            }
+            if (joined === "login status") {
+              return { stdout: "Logged in using ChatGPT\n", stderr: "", code: 0 };
+            }
+            throw new Error(`Unexpected args: ${joined}`);
+          });
+          const homePath = "/tmp/cafecode-codex-status-home";
+
+          const status = yield* checkCodexCliProviderStatus(decodeCodexSettings({ homePath })).pipe(
+            Effect.provide(layer),
+          );
+
+          assert.strictEqual(status.status, "ready");
+          assert.deepStrictEqual(
+            commands.map((command) => command.args.join(" ")),
+            ["--version", "login status"],
+          );
+          assert.deepStrictEqual(
+            commands.map((command) => command.env?.CODEX_HOME),
+            [homePath, homePath],
+          );
+        }),
+      );
+
+      it.effect("returns unauthenticated when Codex CLI reports not logged in", () =>
+        Effect.gen(function* () {
+          const status = yield* checkCodexCliProviderStatus(defaultCodexSettings).pipe(
+            Effect.provide(
+              mockSpawnerLayer((args) => {
+                const joined = args.join(" ");
+                if (joined === "--version") {
+                  return { stdout: "codex-cli 0.133.0\n", stderr: "", code: 0 };
+                }
+                if (joined === "login status") {
+                  return { stdout: "", stderr: "Not logged in\n", code: 1 };
+                }
+                throw new Error(`Unexpected args: ${joined}`);
+              }),
+            ),
+          );
+
+          assert.strictEqual(status.status, "error");
+          assert.strictEqual(status.installed, true);
+          assert.strictEqual(status.version, "0.133.0");
+          assert.strictEqual(status.auth.status, "unauthenticated");
+          assert.strictEqual(
+            status.message,
+            "Codex CLI is not authenticated. Run `codex login` and try again.",
+          );
         }),
       );
     });

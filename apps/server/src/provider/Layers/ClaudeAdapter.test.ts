@@ -2706,7 +2706,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("passes Claude resume ids without pinning a stale assistant checkpoint", () => {
+  it.effect("passes Claude resume ids and assistant checkpoint into SDK resume options", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -2734,7 +2734,94 @@ describe("ClaudeAdapterLive", () => {
       const createInput = harness.getLastCreateQueryInput();
       assert.equal(createInput?.options.resume, "550e8400-e29b-41d4-a716-446655440000");
       assert.equal(createInput?.options.sessionId, undefined);
-      assert.equal(createInput?.options.resumeSessionAt, undefined);
+      assert.equal(createInput?.options.resumeSessionAt, "assistant-99");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("emits Claude process stderr diagnostics as runtime warnings", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const warningFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "runtime.warning" && event.raw?.method === "process/stderr",
+      ).pipe(Stream.runHead, Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const stderr = harness.getLastCreateQueryInput()?.options.stderr;
+      assert.equal(typeof stderr, "function");
+      if (typeof stderr !== "function") {
+        return;
+      }
+      stderr("\u001B[31mWARN slow stream path\u001B[0m\n");
+
+      const warning = yield* Fiber.join(warningFiber);
+      assert.equal(warning._tag, "Some");
+      if (warning._tag !== "Some" || warning.value.type !== "runtime.warning") {
+        return;
+      }
+      assert.equal(warning.value.payload.message, "Claude process stderr.");
+      assert.equal(warning.value.raw?.source, "claude.sdk.message");
+      assert.equal(warning.value.raw?.method, "process/stderr");
+      const detail = warning.value.payload.detail as { readonly line?: string } | undefined;
+      assert.equal(detail?.line, "WARN slow stream path");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("emits Claude turn-start diagnostics when the SDK stream stays silent", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const warningFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) =>
+          event.type === "runtime.warning" &&
+          event.raw?.method === "claude.turnStart/noSdkMessageYet",
+      ).pipe(Stream.runHead, Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        attachments: [],
+      });
+
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("2 seconds");
+      yield* Effect.yieldNow;
+
+      const warning = yield* Fiber.join(warningFiber);
+      assert.equal(warning._tag, "Some");
+      if (warning._tag !== "Some" || warning.value.type !== "runtime.warning") {
+        return;
+      }
+      assert.equal(warning.value.raw?.source, "claude.sdk.message");
+      assert.equal(warning.value.raw?.method, "claude.turnStart/noSdkMessageYet");
+      const detail = warning.value.payload.detail as
+        | {
+            readonly sdkMessageCount?: number;
+            readonly promptTextBytes?: number;
+            readonly promptAttachmentCount?: number;
+          }
+        | undefined;
+      assert.equal(detail?.sdkMessageCount, 0);
+      assert.equal(detail?.promptTextBytes, 5);
+      assert.equal(detail?.promptAttachmentCount, 0);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

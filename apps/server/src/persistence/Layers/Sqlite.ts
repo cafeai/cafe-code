@@ -9,6 +9,8 @@ import { ServerConfig } from "../../config.ts";
 
 type RuntimeSqliteLayerConfig = {
   readonly filename: string;
+  readonly busyTimeoutMs?: number;
+  readonly disableWAL?: boolean;
   readonly spanAttributes?: Record<string, unknown>;
 };
 
@@ -19,6 +21,8 @@ const defaultSqliteClientLoaders = {
   bun: () => import("@effect/sql-sqlite-bun/SqliteClient"),
   node: () => import("../NodeSqliteClient.ts"),
 } satisfies Record<string, () => Promise<Loader>>;
+
+export const SQLITE_BUSY_TIMEOUT_MS = 15_000;
 
 const makeRuntimeSqliteLayer = Effect.fn("makeRuntimeSqliteLayer")(function* (
   config: RuntimeSqliteLayerConfig,
@@ -32,6 +36,7 @@ const makeRuntimeSqliteLayer = Effect.fn("makeRuntimeSqliteLayer")(function* (
 const setup = Layer.effectDiscard(
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    yield* sql`PRAGMA busy_timeout = 15000;`;
     yield* sql`PRAGMA journal_mode = WAL;`;
     yield* sql`PRAGMA foreign_keys = ON;`;
     yield* runMigrations();
@@ -49,6 +54,8 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
     setup,
     makeRuntimeSqliteLayer({
       filename: dbPath,
+      busyTimeoutMs: SQLITE_BUSY_TIMEOUT_MS,
+      disableWAL: true,
       spanAttributes: {
         "db.name": path.basename(dbPath),
         "service.name": "cafe-code-server",
@@ -59,7 +66,11 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
 
 export const SqlitePersistenceMemory = Layer.provideMerge(
   setup,
-  makeRuntimeSqliteLayer({ filename: ":memory:" }),
+  makeRuntimeSqliteLayer({
+    filename: ":memory:",
+    busyTimeoutMs: SQLITE_BUSY_TIMEOUT_MS,
+    disableWAL: true,
+  }),
 );
 
 export const layerConfig = Layer.unwrap(

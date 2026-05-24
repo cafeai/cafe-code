@@ -1,6 +1,7 @@
 import type { ContextMenuItem, LocalApi } from "@cafecode/contracts";
 
 import { resetGitStatusStateForTests } from "./lib/gitStatusState";
+import { __resetClientSettingsPersistenceForTests } from "./hooks/clientSettingsState";
 import { resetSourceControlDiscoveryStateForTests } from "./lib/sourceControlDiscoveryState";
 import { resetRequestLatencyStateForTests } from "./rpc/requestLatencyState";
 import { resetServerStateForTests } from "./rpc/serverState";
@@ -206,7 +207,6 @@ export function ensureLocalApi(): LocalApi {
 
 export async function __resetLocalApiForTests() {
   cachedApi = undefined;
-  const { __resetClientSettingsPersistenceForTests } = await import("./hooks/useSettings");
   __resetClientSettingsPersistenceForTests();
   await resetEnvironmentServiceForTests();
   resetGitStatusStateForTests();

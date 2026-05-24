@@ -230,6 +230,56 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     }),
   );
 
+  it.effect("keeps draining inbound messages while an extension request handler is waiting", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        stdio,
+        serverRequestMethods: new Set(),
+        onExtRequest: () => Effect.never,
+      });
+
+      const response = yield* transport
+        .request("x/test", { hello: "world" })
+        .pipe(Effect.forkScoped);
+      const outbound = yield* Queue.take(output);
+      assert.deepEqual(yield* decodeExtRequest(outbound), {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "x/test",
+        params: {
+          hello: "world",
+        },
+        headers: [],
+      });
+
+      yield* Queue.offer(
+        input,
+        yield* encodeJsonl(ExtRequest, {
+          jsonrpc: "2.0",
+          id: 99,
+          method: "x/test",
+          params: {
+            hello: "peer",
+          },
+          headers: [],
+        }),
+      );
+      yield* Queue.offer(
+        input,
+        yield* encodeJsonl(ExtResponse, {
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            ok: true,
+          },
+        }),
+      );
+
+      assert.deepEqual(yield* Fiber.join(response), { ok: true });
+    }),
+  );
+
   it.effect("preserves zero-valued ids for inbound core client requests", () =>
     Effect.gen(function* () {
       const { stdio, input, output } = yield* makeInMemoryStdio();

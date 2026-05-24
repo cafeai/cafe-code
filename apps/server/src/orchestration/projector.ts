@@ -27,6 +27,7 @@ import {
   ThreadRevertedPayload,
   ThreadSessionSetPayload,
   ThreadTurnDiffCompletedPayload,
+  ThreadTurnInterruptRequestedPayload,
   ThreadTurnStartRequestedPayload,
 } from "./Schemas.ts";
 
@@ -560,6 +561,72 @@ export function projectEvent(
                       };
                     })()
                   : thread.latestTurn,
+            updatedAt: event.occurredAt,
+          }),
+        };
+      });
+
+    case "thread.turn-interrupt-requested":
+      return Effect.gen(function* () {
+        const payload = yield* decodeForEvent(
+          ThreadTurnInterruptRequestedPayload,
+          event.payload,
+          event.type,
+          "payload",
+        );
+        const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+        if (!thread) {
+          return nextBase;
+        }
+
+        const interruptedTurnId =
+          payload.turnId ??
+          thread.session?.activeTurnId ??
+          (thread.latestTurn?.state === "running" ? thread.latestTurn.turnId : null);
+        const sessionActiveTurnId = thread.session?.activeTurnId ?? null;
+        const interruptMatchesSession =
+          payload.turnId === undefined ||
+          sessionActiveTurnId === null ||
+          sessionActiveTurnId === payload.turnId;
+        const shouldCloseSession =
+          thread.session !== null &&
+          interruptMatchesSession &&
+          (thread.session.status === "starting" ||
+            thread.session.status === "running" ||
+            thread.session.activeTurnId !== null);
+        const shouldUpdateLatestTurn =
+          interruptedTurnId !== null &&
+          (thread.latestTurn === null || thread.latestTurn.turnId === interruptedTurnId);
+        const sameLatestTurn =
+          thread.latestTurn !== null && thread.latestTurn.turnId === interruptedTurnId;
+
+        return {
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            session: shouldCloseSession
+              ? {
+                  ...thread.session,
+                  status: "interrupted",
+                  activeTurnId: null,
+                  updatedAt: payload.createdAt,
+                }
+              : thread.session,
+            latestTurn: shouldUpdateLatestTurn
+              ? {
+                  turnId: interruptedTurnId,
+                  state: "interrupted",
+                  requestedAt: sameLatestTurn
+                    ? (thread.latestTurn?.requestedAt ?? payload.createdAt)
+                    : payload.createdAt,
+                  startedAt: sameLatestTurn
+                    ? (thread.latestTurn?.startedAt ?? payload.createdAt)
+                    : payload.createdAt,
+                  completedAt: sameLatestTurn
+                    ? (thread.latestTurn?.completedAt ?? payload.createdAt)
+                    : payload.createdAt,
+                  assistantMessageId: sameLatestTurn ? thread.latestTurn?.assistantMessageId : null,
+                }
+              : thread.latestTurn,
             updatedAt: event.occurredAt,
           }),
         };

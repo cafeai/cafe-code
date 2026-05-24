@@ -283,6 +283,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   isConnecting: boolean;
   isEnvironmentUnavailable: boolean;
   hasSendableContent: boolean;
+  pendingStatusLabel: string | null;
   preserveComposerFocusOnPointerDown?: boolean;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
@@ -291,8 +292,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   return (
     <>
       {props.activeContextWindow ? <ContextWindowMeter usage={props.activeContextWindow} /> : null}
-      {props.isPreparingWorktree ? (
-        <span className="text-muted-foreground/70 text-xs">Preparing worktree...</span>
+      {props.pendingStatusLabel ? (
+        <span className="text-muted-foreground/70 text-xs">{props.pendingStatusLabel}</span>
       ) : null}
       <ComposerPrimaryActions
         compact={props.compact}
@@ -956,6 +957,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }),
     [composerImages.length, prompt],
   );
+  const selectedProviderDisplayName =
+    selectedProviderEntry?.displayName ||
+    selectedProviderStatus?.displayName?.trim() ||
+    String(selectedProviderStatus?.instanceId ?? selectedProvider);
+  const composerPendingStatusLabel = isPreparingWorktree
+    ? "Preparing worktree..."
+    : isSendBusy
+      ? "Submitting prompt..."
+      : isConnecting
+        ? `Starting ${selectedProviderDisplayName}...`
+        : null;
 
   // ------------------------------------------------------------------
   // Derived: composer trigger / menu
@@ -1181,7 +1193,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
   const collapsedComposerPrimaryActionDisabled =
     phase === "running" || isSendBusy || isConnecting || !composerSendState.hasSendableContent;
-  const collapsedComposerPrimaryActionLabel = "Send message";
+  const collapsedComposerPrimaryActionPending = isSendBusy || isConnecting || isPreparingWorktree;
+  const collapsedComposerPrimaryActionLabel = collapsedComposerPrimaryActionPending
+    ? isConnecting
+      ? "Connecting"
+      : "Sending"
+    : "Send message";
   const showMobilePendingAnswerActions =
     isMobileViewport && !isComposerCollapsedMobile && pendingPrimaryAction !== null;
 
@@ -2198,15 +2215,36 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   submitComposer();
                 }}
               >
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                  <path
-                    d="M8 3L8 13M8 3L4 7M8 3L12 7"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
+                {collapsedComposerPrimaryActionPending ? (
+                  <svg
+                    width="16"
+                    height="16"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    className="animate-spin"
+                    aria-hidden="true"
+                  >
+                    <circle
+                      cx="8"
+                      cy="8"
+                      r="6"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeDasharray="22 14"
+                    />
+                  </svg>
+                ) : (
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path
+                      d="M8 3L8 13M8 3L4 7M8 3L12 7"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                )}
               </button>
             </div>
           ) : null}
@@ -2339,6 +2377,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                             : "Ask anything, @tag files/folders, $use skills, or / for commands"
                 }
                 disabled={
+                  isSendBusy ||
                   isConnecting ||
                   isComposerApprovalState ||
                   (environmentUnavailable !== null && activePendingProgress === null)
@@ -2467,6 +2506,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   isEnvironmentUnavailable={environmentUnavailable !== null}
                   isPreparingWorktree={isPreparingWorktree}
                   hasSendableContent={composerSendState.hasSendableContent}
+                  pendingStatusLabel={composerPendingStatusLabel}
                   preserveComposerFocusOnPointerDown={isMobileViewport}
                   onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                   onInterrupt={handleInterruptPrimaryAction}

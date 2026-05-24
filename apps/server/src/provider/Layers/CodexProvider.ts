@@ -7,7 +7,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Types from "effect/Types";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexSchema from "effect-codex-app-server/schema";
 import * as CodexErrors from "effect-codex-app-server/errors";
@@ -25,7 +25,12 @@ import { ServerSettingsError } from "@cafecode/contracts";
 import { createModelCapabilities } from "@cafecode/shared/model";
 import {
   AUTH_PROBE_TIMEOUT_MS,
+  DEFAULT_TIMEOUT_MS,
   buildServerProvider,
+  detailFromResult,
+  isCommandMissingCause,
+  parseGenericCliVersion,
+  spawnAndCollect,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
@@ -142,6 +147,93 @@ const toDisplayName = (model: CodexSchema.V2ModelListResponse__Model): string =>
     .replace(/^gpt/i, "GPT") // Handle start with 'gpt' or 'GPT'
     .replace(/-([a-z])/g, (_, c) => "-" + c.toUpperCase());
 };
+
+function makeStaticCodexReasoningCapabilities(input: {
+  readonly defaultEffort: CodexSchema.V2ModelListResponse__ReasoningEffort;
+  readonly supportedEfforts?: ReadonlyArray<CodexSchema.V2ModelListResponse__ReasoningEffort>;
+  readonly supportsFastMode?: boolean;
+}): ModelCapabilities {
+  const supportedEfforts = input.supportedEfforts ?? ["low", "medium", "high", "xhigh"];
+  return createModelCapabilities({
+    optionDescriptors: [
+      {
+        id: "reasoningEffort",
+        label: "Reasoning",
+        type: "select" as const,
+        options: supportedEfforts.map((reasoningEffort) =>
+          reasoningEffort === input.defaultEffort
+            ? {
+                id: reasoningEffort,
+                label: REASONING_EFFORT_LABELS[reasoningEffort],
+                isDefault: true,
+              }
+            : {
+                id: reasoningEffort,
+                label: REASONING_EFFORT_LABELS[reasoningEffort],
+              },
+        ),
+        currentValue: input.defaultEffort,
+      },
+      ...(input.supportsFastMode
+        ? [
+            {
+              id: "fastMode",
+              label: "Fast Mode",
+              type: "boolean" as const,
+            },
+          ]
+        : []),
+    ],
+  });
+}
+
+// Lightweight provider status deliberately avoids `codex app-server`; keep a
+// conservative model fallback so a fresh install still has selectable Codex
+// models before the full app-server diagnostic path has ever populated cache.
+const STATIC_CODEX_MODELS: ReadonlyArray<ServerProviderModel> = [
+  {
+    slug: "gpt-5.5",
+    name: "GPT-5.5",
+    isCustom: false,
+    capabilities: makeStaticCodexReasoningCapabilities({
+      defaultEffort: "medium",
+      supportsFastMode: true,
+    }),
+  },
+  {
+    slug: "gpt-5.4",
+    name: "GPT-5.4",
+    isCustom: false,
+    capabilities: makeStaticCodexReasoningCapabilities({
+      defaultEffort: "medium",
+      supportsFastMode: true,
+    }),
+  },
+  {
+    slug: "gpt-5.4-mini",
+    name: "GPT-5.4-Mini",
+    isCustom: false,
+    capabilities: makeStaticCodexReasoningCapabilities({ defaultEffort: "medium" }),
+  },
+  {
+    slug: "gpt-5.3-codex",
+    name: "GPT-5.3-Codex",
+    isCustom: false,
+    capabilities: makeStaticCodexReasoningCapabilities({ defaultEffort: "medium" }),
+  },
+  {
+    slug: "gpt-5.3-codex-spark",
+    name: "GPT-5.3-Codex-Spark",
+    isCustom: false,
+    capabilities: makeStaticCodexReasoningCapabilities({ defaultEffort: "high" }),
+  },
+  {
+    slug: "gpt-5.2",
+    name: "GPT-5.2",
+    isCustom: false,
+    capabilities: makeStaticCodexReasoningCapabilities({ defaultEffort: "medium" }),
+  },
+];
 
 function parseCodexModelListResponse(
   response: CodexSchema.V2ModelListResponse,
@@ -330,12 +422,108 @@ const emptyCodexModelsFromSettings = (codexSettings: CodexSettings): ServerProvi
       capabilities: null,
     }));
 
+const fallbackCodexModelsFromSettings = (codexSettings: CodexSettings): ServerProvider["models"] =>
+  appendCustomCodexModels(STATIC_CODEX_MODELS, codexSettings.customModels);
+
+const runCodexCommand = Effect.fn("runCodexCommand")(function* (
+  codexSettings: CodexSettings,
+  args: ReadonlyArray<string>,
+  environment: NodeJS.ProcessEnv = process.env,
+) {
+  const resolvedHomePath = codexSettings.homePath ? expandHomePath(codexSettings.homePath) : "";
+  const command = ChildProcess.make(codexSettings.binaryPath, [...args], {
+    env: {
+      ...environment,
+      ...(resolvedHomePath.length > 0 ? { CODEX_HOME: resolvedHomePath } : {}),
+    },
+    shell: process.platform === "win32",
+  });
+  return yield* spawnAndCollect(codexSettings.binaryPath, command);
+});
+
+function codexAuthProbeStatusFromLoginStatusResult(result: {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly code: number;
+}): {
+  readonly status: Exclude<ServerProviderState, "disabled">;
+  readonly auth: ServerProvider["auth"];
+  readonly message?: string;
+} {
+  const output = `${result.stdout}\n${result.stderr}`.trim();
+  const normalized = output.toLowerCase();
+
+  // Keep this parser aligned with upstream Codex CLI `codex login status`.
+  // As of codex-cli 0.133.0, `codex-rs/cli/src/login.rs` prints one of:
+  // "Logged in using ChatGPT", "Logged in using an API key - ...",
+  // "Logged in using access token", or "Not logged in".
+  if (result.code === 0) {
+    if (normalized.includes("chatgpt")) {
+      return {
+        status: "ready",
+        auth: {
+          status: "authenticated",
+          type: "chatgpt",
+          label: "ChatGPT Subscription",
+        },
+      };
+    }
+
+    if (normalized.includes("api key")) {
+      return {
+        status: "ready",
+        auth: {
+          status: "authenticated",
+          type: "apiKey",
+          label: "OpenAI API Key",
+        },
+      };
+    }
+
+    if (normalized.includes("access token")) {
+      return {
+        status: "ready",
+        auth: {
+          status: "authenticated",
+          type: "accessToken",
+          label: "Codex Access Token",
+        },
+      };
+    }
+
+    return {
+      status: "warning",
+      auth: { status: "unknown" },
+      message: output
+        ? `Codex CLI login status returned an unrecognized success response: ${output}`
+        : "Codex CLI login status returned an unrecognized success response.",
+    };
+  }
+
+  if (normalized.includes("not logged in")) {
+    return {
+      status: "error",
+      auth: { status: "unauthenticated" },
+      message: "Codex CLI is not authenticated. Run `codex login` and try again.",
+    };
+  }
+
+  const detail = detailFromResult(result);
+  return {
+    status: "error",
+    auth: { status: "unknown" },
+    message: detail
+      ? `Codex CLI login status check failed. ${detail}`
+      : "Codex CLI login status check failed.",
+  };
+}
+
 const makePendingCodexProvider = (
   codexSettings: CodexSettings,
 ): Effect.Effect<ServerProviderDraft> =>
   Effect.gen(function* () {
     const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
-    const models = emptyCodexModelsFromSettings(codexSettings);
+    const models = fallbackCodexModelsFromSettings(codexSettings);
 
     if (!codexSettings.enabled) {
       return buildServerProvider({
@@ -507,11 +695,159 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   });
 });
 
+export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatus")(function* (
+  codexSettings: CodexSettings,
+  environment: NodeJS.ProcessEnv = process.env,
+): Effect.fn.Return<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> {
+  const checkedAt = DateTime.formatIso(yield* DateTime.now);
+  const models = fallbackCodexModelsFromSettings(codexSettings);
+
+  if (!codexSettings.enabled) {
+    return buildServerProvider({
+      presentation: CODEX_PRESENTATION,
+      enabled: false,
+      checkedAt,
+      models,
+      skills: [],
+      probe: {
+        installed: false,
+        version: null,
+        status: "warning",
+        auth: { status: "unknown" },
+        message: "Codex is disabled in Cafe Code settings.",
+      },
+    });
+  }
+
+  const versionProbe = yield* runCodexCommand(codexSettings, ["--version"], environment).pipe(
+    Effect.timeoutOption(DEFAULT_TIMEOUT_MS),
+    Effect.result,
+  );
+
+  if (Result.isFailure(versionProbe)) {
+    const error = versionProbe.failure;
+    return buildServerProvider({
+      presentation: CODEX_PRESENTATION,
+      enabled: codexSettings.enabled,
+      checkedAt,
+      models,
+      skills: [],
+      probe: {
+        installed: !isCommandMissingCause(error),
+        version: null,
+        status: "error",
+        auth: { status: "unknown" },
+        message: isCommandMissingCause(error)
+          ? "Codex CLI (`codex`) is not installed or not on PATH."
+          : `Failed to execute Codex CLI health check: ${error instanceof Error ? error.message : String(error)}.`,
+      },
+    });
+  }
+
+  if (Option.isNone(versionProbe.success)) {
+    return buildServerProvider({
+      presentation: CODEX_PRESENTATION,
+      enabled: codexSettings.enabled,
+      checkedAt,
+      models,
+      skills: [],
+      probe: {
+        installed: true,
+        version: null,
+        status: "error",
+        auth: { status: "unknown" },
+        message: "Codex CLI is installed but failed to run. Timed out while running command.",
+      },
+    });
+  }
+
+  const versionResult = versionProbe.success.value;
+  const parsedVersion = parseGenericCliVersion(`${versionResult.stdout}\n${versionResult.stderr}`);
+  if (versionResult.code !== 0) {
+    const detail = detailFromResult(versionResult);
+    return buildServerProvider({
+      presentation: CODEX_PRESENTATION,
+      enabled: codexSettings.enabled,
+      checkedAt,
+      models,
+      skills: [],
+      probe: {
+        installed: true,
+        version: parsedVersion,
+        status: "error",
+        auth: { status: "unknown" },
+        message: detail
+          ? `Codex CLI is installed but failed to run. ${detail}`
+          : "Codex CLI is installed but failed to run.",
+      },
+    });
+  }
+
+  const loginStatusProbe = yield* runCodexCommand(
+    codexSettings,
+    ["login", "status"],
+    environment,
+  ).pipe(Effect.timeoutOption(DEFAULT_TIMEOUT_MS), Effect.result);
+
+  if (Result.isFailure(loginStatusProbe)) {
+    const error = loginStatusProbe.failure;
+    return buildServerProvider({
+      presentation: CODEX_PRESENTATION,
+      enabled: codexSettings.enabled,
+      checkedAt,
+      models,
+      skills: [],
+      probe: {
+        installed: true,
+        version: parsedVersion,
+        status: "error",
+        auth: { status: "unknown" },
+        message: `Failed to execute Codex CLI login status check: ${error instanceof Error ? error.message : String(error)}.`,
+      },
+    });
+  }
+
+  if (Option.isNone(loginStatusProbe.success)) {
+    return buildServerProvider({
+      presentation: CODEX_PRESENTATION,
+      enabled: codexSettings.enabled,
+      checkedAt,
+      models,
+      skills: [],
+      probe: {
+        installed: true,
+        version: parsedVersion,
+        status: "warning",
+        auth: { status: "unknown" },
+        message: "Codex CLI login status check timed out. Provider sessions may still work.",
+      },
+    });
+  }
+
+  const accountStatus = codexAuthProbeStatusFromLoginStatusResult(loginStatusProbe.success.value);
+  return buildServerProvider({
+    presentation: CODEX_PRESENTATION,
+    enabled: codexSettings.enabled,
+    checkedAt,
+    models,
+    skills: [],
+    probe: {
+      installed: true,
+      version: parsedVersion,
+      status: accountStatus.status,
+      auth: accountStatus.auth,
+      ...(accountStatus.message ? { message: accountStatus.message } : {}),
+    },
+  });
+});
+
 // NOTE: the singleton `CodexProviderLive` Layer has been removed as part of
 // the per-instance-driver refactor. `CodexDriver.create()` builds a managed
 // snapshot per instance (each with its own `CodexSettings`) and hands the
 // resulting `ServerProviderShape` back as `ProviderInstance.snapshot`.
 //
-// The `makePendingCodexProvider` and `checkCodexProviderStatus` helpers are
-// re-exported for use by `CodexDriver`.
+// `CodexDriver` uses `makePendingCodexProvider` plus the lightweight
+// `checkCodexCliProviderStatus` path for normal startup snapshots. The full
+// app-server status probe remains exported for targeted diagnostics and tests
+// that need account/model metadata from Codex RPC itself.
 export { makePendingCodexProvider };

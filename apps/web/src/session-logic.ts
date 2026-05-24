@@ -49,6 +49,7 @@ export const PROVIDER_OPTIONS: Array<{
 
 export interface WorkLogEntry {
   id: string;
+  turnId?: TurnId | null;
   createdAt: string;
   label: string;
   detail?: string;
@@ -550,6 +551,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   const toolCallId = isTaskActivity ? null : extractToolCallId(payload);
   const entry: DerivedWorkLogEntry = {
     id: activity.id,
+    turnId: activity.turnId,
     createdAt: activity.createdAt,
     label: taskLabel || activity.summary,
     tone:
@@ -616,6 +618,9 @@ function shouldCollapseToolLifecycleEntries(
     return false;
   }
   if (next.activityKind !== "tool.updated" && next.activityKind !== "tool.completed") {
+    return false;
+  }
+  if (previous.turnId !== next.turnId) {
     return false;
   }
   if (previous.activityKind === "tool.completed") {
@@ -1294,6 +1299,35 @@ export function deriveCompletionDividerBeforeEntryId(
     }
   }
   return inRangeMatch ?? fallbackMatch;
+}
+
+export function deriveCompletionDividerAfterEntryId(
+  timelineEntries: ReadonlyArray<TimelineEntry>,
+  latestTurn: Pick<
+    OrchestrationLatestTurn,
+    "turnId" | "assistantMessageId" | "startedAt" | "completedAt"
+  > | null,
+): string | null {
+  if (!latestTurn?.startedAt || !latestTurn.completedAt) {
+    return null;
+  }
+
+  let latestSameTurnEntryId: string | null = null;
+  for (const timelineEntry of timelineEntries) {
+    if (
+      (timelineEntry.kind === "message" && timelineEntry.message.turnId === latestTurn.turnId) ||
+      (timelineEntry.kind === "work" && timelineEntry.entry.turnId === latestTurn.turnId) ||
+      (timelineEntry.kind === "proposed-plan" &&
+        timelineEntry.proposedPlan.turnId === latestTurn.turnId)
+    ) {
+      latestSameTurnEntryId = timelineEntry.id;
+    }
+  }
+  if (latestSameTurnEntryId !== null) {
+    return latestSameTurnEntryId;
+  }
+
+  return deriveCompletionDividerBeforeEntryId(timelineEntries, latestTurn);
 }
 
 export function inferCheckpointTurnCountByTurnId(

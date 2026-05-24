@@ -34,7 +34,7 @@ import { makeCodexTextGeneration } from "../../textGeneration/CodexTextGeneratio
 import { ServerConfig } from "../../config.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
-import { checkCodexProviderStatus, makePendingCodexProvider } from "../Layers/CodexProvider.ts";
+import { checkCodexCliProviderStatus, makePendingCodexProvider } from "../Layers/CodexProvider.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
@@ -53,9 +53,9 @@ import {
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("codex");
-// A Codex status refresh starts `codex app-server`, which can touch remote
-// Codex/ChatGPT endpoints. Keep it user-driven instead of running it forever
-// while the desktop app is idle in the background.
+// Snapshot refresh remains manual because even the lightweight CLI status
+// path can touch local auth state. Real chat turns own the app-server
+// lifecycle and should be the only path that starts long-lived Codex RPC.
 const PERIODIC_SNAPSHOT_REFRESH_INTERVAL: null = null;
 const UPDATE = makePackageManagedProviderMaintenanceResolver({
   provider: DRIVER_KIND,
@@ -63,6 +63,7 @@ const UPDATE = makePackageManagedProviderMaintenanceResolver({
   homebrewFormula: "codex",
   nativeUpdate: null,
 });
+const DEFAULT_SHADOW_HOME_ROOT = "~/.cafe-code/codex-homes";
 
 /**
  * Services the driver needs to materialize an instance. Surfaced as the
@@ -100,6 +101,25 @@ const withInstanceIdentity =
     runtimeCapabilities: { ...snapshot.runtimeCapabilities, liveSteer: "supported" },
   });
 
+function sanitizeShadowHomeSegment(value: string): string {
+  const sanitized = value.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^[._-]+|[._-]+$/g, "");
+  return sanitized.length > 0 ? sanitized : "codex";
+}
+
+export function withDefaultCodexShadowHome(input: {
+  readonly instanceId: ProviderInstance["instanceId"];
+  readonly config: CodexSettings;
+}): CodexSettings {
+  if (input.config.homePath.trim().length > 0 || input.config.shadowHomePath.trim().length > 0) {
+    return input.config;
+  }
+
+  return {
+    ...input.config,
+    shadowHomePath: `${DEFAULT_SHADOW_HOME_ROOT}/${sanitizeShadowHomeSegment(String(input.instanceId))}`,
+  };
+}
+
 export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
   driverKind: DRIVER_KIND,
   metadata: {
@@ -114,7 +134,8 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const httpClient = yield* HttpClient.HttpClient;
       const eventLoggers = yield* ProviderEventLoggers;
       const processEnv = mergeProviderInstanceEnvironment(environment);
-      const homeLayout = yield* resolveCodexHomeLayout(config);
+      const layoutConfig = withDefaultCodexShadowHome({ instanceId, config });
+      const homeLayout = yield* resolveCodexHomeLayout(layoutConfig);
       const continuationIdentity = codexContinuationIdentity(homeLayout);
       const stampIdentity = withInstanceIdentity({
         instanceId,
@@ -122,19 +143,29 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         accentColor,
         continuationGroupKey: continuationIdentity.continuationKey,
       });
-      yield* materializeCodexShadowHome(homeLayout).pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProviderDriverError({
-              driver: DRIVER_KIND,
-              instanceId,
-              detail: cause.message,
-              cause,
-            }),
-        ),
-      );
+      if (enabled) {
+        yield* materializeCodexShadowHome(homeLayout).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderDriverError({
+                driver: DRIVER_KIND,
+                instanceId,
+                detail: cause.message,
+                cause,
+              }),
+          ),
+        );
+      }
+      yield* Effect.logInfo("codex.home.layout", {
+        instanceId,
+        mode: homeLayout.mode,
+        sharedHomePath: homeLayout.sharedHomePath,
+        effectiveHomePath: homeLayout.effectiveHomePath ?? null,
+        defaultShadowHomeApplied: layoutConfig !== config,
+        sqliteState: homeLayout.mode === "authOverlay" ? "shadow-local" : "direct",
+      });
       const effectiveConfig = {
-        ...config,
+        ...layoutConfig,
         enabled,
         homePath: homeLayout.effectiveHomePath ?? "",
       } satisfies CodexSettings;
@@ -147,8 +178,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // channels at construction time — their failure modes are all on the
       // per-operation closures they return. No `mapError` wrapper is needed
       // here; the registry only has to worry about snapshot-build and
-      // spawner-availability failures surfaced from `checkCodexProviderStatus`
-      // below.
+      // spawner-availability failures surfaced from the status probe below.
       const adapter = yield* makeCodexAdapter(effectiveConfig, {
         instanceId,
         environment: processEnv,
@@ -158,9 +188,13 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
 
       // Build a managed snapshot whose settings never change — mutations come
       // in as instance rebuilds from the registry rather than in-place
-      // updates. Pre-provide `ChildProcessSpawner` so the check fits
-      // `makeManagedServerProvider.checkProvider`'s `R = never`.
-      const checkProvider = checkCodexProviderStatus(effectiveConfig, undefined, processEnv).pipe(
+      // updates. The snapshot health check intentionally mirrors upstream
+      // Codex CLI's cheap `codex --version` + `codex login status` path.
+      // Starting `codex app-server` just to draw the provider badge can run
+      // model/skill metadata requests and block for long enough to show a
+      // false "provider unavailable" warning before the user has sent a
+      // message. Real sessions still use the app-server lifecycle below.
+      const checkProvider = checkCodexCliProviderStatus(effectiveConfig, processEnv).pipe(
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       );

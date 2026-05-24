@@ -684,6 +684,69 @@ const make = Effect.gen(function* () {
     };
   });
 
+  const markThreadRunningFromSendTurnResult = Effect.fn("markThreadRunningFromSendTurnResult")(
+    function* (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) {
+      const thread = yield* resolveThread(input.threadId);
+      const providerSessions = yield* providerService
+        .listSessions()
+        .pipe(Effect.catchCause(() => Effect.succeed<ReadonlyArray<ProviderSession>>([])));
+      const activeProviderSession = providerSessions.find(
+        (session) => session.threadId === input.threadId,
+      );
+      const currentSession = thread?.session ?? null;
+
+      if (
+        currentSession?.status === "running" &&
+        currentSession.activeTurnId !== null &&
+        currentSession.activeTurnId !== input.turnId
+      ) {
+        yield* Effect.logWarning("provider command reactor skipped stale sendTurn running marker", {
+          threadId: input.threadId,
+          currentActiveTurnId: currentSession.activeTurnId,
+          sendTurnActiveTurnId: input.turnId,
+        });
+        return;
+      }
+
+      const providerName = activeProviderSession?.provider ?? currentSession?.providerName;
+      if (providerName === undefined) {
+        yield* Effect.logWarning(
+          "provider command reactor could not mark sendTurn result running",
+          {
+            threadId: input.threadId,
+            turnId: input.turnId,
+            reason: "missing-provider-session",
+          },
+        );
+        return;
+      }
+
+      const providerInstanceId =
+        activeProviderSession?.providerInstanceId ?? currentSession?.providerInstanceId;
+      const runtimeMode =
+        activeProviderSession?.runtimeMode ??
+        currentSession?.runtimeMode ??
+        thread?.runtimeMode ??
+        DEFAULT_RUNTIME_MODE;
+      const updatedAt = DateTime.formatIso(yield* DateTime.now);
+
+      yield* setThreadSession({
+        threadId: input.threadId,
+        session: {
+          threadId: input.threadId,
+          status: "running",
+          providerName,
+          ...(providerInstanceId !== undefined ? { providerInstanceId } : {}),
+          runtimeMode,
+          activeTurnId: input.turnId,
+          lastError: null,
+          updatedAt,
+        },
+        createdAt: updatedAt,
+      });
+    },
+  );
+
   const maybeGenerateAndRenameWorktreeBranchForFirstTurn = Effect.fn(
     "maybeGenerateAndRenameWorktreeBranchForFirstTurn",
   )(function* (input: {
@@ -897,9 +960,16 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    yield* providerService
-      .sendTurn(sendTurnRequest.value)
-      .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
+    yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+      Effect.tap((turn) =>
+        markThreadRunningFromSendTurnResult({
+          threadId: event.payload.threadId,
+          turnId: turn.turnId,
+        }),
+      ),
+      Effect.catchCause(recoverTurnStartFailure),
+      Effect.forkScoped,
+    );
   });
 
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (

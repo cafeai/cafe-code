@@ -857,6 +857,14 @@ function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error"
   return "completed" as const;
 }
 
+function maxIso(left: string | null, right: string): string {
+  return left !== null && left > right ? left : right;
+}
+
+function latestTurnStateIsTerminal(state: NonNullable<Thread["latestTurn"]>["state"]): boolean {
+  return state === "completed" || state === "error" || state === "interrupted";
+}
+
 function sessionStatusToSettledLatestTurnState(status: OrchestrationSessionStatus) {
   if (status === "error") {
     return "error" as const;
@@ -1512,7 +1520,9 @@ function applyEnvironmentOrchestrationEvent(
                       : event.payload.createdAt,
                   sourceProposedPlan: thread.pendingSourceProposedPlan,
                   completedAt:
-                    terminalState !== null ? (thread.latestTurn?.completedAt ?? null) : null,
+                    terminalState !== null
+                      ? maxIso(thread.latestTurn?.completedAt ?? null, event.payload.updatedAt)
+                      : null,
                   assistantMessageId: event.payload.messageId,
                 });
               })()
@@ -1647,14 +1657,28 @@ function applyEnvironmentOrchestrationEvent(
         const latestTurn =
           thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId
             ? (() => {
+                const preserveRunningForMissingProviderDiff =
+                  event.payload.status === "missing" &&
+                  thread.latestTurn?.state === "running" &&
+                  thread.latestTurn.completedAt === null;
+                const preserveCompletedForMissingProviderDiff =
+                  event.payload.status === "missing" && thread.latestTurn?.state === "completed";
                 return buildLatestTurn({
                   previous: thread.latestTurn,
                   turnId: event.payload.turnId,
-                  state: checkpointStatusToLatestTurnState(event.payload.status),
+                  state: preserveRunningForMissingProviderDiff
+                    ? "running"
+                    : preserveCompletedForMissingProviderDiff
+                      ? "completed"
+                      : checkpointStatusToLatestTurnState(event.payload.status),
                   requestedAt: thread.latestTurn?.requestedAt ?? event.payload.completedAt,
                   startedAt: thread.latestTurn?.startedAt ?? event.payload.completedAt,
-                  completedAt: event.payload.completedAt,
-                  assistantMessageId: event.payload.assistantMessageId,
+                  completedAt: preserveRunningForMissingProviderDiff
+                    ? null
+                    : maxIso(thread.latestTurn?.completedAt ?? null, event.payload.completedAt),
+                  assistantMessageId: preserveRunningForMissingProviderDiff
+                    ? (thread.latestTurn?.assistantMessageId ?? null)
+                    : event.payload.assistantMessageId,
                   sourceProposedPlan: thread.pendingSourceProposedPlan,
                 });
               })()
@@ -1726,9 +1750,28 @@ function applyEnvironmentOrchestrationEvent(
         ]
           .toSorted(compareActivities)
           .slice(-MAX_THREAD_ACTIVITIES);
+        const latestTurn =
+          event.payload.activity.turnId !== null &&
+          thread.latestTurn?.turnId === event.payload.activity.turnId &&
+          latestTurnStateIsTerminal(thread.latestTurn.state)
+            ? buildLatestTurn({
+                previous: thread.latestTurn,
+                turnId: thread.latestTurn.turnId,
+                state: thread.latestTurn.state,
+                requestedAt: thread.latestTurn.requestedAt,
+                startedAt: thread.latestTurn.startedAt,
+                completedAt: maxIso(
+                  thread.latestTurn.completedAt,
+                  event.payload.activity.createdAt,
+                ),
+                assistantMessageId: thread.latestTurn.assistantMessageId,
+                sourceProposedPlan: thread.pendingSourceProposedPlan,
+              })
+            : thread.latestTurn;
         return {
           ...thread,
           activities,
+          latestTurn,
           updatedAt: event.occurredAt,
         };
       });

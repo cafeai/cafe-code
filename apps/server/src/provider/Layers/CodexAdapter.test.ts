@@ -153,7 +153,9 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     return Stream.fromQueue(this.eventQueue);
   }
 
-  close = Effect.promise(() => this.closeImpl());
+  close = Effect.promise(() => this.closeImpl()).pipe(
+    Effect.andThen(Queue.shutdown(this.eventQueue)),
+  );
 
   emit(event: ProviderEvent) {
     return Queue.offer(this.eventQueue, event).pipe(Effect.asVoid);
@@ -668,6 +670,42 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("maps Codex warning notifications to runtime.warning", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-warning"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "warning",
+        turnId: asTurnId("turn-1"),
+        payload: {
+          message: "Codex runtime is retrying a transient provider transport failure.",
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      assert.equal(firstEvent.value.type, "runtime.warning");
+      if (firstEvent.value.type !== "runtime.warning") {
+        return;
+      }
+      assert.equal(firstEvent.value.turnId, "turn-1");
+      assert.equal(
+        firstEvent.value.payload.message,
+        "Codex runtime is retrying a transient provider transport failure.",
+      );
+    }),
+  );
+
   it.effect("maps process stderr notifications to runtime.warning", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
@@ -699,6 +737,96 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         firstEvent.value.payload.message,
         "The filename or extension is too long. (os error 206)",
       );
+    }),
+  );
+
+  it.effect("maps Codex turn-start event starvation diagnostics to runtime.warning", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-turn-start-no-event"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "codex.turnStart/noRuntimeEventYet",
+        turnId: asTurnId("turn-1"),
+        message: "Codex app-server accepted turn/start but has not emitted a turn event yet.",
+        payload: {
+          providerThreadId: "provider-thread-1",
+          ackLatencyMs: 4,
+          firstNotificationMethod: null,
+          firstTurnEventMethod: null,
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      assert.equal(firstEvent.value.type, "runtime.warning");
+      if (firstEvent.value.type !== "runtime.warning") {
+        return;
+      }
+      assert.equal(firstEvent.value.turnId, "turn-1");
+      assert.equal(
+        firstEvent.value.payload.message,
+        "Codex app-server accepted turn/start but has not emitted a turn event yet.",
+      );
+      assert.deepEqual(firstEvent.value.payload.detail, {
+        providerThreadId: "provider-thread-1",
+        ackLatencyMs: 4,
+        firstNotificationMethod: null,
+        firstTurnEventMethod: null,
+      });
+    }),
+  );
+
+  it.effect("maps Codex turn-start acceptance diagnostics to task progress", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-turn-start-accepted"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "codex.turnStart/accepted",
+        turnId: asTurnId("turn-1"),
+        message: "Codex app-server accepted turn/start.",
+        payload: {
+          providerThreadId: "provider-thread-1",
+          ackLatencyMs: 4,
+          semantics:
+            "turn/start is an acknowledgement; turn/started must arrive later from the app-server listener.",
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      assert.equal(firstEvent.value.type, "task.progress");
+      if (firstEvent.value.type !== "task.progress") {
+        return;
+      }
+      assert.equal(firstEvent.value.turnId, "turn-1");
+      assert.equal(firstEvent.value.payload.taskId, "codex-turn-start:turn-1");
+      assert.equal(firstEvent.value.payload.description, "Codex app-server accepted turn/start.");
+      assert.deepEqual(firstEvent.value.payload.usage, {
+        providerThreadId: "provider-thread-1",
+        ackLatencyMs: 4,
+        semantics:
+          "turn/start is an acknowledgement; turn/started must arrive later from the app-server listener.",
+      });
     }),
   );
 
@@ -1058,6 +1186,220 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 });
+
+it.effect("persists Codex HTTP fallback policy and applies it to a restarted adapter", () =>
+  Effect.gen(function* () {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cafecode-codex-transport-policy-"));
+    const policyPath = path.join(tempDir, "userdata", "codex-transport-policy.json");
+    let scope1Closed = false;
+    let scope2Closed = false;
+
+    const makeLayer = (runtimeFactory: ReturnType<typeof makeRuntimeFactory>) =>
+      Layer.effect(
+        CodexAdapter,
+        Effect.gen(function* () {
+          const codexConfig = decodeCodexSettings({});
+          return yield* makeCodexAdapter(codexConfig, {
+            makeRuntime: runtimeFactory.factory,
+          });
+        }),
+      ).pipe(
+        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), tempDir)),
+        Layer.provideMerge(ServerSettingsService.layerTest()),
+        Layer.provideMerge(providerSessionDirectoryTestLayer),
+        Layer.provideMerge(NodeServices.layer),
+      );
+
+    const scope1 = yield* Scope.make("sequential");
+    const scope2 = yield* Scope.make("sequential");
+    try {
+      const runtimeFactory1 = makeRuntimeFactory();
+      const context1 = yield* Layer.buildWithScope(makeLayer(runtimeFactory1), scope1);
+      const adapter1 = yield* Effect.service(CodexAdapter).pipe(Effect.provide(context1));
+
+      yield* adapter1.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-policy-1"),
+        runtimeMode: "full-access",
+      });
+      assert.equal(runtimeFactory1.factory.mock.calls[0]?.[0].transportPolicy, undefined);
+
+      const runtime1 = runtimeFactory1.lastRuntime;
+      assert.ok(runtime1);
+
+      const retryFiber = yield* Stream.runHead(adapter1.streamEvents).pipe(Effect.forkChild);
+      yield* runtime1.emit({
+        id: asEventId("evt-policy-retry"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-policy-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "error",
+        turnId: asTurnId("turn-policy-1"),
+        message: "Reconnecting... 5/5",
+        payload: {
+          error: {
+            message: "Reconnecting... 5/5",
+            additionalDetails:
+              "stream disconnected before completion: websocket closed by server before response.completed",
+          },
+          willRetry: true,
+        },
+      } satisfies ProviderEvent);
+
+      const retryWarning = yield* Fiber.join(retryFiber);
+      assert.equal(retryWarning._tag, "Some");
+      assert.equal(fs.existsSync(policyPath), false);
+
+      const warningFiber = yield* Stream.runHead(adapter1.streamEvents).pipe(Effect.forkChild);
+      yield* runtime1.emit({
+        id: asEventId("evt-policy-warning"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-policy-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "warning",
+        turnId: asTurnId("turn-policy-1"),
+        payload: {
+          message:
+            "Falling back from WebSockets to HTTPS transport. stream disconnected before completion: websocket closed by server before response.completed",
+        },
+      } satisfies ProviderEvent);
+
+      const warning = yield* Fiber.join(warningFiber);
+      assert.equal(warning._tag, "Some");
+      assert.equal(fs.existsSync(policyPath), true);
+      const persisted = fs.readFileSync(policyPath, "utf8");
+      assert.match(persisted, /"responsesWebsockets": "disabled"/);
+      assert.doesNotMatch(persisted, /prompt text/i);
+
+      yield* Scope.close(scope1, Exit.void);
+      scope1Closed = true;
+
+      const runtimeFactory2 = makeRuntimeFactory();
+      const context2 = yield* Layer.buildWithScope(makeLayer(runtimeFactory2), scope2);
+      const adapter2 = yield* Effect.service(CodexAdapter).pipe(Effect.provide(context2));
+
+      yield* adapter2.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-policy-2"),
+        runtimeMode: "full-access",
+      });
+
+      const launchOptions = runtimeFactory2.factory.mock.calls[0]?.[0];
+      assert.equal(launchOptions?.transportPolicy?.responsesWebsockets, "disabled");
+      assert.equal(
+        launchOptions?.transportPolicy?.reason,
+        "responses_websocket_stream_disconnected",
+      );
+    } finally {
+      if (!scope1Closed) {
+        yield* Scope.close(scope1, Exit.void).pipe(Effect.ignore);
+      }
+      if (!scope2Closed) {
+        yield* Scope.close(scope2, Exit.void).pipe(Effect.ignore);
+      }
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  }),
+);
+
+it.effect("retires pre-policy Codex sessions after a fallback turn completes", () =>
+  Effect.gen(function* () {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cafecode-codex-transport-retire-"));
+    const threadId = asThreadId("thread-policy-retire");
+    const runtimeFactory = makeRuntimeFactory();
+    const scope = yield* Scope.make("sequential");
+    let scopeClosed = false;
+
+    try {
+      const layer = Layer.effect(
+        CodexAdapter,
+        Effect.gen(function* () {
+          const codexConfig = decodeCodexSettings({});
+          return yield* makeCodexAdapter(codexConfig, {
+            makeRuntime: runtimeFactory.factory,
+          });
+        }),
+      ).pipe(
+        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), tempDir)),
+        Layer.provideMerge(ServerSettingsService.layerTest()),
+        Layer.provideMerge(providerSessionDirectoryTestLayer),
+        Layer.provideMerge(NodeServices.layer),
+      );
+      const context = yield* Layer.buildWithScope(layer, scope);
+      const adapter = yield* Effect.service(CodexAdapter).pipe(Effect.provide(context));
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      assert.equal(runtimeFactory.factory.mock.calls[0]?.[0].transportPolicy, undefined);
+
+      const runtime = runtimeFactory.lastRuntime;
+      assert.ok(runtime);
+
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* runtime.emit({
+        id: asEventId("evt-policy-retire-warning"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "warning",
+        payload: {
+          message:
+            "Falling back from WebSockets to HTTPS transport. stream disconnected before completion: websocket closed by server before response.completed",
+        },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-policy-retire-completed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: asTurnId("turn-policy-retire"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "turn/completed",
+        payload: {
+          threadId: "provider-thread-policy-retire",
+          turn: {
+            id: "turn-policy-retire",
+            items: [],
+            status: "completed",
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      assert.equal(runtimeEvents[0]?.type, "runtime.warning");
+      assert.equal(runtimeEvents[1]?.type, "turn.completed");
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      assert.equal(runtime.closeImpl.mock.calls.length, 1);
+      assert.equal(yield* adapter.hasSession(threadId), false);
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      assert.equal(
+        runtimeFactory.factory.mock.calls[1]?.[0].transportPolicy?.responsesWebsockets,
+        "disabled",
+      );
+    } finally {
+      if (!scopeClosed) {
+        yield* Scope.close(scope, Exit.void).pipe(Effect.ignore);
+      }
+      scopeClosed = true;
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  }),
+);
 
 const scopedLifecycleRuntimeFactory = makeScopedRuntimeFactory();
 const scopedLifecycleLayer = it.layer(

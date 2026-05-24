@@ -182,6 +182,45 @@ function hasRenderableAssistantText(text: string | undefined): boolean {
   return (text?.trim().length ?? 0) > 0;
 }
 
+function normalizedAssistantDedupText(text: string | undefined): string | undefined {
+  const trimmed = text?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
+function isCodexSnapshotBackfillEvent(event: ProviderRuntimeEvent): boolean {
+  return String(event.eventId).startsWith("codex-snapshot:");
+}
+
+function hasSameTurnAssistantTextMessage(
+  messages: ReadonlyArray<OrchestrationMessage>,
+  input: {
+    readonly turnId: TurnId;
+    readonly text: string | undefined;
+    readonly excludeMessageId: MessageId;
+  },
+): boolean {
+  const normalizedText = normalizedAssistantDedupText(input.text);
+  if (!normalizedText) {
+    return false;
+  }
+
+  for (const message of messages) {
+    if (message.id === input.excludeMessageId) {
+      continue;
+    }
+    if (message.role !== "assistant" || message.turnId !== input.turnId || message.streaming) {
+      continue;
+    }
+    if ((message.attachments?.length ?? 0) > 0) {
+      continue;
+    }
+    if (normalizedAssistantDedupText(message.text) === normalizedText) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function proposedPlanIdForTurn(threadId: ThreadId, turnId: TurnId): string {
   return `plan:${threadId}:turn:${turnId}`;
 }
@@ -280,6 +319,8 @@ function runtimeEventCarriesActiveTurnWork(event: ProviderRuntimeEvent): boolean
     case "turn.proposed.delta":
     case "item.started":
     case "item.updated":
+    case "task.started":
+    case "task.progress":
       return true;
     default:
       return false;
@@ -1377,12 +1418,18 @@ const make = Effect.gen(function* () {
         runtimeThreadStateAffectsSession(event.payload.state)
           ? event.payload.state
           : undefined;
-      const eventCarriesActiveTurnWork =
-        activeTurnId !== null &&
+      const eventMatchesTrackedActiveTurn =
+        activeTurnId !== null && eventTurnId !== undefined && sameId(activeTurnId, eventTurnId);
+      const eventResumesLatestCompletedTurn =
+        activeTurnId === null &&
         eventTurnId !== undefined &&
-        sameId(activeTurnId, eventTurnId) &&
+        thread.latestTurn?.turnId === eventTurnId &&
+        thread.latestTurn.state === "completed";
+      const eventCarriesActiveTurnWork =
+        eventTurnId !== undefined &&
         !conflictsWithActiveTurn &&
-        runtimeEventCarriesActiveTurnWork(event);
+        runtimeEventCarriesActiveTurnWork(event) &&
+        (eventMatchesTrackedActiveTurn || eventResumesLatestCompletedTurn);
 
       if (
         event.type === "session.started" ||
@@ -1440,6 +1487,8 @@ const make = Effect.gen(function* () {
             case "turn.proposed.delta":
             case "item.started":
             case "item.updated":
+            case "task.started":
+            case "task.progress":
               return "running";
             case "turn.started":
               return "running";
@@ -1654,6 +1703,16 @@ const make = Effect.gen(function* () {
           () => assistantCompletion.messageId,
         );
         const existingAssistantMessage = findMessageById(messages, assistantMessageId);
+        const shouldSkipDuplicateSnapshotCompletion =
+          Option.isNone(activeAssistantMessageId) &&
+          turnId !== undefined &&
+          existingAssistantMessage === undefined &&
+          isCodexSnapshotBackfillEvent(event) &&
+          hasSameTurnAssistantTextMessage(messages, {
+            turnId,
+            text: assistantCompletion.fallbackText,
+            excludeMessageId: assistantMessageId,
+          });
         const shouldApplyFallbackCompletionText =
           !existingAssistantMessage || existingAssistantMessage.text.length === 0;
 
@@ -1663,7 +1722,7 @@ const make = Effect.gen(function* () {
           existingAssistantMessage !== undefined &&
           (assistantCompletion.fallbackText?.trim().length ?? 0) === 0;
 
-        if (!shouldSkipRedundantCompletion) {
+        if (!shouldSkipRedundantCompletion && !shouldSkipDuplicateSnapshotCompletion) {
           if (turnId && Option.isNone(activeAssistantMessageId)) {
             yield* rememberAssistantMessageId(thread.id, turnId, assistantMessageId);
           }

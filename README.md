@@ -4,6 +4,8 @@
 
 Made in Japan with love.
 
+**Warning**: Large parts of the application are currently under development and have been completely rewritten. It may take some time for the system to become stable.
+
 _Cafe Code is very small, barely does a thing at all. Chat goes in and chat comes out, soft and sweet, without a shout._
 
 Cafe Code is a tiny desktop GUI for coding agents. It is a fork of [T3 Code](https://github.com/pingdotgg/t3code), with a basket of bug fixes, a little sweep-up, and some very opinionated trimming for people who want the agent chat and not much else.
@@ -38,7 +40,9 @@ dashboard, a project-management suite, or a museum of buttons, no.
 
 This is the practical working list. It will probably get cleaned up later.
 
+- Completely rewrote the lifecycle system to be more inline with Codex and Claude.
 - Numerous bug fixes.
+- Excessive debugging information.
 - Rebranded the app around Cafe Code.
 - Moved local app data into `~/.cafe-code`.
 - Removed the in-app terminal drawer and terminal UI.

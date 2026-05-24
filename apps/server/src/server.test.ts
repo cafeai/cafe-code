@@ -786,20 +786,16 @@ const bootstrapBrowserSession = (
   },
 ) =>
   Effect.gen(function* () {
-    const bootstrapUrl = yield* getHttpServerUrl("/api/auth/bootstrap");
-    const response = yield* Effect.promise(() =>
-      fetch(bootstrapUrl, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...options?.headers,
-        },
-        body: JSON.stringify({
-          credential,
-        }),
+    const response = yield* HttpClient.post("/api/auth/bootstrap", {
+      headers: {
+        "content-type": "application/json",
+        ...options?.headers,
+      },
+      body: HttpBody.jsonUnsafe({
+        credential,
       }),
-    );
-    const body = (yield* Effect.promise(() => response.json())) as {
+    });
+    const body = (yield* response.json) as {
       readonly authenticated: boolean;
       readonly sessionMethod: string;
       readonly expiresAt: string;
@@ -807,7 +803,7 @@ const bootstrapBrowserSession = (
     return {
       response,
       body,
-      cookie: response.headers.get("set-cookie"),
+      cookie: getHeader(response.headers, "set-cookie"),
     };
   });
 
@@ -818,20 +814,16 @@ const bootstrapBearerSession = (
   },
 ) =>
   Effect.gen(function* () {
-    const bootstrapUrl = yield* getHttpServerUrl("/api/auth/bootstrap/bearer");
-    const response = yield* Effect.promise(() =>
-      fetch(bootstrapUrl, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...options?.headers,
-        },
-        body: JSON.stringify({
-          credential,
-        }),
+    const response = yield* HttpClient.post("/api/auth/bootstrap/bearer", {
+      headers: {
+        "content-type": "application/json",
+        ...options?.headers,
+      },
+      body: HttpBody.jsonUnsafe({
+        credential,
       }),
-    );
-    const body = (yield* Effect.promise(() => response.json())) as {
+    });
+    const body = (yield* response.json) as {
       readonly authenticated: boolean;
       readonly sessionMethod: string;
       readonly expiresAt: string;
@@ -851,7 +843,7 @@ class AuthenticationGetterError extends Data.TaggedError("AuthenticationGetterEr
 const getAuthenticatedSessionCookieHeader = (credential = defaultDesktopBootstrapToken) =>
   Effect.gen(function* () {
     const { response, cookie } = yield* bootstrapBrowserSession(credential);
-    if (!response.ok) {
+    if (response.status < 200 || response.status >= 300) {
       return yield* new AuthenticationGetterError({
         message: `Expected bootstrap session response to succeed, got ${response.status}`,
       });
@@ -869,7 +861,7 @@ const getAuthenticatedSessionCookieHeader = (credential = defaultDesktopBootstra
 const getAuthenticatedBearerSessionToken = (credential = defaultDesktopBootstrapToken) =>
   Effect.gen(function* () {
     const { response, body } = yield* bootstrapBearerSession(credential);
-    if (!response.ok) {
+    if (response.status < 200 || response.status >= 300) {
       return yield* new AuthenticationGetterError({
         message: `Expected bearer bootstrap response to succeed, got ${response.status}`,
       });
@@ -900,14 +892,32 @@ const splitHeaderTokens = (value: string | null) =>
     .filter((token) => token.length > 0)
     .toSorted();
 
-const assertBrowserApiCorsHeaders = (headers: Headers) => {
-  assert.equal(headers.get("access-control-allow-origin"), "*");
-  assert.deepEqual(splitHeaderTokens(headers.get("access-control-allow-methods")), [
+type HeaderBag = Headers | Record<string, string | ReadonlyArray<string> | undefined>;
+
+const getHeader = (headers: HeaderBag, name: string): string | null => {
+  if ("get" in headers && typeof headers.get === "function") {
+    return headers.get(name);
+  }
+
+  const headerRecord = headers as Record<string, string | ReadonlyArray<string> | undefined>;
+  const value =
+    headerRecord[name] ??
+    headerRecord[name.toLowerCase()] ??
+    headerRecord[name.replace(/[A-Z]/g, (match) => `-${match.toLowerCase()}`)];
+  if (typeof value === "string") {
+    return value;
+  }
+  return value ? value.join(",") : null;
+};
+
+const assertBrowserApiCorsHeaders = (headers: HeaderBag) => {
+  assert.equal(getHeader(headers, "access-control-allow-origin"), "*");
+  assert.deepEqual(splitHeaderTokens(getHeader(headers, "access-control-allow-methods")), [
     "GET",
     "OPTIONS",
     "POST",
   ]);
-  assert.deepEqual(splitHeaderTokens(headers.get("access-control-allow-headers")), [
+  assert.deepEqual(splitHeaderTokens(getHeader(headers, "access-control-allow-headers")), [
     "authorization",
     "b3",
     "content-type",

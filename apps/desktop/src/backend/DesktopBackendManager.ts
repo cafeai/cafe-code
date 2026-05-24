@@ -29,6 +29,11 @@ import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
+import {
+  matchesDesktopBackendProcess,
+  reapMatchingUnixProcesses,
+  type DesktopProcessSnapshot,
+} from "./DesktopProcessReaper.ts";
 
 const INITIAL_RESTART_DELAY = Duration.millis(500);
 const MAX_RESTART_DELAY = Duration.seconds(10);
@@ -54,6 +59,9 @@ export interface DesktopBackendStartConfig {
   readonly bootstrap: DesktopBackendBootstrapValue;
   readonly httpBaseUrl: URL;
   readonly captureOutput: boolean;
+  readonly readinessTimeout?: Duration.Duration;
+  readonly healthCheckInterval?: Duration.Duration;
+  readonly healthFailureThreshold?: number;
 }
 
 interface BackendProcessExit {
@@ -100,9 +108,6 @@ class BackendHealthCheckFailedError extends Data.TaggedError("BackendHealthCheck
 type BackendProcessError = BackendProcessBootstrapEncodeError | BackendProcessSpawnError;
 
 interface RunBackendProcessOptions extends DesktopBackendStartConfig {
-  readonly readinessTimeout?: Duration.Duration;
-  readonly healthCheckInterval?: Duration.Duration;
-  readonly healthFailureThreshold?: number;
   readonly onStarted?: (pid: number, terminate: Effect.Effect<void>) => Effect.Effect<void>;
   readonly onReady?: () => Effect.Effect<void>;
   readonly onReadinessFailure?: (error: BackendTimeoutError) => Effect.Effect<void>;
@@ -135,6 +140,35 @@ export class DesktopBackendManager extends Context.Service<
 
 const { logWarning: logBackendManagerWarning, logError: logBackendManagerError } =
   DesktopObservability.makeComponentLogger("desktop-backend-manager");
+
+const reapStaleDesktopBackendProcesses = (
+  entryPath: string,
+  keepPids: ReadonlyArray<number | undefined>,
+): Effect.Effect<void> => {
+  const keepPidSet = new Set(keepPids.filter((pid): pid is number => pid !== undefined && pid > 0));
+  return reapMatchingUnixProcesses({
+    keepPids: keepPidSet,
+    matches: (processSnapshot: DesktopProcessSnapshot) =>
+      matchesDesktopBackendProcess(processSnapshot, entryPath),
+  }).pipe(
+    Effect.flatMap((results) =>
+      Effect.forEach(
+        results,
+        (result) =>
+          logBackendManagerWarning("reaped stale desktop backend process", {
+            pid: result.pid,
+            ppid: result.ppid,
+            signalSent: result.signalSent,
+            escalated: result.escalated,
+            stillAlive: result.stillAlive,
+            ...(result.error !== null ? { error: result.error } : {}),
+          }),
+        { concurrency: 1 },
+      ),
+    ),
+    Effect.asVoid,
+  );
+};
 
 interface ActiveBackendRun {
   readonly id: number;
@@ -405,7 +439,12 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
         Effect.andThen(handle.kill().pipe(Effect.ignore)),
       ),
     ),
-    Effect.forkScoped,
+    Effect.catchCause((cause) =>
+      Effect.logWarning("desktop.backend.readiness-monitor.failed", {
+        cause: Cause.pretty(cause),
+      }).pipe(Effect.andThen(handle.kill().pipe(Effect.ignore))),
+    ),
+    Effect.forkIn(processScope),
   );
 
   return describeProcessExit(yield* Effect.result(handle.exitCode));
@@ -579,6 +618,15 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
               phase: "START",
               details: `pid=${pid} port=${config.bootstrap.port} cwd=${config.cwd}`,
             });
+            yield* reapStaleDesktopBackendProcesses(config.entryPath, [pid]).pipe(
+              Effect.catchCause((cause) =>
+                logBackendManagerWarning("failed to reap stale desktop backend processes", {
+                  cause: Cause.pretty(cause),
+                }),
+              ),
+              Effect.forkIn(parentScope),
+              Effect.asVoid,
+            );
           }),
           onReady: Effect.fn("desktop.backendManager.onReady")(function* () {
             const isCurrentRun = yield* Ref.modify(state, (latest) => {

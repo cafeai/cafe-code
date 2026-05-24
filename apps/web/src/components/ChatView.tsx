@@ -41,7 +41,7 @@ import {
   parseStandaloneComposerSlashCommand,
 } from "../composer-logic";
 import {
-  deriveCompletionDividerBeforeEntryId,
+  deriveCompletionDividerAfterEntryId,
   derivePendingApprovals,
   derivePendingUserInputs,
   derivePhase,
@@ -181,12 +181,14 @@ const IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROPOSED_PLANS: Thread["proposedPlans"] = [];
-const DEBUG_SNAPSHOT_VERSION = 5;
+const DEBUG_SNAPSHOT_VERSION = 7;
 const DEBUG_TEXT_PREVIEW_LIMIT = 240;
 const DEBUG_JSON_PREVIEW_LIMIT = 2_000;
 const DEBUG_RECENT_MESSAGE_LIMIT = 20;
 const DEBUG_RECENT_ACTIVITY_LIMIT = 30;
 const DEBUG_RECENT_RUNTIME_EVENT_LIMIT = 12;
+const DEBUG_PROVIDER_CONTINUATION_SIGNAL_LIMIT = 24;
+const DEBUG_PROVIDER_COMPLETION_BOUNDARY_LIMIT = 8;
 const DEBUG_INTERESTING_THREAD_LIMIT = 40;
 const DEBUG_THREAD_DETAIL_MESSAGE_LIMIT = 2_000;
 const DEBUG_THREAD_DETAIL_ACTIVITY_LIMIT = 500;
@@ -250,32 +252,66 @@ function readDebugString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function summarizeDebugContextWindowUsagePayload(payloadValue: unknown) {
+  const payload = readDebugRecord(payloadValue);
+  if (payload === null) {
+    return null;
+  }
+
+  const usage = {
+    usedTokens: readDebugNumber(payload.usedTokens),
+    totalProcessedTokens: readDebugNumber(payload.totalProcessedTokens),
+    maxTokens: readDebugNumber(payload.maxTokens),
+    inputTokens: readDebugNumber(payload.inputTokens),
+    cachedInputTokens: readDebugNumber(payload.cachedInputTokens),
+    outputTokens: readDebugNumber(payload.outputTokens),
+    reasoningOutputTokens: readDebugNumber(payload.reasoningOutputTokens),
+    lastUsedTokens: readDebugNumber(payload.lastUsedTokens),
+    lastInputTokens: readDebugNumber(payload.lastInputTokens),
+    lastCachedInputTokens: readDebugNumber(payload.lastCachedInputTokens),
+    lastOutputTokens: readDebugNumber(payload.lastOutputTokens),
+    lastReasoningOutputTokens: readDebugNumber(payload.lastReasoningOutputTokens),
+    toolUses: readDebugNumber(payload.toolUses),
+    durationMs: readDebugNumber(payload.durationMs),
+    compactsAutomatically: readDebugBoolean(payload.compactsAutomatically),
+  };
+  const tokenTypesPresent = [
+    usage.inputTokens !== null || usage.lastInputTokens !== null ? "input" : null,
+    usage.cachedInputTokens !== null || usage.lastCachedInputTokens !== null
+      ? "cached-input"
+      : null,
+    usage.outputTokens !== null || usage.lastOutputTokens !== null ? "output" : null,
+    usage.reasoningOutputTokens !== null || usage.lastReasoningOutputTokens !== null
+      ? "reasoning-output"
+      : null,
+  ].filter((value): value is string => value !== null);
+
+  return {
+    ...usage,
+    tokenTypesPresent,
+    totals: {
+      inputTokens: usage.inputTokens,
+      cachedInputTokens: usage.cachedInputTokens,
+      outputTokens: usage.outputTokens,
+      reasoningOutputTokens: usage.reasoningOutputTokens,
+    },
+    latestDelta: {
+      usedTokens: usage.lastUsedTokens,
+      inputTokens: usage.lastInputTokens,
+      cachedInputTokens: usage.lastCachedInputTokens,
+      outputTokens: usage.lastOutputTokens,
+      reasoningOutputTokens: usage.lastReasoningOutputTokens,
+    },
+  };
+}
+
 function summarizeDebugContextWindowActivity(activity: OrchestrationThreadActivity | null) {
   if (activity === null) {
     return null;
   }
-  const payload = readDebugRecord(activity.payload);
   return {
     ...summarizeDebugActivity(activity),
-    usage:
-      payload === null
-        ? null
-        : {
-            usedTokens: readDebugNumber(payload.usedTokens),
-            totalProcessedTokens: readDebugNumber(payload.totalProcessedTokens),
-            maxTokens: readDebugNumber(payload.maxTokens),
-            inputTokens: readDebugNumber(payload.inputTokens),
-            cachedInputTokens: readDebugNumber(payload.cachedInputTokens),
-            outputTokens: readDebugNumber(payload.outputTokens),
-            reasoningOutputTokens: readDebugNumber(payload.reasoningOutputTokens),
-            lastUsedTokens: readDebugNumber(payload.lastUsedTokens),
-            lastInputTokens: readDebugNumber(payload.lastInputTokens),
-            lastCachedInputTokens: readDebugNumber(payload.lastCachedInputTokens),
-            lastOutputTokens: readDebugNumber(payload.lastOutputTokens),
-            lastReasoningOutputTokens: readDebugNumber(payload.lastReasoningOutputTokens),
-            toolUses: readDebugNumber(payload.toolUses),
-            durationMs: readDebugNumber(payload.durationMs),
-          },
+    usage: summarizeDebugContextWindowUsagePayload(activity.payload),
   };
 }
 
@@ -347,6 +383,295 @@ function summarizeDebugActivity(activity: OrchestrationThreadActivity) {
     createdAt: activity.createdAt,
     payloadKeys: payloadKeys(activity.payload),
     payloadPreview: stringifyDebugPreview(activity.payload),
+  };
+}
+
+function compareDebugIso(left: string, right: string): number {
+  if (left < right) {
+    return -1;
+  }
+  if (left > right) {
+    return 1;
+  }
+  return 0;
+}
+
+function messageDebugEventAt(message: ChatMessage): string {
+  return message.completedAt ?? message.createdAt;
+}
+
+function isAfterDebugBoundary(eventAt: string, boundaryAt: string | null): boolean {
+  return boundaryAt !== null && eventAt > boundaryAt;
+}
+
+function classifyDebugMessageContinuationSignal(message: ChatMessage): string {
+  switch (message.role) {
+    case "assistant":
+      return message.streaming ? "assistant-streaming-message" : "assistant-message";
+    case "user":
+      return "user-message";
+    case "system":
+      return "system-message";
+  }
+}
+
+function classifyDebugActivityContinuationSignal(activity: OrchestrationThreadActivity): string {
+  if (activity.kind === "context-window.updated") {
+    return "token-usage";
+  }
+  if (
+    activity.kind === "runtime.warning" ||
+    activity.kind === "runtime.error" ||
+    activity.kind === "turn.plan.updated" ||
+    activity.kind === "approval.requested" ||
+    activity.kind === "approval.resolved" ||
+    activity.kind === "user-input.requested" ||
+    activity.kind === "user-input.resolved"
+  ) {
+    return activity.kind.replaceAll(".", "-");
+  }
+  if (
+    activity.kind.startsWith("tool.") ||
+    activity.kind.startsWith("task.") ||
+    activity.kind.startsWith("mcp.")
+  ) {
+    return activity.kind.replaceAll(".", "-");
+  }
+  return activity.kind;
+}
+
+function classifyDebugProviderSurfaceForActivity(activity: OrchestrationThreadActivity): string {
+  if (activity.kind === "context-window.updated") {
+    return "token-usage-meter";
+  }
+  if (activity.kind.startsWith("task.")) {
+    return "background-task-monitor";
+  }
+  if (activity.kind.startsWith("tool.")) {
+    return "tool-lifecycle";
+  }
+  if (activity.kind.startsWith("runtime.")) {
+    return "runtime-transport";
+  }
+  if (activity.kind.startsWith("approval.") || activity.kind.startsWith("user-input.")) {
+    return "human-input-gate";
+  }
+  if (activity.kind === "turn.plan.updated") {
+    return "plan-projection";
+  }
+  return "provider-activity";
+}
+
+function activityIsProviderContinuationRelevant(activity: OrchestrationThreadActivity): boolean {
+  return (
+    activity.kind === "context-window.updated" ||
+    activity.kind === "runtime.warning" ||
+    activity.kind === "runtime.error" ||
+    activity.kind === "turn.plan.updated" ||
+    activity.kind === "approval.requested" ||
+    activity.kind === "approval.resolved" ||
+    activity.kind === "user-input.requested" ||
+    activity.kind === "user-input.resolved" ||
+    activity.kind.startsWith("tool.") ||
+    activity.kind.startsWith("task.") ||
+    activity.kind.startsWith("mcp.")
+  );
+}
+
+function summarizeDebugContinuationMessage(
+  message: ChatMessage,
+  latestTurnCompletedAt: string | null,
+  earliestCompletionSignalAt: string | null,
+) {
+  const eventAt = messageDebugEventAt(message);
+  return {
+    source: "message" as const,
+    id: message.id,
+    turnId: message.turnId ?? null,
+    createdAt: message.createdAt,
+    eventAt,
+    completedAt: message.completedAt ?? null,
+    signalKind: classifyDebugMessageContinuationSignal(message),
+    providerSurface: "assistant-output",
+    afterLatestTurnCompleted: isAfterDebugBoundary(eventAt, latestTurnCompletedAt),
+    afterEarliestCompletionSignal: isAfterDebugBoundary(eventAt, earliestCompletionSignalAt),
+    role: message.role,
+    streaming: message.streaming,
+    textLength: message.text.length,
+    textPreview: truncateDebugText(message.text),
+    attachmentCount: message.attachments?.length ?? 0,
+  };
+}
+
+function summarizeDebugContinuationActivity(
+  activity: OrchestrationThreadActivity,
+  latestTurnCompletedAt: string | null,
+  earliestCompletionSignalAt: string | null,
+) {
+  const tokenUsage =
+    activity.kind === "context-window.updated"
+      ? summarizeDebugContextWindowUsagePayload(activity.payload)
+      : null;
+  return {
+    source: "activity" as const,
+    id: activity.id,
+    turnId: activity.turnId,
+    sequence: activity.sequence ?? null,
+    createdAt: activity.createdAt,
+    eventAt: activity.createdAt,
+    signalKind: classifyDebugActivityContinuationSignal(activity),
+    providerSurface: classifyDebugProviderSurfaceForActivity(activity),
+    afterLatestTurnCompleted: isAfterDebugBoundary(activity.createdAt, latestTurnCompletedAt),
+    afterEarliestCompletionSignal: isAfterDebugBoundary(
+      activity.createdAt,
+      earliestCompletionSignalAt,
+    ),
+    kind: activity.kind,
+    tone: activity.tone,
+    summary: activity.summary,
+    payloadKeys: payloadKeys(activity.payload),
+    payloadPreview: stringifyDebugPreview(activity.payload, 500),
+    tokenUsage,
+  };
+}
+
+function summarizeDebugProviderContinuation(thread: Thread, nowMs: number) {
+  const latestTurn = thread.latestTurn;
+  const latestTurnId = latestTurn?.turnId ?? null;
+  if (latestTurnId === null) {
+    return null;
+  }
+
+  const latestTurnCompletedAt = latestTurn?.completedAt ?? null;
+  const sameTurnMessages = thread.messages.filter((message) => message.turnId === latestTurnId);
+  const sameTurnActivities = thread.activities.filter(
+    (activity) => activity.turnId === latestTurnId,
+  );
+  const sameTurnDiffSummaries = thread.turnDiffSummaries.filter(
+    (summary) => summary.turnId === latestTurnId,
+  );
+  const completionBoundaries = [
+    latestTurnCompletedAt === null
+      ? null
+      : {
+          source: "latestTurn.completedAt" as const,
+          completedAt: latestTurnCompletedAt,
+          state: latestTurn?.state ?? null,
+          status: null,
+          checkpointRef: null,
+          assistantMessageId: latestTurn?.assistantMessageId ?? null,
+          fileCount: null,
+        },
+    ...sameTurnDiffSummaries.map((summary) => ({
+      source: "turnDiff.completedAt" as const,
+      completedAt: summary.completedAt,
+      state: null,
+      status: summary.status ?? null,
+      checkpointRef: summary.checkpointRef ?? null,
+      assistantMessageId: summary.assistantMessageId ?? null,
+      fileCount: summary.files.length,
+    })),
+  ]
+    .filter((boundary): boundary is NonNullable<typeof boundary> => boundary !== null)
+    .toSorted((left, right) => compareDebugIso(left.completedAt, right.completedAt));
+  const earliestCompletionSignalAt = completionBoundaries.at(0)?.completedAt ?? null;
+  const latestCompletionSignalAt = completionBoundaries.at(-1)?.completedAt ?? null;
+  const signals = [
+    ...sameTurnMessages
+      .filter((message) => message.role === "assistant")
+      .map((message) =>
+        summarizeDebugContinuationMessage(
+          message,
+          latestTurnCompletedAt,
+          earliestCompletionSignalAt,
+        ),
+      ),
+    ...sameTurnActivities
+      .filter(activityIsProviderContinuationRelevant)
+      .map((activity) =>
+        summarizeDebugContinuationActivity(
+          activity,
+          latestTurnCompletedAt,
+          earliestCompletionSignalAt,
+        ),
+      ),
+  ].toSorted((left, right) => {
+    const eventOrder = compareDebugIso(left.eventAt, right.eventAt);
+    if (eventOrder !== 0) {
+      return eventOrder;
+    }
+    return left.id.localeCompare(right.id);
+  });
+  const signalsAfterLatestTurnCompleted = signals.filter(
+    (signal) => signal.afterLatestTurnCompleted,
+  );
+  const signalsAfterEarliestCompletionSignal = signals.filter(
+    (signal) => signal.afterEarliestCompletionSignal,
+  );
+  const tokenUsageSignals = signals.filter((signal) => signal.signalKind === "token-usage");
+  const tokenUsageSignalsAfterLatestTurnCompleted = signalsAfterLatestTurnCompleted.filter(
+    (signal) => signal.signalKind === "token-usage",
+  );
+  const tokenUsageSignalsAfterEarliestCompletionSignal =
+    signalsAfterEarliestCompletionSignal.filter((signal) => signal.signalKind === "token-usage");
+  const latestSignal = signals.at(-1) ?? null;
+  const latestSignalAfterEarliestCompletion = signalsAfterEarliestCompletionSignal.at(-1) ?? null;
+  const latestSignalAfterLatestTurnCompleted = signalsAfterLatestTurnCompleted.at(-1) ?? null;
+
+  return {
+    provider: thread.session?.provider ?? null,
+    providerInstanceId: thread.session?.providerInstanceId ?? null,
+    modelSelection: thread.modelSelection,
+    runtimeMode: thread.runtimeMode,
+    interactionMode: thread.interactionMode,
+    latestTurnId,
+    latestTurnState: latestTurn?.state ?? null,
+    latestTurnCompletedAt,
+    sameTurnMessageCount: sameTurnMessages.length,
+    sameTurnActivityCount: sameTurnActivities.length,
+    sameTurnDiffSummaryCount: sameTurnDiffSummaries.length,
+    completionBoundaries: completionBoundaries.slice(-DEBUG_PROVIDER_COMPLETION_BOUNDARY_LIMIT),
+    earliestCompletionSignalAt,
+    latestCompletionSignalAt,
+    signalCount: signals.length,
+    signalCountsByKind: countBy(signals, (signal) => signal.signalKind),
+    signalCountsByProviderSurface: countBy(signals, (signal) => signal.providerSurface),
+    afterLatestTurnCompletedCount: signalsAfterLatestTurnCompleted.length,
+    afterLatestTurnCompletedCountsByKind: countBy(
+      signalsAfterLatestTurnCompleted,
+      (signal) => signal.signalKind,
+    ),
+    afterEarliestCompletionSignalCount: signalsAfterEarliestCompletionSignal.length,
+    afterEarliestCompletionSignalCountsByKind: countBy(
+      signalsAfterEarliestCompletionSignal,
+      (signal) => signal.signalKind,
+    ),
+    tokenUsageSignalCount: tokenUsageSignals.length,
+    tokenUsageAfterLatestTurnCompletedCount: tokenUsageSignalsAfterLatestTurnCompleted.length,
+    tokenUsageAfterEarliestCompletionSignalCount:
+      tokenUsageSignalsAfterEarliestCompletionSignal.length,
+    latestSignalAt: latestSignal?.eventAt ?? null,
+    latestSignalAgeMs: elapsedDebugMs(nowMs, latestSignal?.eventAt),
+    latestSignalKind: latestSignal?.signalKind ?? null,
+    latestSignalProviderSurface: latestSignal?.providerSurface ?? null,
+    latestSignalAfterEarliestCompletionAt: latestSignalAfterEarliestCompletion?.eventAt ?? null,
+    latestSignalAfterEarliestCompletionKind:
+      latestSignalAfterEarliestCompletion?.signalKind ?? null,
+    latestSignalAfterLatestTurnCompletedAt: latestSignalAfterLatestTurnCompleted?.eventAt ?? null,
+    latestSignalAfterLatestTurnCompletedKind:
+      latestSignalAfterLatestTurnCompleted?.signalKind ?? null,
+    latestTokenUsageSignal: tokenUsageSignals.at(-1) ?? null,
+    latestTokenUsageAfterEarliestCompletionSignal:
+      tokenUsageSignalsAfterEarliestCompletionSignal.at(-1) ?? null,
+    latestTokenUsageAfterLatestTurnCompleted:
+      tokenUsageSignalsAfterLatestTurnCompleted.at(-1) ?? null,
+    recentSignals: signals.slice(-DEBUG_PROVIDER_CONTINUATION_SIGNAL_LIMIT),
+    recentSignalsAfterEarliestCompletionSignal: signalsAfterEarliestCompletionSignal.slice(
+      -DEBUG_PROVIDER_CONTINUATION_SIGNAL_LIMIT,
+    ),
+    recentSignalsAfterLatestTurnCompleted: signalsAfterLatestTurnCompleted.slice(
+      -DEBUG_PROVIDER_CONTINUATION_SIGNAL_LIMIT,
+    ),
   };
 }
 
@@ -513,6 +838,9 @@ function activityIsLifecycleRelevant(activity: OrchestrationThreadActivity): boo
     activity.kind === "tool.started" ||
     activity.kind === "tool.updated" ||
     activity.kind === "tool.completed" ||
+    activity.kind === "task.started" ||
+    activity.kind === "task.progress" ||
+    activity.kind === "task.completed" ||
     activity.kind === "turn.plan.updated" ||
     activity.kind === "approval.requested" ||
     activity.kind === "approval.resolved" ||
@@ -521,7 +849,7 @@ function activityIsLifecycleRelevant(activity: OrchestrationThreadActivity): boo
   );
 }
 
-function summarizeDebugThreadLifecycle(thread: Thread) {
+function summarizeDebugThreadLifecycle(thread: Thread, nowMs: number) {
   const session = thread.session;
   const latestTurn = thread.latestTurn;
   const activeTurnId = session?.activeTurnId ?? null;
@@ -542,6 +870,11 @@ function summarizeDebugThreadLifecycle(thread: Thread) {
     latestTurnId !== null && latestTurnCompletedAt !== null
       ? activeTurnActivities.filter((activity) => activity.createdAt > latestTurnCompletedAt)
       : [];
+  const messagesAfterLatestTurnCompleted =
+    latestTurnId !== null && latestTurnCompletedAt !== null
+      ? activeTurnMessages.filter((message) => messageDebugEventAt(message) > latestTurnCompletedAt)
+      : [];
+  const providerContinuation = summarizeDebugProviderContinuation(thread, nowMs);
   const sessionActiveTurnMatchesLatestTurn =
     activeTurnId !== null && latestTurnId !== null && activeTurnId === latestTurnId;
   const staleCompletedActiveTurn =
@@ -568,7 +901,17 @@ function summarizeDebugThreadLifecycle(thread: Thread) {
     latestTurnReadyButSessionOwnsActiveTurn ? "completed-turn-still-owned-by-session" : null,
     latestTurnRunningButSessionNotRunning ? "latest-turn-running-session-not-running" : null,
     hasStreamingMessagesButNotRunning ? "streaming-message-while-not-running" : null,
+    messagesAfterLatestTurnCompleted.length > 0 ? "message-after-latest-turn-completed" : null,
     activitiesAfterLatestTurnCompleted.length > 0 ? "activity-after-latest-turn-completed" : null,
+    (providerContinuation?.afterLatestTurnCompletedCount ?? 0) > 0
+      ? "provider-signal-after-latest-turn-completed"
+      : null,
+    (providerContinuation?.afterEarliestCompletionSignalCount ?? 0) > 0
+      ? "provider-signal-after-earliest-completion-signal"
+      : null,
+    (providerContinuation?.tokenUsageAfterEarliestCompletionSignalCount ?? 0) > 0
+      ? "token-usage-after-completion-signal"
+      : null,
   ].filter((value): value is string => value !== null);
 
   return {
@@ -594,12 +937,18 @@ function summarizeDebugThreadLifecycle(thread: Thread) {
     hasStreamingMessagesButNotRunning,
     activeTurnMessageCount: activeTurnMessages.length,
     activeTurnActivityCount: activeTurnActivities.length,
+    messageAfterLatestTurnCompletedCount: messagesAfterLatestTurnCompleted.length,
     activityAfterLatestTurnCompletedCount: activitiesAfterLatestTurnCompleted.length,
     redFlags,
+    providerContinuation,
     latestActiveTurnMessage:
       activeTurnMessages.length > 0 ? summarizeDebugMessage(activeTurnMessages.at(-1)!) : null,
     latestActiveTurnActivity:
       activeTurnActivities.length > 0 ? summarizeDebugActivity(activeTurnActivities.at(-1)!) : null,
+    latestMessageAfterLatestTurnCompleted:
+      messagesAfterLatestTurnCompleted.length > 0
+        ? summarizeDebugMessage(messagesAfterLatestTurnCompleted.at(-1)!)
+        : null,
     latestActivityAfterLatestTurnCompleted:
       activitiesAfterLatestTurnCompleted.length > 0
         ? summarizeDebugActivity(activitiesAfterLatestTurnCompleted.at(-1)!)
@@ -705,6 +1054,8 @@ function summarizeDebugThreadPerformance(thread: Thread, nowMs: number) {
       threadDetailActivityLimit: DEBUG_THREAD_DETAIL_ACTIVITY_LIMIT,
       recentMessageLimit: DEBUG_RECENT_MESSAGE_LIMIT,
       recentActivityLimit: DEBUG_RECENT_ACTIVITY_LIMIT,
+      providerContinuationSignalLimit: DEBUG_PROVIDER_CONTINUATION_SIGNAL_LIMIT,
+      providerCompletionBoundaryLimit: DEBUG_PROVIDER_COMPLETION_BOUNDARY_LIMIT,
     },
     counts: {
       messages: thread.messages.length,
@@ -1105,6 +1456,7 @@ export default function ChatView(props: ChatViewProps) {
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
   const [optimisticUserMessages, setOptimisticUserMessages] = useState<ChatMessage[]>([]);
+  const [stickTimelineToEndRevision, setStickTimelineToEndRevision] = useState(0);
   const optimisticUserMessagesRef = useRef(optimisticUserMessages);
   optimisticUserMessagesRef.current = optimisticUserMessages;
   const [localDraftErrorsByDraftId, setLocalDraftErrorsByDraftId] = useState<
@@ -1709,6 +2061,8 @@ export default function ChatView(props: ChatViewProps) {
   );
   const selectedProvider: ProviderDriverKind = lockedProvider ?? unlockedSelectedProvider;
   const phase = derivePhase(activeThread?.session ?? null);
+  const isProviderConnecting = phase === "connecting";
+  const isComposerConnecting = isConnecting || isProviderConnecting;
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
   const workLogEntries = useMemo(
     () => deriveWorkLogEntries(threadActivities, activeLatestTurn?.turnId ?? undefined),
@@ -1810,7 +2164,8 @@ export default function ChatView(props: ChatViewProps) {
       setQueueDispatchInFlight(false);
     }
   }, [serverAcknowledgedLocalDispatch, setQueueDispatchInFlight, setSendInFlight]);
-  const isWorking = phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint;
+  const isWorking =
+    phase === "running" || isSendBusy || isComposerConnecting || isRevertingCheckpoint;
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
     activeLatestTurn,
     activeThread?.session ?? null,
@@ -2077,10 +2432,10 @@ export default function ChatView(props: ChatViewProps) {
     latestTurnHasToolActivity,
     latestTurnSettled,
   ]);
-  const completionDividerBeforeEntryId = useMemo(() => {
+  const completionDividerAfterEntryId = useMemo(() => {
     if (!latestTurnSettled) return null;
     if (!completionSummary) return null;
-    return deriveCompletionDividerBeforeEntryId(timelineEntries, activeLatestTurn);
+    return deriveCompletionDividerAfterEntryId(timelineEntries, activeLatestTurn);
   }, [activeLatestTurn, completionSummary, latestTurnSettled, timelineEntries]);
   const gitCwd = activeThread?.worktreePath ?? activeProject?.cwd ?? null;
   const gitStatusQuery = useGitStatus({ environmentId, cwd: gitCwd });
@@ -2118,14 +2473,14 @@ export default function ChatView(props: ChatViewProps) {
   });
   const followUpQueueUiIdle = followUpQueuePhase !== "running";
   const followUpQueueVisibleWorking =
-    followUpQueuePhase === "running" || isConnecting || isRevertingCheckpoint;
+    followUpQueuePhase === "running" || isComposerConnecting || isRevertingCheckpoint;
   const firstActiveFollowUpQueueItem = activeFollowUpQueue[0] ?? null;
   const followUpQueueDispatchInFlight = queueDispatchInFlightRef.current;
   const followUpQueueCanStartTurn = canStartQueuedFollowUpTurn({
     queueLength: activeFollowUpQueue.length,
     firstItemBlocked: firstActiveFollowUpQueueItem?.blockedReason != null,
     isWorking: followUpQueueVisibleWorking,
-    isConnecting,
+    isConnecting: isComposerConnecting,
     isEnvironmentUnavailable: activeEnvironmentUnavailable,
     isDispatchInFlight: followUpQueueDispatchInFlight,
   });
@@ -2146,13 +2501,13 @@ export default function ChatView(props: ChatViewProps) {
   const canSteerFollowUpQueue =
     followUpQueuePhase === "running" &&
     activeProviderLiveSteerSupported &&
-    !isConnecting &&
+    !isComposerConnecting &&
     !activeEnvironmentUnavailable &&
     !followUpQueueDispatchInFlight;
   const canActivateRunningFollowUpQueueAction =
     followUpQueuePhase === "running" &&
     activeThread?.session?.status === "running" &&
-    !isConnecting &&
+    !isComposerConnecting &&
     !activeEnvironmentUnavailable &&
     !followUpQueueDispatchInFlight;
   const followUpQueueActionLabel = queuedFollowUpActionLabel({
@@ -2191,6 +2546,9 @@ export default function ChatView(props: ChatViewProps) {
     }
     if (followUpQueueVisibleWorking) {
       queueBlockers.push("thread-visible-working");
+    }
+    if (isProviderConnecting) {
+      queueBlockers.push("provider-connecting");
     }
     if (isConnecting) {
       queueBlockers.push("environment-connecting");
@@ -2238,11 +2596,14 @@ export default function ChatView(props: ChatViewProps) {
         .map(([queuedThreadId]) => queuedThreadId),
     );
     const lifecycleByThreadId = new Map(
-      allThreads.map((thread) => [thread.id, summarizeDebugThreadLifecycle(thread)] as const),
+      allThreads.map(
+        (thread) => [thread.id, summarizeDebugThreadLifecycle(thread, capturedAtMs)] as const,
+      ),
     );
     const activeLifecycleSummary = activeThread
       ? (lifecycleByThreadId.get(activeThread.id) ?? null)
       : null;
+    const activeProviderContinuation = activeLifecycleSummary?.providerContinuation ?? null;
     const lifecycleSummaries = Array.from(lifecycleByThreadId.values());
     const lifecycleRedFlagCounts = countBy(
       lifecycleSummaries.flatMap((thread) => thread.redFlags),
@@ -2400,11 +2761,16 @@ export default function ChatView(props: ChatViewProps) {
                 activeLatestTurn?.turnId === activeThread.session.activeTurnId,
               latestTurnCompletedButSessionRunning:
                 activeLatestTurn?.completedAt != null && activeThread.session?.status === "running",
+              messageAfterLatestTurnCompletedCount:
+                activeLifecycleSummary?.messageAfterLatestTurnCompletedCount ?? 0,
+              latestMessageAfterLatestTurnCompleted:
+                activeLifecycleSummary?.latestMessageAfterLatestTurnCompleted ?? null,
               activityAfterLatestTurnCompletedCount: activitiesAfterLatestTurnCompleted.length,
               latestActivityAfterLatestTurnCompleted:
                 latestActivityAfterLatestTurnCompleted !== null
                   ? summarizeDebugActivity(latestActivityAfterLatestTurnCompleted)
                   : null,
+              providerContinuation: activeProviderContinuation,
             },
             recentMessages: recentMessages.map(summarizeDebugMessage),
             recentActivities: recentActivities.map(summarizeDebugActivity),
@@ -2443,6 +2809,16 @@ export default function ChatView(props: ChatViewProps) {
           latestRunningButSessionNotRunning: lifecycleSummaries.filter(
             (thread) => thread.latestTurnRunningButSessionNotRunning,
           ).length,
+          providerContinuationAfterLatestTurnCompleted: lifecycleSummaries.filter(
+            (thread) => (thread.providerContinuation?.afterLatestTurnCompletedCount ?? 0) > 0,
+          ).length,
+          providerContinuationAfterEarliestCompletionSignal: lifecycleSummaries.filter(
+            (thread) => (thread.providerContinuation?.afterEarliestCompletionSignalCount ?? 0) > 0,
+          ).length,
+          tokenUsageAfterCompletionSignal: lifecycleSummaries.filter(
+            (thread) =>
+              (thread.providerContinuation?.tokenUsageAfterEarliestCompletionSignalCount ?? 0) > 0,
+          ).length,
           redFlagThreads: lifecycleSummaries.filter((thread) => thread.redFlags.length > 0).length,
         },
         interestingThreadLimit: DEBUG_INTERESTING_THREAD_LIMIT,
@@ -2463,6 +2839,8 @@ export default function ChatView(props: ChatViewProps) {
           activeProviderLiveSteerSupported,
           uiWorking: isWorking,
           activeTurnInProgress: isWorking || !latestTurnSettled,
+          isComposerConnecting,
+          isProviderConnecting,
           isConnecting,
           isRevertingCheckpoint,
           activeEnvironmentUnavailable,
@@ -2577,6 +2955,8 @@ export default function ChatView(props: ChatViewProps) {
         queueDispatchInFlightRef: queueDispatchInFlightRef.current,
         dispatchGateRevision,
         desktopDebugRevision,
+        isComposerConnecting,
+        isProviderConnecting,
         isConnecting,
         isRevertingCheckpoint,
         activeEnvironmentUnavailable,
@@ -2623,7 +3003,9 @@ export default function ChatView(props: ChatViewProps) {
     followUpQueuePhase,
     followUpQueueUiIdle,
     followUpQueueVisibleWorking,
+    isComposerConnecting,
     isConnecting,
+    isProviderConnecting,
     isLocalDraftThread,
     isRevertingCheckpoint,
     isSendBusy,
@@ -2876,6 +3258,7 @@ export default function ChatView(props: ChatViewProps) {
     }
 
     hideScrollToBottom();
+    setStickTimelineToEndRevision((revision) => revision + 1);
     void legendListRef.current?.scrollToEnd?.({ animated: false });
     window.requestAnimationFrame(() => {
       void legendListRef.current?.scrollToEnd?.({ animated: false });
@@ -3082,7 +3465,7 @@ export default function ChatView(props: ChatViewProps) {
         );
         return;
       }
-      if (phase === "running" || isSendBusy || isConnecting) {
+      if (phase === "running" || isSendBusy || isComposerConnecting) {
         setThreadError(activeThread.id, "Interrupt the current turn before reverting checkpoints.");
         return;
       }
@@ -3120,7 +3503,7 @@ export default function ChatView(props: ChatViewProps) {
       activeEnvironmentUnavailable,
       activeEnvironmentUnavailableLabel,
       environmentId,
-      isConnecting,
+      isComposerConnecting,
       isRevertingCheckpoint,
       isSendBusy,
       phase,
@@ -3446,7 +3829,7 @@ export default function ChatView(props: ChatViewProps) {
       !api ||
       !activeThread ||
       isSendBusy ||
-      isConnecting ||
+      isComposerConnecting ||
       activeEnvironmentUnavailable ||
       sendInFlightRef.current
     )
@@ -3705,7 +4088,7 @@ export default function ChatView(props: ChatViewProps) {
     if (
       !activeThread ||
       isSendBusy ||
-      isConnecting ||
+      isComposerConnecting ||
       activeEnvironmentUnavailable ||
       sendInFlightRef.current
     ) {
@@ -4124,7 +4507,7 @@ export default function ChatView(props: ChatViewProps) {
         !activeThread ||
         !isServerThread ||
         isSendBusy ||
-        isConnecting ||
+        isComposerConnecting ||
         sendInFlightRef.current
       ) {
         return;
@@ -4239,7 +4622,7 @@ export default function ChatView(props: ChatViewProps) {
       activeThread,
       activeProposedPlan,
       beginLocalDispatch,
-      isConnecting,
+      isComposerConnecting,
       isSendBusy,
       isServerThread,
       persistThreadSettingsForNextTurn,
@@ -4264,7 +4647,7 @@ export default function ChatView(props: ChatViewProps) {
       !activeProposedPlan ||
       !isServerThread ||
       isSendBusy ||
-      isConnecting ||
+      isComposerConnecting ||
       activeEnvironmentUnavailable ||
       sendInFlightRef.current
     ) {
@@ -4381,7 +4764,7 @@ export default function ChatView(props: ChatViewProps) {
     activeThread,
     beginLocalDispatch,
     activeEnvironmentUnavailable,
-    isConnecting,
+    isComposerConnecting,
     isSendBusy,
     isServerThread,
     navigate,
@@ -4551,7 +4934,7 @@ export default function ChatView(props: ChatViewProps) {
               activeTurnStartedAt={activeWorkStartedAt}
               listRef={legendListRef}
               timelineEntries={timelineEntries}
-              completionDividerBeforeEntryId={completionDividerBeforeEntryId}
+              completionDividerAfterEntryId={completionDividerAfterEntryId}
               completionSummary={completionSummary}
               activeThreadEnvironmentId={activeThread.environmentId}
               revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
@@ -4563,6 +4946,7 @@ export default function ChatView(props: ChatViewProps) {
               timestampFormat={timestampFormat}
               workspaceRoot={activeWorkspaceRoot}
               skills={activeProviderStatus?.skills ?? EMPTY_PROVIDER_SKILLS}
+              stickToEndRevision={stickTimelineToEndRevision}
               onIsAtEndChange={onIsAtEndChange}
               onUserScrollIntent={onTimelineUserScrollIntent}
             />
@@ -4607,7 +4991,7 @@ export default function ChatView(props: ChatViewProps) {
                   isServerThread={isServerThread}
                   isLocalDraftThread={isLocalDraftThread}
                   phase={phase}
-                  isConnecting={isConnecting}
+                  isConnecting={isComposerConnecting}
                   isSendBusy={isSendBusy}
                   isPreparingWorktree={isPreparingWorktree}
                   environmentUnavailable={activeEnvironmentUnavailableState}

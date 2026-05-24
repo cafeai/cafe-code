@@ -1,6 +1,6 @@
 import * as Schema from "effect/Schema";
 import type { ProjectionRepositoryError } from "../persistence/Errors.ts";
-import type { VcsError } from "@cafecode/contracts";
+import type * as VcsContracts from "@cafecode/contracts/vcs";
 
 /**
  * CheckpointUnavailableError - Expected checkpoint does not exist.
@@ -35,6 +35,9 @@ export class CheckpointInvariantError extends Schema.TaggedErrorClass<Checkpoint
   }
 }
 
-export type CheckpointStoreError = VcsError | CheckpointInvariantError | CheckpointUnavailableError;
+export type CheckpointStoreError =
+  | VcsContracts.VcsError
+  | CheckpointInvariantError
+  | CheckpointUnavailableError;
 
 export type CheckpointServiceError = CheckpointStoreError | ProjectionRepositoryError;

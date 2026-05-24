@@ -14,6 +14,10 @@ const isJsonRpcId = Schema.is(JsonRpcId);
 const isJsonRpcResponseEnvelope = Schema.is(JsonRpcResponseEnvelope);
 const isCodexAppServerError = Schema.is(CodexError.CodexAppServerError);
 
+const RAW_INCOMING_NOTIFICATION_QUEUE_CAPACITY = 2_048;
+const RAW_INCOMING_REQUEST_QUEUE_CAPACITY = 256;
+const MAX_PROTOCOL_DIAGNOSTIC_LENGTH = 8_000;
+
 export interface CodexAppServerProtocolLogEvent {
   readonly direction: "incoming" | "outgoing";
   readonly stage: "raw" | "decoded" | "decode_failed";
@@ -86,6 +90,30 @@ function isIncomingResponse(value: unknown): value is typeof JsonRpcResponseEnve
   return isJsonRpcResponseEnvelope(value);
 }
 
+function summarizeUnknownProtocolMessage(value: unknown): Record<string, unknown> {
+  if (!isObject(value)) {
+    return {
+      valueType: typeof value,
+    };
+  }
+
+  const keys = Object.keys(value).toSorted();
+  return {
+    keys,
+    hasId: "id" in value,
+    hasMethod: "method" in value,
+    method: typeof value.method === "string" ? value.method : null,
+    idType: "id" in value ? typeof value.id : null,
+  };
+}
+
+function truncateDiagnostic(input: string): string {
+  if (input.length <= MAX_PROTOCOL_DIAGNOSTIC_LENGTH) {
+    return input;
+  }
+  return `${input.slice(0, MAX_PROTOCOL_DIAGNOSTIC_LENGTH)}...<truncated>`;
+}
+
 const encodeJsonString = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
 const decodeJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
 
@@ -140,9 +168,14 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
   function* (
     options: CodexAppServerPatchedProtocolOptions,
   ): Effect.fn.Return<CodexAppServerPatchedProtocol, never, Scope.Scope> {
+    const protocolScope = yield* Scope.Scope;
     const outgoing = yield* Queue.unbounded<string, Cause.Done<void>>();
-    const incomingNotifications = yield* Queue.unbounded<CodexAppServerIncomingNotification>();
-    const incomingRequests = yield* Queue.unbounded<CodexAppServerIncomingRequest>();
+    const incomingNotifications = yield* Queue.sliding<CodexAppServerIncomingNotification>(
+      RAW_INCOMING_NOTIFICATION_QUEUE_CAPACITY,
+    );
+    const incomingRequests = yield* Queue.sliding<CodexAppServerIncomingRequest>(
+      RAW_INCOMING_REQUEST_QUEUE_CAPACITY,
+    );
     const pending = yield* Ref.make(
       new Map<string, Deferred.Deferred<unknown, CodexError.CodexAppServerError>>(),
     );
@@ -151,7 +184,11 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
     const terminationHandled = yield* Ref.make(false);
 
     const logProtocol = (event: CodexAppServerProtocolLogEvent) => {
-      if (event.direction === "incoming" && !options.logIncoming) {
+      if (
+        event.direction === "incoming" &&
+        !options.logIncoming &&
+        event.stage !== "decode_failed"
+      ) {
         return Effect.void;
       }
       if (event.direction === "outgoing" && !options.logOutgoing) {
@@ -255,25 +292,96 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       return resolvePending(requestId, (deferred) => Deferred.succeed(deferred, response.result));
     };
 
+    const runRequestHandler = (request: CodexAppServerIncomingRequest) => {
+      if (!options.onRequest) {
+        return Effect.void;
+      }
+
+      // Codex can send approval/user-input requests while it continues to emit
+      // notifications. The official client detaches request waits from its
+      // event loop; doing the same here prevents a pending UI decision from
+      // blocking all later stdout JSON-RPC messages.
+      return options.onRequest(request).pipe(
+        Effect.matchEffect({
+          onFailure: (error) => respondError(request.id, CodexError.normalizeToRequestError(error)),
+          onSuccess: (result) => respond(request.id, result),
+        }),
+        Effect.catchCause((cause) =>
+          logProtocol({
+            direction: "incoming",
+            stage: "decode_failed",
+            payload: {
+              detail: "Codex App Server request dispatch failed",
+              method: request.method,
+              idType: typeof request.id,
+              cause: truncateDiagnostic(Cause.pretty(cause)),
+            },
+          }).pipe(
+            Effect.andThen(
+              respondError(
+                request.id,
+                CodexError.CodexAppServerRequestError.internalError(
+                  "Codex App Server request handler failed",
+                ),
+              ).pipe(
+                Effect.catchCause((respondCause) =>
+                  logProtocol({
+                    direction: "outgoing",
+                    stage: "decode_failed",
+                    payload: {
+                      detail: "Codex App Server request error response failed",
+                      method: request.method,
+                      idType: typeof request.id,
+                      cause: truncateDiagnostic(Cause.pretty(respondCause)),
+                    },
+                  }),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    };
+
     const handleRequest = (request: CodexAppServerIncomingRequest) =>
       Queue.offer(incomingRequests, request).pipe(
         Effect.andThen(
           options.onRequest
-            ? options.onRequest(request).pipe(
-                Effect.matchEffect({
-                  onFailure: (error) =>
-                    respondError(request.id, CodexError.normalizeToRequestError(error)),
-                  onSuccess: (result) => respond(request.id, result),
-                }),
-              )
+            ? runRequestHandler(request).pipe(Effect.forkIn(protocolScope), Effect.asVoid)
             : Effect.void,
         ),
         Effect.asVoid,
       );
 
+    const runNotificationHandler = (notification: CodexAppServerIncomingNotification) =>
+      options.onNotification
+        ? options.onNotification(notification).pipe(
+            Effect.catchCause((cause) =>
+              logProtocol({
+                direction: "incoming",
+                stage: "decode_failed",
+                payload: {
+                  detail: "Codex App Server notification dispatch failed",
+                  method: notification.method,
+                  cause: truncateDiagnostic(Cause.pretty(cause)),
+                },
+              }),
+            ),
+          )
+        : Effect.void;
+
     const handleNotification = (notification: CodexAppServerIncomingNotification) =>
       Queue.offer(incomingNotifications, notification).pipe(
-        Effect.andThen(options.onNotification ? options.onNotification(notification) : Effect.void),
+        Effect.andThen(
+          // Notifications can trigger renderer projection, disk writes, and
+          // schema fallback handling. The JSON-RPC stdin reader must keep
+          // draining responses even if one notification handler is slow or
+          // waiting on the UI; otherwise a later response to `turn/start` or
+          // `thread/read` can be trapped behind unrelated notification work.
+          options.onNotification
+            ? runNotificationHandler(notification).pipe(Effect.forkIn(protocolScope), Effect.asVoid)
+            : Effect.void,
+        ),
         Effect.asVoid,
       );
 
@@ -292,6 +400,7 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       return Effect.fail(
         new CodexError.CodexAppServerProtocolParseError({
           detail: "Received protocol message in an unknown shape",
+          cause: summarizeUnknownProtocolMessage(message),
         }),
       );
     };
@@ -313,17 +422,18 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
             payload: decoded,
           }),
         ),
-        Effect.tapErrorTag("CodexAppServerProtocolParseError", (error) =>
+        Effect.flatMap(routeMessage),
+        Effect.catchTag("CodexAppServerProtocolParseError", (error) =>
           logProtocol({
             direction: "incoming",
             stage: "decode_failed",
             payload: {
               detail: error.detail,
               cause: error.cause,
+              lineByteLength: Buffer.byteLength(line, "utf8"),
             },
           }),
         ),
-        Effect.flatMap(routeMessage),
       );
     };
 
