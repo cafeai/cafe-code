@@ -17,7 +17,10 @@ import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIdentityResolver.ts";
 import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
-import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
+import {
+  OrchestrationProjectionSnapshotQueryLive,
+  THREAD_DETAIL_MESSAGE_LIMIT,
+} from "./ProjectionSnapshotQuery.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
@@ -1355,6 +1358,286 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const fullSnapshot = yield* snapshotQuery.getSnapshot();
       assert.equal(fullSnapshot.threads[0]?.latestTurn?.turnId, asTurnId("turn-running"));
       assert.equal(fullSnapshot.threads[0]?.latestTurn?.state, "running");
+    }),
+  );
+
+  it.effect("normalizes active-turn session state from the latest turn", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_thread_sessions`;
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_turns`;
+      yield* sql`DELETE FROM projection_state`;
+
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id,
+          title,
+          workspace_root,
+          default_model_selection_json,
+          scripts_json,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES (
+          'project-session-normalize',
+          'Project',
+          '/tmp/project-session-normalize',
+          '{"provider":"codex","model":"gpt-5-codex"}',
+          '[]',
+          '2026-04-04T00:00:00.000Z',
+          '2026-04-04T00:00:00.000Z',
+          NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id,
+          project_id,
+          title,
+          model_selection_json,
+          runtime_mode,
+          interaction_mode,
+          branch,
+          worktree_path,
+          latest_turn_id,
+          latest_user_message_at,
+          pending_approval_count,
+          pending_user_input_count,
+          has_actionable_proposed_plan,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES (
+          'thread-session-normalize',
+          'project-session-normalize',
+          'Thread',
+          '{"provider":"codex","model":"gpt-5-codex"}',
+          'full-access',
+          'default',
+          NULL,
+          NULL,
+          'turn-running',
+          NULL,
+          0,
+          0,
+          0,
+          '2026-04-04T00:00:00.000Z',
+          '2026-04-04T00:00:00.000Z',
+          NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_turns (
+          thread_id,
+          turn_id,
+          pending_message_id,
+          assistant_message_id,
+          state,
+          requested_at,
+          started_at,
+          completed_at,
+          checkpoint_turn_count,
+          checkpoint_ref,
+          checkpoint_status,
+          checkpoint_files_json
+        )
+        VALUES (
+          'thread-session-normalize',
+          'turn-running',
+          NULL,
+          NULL,
+          'running',
+          '2026-04-04T00:00:01.000Z',
+          '2026-04-04T00:00:02.000Z',
+          NULL,
+          NULL,
+          NULL,
+          NULL,
+          '[]'
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_thread_sessions (
+          thread_id,
+          status,
+          provider_name,
+          provider_instance_id,
+          runtime_mode,
+          active_turn_id,
+          last_error,
+          updated_at
+        )
+        VALUES (
+          'thread-session-normalize',
+          'ready',
+          'codex',
+          'codex',
+          'full-access',
+          'turn-running',
+          NULL,
+          '2026-04-04T00:00:03.000Z'
+        )
+      `;
+
+      const runningShell = yield* snapshotQuery.getThreadShellById(
+        ThreadId.make("thread-session-normalize"),
+      );
+      assert.equal(runningShell._tag, "Some");
+      if (runningShell._tag === "Some") {
+        assert.equal(runningShell.value.session?.status, "running");
+        assert.equal(runningShell.value.session?.activeTurnId, asTurnId("turn-running"));
+      }
+
+      yield* sql`
+        UPDATE projection_turns
+        SET state = 'completed',
+            completed_at = '2026-04-04T00:00:04.000Z'
+        WHERE thread_id = 'thread-session-normalize'
+          AND turn_id = 'turn-running'
+      `;
+
+      const completedShell = yield* snapshotQuery.getThreadShellById(
+        ThreadId.make("thread-session-normalize"),
+      );
+      assert.equal(completedShell._tag, "Some");
+      if (completedShell._tag === "Some") {
+        assert.equal(completedShell.value.session?.status, "ready");
+        assert.equal(completedShell.value.session?.activeTurnId, null);
+        assert.equal(completedShell.value.session?.updatedAt, "2026-04-04T00:00:04.000Z");
+      }
+
+      yield* sql`
+        UPDATE projection_thread_sessions
+        SET status = 'ready',
+            active_turn_id = 'turn-missing'
+        WHERE thread_id = 'thread-session-normalize'
+      `;
+
+      const missingActiveTurnShell = yield* snapshotQuery.getThreadShellById(
+        ThreadId.make("thread-session-normalize"),
+      );
+      assert.equal(missingActiveTurnShell._tag, "Some");
+      if (missingActiveTurnShell._tag === "Some") {
+        assert.equal(missingActiveTurnShell.value.session?.status, "ready");
+        assert.equal(missingActiveTurnShell.value.session?.activeTurnId, null);
+      }
+    }),
+  );
+
+  it.effect("caps thread detail messages to the latest server-side window", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_thread_messages`;
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_turns`;
+      yield* sql`DELETE FROM projection_state`;
+
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id,
+          title,
+          workspace_root,
+          default_model_selection_json,
+          scripts_json,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES (
+          'project-message-cap',
+          'Project',
+          '/tmp/project-message-cap',
+          '{"provider":"codex","model":"gpt-5-codex"}',
+          '[]',
+          '2026-04-05T00:00:00.000Z',
+          '2026-04-05T00:00:00.000Z',
+          NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id,
+          project_id,
+          title,
+          model_selection_json,
+          runtime_mode,
+          interaction_mode,
+          branch,
+          worktree_path,
+          latest_turn_id,
+          latest_user_message_at,
+          pending_approval_count,
+          pending_user_input_count,
+          has_actionable_proposed_plan,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES (
+          'thread-message-cap',
+          'project-message-cap',
+          'Thread',
+          '{"provider":"codex","model":"gpt-5-codex"}',
+          'full-access',
+          'default',
+          NULL,
+          NULL,
+          NULL,
+          NULL,
+          0,
+          0,
+          0,
+          '2026-04-05T00:00:00.000Z',
+          '2026-04-05T00:00:00.000Z',
+          NULL
+        )
+      `;
+      yield* sql`
+        WITH RECURSIVE message_numbers(index_value) AS (
+          SELECT 1
+          UNION ALL
+          SELECT index_value + 1
+          FROM message_numbers
+          WHERE index_value < ${THREAD_DETAIL_MESSAGE_LIMIT + 5}
+        )
+        INSERT INTO projection_thread_messages (
+          message_id,
+          thread_id,
+          turn_id,
+          role,
+          text,
+          is_streaming,
+          created_at,
+          updated_at
+        )
+        SELECT
+          printf('message-%04d', index_value),
+          'thread-message-cap',
+          NULL,
+          'assistant',
+          printf('message %04d', index_value),
+          0,
+          printf('2026-04-05T%02d:%02d:%02d.000Z', index_value / 3600, (index_value / 60) % 60, index_value % 60),
+          printf('2026-04-05T%02d:%02d:%02d.000Z', index_value / 3600, (index_value / 60) % 60, index_value % 60)
+        FROM message_numbers
+      `;
+
+      const detail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-message-cap"));
+      assert.equal(detail._tag, "Some");
+      if (detail._tag === "Some") {
+        assert.equal(detail.value.messages.length, THREAD_DETAIL_MESSAGE_LIMIT);
+        assert.equal(detail.value.messages[0]?.id, "message-0006");
+        assert.equal(detail.value.messages.at(-1)?.id, "message-2005");
+      }
     }),
   );
 

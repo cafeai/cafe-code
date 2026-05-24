@@ -107,6 +107,30 @@ function isThreadDetailEvent(event: OrchestrationEvent): event is Extract<
   );
 }
 
+function isStreamingAssistantMessageEvent(event: OrchestrationEvent): boolean {
+  return (
+    event.type === "thread.message-sent" &&
+    event.payload.role === "assistant" &&
+    event.payload.streaming
+  );
+}
+
+function doesActivityAffectShellStream(
+  event: Extract<OrchestrationEvent, { readonly type: "thread.activity-appended" }>,
+): boolean {
+  switch (event.payload.activity.kind) {
+    case "approval.requested":
+    case "approval.resolved":
+    case "provider.approval.respond.failed":
+    case "user-input.requested":
+    case "user-input.resolved":
+    case "provider.user-input.respond.failed":
+      return true;
+    default:
+      return false;
+  }
+}
+
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 function toAuthAccessStreamEvent(
@@ -287,6 +311,13 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
       const toShellStreamEvent = (
         event: OrchestrationEvent,
       ): Effect.Effect<Option.Option<OrchestrationShellStreamEvent>, never, never> => {
+        if (isStreamingAssistantMessageEvent(event)) {
+          return Effect.succeed(Option.none());
+        }
+        if (event.type === "thread.activity-appended" && !doesActivityAffectShellStream(event)) {
+          return Effect.succeed(Option.none());
+        }
+
         switch (event.type) {
           case "project.created":
           case "project.meta-updated":

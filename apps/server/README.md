@@ -32,8 +32,14 @@ Cafe Code expects providers to already be installed and authenticated:
 
 ## Notes
 
-The npm package runs the local Cafe Code server and bundled UI. Desktop
-installers are not published yet.
+The npm package launches the Electron desktop app. Desktop installers are not
+published yet.
+
+For server-only use, run:
+
+```bash
+cafe-code-server
+```
 
 ## License
 

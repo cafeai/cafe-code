@@ -387,25 +387,23 @@ function runtimeEventToActivities(
 
     case "runtime.warning": {
       const detail = event.payload.detail;
-      if (
+      const isRetrying =
         detail !== null &&
         typeof detail === "object" &&
         !Array.isArray(detail) &&
         "willRetry" in detail &&
-        detail.willRetry === true
-      ) {
-        return [];
-      }
+        detail.willRetry === true;
       return [
         {
           id: event.eventId,
           createdAt: event.createdAt,
           tone: "info",
           kind: "runtime.warning",
-          summary: "Runtime warning",
+          summary: isRetrying ? "Provider transport retrying" : "Runtime warning",
           payload: {
             message: truncateDetail(event.payload.message),
             ...(event.payload.detail !== undefined ? { detail: event.payload.detail } : {}),
+            ...(isRetrying ? { retrying: true } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -1317,6 +1315,18 @@ const make = Effect.gen(function* () {
       const now = event.createdAt;
       const eventTurnId = toTurnId(event.turnId);
       const activeTurnId = thread.session?.activeTurnId ?? null;
+      let pendingTurnStartForThread: boolean | undefined;
+      const hasPendingTurnStartForThread = () =>
+        Effect.gen(function* () {
+          if (pendingTurnStartForThread !== undefined) {
+            return pendingTurnStartForThread;
+          }
+          const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
+            threadId: thread.id,
+          });
+          pendingTurnStartForThread = Option.isSome(pendingTurnStart);
+          return pendingTurnStartForThread;
+        });
 
       const conflictsWithActiveTurn =
         activeTurnId !== null && eventTurnId !== undefined && !sameId(activeTurnId, eventTurnId);
@@ -1385,6 +1395,15 @@ const make = Effect.gen(function* () {
         event.type === "turn.aborted" ||
         event.type === "turn.completed"
       ) {
+        const mayResolveSessionReadyBeforeTurnStart =
+          (event.type === "session.state.changed" && event.payload.state === "ready") ||
+          event.type === "session.started" ||
+          event.type === "thread.started" ||
+          (event.type === "thread.state.changed" && sessionRelevantThreadState === "idle");
+        const hasPendingTurnStart =
+          mayResolveSessionReadyBeforeTurnStart && activeTurnId === null
+            ? yield* hasPendingTurnStartForThread()
+            : false;
         const nextActiveTurnId =
           event.type === "turn.started"
             ? (eventTurnId ?? null)
@@ -1405,9 +1424,17 @@ const make = Effect.gen(function* () {
                   : activeTurnId;
         const status = (() => {
           switch (event.type) {
-            case "session.state.changed":
-              return orchestrationSessionStatusFromRuntimeState(event.payload.state);
+            case "session.state.changed": {
+              const runtimeStatus = orchestrationSessionStatusFromRuntimeState(event.payload.state);
+              return runtimeStatus === "ready" && hasPendingTurnStart ? "starting" : runtimeStatus;
+            }
             case "thread.state.changed":
+              if (sessionRelevantThreadState === "idle" && nextActiveTurnId !== null) {
+                return "running";
+              }
+              if (sessionRelevantThreadState === "idle" && hasPendingTurnStart) {
+                return "starting";
+              }
               return orchestrationSessionStatusFromRuntimeThreadState(sessionRelevantThreadState!);
             case "content.delta":
             case "turn.proposed.delta":
@@ -1428,6 +1455,9 @@ const make = Effect.gen(function* () {
             case "thread.started":
               // Provider thread/session start notifications can arrive during an
               // active turn; preserve turn-running state in that case.
+              if (hasPendingTurnStart) {
+                return "starting";
+              }
               return activeTurnId !== null ? "running" : "ready";
           }
           return thread.session?.status ?? "ready";

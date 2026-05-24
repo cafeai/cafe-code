@@ -46,6 +46,16 @@ type DecideOrchestrationCommandResult =
   | PlannedOrchestrationEvent
   | ReadonlyArray<PlannedOrchestrationEvent>;
 
+function threadHasUnsettledTurnStart(thread: OrchestrationReadModel["threads"][number]): boolean {
+  if (thread.session?.status === "starting" || thread.session?.status === "running") {
+    return true;
+  }
+  if (thread.session?.activeTurnId !== null && thread.session?.activeTurnId !== undefined) {
+    return true;
+  }
+  return thread.latestTurn?.state === "running" && thread.latestTurn.completedAt === null;
+}
+
 const decideCommandSequence = Effect.fn("decideCommandSequence")(function* ({
   commands,
   readModel,
@@ -420,6 +430,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (threadHasUnsettledTurnStart(targetThread)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' already has a turn starting or running. Queue a follow-up or steer the active turn instead of starting another turn.`,
+        });
+      }
       const sourceProposedPlan = command.sourceProposedPlan;
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({

@@ -1,0 +1,57 @@
+import { assert, describe, it } from "@effect/vitest";
+
+import packageJson from "../package.json" with { type: "json" };
+import { buildDesktopLaunchEnv, resolveLaunchAction } from "./launcher.ts";
+
+describe("launcher", () => {
+  it("configures the default npm bin to launch the desktop app", () => {
+    assert.equal(packageJson.bin["cafe-code"], "dist/launcher.mjs");
+    assert.equal(packageJson.bin["cafe-code-server"], "dist/bin.mjs");
+  });
+
+  it("routes bare npx execution to the Electron desktop launcher", () => {
+    assert.deepEqual(resolveLaunchAction([]), { type: "desktop", args: [] });
+    assert.deepEqual(resolveLaunchAction(["--cafe-debug"]), {
+      type: "desktop",
+      args: ["--cafe-debug"],
+    });
+  });
+
+  it("routes server-only usage explicitly", () => {
+    assert.deepEqual(resolveLaunchAction(["--server", "serve", "--port", "3773"]), {
+      type: "server",
+      args: ["serve", "--port", "3773"],
+    });
+    assert.deepEqual(resolveLaunchAction(["serve", "--port", "3773"]), {
+      type: "server",
+      args: ["serve", "--port", "3773"],
+    });
+    assert.deepEqual(resolveLaunchAction(["auth", "pairing", "create"]), {
+      type: "server",
+      args: ["auth", "pairing", "create"],
+    });
+  });
+
+  it("keeps help and version local to the launcher", () => {
+    assert.deepEqual(resolveLaunchAction(["--help"]), { type: "help" });
+    assert.deepEqual(resolveLaunchAction(["-h"]), { type: "help" });
+    assert.deepEqual(resolveLaunchAction(["--version"]), { type: "version" });
+    assert.deepEqual(resolveLaunchAction(["-v"]), { type: "version" });
+  });
+
+  it("strips environment variables that can make Electron behave like a web/dev runner", () => {
+    const env = buildDesktopLaunchEnv({
+      ELECTRON_RUN_AS_NODE: "1",
+      CAFE_CODE_DESKTOP_DEV: "1",
+      VITE_DEV_SERVER_URL: "http://127.0.0.1:5173",
+      CAFE_CODE_DEV_URL: "http://127.0.0.1:5173",
+      PATH: "/bin",
+    });
+
+    assert.equal(env.ELECTRON_RUN_AS_NODE, undefined);
+    assert.equal(env.CAFE_CODE_DESKTOP_DEV, undefined);
+    assert.equal(env.VITE_DEV_SERVER_URL, undefined);
+    assert.equal(env.CAFE_CODE_DEV_URL, undefined);
+    assert.equal(env.PATH, "/bin");
+  });
+});

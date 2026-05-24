@@ -175,6 +175,168 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
   );
 });
 
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-clear-pending-turn-start-")))(
+  "OrchestrationProjectionPipeline",
+  (it) => {
+    it.effect("clears pending turn-start rows when a session is reset without an active turn", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const now = "2026-01-01T00:00:00.000Z";
+        const threadId = ThreadId.make("thread-orphan-start");
+        const messageId = MessageId.make("message-orphan-start");
+
+        yield* eventStore.append({
+          type: "project.created",
+          eventId: EventId.make("evt-orphan-project"),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make("project-orphan"),
+          occurredAt: now,
+          commandId: CommandId.make("cmd-orphan-project"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-orphan-project"),
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make("project-orphan"),
+            title: "Project",
+            workspaceRoot: "/tmp/project-orphan",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.created",
+          eventId: EventId.make("evt-orphan-thread"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-orphan-thread"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-orphan-thread"),
+          metadata: {},
+          payload: {
+            threadId,
+            projectId: ProjectId.make("project-orphan"),
+            title: "Thread",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.turn-start-requested",
+          eventId: EventId.make("evt-orphan-turn-start"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-orphan-turn-start"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-orphan-turn-start"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId,
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("claudeAgent"),
+              model: "claude-opus-4-6",
+            },
+            runtimeMode: "approval-required",
+            interactionMode: "plan",
+            createdAt: now,
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-orphan-session-reset"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-01-01T00:00:01.000Z",
+          commandId: CommandId.make("cmd-orphan-session-reset"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-orphan-session-reset"),
+          metadata: {},
+          payload: {
+            threadId,
+            session: {
+              threadId,
+              status: "ready",
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              lastError: "turn start interrupted",
+              updatedAt: "2026-01-01T00:00:01.000Z",
+            },
+          },
+        });
+
+        yield* projectionPipeline.bootstrap;
+
+        const sessionRows = yield* sql<{
+          readonly status: string;
+          readonly activeTurnId: string | null;
+          readonly lastError: string | null;
+        }>`
+          SELECT
+            status,
+            active_turn_id AS "activeTurnId",
+            last_error AS "lastError"
+          FROM projection_thread_sessions
+          WHERE thread_id = ${threadId}
+        `;
+        const threadRows = yield* sql<{
+          readonly instanceId: string;
+          readonly model: string;
+          readonly runtimeMode: string;
+          readonly interactionMode: string;
+        }>`
+          SELECT
+            json_extract(model_selection_json, '$.instanceId') AS "instanceId",
+            json_extract(model_selection_json, '$.model') AS "model",
+            runtime_mode AS "runtimeMode",
+            interaction_mode AS "interactionMode"
+          FROM projection_threads
+          WHERE thread_id = ${threadId}
+        `;
+        const pendingRows = yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count
+          FROM projection_turns
+          WHERE thread_id = ${threadId}
+            AND turn_id IS NULL
+            AND state = 'pending'
+        `;
+
+        assert.deepEqual(sessionRows, [
+          {
+            status: "ready",
+            activeTurnId: null,
+            lastError: "turn start interrupted",
+          },
+        ]);
+        assert.deepEqual(threadRows, [
+          {
+            instanceId: "claudeAgent",
+            model: "claude-opus-4-6",
+            runtimeMode: "approval-required",
+            interactionMode: "plan",
+          },
+        ]);
+        assert.deepEqual(pendingRows, [{ count: 0 }]);
+      }),
+    );
+  },
+);
+
 it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-thread-move-")))(
   "OrchestrationProjectionPipeline",
   (it) => {
@@ -1490,6 +1652,105 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 
+  it.effect("does not churn thread shell timestamps for streaming assistant deltas", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+        eventStore
+          .append(event)
+          .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      const deltaAt = "2026-01-01T00:00:05.000Z";
+
+      yield* appendAndProject({
+        type: "project.created",
+        eventId: EventId.make("evt-stream-shell-project"),
+        aggregateKind: "project",
+        aggregateId: ProjectId.make("project-stream-shell"),
+        occurredAt: createdAt,
+        commandId: CommandId.make("cmd-stream-shell-project"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-stream-shell-project"),
+        metadata: {},
+        payload: {
+          projectId: ProjectId.make("project-stream-shell"),
+          title: "Project Stream Shell",
+          workspaceRoot: "/tmp/project-stream-shell",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+
+      yield* appendAndProject({
+        type: "thread.created",
+        eventId: EventId.make("evt-stream-shell-thread"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-stream-shell"),
+        occurredAt: createdAt,
+        commandId: CommandId.make("cmd-stream-shell-thread"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-stream-shell-thread"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-stream-shell"),
+          projectId: ProjectId.make("project-stream-shell"),
+          title: "Thread Stream Shell",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+
+      yield* appendAndProject({
+        type: "thread.message-sent",
+        eventId: EventId.make("evt-stream-shell-delta"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-stream-shell"),
+        occurredAt: deltaAt,
+        commandId: CommandId.make("cmd-stream-shell-delta"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-stream-shell-delta"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-stream-shell"),
+          messageId: MessageId.make("assistant-stream-shell"),
+          role: "assistant",
+          text: "streaming",
+          turnId: null,
+          streaming: true,
+          createdAt: deltaAt,
+          updatedAt: deltaAt,
+        },
+      });
+
+      const threadRows = yield* sql<{ readonly updatedAt: string }>`
+        SELECT updated_at AS "updatedAt"
+        FROM projection_threads
+        WHERE thread_id = 'thread-stream-shell'
+      `;
+      assert.deepEqual(threadRows, [{ updatedAt: createdAt }]);
+
+      const messageRows = yield* sql<{ readonly text: string }>`
+        SELECT text
+        FROM projection_thread_messages
+        WHERE message_id = 'assistant-stream-shell'
+      `;
+      assert.deepEqual(messageRows, [{ text: "streaming" }]);
+    }),
+  );
+
   it.effect(
     "resolves turn-count conflicts when checkpoint completion rewrites provisional turns",
     () =>
@@ -2261,17 +2522,19 @@ it.effect("restores pending turn-start metadata across projection pipeline resta
         readonly userMessageId: string | null;
         readonly sourceProposedPlanThreadId: string | null;
         readonly sourceProposedPlanId: string | null;
+        readonly requestedAt: string;
         readonly startedAt: string;
       }>`
-        SELECT
-          turn_id AS "turnId",
-          pending_message_id AS "userMessageId",
-          source_proposed_plan_thread_id AS "sourceProposedPlanThreadId",
-          source_proposed_plan_id AS "sourceProposedPlanId",
-          started_at AS "startedAt"
-        FROM projection_turns
-        WHERE turn_id = ${turnId}
-      `;
+	        SELECT
+	          turn_id AS "turnId",
+	          pending_message_id AS "userMessageId",
+	          source_proposed_plan_thread_id AS "sourceProposedPlanThreadId",
+	          source_proposed_plan_id AS "sourceProposedPlanId",
+	          requested_at AS "requestedAt",
+	          started_at AS "startedAt"
+	        FROM projection_turns
+	        WHERE turn_id = ${turnId}
+	      `;
     }).pipe(Effect.provide(secondProjectionLayer));
 
     assert.deepEqual(turnRows, [
@@ -2280,7 +2543,8 @@ it.effect("restores pending turn-start metadata across projection pipeline resta
         userMessageId: "message-restart",
         sourceProposedPlanThreadId: "thread-plan-source",
         sourceProposedPlanId: "plan-source",
-        startedAt: turnStartedAt,
+        requestedAt: turnStartedAt,
+        startedAt: sessionSetAt,
       },
     ]);
   }).pipe(

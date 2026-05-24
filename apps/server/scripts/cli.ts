@@ -18,6 +18,7 @@ import {
 import { resolveCatalogDependencies } from "../../../scripts/lib/resolve-catalog.ts";
 import { fromJsonStringPretty } from "@cafecode/shared/schemaJson";
 import rootPackageJson from "../../../package.json" with { type: "json" };
+import desktopPackageJson from "../../desktop/package.json" with { type: "json" };
 import serverPackageJson from "../package.json" with { type: "json" };
 
 interface PackageJson {
@@ -123,6 +124,92 @@ const restorePublishIconOverrides = Effect.fn("restorePublishIconOverrides")(fun
   }
 });
 
+const stagePublishedDesktopRuntime = Effect.fn("stagePublishedDesktopRuntime")(function* (
+  repoRoot: string,
+  serverDir: string,
+  version: string,
+) {
+  const path = yield* Path.Path;
+  const fs = yield* FileSystem.FileSystem;
+  const stageRoot = path.join(serverDir, "dist/apps");
+  const stagedServerRoot = path.join(stageRoot, "server");
+  const stagedDesktopRoot = path.join(stageRoot, "desktop");
+  const serverDist = path.join(serverDir, "dist");
+  const desktopDir = path.join(repoRoot, "apps/desktop");
+  const requiredPaths = [
+    path.join(serverDist, "bin.mjs"),
+    path.join(serverDist, "client/index.html"),
+    path.join(desktopDir, "dist-electron/main.cjs"),
+    path.join(desktopDir, "dist-electron/preload.cjs"),
+    path.join(desktopDir, "scripts/start-electron.mjs"),
+    path.join(desktopDir, "scripts/electron-launcher.mjs"),
+    path.join(desktopDir, "resources/icon.icns"),
+  ];
+
+  for (const requiredPath of requiredPaths) {
+    if (!(yield* fs.exists(requiredPath))) {
+      return yield* new CliError({
+        message: `Missing desktop npm runtime asset: ${requiredPath}. Run bun run build:desktop first.`,
+      });
+    }
+  }
+
+  yield* fs.remove(stageRoot, { recursive: true, force: true }).pipe(Effect.ignore);
+  yield* fs.makeDirectory(path.join(stagedServerRoot, "dist"), { recursive: true });
+  yield* fs.makeDirectory(stagedDesktopRoot, { recursive: true });
+
+  yield* fs.copyFile(path.join(serverDist, "bin.mjs"), path.join(stagedServerRoot, "dist/bin.mjs"));
+  if (yield* fs.exists(path.join(serverDist, "bin.mjs.map"))) {
+    yield* fs.copyFile(
+      path.join(serverDist, "bin.mjs.map"),
+      path.join(stagedServerRoot, "dist/bin.mjs.map"),
+    );
+  }
+  yield* fs.copy(path.join(serverDist, "client"), path.join(stagedServerRoot, "dist/client"), {
+    overwrite: true,
+    preserveTimestamps: true,
+  });
+  yield* fs.copyFile(
+    path.join(serverDir, "package.json"),
+    path.join(stagedServerRoot, "package.json"),
+  );
+
+  yield* fs.copy(
+    path.join(desktopDir, "dist-electron"),
+    path.join(stagedDesktopRoot, "dist-electron"),
+    {
+      overwrite: true,
+      preserveTimestamps: true,
+    },
+  );
+  yield* fs.makeDirectory(path.join(stagedDesktopRoot, "scripts"), { recursive: true });
+  for (const scriptName of ["start-electron.mjs", "electron-launcher.mjs"]) {
+    yield* fs.copyFile(
+      path.join(desktopDir, "scripts", scriptName),
+      path.join(stagedDesktopRoot, "scripts", scriptName),
+    );
+  }
+  yield* fs.copy(path.join(desktopDir, "resources"), path.join(stagedDesktopRoot, "resources"), {
+    overwrite: true,
+    preserveTimestamps: true,
+  });
+  yield* fs.writeFileString(
+    path.join(stagedDesktopRoot, "package.json"),
+    // @effect-diagnostics-next-line preferSchemaOverJson:off - Package staging writes deterministic package metadata, not untrusted input.
+    `${JSON.stringify({ ...desktopPackageJson, version }, null, 2)}\n`,
+  );
+
+  yield* Effect.log("[cli] Staged Electron desktop runtime for npm");
+  return stageRoot;
+});
+
+const cleanupPublishedDesktopRuntime = Effect.fn("cleanupPublishedDesktopRuntime")(function* (
+  stageRoot: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  yield* fs.remove(stageRoot, { recursive: true, force: true }).pipe(Effect.ignore);
+});
+
 const applyDevelopmentIconOverrides = Effect.fn("applyDevelopmentIconOverrides")(function* (
   repoRoot: string,
   serverDir: string,
@@ -215,7 +302,7 @@ const publishCmd = Command.make(
       const backupPath = `${packageJsonPath}.bak`;
 
       // Assert build assets exist
-      for (const relPath of ["dist/bin.mjs", "dist/client/index.html"]) {
+      for (const relPath of ["dist/bin.mjs", "dist/launcher.mjs", "dist/client/index.html"]) {
         const abs = path.join(serverDir, relPath);
         if (!(yield* fs.exists(abs))) {
           return yield* new CliError({
@@ -261,7 +348,12 @@ const publishCmd = Command.make(
           yield* Effect.log("[cli] Prepared package.json for publish");
 
           const iconBackups = yield* applyPublishIconOverrides(repoRoot, serverDir);
-          return { iconBackups };
+          const stagedDesktopRuntimePath = yield* stagePublishedDesktopRuntime(
+            repoRoot,
+            serverDir,
+            version,
+          );
+          return { iconBackups, stagedDesktopRuntimePath };
         }),
         // Use: npm publish
         () =>
@@ -282,8 +374,12 @@ const publishCmd = Command.make(
             );
           }),
         // Release: restore
-        (resource: { readonly iconBackups: ReadonlyArray<PublishIconBackup> }) =>
+        (resource: {
+          readonly iconBackups: ReadonlyArray<PublishIconBackup>;
+          readonly stagedDesktopRuntimePath: string;
+        }) =>
           Effect.gen(function* () {
+            yield* cleanupPublishedDesktopRuntime(resource.stagedDesktopRuntimePath);
             yield* restorePublishIconOverrides(resource.iconBackups).pipe(
               Effect.catch((error) =>
                 Effect.logError(`[cli] Failed to restore publish icon overrides: ${String(error)}`),

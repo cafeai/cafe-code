@@ -293,6 +293,7 @@ describe("orchestration projector", () => {
   it("tracks latest turn id from session lifecycle events", async () => {
     const createdAt = "2026-02-23T08:00:00.000Z";
     const startedAt = "2026-02-23T08:00:05.000Z";
+    const completedAt = "2026-02-23T08:00:10.000Z";
     const model = createEmptyReadModel(createdAt);
 
     const afterCreate = await Effect.runPromise(
@@ -353,7 +354,45 @@ describe("orchestration projector", () => {
 
     const thread = afterRunning.threads[0];
     expect(thread?.latestTurn?.turnId).toBe("turn-1");
+    expect(thread?.latestTurn?.state).toBe("running");
     expect(thread?.session?.status).toBe("running");
+
+    const afterReady = await Effect.runPromise(
+      projectEvent(
+        afterRunning,
+        makeEvent({
+          sequence: 3,
+          type: "thread.session-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: completedAt,
+          commandId: "cmd-ready",
+          payload: {
+            threadId: "thread-1",
+            session: {
+              threadId: "thread-1",
+              status: "ready",
+              providerName: "codex",
+              providerSessionId: "session-1",
+              providerThreadId: "provider-thread-1",
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: completedAt,
+            },
+          },
+        }),
+      ),
+    );
+
+    const completedThread = afterReady.threads[0];
+    expect(completedThread?.latestTurn).toMatchObject({
+      turnId: "turn-1",
+      state: "completed",
+      completedAt,
+    });
+    expect(completedThread?.session?.status).toBe("ready");
+    expect(completedThread?.session?.activeTurnId).toBeNull();
   });
 
   it("updates canonical thread runtime mode from thread.runtime-mode-set", async () => {

@@ -143,6 +143,7 @@ describe("ProviderCommandReactor", () => {
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly liveSteer?: "supported" | "unsupported";
+    readonly startReactor?: boolean;
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir = input?.baseDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "t3code-reactor-"));
@@ -367,8 +368,37 @@ describe("ProviderCommandReactor", () => {
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const reactor = await runtime.runPromise(Effect.service(ProviderCommandReactor));
     scope = await Effect.runPromise(Scope.make("sequential"));
-    await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
+    const startReactor = () => Effect.runPromise(reactor.start().pipe(Scope.provide(scope!)));
+    if (input?.startReactor !== false) {
+      await startReactor();
+    }
     const drain = () => Effect.runPromise(reactor.drain);
+    const markThreadReady = async (
+      threadId = ThreadId.make("thread-1"),
+      updatedAt = now,
+    ): Promise<void> => {
+      const snapshot = await Effect.runPromise(snapshotQuery.getSnapshot());
+      const thread = snapshot.threads.find((entry) => entry.id === threadId);
+      const session = thread?.session;
+      if (!session) {
+        throw new Error(`Cannot mark thread '${threadId}' ready without a projected session.`);
+      }
+      await Effect.runPromise(
+        engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`cmd-session-ready-${crypto.randomUUID()}`),
+          threadId,
+          session: {
+            ...session,
+            status: "ready",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt,
+          },
+          createdAt: updatedAt,
+        }),
+      );
+    };
 
     await Effect.runPromise(
       engine.dispatch({
@@ -412,9 +442,50 @@ describe("ProviderCommandReactor", () => {
       generateThreadTitle,
       runtimeSessions,
       stateDir,
+      startReactor,
       drain,
+      markThreadReady,
     };
   }
+
+  it("clears interrupted turn starts on startup without resending provider work", async () => {
+    const harness = await createHarness({ startReactor: false });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-before-restart"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-before-restart"),
+          role: "user",
+          text: "hello before restart",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    await harness.startReactor();
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return (
+        thread?.session?.status === "ready" &&
+        thread.session.activeTurnId === null &&
+        thread.activities.some((activity) => activity.kind === "provider.turn.start.failed")
+      );
+    });
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.session?.lastError).toContain("before a provider turn started");
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+  });
 
   it("reacts to thread.turn.start by ensuring session and sending provider turn", async () => {
     const harness = await createHarness();
@@ -852,6 +923,7 @@ describe("ProviderCommandReactor", () => {
     );
 
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.markThreadReady();
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -952,6 +1024,7 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.markThreadReady();
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -1001,6 +1074,7 @@ describe("ProviderCommandReactor", () => {
     );
 
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.markThreadReady();
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -1065,6 +1139,7 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.markThreadReady();
     expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
       cwd: "/tmp/provider-project",
     });
@@ -1143,6 +1218,7 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.markThreadReady();
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -1211,6 +1287,7 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.markThreadReady();
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -1344,6 +1421,7 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.markThreadReady();
 
     harness.startSession.mockImplementationOnce(
       (_: unknown, __: unknown) => Effect.fail("simulated restart failure") as never,
@@ -1399,6 +1477,7 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.markThreadReady();
 
     await Effect.runPromise(
       harness.engine.dispatch({

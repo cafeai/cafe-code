@@ -1288,33 +1288,6 @@ describe("ProviderRuntimeIngestion", () => {
         createdAt,
       }),
     );
-    harness.setProviderSession({
-      provider: ProviderDriverKind.make("codex"),
-      status: "running",
-      runtimeMode: "approval-required",
-      threadId: targetThreadId,
-      createdAt,
-      updatedAt: createdAt,
-      activeTurnId,
-    });
-
-    harness.emit({
-      type: "turn.started",
-      eventId: asEventId("evt-turn-started-already-running"),
-      provider: ProviderDriverKind.make("codex"),
-      createdAt,
-      threadId: targetThreadId,
-      turnId: activeTurnId,
-    });
-
-    await waitForThread(
-      harness.readModel,
-      (thread) =>
-        thread.session?.status === "running" && thread.session?.activeTurnId === activeTurnId,
-      2_000,
-      targetThreadId,
-    );
-
     harness.emit({
       type: "turn.proposed.completed",
       eventId: asEventId("evt-plan-source-completed-guarded"),
@@ -1366,6 +1339,32 @@ describe("ProviderRuntimeIngestion", () => {
         runtimeMode: "approval-required",
         createdAt: "2026-01-01T00:00:00.000Z",
       }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-already-running-guarded"),
+        threadId: targetThreadId,
+        session: {
+          threadId: targetThreadId,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId,
+          updatedAt: createdAt,
+          lastError: null,
+        },
+        createdAt,
+      }),
+    );
+
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" && thread.session?.activeTurnId === activeTurnId,
+      2_000,
+      targetThreadId,
     );
 
     harness.emit({
@@ -2362,7 +2361,7 @@ describe("ProviderRuntimeIngestion", () => {
     expect(completionEvents).toHaveLength(1);
   });
 
-  it("completes assistant output independently from later provider thread idle/completion events", async () => {
+  it("finalizes assistant output without closing the active provider turn", async () => {
     const harness = await createHarness();
     const turnId = asTurnId("turn-provider-idle");
 
@@ -2408,21 +2407,21 @@ describe("ProviderRuntimeIngestion", () => {
       },
     });
 
-    const completedOutput = await waitForThread(
+    const finalizedOutput = await waitForThread(
       harness.readModel,
       (thread) =>
         thread.latestTurn?.turnId === turnId &&
-        thread.latestTurn.state === "completed" &&
-        thread.latestTurn.completedAt === "2026-01-01T00:00:02.000Z" &&
-        thread.session?.status === "ready" &&
-        thread.session.activeTurnId === null &&
+        thread.latestTurn.state === "running" &&
+        thread.latestTurn.completedAt === null &&
+        thread.session?.status === "running" &&
+        thread.session.activeTurnId === turnId &&
         thread.messages.some(
           (message: ProviderRuntimeTestMessage) =>
             message.id === "assistant:item-provider-idle" && !message.streaming,
         ),
     );
-    expect(completedOutput.latestTurn?.state).toBe("completed");
-    expect(completedOutput.session?.status).toBe("ready");
+    expect(finalizedOutput.latestTurn?.state).toBe("running");
+    expect(finalizedOutput.session?.status).toBe("running");
 
     harness.emit({
       type: "thread.state.changed",
@@ -2435,16 +2434,16 @@ describe("ProviderRuntimeIngestion", () => {
       },
     });
 
-    const readyAfterIdle = await waitForThread(
+    const runningAfterIdle = await waitForThread(
       harness.readModel,
       (thread) =>
         thread.latestTurn?.turnId === turnId &&
-        thread.latestTurn.state === "completed" &&
-        thread.latestTurn.completedAt === "2026-01-01T00:00:02.000Z" &&
-        thread.session?.status === "ready" &&
-        thread.session.activeTurnId === null,
+        thread.latestTurn.state === "running" &&
+        thread.latestTurn.completedAt === null &&
+        thread.session?.status === "running" &&
+        thread.session.activeTurnId === turnId,
     );
-    expect(readyAfterIdle.session?.status).toBe("ready");
+    expect(runningAfterIdle.session?.status).toBe("running");
 
     harness.emit({
       type: "turn.completed",
@@ -2463,7 +2462,7 @@ describe("ProviderRuntimeIngestion", () => {
       (thread) =>
         thread.latestTurn?.turnId === turnId &&
         thread.latestTurn.state === "completed" &&
-        thread.latestTurn.completedAt === "2026-01-01T00:00:02.000Z" &&
+        thread.latestTurn.completedAt === "2026-01-01T00:00:04.000Z" &&
         thread.session?.status === "ready",
     );
     expect(completed.latestTurn?.state).toBe("completed");
@@ -2503,7 +2502,7 @@ describe("ProviderRuntimeIngestion", () => {
 
     await waitForThread(
       harness.readModel,
-      (thread) => thread.session?.status === "ready" && thread.session.activeTurnId === turnId,
+      (thread) => thread.session?.status === "running" && thread.session.activeTurnId === turnId,
     );
 
     harness.emit({
@@ -2619,7 +2618,7 @@ describe("ProviderRuntimeIngestion", () => {
       harness.readModel,
       (entry) =>
         entry.session?.status === "error" &&
-        entry.session?.activeTurnId === "turn-3" &&
+        entry.session?.activeTurnId === null &&
         entry.session?.lastError === "runtime exploded",
     );
     expect(thread.session?.status).toBe("error");
@@ -2657,7 +2656,7 @@ describe("ProviderRuntimeIngestion", () => {
     expect(activityPayload?.message).toBe("runtime activity exploded");
   });
 
-  it("keeps the session running and suppresses transient retry warnings during an active turn", async () => {
+  it("keeps the session running and records transient retry warnings during an active turn", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
@@ -2692,18 +2691,116 @@ describe("ProviderRuntimeIngestion", () => {
       (entry) =>
         entry.session?.status === "running" &&
         entry.session?.activeTurnId === "turn-warning" &&
-        !entry.activities.some(
+        entry.activities.some(
           (activity: ProviderRuntimeTestActivity) => activity.id === "evt-warning-runtime",
         ),
     );
+    const activity = thread.activities.find(
+      (entry: ProviderRuntimeTestActivity) => entry.id === "evt-warning-runtime",
+    );
+    const payload =
+      activity?.payload && typeof activity.payload === "object"
+        ? (activity.payload as Record<string, unknown>)
+        : undefined;
     expect(thread.session?.status).toBe("running");
     expect(thread.session?.activeTurnId).toBe("turn-warning");
     expect(thread.session?.lastError).toBeNull();
-    expect(
-      thread.activities.some(
-        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-warning-runtime",
-      ),
-    ).toBe(false);
+    expect(activity?.kind).toBe("runtime.warning");
+    expect(activity?.summary).toBe("Provider transport retrying");
+    expect(payload?.message).toBe("Reconnecting... 2/5");
+    expect(payload?.retrying).toBe(true);
+  });
+
+  it("keeps pending turn starts busy across provider ready and idle startup events", async () => {
+    const harness = await createHarness();
+    const requestedAt = "2026-01-01T00:00:00.000Z";
+    const startedAt = "2026-01-01T00:00:05.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-pending-start-lifecycle"),
+        threadId: asThreadId("thread-1"),
+        message: {
+          messageId: asMessageId("msg-pending-start-lifecycle"),
+          role: "user",
+          text: "hello",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: requestedAt,
+      }),
+    );
+
+    await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.status === "starting" && entry.session?.activeTurnId === null,
+    );
+
+    harness.emit({
+      type: "session.started",
+      eventId: asEventId("evt-pending-start-session-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId: asThreadId("thread-1"),
+      message: "session started",
+    });
+    harness.emit({
+      type: "session.state.changed",
+      eventId: asEventId("evt-pending-start-session-ready"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      threadId: asThreadId("thread-1"),
+      payload: {
+        state: "ready",
+      },
+    });
+    harness.emit({
+      type: "thread.started",
+      eventId: asEventId("evt-pending-start-thread-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId: asThreadId("thread-1"),
+    });
+    harness.emit({
+      type: "thread.state.changed",
+      eventId: asEventId("evt-pending-start-thread-idle"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:04.000Z",
+      threadId: asThreadId("thread-1"),
+      payload: {
+        state: "idle",
+      },
+    });
+    await harness.drain();
+
+    const stillStarting = await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.status === "starting" && entry.session?.activeTurnId === null,
+    );
+    expect(stillStarting.session?.status).toBe("starting");
+    expect(stillStarting.session?.activeTurnId).toBeNull();
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-pending-start-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: startedAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-pending-start"),
+      payload: {},
+    });
+
+    const running = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "running" &&
+        entry.session?.activeTurnId === "turn-pending-start" &&
+        entry.latestTurn?.turnId === "turn-pending-start",
+    );
+    expect(running.latestTurn?.requestedAt).toBe(requestedAt);
+    expect(running.latestTurn?.startedAt).toBe(startedAt);
   });
 
   it("maps session/thread lifecycle and item.started into session/activity projections", async () => {
@@ -3281,7 +3378,7 @@ describe("ProviderRuntimeIngestion", () => {
       harness.readModel,
       (entry) =>
         entry.session?.status === "error" &&
-        entry.session?.activeTurnId === "turn-after-failure" &&
+        entry.session?.activeTurnId === null &&
         entry.session?.lastError === "runtime still processed",
     );
     expect(thread.session?.status).toBe("error");

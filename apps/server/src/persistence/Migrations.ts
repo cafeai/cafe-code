@@ -46,6 +46,10 @@ import Migration0030 from "./Migrations/030_ProjectionThreadShellArchiveIndexes.
 import Migration0031 from "./Migrations/031_ProjectionThreadMessageThreadScopedIdentity.ts";
 import Migration0032 from "./Migrations/032_ReconcileCompletedThreadSessions.ts";
 import Migration0033 from "./Migrations/033_ReopenActiveTurnsWithPostCompletionActivity.ts";
+import Migration0034 from "./Migrations/034_ReconcileRunningActiveTurns.ts";
+import Migration0035 from "./Migrations/035_ReconcileActiveTurnSessionStatus.ts";
+import Migration0036 from "./Migrations/036_ProjectionThreadActivityRecentIndex.ts";
+import Migration0037 from "./Migrations/037_ReconcileCompletedLatestTurnPostCompletionEvents.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -91,6 +95,10 @@ export const migrationEntries = [
   [31, "ProjectionThreadMessageThreadScopedIdentity", Migration0031],
   [32, "ReconcileCompletedThreadSessions", Migration0032],
   [33, "ReopenActiveTurnsWithPostCompletionActivity", Migration0033],
+  [34, "ReconcileRunningActiveTurns", Migration0034],
+  [35, "ReconcileActiveTurnSessionStatus", Migration0035],
+  [36, "ProjectionThreadActivityRecentIndex", Migration0036],
+  [37, "ReconcileCompletedLatestTurnPostCompletionEvents", Migration0037],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

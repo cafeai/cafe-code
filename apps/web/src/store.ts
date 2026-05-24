@@ -1,5 +1,6 @@
 import type {
   EnvironmentId,
+  ModelSelection,
   MessageId,
   OrchestrationCheckpointSummary,
   OrchestrationEvent,
@@ -141,6 +142,24 @@ function normalizeModelSelection<T extends { instanceId: string; model: string }
     ...selection,
     model: resolveModelSlugForProvider(selection.instanceId, selection.model),
   };
+}
+
+function modelSelectionsEqual(
+  left: ModelSelection | null | undefined,
+  right: ModelSelection | null | undefined,
+): boolean {
+  if (left === right) return true;
+  if (left == null || right == null) return false;
+  if (left.instanceId !== right.instanceId || left.model !== right.model) return false;
+  const leftOptions = left.options ?? [];
+  const rightOptions = right.options ?? [];
+  return (
+    leftOptions.length === rightOptions.length &&
+    leftOptions.every(
+      (option, index) =>
+        option.id === rightOptions[index]?.id && option.value === rightOptions[index]?.value,
+    )
+  );
 }
 
 function mapProjectScripts(scripts: ReadonlyArray<Project["scripts"][number]>): Project["scripts"] {
@@ -415,7 +434,7 @@ function threadShellsEqual(left: ThreadShell | undefined, right: ThreadShell): b
     left.codexThreadId === right.codexThreadId &&
     left.projectId === right.projectId &&
     left.title === right.title &&
-    left.modelSelection === right.modelSelection &&
+    modelSelectionsEqual(left.modelSelection, right.modelSelection) &&
     left.runtimeMode === right.runtimeMode &&
     left.interactionMode === right.interactionMode &&
     left.error === right.error &&
@@ -835,6 +854,19 @@ function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error"
     return "interrupted" as const;
   }
   return "completed" as const;
+}
+
+function sessionStatusToSettledLatestTurnState(status: OrchestrationSessionStatus) {
+  if (status === "error") {
+    return "error" as const;
+  }
+  if (status === "ready") {
+    return "completed" as const;
+  }
+  if (status === "interrupted" || status === "stopped") {
+    return "interrupted" as const;
+  }
+  return null;
 }
 
 function compareActivities(
@@ -1349,16 +1381,30 @@ function applyEnvironmentOrchestrationEvent(
       }));
 
     case "thread.turn-start-requested":
-      return updateThreadState(state, event.payload.threadId, (thread) => ({
-        ...thread,
-        ...(event.payload.modelSelection !== undefined
-          ? { modelSelection: normalizeModelSelection(event.payload.modelSelection) }
-          : {}),
-        runtimeMode: event.payload.runtimeMode,
-        interactionMode: event.payload.interactionMode,
-        pendingSourceProposedPlan: event.payload.sourceProposedPlan,
-        updatedAt: event.occurredAt,
-      }));
+      return updateThreadState(state, event.payload.threadId, (thread) => {
+        const previousSession = thread.session;
+        return {
+          ...thread,
+          ...(event.payload.modelSelection !== undefined
+            ? { modelSelection: normalizeModelSelection(event.payload.modelSelection) }
+            : {}),
+          runtimeMode: event.payload.runtimeMode,
+          interactionMode: event.payload.interactionMode,
+          pendingSourceProposedPlan: event.payload.sourceProposedPlan,
+          session: {
+            provider: previousSession?.provider ?? ProviderDriverKind.make("codex"),
+            ...(previousSession?.providerInstanceId !== undefined
+              ? { providerInstanceId: previousSession.providerInstanceId }
+              : {}),
+            status: "connecting",
+            orchestrationStatus: "starting",
+            activeTurnId: undefined,
+            createdAt: previousSession?.createdAt ?? event.payload.createdAt,
+            updatedAt: event.payload.createdAt,
+          },
+          updatedAt: event.occurredAt,
+        };
+      });
 
     case "thread.turn-interrupt-requested": {
       if (event.payload.turnId === undefined) {
@@ -1440,20 +1486,17 @@ function applyEnvironmentOrchestrationEvent(
           event.payload.turnId !== null &&
           (thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId)
             ? (() => {
-                const shouldHoldTurnOpen = event.payload.streaming;
+                const previousState = thread.latestTurn?.state;
+                const terminalState =
+                  previousState === "completed" ||
+                  previousState === "error" ||
+                  previousState === "interrupted"
+                    ? previousState
+                    : null;
                 return buildLatestTurn({
                   previous: thread.latestTurn,
                   turnId: event.payload.turnId,
-                  state: shouldHoldTurnOpen
-                    ? thread.latestTurn?.state === "error" ||
-                      thread.latestTurn?.state === "interrupted"
-                      ? thread.latestTurn.state
-                      : "running"
-                    : thread.latestTurn?.state === "interrupted"
-                      ? "interrupted"
-                      : thread.latestTurn?.state === "error"
-                        ? "error"
-                        : "completed",
+                  state: terminalState ?? "running",
                   requestedAt:
                     thread.latestTurn?.turnId === event.payload.turnId
                       ? thread.latestTurn.requestedAt
@@ -1463,11 +1506,8 @@ function applyEnvironmentOrchestrationEvent(
                       ? (thread.latestTurn.startedAt ?? event.payload.createdAt)
                       : event.payload.createdAt,
                   sourceProposedPlan: thread.pendingSourceProposedPlan,
-                  completedAt: shouldHoldTurnOpen
-                    ? thread.latestTurn?.turnId === event.payload.turnId
-                      ? (thread.latestTurn.completedAt ?? null)
-                      : null
-                    : event.payload.updatedAt,
+                  completedAt:
+                    terminalState !== null ? (thread.latestTurn?.completedAt ?? null) : null,
                   assistantMessageId: event.payload.messageId,
                 });
               })()
@@ -1482,34 +1522,59 @@ function applyEnvironmentOrchestrationEvent(
       });
 
     case "thread.session-set":
-      return updateThreadState(state, event.payload.threadId, (thread) => ({
-        ...thread,
-        session: mapSession(event.payload.session),
-        error: sanitizeThreadErrorMessage(event.payload.session.lastError),
-        latestTurn:
+      return updateThreadState(state, event.payload.threadId, (thread) => {
+        const previousSession = thread.session;
+        const previousActiveTurnId = thread.session?.activeTurnId ?? null;
+        const settledState = sessionStatusToSettledLatestTurnState(event.payload.session.status);
+        const currentLatestTurn = thread.latestTurn;
+        const latestTurn =
           event.payload.session.status === "running" && event.payload.session.activeTurnId !== null
-            ? buildLatestTurn({
-                previous: thread.latestTurn,
-                turnId: event.payload.session.activeTurnId,
-                state: "running",
-                requestedAt:
-                  thread.latestTurn?.turnId === event.payload.session.activeTurnId
-                    ? thread.latestTurn.requestedAt
+            ? (() => {
+                const isSameTurn = currentLatestTurn?.turnId === event.payload.session.activeTurnId;
+                const requestedAt = isSameTurn
+                  ? currentLatestTurn.requestedAt
+                  : previousSession?.orchestrationStatus === "starting" &&
+                      previousSession.activeTurnId === undefined
+                    ? previousSession.updatedAt
+                    : event.payload.session.updatedAt;
+                return buildLatestTurn({
+                  previous: currentLatestTurn,
+                  turnId: event.payload.session.activeTurnId,
+                  state: "running",
+                  requestedAt,
+                  startedAt: isSameTurn
+                    ? (currentLatestTurn.startedAt ?? event.payload.session.updatedAt)
                     : event.payload.session.updatedAt,
-                startedAt:
-                  thread.latestTurn?.turnId === event.payload.session.activeTurnId
-                    ? (thread.latestTurn.startedAt ?? event.payload.session.updatedAt)
-                    : event.payload.session.updatedAt,
-                completedAt: null,
-                assistantMessageId:
-                  thread.latestTurn?.turnId === event.payload.session.activeTurnId
-                    ? thread.latestTurn.assistantMessageId
-                    : null,
-                sourceProposedPlan: thread.pendingSourceProposedPlan,
-              })
-            : thread.latestTurn,
-        updatedAt: event.occurredAt,
-      }));
+                  completedAt: null,
+                  assistantMessageId: isSameTurn ? currentLatestTurn.assistantMessageId : null,
+                  sourceProposedPlan: thread.pendingSourceProposedPlan,
+                });
+              })()
+            : settledState !== null &&
+                previousActiveTurnId !== null &&
+                currentLatestTurn?.turnId === previousActiveTurnId
+              ? buildLatestTurn({
+                  previous: currentLatestTurn,
+                  turnId: previousActiveTurnId,
+                  state:
+                    currentLatestTurn.state === "error" || currentLatestTurn.state === "interrupted"
+                      ? currentLatestTurn.state
+                      : settledState,
+                  requestedAt: currentLatestTurn.requestedAt,
+                  startedAt: currentLatestTurn.startedAt ?? event.payload.session.updatedAt,
+                  completedAt: currentLatestTurn.completedAt ?? event.payload.session.updatedAt,
+                  assistantMessageId: currentLatestTurn.assistantMessageId,
+                  sourceProposedPlan: thread.pendingSourceProposedPlan,
+                })
+              : currentLatestTurn;
+        return {
+          ...thread,
+          session: mapSession(event.payload.session),
+          error: sanitizeThreadErrorMessage(event.payload.session.lastError),
+          latestTurn,
+          updatedAt: event.occurredAt,
+        };
+      });
 
     case "thread.session-stop-requested":
       return updateThreadState(state, event.payload.threadId, (thread) =>

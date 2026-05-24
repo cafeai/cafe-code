@@ -27,6 +27,7 @@ import {
   ThreadRevertedPayload,
   ThreadSessionSetPayload,
   ThreadTurnDiffCompletedPayload,
+  ThreadTurnStartRequestedPayload,
 } from "./Schemas.ts";
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id">>;
@@ -370,6 +371,44 @@ export function projectEvent(
         })),
       );
 
+    case "thread.turn-start-requested":
+      return decodeForEvent(
+        ThreadTurnStartRequestedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) {
+            return nextBase;
+          }
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              ...(payload.modelSelection !== undefined
+                ? { modelSelection: payload.modelSelection }
+                : {}),
+              runtimeMode: payload.runtimeMode,
+              interactionMode: payload.interactionMode,
+              session: {
+                threadId: payload.threadId,
+                status: "starting",
+                providerName: thread.session?.providerName ?? null,
+                ...(thread.session?.providerInstanceId !== undefined
+                  ? { providerInstanceId: thread.session.providerInstanceId }
+                  : {}),
+                runtimeMode: payload.runtimeMode,
+                activeTurnId: null,
+                lastError: null,
+                updatedAt: payload.createdAt,
+              },
+              updatedAt: event.occurredAt,
+            }),
+          };
+        }),
+      );
+
     case "thread.message-sent":
       return Effect.gen(function* () {
         const payload = yield* decodeForEvent(
@@ -450,6 +489,22 @@ export function projectEvent(
           event.type,
           "session",
         );
+        const existingActiveTurnId =
+          thread.session?.activeTurnId ??
+          (thread.latestTurn?.state === "running" ? thread.latestTurn.turnId : null);
+        const closesActiveTurn =
+          session.activeTurnId === null &&
+          existingActiveTurnId !== null &&
+          (session.status === "ready" ||
+            session.status === "error" ||
+            session.status === "interrupted" ||
+            session.status === "stopped");
+        const closedTurnState =
+          session.status === "error"
+            ? "error"
+            : session.status === "ready"
+              ? "completed"
+              : "interrupted";
 
         return {
           ...nextBase,
@@ -457,24 +512,50 @@ export function projectEvent(
             session,
             latestTurn:
               session.status === "running" && session.activeTurnId !== null
-                ? {
-                    turnId: session.activeTurnId,
-                    state: "running",
-                    requestedAt:
-                      thread.latestTurn?.turnId === session.activeTurnId
-                        ? thread.latestTurn.requestedAt
-                        : session.updatedAt,
-                    startedAt:
-                      thread.latestTurn?.turnId === session.activeTurnId
+                ? (() => {
+                    const isSameTurn = thread.latestTurn?.turnId === session.activeTurnId;
+                    const requestedAt = isSameTurn
+                      ? thread.latestTurn.requestedAt
+                      : thread.session?.status === "starting" &&
+                          thread.session.activeTurnId === null
+                        ? thread.session.updatedAt
+                        : session.updatedAt;
+                    return {
+                      turnId: session.activeTurnId,
+                      state: "running",
+                      requestedAt,
+                      startedAt: isSameTurn
                         ? (thread.latestTurn.startedAt ?? session.updatedAt)
                         : session.updatedAt,
-                    completedAt: null,
-                    assistantMessageId:
-                      thread.latestTurn?.turnId === session.activeTurnId
-                        ? thread.latestTurn.assistantMessageId
-                        : null,
-                  }
-                : thread.latestTurn,
+                      completedAt: null,
+                      assistantMessageId: isSameTurn ? thread.latestTurn.assistantMessageId : null,
+                    };
+                  })()
+                : closesActiveTurn
+                  ? (() => {
+                      const isSameTurn = thread.latestTurn?.turnId === existingActiveTurnId;
+                      return {
+                        turnId: existingActiveTurnId,
+                        state:
+                          thread.latestTurn?.state === "error" ||
+                          thread.latestTurn?.state === "interrupted"
+                            ? thread.latestTurn.state
+                            : closedTurnState,
+                        requestedAt: isSameTurn
+                          ? (thread.latestTurn.requestedAt ?? session.updatedAt)
+                          : session.updatedAt,
+                        startedAt: isSameTurn
+                          ? (thread.latestTurn.startedAt ?? session.updatedAt)
+                          : session.updatedAt,
+                        completedAt: isSameTurn
+                          ? (thread.latestTurn.completedAt ?? session.updatedAt)
+                          : session.updatedAt,
+                        assistantMessageId: isSameTurn
+                          ? thread.latestTurn.assistantMessageId
+                          : null,
+                      };
+                    })()
+                  : thread.latestTurn,
             updatedAt: event.occurredAt,
           }),
         };

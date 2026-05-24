@@ -58,6 +58,7 @@ const decodeReadModel = Schema.decodeUnknownEffect(OrchestrationReadModel);
 const decodeShellSnapshot = Schema.decodeUnknownEffect(OrchestrationShellSnapshot);
 const decodeThread = Schema.decodeUnknownEffect(OrchestrationThread);
 export const THREAD_DETAIL_ACTIVITY_LIMIT = 500;
+export const THREAD_DETAIL_MESSAGE_LIMIT = 2_000;
 const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
   Struct.assign({
     defaultModelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
@@ -211,23 +212,50 @@ function reconcileSessionWithLatestTurn(
   session: OrchestrationSession,
   latestTurn: OrchestrationLatestTurn | null | undefined,
 ): OrchestrationSession {
-  if (
-    session.status !== "running" ||
-    session.activeTurnId === null ||
-    latestTurn?.turnId !== session.activeTurnId ||
-    latestTurn.state !== "completed" ||
-    latestTurn.completedAt === null
-  ) {
+  if (session.activeTurnId === null) {
     return session;
   }
 
-  return {
-    ...session,
-    status: "ready",
-    activeTurnId: null,
-    lastError: null,
-    updatedAt: maxIso(session.updatedAt, latestTurn.completedAt),
-  };
+  if (latestTurn?.turnId !== session.activeTurnId) {
+    if (session.status !== "running") {
+      return {
+        ...session,
+        activeTurnId: null,
+      };
+    }
+    return session;
+  }
+
+  if (latestTurn.state === "completed" && latestTurn.completedAt !== null) {
+    return {
+      ...session,
+      status: "ready",
+      activeTurnId: null,
+      lastError: null,
+      updatedAt: maxIso(session.updatedAt, latestTurn.completedAt),
+    };
+  }
+
+  if (latestTurn.state === "interrupted" || latestTurn.state === "error") {
+    return {
+      ...session,
+      status: latestTurn.state,
+      activeTurnId: null,
+      updatedAt:
+        latestTurn.completedAt !== null
+          ? maxIso(session.updatedAt, latestTurn.completedAt)
+          : session.updatedAt,
+    };
+  }
+
+  if (latestTurn.state === "running" && session.status !== "running") {
+    return {
+      ...session,
+      status: "running",
+    };
+  }
+
+  return session;
 }
 
 function mapSessionRowForThread(
@@ -867,19 +895,24 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     Result: ProjectionThreadMessageDbRowSchema,
     execute: ({ threadId }) =>
       sql`
-        SELECT
-          message_id AS "messageId",
-          thread_id AS "threadId",
-          turn_id AS "turnId",
-          role,
-          text,
-          attachments_json AS "attachments",
-          is_streaming AS "isStreaming",
-          created_at AS "createdAt",
-          updated_at AS "updatedAt"
-        FROM projection_thread_messages
-        WHERE thread_id = ${threadId}
-        ORDER BY created_at ASC, message_id ASC
+        SELECT *
+        FROM (
+          SELECT
+            message_id AS "messageId",
+            thread_id AS "threadId",
+            turn_id AS "turnId",
+            role,
+            text,
+            attachments_json AS "attachments",
+            is_streaming AS "isStreaming",
+            created_at AS "createdAt",
+            updated_at AS "updatedAt"
+          FROM projection_thread_messages
+          WHERE thread_id = ${threadId}
+          ORDER BY created_at DESC, message_id DESC
+          LIMIT ${THREAD_DETAIL_MESSAGE_LIMIT}
+        )
+        ORDER BY "createdAt" ASC, "messageId" ASC
       `,
   });
 
@@ -908,18 +941,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     Result: ProjectionThreadActivityDbRowSchema,
     execute: ({ threadId }) =>
       sql`
-        SELECT *
-        FROM (
-          SELECT
-            activity_id AS "activityId",
-            thread_id AS "threadId",
-            turn_id AS "turnId",
-            tone,
-            kind,
-            summary,
-            payload_json AS "payload",
-            sequence,
-            created_at AS "createdAt"
+        WITH recent_activity_ids AS (
+          SELECT activity_id
           FROM projection_thread_activities
           WHERE thread_id = ${threadId}
           ORDER BY
@@ -929,11 +952,24 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             activity_id DESC
           LIMIT ${THREAD_DETAIL_ACTIVITY_LIMIT}
         )
+        SELECT
+          activities.activity_id AS "activityId",
+          activities.thread_id AS "threadId",
+          activities.turn_id AS "turnId",
+          activities.tone,
+          activities.kind,
+          activities.summary,
+          activities.payload_json AS "payload",
+          activities.sequence,
+          activities.created_at AS "createdAt"
+        FROM projection_thread_activities activities
+        INNER JOIN recent_activity_ids recent
+          ON recent.activity_id = activities.activity_id
         ORDER BY
-          CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,
-          sequence ASC,
-          "createdAt" ASC,
-          "activityId" ASC
+          CASE WHEN activities.sequence IS NULL THEN 0 ELSE 1 END ASC,
+          activities.sequence ASC,
+          activities.created_at ASC,
+          activities.activity_id ASC
       `,
   });
 

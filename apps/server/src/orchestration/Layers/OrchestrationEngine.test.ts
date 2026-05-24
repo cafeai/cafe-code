@@ -297,6 +297,96 @@ describe("OrchestrationEngine", () => {
     await system.dispose();
   });
 
+  it("rejects a second turn start while the first start is still materializing", async () => {
+    const createdAt = now();
+    const system = await createOrchestrationSystem();
+    const { engine } = system;
+
+    await system.run(
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-project-single-flight-create"),
+        projectId: asProjectId("project-single-flight"),
+        title: "Project Single Flight",
+        workspaceRoot: "/tmp/project-single-flight",
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        createdAt,
+      }),
+    );
+    await system.run(
+      engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-thread-single-flight-create"),
+        threadId: ThreadId.make("thread-single-flight"),
+        projectId: asProjectId("project-single-flight"),
+        title: "Thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      }),
+    );
+    await system.run(
+      engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-single-flight-1"),
+        threadId: ThreadId.make("thread-single-flight"),
+        message: {
+          messageId: asMessageId("msg-single-flight-1"),
+          role: "user",
+          text: "first",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt,
+      }),
+    );
+
+    const snapshotAfterFirstStart = await system.readModel();
+    const threadAfterFirstStart = snapshotAfterFirstStart.threads.find(
+      (thread) => thread.id === "thread-single-flight",
+    );
+    expect(threadAfterFirstStart?.session?.status).toBe("starting");
+
+    await expect(
+      system.run(
+        engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-single-flight-2"),
+          threadId: ThreadId.make("thread-single-flight"),
+          message: {
+            messageId: asMessageId("msg-single-flight-2"),
+            role: "user",
+            text: "second",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: "2026-01-01T00:00:01.000Z",
+        }),
+      ),
+    ).rejects.toThrow("already has a turn starting or running");
+
+    const events = await system.run(
+      Stream.runCollect(engine.readEvents(0)).pipe(
+        Effect.map((chunk): OrchestrationEvent[] => Array.from(chunk)),
+      ),
+    );
+    expect(events.filter((event) => event.type === "thread.turn-start-requested")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "thread.message-sent")).toHaveLength(1);
+
+    await system.dispose();
+  });
+
   it("archives and unarchives threads through orchestration commands", async () => {
     const system = await createOrchestrationSystem();
     const { engine } = system;

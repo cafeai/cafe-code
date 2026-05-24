@@ -10,10 +10,12 @@ import {
   ThreadId,
   TurnId,
   type OrchestrationEvent,
+  type OrchestrationShellStreamEvent,
 } from "@cafecode/contracts";
 import { describe, expect, it } from "vitest";
 
 import {
+  applyShellEvent,
   applyOrchestrationEvent,
   applyOrchestrationEvents,
   removeEnvironmentState,
@@ -281,6 +283,43 @@ describe("environment state removal", () => {
 });
 
 describe("thread selection memoization", () => {
+  it("does not rewrite shell state for structurally equal model selections", () => {
+    const thread = makeThread();
+    const state = makeState(thread);
+    const shellEvent: OrchestrationShellStreamEvent = {
+      kind: "thread-upserted",
+      sequence: 1,
+      thread: {
+        id: thread.id,
+        projectId: thread.projectId,
+        title: thread.title,
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        runtimeMode: thread.runtimeMode,
+        interactionMode: thread.interactionMode,
+        branch: thread.branch,
+        worktreePath: thread.worktreePath,
+        latestTurn: thread.latestTurn,
+        createdAt: thread.createdAt,
+        updatedAt: thread.updatedAt ?? thread.createdAt,
+        archivedAt: thread.archivedAt,
+        deletedAt: null,
+        session: null,
+        latestUserMessageAt: null,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        hasActionableProposedPlan: false,
+      },
+    };
+
+    const populated = applyShellEvent(state, shellEvent, localEnvironmentId);
+    const repeated = applyShellEvent(populated, { ...shellEvent, sequence: 2 }, localEnvironmentId);
+
+    expect(repeated).toBe(populated);
+  });
+
   it("returns stable thread references for repeated reads of the same state", () => {
     const thread = makeThread({
       messages: [
@@ -808,7 +847,7 @@ describe("incremental orchestration updates", () => {
     });
     const state = makeState(thread);
 
-    const next = applyOrchestrationEvents(
+    const afterAssistantMessage = applyOrchestrationEvents(
       state,
       [
         makeEvent(
@@ -845,9 +884,99 @@ describe("incremental orchestration updates", () => {
       localEnvironmentId,
     );
 
-    expect(threadsOf(next)[0]?.session?.status).toBe("running");
-    expect(threadsOf(next)[0]?.latestTurn?.state).toBe("completed");
-    expect(threadsOf(next)[0]?.messages).toHaveLength(1);
+    expect(threadsOf(afterAssistantMessage)[0]?.session?.status).toBe("running");
+    expect(threadsOf(afterAssistantMessage)[0]?.latestTurn?.state).toBe("running");
+    expect(threadsOf(afterAssistantMessage)[0]?.messages).toHaveLength(1);
+
+    const afterSessionReady = applyOrchestrationEvent(
+      afterAssistantMessage,
+      makeEvent(
+        "thread.session-set",
+        {
+          threadId: thread.id,
+          session: {
+            threadId: thread.id,
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: "2026-02-27T00:00:04.000Z",
+          },
+        },
+        { sequence: 4 },
+      ),
+      localEnvironmentId,
+    );
+
+    expect(threadsOf(afterSessionReady)[0]?.session?.status).toBe("ready");
+    expect(threadsOf(afterSessionReady)[0]?.latestTurn?.state).toBe("completed");
+    expect(threadsOf(afterSessionReady)[0]?.latestTurn?.completedAt).toBe(
+      "2026-02-27T00:00:04.000Z",
+    );
+  });
+
+  it("marks a turn start request as a starting session before provider events arrive", () => {
+    const thread = makeThread();
+    const state = makeState(thread);
+
+    const next = applyOrchestrationEvent(
+      state,
+      makeEvent("thread.turn-start-requested", {
+        threadId: thread.id,
+        messageId: MessageId.make("message-starting"),
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        createdAt: "2026-02-27T00:00:00.000Z",
+      }),
+      localEnvironmentId,
+    );
+
+    const nextThread = threadsOf(next)[0];
+    expect(nextThread?.session?.status).toBe("connecting");
+    expect(nextThread?.session?.orchestrationStatus).toBe("starting");
+    expect(nextThread?.session?.activeTurnId).toBeUndefined();
+    expect(nextThread?.runtimeMode).toBe("approval-required");
+  });
+
+  it("preserves turn request time when a starting session becomes running", () => {
+    const thread = makeThread();
+    const state = makeState(thread);
+
+    const requested = applyOrchestrationEvent(
+      state,
+      makeEvent("thread.turn-start-requested", {
+        threadId: thread.id,
+        messageId: MessageId.make("message-starting"),
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        createdAt: "2026-02-27T00:00:00.000Z",
+      }),
+      localEnvironmentId,
+    );
+    const running = applyOrchestrationEvent(
+      requested,
+      makeEvent("thread.session-set", {
+        threadId: thread.id,
+        session: {
+          threadId: thread.id,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: TurnId.make("turn-1"),
+          lastError: null,
+          updatedAt: "2026-02-27T00:00:05.000Z",
+        },
+      }),
+      localEnvironmentId,
+    );
+
+    expect(threadsOf(running)[0]?.latestTurn).toMatchObject({
+      turnId: TurnId.make("turn-1"),
+      state: "running",
+      requestedAt: "2026-02-27T00:00:00.000Z",
+      startedAt: "2026-02-27T00:00:05.000Z",
+    });
   });
 
   it("does not regress latestTurn when an older turn diff completes late", () => {

@@ -1047,7 +1047,11 @@ it.live("recovers claudeAgent sessions after provider stopAll using persisted re
         yield* harness.waitForThread(
           THREAD_ID,
           (entry) =>
-            entry.latestTurn?.turnId === "turn-1" && entry.session?.threadId === "thread-1",
+            entry.latestTurn?.turnId === "turn-1" &&
+            entry.latestTurn.state === "completed" &&
+            entry.session?.threadId === "thread-1" &&
+            entry.session.status === "ready" &&
+            entry.session.activeTurnId === null,
         );
 
         yield* harness.adapterHarness!.adapter.stopAll();
@@ -1350,7 +1354,12 @@ it.live("reverts claudeAgent turns and rolls back provider conversation state", 
         yield* harness.waitForThread(
           THREAD_ID,
           (entry) =>
-            entry.latestTurn?.turnId === "turn-1" && entry.session?.threadId === "thread-1",
+            entry.latestTurn?.turnId === "turn-1" &&
+            entry.latestTurn.state === "completed" &&
+            entry.session?.threadId === "thread-1" &&
+            entry.session.status === "ready" &&
+            entry.session.activeTurnId === null &&
+            entry.checkpoints.length === 1,
         );
 
         yield* harness.adapterHarness!.queueTurnResponse(THREAD_ID, {

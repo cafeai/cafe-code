@@ -180,13 +180,17 @@ const IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROPOSED_PLANS: Thread["proposedPlans"] = [];
-const DEBUG_SNAPSHOT_VERSION = 3;
+const DEBUG_SNAPSHOT_VERSION = 4;
 const DEBUG_TEXT_PREVIEW_LIMIT = 240;
 const DEBUG_JSON_PREVIEW_LIMIT = 2_000;
 const DEBUG_RECENT_MESSAGE_LIMIT = 20;
 const DEBUG_RECENT_ACTIVITY_LIMIT = 30;
 const DEBUG_RECENT_RUNTIME_EVENT_LIMIT = 12;
 const DEBUG_INTERESTING_THREAD_LIMIT = 40;
+const DEBUG_THREAD_DETAIL_MESSAGE_LIMIT = 2_000;
+const DEBUG_THREAD_DETAIL_ACTIVITY_LIMIT = 500;
+const DEBUG_LARGE_THREAD_TEXT_CHARS = 1_000_000;
+const DEBUG_LARGE_ACTIVITY_PAYLOAD_CHARS = 1_000_000;
 
 function truncateDebugText(value: string, limit = DEBUG_TEXT_PREVIEW_LIMIT): string {
   if (value.length <= limit) {
@@ -210,6 +214,45 @@ function payloadKeys(payload: unknown): readonly string[] {
   return Object.keys(payload).toSorted();
 }
 
+function readDebugRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readDebugNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function summarizeDebugContextWindowActivity(activity: OrchestrationThreadActivity | null) {
+  if (activity === null) {
+    return null;
+  }
+  const payload = readDebugRecord(activity.payload);
+  return {
+    ...summarizeDebugActivity(activity),
+    usage:
+      payload === null
+        ? null
+        : {
+            usedTokens: readDebugNumber(payload.usedTokens),
+            totalProcessedTokens: readDebugNumber(payload.totalProcessedTokens),
+            maxTokens: readDebugNumber(payload.maxTokens),
+            inputTokens: readDebugNumber(payload.inputTokens),
+            cachedInputTokens: readDebugNumber(payload.cachedInputTokens),
+            outputTokens: readDebugNumber(payload.outputTokens),
+            reasoningOutputTokens: readDebugNumber(payload.reasoningOutputTokens),
+            lastUsedTokens: readDebugNumber(payload.lastUsedTokens),
+            lastInputTokens: readDebugNumber(payload.lastInputTokens),
+            lastCachedInputTokens: readDebugNumber(payload.lastCachedInputTokens),
+            lastOutputTokens: readDebugNumber(payload.lastOutputTokens),
+            lastReasoningOutputTokens: readDebugNumber(payload.lastReasoningOutputTokens),
+            toolUses: readDebugNumber(payload.toolUses),
+            durationMs: readDebugNumber(payload.durationMs),
+          },
+  };
+}
+
 function countBy<T>(items: readonly T[], keyOf: (item: T) => string): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const item of items) {
@@ -217,6 +260,40 @@ function countBy<T>(items: readonly T[], keyOf: (item: T) => string): Record<str
     counts[key] = (counts[key] ?? 0) + 1;
   }
   return counts;
+}
+
+function roundDebugMs(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function parseDebugTimestamp(value: string | null | undefined): number | null {
+  if (value == null) {
+    return null;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function elapsedDebugMs(nowMs: number, value: string | null | undefined): number | null {
+  const timestampMs = parseDebugTimestamp(value);
+  return timestampMs === null ? null : Math.max(0, nowMs - timestampMs);
+}
+
+function durationDebugMs(
+  start: string | null | undefined,
+  end: string | null | undefined,
+): number | null {
+  const startMs = parseDebugTimestamp(start);
+  const endMs = parseDebugTimestamp(end);
+  return startMs === null || endMs === null ? null : Math.max(0, endMs - startMs);
+}
+
+function estimateDebugJsonChars(value: unknown): number {
+  try {
+    return JSON.stringify(value)?.length ?? 0;
+  } catch {
+    return 0;
+  }
 }
 
 function summarizeDebugMessage(message: ChatMessage) {
@@ -393,6 +470,144 @@ function summarizeDebugThreadLifecycle(thread: Thread) {
       .filter(activityIsLifecycleRelevant)
       .slice(-12)
       .map(summarizeDebugActivity),
+  };
+}
+
+function summarizeDebugThreadPerformance(thread: Thread, nowMs: number) {
+  const latestTurn = thread.latestTurn;
+  const latestTurnId = latestTurn?.turnId ?? null;
+  const latestTurnMessages =
+    latestTurnId === null
+      ? []
+      : thread.messages.filter((message) => message.turnId === latestTurnId);
+  const latestTurnActivities =
+    latestTurnId === null
+      ? []
+      : thread.activities.filter((activity) => activity.turnId === latestTurnId);
+  const firstAssistantMessage =
+    latestTurnMessages.find((message) => message.role === "assistant") ?? null;
+  const lastAssistantMessage =
+    latestTurnMessages.findLast((message) => message.role === "assistant") ?? null;
+  const latestMessage = thread.messages.at(-1) ?? null;
+  const latestActivity = thread.activities.at(-1) ?? null;
+  const latestTurnRuntimeActivities = latestTurnActivities.filter(
+    (activity) => activity.kind === "runtime.warning" || activity.kind === "runtime.error",
+  );
+  const latestRuntimeActivity = latestTurnRuntimeActivities.at(-1) ?? null;
+  const contextWindowActivities = thread.activities.filter(
+    (activity) => activity.kind === "context-window.updated",
+  );
+  const latestContextWindowActivity = contextWindowActivities.at(-1) ?? null;
+  const latestContextWindowPayload = readDebugRecord(latestContextWindowActivity?.payload);
+  const latestContextInputTokens =
+    readDebugNumber(latestContextWindowPayload?.lastInputTokens) ??
+    readDebugNumber(latestContextWindowPayload?.inputTokens);
+  const messageTextChars = thread.messages.reduce(
+    (total, message) => total + message.text.length,
+    0,
+  );
+  const activitySummaryChars = thread.activities.reduce(
+    (total, activity) => total + activity.summary.length,
+    0,
+  );
+  const activityPayloadJsonChars = thread.activities.reduce(
+    (total, activity) => total + estimateDebugJsonChars(activity.payload),
+    0,
+  );
+  const streamingMessageCount = thread.messages.filter((message) => message.streaming).length;
+  const activeTurnElapsedMs =
+    latestTurn?.state === "running" ? elapsedDebugMs(nowMs, latestTurn.requestedAt) : null;
+  const firstAssistantLatencyMs = durationDebugMs(
+    latestTurn?.requestedAt,
+    firstAssistantMessage?.createdAt,
+  );
+  const startedToFirstAssistantMs = durationDebugMs(
+    latestTurn?.startedAt,
+    firstAssistantMessage?.createdAt,
+  );
+  const assistantCompletionLatencyMs = durationDebugMs(
+    latestTurn?.requestedAt,
+    lastAssistantMessage?.completedAt ?? latestTurn?.completedAt,
+  );
+  const pressureFlags = [
+    thread.messages.length >= DEBUG_THREAD_DETAIL_MESSAGE_LIMIT
+      ? "message-window-at-server-limit"
+      : null,
+    thread.activities.length >= DEBUG_THREAD_DETAIL_ACTIVITY_LIMIT
+      ? "activity-window-at-server-limit"
+      : null,
+    messageTextChars >= DEBUG_LARGE_THREAD_TEXT_CHARS ? "large-message-text-window" : null,
+    activityPayloadJsonChars >= DEBUG_LARGE_ACTIVITY_PAYLOAD_CHARS
+      ? "large-activity-payload-window"
+      : null,
+    streamingMessageCount > 0 && latestTurn?.state !== "running"
+      ? "streaming-message-without-running-latest-turn"
+      : null,
+    latestTurnRuntimeActivities.length > 0 ? "latest-turn-runtime-warnings" : null,
+    latestContextInputTokens !== null && latestContextInputTokens >= 100_000
+      ? "large-context-input-token-count"
+      : null,
+  ].filter((flag): flag is string => flag !== null);
+
+  return {
+    modelSelection: thread.modelSelection,
+    limits: {
+      threadDetailMessageLimit: DEBUG_THREAD_DETAIL_MESSAGE_LIMIT,
+      threadDetailActivityLimit: DEBUG_THREAD_DETAIL_ACTIVITY_LIMIT,
+      recentMessageLimit: DEBUG_RECENT_MESSAGE_LIMIT,
+      recentActivityLimit: DEBUG_RECENT_ACTIVITY_LIMIT,
+    },
+    counts: {
+      messages: thread.messages.length,
+      activities: thread.activities.length,
+      latestTurnMessages: latestTurnMessages.length,
+      latestTurnActivities: latestTurnActivities.length,
+      latestTurnRuntimeActivities: latestTurnRuntimeActivities.length,
+      contextWindowUpdates: contextWindowActivities.length,
+      streamingMessages: streamingMessageCount,
+    },
+    approximateChars: {
+      messageText: messageTextChars,
+      activitySummaries: activitySummaryChars,
+      activityPayloadJson: activityPayloadJsonChars,
+    },
+    latency: {
+      latestTurnState: latestTurn?.state ?? null,
+      latestTurnRequestedAt: latestTurn?.requestedAt ?? null,
+      latestTurnStartedAt: latestTurn?.startedAt ?? null,
+      latestTurnCompletedAt: latestTurn?.completedAt ?? null,
+      requestedToStartedMs: durationDebugMs(latestTurn?.requestedAt, latestTurn?.startedAt),
+      requestedToFirstAssistantMs: firstAssistantLatencyMs,
+      startedToFirstAssistantMs,
+      requestedToAssistantCompletedMs: assistantCompletionLatencyMs,
+      activeTurnElapsedMs,
+      lastMessageAgeMs: elapsedDebugMs(nowMs, latestMessage?.createdAt),
+      lastActivityAgeMs: elapsedDebugMs(nowMs, latestActivity?.createdAt),
+    },
+    latestMessage: latestMessage === null ? null : summarizeDebugMessage(latestMessage),
+    latestActivity: latestActivity === null ? null : summarizeDebugActivity(latestActivity),
+    latestRuntimeActivity:
+      latestRuntimeActivity === null ? null : summarizeDebugActivity(latestRuntimeActivity),
+    latestContextWindowActivity: summarizeDebugContextWindowActivity(latestContextWindowActivity),
+    pressureFlags,
+  };
+}
+
+function summarizeDebugNotableThread(input: {
+  readonly thread: Thread;
+  readonly lifecycle: ReturnType<typeof summarizeDebugThreadLifecycle> | null;
+  readonly nowMs: number;
+}) {
+  return {
+    id: input.thread.id,
+    title: input.thread.title,
+    projectId: input.thread.projectId,
+    worktreePath: input.thread.worktreePath,
+    error: input.thread.error ?? null,
+    session: summarizeDebugSession(input.thread.session),
+    latestTurn: summarizeDebugLatestTurn(input.thread.latestTurn),
+    lifecycle: input.lifecycle,
+    performance: summarizeDebugThreadPerformance(input.thread, input.nowMs),
   };
 }
 const EMPTY_PROVIDERS: ServerProvider[] = [];
@@ -1811,6 +2026,10 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
 
+    const snapshotBuildStartedAt = performance.now();
+    const capturedAtMs = Date.now();
+    const capturedAt = new Date(capturedAtMs).toISOString();
+    const localApi = readLocalApi();
     const firstItem = firstActiveFollowUpQueueItem;
     const queueBlockers: string[] = [];
     if (activeFollowUpQueue.length === 0) {
@@ -1874,6 +2093,18 @@ export default function ChatView(props: ChatViewProps) {
       ? (lifecycleByThreadId.get(activeThread.id) ?? null)
       : null;
     const lifecycleSummaries = Array.from(lifecycleByThreadId.values());
+    const lifecycleRedFlagCounts = countBy(
+      lifecycleSummaries.flatMap((thread) => thread.redFlags),
+      (redFlag) => redFlag,
+    );
+    const maxThreadMessageCount = allThreads.reduce(
+      (max, thread) => Math.max(max, thread.messages.length),
+      0,
+    );
+    const maxThreadActivityCount = allThreads.reduce(
+      (max, thread) => Math.max(max, thread.activities.length),
+      0,
+    );
     const interestingLifecycleThreads = lifecycleSummaries
       .filter(
         (thread) =>
@@ -1887,6 +2118,27 @@ export default function ChatView(props: ChatViewProps) {
           thread.session?.status === "error",
       )
       .slice(0, DEBUG_INTERESTING_THREAD_LIMIT);
+    const notablePerformanceThreads = allThreads
+      .filter((thread) => {
+        const lifecycle = lifecycleByThreadId.get(thread.id);
+        return (
+          thread.id === activeThreadId ||
+          queuedThreadIds.has(thread.id) ||
+          thread.session?.status === "running" ||
+          thread.session?.status === "error" ||
+          thread.error !== null ||
+          thread.latestTurn?.state === "running" ||
+          (lifecycle?.redFlags.length ?? 0) > 0
+        );
+      })
+      .slice(0, DEBUG_INTERESTING_THREAD_LIMIT)
+      .map((thread) =>
+        summarizeDebugNotableThread({
+          thread,
+          lifecycle: lifecycleByThreadId.get(thread.id) ?? null,
+          nowMs: capturedAtMs,
+        }),
+      );
     const lifecycleQueueRedFlags = [
       activeFollowUpQueue.length > 0 && followUpQueueUiIdle && !followUpQueueCanStartTurn
         ? "queue-has-items-but-cannot-start-while-idle"
@@ -1904,7 +2156,7 @@ export default function ChatView(props: ChatViewProps) {
     const snapshot: DesktopRendererDebugSnapshot = {
       debugSnapshotVersion: DEBUG_SNAPSHOT_VERSION,
       source: "ChatView",
-      capturedAt: new Date().toISOString(),
+      capturedAt,
       diagnostics: {
         location: {
           pathname: window.location.pathname,
@@ -1914,6 +2166,32 @@ export default function ChatView(props: ChatViewProps) {
         visibilityState: document.visibilityState,
         hasFocus: document.hasFocus(),
         online: navigator.onLine,
+        localApi: {
+          available: localApi !== undefined,
+          traceDiagnosticsAvailable: typeof localApi?.server.getTraceDiagnostics === "function",
+          processDiagnosticsAvailable: typeof localApi?.server.getProcessDiagnostics === "function",
+          resourceHistoryAvailable:
+            typeof localApi?.server.getProcessResourceHistory === "function",
+        },
+      },
+      performance: {
+        rendererSnapshotBuildDurationMs: null,
+        capturedAtEpochMs: capturedAtMs,
+        activeThread:
+          activeThread == null ? null : summarizeDebugThreadPerformance(activeThread, capturedAtMs),
+        notableThreads: notablePerformanceThreads,
+        storePressure: {
+          threadCount: allThreads.length,
+          maxThreadMessageCount,
+          maxThreadActivityCount,
+          threadsAtMessageLimit: allThreads.filter(
+            (thread) => thread.messages.length >= DEBUG_THREAD_DETAIL_MESSAGE_LIMIT,
+          ).length,
+          threadsAtActivityLimit: allThreads.filter(
+            (thread) => thread.activities.length >= DEBUG_THREAD_DETAIL_ACTIVITY_LIMIT,
+          ).length,
+          lifecycleRedFlagCounts,
+        },
       },
       store: {
         projectCount: allProjects.length,
@@ -1955,6 +2233,7 @@ export default function ChatView(props: ChatViewProps) {
             title: activeThread.title,
             projectId: activeThread.projectId,
             worktreePath: activeThread.worktreePath,
+            modelSelection: activeThread.modelSelection,
             runtimeMode: activeThread.runtimeMode,
             interactionMode: activeThread.interactionMode,
             error: activeThread.error ?? null,
@@ -2157,6 +2436,12 @@ export default function ChatView(props: ChatViewProps) {
         activePendingUserInputRequestId: activePendingUserInput?.requestId ?? null,
       },
     };
+
+    (
+      snapshot.performance as {
+        rendererSnapshotBuildDurationMs: number;
+      }
+    ).rendererSnapshotBuildDurationMs = roundDebugMs(performance.now() - snapshotBuildStartedAt);
 
     void bridge.publishDebugSnapshot(snapshot).catch(() => undefined);
   }, [
@@ -2423,6 +2708,16 @@ export default function ChatView(props: ChatViewProps) {
     },
     [hideScrollToBottom],
   );
+  const pinTimelineToEndForLocalMessage = useCallback(() => {
+    hideScrollToBottom();
+    void legendListRef.current?.scrollToEnd?.({ animated: false });
+    window.requestAnimationFrame(() => {
+      void legendListRef.current?.scrollToEnd?.({ animated: false });
+      window.requestAnimationFrame(() => {
+        void legendListRef.current?.scrollToEnd?.({ animated: false });
+      });
+    });
+  }, [hideScrollToBottom]);
   const onIsAtEndChange = useCallback(
     (isAtEnd: boolean) => {
       if (isAtEnd) {
@@ -2815,10 +3110,7 @@ export default function ChatView(props: ChatViewProps) {
     const turnAttachmentsPromise = buildAttachmentsForSnapshot(item);
 
     removeFollowUpQueueItem(item.threadId, item.id, false);
-    isAtEndRef.current = true;
-    showScrollDebouncer.current.cancel();
-    setShowScrollToBottom(false);
-    await legendListRef.current?.scrollToEnd?.({ animated: false });
+    pinTimelineToEndForLocalMessage();
     setOptimisticUserMessages((existing) => [
       ...existing,
       {
@@ -2915,10 +3207,7 @@ export default function ChatView(props: ChatViewProps) {
       removeFollowUpQueueItem(options.queuedItem.threadId, options.queuedItem.id, false);
     }
 
-    isAtEndRef.current = true;
-    showScrollDebouncer.current.cancel();
-    setShowScrollToBottom(false);
-    await legendListRef.current?.scrollToEnd?.({ animated: false });
+    pinTimelineToEndForLocalMessage();
     setOptimisticUserMessages((existing) => [
       ...existing,
       {
@@ -3087,13 +3376,7 @@ export default function ChatView(props: ChatViewProps) {
       sizeBytes: image.sizeBytes,
       previewUrl: image.previewUrl,
     }));
-    // Scroll to the current end *before* adding the optimistic message.
-    // This sets LegendList's internal isAtEnd=true so maintainScrollAtEnd
-    // automatically pins to the new item when the data changes.
-    isAtEndRef.current = true;
-    showScrollDebouncer.current.cancel();
-    setShowScrollToBottom(false);
-    await legendListRef.current?.scrollToEnd?.({ animated: false });
+    pinTimelineToEndForLocalMessage();
 
     setOptimisticUserMessages((existing) => [
       ...existing,
@@ -3703,11 +3986,7 @@ export default function ChatView(props: ChatViewProps) {
       beginLocalDispatch({ preparingWorktree: false });
       setThreadError(threadIdForSend, null);
 
-      // Scroll to the current end *before* adding the optimistic message.
-      isAtEndRef.current = true;
-      showScrollDebouncer.current.cancel();
-      setShowScrollToBottom(false);
-      await legendListRef.current?.scrollToEnd?.({ animated: false });
+      pinTimelineToEndForLocalMessage();
 
       setOptimisticUserMessages((existing) => [
         ...existing,
@@ -3788,6 +4067,7 @@ export default function ChatView(props: ChatViewProps) {
       isSendBusy,
       isServerThread,
       persistThreadSettingsForNextTurn,
+      pinTimelineToEndForLocalMessage,
       resetLocalDispatch,
       runtimeMode,
       setComposerDraftInteractionMode,

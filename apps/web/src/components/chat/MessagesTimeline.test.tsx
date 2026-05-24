@@ -147,7 +147,7 @@ describe("MessagesTimeline file open helpers", () => {
       isTimelineScrolledToEnd({
         isAtEnd: false,
         contentLength: 2_000,
-        scroll: 1_300,
+        scroll: 1_100,
         scrollLength: 500,
       }),
     ).toBe(false);
