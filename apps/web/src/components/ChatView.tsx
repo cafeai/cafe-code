@@ -180,7 +180,7 @@ const IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROPOSED_PLANS: Thread["proposedPlans"] = [];
-const DEBUG_SNAPSHOT_VERSION = 4;
+const DEBUG_SNAPSHOT_VERSION = 5;
 const DEBUG_TEXT_PREVIEW_LIMIT = 240;
 const DEBUG_JSON_PREVIEW_LIMIT = 2_000;
 const DEBUG_RECENT_MESSAGE_LIMIT = 20;
@@ -191,12 +191,29 @@ const DEBUG_THREAD_DETAIL_MESSAGE_LIMIT = 2_000;
 const DEBUG_THREAD_DETAIL_ACTIVITY_LIMIT = 500;
 const DEBUG_LARGE_THREAD_TEXT_CHARS = 1_000_000;
 const DEBUG_LARGE_ACTIVITY_PAYLOAD_CHARS = 1_000_000;
+const DEBUG_SECRET_REDACTIONS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\bnpm_[A-Za-z0-9]{8,}\b/g, "npm_[redacted]"],
+  [/\bsk-[A-Za-z0-9_-]{16,}\b/g, "sk-[redacted]"],
+  [/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "github_pat_[redacted]"],
+  [/\bgh[pousr]_[A-Za-z0-9_]{16,}\b/g, "gh[redacted]"],
+  [/\bxox[baprs]-[A-Za-z0-9-]{16,}\b/g, "xox[redacted]"],
+  [/\bBearer\s+[A-Za-z0-9._~+/=-]{16,}\b/g, "Bearer [redacted]"],
+];
+
+function redactDebugSecrets(value: string): string {
+  let redacted = value;
+  for (const [pattern, replacement] of DEBUG_SECRET_REDACTIONS) {
+    redacted = redacted.replace(pattern, replacement);
+  }
+  return redacted;
+}
 
 function truncateDebugText(value: string, limit = DEBUG_TEXT_PREVIEW_LIMIT): string {
-  if (value.length <= limit) {
-    return value;
+  const redacted = redactDebugSecrets(value);
+  if (redacted.length <= limit) {
+    return redacted;
   }
-  return `${value.slice(0, Math.max(0, limit - 1))}…`;
+  return `${redacted.slice(0, Math.max(0, limit - 1))}…`;
 }
 
 function stringifyDebugPreview(value: unknown, limit = DEBUG_JSON_PREVIEW_LIMIT): string {
@@ -222,6 +239,14 @@ function readDebugRecord(value: unknown): Record<string, unknown> | null {
 
 function readDebugNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readDebugBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function readDebugString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function summarizeDebugContextWindowActivity(activity: OrchestrationThreadActivity | null) {
@@ -321,6 +346,118 @@ function summarizeDebugActivity(activity: OrchestrationThreadActivity) {
     createdAt: activity.createdAt,
     payloadKeys: payloadKeys(activity.payload),
     payloadPreview: stringifyDebugPreview(activity.payload),
+  };
+}
+
+function parseDebugRetryProgress(message: string | null): {
+  readonly retryAttempt: number | null;
+  readonly retryLimit: number | null;
+} {
+  if (message === null) {
+    return { retryAttempt: null, retryLimit: null };
+  }
+  const match = /(?:^|\b)Reconnecting\.\.\.\s+(\d+)\/(\d+)(?:\b|$)/.exec(message);
+  if (!match) {
+    return { retryAttempt: null, retryLimit: null };
+  }
+  const retryAttempt = Number.parseInt(match[1] ?? "", 10);
+  const retryLimit = Number.parseInt(match[2] ?? "", 10);
+  return {
+    retryAttempt: Number.isFinite(retryAttempt) ? retryAttempt : null,
+    retryLimit: Number.isFinite(retryLimit) ? retryLimit : null,
+  };
+}
+
+function summarizeDebugProviderTransportActivity(activity: OrchestrationThreadActivity) {
+  if (activity.kind !== "runtime.warning" && activity.kind !== "runtime.error") {
+    return null;
+  }
+
+  const payload = readDebugRecord(activity.payload);
+  const detail = readDebugRecord(payload?.detail);
+  const error = readDebugRecord(detail?.error);
+  const codexErrorInfo = readDebugRecord(error?.codexErrorInfo);
+  const responseStreamDisconnected = readDebugRecord(codexErrorInfo?.responseStreamDisconnected);
+  const message =
+    readDebugString(payload?.message) ??
+    readDebugString(error?.message) ??
+    readDebugString(activity.summary);
+  const additionalDetails = readDebugString(error?.additionalDetails);
+  const retryProgress = parseDebugRetryProgress(message);
+  const retrying = readDebugBoolean(payload?.retrying) ?? false;
+  const willRetry = readDebugBoolean(detail?.willRetry);
+  const isResponseStreamDisconnected =
+    responseStreamDisconnected !== null ||
+    additionalDetails?.includes("stream disconnected before completion") === true;
+  const isWebsocketTransportIssue =
+    additionalDetails?.toLowerCase().includes("websocket") === true ||
+    message?.toLowerCase().includes("websocket") === true;
+  const isRetryEvent =
+    retrying ||
+    willRetry === true ||
+    retryProgress.retryAttempt !== null ||
+    message?.startsWith("Reconnecting...") === true;
+
+  if (!isRetryEvent && !isResponseStreamDisconnected && !isWebsocketTransportIssue) {
+    return null;
+  }
+
+  return {
+    id: activity.id,
+    kind: activity.kind,
+    createdAt: activity.createdAt,
+    turnId: activity.turnId,
+    message,
+    retrying,
+    willRetry,
+    retryAttempt: retryProgress.retryAttempt,
+    retryLimit: retryProgress.retryLimit,
+    atRetryLimit:
+      retryProgress.retryAttempt !== null &&
+      retryProgress.retryLimit !== null &&
+      retryProgress.retryAttempt >= retryProgress.retryLimit,
+    responseStreamDisconnected: isResponseStreamDisconnected,
+    httpStatusCode: readDebugNumber(responseStreamDisconnected?.httpStatusCode),
+    additionalDetails:
+      additionalDetails === null ? null : truncateDebugText(additionalDetails, 500),
+  };
+}
+
+function summarizeDebugProviderTransport(
+  activities: readonly OrchestrationThreadActivity[],
+  nowMs: number,
+) {
+  const events = activities
+    .map(summarizeDebugProviderTransportActivity)
+    .filter((event): event is NonNullable<typeof event> => event !== null);
+  const latest = events.at(-1) ?? null;
+  const responseStreamDisconnectedCount = events.filter(
+    (event) => event.responseStreamDisconnected,
+  ).length;
+  const retryEventCount = events.filter(
+    (event) =>
+      event.retrying ||
+      event.willRetry === true ||
+      event.retryAttempt !== null ||
+      event.message?.startsWith("Reconnecting...") === true,
+  ).length;
+  const retryAttempts = events
+    .map((event) => event.retryAttempt)
+    .filter((value): value is number => value !== null);
+  const retryLimits = events
+    .map((event) => event.retryLimit)
+    .filter((value): value is number => value !== null);
+
+  return {
+    eventCount: events.length,
+    retryEventCount,
+    responseStreamDisconnectedCount,
+    maxRetryAttempt: retryAttempts.length > 0 ? Math.max(...retryAttempts) : null,
+    retryLimit: retryLimits.length > 0 ? Math.max(...retryLimits) : null,
+    atRetryLimit: events.some((event) => event.atRetryLimit),
+    latest,
+    latestEventAgeMs: elapsedDebugMs(nowMs, latest?.createdAt),
+    events: events.slice(-DEBUG_RECENT_RUNTIME_EVENT_LIMIT),
   };
 }
 
@@ -494,6 +631,7 @@ function summarizeDebugThreadPerformance(thread: Thread, nowMs: number) {
     (activity) => activity.kind === "runtime.warning" || activity.kind === "runtime.error",
   );
   const latestRuntimeActivity = latestTurnRuntimeActivities.at(-1) ?? null;
+  const providerTransport = summarizeDebugProviderTransport(latestTurnRuntimeActivities, nowMs);
   const contextWindowActivities = thread.activities.filter(
     (activity) => activity.kind === "context-window.updated",
   );
@@ -544,6 +682,16 @@ function summarizeDebugThreadPerformance(thread: Thread, nowMs: number) {
       ? "streaming-message-without-running-latest-turn"
       : null,
     latestTurnRuntimeActivities.length > 0 ? "latest-turn-runtime-warnings" : null,
+    providerTransport.retryEventCount > 0 ? "provider-transport-retries" : null,
+    providerTransport.responseStreamDisconnectedCount > 0
+      ? "provider-response-stream-disconnects"
+      : null,
+    providerTransport.atRetryLimit ? "provider-transport-at-retry-limit" : null,
+    latestTurn?.state === "running" &&
+    providerTransport.latestEventAgeMs !== null &&
+    providerTransport.latestEventAgeMs >= 60_000
+      ? "running-turn-stalled-after-provider-transport-warning"
+      : null,
     latestContextInputTokens !== null && latestContextInputTokens >= 100_000
       ? "large-context-input-token-count"
       : null,
@@ -588,6 +736,7 @@ function summarizeDebugThreadPerformance(thread: Thread, nowMs: number) {
     latestActivity: latestActivity === null ? null : summarizeDebugActivity(latestActivity),
     latestRuntimeActivity:
       latestRuntimeActivity === null ? null : summarizeDebugActivity(latestRuntimeActivity),
+    providerTransport,
     latestContextWindowActivity: summarizeDebugContextWindowActivity(latestContextWindowActivity),
     pressureFlags,
   };
