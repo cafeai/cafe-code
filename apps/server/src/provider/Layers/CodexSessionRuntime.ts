@@ -10,6 +10,7 @@ import {
   type ProviderInteractionMode,
   type ProviderRequestKind,
   type ProviderSession,
+  type ProviderTurnSteerResult,
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
   RuntimeMode,
@@ -45,6 +46,8 @@ import {
   CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
 } from "../CodexDeveloperInstructions.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
+const decodeV2TurnSteerParams = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnSteerParams);
+const decodeV2TurnSteerResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnSteerResponse);
 
 const PROVIDER = ProviderDriverKind.make("codex");
 
@@ -63,6 +66,8 @@ const CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS = [
   "10 seconds",
   "30 seconds",
   "60 seconds",
+  "180 seconds",
+  "300 seconds",
 ] as const;
 const CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT = "10 seconds" as const;
 const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
@@ -118,6 +123,11 @@ type CodexSnapshotThread = {
   readonly id: string;
   readonly turns: ReadonlyArray<CodexSnapshotTurn>;
 };
+type CodexSnapshotBackfillReason =
+  | "session-start"
+  | "session-resume"
+  | "send-turn-follow-up"
+  | "turn-steer-follow-up";
 
 export interface CodexTransportPolicy {
   readonly responsesWebsockets: "auto" | "disabled";
@@ -182,6 +192,15 @@ export interface CodexSessionRuntimeSendTurnInput {
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
 }
 
+export interface CodexSessionRuntimeSteerTurnInput {
+  readonly expectedTurnId: TurnId;
+  readonly input?: string;
+  readonly attachments?: ReadonlyArray<{
+    readonly type: "image";
+    readonly url: string;
+  }>;
+}
+
 export interface CodexThreadTurnSnapshot {
   readonly id: TurnId;
   readonly items: ReadonlyArray<CodexThreadItem>;
@@ -198,6 +217,9 @@ export interface CodexSessionRuntimeShape {
   readonly sendTurn: (
     input: CodexSessionRuntimeSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, CodexSessionRuntimeError>;
+  readonly steerTurn: (
+    input: CodexSessionRuntimeSteerTurnInput,
+  ) => Effect.Effect<ProviderTurnSteerResult, CodexSessionRuntimeError>;
   readonly interruptTurn: (turnId?: TurnId) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly readThread: Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
   readonly rollbackThread: (
@@ -491,6 +513,43 @@ export function buildTurnStartParams(input: {
     ...(collaborationMode ? { collaborationMode } : {}),
   }).pipe(
     Effect.mapError((error) => toProtocolParseError("Invalid turn/start request payload", error)),
+  );
+}
+
+export function buildTurnSteerParams(input: {
+  readonly threadId: string;
+  readonly expectedTurnId: TurnId;
+  readonly prompt?: string;
+  readonly attachments?: ReadonlyArray<{
+    readonly type: "image";
+    readonly url: string;
+  }>;
+}): Effect.Effect<
+  EffectCodexSchema.V2TurnSteerParams,
+  CodexErrors.CodexAppServerProtocolParseError
+> {
+  const turnInput: Array<EffectCodexSchema.V2TurnSteerParams__UserInput> = [];
+  if (input.prompt) {
+    turnInput.push({
+      type: "text",
+      text: input.prompt,
+    });
+  }
+  for (const attachment of input.attachments ?? []) {
+    turnInput.push(attachment);
+  }
+
+  // Upstream Codex app-server documents `turn/steer` as input injection for
+  // the current in-flight turn. It requires the active turn precondition and
+  // intentionally omits turn-level overrides such as model, effort, sandbox, or
+  // collaboration mode. It returns the existing active turn id and does not emit
+  // a new `turn/started` notification.
+  return decodeV2TurnSteerParams({
+    threadId: input.threadId,
+    expectedTurnId: input.expectedTurnId,
+    input: turnInput,
+  }).pipe(
+    Effect.mapError((error) => toProtocolParseError("Invalid turn/steer request payload", error)),
   );
 }
 
@@ -962,7 +1021,7 @@ export function buildCodexThreadSnapshotBackfillEvents(input: {
   readonly providerInstanceId?: ProviderInstanceId;
   readonly providerThread: CodexSnapshotThread;
   readonly createdAt: string;
-  readonly reason: "session-start" | "session-resume" | "send-turn-follow-up";
+  readonly reason: CodexSnapshotBackfillReason;
   readonly focusTurnId?: TurnId;
   readonly turnLimit?: number;
 }): ReadonlyArray<ProviderEvent> {
@@ -1324,7 +1383,7 @@ export const makeCodexSessionRuntime = (
       });
     const emitSnapshotBackfillEvents = (input: {
       readonly providerThread: CodexSnapshotThread;
-      readonly reason: "session-start" | "session-resume" | "send-turn-follow-up";
+      readonly reason: CodexSnapshotBackfillReason;
       readonly focusTurnId?: TurnId;
     }) =>
       Effect.gen(function* () {
@@ -1365,11 +1424,13 @@ export const makeCodexSessionRuntime = (
     const readAndBackfillSnapshot = (input: {
       readonly providerThreadId: string;
       readonly focusTurnId: TurnId;
+      readonly reason: CodexSnapshotBackfillReason;
     }) =>
       Effect.logInfo("codex.snapshot.backfill.read-attempt", {
         threadId: options.threadId,
         providerThreadId: input.providerThreadId,
         focusTurnId: input.focusTurnId,
+        reason: input.reason,
         timeout: CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT,
       }).pipe(
         Effect.andThen(
@@ -1414,7 +1475,7 @@ export const makeCodexSessionRuntime = (
                 Effect.andThen(
                   emitSnapshotBackfillEvents({
                     providerThread: response.thread,
-                    reason: "send-turn-follow-up",
+                    reason: input.reason,
                     focusTurnId: input.focusTurnId,
                   }),
                 ),
@@ -1423,6 +1484,7 @@ export const makeCodexSessionRuntime = (
                     threadId: options.threadId,
                     providerThreadId: input.providerThreadId,
                     focusTurnId: input.focusTurnId,
+                    reason: input.reason,
                     turnFound: turn !== undefined,
                     turnStatus: turn?.status ?? null,
                     itemCount: turn?.items.length ?? 0,
@@ -1448,6 +1510,7 @@ export const makeCodexSessionRuntime = (
                 threadId: options.threadId,
                 providerThreadId: input.providerThreadId,
                 focusTurnId: input.focusTurnId,
+                reason: input.reason,
                 cause: cause.message,
               }),
             ),
@@ -1456,11 +1519,54 @@ export const makeCodexSessionRuntime = (
         ),
       );
 
+    const emitTurnSnapshotStillInProgressWarning = (input: {
+      readonly providerThreadId: string;
+      readonly turnId: TurnId;
+      readonly reason: CodexSnapshotBackfillReason;
+      readonly elapsedDelay: (typeof CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS)[number];
+      readonly turn: CodexSnapshotTurn;
+    }) =>
+      Effect.gen(function* () {
+        yield* Effect.logWarning("codex.turnProgress.stillInProgressAfterSnapshotPolling", {
+          threadId: options.threadId,
+          providerInstanceId: options.providerInstanceId ?? PROVIDER,
+          providerThreadId: input.providerThreadId,
+          turnId: input.turnId,
+          reason: input.reason,
+          elapsedDelay: input.elapsedDelay,
+          itemCount: input.turn.items.length,
+          itemsView: input.turn.itemsView ?? null,
+        });
+        yield* emitEvent({
+          kind: "notification",
+          threadId: options.threadId,
+          method: "codex.turnProgress/stillInProgressAfterSnapshotPolling",
+          turnId: input.turnId,
+          message:
+            "Codex still reports the active turn as in progress after delayed snapshot polling.",
+          payload: {
+            providerThreadId: input.providerThreadId,
+            turnId: input.turnId,
+            reason: input.reason,
+            elapsedDelay: input.elapsedDelay,
+            itemCount: input.turn.items.length,
+            itemsView: input.turn.itemsView ?? null,
+            semantics:
+              "Cafe will not synthesize turn completion from diff or item events; upstream Codex must emit turn/completed or report a terminal turn status from thread/read.",
+          },
+        });
+      });
+
     const scheduleSendTurnSnapshotBackfill = (input: {
       readonly providerThreadId: string;
       readonly turnId: TurnId;
+      readonly reason: CodexSnapshotBackfillReason;
     }) =>
       Effect.gen(function* () {
+        const terminalDelay =
+          CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS[
+            CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS.length - 1
+          ];
         for (const delay of CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS) {
           yield* Effect.sleep(delay);
           if (yield* Ref.get(closedRef)) {
@@ -1484,9 +1590,19 @@ export const makeCodexSessionRuntime = (
           const turn = yield* readAndBackfillSnapshot({
             providerThreadId: input.providerThreadId,
             focusTurnId: input.turnId,
+            reason: input.reason,
           });
           if (turn && turn.status !== "inProgress" && hasBackfillableSnapshotItem(turn)) {
             return;
+          }
+          if (turn?.status === "inProgress" && delay === terminalDelay) {
+            yield* emitTurnSnapshotStillInProgressWarning({
+              providerThreadId: input.providerThreadId,
+              turnId: input.turnId,
+              reason: input.reason,
+              elapsedDelay: delay,
+              turn,
+            });
           }
         }
       }).pipe(Effect.forkIn(runtimeScope), Effect.asVoid);
@@ -2163,7 +2279,11 @@ export const makeCodexSessionRuntime = (
             activeTurnId: turnId,
             ...(normalizedModel ? { model: normalizedModel } : {}),
           });
-          yield* scheduleSendTurnSnapshotBackfill({ providerThreadId, turnId });
+          yield* scheduleSendTurnSnapshotBackfill({
+            providerThreadId,
+            turnId,
+            reason: "send-turn-follow-up",
+          });
           const resumedProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
           return {
             threadId: options.threadId,
@@ -2172,6 +2292,69 @@ export const makeCodexSessionRuntime = (
               ? { resumeCursor: { threadId: resumedProviderThreadId } }
               : {}),
           } satisfies ProviderTurnStartResult;
+        }),
+      steerTurn: (input) =>
+        Effect.gen(function* () {
+          const providerThreadId = yield* readProviderThreadId;
+          const params = yield* buildTurnSteerParams({
+            threadId: providerThreadId,
+            expectedTurnId: input.expectedTurnId,
+            ...(input.input ? { prompt: input.input } : {}),
+            ...(input.attachments ? { attachments: input.attachments } : {}),
+          });
+          const steerRequestedAt = yield* nowIso;
+          const steerRequestedAtMs = yield* Clock.currentTimeMillis;
+          const rawResponse = yield* client.raw.request("turn/steer", params);
+          const steerAcknowledgedAt = yield* nowIso;
+          const steerAcknowledgedAtMs = yield* Clock.currentTimeMillis;
+          const response = yield* decodeV2TurnSteerResponse(rawResponse).pipe(
+            Effect.mapError((error) =>
+              toProtocolParseError("Invalid turn/steer response payload", error),
+            ),
+          );
+          const turnId = TurnId.make(response.turnId);
+          const diagnostics = {
+            providerThreadId,
+            turnId,
+            expectedTurnId: input.expectedTurnId,
+            requestedAt: steerRequestedAt,
+            acknowledgedAt: steerAcknowledgedAt,
+            ackLatencyMs: Math.max(0, steerAcknowledgedAtMs - steerRequestedAtMs),
+            promptByteLength: Buffer.byteLength(input.input ?? "", "utf8"),
+            attachmentCount: input.attachments?.length ?? 0,
+            semantics:
+              "turn/steer appends input to the active turn and does not emit a new turn/started notification.",
+          };
+          yield* Effect.logInfo("codex.turnSteer.accepted", {
+            threadId: options.threadId,
+            providerInstanceId: options.providerInstanceId ?? PROVIDER,
+            ...diagnostics,
+          });
+          yield* emitEvent({
+            kind: "notification",
+            threadId: options.threadId,
+            method: "codex.turnSteer/accepted",
+            turnId,
+            message: "Codex app-server accepted turn/steer.",
+            payload: diagnostics,
+          });
+          yield* updateSession(sessionRef, {
+            status: "running",
+            activeTurnId: turnId,
+          });
+          yield* scheduleSendTurnSnapshotBackfill({
+            providerThreadId,
+            turnId,
+            reason: "turn-steer-follow-up",
+          });
+          const resumedProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
+          return {
+            threadId: options.threadId,
+            turnId,
+            ...(resumedProviderThreadId
+              ? { resumeCursor: { threadId: resumedProviderThreadId } }
+              : {}),
+          } satisfies ProviderTurnSteerResult;
         }),
       interruptTurn: (turnId) =>
         Effect.gen(function* () {

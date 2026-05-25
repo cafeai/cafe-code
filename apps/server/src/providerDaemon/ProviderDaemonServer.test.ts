@@ -85,6 +85,7 @@ const getAvailablePort: Effect.Effect<number, AvailablePortError> = Effect.tryPr
 const mockProviderService = {
   startSession: () => Effect.die("unexpected startSession"),
   sendTurn: () => Effect.die("unexpected sendTurn"),
+  steerTurn: () => Effect.die("unexpected steerTurn"),
   interruptTurn: () => Effect.die("unexpected interruptTurn"),
   respondToRequest: () => Effect.die("unexpected respondToRequest"),
   respondToUserInput: () => Effect.die("unexpected respondToUserInput"),

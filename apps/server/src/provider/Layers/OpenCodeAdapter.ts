@@ -1254,6 +1254,15 @@ export function makeOpenCodeAdapter(
       };
     });
 
+    const steerTurn: OpenCodeAdapterShape["steerTurn"] = (input) =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "turn/steer",
+          detail: `OpenCode session '${input.threadId}' does not support live steering.`,
+        }),
+      );
+
     const interruptTurn: OpenCodeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
       function* (threadId, turnId) {
         const context = ensureSessionContext(sessions, threadId);
@@ -1419,6 +1428,7 @@ export function makeOpenCodeAdapter(
       },
       startSession,
       sendTurn,
+      steerTurn,
       interruptTurn,
       respondToRequest,
       respondToUserInput,

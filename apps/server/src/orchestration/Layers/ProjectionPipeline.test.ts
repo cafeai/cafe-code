@@ -470,6 +470,214 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-interrupt-clear
   },
 );
 
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-diff-completes-session-")))(
+  "OrchestrationProjectionPipeline",
+  (it) => {
+    it.effect("clears active sessions when a real turn diff completes the active turn", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-diff-completes-session");
+        const missingThreadId = ThreadId.make("thread-missing-diff-keeps-session");
+        const turnId = TurnId.make("turn-diff-completes-session");
+        const missingTurnId = TurnId.make("turn-missing-diff-keeps-session");
+        const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+          eventStore
+            .append(event)
+            .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+        yield* appendAndProject({
+          type: "project.created",
+          eventId: EventId.make("evt-diff-project"),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make("project-diff-session"),
+          occurredAt: "2026-05-24T16:00:00.000Z",
+          commandId: CommandId.make("cmd-diff-project"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-diff-project"),
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make("project-diff-session"),
+            title: "Project",
+            workspaceRoot: "/tmp/project-diff-session",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-05-24T16:00:00.000Z",
+            updatedAt: "2026-05-24T16:00:00.000Z",
+          },
+        });
+
+        for (const [id, title] of [
+          [threadId, "Real Diff"],
+          [missingThreadId, "Missing Diff"],
+        ] as const) {
+          yield* appendAndProject({
+            type: "thread.created",
+            eventId: EventId.make(`evt-diff-thread-${id}`),
+            aggregateKind: "thread",
+            aggregateId: id,
+            occurredAt: "2026-05-24T16:00:01.000Z",
+            commandId: CommandId.make(`cmd-diff-thread-${id}`),
+            causationEventId: null,
+            correlationId: CommandId.make(`cmd-diff-thread-${id}`),
+            metadata: {},
+            payload: {
+              threadId: id,
+              projectId: ProjectId.make("project-diff-session"),
+              title,
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("codex"),
+                model: "gpt-5-codex",
+              },
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+              createdAt: "2026-05-24T16:00:01.000Z",
+              updatedAt: "2026-05-24T16:00:01.000Z",
+            },
+          });
+        }
+
+        yield* appendAndProject({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-diff-running"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-24T16:00:02.000Z",
+          commandId: CommandId.make("cmd-diff-running"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-diff-running"),
+          metadata: {},
+          payload: {
+            threadId,
+            session: {
+              threadId,
+              status: "running",
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeMode: "full-access",
+              activeTurnId: turnId,
+              lastError: null,
+              updatedAt: "2026-05-24T16:00:02.000Z",
+            },
+          },
+        });
+        yield* appendAndProject({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-diff-missing-running"),
+          aggregateKind: "thread",
+          aggregateId: missingThreadId,
+          occurredAt: "2026-05-24T16:00:02.000Z",
+          commandId: CommandId.make("cmd-diff-missing-running"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-diff-missing-running"),
+          metadata: {},
+          payload: {
+            threadId: missingThreadId,
+            session: {
+              threadId: missingThreadId,
+              status: "running",
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeMode: "full-access",
+              activeTurnId: missingTurnId,
+              lastError: null,
+              updatedAt: "2026-05-24T16:00:02.000Z",
+            },
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.turn-diff-completed",
+          eventId: EventId.make("evt-diff-completed"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-24T16:00:03.000Z",
+          commandId: CommandId.make("cmd-diff-completed"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-diff-completed"),
+          metadata: {},
+          payload: {
+            threadId,
+            turnId,
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make("refs/t3/checkpoints/diff/turn/1"),
+            status: "ready",
+            files: [],
+            assistantMessageId: MessageId.make("assistant-diff-completed"),
+            completedAt: "2026-05-24T16:00:03.000Z",
+          },
+        });
+        yield* appendAndProject({
+          type: "thread.turn-diff-completed",
+          eventId: EventId.make("evt-diff-missing"),
+          aggregateKind: "thread",
+          aggregateId: missingThreadId,
+          occurredAt: "2026-05-24T16:00:03.000Z",
+          commandId: CommandId.make("cmd-diff-missing"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-diff-missing"),
+          metadata: {},
+          payload: {
+            threadId: missingThreadId,
+            turnId: missingTurnId,
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make("provider-diff:event"),
+            status: "missing",
+            files: [],
+            assistantMessageId: MessageId.make("assistant-diff-missing"),
+            completedAt: "2026-05-24T16:00:03.000Z",
+          },
+        });
+
+        const rows = yield* sql<{
+          readonly threadId: string;
+          readonly status: string;
+          readonly activeTurnId: string | null;
+          readonly turnState: string;
+          readonly completedAt: string | null;
+        }>`
+          SELECT
+            sessions.thread_id AS "threadId",
+            sessions.status,
+            sessions.active_turn_id AS "activeTurnId",
+            turns.state AS "turnState",
+            turns.completed_at AS "completedAt"
+          FROM projection_thread_sessions sessions
+          JOIN projection_turns turns
+            ON turns.thread_id = sessions.thread_id
+           AND turns.turn_id = sessions.active_turn_id
+              OR (
+                sessions.active_turn_id IS NULL
+                AND turns.thread_id = sessions.thread_id
+              )
+          WHERE sessions.thread_id IN (${threadId}, ${missingThreadId})
+          ORDER BY sessions.thread_id ASC
+        `;
+
+        assert.deepEqual(rows, [
+          {
+            threadId: "thread-diff-completes-session",
+            status: "ready",
+            activeTurnId: null,
+            turnState: "completed",
+            completedAt: "2026-05-24T16:00:03.000Z",
+          },
+          {
+            threadId: "thread-missing-diff-keeps-session",
+            status: "running",
+            activeTurnId: "turn-missing-diff-keeps-session",
+            turnState: "running",
+            completedAt: null,
+          },
+        ]);
+      }),
+    );
+  },
+);
+
 it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-thread-move-")))(
   "OrchestrationProjectionPipeline",
   (it) => {

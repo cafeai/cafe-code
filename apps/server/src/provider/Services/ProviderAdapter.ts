@@ -16,7 +16,9 @@ import type {
   ProviderSendTurnInput,
   ProviderSession,
   ProviderSessionStartInput,
+  ProviderSteerTurnInput,
   ThreadId,
+  ProviderTurnSteerResult,
   ProviderTurnStartResult,
   TurnId,
 } from "@cafecode/contracts";
@@ -67,6 +69,17 @@ export interface ProviderAdapterShape<TError> {
   readonly sendTurn: (
     input: ProviderSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, TError>;
+
+  /**
+   * Steer an active provider turn without starting a new turn.
+   *
+   * Adapters that declare `liveSteer: "supported"` must cryptographically bind
+   * or protocol-bind the steer to the expected active turn id when the upstream
+   * provider offers that precondition.
+   */
+  readonly steerTurn: (
+    input: ProviderSteerTurnInput,
+  ) => Effect.Effect<ProviderTurnSteerResult, TError>;
 
   /**
    * Interrupt an active turn.

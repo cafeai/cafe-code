@@ -42,6 +42,7 @@ import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.t
 import {
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeSendTurnInput,
+  type CodexSessionRuntimeSteerTurnInput,
   type CodexSessionRuntimeShape,
   type CodexThreadSnapshot,
 } from "./CodexSessionRuntime.ts";
@@ -77,6 +78,14 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   public readonly sendTurnImpl = vi.fn(
     (_input: CodexSessionRuntimeSendTurnInput): Promise<ProviderTurnStartResult> =>
+      Promise.resolve({
+        threadId: this.options.threadId,
+        turnId: asTurnId("turn-1"),
+      }),
+  );
+
+  public readonly steerTurnImpl = vi.fn(
+    (_input: CodexSessionRuntimeSteerTurnInput): Promise<ProviderTurnStartResult> =>
       Promise.resolve({
         threadId: this.options.threadId,
         turnId: asTurnId("turn-1"),
@@ -129,6 +138,10 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   sendTurn(input: CodexSessionRuntimeSendTurnInput) {
     return Effect.promise(() => this.sendTurnImpl(input));
+  }
+
+  steerTurn(input: CodexSessionRuntimeSteerTurnInput) {
+    return Effect.promise(() => this.steerTurnImpl(input));
   }
 
   interruptTurn(turnId?: TurnId) {
@@ -357,6 +370,36 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         model: "gpt-5.3-codex",
         effort: "high",
         serviceTier: "fast",
+      });
+    }),
+  );
+
+  it.effect("routes live steering through Codex turn/steer without turn-start overrides", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("sess-steer"),
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      assert.ok(runtime);
+      runtime.steerTurnImpl.mockClear();
+      runtime.sendTurnImpl.mockClear();
+
+      yield* Effect.ignore(
+        adapter.steerTurn({
+          threadId: asThreadId("sess-steer"),
+          expectedTurnId: asTurnId("turn-active"),
+          input: "keep going but narrow the scope",
+          attachments: [],
+        }),
+      );
+
+      assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+      assert.deepStrictEqual(runtime.steerTurnImpl.mock.calls[0]?.[0], {
+        expectedTurnId: asTurnId("turn-active"),
+        input: "keep going but narrow the scope",
       });
     }),
   );
@@ -786,6 +829,53 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("maps Codex active-turn snapshot polling diagnostics to runtime.warning", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-turn-still-in-progress"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "codex.turnProgress/stillInProgressAfterSnapshotPolling",
+        turnId: asTurnId("turn-1"),
+        message:
+          "Codex still reports the active turn as in progress after delayed snapshot polling.",
+        payload: {
+          providerThreadId: "provider-thread-1",
+          reason: "turn-steer-follow-up",
+          elapsedDelay: "300 seconds",
+          itemCount: 4,
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      assert.equal(firstEvent.value.type, "runtime.warning");
+      if (firstEvent.value.type !== "runtime.warning") {
+        return;
+      }
+      assert.equal(firstEvent.value.turnId, "turn-1");
+      assert.equal(
+        firstEvent.value.payload.message,
+        "Codex still reports the active turn as in progress after delayed snapshot polling.",
+      );
+      assert.deepEqual(firstEvent.value.payload.detail, {
+        providerThreadId: "provider-thread-1",
+        reason: "turn-steer-follow-up",
+        elapsedDelay: "300 seconds",
+        itemCount: 4,
+      });
+    }),
+  );
+
   it.effect("maps Codex turn-start acceptance diagnostics to task progress", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
@@ -826,6 +916,52 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         ackLatencyMs: 4,
         semantics:
           "turn/start is an acknowledgement; turn/started must arrive later from the app-server listener.",
+      });
+    }),
+  );
+
+  it.effect("maps Codex turn-steer acceptance diagnostics to task progress", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-turn-steer-accepted"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "codex.turnSteer/accepted",
+        turnId: asTurnId("turn-1"),
+        message: "Codex app-server accepted turn/steer.",
+        payload: {
+          providerThreadId: "provider-thread-1",
+          expectedTurnId: "turn-1",
+          ackLatencyMs: 3,
+          semantics:
+            "turn/steer appends input to the active turn and does not emit a new turn/started notification.",
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      assert.equal(firstEvent.value.type, "task.progress");
+      if (firstEvent.value.type !== "task.progress") {
+        return;
+      }
+      assert.equal(firstEvent.value.turnId, "turn-1");
+      assert.equal(firstEvent.value.payload.taskId, "codex-turn-steer:turn-1");
+      assert.equal(firstEvent.value.payload.description, "Codex app-server accepted turn/steer.");
+      assert.deepEqual(firstEvent.value.payload.usage, {
+        providerThreadId: "provider-thread-1",
+        expectedTurnId: "turn-1",
+        ackLatencyMs: 3,
+        semantics:
+          "turn/steer appends input to the active turn and does not emit a new turn/started notification.",
       });
     }),
   );

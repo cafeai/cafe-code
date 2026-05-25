@@ -104,6 +104,8 @@ Codex lifecycle facts to preserve:
 - `thread/resume` reopens an existing thread so later `turn/start` calls append to it.
 - `turn/start` accepts input and returns an initial in-progress turn, but the client must keep reading notifications such as `turn/started`, `item/started`, `item/completed`, `item/agentMessage/delta`, `turn/diff/updated`, and `turn/completed`.
 - `turn/steer` appends input to the active in-flight turn, requires the expected active turn id, does not emit a new `turn/started`, and does not accept turn-level overrides.
+- Cafe must route live follow-up messages through the separate `ProviderService.steerTurn` / provider-daemon `steerTurn` command path, not through `sendTurn`. The request shape must be only thread id, expected active turn id, user input, and attachments; model, effort, sandbox, collaboration/interaction mode, and other `turn/start` overrides must not be forwarded.
+- The steer split is based on the official Codex app-server docs and the upstream `openai/codex` app-server implementation: `turn_steer_inner` records the request against `expected_turn_id`, calls `thread.steer_input`, returns the active `turnId`, and rejects missing, mismatched, non-steerable, or empty input. Treat the absence of a new `turn/started` after steer as expected protocol behavior, not a stalled start.
 - Approvals are server-initiated JSON-RPC requests and must be answered through the matching request id.
 
 Codex transport behavior to preserve:
@@ -116,11 +118,13 @@ Codex transport behavior to preserve:
 - Codex built-in provider IDs are reserved and cannot be overridden directly. When Cafe needs to start a future app-server with WebSockets disabled, use a Cafe-scoped OpenAI-compatible provider that preserves OpenAI/ChatGPT auth and the Responses API while setting only `supports_websockets = false`.
 - Keep Codex turn diagnostics explicit: `turn/start` ACK latency, `turn/started`, first assistant delta/item, retry warnings, fallback warning, stream disconnects, and `turn/completed` are separate facts and should be visible in debug output.
 - Codex snapshot backfill is reconciliation data, not a second authoritative assistant stream. If delayed snapshot `agentMessage` items repeat assistant text that the live stream already projected for the same turn, keep the live `msg_*` message and suppress the snapshot `item-*` duplicate while still preserving snapshot-only messages.
+- After `turn/start` and `turn/steer`, delayed `thread/read` polling may backfill missed Codex terminal events, but only when upstream returns a terminal turn status. Upstream documents `turn/diff/updated` as a diff snapshot, so Cafe must not treat provider-diff placeholders or completed items as authoritative turn completion. If polling still sees `inProgress`, emit `codex.turnProgress/stillInProgressAfterSnapshotPolling` diagnostics and keep the turn running until Codex emits `turn/completed`, `turn/interrupt` finishes, or `thread/read` reports a terminal status.
 
 Important local files:
 
 - Runtime process and raw Codex protocol handling: `apps/server/src/provider/Layers/CodexSessionRuntime.ts`.
 - Canonical event mapping and provider service adapter: `apps/server/src/provider/Layers/CodexAdapter.ts`.
+- Cross-provider turn routing and live-steer command handling: `apps/server/src/provider/Layers/ProviderService.ts`, `apps/server/src/providerDaemon/ProviderDaemonServer.ts`, `apps/server/src/providerDaemon/RemoteProviderService.ts`, and `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts`.
 - Codex provider settings and effective home resolution: `apps/server/src/provider/Drivers/CodexDriver.ts`.
 - Codex shadow-home materialization: `apps/server/src/provider/Drivers/CodexHomeLayout.ts`.
 - Generated/typed Codex protocol package: `packages/effect-codex-app-server`.

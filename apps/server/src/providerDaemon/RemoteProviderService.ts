@@ -56,6 +56,7 @@ const VOID_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
 const MUTATING_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "startSession",
   "sendTurn",
+  "steerTurn",
   "interruptTurn",
   "respondToRequest",
   "respondToUserInput",
@@ -176,6 +177,7 @@ const makeRemoteProviderService = Effect.gen(function* () {
         payload: { ...input, threadId },
       }),
     sendTurn: (input) => rpc(daemonConfig, { method: "sendTurn", payload: input }),
+    steerTurn: (input) => rpc(daemonConfig, { method: "steerTurn", payload: input }),
     interruptTurn: (input) => rpc(daemonConfig, { method: "interruptTurn", payload: input }),
     respondToRequest: (input) => rpc(daemonConfig, { method: "respondToRequest", payload: input }),
     respondToUserInput: (input) =>

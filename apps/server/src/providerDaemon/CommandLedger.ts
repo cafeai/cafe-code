@@ -28,6 +28,7 @@ const encodeProviderDaemonRpcRequestJson = Schema.encodeSync(
 const MUTATING_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "startSession",
   "sendTurn",
+  "steerTurn",
   "interruptTurn",
   "respondToRequest",
   "respondToUserInput",
@@ -225,6 +226,9 @@ function storedRequestSummary(requestJson: string | null): Record<string, unknow
         : {}),
       ...(readStringField(payload, "interactionMode") !== undefined
         ? { interactionMode: readStringField(payload, "interactionMode") }
+        : {}),
+      ...(readStringField(payload, "expectedTurnId") !== undefined
+        ? { expectedTurnId: readStringField(payload, "expectedTurnId") }
         : {}),
       ...(input !== undefined ? { inputByteLength: Buffer.byteLength(input, "utf8") } : {}),
       ...(readArrayLength(payload?.["attachments"]) !== undefined

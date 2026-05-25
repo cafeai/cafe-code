@@ -962,6 +962,15 @@ export function makeCursorAdapter(
         };
       });
 
+    const steerTurn: CursorAdapterShape["steerTurn"] = (input) =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "turn/steer",
+          detail: `Cursor session '${input.threadId}' does not support live steering.`,
+        }),
+      );
+
     const interruptTurn: CursorAdapterShape["interruptTurn"] = (threadId) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
@@ -1068,6 +1077,7 @@ export function makeCursorAdapter(
       capabilities: { sessionModelSwitch: "in-session", liveSteer: "unsupported" },
       startSession,
       sendTurn,
+      steerTurn,
       interruptTurn,
       readThread,
       rollbackThread,

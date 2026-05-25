@@ -20,8 +20,10 @@ import type {
   ProviderSendTurnInput,
   ProviderSession,
   ProviderSessionStartInput,
+  ProviderSteerTurnInput,
   ProviderStopSessionInput,
   ThreadId,
+  ProviderTurnSteerResult,
   ProviderTurnStartResult,
 } from "@cafecode/contracts";
 import * as Context from "effect/Context";
@@ -50,6 +52,13 @@ export interface ProviderServiceShape {
   readonly sendTurn: (
     input: ProviderSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, ProviderServiceError>;
+
+  /**
+   * Steer a currently running provider turn.
+   */
+  readonly steerTurn: (
+    input: ProviderSteerTurnInput,
+  ) => Effect.Effect<ProviderTurnSteerResult, ProviderServiceError>;
 
   /**
    * Interrupt a running provider turn.

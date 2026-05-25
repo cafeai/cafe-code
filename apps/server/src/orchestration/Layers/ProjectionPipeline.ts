@@ -122,8 +122,52 @@ function maxIso(left: string | null, right: string): string {
   return left !== null && left > right ? left : right;
 }
 
-function isTerminalTurnState(state: ProjectionTurn["state"]): boolean {
+function isTerminalTurnState(
+  state: ProjectionTurn["state"],
+): state is Extract<ProjectionTurn["state"], "completed" | "error" | "interrupted"> {
   return state === "completed" || state === "error" || state === "interrupted";
+}
+
+function terminalSessionStatusForTurnState(
+  state: Extract<ProjectionTurn["state"], "completed" | "error" | "interrupted">,
+) {
+  return state === "completed" ? "ready" : state;
+}
+
+function terminalSessionStatusForCheckpointStatus(status: "ready" | "missing" | "error") {
+  if (status === "ready") {
+    return "ready" as const;
+  }
+  if (status === "error") {
+    return "error" as const;
+  }
+  return "interrupted" as const;
+}
+
+function shouldPromoteLatestTurnFromSessionSet(input: {
+  readonly currentLatestTurn: Option.Option<ProjectionTurnById>;
+  readonly candidateActiveTurn: Option.Option<ProjectionTurnById>;
+  readonly candidateActiveTurnId: string;
+  readonly sessionUpdatedAt: string;
+}): boolean {
+  if (Option.isNone(input.currentLatestTurn)) {
+    return true;
+  }
+
+  if (input.currentLatestTurn.value.turnId === input.candidateActiveTurnId) {
+    return true;
+  }
+
+  const candidateRequestedAt = Option.isSome(input.candidateActiveTurn)
+    ? input.candidateActiveTurn.value.requestedAt
+    : input.sessionUpdatedAt;
+
+  // Provider session snapshots can arrive after a newer turn has already been
+  // projected, especially during daemon handoff or backfill. A stale
+  // thread.session-set must not move the thread shell back to an older active
+  // turn, because that makes the renderer offer steer/interrupt for a turn the
+  // provider no longer owns.
+  return input.currentLatestTurn.value.requestedAt <= candidateRequestedAt;
 }
 
 function extendCompletedTurnAt(turn: ProjectionTurnById, observedAt: string): ProjectionTurnById {
@@ -810,9 +854,34 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           if (Option.isNone(existingRow)) {
             return;
           }
+          const activeTurnId = event.payload.session.activeTurnId;
+          const candidateActiveTurn =
+            activeTurnId === null
+              ? Option.none<ProjectionTurnById>()
+              : yield* projectionTurnRepository.getByTurnId({
+                  threadId: event.payload.threadId,
+                  turnId: activeTurnId,
+                });
+          const currentLatestTurn =
+            existingRow.value.latestTurnId === null
+              ? Option.none<ProjectionTurnById>()
+              : yield* projectionTurnRepository.getByTurnId({
+                  threadId: event.payload.threadId,
+                  turnId: existingRow.value.latestTurnId,
+                });
+          const latestTurnId =
+            activeTurnId !== null &&
+            shouldPromoteLatestTurnFromSessionSet({
+              currentLatestTurn,
+              candidateActiveTurn,
+              candidateActiveTurnId: activeTurnId,
+              sessionUpdatedAt: event.payload.session.updatedAt,
+            })
+              ? activeTurnId
+              : existingRow.value.latestTurnId;
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
-            latestTurnId: event.payload.session.activeTurnId ?? existingRow.value.latestTurnId,
+            latestTurnId,
             updatedAt: event.occurredAt,
           });
           yield* refreshThreadShellSummary(event.payload.threadId);
@@ -1129,6 +1198,32 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         });
         return;
       }
+      if (event.type === "thread.turn-diff-completed") {
+        if (event.payload.status === "missing") {
+          return;
+        }
+        const existingSession = yield* projectionThreadSessionRepository.getByThreadId({
+          threadId: event.payload.threadId,
+        });
+        if (
+          Option.isNone(existingSession) ||
+          existingSession.value.activeTurnId !== event.payload.turnId
+        ) {
+          return;
+        }
+        const status = terminalSessionStatusForCheckpointStatus(event.payload.status);
+        yield* projectionThreadSessionRepository.upsert({
+          threadId: event.payload.threadId,
+          status,
+          providerName: existingSession.value.providerName,
+          providerInstanceId: existingSession.value.providerInstanceId,
+          runtimeMode: existingSession.value.runtimeMode,
+          activeTurnId: null,
+          lastError: status === "ready" ? null : existingSession.value.lastError,
+          updatedAt: maxIso(existingSession.value.updatedAt, event.payload.completedAt),
+        });
+        return;
+      }
       if (event.type !== "thread.session-set") {
         return;
       }
@@ -1185,6 +1280,54 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           });
         }
       }
+
+      if (
+        event.payload.session.status === "running" &&
+        event.payload.session.activeTurnId !== null
+      ) {
+        const existingRow = yield* projectionThreadRepository.getById({
+          threadId: event.payload.threadId,
+        });
+        const activeTurn = yield* projectionTurnRepository.getByTurnId({
+          threadId: event.payload.threadId,
+          turnId: event.payload.session.activeTurnId,
+        });
+        const latestTurn =
+          Option.isSome(existingRow) && existingRow.value.latestTurnId !== null
+            ? yield* projectionTurnRepository.getByTurnId({
+                threadId: event.payload.threadId,
+                turnId: existingRow.value.latestTurnId,
+              })
+            : Option.none<ProjectionTurnById>();
+        if (
+          Option.isSome(latestTurn) &&
+          latestTurn.value.turnId !== event.payload.session.activeTurnId &&
+          !shouldPromoteLatestTurnFromSessionSet({
+            currentLatestTurn: latestTurn,
+            candidateActiveTurn: activeTurn,
+            candidateActiveTurnId: event.payload.session.activeTurnId,
+            sessionUpdatedAt: event.payload.session.updatedAt,
+          }) &&
+          isTerminalTurnState(latestTurn.value.state)
+        ) {
+          const status = terminalSessionStatusForTurnState(latestTurn.value.state);
+          yield* projectionThreadSessionRepository.upsert({
+            threadId: event.payload.threadId,
+            status,
+            providerName: event.payload.session.providerName,
+            providerInstanceId: event.payload.session.providerInstanceId ?? null,
+            runtimeMode: event.payload.session.runtimeMode,
+            activeTurnId: null,
+            lastError: status === "ready" ? null : event.payload.session.lastError,
+            updatedAt:
+              latestTurn.value.completedAt !== null
+                ? maxIso(event.payload.session.updatedAt, latestTurn.value.completedAt)
+                : event.payload.session.updatedAt,
+          });
+          return;
+        }
+      }
+
       yield* projectionThreadSessionRepository.upsert({
         threadId: event.payload.threadId,
         status: event.payload.session.status,

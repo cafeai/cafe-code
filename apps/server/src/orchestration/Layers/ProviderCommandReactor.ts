@@ -1023,6 +1023,16 @@ const make = Effect.gen(function* () {
         createdAt: event.payload.createdAt,
       });
     }
+    if (!thread.session.activeTurnId) {
+      return yield* appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.turn.steer.failed",
+        summary: "Provider steer failed",
+        detail: "The active provider session is missing an active turn id.",
+        turnId: null,
+        createdAt: event.payload.createdAt,
+      });
+    }
     const providerInstanceId = thread.session.providerInstanceId;
     if (providerInstanceId === undefined) {
       return yield* appendProviderFailureActivity({
@@ -1046,45 +1056,45 @@ const make = Effect.gen(function* () {
       });
     }
 
-    const project = yield* resolveProject(thread.projectId);
-    const sendTurnRequest = yield* buildSendTurnRequestForThread({
-      threadId: event.payload.threadId,
-      messageText: message.text,
-      ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
-      createdAt: event.payload.createdAt,
-      thread,
-      ...(project !== undefined ? { project } : {}),
-    }).pipe(
-      Effect.map(Option.some),
-      Effect.catchCause((cause) =>
-        appendProviderFailureActivity({
-          threadId: event.payload.threadId,
-          kind: "provider.turn.steer.failed",
-          summary: "Provider steer failed",
-          detail: formatFailureDetail(cause),
-          turnId: thread.session?.activeTurnId ?? null,
-          createdAt: event.payload.createdAt,
-        }).pipe(Effect.as(Option.none())),
-      ),
-    );
-
-    if (Option.isNone(sendTurnRequest)) {
-      return;
+    const normalizedInput = toNonEmptyProviderInput(message.text);
+    const normalizedAttachments = message.attachments ?? [];
+    if (!normalizedInput && normalizedAttachments.length === 0) {
+      return yield* appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.turn.steer.failed",
+        summary: "Provider steer failed",
+        detail: "Either input text or at least one attachment is required.",
+        turnId: thread.session.activeTurnId,
+        createdAt: event.payload.createdAt,
+      });
     }
 
-    yield* providerService.sendTurn(sendTurnRequest.value).pipe(
-      Effect.catchCause((cause) =>
-        appendProviderFailureActivity({
-          threadId: event.payload.threadId,
-          kind: "provider.turn.steer.failed",
-          summary: "Provider steer failed",
-          detail: formatFailureDetail(cause),
-          turnId: thread.session?.activeTurnId ?? null,
-          createdAt: event.payload.createdAt,
-        }),
-      ),
-      Effect.forkScoped,
-    );
+    // Codex app-server's `turn/steer` is intentionally not a second
+    // `turn/start`: upstream requires the expected active turn id, rejects
+    // mismatches, does not accept turn-level overrides, and does not emit a new
+    // `turn/started` notification. Keep this operation separate so a follow-up
+    // typed during an active turn cannot violate Codex's one-active-turn
+    // invariant by starting another turn.
+    yield* providerService
+      .steerTurn({
+        threadId: event.payload.threadId,
+        expectedTurnId: thread.session.activeTurnId,
+        ...(normalizedInput ? { input: normalizedInput } : {}),
+        ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
+      })
+      .pipe(
+        Effect.catchCause((cause) =>
+          appendProviderFailureActivity({
+            threadId: event.payload.threadId,
+            kind: "provider.turn.steer.failed",
+            summary: "Provider steer failed",
+            detail: formatFailureDetail(cause),
+            turnId: thread.session?.activeTurnId ?? null,
+            createdAt: event.payload.createdAt,
+          }),
+        ),
+        Effect.forkScoped,
+      );
   });
 
   const processApprovalResponseRequested = Effect.fn("processApprovalResponseRequested")(function* (

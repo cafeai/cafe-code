@@ -18,6 +18,7 @@ import {
   ProviderRespondToUserInputInput,
   ProviderSendTurnInput,
   ProviderSessionStartInput,
+  ProviderSteerTurnInput,
   ProviderStopSessionInput,
   type TurnId,
   type ProviderSessionRuntimeStatus,
@@ -852,6 +853,82 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   });
 
+  const steerTurn: ProviderServiceShape["steerTurn"] = Effect.fn("steerTurn")(function* (rawInput) {
+    const parsed = yield* decodeInputOrValidationError({
+      operation: "ProviderService.steerTurn",
+      schema: ProviderSteerTurnInput,
+      payload: rawInput,
+    });
+
+    const input = {
+      ...parsed,
+      attachments: parsed.attachments ?? [],
+    };
+    if (!input.input && input.attachments.length === 0) {
+      return yield* toValidationError(
+        "ProviderService.steerTurn",
+        "Either input text or at least one attachment is required",
+      );
+    }
+    yield* Effect.annotateCurrentSpan({
+      "provider.operation": "steer-turn",
+      "provider.thread_id": input.threadId,
+      "provider.expected_turn_id": input.expectedTurnId,
+      "provider.attachment_count": input.attachments.length,
+    });
+
+    let metricProvider = "unknown";
+    return yield* Effect.gen(function* () {
+      const routed = yield* resolveRoutableSession({
+        threadId: input.threadId,
+        operation: "ProviderService.steerTurn",
+        allowRecovery: true,
+      });
+      metricProvider = routed.adapter.provider;
+      if (routed.adapter.capabilities.liveSteer !== "supported") {
+        return yield* toValidationError(
+          "ProviderService.steerTurn",
+          `Provider '${routed.adapter.provider}' does not support live steering`,
+        );
+      }
+      yield* Effect.annotateCurrentSpan({
+        "provider.kind": routed.adapter.provider,
+      });
+      const turn = yield* routed.adapter.steerTurn(input);
+      yield* directory.upsert({
+        threadId: input.threadId,
+        provider: routed.adapter.provider,
+        providerInstanceId: routed.instanceId,
+        status: "running",
+        ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
+        runtimePayload: {
+          activeTurnId: turn.turnId,
+          lastRuntimeEvent: "provider.steerTurn",
+          lastRuntimeEventAt: yield* nowIso,
+        },
+      });
+      yield* analytics.record("provider.turn.steered", {
+        provider: routed.adapter.provider,
+        attachmentCount: input.attachments.length,
+        hasInput: typeof input.input === "string" && input.input.trim().length > 0,
+      });
+      return turn;
+    }).pipe(
+      withMetrics({
+        counter: providerTurnsTotal,
+        timer: providerTurnDuration,
+        attributes: () =>
+          providerTurnMetricAttributes({
+            provider: metricProvider,
+            model: undefined,
+            extra: {
+              operation: "steer",
+            },
+          }),
+      }),
+    );
+  });
+
   const interruptTurn: ProviderServiceShape["interruptTurn"] = Effect.fn("interruptTurn")(
     function* (rawInput) {
       const input = yield* decodeInputOrValidationError({
@@ -1192,6 +1269,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   return {
     startSession,
     sendTurn,
+    steerTurn,
     interruptTurn,
     respondToRequest,
     respondToUserInput,

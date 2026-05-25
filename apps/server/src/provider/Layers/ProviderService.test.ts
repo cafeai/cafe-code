@@ -8,6 +8,8 @@ import type {
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
   ProviderSession,
+  ProviderSteerTurnInput,
+  ProviderTurnSteerResult,
   ProviderTurnStartResult,
 } from "@cafecode/contracts";
 import {
@@ -135,6 +137,26 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     },
   );
 
+  const steerTurn = vi.fn(
+    (
+      input: ProviderSteerTurnInput,
+    ): Effect.Effect<ProviderTurnSteerResult, ProviderAdapterError> => {
+      if (!sessions.has(input.threadId)) {
+        return Effect.fail(
+          new ProviderAdapterSessionNotFoundError({
+            provider,
+            threadId: input.threadId,
+          }),
+        );
+      }
+
+      return Effect.succeed({
+        threadId: input.threadId,
+        turnId: input.expectedTurnId,
+      });
+    },
+  );
+
   const interruptTurn = vi.fn(
     (_threadId: ThreadId, _turnId?: TurnId): Effect.Effect<void, ProviderAdapterError> =>
       Effect.void,
@@ -207,10 +229,11 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     provider,
     capabilities: {
       sessionModelSwitch: "in-session",
-      liveSteer: "unsupported",
+      liveSteer: provider === CODEX_DRIVER ? "supported" : "unsupported",
     },
     startSession,
     sendTurn,
+    steerTurn,
     interruptTurn,
     respondToRequest,
     respondToUserInput,
@@ -246,6 +269,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     updateSession,
     startSession,
     sendTurn,
+    steerTurn,
     interruptTurn,
     respondToRequest,
     respondToUserInput,
@@ -1221,6 +1245,53 @@ routing.layer("ProviderServiceLive routing", (it) => {
           assert.equal(runtimePayload.activeTurnId, `turn-${String(session.threadId)}`);
           assert.equal(runtimePayload.lastError, null);
           assert.equal(runtimePayload.lastRuntimeEvent, "provider.sendTurn");
+        }
+      }
+    }),
+  );
+
+  it.effect("routes live steering and preserves the expected active turn id", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+
+      const threadId = asThreadId("thread-runtime-steer");
+      const session = yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const result = yield* provider.steerTurn({
+        threadId: session.threadId,
+        expectedTurnId: asTurnId("turn-active"),
+        input: "adjust course",
+        attachments: [],
+      });
+
+      assert.equal(result.turnId, asTurnId("turn-active"));
+      assert.equal(routing.codex.steerTurn.mock.calls.length, 1);
+      assert.deepEqual(routing.codex.steerTurn.mock.calls[0]?.[0], {
+        threadId,
+        expectedTurnId: asTurnId("turn-active"),
+        input: "adjust course",
+        attachments: [],
+      });
+
+      const runningRuntime = yield* runtimeRepository.getByThreadId({
+        threadId: session.threadId,
+      });
+      assert.equal(Option.isSome(runningRuntime), true);
+      if (Option.isSome(runningRuntime)) {
+        const payload = runningRuntime.value.runtimePayload;
+        assert.equal(payload !== null && typeof payload === "object", true);
+        if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+          const runtimePayload = payload as {
+            activeTurnId: string | null;
+            lastRuntimeEvent: string | null;
+          };
+          assert.equal(runtimePayload.activeTurnId, "turn-active");
+          assert.equal(runtimePayload.lastRuntimeEvent, "provider.steerTurn");
         }
       }
     }),

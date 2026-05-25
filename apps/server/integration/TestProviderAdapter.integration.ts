@@ -475,6 +475,15 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
         sessions.clear();
       });
 
+    const steerTurn: ProviderAdapterShape<ProviderAdapterError>["steerTurn"] = (input) =>
+      Effect.fail(
+        new ProviderAdapterValidationError({
+          provider,
+          operation: "steerTurn",
+          issue: `Test provider session '${input.threadId}' does not support live steering.`,
+        }),
+      );
+
     const adapter: ProviderAdapterShape<ProviderAdapterError> = {
       provider,
       capabilities: {
@@ -483,6 +492,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
       },
       startSession,
       sendTurn,
+      steerTurn,
       interruptTurn,
       respondToRequest,
       respondToUserInput,

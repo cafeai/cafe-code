@@ -8,7 +8,9 @@ import {
   ProviderSendTurnInput,
   ProviderSession,
   ProviderSessionStartInput,
+  ProviderSteerTurnInput,
   ProviderStopSessionInput,
+  ProviderTurnSteerResult,
   ProviderTurnStartResult,
 } from "./provider.ts";
 import { ProviderRuntimeEvent } from "./providerRuntime.ts";
@@ -401,6 +403,11 @@ export const ProviderDaemonRpcRequest = Schema.Union([
     payload: ProviderSendTurnInput,
   }),
   Schema.Struct({
+    method: Schema.Literal("steerTurn"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: ProviderSteerTurnInput,
+  }),
+  Schema.Struct({
     method: Schema.Literal("interruptTurn"),
     commandId: Schema.optional(ProviderDaemonCommandId),
     payload: ProviderInterruptTurnInput,
@@ -443,6 +450,7 @@ export type ProviderDaemonRpcRequest = typeof ProviderDaemonRpcRequest.Type;
 export const ProviderDaemonRpcResultByMethod = {
   startSession: ProviderSession,
   sendTurn: ProviderTurnStartResult,
+  steerTurn: ProviderTurnSteerResult,
   interruptTurn: Schema.Void,
   respondToRequest: Schema.Void,
   respondToUserInput: Schema.Void,

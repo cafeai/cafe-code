@@ -1493,7 +1493,10 @@ function mapToRuntimeEvents(
     ];
   }
 
-  if (event.method === "codex.turnStart/noRuntimeEventYet") {
+  if (
+    event.method === "codex.turnStart/noRuntimeEventYet" ||
+    event.method === "codex.turnProgress/stillInProgressAfterSnapshotPolling"
+  ) {
     return [
       {
         type: "runtime.warning",
@@ -1501,7 +1504,9 @@ function mapToRuntimeEvents(
         payload: {
           message:
             event.message ??
-            "Codex app-server accepted turn/start but has not emitted a turn event yet.",
+            (event.method === "codex.turnStart/noRuntimeEventYet"
+              ? "Codex app-server accepted turn/start but has not emitted a turn event yet."
+              : "Codex still reports the active turn as in progress after delayed snapshot polling."),
           ...(event.payload !== undefined ? { detail: event.payload } : {}),
         },
       },
@@ -1516,6 +1521,20 @@ function mapToRuntimeEvents(
         payload: {
           taskId: RuntimeTaskId.make(`codex-turn-start:${event.turnId ?? event.id}`),
           description: event.message ?? "Codex app-server accepted turn/start.",
+          ...(event.payload !== undefined ? { usage: event.payload } : {}),
+        },
+      },
+    ];
+  }
+
+  if (event.method === "codex.turnSteer/accepted") {
+    return [
+      {
+        type: "task.progress",
+        ...runtimeEventBase(event, canonicalThreadId),
+        payload: {
+          taskId: RuntimeTaskId.make(`codex-turn-steer:${event.turnId ?? event.id}`),
+          description: event.message ?? "Codex app-server accepted turn/steer.",
           ...(event.payload !== undefined ? { usage: event.payload } : {}),
         },
       },
@@ -1911,7 +1930,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
 
   const resolveAttachment = Effect.fn("resolveAttachment")(function* (
-    input: ProviderSendTurnInput,
+    method: "turn/start" | "turn/steer",
     attachment: NonNullable<ProviderSendTurnInput["attachments"]>[number],
   ) {
     const attachmentPath = resolveAttachmentPath({
@@ -1921,7 +1940,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     if (!attachmentPath) {
       return yield* new ProviderAdapterRequestError({
         provider: PROVIDER,
-        method: "turn/start",
+        method,
         detail: `Invalid attachment id '${attachment.id}'.`,
       });
     }
@@ -1930,7 +1949,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         (cause) =>
           new ProviderAdapterRequestError({
             provider: PROVIDER,
-            method: "turn/start",
+            method,
             detail: `Failed to read attachment file: ${cause.message}.`,
             cause,
           }),
@@ -1945,7 +1964,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
     const codexAttachments = yield* Effect.forEach(
       input.attachments ?? [],
-      (attachment) => resolveAttachment(input, attachment),
+      (attachment) => resolveAttachment("turn/start", attachment),
       { concurrency: 1 },
     );
 
@@ -1974,6 +1993,23 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
       })
       .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)));
+  });
+
+  const steerTurn: CodexAdapterShape["steerTurn"] = Effect.fn("steerTurn")(function* (input) {
+    const codexAttachments = yield* Effect.forEach(
+      input.attachments ?? [],
+      (attachment) => resolveAttachment("turn/steer", attachment),
+      { concurrency: 1 },
+    );
+
+    const session = yield* requireSession(input.threadId);
+    return yield* session.runtime
+      .steerTurn({
+        expectedTurnId: input.expectedTurnId,
+        ...(input.input !== undefined ? { input: input.input } : {}),
+        ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
+      })
+      .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/steer", cause)));
   });
 
   const requireSession = Effect.fn("requireSession")(function* (threadId: ThreadId) {
@@ -2121,6 +2157,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     },
     startSession,
     sendTurn,
+    steerTurn,
     interruptTurn,
     readThread,
     rollbackThread,

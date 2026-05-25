@@ -226,6 +226,23 @@ function reconcileSessionWithLatestTurn(
         activeTurnId: null,
       };
     }
+    if (
+      latestTurn !== null &&
+      latestTurn !== undefined &&
+      latestTurn.completedAt !== null &&
+      latestTurn.completedAt >= session.updatedAt &&
+      (latestTurn.state === "completed" ||
+        latestTurn.state === "interrupted" ||
+        latestTurn.state === "error")
+    ) {
+      return {
+        ...session,
+        status: latestTurn.state === "completed" ? "ready" : latestTurn.state,
+        activeTurnId: null,
+        lastError: latestTurn.state === "completed" ? null : session.lastError,
+        updatedAt: maxIso(session.updatedAt, latestTurn.completedAt),
+      };
+    }
     return session;
   }
 

@@ -56,6 +56,7 @@ import Migration0040 from "./Migrations/040_ProviderDaemonDurability.ts";
 import Migration0041 from "./Migrations/041_ProviderSupervisorFoundation.ts";
 import Migration0042 from "./Migrations/042_ProviderDaemonEventJournalOwnerKey.ts";
 import Migration0043 from "./Migrations/043_ReconcileTerminalActiveThreadSessions.ts";
+import Migration0044 from "./Migrations/044_ReconcileStaleActiveTurnPointers.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -111,6 +112,7 @@ export const migrationEntries = [
   [41, "ProviderSupervisorFoundation", Migration0041],
   [42, "ProviderDaemonEventJournalOwnerKey", Migration0042],
   [43, "ReconcileTerminalActiveThreadSessions", Migration0043],
+  [44, "ReconcileStaleActiveTurnPointers", Migration0044],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

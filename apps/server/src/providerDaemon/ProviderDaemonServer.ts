@@ -669,6 +669,8 @@ const executeRpcRequest = (
       return providerService.startSession(request.payload.threadId, request.payload);
     case "sendTurn":
       return providerService.sendTurn(request.payload);
+    case "steerTurn":
+      return providerService.steerTurn(request.payload);
     case "interruptTurn":
       return providerService.interruptTurn(request.payload);
     case "respondToRequest":

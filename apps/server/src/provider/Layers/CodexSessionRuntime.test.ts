@@ -15,6 +15,7 @@ import {
   buildCodexAppServerArgs,
   buildCodexThreadSnapshotBackfillEvents,
   buildTurnStartParams,
+  buildTurnSteerParams,
   isRecoverableThreadResumeError,
   openCodexThread,
 } from "./CodexSessionRuntime.ts";
@@ -192,6 +193,39 @@ describe("buildTurnStartParams", () => {
     assert.deepStrictEqual(params.sandboxPolicy, {
       type: "workspaceWrite",
       writableRoots: ["/tmp/docs", "/tmp/tools"],
+    });
+  });
+});
+
+describe("buildTurnSteerParams", () => {
+  it("builds the upstream Codex turn/steer shape without turn-start overrides", () => {
+    const params = Effect.runSync(
+      buildTurnSteerParams({
+        threadId: "provider-thread-1",
+        expectedTurnId: TurnId.make("turn-active"),
+        prompt: "stay on this path",
+        attachments: [
+          {
+            type: "image",
+            url: "data:image/png;base64,abc",
+          },
+        ],
+      }),
+    );
+
+    assert.deepStrictEqual(params, {
+      threadId: "provider-thread-1",
+      expectedTurnId: "turn-active",
+      input: [
+        {
+          type: "text",
+          text: "stay on this path",
+        },
+        {
+          type: "image",
+          url: "data:image/png;base64,abc",
+        },
+      ],
     });
   });
 });
