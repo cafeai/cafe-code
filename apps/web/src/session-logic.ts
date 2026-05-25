@@ -122,15 +122,33 @@ export type TimelineEntry =
     };
 
 export function formatDuration(durationMs: number): string {
-  if (!Number.isFinite(durationMs) || durationMs < 0) return "0ms";
-  if (durationMs < 1_000) return `${Math.max(1, Math.round(durationMs))}ms`;
-  if (durationMs < 10_000) return `${(durationMs / 1_000).toFixed(1)}s`;
-  if (durationMs < 60_000) return `${Math.round(durationMs / 1_000)}s`;
-  const minutes = Math.floor(durationMs / 60_000);
-  const seconds = Math.round((durationMs % 60_000) / 1_000);
-  if (seconds === 0) return `${minutes}m`;
-  if (seconds === 60) return `${minutes + 1}m`;
-  return `${minutes}m ${seconds}s`;
+  if (!Number.isFinite(durationMs) || durationMs < 0) return "0s";
+
+  // Turn-duration labels are user-facing liveness/status text, not precise
+  // profiling metrics. Keep the same whole-second model for both the live
+  // "Working for ..." timer and the completed "Worked for ..." summary so the
+  // label does not change shape when a turn finishes.
+  const elapsedSeconds = Math.max(0, Math.floor(durationMs / 1_000));
+  if (elapsedSeconds < 60) {
+    return `${elapsedSeconds}s`;
+  }
+
+  const hours = Math.floor(elapsedSeconds / 3_600);
+  const minutes = Math.floor((elapsedSeconds % 3_600) / 60);
+  const seconds = elapsedSeconds % 60;
+  const parts: string[] = [];
+
+  if (hours > 0) {
+    parts.push(`${hours}h`);
+  }
+  if (minutes > 0) {
+    parts.push(`${minutes}m`);
+  }
+  if (seconds > 0) {
+    parts.push(`${seconds}s`);
+  }
+
+  return parts.length > 0 ? parts.join(" ") : "0s";
 }
 
 export function formatElapsed(startIso: string, endIso: string | undefined): string | null {

@@ -17,6 +17,8 @@ import {
   deriveWorkLogEntries,
   findLatestProposedPlan,
   findSidebarProposedPlan,
+  formatDuration,
+  formatElapsed,
   hasActionableProposedPlan,
   hasToolActivityForTurn,
   isLatestTurnSettled,
@@ -44,6 +46,21 @@ function makeActivity(overrides: {
     ...(overrides.sequence !== undefined ? { sequence: overrides.sequence } : {}),
   };
 }
+
+describe("turn duration formatting", () => {
+  it("uses one whole-second model across live and completed turn labels", () => {
+    expect(formatDuration(0)).toBe("0s");
+    expect(formatDuration(59_999)).toBe("59s");
+    expect(formatDuration(61_000)).toBe("1m 1s");
+    expect(formatDuration(3_600_000)).toBe("1h");
+    expect(formatDuration(3_603_000)).toBe("1h 3s");
+    expect(formatDuration(3_723_000)).toBe("1h 2m 3s");
+  });
+
+  it("keeps seconds visible after elapsed time passes one hour", () => {
+    expect(formatElapsed("2026-05-26T00:00:00.000Z", "2026-05-26T01:02:03.000Z")).toBe("1h 2m 3s");
+  });
+});
 
 describe("derivePendingApprovals", () => {
   it("tracks open approvals and removes resolved ones", () => {
