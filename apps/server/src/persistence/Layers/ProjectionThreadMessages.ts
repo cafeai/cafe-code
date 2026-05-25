@@ -9,6 +9,7 @@ import { ChatAttachment, IsoDateTime } from "@cafecode/contracts";
 
 import { toPersistenceSqlError } from "../Errors.ts";
 import {
+  CloseStreamingProjectionThreadMessagesByTurnInput,
   GetProjectionThreadMessageInput,
   ProjectionThreadMessageRepository,
   type ProjectionThreadMessageRepositoryShape,
@@ -154,6 +155,25 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
       `,
   });
 
+  const closeStreamingProjectionThreadMessagesByTurn = SqlSchema.void({
+    Request: CloseStreamingProjectionThreadMessagesByTurnInput,
+    execute: ({ threadId, turnId, updatedAt }) =>
+      sql`
+        UPDATE projection_thread_messages
+        SET
+          is_streaming = 0,
+          updated_at = CASE
+            WHEN updated_at > ${updatedAt}
+            THEN updated_at
+            ELSE ${updatedAt}
+          END
+        WHERE thread_id = ${threadId}
+          AND turn_id = ${turnId}
+          AND role = 'assistant'
+          AND is_streaming = 1
+      `,
+  });
+
   const deleteProjectionThreadMessageRows = SqlSchema.void({
     Request: DeleteProjectionThreadMessagesInput,
     execute: ({ threadId }) =>
@@ -195,6 +215,15 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
         Effect.map(Option.map((row) => row.latestUserMessageAt)),
       );
 
+  const closeStreamingByTurnId: ProjectionThreadMessageRepositoryShape["closeStreamingByTurnId"] = (
+    input,
+  ) =>
+    closeStreamingProjectionThreadMessagesByTurn(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlError("ProjectionThreadMessageRepository.closeStreamingByTurnId:query"),
+      ),
+    );
+
   const deleteByThreadId: ProjectionThreadMessageRepositoryShape["deleteByThreadId"] = (input) =>
     deleteProjectionThreadMessageRows(input).pipe(
       Effect.mapError(
@@ -207,6 +236,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
     getByMessageId,
     listByThreadId,
     getLatestUserMessageAtByThreadId,
+    closeStreamingByTurnId,
     deleteByThreadId,
   } satisfies ProjectionThreadMessageRepositoryShape;
 });

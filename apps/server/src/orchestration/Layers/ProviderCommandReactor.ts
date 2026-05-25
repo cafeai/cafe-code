@@ -2,6 +2,7 @@ import {
   type ChatAttachment,
   CommandId,
   EventId,
+  type MessageId,
   type ModelSelection,
   type OrchestrationEvent,
   type OrchestrationProjectShell,
@@ -148,6 +149,73 @@ function findProviderAdapterRequestError(
   return isProviderAdapterRequestError(failReason?.error) ? failReason.error : undefined;
 }
 
+type CodexNonSteerableTurnKind = "review" | "compact";
+
+function readRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function readCodexNonSteerableTurnKindFromData(
+  value: unknown,
+): CodexNonSteerableTurnKind | undefined {
+  const data = readRecord(value);
+  const codexErrorInfo = readRecord(data?.codexErrorInfo ?? data?.codex_error_info);
+  const activeTurnNotSteerable = readRecord(
+    codexErrorInfo?.activeTurnNotSteerable ?? codexErrorInfo?.active_turn_not_steerable,
+  );
+  const turnKind = activeTurnNotSteerable?.turnKind ?? activeTurnNotSteerable?.turn_kind;
+  return turnKind === "review" || turnKind === "compact" ? turnKind : undefined;
+}
+
+function readNestedCodexNonSteerableTurnKind(
+  value: unknown,
+  seen = new WeakSet<object>(),
+): CodexNonSteerableTurnKind | undefined {
+  const structured = readCodexNonSteerableTurnKindFromData(value);
+  if (structured !== undefined) {
+    return structured;
+  }
+
+  const record = readRecord(value);
+  if (record === undefined) {
+    return undefined;
+  }
+  if (seen.has(record)) {
+    return undefined;
+  }
+  seen.add(record);
+
+  return (
+    readNestedCodexNonSteerableTurnKind(record.data, seen) ??
+    readNestedCodexNonSteerableTurnKind(record.cause, seen)
+  );
+}
+
+function detectCodexNonSteerableTurnKind(
+  cause: Cause.Cause<ProviderServiceError>,
+): CodexNonSteerableTurnKind | undefined {
+  const providerError = findProviderAdapterRequestError(cause);
+  const structured = readNestedCodexNonSteerableTurnKind(providerError?.cause);
+  if (structured !== undefined) {
+    return structured;
+  }
+
+  const detail = `${providerError?.detail ?? ""}\n${Cause.pretty(cause)}`.toLowerCase();
+  if (detail.includes("cannot steer a review turn")) {
+    return "review";
+  }
+  if (detail.includes("cannot steer a compact turn")) {
+    return "compact";
+  }
+  return undefined;
+}
+
+function codexNonSteerableDetail(turnKind: CodexNonSteerableTurnKind): string {
+  return `Codex rejected live steer because the active turn is a ${turnKind} turn. Cafe Code will re-queue this follow-up locally and send it after the active turn finishes.`;
+}
+
 function isUnknownPendingApprovalRequestError(cause: Cause.Cause<ProviderServiceError>): boolean {
   const error = findProviderAdapterRequestError(cause);
   if (error) {
@@ -240,6 +308,10 @@ const make = Effect.gen(function* () {
     readonly turnId: TurnId | null;
     readonly createdAt: string;
     readonly requestId?: string;
+    readonly messageId?: MessageId;
+    readonly retryableFollowUp?: boolean;
+    readonly retryAfter?: "active-turn";
+    readonly codexNonSteerableTurnKind?: CodexNonSteerableTurnKind;
   }) =>
     orchestrationEngine.dispatch({
       type: "thread.activity.append",
@@ -253,6 +325,14 @@ const make = Effect.gen(function* () {
         payload: {
           detail: input.detail,
           ...(input.requestId ? { requestId: input.requestId } : {}),
+          ...(input.messageId ? { messageId: input.messageId } : {}),
+          ...(input.retryableFollowUp !== undefined
+            ? { retryableFollowUp: input.retryableFollowUp }
+            : {}),
+          ...(input.retryAfter ? { retryAfter: input.retryAfter } : {}),
+          ...(input.codexNonSteerableTurnKind
+            ? { codexNonSteerableTurnKind: input.codexNonSteerableTurnKind }
+            : {}),
         },
         turnId: input.turnId,
         createdAt: input.createdAt,
@@ -1095,16 +1175,28 @@ const make = Effect.gen(function* () {
         ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       })
       .pipe(
-        Effect.catchCause((cause) =>
-          appendProviderFailureActivity({
+        Effect.catchCause((cause) => {
+          const codexNonSteerableTurnKind = detectCodexNonSteerableTurnKind(cause);
+          return appendProviderFailureActivity({
             threadId: event.payload.threadId,
             kind: "provider.turn.steer.failed",
             summary: "Provider steer failed",
-            detail: formatFailureDetail(cause),
+            detail:
+              codexNonSteerableTurnKind === undefined
+                ? formatFailureDetail(cause)
+                : codexNonSteerableDetail(codexNonSteerableTurnKind),
             turnId: thread.session?.activeTurnId ?? null,
             createdAt: event.payload.createdAt,
-          }),
-        ),
+            messageId: event.payload.messageId,
+            ...(codexNonSteerableTurnKind !== undefined
+              ? {
+                  retryableFollowUp: true,
+                  retryAfter: "active-turn" as const,
+                  codexNonSteerableTurnKind,
+                }
+              : {}),
+          });
+        }),
         Effect.forkScoped,
       );
   });

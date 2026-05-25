@@ -3,6 +3,7 @@ import {
   type ChatAttachment,
   type OrchestrationEvent,
   ThreadId,
+  type TurnId,
 } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -947,6 +948,21 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       }
     });
 
+    const closeStreamingMessagesForTerminalTurn = Effect.fn(
+      "ProjectionPipeline.closeStreamingMessagesForTerminalTurn",
+    )(function* (input: {
+      readonly threadId: ThreadId;
+      readonly turnId: TurnId;
+      readonly updatedAt: string;
+    }) {
+      // Codex and other providers can terminate a turn through interruption,
+      // error, or checkpoint completion without emitting a non-streaming
+      // replacement for every partial assistant message. Closing all streaming
+      // assistant rows for the terminal turn keeps renderer "working" state
+      // bound to provider truth instead of stale per-message flags.
+      yield* projectionThreadMessageRepository.closeStreamingByTurnId(input);
+    });
+
     const applyThreadMessagesProjection: ProjectorDefinition["apply"] = Effect.fn(
       "applyThreadMessagesProjection",
     )(function* (event, attachmentSideEffects) {
@@ -984,6 +1000,60 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             isStreaming: event.payload.streaming,
             createdAt: previousMessage?.createdAt ?? event.payload.createdAt,
             updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.turn-interrupt-requested": {
+          const existingSession = yield* projectionThreadSessionRepository.getByThreadId({
+            threadId: event.payload.threadId,
+          });
+          const terminalTurnId =
+            event.payload.turnId ??
+            (Option.isSome(existingSession) ? existingSession.value.activeTurnId : null);
+          if (terminalTurnId === null || terminalTurnId === undefined) {
+            return;
+          }
+          yield* closeStreamingMessagesForTerminalTurn({
+            threadId: event.payload.threadId,
+            turnId: terminalTurnId,
+            updatedAt: event.payload.createdAt,
+          });
+          return;
+        }
+
+        case "thread.turn-diff-completed": {
+          if (event.payload.status === "missing") {
+            return;
+          }
+          yield* closeStreamingMessagesForTerminalTurn({
+            threadId: event.payload.threadId,
+            turnId: event.payload.turnId,
+            updatedAt: event.payload.completedAt,
+          });
+          return;
+        }
+
+        case "thread.session-set": {
+          if (
+            event.payload.session.activeTurnId !== null ||
+            (event.payload.session.status !== "ready" &&
+              event.payload.session.status !== "error" &&
+              event.payload.session.status !== "interrupted" &&
+              event.payload.session.status !== "stopped")
+          ) {
+            return;
+          }
+          const existingSession = yield* projectionThreadSessionRepository.getByThreadId({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingSession) || existingSession.value.activeTurnId === null) {
+            return;
+          }
+          yield* closeStreamingMessagesForTerminalTurn({
+            threadId: event.payload.threadId,
+            turnId: existingSession.value.activeTurnId,
+            updatedAt: event.payload.session.updatedAt,
           });
           return;
         }

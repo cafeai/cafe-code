@@ -264,6 +264,10 @@ async function readFirstPromptMessage(
   return next.value;
 }
 
+function claudeProjectDirectoryForTest(homePath: string, cwd: string): string {
+  return path.join(homePath, ".claude", "projects", path.resolve(cwd).replaceAll(path.sep, "-"));
+}
+
 const THREAD_ID = ThreadId.make("thread-claude-1");
 const RESUME_THREAD_ID = ThreadId.make("thread-claude-resume");
 
@@ -2735,6 +2739,103 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(createInput?.options.resume, "550e8400-e29b-41d4-a716-446655440000");
       assert.equal(createInput?.options.sessionId, undefined);
       assert.equal(createInput?.options.resumeSessionAt, "assistant-99");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("drops a durable Claude resume cursor when the cwd transcript is missing", () => {
+    const homePath = mkdtempSync(path.join(os.tmpdir(), "claude-missing-resume-home-"));
+    const cwd = path.join(homePath, "workspace");
+    const harness = makeHarness({
+      cwd,
+      claudeConfig: { homePath },
+    });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() =>
+          rmSync(homePath, {
+            recursive: true,
+            force: true,
+          }),
+        ),
+      );
+
+      const adapter = yield* ClaudeAdapter;
+      const missingSessionId = "550e8400-e29b-41d4-a716-446655440000";
+
+      const session = yield* adapter.startSession({
+        threadId: RESUME_THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        cwd,
+        resumeCursor: {
+          threadId: RESUME_THREAD_ID,
+          resume: missingSessionId,
+          resumeSessionAt: "assistant-99",
+          turnCount: 3,
+        },
+        runtimeMode: "full-access",
+      });
+
+      const createInput = harness.getLastCreateQueryInput();
+      assert.equal(session.resumeCursor, undefined);
+      assert.equal(createInput?.options.resume, undefined);
+      assert.equal(createInput?.options.resumeSessionAt, undefined);
+      assert.equal(createInput?.options.sessionId, undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("passes a durable Claude resume cursor when the cwd transcript exists", () => {
+    const homePath = mkdtempSync(path.join(os.tmpdir(), "claude-present-resume-home-"));
+    const cwd = path.join(homePath, "workspace");
+    const sessionId = "550e8400-e29b-41d4-a716-446655440000";
+    const projectDirectory = claudeProjectDirectoryForTest(homePath, cwd);
+    mkdirSync(projectDirectory, { recursive: true });
+    writeFileSync(path.join(projectDirectory, `${sessionId}.jsonl`), "{}\n");
+
+    const harness = makeHarness({
+      cwd,
+      claudeConfig: { homePath },
+    });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() =>
+          rmSync(homePath, {
+            recursive: true,
+            force: true,
+          }),
+        ),
+      );
+
+      const adapter = yield* ClaudeAdapter;
+
+      const session = yield* adapter.startSession({
+        threadId: RESUME_THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        cwd,
+        resumeCursor: {
+          threadId: RESUME_THREAD_ID,
+          resume: sessionId,
+          resumeSessionAt: "assistant-99",
+          turnCount: 3,
+        },
+        runtimeMode: "full-access",
+      });
+
+      const createInput = harness.getLastCreateQueryInput();
+      assert.deepEqual(session.resumeCursor, {
+        threadId: RESUME_THREAD_ID,
+        resume: sessionId,
+        resumeSessionAt: "assistant-99",
+        turnCount: 3,
+      });
+      assert.equal(createInput?.options.resume, sessionId);
+      assert.equal(createInput?.options.resumeSessionAt, "assistant-99");
+      assert.equal(createInput?.options.sessionId, undefined);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

@@ -26,11 +26,6 @@ export interface LiveSteerAvailabilityInput {
     readonly turnId: string;
     readonly state: string;
   } | null;
-  messages: readonly {
-    readonly role: string;
-    readonly turnId?: string | null | undefined;
-    readonly streaming: boolean;
-  }[];
 }
 
 export function isLiveSteerAvailableForThread(input: LiveSteerAvailabilityInput): boolean {
@@ -38,29 +33,17 @@ export function isLiveSteerAvailableForThread(input: LiveSteerAvailabilityInput)
     return false;
   }
 
-  // Upstream Codex app-server defines `turn/steer` as injection into the
-  // currently in-flight regular turn, and the call does not produce a new
-  // `turn/started` boundary. If Cafe has already projected the active Codex
-  // assistant message as non-streaming, late steering can attach a user message
-  // to a turn that is only stuck because the terminal `turn/completed` event has
-  // not arrived. Keep live steer available only while there is an actual live
-  // assistant stream for that active turn; otherwise queue or interrupt first.
-  if (input.provider !== "codex") {
-    return true;
-  }
-
+  // Upstream Codex app-server defines `turn/steer` against the active
+  // in-flight turn with an `expectedTurnId`; it is not tied to whether Cafe has
+  // a currently streaming assistant text row. The generated Codex schema names
+  // the protocol-specific rejection cases (`review` and `compact`) as
+  // `activeTurnNotSteerable`, so let upstream make that decision instead of
+  // guessing from renderer projection timing.
   const activeTurnId = input.activeTurnId ?? null;
   if (activeTurnId === null) {
     return false;
   }
-  if (input.latestTurn?.turnId !== activeTurnId || input.latestTurn.state !== "running") {
-    return false;
-  }
-
-  return input.messages.some(
-    (message) =>
-      message.role === "assistant" && message.turnId === activeTurnId && message.streaming,
-  );
+  return input.latestTurn?.turnId === activeTurnId && input.latestTurn.state === "running";
 }
 
 export interface QueuedFollowUpStartInput {

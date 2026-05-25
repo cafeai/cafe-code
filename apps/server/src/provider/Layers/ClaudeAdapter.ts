@@ -562,16 +562,45 @@ const ensureClaudeResumeArtifactsForCwd = Effect.fn(
   readonly env: NodeJS.ProcessEnv;
   readonly cwd: string | undefined;
   readonly resumeSessionId: string | undefined;
-}): Effect.fn.Return<void, never> {
+}): Effect.fn.Return<
+  | {
+      readonly checked: false;
+      readonly reason: "missing-cwd-or-session";
+    }
+  | {
+      readonly checked: true;
+      readonly sessionFileExists: boolean;
+      readonly targetSessionFile: string;
+      readonly targetProjectDirectory: string;
+      readonly copiedFile: boolean;
+      readonly copiedDirectory: boolean;
+      readonly sourceProjectDirectory?: string;
+    },
+  never
+> {
   if (!input.cwd || !input.resumeSessionId) {
-    return;
+    return {
+      checked: false,
+      reason: "missing-cwd-or-session",
+    };
   }
 
   const { fileSystem, path } = input;
   const resumeSessionId = input.resumeSessionId;
   const projectsDirectory = path.join(resolveClaudeConfigDirectory(path, input.env), "projects");
   if (!(yield* pathExists(fileSystem, projectsDirectory))) {
-    return;
+    const targetProjectDirectory = path.join(
+      projectsDirectory,
+      claudeProjectDirectoryName(path, input.cwd),
+    );
+    return {
+      checked: true,
+      sessionFileExists: false,
+      targetSessionFile: path.join(targetProjectDirectory, `${resumeSessionId}.jsonl`),
+      targetProjectDirectory,
+      copiedFile: false,
+      copiedDirectory: false,
+    };
   }
 
   const targetProjectDirectory = path.join(
@@ -583,9 +612,15 @@ const ensureClaudeResumeArtifactsForCwd = Effect.fn(
 
   const result = yield* Effect.gen(function* () {
     const targetSessionFileExists = yield* pathExists(fileSystem, targetSessionFile);
-    const targetSessionDirectoryExists = yield* pathExists(fileSystem, targetSessionDirectory);
-    if (targetSessionFileExists && targetSessionDirectoryExists) {
-      return undefined;
+    if (targetSessionFileExists) {
+      return {
+        checked: true as const,
+        sessionFileExists: true,
+        targetSessionFile,
+        targetProjectDirectory,
+        copiedFile: false,
+        copiedDirectory: false,
+      };
     }
 
     const projectEntries = yield* fileSystem.readDirectory(projectsDirectory);
@@ -623,32 +658,68 @@ const ensureClaudeResumeArtifactsForCwd = Effect.fn(
           })
         : false;
       if (!copiedFile && !copiedDirectory) {
-        return undefined;
+        return {
+          checked: true as const,
+          sessionFileExists: yield* pathExists(fileSystem, targetSessionFile),
+          targetSessionFile,
+          targetProjectDirectory,
+          copiedFile,
+          copiedDirectory,
+          sourceProjectDirectory,
+        };
       }
 
-      return { copiedFile, copiedDirectory, sourceProjectDirectory, targetProjectDirectory };
+      return {
+        checked: true as const,
+        sessionFileExists: yield* pathExists(fileSystem, targetSessionFile),
+        targetSessionFile,
+        targetProjectDirectory,
+        copiedFile,
+        copiedDirectory,
+        sourceProjectDirectory,
+      };
     }
-    return undefined;
+    return {
+      checked: true as const,
+      sessionFileExists: yield* pathExists(fileSystem, targetSessionFile),
+      targetSessionFile,
+      targetProjectDirectory,
+      copiedFile: false,
+      copiedDirectory: false,
+    };
   }).pipe(
     Effect.catchCause((cause) =>
       Effect.logWarning("claude.resume.artifacts.copy-failed", {
         sessionId: input.resumeSessionId,
         cwd: input.cwd,
         cause: Cause.pretty(cause),
-      }).pipe(Effect.as(undefined)),
+      }).pipe(
+        Effect.as({
+          checked: true as const,
+          sessionFileExists: false,
+          targetSessionFile,
+          targetProjectDirectory,
+          copiedFile: false,
+          copiedDirectory: false,
+        }),
+      ),
     ),
   );
 
-  if (!result) {
-    return;
+  const copiedSourceProjectDirectory =
+    "sourceProjectDirectory" in result ? result.sourceProjectDirectory : undefined;
+  if (copiedSourceProjectDirectory !== undefined && (result.copiedFile || result.copiedDirectory)) {
+    yield* Effect.logInfo("claude.resume.artifacts.copied-for-cwd", {
+      sessionId: input.resumeSessionId,
+      sourceProjectDirectory: copiedSourceProjectDirectory,
+      targetProjectDirectory: result.targetProjectDirectory,
+      copiedFile: result.copiedFile,
+      copiedDirectory: result.copiedDirectory,
+      sessionFileExists: result.sessionFileExists,
+    });
   }
-  yield* Effect.logInfo("claude.resume.artifacts.copied-for-cwd", {
-    sessionId: input.resumeSessionId,
-    sourceProjectDirectory: result.sourceProjectDirectory,
-    targetProjectDirectory: result.targetProjectDirectory,
-    copiedFile: result.copiedFile,
-    copiedDirectory: result.copiedDirectory,
-  });
+
+  return result;
 });
 
 function classifyToolItemType(toolName: string): CanonicalItemType {
@@ -2953,10 +3024,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
       const startedAt = yield* nowIso;
       const resumeState = readClaudeResumeState(input.resumeCursor);
-      const durableResumeState = isDurableClaudeResumeState(resumeState) ? resumeState : undefined;
+      let durableResumeState = isDurableClaudeResumeState(resumeState) ? resumeState : undefined;
       const threadId = input.threadId;
-      const existingResumeSessionId = durableResumeState?.resume;
-      const resumeBaseTurnCount = durableResumeState?.turnCount ?? 0;
 
       const runtimeContext = yield* Effect.context<never>();
       const runFork = Effect.runForkWith(runtimeContext);
@@ -3306,6 +3375,36 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(input.additionalDirectories ?? []),
       ].filter((directory, index, directories) => directories.indexOf(directory) === index);
 
+      const initialResumeSessionId = durableResumeState?.resume;
+      const resumeArtifactStatus =
+        initialResumeSessionId === undefined
+          ? undefined
+          : yield* ensureClaudeResumeArtifactsForCwd({
+              fileSystem,
+              path,
+              env: claudeEnvironment,
+              cwd: input.cwd,
+              resumeSessionId: initialResumeSessionId,
+            });
+      if (resumeArtifactStatus?.checked === true && !resumeArtifactStatus.sessionFileExists) {
+        // Claude's sessions guide documents resume as loading the local
+        // transcript under ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl.
+        // Passing a durable Cafe cursor whose transcript file is absent makes
+        // current Claude Code fail before the model turn starts. Drop that
+        // stale cursor and start a fresh upstream session; the user's prompt is
+        // still sent once, but without a doomed `--resume`.
+        yield* Effect.logWarning("claude.resume.cursor.dropped-missing-transcript", {
+          threadId,
+          resumeSessionId: initialResumeSessionId,
+          cwd: input.cwd ?? "",
+          targetSessionFile: resumeArtifactStatus.targetSessionFile,
+        });
+        durableResumeState = undefined;
+      }
+
+      const existingResumeSessionId = durableResumeState?.resume;
+      const resumeBaseTurnCount = durableResumeState?.turnCount ?? 0;
+
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
@@ -3385,10 +3484,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "provider.runtime_mode": input.runtimeMode,
         "claude.resume.source":
           existingResumeSessionId !== undefined ? "resume-session" : "fresh-session",
+        "claude.resume.dropped_missing_transcript":
+          initialResumeSessionId !== undefined && existingResumeSessionId === undefined,
         "claude.resume.thread_id": durableResumeState?.threadId ?? "",
-        "claude.resume.session_id": existingResumeSessionId ?? "",
+        "claude.resume.session_id": existingResumeSessionId ?? initialResumeSessionId ?? "",
         "claude.resume.session_at": durableResumeState?.resumeSessionAt ?? "",
         "claude.resume.turn_count": durableResumeState?.turnCount ?? -1,
+        "claude.resume.target_session_file":
+          resumeArtifactStatus?.checked === true ? resumeArtifactStatus.targetSessionFile : "",
         "claude.query.cwd": input.cwd ?? "",
         "claude.query.model": apiModelId ?? "",
         "claude.query.effort": effectiveEffort ?? "",
@@ -3404,14 +3507,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.settings_json": encodeJsonStringForDiagnostics(settings) ?? "",
         "claude.query.extra_args_json": encodeJsonStringForDiagnostics(extraArgs) ?? "",
         "claude.query.path_to_executable": claudeBinaryPath,
-      });
-
-      yield* ensureClaudeResumeArtifactsForCwd({
-        fileSystem,
-        path,
-        env: claudeEnvironment,
-        cwd: input.cwd,
-        resumeSessionId: existingResumeSessionId,
       });
 
       const queryRuntime = yield* Effect.try({
@@ -3493,7 +3588,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         provider: PROVIDER,
         createdAt: sessionStartedStamp.createdAt,
         threadId,
-        payload: input.resumeCursor !== undefined ? { resume: input.resumeCursor } : {},
+        payload: initialResumeCursor !== undefined ? { resume: initialResumeCursor } : {},
         providerRefs: {},
       });
 
@@ -3512,6 +3607,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ...(initialPermissionMode ? { permissionMode: initialPermissionMode } : {}),
             ...(permissionMode ? { basePermissionMode: permissionMode } : {}),
             ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
+            ...(initialResumeSessionId !== undefined && existingResumeSessionId === undefined
+              ? { droppedResumeReason: "missing-transcript" }
+              : {}),
             ...(fastMode ? { fastMode: true } : {}),
           },
         },

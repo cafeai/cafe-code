@@ -219,7 +219,7 @@ describe("ProviderCommandReactor", () => {
         turnId: asTurnId("turn-1"),
       }),
     );
-    const steerTurn = vi.fn((_: unknown) =>
+    const steerTurn = vi.fn<ProviderServiceShape["steerTurn"]>((_) =>
       Effect.succeed({
         threadId: ThreadId.make("thread-1"),
         turnId: asTurnId("turn-1"),
@@ -1765,8 +1765,8 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
-  it("rejects late Codex steer before appending a user message when the assistant stream is closed", async () => {
-    const harness = await createHarness({ liveSteer: "supported", startReactor: false });
+  it("routes Codex steer while the active turn is running even when assistant text is closed", async () => {
+    const harness = await createHarness({ liveSteer: "supported" });
     const now = "2026-01-01T00:00:00.000Z";
     const threadId = ThreadId.make("thread-1");
     const activeTurnId = asTurnId("turn-closed-assistant");
@@ -1800,28 +1800,117 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await expect(
-      Effect.runPromise(
-        harness.engine.dispatch({
-          type: "thread.turn.steer",
-          commandId: CommandId.make("cmd-turn-steer-closed-assistant"),
-          threadId,
-          message: {
-            messageId: asMessageId("user-message-late-steer"),
-            role: "user",
-            text: "new request after closed assistant output",
-            attachments: [],
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.steer",
+        commandId: CommandId.make("cmd-turn-steer-closed-assistant"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-late-steer"),
+          role: "user",
+          text: "new request after closed assistant output",
+          attachments: [],
+        },
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.steerTurn.mock.calls.length === 1);
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.messages.some((message) => message.id === "user-message-late-steer")).toBe(true);
+    expect(harness.steerTurn.mock.calls[0]?.[0]).toMatchObject({
+      threadId,
+      expectedTurnId: activeTurnId,
+      input: "new request after closed assistant output",
+    });
+  });
+
+  it("spells out Codex review steer rejection as a retryable queued follow-up", async () => {
+    const harness = await createHarness({ liveSteer: "supported" });
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+    const activeTurnId = asTurnId("turn-review");
+    harness.steerTurn.mockImplementation(() =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: ProviderDriverKind.make("codex"),
+          method: "turn/steer",
+          detail: "cannot steer a review turn",
+          cause: {
+            code: -32600,
+            errorMessage: "cannot steer a review turn",
+            data: {
+              message: "cannot steer a review turn",
+              codexErrorInfo: {
+                activeTurnNotSteerable: {
+                  turnKind: "review",
+                },
+              },
+              additionalDetails: null,
+            },
           },
-          createdAt: now,
         }),
       ),
-    ).rejects.toThrow("assistant stream is already closed");
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-review-steer"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.steer",
+        commandId: CommandId.make("cmd-turn-steer-review"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-review-steer"),
+          role: "user",
+          text: "apply after review",
+          attachments: [],
+        },
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      return (
+        thread?.activities.some(
+          (activity) =>
+            activity.kind === "provider.turn.steer.failed" &&
+            activity.payload !== null &&
+            typeof activity.payload === "object" &&
+            "retryableFollowUp" in activity.payload,
+        ) ?? false
+      );
+    });
 
     const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
-    expect(thread?.messages.some((message) => message.id === "user-message-late-steer")).toBe(
-      false,
+    const failure = thread?.activities.find(
+      (activity) => activity.kind === "provider.turn.steer.failed",
     );
-    expect(harness.steerTurn.mock.calls.length).toBe(0);
+    expect(failure?.payload).toMatchObject({
+      messageId: "user-message-review-steer",
+      retryableFollowUp: true,
+      retryAfter: "active-turn",
+      codexNonSteerableTurnKind: "review",
+    });
+    expect(JSON.stringify(failure?.payload)).toContain("active turn is a review turn");
   });
 
   it("does not route steer requests to providers without live steering support", async () => {

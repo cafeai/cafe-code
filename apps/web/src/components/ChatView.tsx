@@ -4,7 +4,7 @@ import {
   defaultInstanceIdForDriver,
   type EnvironmentId,
   type DesktopRendererDebugSnapshot,
-  type MessageId,
+  MessageId,
   type ModelSelection,
   type ProjectId,
   type ProviderApprovalDecision,
@@ -1310,6 +1310,37 @@ interface QueuedFollowUpPendingDispatch {
   dispatchedAt: string;
 }
 
+type CodexNonSteerableTurnKind = "review" | "compact";
+
+interface PendingSteerDispatch {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly messageId: MessageId;
+  readonly snapshot: ComposerSendSnapshot;
+  readonly dispatchedAt: string;
+}
+
+function readRetryableSteerFailure(
+  activity: OrchestrationThreadActivity,
+): { readonly messageId: MessageId; readonly turnKind: CodexNonSteerableTurnKind } | null {
+  if (activity.kind !== "provider.turn.steer.failed") {
+    return null;
+  }
+  const payload = readDebugRecord(activity.payload);
+  if (payload === null || readDebugBoolean(payload.retryableFollowUp) !== true) {
+    return null;
+  }
+  const messageId = readDebugString(payload.messageId);
+  const turnKind = readDebugString(payload.codexNonSteerableTurnKind);
+  if (messageId === null || (turnKind !== "review" && turnKind !== "compact")) {
+    return null;
+  }
+  return {
+    messageId: MessageId.make(messageId),
+    turnKind,
+  };
+}
+
 function revokeQueuedFollowUpPreviewUrls(item: FollowUpQueueItem): void {
   for (const image of item.images) {
     revokeBlobPreviewUrl(image.previewUrl);
@@ -1513,6 +1544,7 @@ export default function ChatView(props: ChatViewProps) {
   const attachmentPreviewPromotionInFlightByMessageIdRef = useRef<Record<string, true>>({});
   const sendInFlightRef = useRef(false);
   const queueDispatchInFlightRef = useRef(false);
+  const pendingSteerDispatchByMessageIdRef = useRef<Record<string, PendingSteerDispatch>>({});
   const [desktopDebugEnabled, setDesktopDebugEnabled] = useState(false);
   const [desktopDebugRevision, setDesktopDebugRevision] = useState(0);
   const followUpQueueDebugRef = useRef({
@@ -1695,6 +1727,53 @@ export default function ChatView(props: ChatViewProps) {
     [],
   );
   const activeLatestTurn = activeThread?.latestTurn ?? null;
+  useEffect(() => {
+    if (!activeThread) {
+      return;
+    }
+
+    for (const activity of activeThread.activities) {
+      const retryableFailure = readRetryableSteerFailure(activity);
+      if (retryableFailure === null) {
+        continue;
+      }
+      const pending =
+        pendingSteerDispatchByMessageIdRef.current[String(retryableFailure.messageId)];
+      if (!pending) {
+        continue;
+      }
+
+      delete pendingSteerDispatchByMessageIdRef.current[String(retryableFailure.messageId)];
+      setOptimisticUserMessages((existing) => {
+        const removed = existing.filter((message) => message.id === retryableFailure.messageId);
+        for (const message of removed) {
+          revokeUserMessagePreviewUrls(message);
+        }
+        return existing.filter((message) => message.id !== retryableFailure.messageId);
+      });
+
+      const queuedItem: FollowUpQueueItem = {
+        ...pending.snapshot,
+        id: newMessageId(),
+        environmentId: pending.environmentId,
+        threadId: pending.threadId,
+        queuedAt: activity.createdAt,
+        expanded: false,
+        blockedReason: null,
+      };
+      setFollowUpQueueByThreadId((existing) => ({
+        ...existing,
+        [pending.threadId]: [...(existing[pending.threadId] ?? EMPTY_FOLLOW_UP_QUEUE), queuedItem],
+      }));
+
+      const turnLabel = retryableFailure.turnKind === "review" ? "review" : "compact";
+      toastManager.add({
+        type: "info",
+        title: "Queued follow-up",
+        description: `Codex is running a ${turnLabel} turn, so Cafe Code will send this after the active turn finishes.`,
+      });
+    }
+  }, [activeThread, setFollowUpQueueByThreadId]);
   const threadPlanCatalog = useThreadPlanCatalog(
     useMemo(() => {
       const threadIds: ThreadId[] = [];
@@ -2525,7 +2604,6 @@ export default function ChatView(props: ChatViewProps) {
     provider: activeThread?.session?.provider ?? null,
     activeTurnId: activeThread?.session?.activeTurnId ?? null,
     latestTurn: activeLatestTurn,
-    messages: activeThread?.messages ?? [],
   });
   const resolveQueuedFollowUpThread = useCallback((item: FollowUpQueueItem): Thread | undefined => {
     return selectThreadByRef(
@@ -3780,7 +3858,8 @@ export default function ChatView(props: ChatViewProps) {
       toastManager.add({
         type: "info",
         title: "Queued follow-up",
-        description: "This provider can only queue follow-ups right now.",
+        description:
+          "Live steering is not available for the current turn, so Cafe Code will send this when the active turn finishes.",
       });
     }
   };
@@ -3985,6 +4064,23 @@ export default function ChatView(props: ChatViewProps) {
     const optimisticAttachments = optimisticAttachmentsForSnapshot(snapshot);
     const turnAttachmentsPromise = buildAttachmentsForSnapshot(snapshot);
 
+    pendingSteerDispatchByMessageIdRef.current[String(messageIdForSend)] = {
+      environmentId: activeThread.environmentId,
+      threadId: activeThread.id,
+      messageId: messageIdForSend,
+      snapshot,
+      dispatchedAt: messageCreatedAt,
+    };
+    const pendingSteerEntries = Object.entries(pendingSteerDispatchByMessageIdRef.current);
+    if (pendingSteerEntries.length > 64) {
+      pendingSteerEntries
+        .toSorted(([, left], [, right]) => left.dispatchedAt.localeCompare(right.dispatchedAt))
+        .slice(0, pendingSteerEntries.length - 64)
+        .forEach(([messageId]) => {
+          delete pendingSteerDispatchByMessageIdRef.current[messageId];
+        });
+    }
+
     if (options?.queuedItem) {
       removeFollowUpQueueItem(options.queuedItem.threadId, options.queuedItem.id, false);
     }
@@ -4021,6 +4117,7 @@ export default function ChatView(props: ChatViewProps) {
         clearActiveComposerContent();
       }
     } catch (err) {
+      delete pendingSteerDispatchByMessageIdRef.current[String(messageIdForSend)];
       setOptimisticUserMessages((existing) => {
         const removed = existing.filter((message) => message.id === messageIdForSend);
         for (const message of removed) {

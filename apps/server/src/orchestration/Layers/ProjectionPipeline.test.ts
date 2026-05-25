@@ -423,6 +423,27 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-interrupt-clear
           },
         });
         yield* appendAndProject({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-interrupt-streaming-message"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-24T15:00:02.500Z",
+          commandId: CommandId.make("cmd-interrupt-streaming-message"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-interrupt-streaming-message"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-interrupt-streaming"),
+            role: "assistant",
+            text: "partial assistant text",
+            turnId,
+            streaming: true,
+            createdAt: "2026-05-24T15:00:02.500Z",
+            updatedAt: "2026-05-24T15:00:02.500Z",
+          },
+        });
+        yield* appendAndProject({
           type: "thread.turn-interrupt-requested",
           eventId: EventId.make("evt-interrupt-requested"),
           aggregateKind: "thread",
@@ -444,16 +465,23 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-interrupt-clear
           readonly activeTurnId: string | null;
           readonly turnState: string;
           readonly completedAt: string | null;
+          readonly isStreaming: number;
+          readonly messageUpdatedAt: string;
         }>`
           SELECT
             sessions.status,
             sessions.active_turn_id AS "activeTurnId",
             turns.state AS "turnState",
-            turns.completed_at AS "completedAt"
+            turns.completed_at AS "completedAt",
+            messages.is_streaming AS "isStreaming",
+            messages.updated_at AS "messageUpdatedAt"
           FROM projection_thread_sessions sessions
           JOIN projection_turns turns
             ON turns.thread_id = sessions.thread_id
            AND turns.turn_id = ${turnId}
+          JOIN projection_thread_messages messages
+            ON messages.thread_id = sessions.thread_id
+           AND messages.message_id = 'message-interrupt-streaming'
           WHERE sessions.thread_id = ${threadId}
         `;
 
@@ -463,6 +491,8 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-interrupt-clear
             activeTurnId: null,
             turnState: "interrupted",
             completedAt: "2026-05-24T15:00:03.000Z",
+            isStreaming: 0,
+            messageUpdatedAt: "2026-05-24T15:00:03.000Z",
           },
         ]);
       }),

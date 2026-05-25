@@ -59,14 +59,13 @@ describe("followUpQueue", () => {
     ).toBe("queue-unsupported");
   });
 
-  it("keeps Codex live steer available only while the active assistant stream is live", () => {
+  it("keeps Codex live steer available while the active turn is running", () => {
     expect(
       isLiveSteerAvailableForThread({
         liveSteerSupported: true,
         provider: "codex",
         activeTurnId: "turn-1",
         latestTurn: { turnId: "turn-1", state: "running" },
-        messages: [{ role: "assistant", turnId: "turn-1", streaming: true }],
       }),
     ).toBe(true);
 
@@ -76,7 +75,15 @@ describe("followUpQueue", () => {
         provider: "codex",
         activeTurnId: "turn-1",
         latestTurn: { turnId: "turn-1", state: "running" },
-        messages: [{ role: "assistant", turnId: "turn-1", streaming: false }],
+      }),
+    ).toBe(true);
+
+    expect(
+      isLiveSteerAvailableForThread({
+        liveSteerSupported: true,
+        provider: "codex",
+        activeTurnId: "turn-1",
+        latestTurn: { turnId: "turn-2", state: "running" },
       }),
     ).toBe(false);
 
@@ -86,7 +93,6 @@ describe("followUpQueue", () => {
         provider: "claudeAgent",
         activeTurnId: "turn-1",
         latestTurn: { turnId: "turn-1", state: "running" },
-        messages: [],
       }),
     ).toBe(true);
   });

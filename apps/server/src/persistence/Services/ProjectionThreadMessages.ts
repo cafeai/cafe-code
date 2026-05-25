@@ -49,6 +49,14 @@ export const DeleteProjectionThreadMessagesInput = Schema.Struct({
 });
 export type DeleteProjectionThreadMessagesInput = typeof DeleteProjectionThreadMessagesInput.Type;
 
+export const CloseStreamingProjectionThreadMessagesByTurnInput = Schema.Struct({
+  threadId: ThreadId,
+  turnId: TurnId,
+  updatedAt: IsoDateTime,
+});
+export type CloseStreamingProjectionThreadMessagesByTurnInput =
+  typeof CloseStreamingProjectionThreadMessagesByTurnInput.Type;
+
 /**
  * ProjectionThreadMessageRepositoryShape - Service API for projected thread messages.
  */
@@ -85,6 +93,19 @@ export interface ProjectionThreadMessageRepositoryShape {
   readonly getLatestUserMessageAtByThreadId: (
     input: ListProjectionThreadMessagesInput,
   ) => Effect.Effect<Option.Option<IsoDateTime>, ProjectionRepositoryError>;
+
+  /**
+   * Mark any still-streaming assistant messages for a terminal provider turn
+   * as closed.
+   *
+   * Providers can be interrupted, fail, or checkpoint-complete a turn without
+   * sending an explicit completion update for every partial assistant message.
+   * The projection must close those partial rows at the same terminal boundary
+   * so the renderer does not keep showing stale streaming/working markers.
+   */
+  readonly closeStreamingByTurnId: (
+    input: CloseStreamingProjectionThreadMessagesByTurnInput,
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
 
   /**
    * Delete projected thread messages by thread.

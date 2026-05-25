@@ -56,34 +56,6 @@ function threadHasUnsettledTurnStart(thread: OrchestrationReadModel["threads"][n
   return thread.latestTurn?.state === "running" && thread.latestTurn.completedAt === null;
 }
 
-function codexActiveTurnHasOnlyClosedAssistantMessages(
-  thread: OrchestrationReadModel["threads"][number],
-): boolean {
-  // Upstream Codex app-server documents `turn/steer` as input injection into
-  // the current in-flight regular turn and explicitly says it does not create a
-  // new `turn/started` boundary. A Codex turn whose assistant message has
-  // already closed but whose terminal `turn/completed` has not reached Cafe is
-  // not a safe target for another user message: accepting a late steer keeps
-  // that message tied to the old active turn and can leave the UI waiting on a
-  // terminal event that upstream still has not emitted. Reject before appending
-  // the user message so the renderer can keep it queued or interrupt first.
-  if (thread.session?.providerName !== "codex") {
-    return false;
-  }
-  const activeTurnId = thread.session.activeTurnId;
-  if (activeTurnId === null || activeTurnId === undefined) {
-    return false;
-  }
-
-  const activeAssistantMessages = thread.messages.filter(
-    (message) => message.role === "assistant" && message.turnId === activeTurnId,
-  );
-  return (
-    activeAssistantMessages.length > 0 &&
-    activeAssistantMessages.every((message) => !message.streaming)
-  );
-}
-
 const decideCommandSequence = Effect.fn("decideCommandSequence")(function* ({
   commands,
   readModel,
@@ -577,12 +549,6 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
           detail: `Thread '${command.threadId}' does not have a running provider turn to steer.`,
-        });
-      }
-      if (codexActiveTurnHasOnlyClosedAssistantMessages(targetThread)) {
-        return yield* new OrchestrationCommandInvariantError({
-          commandType: command.type,
-          detail: `Thread '${command.threadId}' has a Codex active turn whose assistant stream is already closed. Queue the follow-up or interrupt the active turn before starting a new turn instead of appending a late turn/steer.`,
         });
       }
       const userMessageEvent: Omit<OrchestrationEvent, "sequence"> = {
