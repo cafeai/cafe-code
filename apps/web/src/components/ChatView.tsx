@@ -129,6 +129,7 @@ import {
   decideQueuedFollowUpAction,
   decideFollowUpDelivery,
   hasQueuedFollowUpDispatchBeenObserved,
+  isLiveSteerAvailableForThread,
   previewQueuedFollowUpText,
   queuedFollowUpActionLabel,
   queuedFollowUpActionTitle,
@@ -566,15 +567,20 @@ function summarizeDebugProviderContinuation(thread: Thread, nowMs: number) {
           assistantMessageId: latestTurn?.assistantMessageId ?? null,
           fileCount: null,
         },
-    ...sameTurnDiffSummaries.map((summary) => ({
-      source: "turnDiff.completedAt" as const,
-      completedAt: summary.completedAt,
-      state: null,
-      status: summary.status ?? null,
-      checkpointRef: summary.checkpointRef ?? null,
-      assistantMessageId: summary.assistantMessageId ?? null,
-      fileCount: summary.files.length,
-    })),
+    // `missing` provider-diff rows are mid-turn placeholders emitted before a
+    // durable checkpoint exists; treating them as completion boundaries makes
+    // ordinary later tool events look like post-completion lifecycle corruption.
+    ...sameTurnDiffSummaries
+      .filter((summary) => summary.status !== "missing")
+      .map((summary) => ({
+        source: "turnDiff.completedAt" as const,
+        completedAt: summary.completedAt,
+        state: null,
+        status: summary.status ?? null,
+        checkpointRef: summary.checkpointRef ?? null,
+        assistantMessageId: summary.assistantMessageId ?? null,
+        fileCount: summary.files.length,
+      })),
   ]
     .filter((boundary): boundary is NonNullable<typeof boundary> => boundary !== null)
     .toSorted((left, right) => compareDebugIso(left.completedAt, right.completedAt));
@@ -2514,6 +2520,13 @@ export default function ChatView(props: ChatViewProps) {
   }, [activeProviderInstanceId, providerStatuses, selectedProvider]);
   const activeProviderLiveSteerSupported =
     activeProviderStatus?.runtimeCapabilities?.liveSteer === "supported";
+  const activeProviderLiveSteerAvailable = isLiveSteerAvailableForThread({
+    liveSteerSupported: activeProviderLiveSteerSupported,
+    provider: activeThread?.session?.provider ?? null,
+    activeTurnId: activeThread?.session?.activeTurnId ?? null,
+    latestTurn: activeLatestTurn,
+    messages: activeThread?.messages ?? [],
+  });
   const resolveQueuedFollowUpThread = useCallback((item: FollowUpQueueItem): Thread | undefined => {
     return selectThreadByRef(
       useStore.getState(),
@@ -2657,7 +2670,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   const canSteerFollowUpQueue =
     followUpQueuePhase === "running" &&
-    activeProviderLiveSteerSupported &&
+    activeProviderLiveSteerAvailable &&
     !isComposerConnecting &&
     !activeEnvironmentUnavailable &&
     !followUpQueueDispatchInFlight &&
@@ -2671,11 +2684,11 @@ export default function ChatView(props: ChatViewProps) {
     !activeQueuedFollowUpPendingDispatch;
   const followUpQueueActionLabel = queuedFollowUpActionLabel({
     phase: followUpQueuePhase,
-    liveSteerSupported: activeProviderLiveSteerSupported,
+    liveSteerSupported: activeProviderLiveSteerAvailable,
   });
   const followUpQueueActionTitle = queuedFollowUpActionTitle({
     phase: followUpQueuePhase,
-    liveSteerSupported: activeProviderLiveSteerSupported,
+    liveSteerSupported: activeProviderLiveSteerAvailable,
   });
   useEffect(() => {
     if (activeFollowUpQueue.length > 0 && followUpQueueUiIdle && sendInFlightRef.current) {
@@ -3001,6 +3014,7 @@ export default function ChatView(props: ChatViewProps) {
           canActivateRunningFollowUpQueueAction,
           followUpQueueActionLabel,
           activeProviderLiveSteerSupported,
+          activeProviderLiveSteerAvailable,
           uiWorking: isWorking,
           activeTurnInProgress: isWorking || !latestTurnSettled,
           isComposerConnecting,
@@ -3026,6 +3040,7 @@ export default function ChatView(props: ChatViewProps) {
         selectedProvider,
         activeProviderInstanceId,
         activeProviderLiveSteerSupported,
+        activeProviderLiveSteerAvailable,
         activeProviderStatus: activeProviderStatus
           ? {
               instanceId: activeProviderStatus.instanceId,
@@ -3150,6 +3165,7 @@ export default function ChatView(props: ChatViewProps) {
     activePendingUserInput?.requestId,
     activeProject,
     activeProviderInstanceId,
+    activeProviderLiveSteerAvailable,
     activeProviderLiveSteerSupported,
     activeProviderStatus,
     activeQueueTurnId,
@@ -3955,7 +3971,7 @@ export default function ChatView(props: ChatViewProps) {
     const api = readEnvironmentApi(environmentId);
     if (!api || !activeThread) return;
     if (!options?.queuedItem && sendInFlightRef.current) return;
-    if (!activeProviderLiveSteerSupported || phase !== "running") {
+    if (!activeProviderLiveSteerAvailable || phase !== "running") {
       if (!options?.queuedItem) {
         enqueueFollowUpSnapshot(snapshot, { unsupportedSteerToast: true });
       }
@@ -4063,7 +4079,7 @@ export default function ChatView(props: ChatViewProps) {
     const delivery = decideFollowUpDelivery({
       phase: followUpQueuePhase,
       requestedSteer: false,
-      liveSteerSupported: activeProviderLiveSteerSupported,
+      liveSteerSupported: activeProviderLiveSteerAvailable,
     });
     if (delivery === "queue") {
       if (!hasSendableContent) return;
@@ -4320,7 +4336,7 @@ export default function ChatView(props: ChatViewProps) {
     const delivery = decideFollowUpDelivery({
       phase: followUpQueuePhase,
       requestedSteer: true,
-      liveSteerSupported: activeProviderLiveSteerSupported,
+      liveSteerSupported: activeProviderLiveSteerAvailable,
     });
     if (delivery === "send") {
       await onSend(e);
@@ -4434,7 +4450,7 @@ export default function ChatView(props: ChatViewProps) {
 
     const action = decideQueuedFollowUpAction({
       phase: followUpQueuePhase,
-      liveSteerSupported: activeProviderLiveSteerSupported,
+      liveSteerSupported: activeProviderLiveSteerAvailable,
       canDispatchNow:
         followUpQueuePhase === "running"
           ? canActivateRunningFollowUpQueueAction
@@ -4461,7 +4477,7 @@ export default function ChatView(props: ChatViewProps) {
       title: "Queued follow-up",
       description:
         followUpQueuePhase === "running"
-          ? activeProviderLiveSteerSupported
+          ? activeProviderLiveSteerAvailable
             ? "Cafe Code is not ready to steer this queued message yet."
             : "Cafe Code is not ready to interrupt this turn yet."
           : "Cafe Code will send this queued message when it is ready.",

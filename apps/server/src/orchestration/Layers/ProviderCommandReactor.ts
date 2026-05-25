@@ -384,6 +384,7 @@ const make = Effect.gen(function* () {
       readonly project?: OrchestrationProjectShell;
       readonly activeSession?: ProviderSession | undefined;
       readonly activeSessionResolved?: boolean;
+      readonly interactionMode?: "default" | "plan";
     },
   ) {
     const thread = options?.thread ?? (yield* resolveThread(threadId));
@@ -508,6 +509,9 @@ const make = Effect.gen(function* () {
           : {}),
         modelSelection: desiredModelSelection,
         ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+        ...(options?.interactionMode !== undefined
+          ? { interactionMode: options.interactionMode }
+          : {}),
         runtimeMode: desiredRuntimeMode,
       });
 
@@ -648,6 +652,7 @@ const make = Effect.gen(function* () {
       ...(input.project !== undefined ? { project: input.project } : {}),
       activeSession,
       activeSessionResolved: true,
+      ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
     });
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
@@ -991,8 +996,15 @@ const make = Effect.gen(function* () {
       });
     }
 
-    // Orchestration turn ids are not provider turn ids, so interrupt by session.
-    yield* providerService.interruptTurn({ threadId: event.payload.threadId });
+    // Cafe persists the provider runtime turn id on the thread session once the
+    // provider accepts a turn. Keep passing it through the interrupt boundary:
+    // upstream Codex requires `turn/interrupt` to name the exact active turn id
+    // and rejects session-only interrupts.
+    const activeTurnId = event.payload.turnId ?? thread.session?.activeTurnId ?? undefined;
+    yield* providerService.interruptTurn({
+      threadId: event.payload.threadId,
+      ...(activeTurnId !== undefined ? { turnId: activeTurnId } : {}),
+    });
   });
 
   const processTurnSteerRequested = Effect.fn("processTurnSteerRequested")(function* (

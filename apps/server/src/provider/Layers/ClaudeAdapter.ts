@@ -181,6 +181,7 @@ interface ClaudeSessionContext {
   streamFiber: Fiber.Fiber<void, Error> | undefined;
   readonly startedAt: string;
   readonly basePermissionMode: PermissionMode | undefined;
+  currentPermissionMode: PermissionMode;
   currentApiModelId: string | undefined;
   selectedContextWindowTokens: number | undefined;
   resumeSessionId: string | undefined;
@@ -198,6 +199,7 @@ interface ClaudeSessionContext {
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
   lastAssistantUuid: string | undefined;
   lastThreadStartedId: string | undefined;
+  hasSubmittedUserPrompt: boolean;
   stopped: boolean;
 }
 
@@ -2954,9 +2956,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const durableResumeState = isDurableClaudeResumeState(resumeState) ? resumeState : undefined;
       const threadId = input.threadId;
       const existingResumeSessionId = durableResumeState?.resume;
-      const newSessionId =
-        existingResumeSessionId === undefined ? yield* Random.nextUUIDv4 : undefined;
-      const sessionId = existingResumeSessionId ?? newSessionId;
       const resumeBaseTurnCount = durableResumeState?.turnCount ?? 0;
 
       const runtimeContext = yield* Effect.context<never>();
@@ -3297,6 +3296,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "full-access": "bypassPermissions",
       };
       const permissionMode = runtimeModeToPermission[input.runtimeMode];
+      const initialPermissionMode = input.interactionMode === "plan" ? "plan" : permissionMode;
       const settings = {
         ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
         ...(fastMode ? { fastMode: true } : {}),
@@ -3319,7 +3319,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               effort: effectiveEffort as unknown as NonNullable<ClaudeQueryOptions["effort"]>,
             }
           : {}),
-        ...(permissionMode ? { permissionMode } : {}),
+        // Claude's Agent SDK supports setting the session permission mode at
+        // query creation, and reserves setPermissionMode() for changing an
+        // already-active streaming session. Starting a plan-mode first turn
+        // here avoids a pre-prompt control request that current Claude Code
+        // rejects because no transcript message exists yet.
+        ...(initialPermissionMode ? { permissionMode: initialPermissionMode } : {}),
         ...(permissionMode === "bypassPermissions"
           ? { allowDangerouslySkipPermissions: true }
           : {}),
@@ -3328,7 +3333,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(durableResumeState?.resumeSessionAt
           ? { resumeSessionAt: durableResumeState.resumeSessionAt }
           : {}),
-        ...(newSessionId ? { sessionId: newSessionId } : {}),
+        // Let upstream Claude Code allocate fresh session IDs. The Agent SDK
+        // documents `sessionId` as an optional override whose default is an
+        // auto-generated UUID, and its sessions guide recommends capturing the
+        // durable ID from the init/result SDK messages before later passing it
+        // back through `resume`. With Cafe's long-lived AsyncIterable prompt
+        // queue, preassigning a fresh `--session-id` can make current Claude
+        // Code validate the ID before a transcript exists and fail the turn
+        // with "No conversation found with session ID". We therefore only
+        // send upstream resume coordinates after a real persisted Claude
+        // transcript has produced a session_id.
         includePartialMessages: true,
         canUseTool,
         stderr: (data: string) => {
@@ -3370,7 +3384,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "provider.thread_id": threadId,
         "provider.runtime_mode": input.runtimeMode,
         "claude.resume.source":
-          existingResumeSessionId !== undefined ? "resume-session" : "generated-session",
+          existingResumeSessionId !== undefined ? "resume-session" : "fresh-session",
         "claude.resume.thread_id": durableResumeState?.threadId ?? "",
         "claude.resume.session_id": existingResumeSessionId ?? "",
         "claude.resume.session_at": durableResumeState?.resumeSessionAt ?? "",
@@ -3378,11 +3392,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.cwd": input.cwd ?? "",
         "claude.query.model": apiModelId ?? "",
         "claude.query.effort": effectiveEffort ?? "",
-        "claude.query.permission_mode": permissionMode ?? "",
+        "claude.query.permission_mode": initialPermissionMode ?? "",
+        "claude.query.base_permission_mode": permissionMode ?? "",
         "claude.query.allow_dangerously_skip_permissions": permissionMode === "bypassPermissions",
         "claude.query.resume": existingResumeSessionId ?? "",
         "claude.query.resume_session_at": durableResumeState?.resumeSessionAt ?? "",
-        "claude.query.session_id": newSessionId ?? "",
+        "claude.query.session_id": "",
         "claude.query.include_partial_messages": true,
         "claude.query.additional_directories": claudeAdditionalDirectories,
         "claude.query.setting_sources": [...CLAUDE_SETTING_SOURCES],
@@ -3450,9 +3465,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         streamFiber: undefined,
         startedAt,
         basePermissionMode: permissionMode,
+        currentPermissionMode: initialPermissionMode ?? "default",
         currentApiModelId: apiModelId,
         selectedContextWindowTokens,
-        resumeSessionId: sessionId,
+        resumeSessionId: existingResumeSessionId,
         resumeCursorDurable: existingResumeSessionId !== undefined,
         resumeBaseTurnCount,
         pendingApprovals,
@@ -3464,6 +3480,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastKnownTokenUsage: undefined,
         lastAssistantUuid: durableResumeState?.resumeSessionAt,
         lastThreadStartedId: undefined,
+        hasSubmittedUserPrompt: false,
         stopped: false,
       };
       yield* Ref.set(contextRef, context);
@@ -3492,7 +3509,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ...(apiModelId ? { model: apiModelId } : {}),
             ...(input.cwd ? { cwd: input.cwd } : {}),
             ...(effectiveEffort ? { effort: effectiveEffort } : {}),
-            ...(permissionMode ? { permissionMode } : {}),
+            ...(initialPermissionMode ? { permissionMode: initialPermissionMode } : {}),
+            ...(permissionMode ? { basePermissionMode: permissionMode } : {}),
+            ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
             ...(fastMode ? { fastMode: true } : {}),
           },
         },
@@ -3572,20 +3591,34 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       };
     }
 
-    // Apply interaction mode by switching the SDK's permission mode.
-    // "plan" maps directly to the SDK's "plan" permission mode;
-    // "default" restores the session's original permission mode.
-    // When interactionMode is absent we leave the current mode unchanged.
-    if (input.interactionMode === "plan") {
+    // Apply only real permission-mode transitions here. The session's initial
+    // permission mode is already bound into query() options at startSession
+    // time; issuing a redundant setPermissionMode() before Claude Code has
+    // attached the first streamed user message can fail with "No message
+    // found" / "No conversation found" on current Claude Agent SDK releases.
+    const desiredPermissionMode =
+      input.interactionMode === "plan"
+        ? "plan"
+        : input.interactionMode === "default"
+          ? (context.basePermissionMode ?? "default")
+          : undefined;
+    if (
+      desiredPermissionMode !== undefined &&
+      desiredPermissionMode !== context.currentPermissionMode
+    ) {
+      if (!context.hasSubmittedUserPrompt) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "turn/setPermissionMode",
+          detail:
+            "Claude permission mode cannot be changed before the first streamed user prompt. Start the Claude session with the first turn's interaction mode instead.",
+        });
+      }
       yield* Effect.tryPromise({
-        try: () => context.query.setPermissionMode("plan"),
+        try: () => context.query.setPermissionMode(desiredPermissionMode),
         catch: (cause) => toRequestError(input.threadId, "turn/setPermissionMode", cause),
       });
-    } else if (input.interactionMode === "default") {
-      yield* Effect.tryPromise({
-        try: () => context.query.setPermissionMode(context.basePermissionMode ?? "default"),
-        catch: (cause) => toRequestError(input.threadId, "turn/setPermissionMode", cause),
-      });
+      context.currentPermissionMode = desiredPermissionMode;
     }
 
     const message = yield* buildUserMessageEffect(input, {
@@ -3632,6 +3665,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         completeTurn(context, "failed", toMessage(error, "Failed to queue Claude turn.")),
       ),
     );
+    context.hasSubmittedUserPrompt = true;
     turnState.promptQueuedAt = yield* nowIso;
     scheduleClaudeTurnStartWatchdog(context, turnState);
 

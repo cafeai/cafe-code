@@ -2918,7 +2918,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("uses an app-generated Claude session id without persisting a zero-turn cursor", () => {
+  it.effect("lets Claude allocate fresh session ids without persisting a zero-turn cursor", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -2931,10 +2931,7 @@ describe("ClaudeAdapterLive", () => {
 
       const createInput = harness.getLastCreateQueryInput();
       assert.equal(session.resumeCursor, undefined);
-      assert.match(
-        String(createInput?.options.sessionId ?? ""),
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
-      );
+      assert.equal(createInput?.options.sessionId, undefined);
       assert.equal(createInput?.options.resume, undefined);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -2961,10 +2958,7 @@ describe("ClaudeAdapterLive", () => {
       const createInput = harness.getLastCreateQueryInput();
       assert.equal(session.resumeCursor, undefined);
       assert.equal(createInput?.options.resume, undefined);
-      assert.match(
-        String(createInput?.options.sessionId ?? ""),
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
-      );
+      assert.equal(createInput?.options.sessionId, undefined);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -2991,7 +2985,8 @@ describe("ClaudeAdapterLive", () => {
         adapter.streamEvents,
         (event) => event.type === "turn.completed",
       ).pipe(Stream.runHead, Effect.forkChild);
-      const sessionId = String(harness.getLastCreateQueryInput()?.options.sessionId);
+      assert.equal(harness.getLastCreateQueryInput()?.options.sessionId, undefined);
+      const sessionId = "550e8400-e29b-41d4-a716-446655440001";
 
       harness.query.emit({
         type: "assistant",
@@ -3252,7 +3247,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("sets plan permission mode on sendTurn when interactionMode is plan", () => {
+  it.effect("starts the Claude query in plan mode for a first plan turn", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -3261,6 +3256,7 @@ describe("ClaudeAdapterLive", () => {
         threadId: THREAD_ID,
         provider: ProviderDriverKind.make("claudeAgent"),
         runtimeMode: "full-access",
+        interactionMode: "plan",
       });
       yield* adapter.sendTurn({
         threadId: session.threadId,
@@ -3269,7 +3265,10 @@ describe("ClaudeAdapterLive", () => {
         attachments: [],
       });
 
-      assert.deepEqual(harness.query.setPermissionModeCalls, ["plan"]);
+      const createInput = harness.getLastCreateQueryInput();
+      assert.equal(createInput?.options.permissionMode, "plan");
+      assert.equal(createInput?.options.allowDangerouslySkipPermissions, true);
+      assert.deepEqual(harness.query.setPermissionModeCalls, []);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -3291,6 +3290,7 @@ describe("ClaudeAdapterLive", () => {
           threadId: THREAD_ID,
           provider: ProviderDriverKind.make("claudeAgent"),
           runtimeMode,
+          interactionMode: "plan",
         });
 
         // First turn in plan mode
@@ -3326,13 +3326,39 @@ describe("ClaudeAdapterLive", () => {
           attachments: [],
         });
 
-        assert.deepEqual(harness.query.setPermissionModeCalls, ["plan", expectedBase]);
+        assert.deepEqual(harness.query.setPermissionModeCalls, [expectedBase]);
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
         Effect.provide(harness.layer),
       );
     },
   );
+
+  it.effect("skips redundant default permission mode control request on first sendTurn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        interactionMode: "default",
+        attachments: [],
+      });
+
+      assert.equal(harness.getLastCreateQueryInput()?.options.permissionMode, "bypassPermissions");
+      assert.deepEqual(harness.query.setPermissionModeCalls, []);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 
   it.effect("does not call setPermissionMode when interactionMode is absent", () => {
     const harness = makeHarness();
@@ -3366,6 +3392,7 @@ describe("ClaudeAdapterLive", () => {
         threadId: THREAD_ID,
         provider: ProviderDriverKind.make("claudeAgent"),
         runtimeMode: "full-access",
+        interactionMode: "plan",
       });
 
       yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
@@ -3432,6 +3459,7 @@ describe("ClaudeAdapterLive", () => {
         threadId: THREAD_ID,
         provider: ProviderDriverKind.make("claudeAgent"),
         runtimeMode: "full-access",
+        interactionMode: "plan",
       });
 
       yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);

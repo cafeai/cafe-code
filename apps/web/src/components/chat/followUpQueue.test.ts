@@ -6,6 +6,7 @@ import {
   decideQueuedFollowUpAction,
   decideFollowUpDelivery,
   hasQueuedFollowUpDispatchBeenObserved,
+  isLiveSteerAvailableForThread,
   previewQueuedFollowUpText,
   queuedFollowUpActionLabel,
   queuedFollowUpActionTitle,
@@ -56,6 +57,38 @@ describe("followUpQueue", () => {
         liveSteerSupported: false,
       }),
     ).toBe("queue-unsupported");
+  });
+
+  it("keeps Codex live steer available only while the active assistant stream is live", () => {
+    expect(
+      isLiveSteerAvailableForThread({
+        liveSteerSupported: true,
+        provider: "codex",
+        activeTurnId: "turn-1",
+        latestTurn: { turnId: "turn-1", state: "running" },
+        messages: [{ role: "assistant", turnId: "turn-1", streaming: true }],
+      }),
+    ).toBe(true);
+
+    expect(
+      isLiveSteerAvailableForThread({
+        liveSteerSupported: true,
+        provider: "codex",
+        activeTurnId: "turn-1",
+        latestTurn: { turnId: "turn-1", state: "running" },
+        messages: [{ role: "assistant", turnId: "turn-1", streaming: false }],
+      }),
+    ).toBe(false);
+
+    expect(
+      isLiveSteerAvailableForThread({
+        liveSteerSupported: true,
+        provider: "claudeAgent",
+        activeTurnId: "turn-1",
+        latestTurn: { turnId: "turn-1", state: "running" },
+        messages: [],
+      }),
+    ).toBe(true);
   });
 
   it("normalizes queue preview text", () => {

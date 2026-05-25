@@ -66,6 +66,7 @@ describe("ProviderSessionStartInput", () => {
           { id: "fastMode", value: true },
         ],
       },
+      interactionMode: "plan",
       runtimeMode: "full-access",
     });
     expect(parsed.provider).toBe("claudeAgent");
@@ -74,6 +75,7 @@ describe("ProviderSessionStartInput", () => {
     expect(getOptionValue(parsed.modelSelection?.options, "thinking")).toBe(true);
     expect(getOptionValue(parsed.modelSelection?.options, "effort")).toBe("max");
     expect(getOptionValue(parsed.modelSelection?.options, "fastMode")).toBe(true);
+    expect(parsed.interactionMode).toBe("plan");
     expect(parsed.runtimeMode).toBe("full-access");
   });
 

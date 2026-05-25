@@ -18,6 +18,51 @@ export function decideFollowUpDelivery(input: FollowUpDeliveryInput): FollowUpDe
   return input.liveSteerSupported ? "steer" : "queue-unsupported";
 }
 
+export interface LiveSteerAvailabilityInput {
+  liveSteerSupported: boolean;
+  provider: string | null | undefined;
+  activeTurnId: string | null | undefined;
+  latestTurn: {
+    readonly turnId: string;
+    readonly state: string;
+  } | null;
+  messages: readonly {
+    readonly role: string;
+    readonly turnId?: string | null | undefined;
+    readonly streaming: boolean;
+  }[];
+}
+
+export function isLiveSteerAvailableForThread(input: LiveSteerAvailabilityInput): boolean {
+  if (!input.liveSteerSupported) {
+    return false;
+  }
+
+  // Upstream Codex app-server defines `turn/steer` as injection into the
+  // currently in-flight regular turn, and the call does not produce a new
+  // `turn/started` boundary. If Cafe has already projected the active Codex
+  // assistant message as non-streaming, late steering can attach a user message
+  // to a turn that is only stuck because the terminal `turn/completed` event has
+  // not arrived. Keep live steer available only while there is an actual live
+  // assistant stream for that active turn; otherwise queue or interrupt first.
+  if (input.provider !== "codex") {
+    return true;
+  }
+
+  const activeTurnId = input.activeTurnId ?? null;
+  if (activeTurnId === null) {
+    return false;
+  }
+  if (input.latestTurn?.turnId !== activeTurnId || input.latestTurn.state !== "running") {
+    return false;
+  }
+
+  return input.messages.some(
+    (message) =>
+      message.role === "assistant" && message.turnId === activeTurnId && message.streaming,
+  );
+}
+
 export interface QueuedFollowUpStartInput {
   queueLength: number;
   firstItemBlocked: boolean;
