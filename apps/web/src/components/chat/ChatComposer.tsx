@@ -84,6 +84,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   CircleAlertIcon,
+  LoaderCircleIcon,
   ListTodoIcon,
   type LucideIcon,
   LockIcon,
@@ -372,8 +373,16 @@ export interface FollowUpQueueViewItem {
   blockedReason: string | null;
 }
 
+export interface SteeringFollowUpViewItem {
+  id: string;
+  preview: string;
+  promptText: string;
+  dispatchedAt: string;
+}
+
 export function FollowUpQueueShelf(props: {
   items: readonly FollowUpQueueViewItem[];
+  steeringItems?: readonly SteeringFollowUpViewItem[];
   actionLabel: string;
   actionTitle: string;
   onToggleExpanded: (itemId: string) => void;
@@ -382,9 +391,20 @@ export function FollowUpQueueShelf(props: {
   onClear: () => void;
   onExpandImage: (preview: ExpandedImagePreview) => void;
 }) {
-  if (props.items.length === 0) {
+  const steeringItems = props.steeringItems ?? [];
+  if (props.items.length === 0 && steeringItems.length === 0) {
     return null;
   }
+  const queuedLabel =
+    props.items.length === 1 ? "1 message queued" : `${props.items.length} messages queued`;
+  const steeringLabel =
+    steeringItems.length === 1 ? "1 message steering" : `${steeringItems.length} messages steering`;
+  const shelfLabel =
+    props.items.length > 0 && steeringItems.length > 0
+      ? `${queuedLabel}, ${steeringLabel}`
+      : props.items.length > 0
+        ? queuedLabel
+        : steeringLabel;
 
   return (
     <div
@@ -392,20 +412,49 @@ export function FollowUpQueueShelf(props: {
       data-cafe-followup-queue="true"
     >
       <div className="relative z-10 flex min-w-0 items-center justify-between gap-3">
-        <div className="min-w-0 text-muted-foreground text-xs font-medium">
-          {props.items.length === 1 ? "1 message queued" : `${props.items.length} messages queued`}
-        </div>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="h-7 shrink-0 px-2 text-muted-foreground/80 hover:text-foreground"
-          onClick={props.onClear}
-        >
-          Clear
-        </Button>
+        <div className="min-w-0 text-muted-foreground text-xs font-medium">{shelfLabel}</div>
+        {props.items.length > 0 ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 shrink-0 px-2 text-muted-foreground/80 hover:text-foreground"
+            onClick={props.onClear}
+          >
+            Clear
+          </Button>
+        ) : null}
       </div>
       <div className="relative z-10 mt-1.5 grid gap-1">
+        {steeringItems.map((item) => (
+          <div
+            key={item.id}
+            className="rounded-xl border border-primary/20 bg-primary/5 p-2"
+            data-cafe-followup-steering="true"
+          >
+            <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
+              <span
+                className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-primary"
+                aria-hidden="true"
+              >
+                <LoaderCircleIcon className="size-4 animate-spin" />
+              </span>
+              <div
+                className="min-w-0 truncate text-left text-muted-foreground"
+                title={item.promptText.trim().length > 0 ? item.promptText : item.preview}
+              >
+                {item.preview}
+              </div>
+              <span
+                className="h-7 shrink-0 rounded-md border border-primary/25 px-2 py-1 text-primary text-xs"
+                aria-label="Follow-up steering into active turn"
+                title="Follow-up accepted for the active turn; waiting for the provider to act on it."
+              >
+                Steering
+              </span>
+            </div>
+          </div>
+        ))}
         {props.items.map((item) => (
           <div key={item.id} className="rounded-xl border border-border/45 bg-background/42 p-2">
             <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-2">
@@ -585,6 +634,7 @@ export interface ChatComposerProps {
   keybindings: ResolvedKeybindingsConfig;
   gitCwd: string | null;
   followUpQueueItems: readonly FollowUpQueueViewItem[];
+  steeringFollowUpItems: readonly SteeringFollowUpViewItem[];
   followUpQueueActionLabel: string;
   followUpQueueActionTitle: string;
 
@@ -681,6 +731,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     keybindings,
     gitCwd,
     followUpQueueItems,
+    steeringFollowUpItems,
     followUpQueueActionLabel,
     followUpQueueActionTitle,
     promptRef,
@@ -2060,6 +2111,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     >
       <FollowUpQueueShelf
         items={followUpQueueItems}
+        steeringItems={steeringFollowUpItems}
         actionLabel={followUpQueueActionLabel}
         actionTitle={followUpQueueActionTitle}
         onToggleExpanded={onToggleFollowUpQueueItem}

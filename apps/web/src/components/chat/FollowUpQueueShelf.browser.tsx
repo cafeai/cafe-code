@@ -110,6 +110,50 @@ describe("FollowUpQueueShelf", () => {
     }
   });
 
+  it("renders accepted steers as non-cancelable steering rows", async () => {
+    const onRemove = vi.fn();
+    const onClear = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+
+    const screen = await render(
+      <FollowUpQueueShelf
+        items={[]}
+        steeringItems={[
+          {
+            id: "steer-1",
+            preview: "check whether the design finished",
+            promptText: "check whether the design finished",
+            dispatchedAt: "2026-05-25T16:05:10.616Z",
+          },
+        ]}
+        actionLabel="Steer"
+        actionTitle="Steer this into the active turn now"
+        onToggleExpanded={vi.fn()}
+        onAction={vi.fn()}
+        onRemove={onRemove}
+        onClear={onClear}
+        onExpandImage={vi.fn()}
+      />,
+      { container: host },
+    );
+
+    try {
+      expect(document.body.textContent ?? "").toContain("1 message steering");
+      expect(document.body.textContent ?? "").toContain("Steering");
+      await expect
+        .element(page.getByLabelText("Follow-up steering into active turn"))
+        .toBeInTheDocument();
+      await expect.element(page.getByLabelText("Remove queued message")).not.toBeInTheDocument();
+      await expect.element(page.getByText("Clear")).not.toBeInTheDocument();
+      expect(onRemove).not.toHaveBeenCalled();
+      expect(onClear).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
   it("exposes expansion and image previews for queued attachments", async () => {
     const onToggleExpanded = vi.fn();
     const onExpandImage = vi.fn();

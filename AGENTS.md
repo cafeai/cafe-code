@@ -193,6 +193,7 @@ If Claude behavior is unclear, check the official Claude Agent SDK docs, the ins
 - Scroll-follow behavior should be tolerant of small gaps from the bottom and must not jump to the top when steer messages, late messages, or terminal markers arrive.
 - Message timelines must handle late provider events after completion without duplicating terminal banners or losing streamed content.
 - Per-thread detail subscriptions must apply snapshots and events monotonically by orchestration sequence. Events at or below the detail snapshot sequence are stale for that subscription and must not regress focused-thread session or turn state.
+- Live steer UI must distinguish queued follow-ups from accepted in-flight steers. Once Cafe dispatches a provider-supported steer into an active turn, show a non-cancelable steering state until provider output, terminal turn state, or an explicit steer failure/requeue proves the handoff is resolved; otherwise users cannot tell whether Codex/Claude received the follow-up or the renderer lost it.
 
 ## Reference Sources
 

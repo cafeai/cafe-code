@@ -122,6 +122,7 @@ import {
   ChatComposer,
   type ChatComposerHandle,
   type FollowUpQueueViewItem,
+  type SteeringFollowUpViewItem,
 } from "./chat/ChatComposer";
 import {
   canExpandQueuedFollowUpText,
@@ -1316,6 +1317,7 @@ interface PendingSteerDispatch {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly messageId: MessageId;
+  readonly turnId: TurnId | null;
   readonly snapshot: ComposerSendSnapshot;
   readonly dispatchedAt: string;
 }
@@ -1339,6 +1341,46 @@ function readRetryableSteerFailure(
     messageId: MessageId.make(messageId),
     turnKind,
   };
+}
+
+function readSteerFailureMessageId(activity: OrchestrationThreadActivity): MessageId | null {
+  if (activity.kind !== "provider.turn.steer.failed") {
+    return null;
+  }
+  const payload = readDebugRecord(activity.payload);
+  const messageId = readDebugString(payload?.messageId);
+  return messageId === null ? null : MessageId.make(messageId);
+}
+
+function threadHasAssistantResponseAfterSteer(thread: Thread, pending: PendingSteerDispatch) {
+  return thread.messages.some(
+    (message) =>
+      message.role === "assistant" &&
+      message.createdAt > pending.dispatchedAt &&
+      (pending.turnId === null || message.turnId === pending.turnId),
+  );
+}
+
+function threadHasTerminalTurnAfterSteer(thread: Thread, pending: PendingSteerDispatch) {
+  const latestTurn = thread.latestTurn;
+  return (
+    latestTurn !== null &&
+    latestTurn.completedAt !== null &&
+    latestTurn.completedAt > pending.dispatchedAt &&
+    (pending.turnId === null || latestTurn.turnId === pending.turnId)
+  );
+}
+
+function threadHasSteerFailureForMessage(thread: Thread, messageId: MessageId) {
+  return thread.activities.some((activity) => readSteerFailureMessageId(activity) === messageId);
+}
+
+function threadHasResolvedPendingSteer(thread: Thread, pending: PendingSteerDispatch) {
+  return (
+    threadHasSteerFailureForMessage(thread, pending.messageId) ||
+    threadHasAssistantResponseAfterSteer(thread, pending) ||
+    threadHasTerminalTurnAfterSteer(thread, pending)
+  );
 }
 
 function revokeQueuedFollowUpPreviewUrls(item: FollowUpQueueItem): void {
@@ -1545,6 +1587,9 @@ export default function ChatView(props: ChatViewProps) {
   const sendInFlightRef = useRef(false);
   const queueDispatchInFlightRef = useRef(false);
   const pendingSteerDispatchByMessageIdRef = useRef<Record<string, PendingSteerDispatch>>({});
+  const [pendingSteerDispatchByMessageId, setPendingSteerDispatchByMessageId] = useState<
+    Record<string, PendingSteerDispatch>
+  >({});
   const [desktopDebugEnabled, setDesktopDebugEnabled] = useState(false);
   const [desktopDebugRevision, setDesktopDebugRevision] = useState(0);
   const followUpQueueDebugRef = useRef({
@@ -1568,6 +1613,38 @@ export default function ChatView(props: ChatViewProps) {
     queueDispatchInFlightRef.current = next;
     setDispatchGateRevision((revision) => revision + 1);
   }, []);
+  const updatePendingSteerDispatches = useCallback(
+    (
+      updater: (
+        current: Record<string, PendingSteerDispatch>,
+      ) => Record<string, PendingSteerDispatch>,
+    ) => {
+      const current = pendingSteerDispatchByMessageIdRef.current;
+      const next = updater(current);
+      if (next === current) {
+        return;
+      }
+      pendingSteerDispatchByMessageIdRef.current = next;
+      setPendingSteerDispatchByMessageId(next);
+      if (desktopDebugEnabled) {
+        setDesktopDebugRevision((revision) => revision + 1);
+      }
+    },
+    [desktopDebugEnabled],
+  );
+  const removePendingSteerDispatch = useCallback(
+    (messageId: MessageId) => {
+      updatePendingSteerDispatches((current) => {
+        if (!(String(messageId) in current)) {
+          return current;
+        }
+        const next = { ...current };
+        delete next[String(messageId)];
+        return next;
+      });
+    },
+    [updatePendingSteerDispatches],
+  );
   useEffect(() => {
     const bridge = window.desktopBridge;
     if (!bridge?.getDebugEndpointState) {
@@ -1743,7 +1820,7 @@ export default function ChatView(props: ChatViewProps) {
         continue;
       }
 
-      delete pendingSteerDispatchByMessageIdRef.current[String(retryableFailure.messageId)];
+      removePendingSteerDispatch(retryableFailure.messageId);
       setOptimisticUserMessages((existing) => {
         const removed = existing.filter((message) => message.id === retryableFailure.messageId);
         for (const message of removed) {
@@ -1773,7 +1850,26 @@ export default function ChatView(props: ChatViewProps) {
         description: `Codex is running a ${turnLabel} turn, so Cafe Code will send this after the active turn finishes.`,
       });
     }
-  }, [activeThread, setFollowUpQueueByThreadId]);
+  }, [activeThread, removePendingSteerDispatch, setFollowUpQueueByThreadId]);
+  useEffect(() => {
+    if (Object.keys(pendingSteerDispatchByMessageId).length === 0) {
+      return;
+    }
+
+    const threadsById = new Map(allThreads.map((thread) => [thread.id, thread]));
+    updatePendingSteerDispatches((current) => {
+      let next: Record<string, PendingSteerDispatch> | null = null;
+      for (const [messageId, pending] of Object.entries(current)) {
+        const thread = threadsById.get(pending.threadId);
+        if (thread === undefined || !threadHasResolvedPendingSteer(thread, pending)) {
+          continue;
+        }
+        next ??= { ...current };
+        delete next[messageId];
+      }
+      return next ?? current;
+    });
+  }, [allThreads, pendingSteerDispatchByMessageId, updatePendingSteerDispatches]);
   const threadPlanCatalog = useThreadPlanCatalog(
     useMemo(() => {
       const threadIds: ThreadId[] = [];
@@ -2746,6 +2842,19 @@ export default function ChatView(props: ChatViewProps) {
       })),
     [activeFollowUpQueue],
   );
+  const steeringFollowUpViewItems = useMemo<readonly SteeringFollowUpViewItem[]>(
+    () =>
+      Object.values(pendingSteerDispatchByMessageId)
+        .filter((pending) => activeThreadId !== null && pending.threadId === activeThreadId)
+        .toSorted((left, right) => left.dispatchedAt.localeCompare(right.dispatchedAt))
+        .map((pending) => ({
+          id: pending.messageId,
+          preview: previewQueuedFollowUpText(pending.snapshot.promptText),
+          promptText: pending.snapshot.promptText,
+          dispatchedAt: pending.dispatchedAt,
+        })),
+    [activeThreadId, pendingSteerDispatchByMessageId],
+  );
   const canSteerFollowUpQueue =
     followUpQueuePhase === "running" &&
     activeProviderLiveSteerAvailable &&
@@ -3082,6 +3191,7 @@ export default function ChatView(props: ChatViewProps) {
           activeThreadId,
           activeQueueTurnId,
           activeQueueLength: activeFollowUpQueue.length,
+          activeSteeringFollowUpCount: steeringFollowUpViewItems.length,
           queueBlockers,
           followUpQueuePhase,
           followUpQueueUiIdle,
@@ -3138,6 +3248,7 @@ export default function ChatView(props: ChatViewProps) {
       queue: {
         activeThreadId,
         length: activeFollowUpQueue.length,
+        steeringLength: steeringFollowUpViewItems.length,
         firstItemId: firstItem?.id ?? null,
         firstItemBlockedReason: firstItem?.blockedReason ?? null,
         canStartTurn: followUpQueueCanStartTurn,
@@ -3177,6 +3288,24 @@ export default function ChatView(props: ChatViewProps) {
             },
           ]),
         ),
+        steering: {
+          length: Object.keys(pendingSteerDispatchByMessageId).length,
+          activeThreadLength: steeringFollowUpViewItems.length,
+          items: Object.values(pendingSteerDispatchByMessageId)
+            .toSorted((left, right) => left.dispatchedAt.localeCompare(right.dispatchedAt))
+            .map((pending) => ({
+              environmentId: pending.environmentId,
+              threadId: pending.threadId,
+              messageId: pending.messageId,
+              turnId: pending.turnId,
+              dispatchedAt: pending.dispatchedAt,
+              promptLength: pending.snapshot.promptText.length,
+              promptPreview: previewQueuedFollowUpText(pending.snapshot.promptText).slice(0, 240),
+              imageCount: pending.snapshot.images.length,
+              provider: pending.snapshot.provider,
+              model: pending.snapshot.model,
+            })),
+        },
         dispatchDebug: followUpQueueDebugRef.current,
         items: activeFollowUpQueue.map((item, index) => ({
           index,
@@ -3213,6 +3342,7 @@ export default function ChatView(props: ChatViewProps) {
         sendInFlightRef: sendInFlightRef.current,
         queueDispatchInFlightRef: queueDispatchInFlightRef.current,
         queuedFollowUpPendingDispatchByThreadId,
+        pendingSteerDispatchByMessageId,
         dispatchGateRevision,
         desktopDebugRevision,
         isComposerConnecting,
@@ -3278,10 +3408,12 @@ export default function ChatView(props: ChatViewProps) {
     latestTurnSettled,
     localDispatchStartedAt,
     phase,
+    pendingSteerDispatchByMessageId,
     queuedFollowUpPendingDispatchByThreadId,
     routeKind,
     selectedProvider,
     serverAcknowledgedLocalDispatch,
+    steeringFollowUpViewItems,
     threadId,
   ]);
   const activeProjectCwd = activeProject?.cwd ?? null;
@@ -4064,22 +4196,29 @@ export default function ChatView(props: ChatViewProps) {
     const optimisticAttachments = optimisticAttachmentsForSnapshot(snapshot);
     const turnAttachmentsPromise = buildAttachmentsForSnapshot(snapshot);
 
-    pendingSteerDispatchByMessageIdRef.current[String(messageIdForSend)] = {
-      environmentId: activeThread.environmentId,
-      threadId: activeThread.id,
-      messageId: messageIdForSend,
-      snapshot,
-      dispatchedAt: messageCreatedAt,
-    };
-    const pendingSteerEntries = Object.entries(pendingSteerDispatchByMessageIdRef.current);
-    if (pendingSteerEntries.length > 64) {
-      pendingSteerEntries
+    updatePendingSteerDispatches((current) => {
+      const next = {
+        ...current,
+        [String(messageIdForSend)]: {
+          environmentId: activeThread.environmentId,
+          threadId: activeThread.id,
+          messageId: messageIdForSend,
+          turnId: activeThread.session?.activeTurnId ?? activeThread.latestTurn?.turnId ?? null,
+          snapshot,
+          dispatchedAt: messageCreatedAt,
+        },
+      };
+      const pendingSteerEntries = Object.entries(next);
+      if (pendingSteerEntries.length <= 64) {
+        return next;
+      }
+      for (const [messageId] of pendingSteerEntries
         .toSorted(([, left], [, right]) => left.dispatchedAt.localeCompare(right.dispatchedAt))
-        .slice(0, pendingSteerEntries.length - 64)
-        .forEach(([messageId]) => {
-          delete pendingSteerDispatchByMessageIdRef.current[messageId];
-        });
-    }
+        .slice(0, pendingSteerEntries.length - 64)) {
+        delete next[messageId];
+      }
+      return next;
+    });
 
     if (options?.queuedItem) {
       removeFollowUpQueueItem(options.queuedItem.threadId, options.queuedItem.id, false);
@@ -4117,7 +4256,7 @@ export default function ChatView(props: ChatViewProps) {
         clearActiveComposerContent();
       }
     } catch (err) {
-      delete pendingSteerDispatchByMessageIdRef.current[String(messageIdForSend)];
+      removePendingSteerDispatch(messageIdForSend);
       setOptimisticUserMessages((existing) => {
         const removed = existing.filter((message) => message.id === messageIdForSend);
         for (const message of removed) {
@@ -5390,6 +5529,7 @@ export default function ChatView(props: ChatViewProps) {
                   keybindings={keybindings}
                   gitCwd={gitCwd}
                   followUpQueueItems={followUpQueueViewItems}
+                  steeringFollowUpItems={steeringFollowUpViewItems}
                   followUpQueueActionLabel={followUpQueueActionLabel}
                   followUpQueueActionTitle={followUpQueueActionTitle}
                   promptRef={promptRef}
