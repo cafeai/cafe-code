@@ -20,6 +20,7 @@ export interface ElectronAppShape {
   readonly whenReady: Effect.Effect<void>;
   readonly quit: Effect.Effect<void>;
   readonly exit: (code: number) => Effect.Effect<void>;
+  readonly requestSingleInstanceLock: Effect.Effect<boolean>;
   readonly relaunch: (options: Electron.RelaunchOptions) => Effect.Effect<void>;
   readonly setPath: (
     name: Parameters<Electron.App["setPath"]>[0],
@@ -74,6 +75,7 @@ const make = ElectronApp.of({
     Effect.sync(() => {
       Electron.app.exit(code);
     }),
+  requestSingleInstanceLock: Effect.sync(() => Electron.app.requestSingleInstanceLock()),
   relaunch: (options) =>
     Effect.sync(() => {
       Electron.app.relaunch(options);

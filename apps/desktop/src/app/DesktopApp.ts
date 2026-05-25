@@ -57,8 +57,26 @@ class DesktopDevelopmentBackendPortRequiredError extends Data.TaggedError(
 const { logInfo: logBootstrapInfo, logWarning: logBootstrapWarning } =
   DesktopObservability.makeComponentLogger("desktop-bootstrap");
 
-const { logInfo: logStartupInfo, logError: logStartupError } =
-  DesktopObservability.makeComponentLogger("desktop-startup");
+const {
+  logInfo: logStartupInfo,
+  logWarning: logStartupWarning,
+  logError: logStartupError,
+} = DesktopObservability.makeComponentLogger("desktop-startup");
+
+const acquireSingleInstanceLock = Effect.fn("desktop.startup.acquireSingleInstanceLock")(
+  function* (): Effect.fn.Return<"primary" | "secondary", never, ElectronApp.ElectronApp> {
+    const electronApp = yield* ElectronApp.ElectronApp;
+    const acquired = yield* electronApp.requestSingleInstanceLock;
+    if (acquired) {
+      yield* logStartupInfo("single instance lock acquired");
+      return "primary";
+    }
+
+    yield* logStartupWarning("single instance lock rejected; another instance is active");
+    yield* electronApp.exit(0);
+    return "secondary";
+  },
+);
 
 const resolveDesktopBackendPort = Effect.fn("resolveDesktopBackendPort")(function* (
   configuredPort: Option.Option<number>,
@@ -208,6 +226,10 @@ const startup = Effect.gen(function* () {
   const userDataPath = yield* appIdentity.resolveUserDataPath;
   yield* electronApp.setPath("userData", userDataPath);
   yield* logStartupInfo("runtime logging configured", { logDir: environment.logDir });
+  const startupRole = yield* acquireSingleInstanceLock();
+  if (startupRole === "secondary") {
+    return startupRole;
+  }
   yield* desktopSettings.load;
 
   if (environment.platform === "linux") {
@@ -227,6 +249,7 @@ const startup = Effect.gen(function* () {
   yield* electronProtocol.registerDesktopFileProtocol;
   yield* updates.configure;
   yield* bootstrap.pipe(Effect.catchCause((cause) => fatalStartupCause("bootstrap", cause)));
+  return startupRole;
 }).pipe(Effect.withSpan("desktop.startup"));
 
 const scopedProgram = Effect.scoped(
@@ -244,7 +267,10 @@ const scopedProgram = Effect.scoped(
         .pipe(Effect.ensuring(shutdown.markComplete)),
     );
 
-    yield* startup;
+    const startupRole = yield* startup;
+    if (startupRole === "secondary") {
+      return;
+    }
     yield* shutdown.awaitRequest;
   }),
 );

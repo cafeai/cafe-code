@@ -13,6 +13,7 @@ const {
   quitMock,
   relaunchMock,
   removeListenerMock,
+  requestSingleInstanceLockMock,
   setAboutPanelOptionsMock,
   setAppUserModelIdMock,
   setDesktopNameMock,
@@ -30,6 +31,7 @@ const {
   quitMock: vi.fn(),
   relaunchMock: vi.fn(),
   removeListenerMock: vi.fn(),
+  requestSingleInstanceLockMock: vi.fn(() => true),
   setAboutPanelOptionsMock: vi.fn(),
   setAppUserModelIdMock: vi.fn(),
   setDesktopNameMock: vi.fn(),
@@ -57,6 +59,7 @@ vi.mock("electron", () => ({
     quit: quitMock,
     relaunch: relaunchMock,
     removeListener: removeListenerMock,
+    requestSingleInstanceLock: requestSingleInstanceLockMock,
     runningUnderARM64Translation: false,
     setAboutPanelOptions: setAboutPanelOptionsMock,
     setAppUserModelId: setAppUserModelIdMock,
@@ -78,6 +81,8 @@ describe("ElectronApp", () => {
     quitMock.mockClear();
     relaunchMock.mockClear();
     removeListenerMock.mockClear();
+    requestSingleInstanceLockMock.mockClear();
+    requestSingleInstanceLockMock.mockReturnValue(true);
     setPathMock.mockClear();
     getVersionMock.mockClear();
     getAppPathMock.mockClear();
@@ -112,6 +117,18 @@ describe("ElectronApp", () => {
 
       assert.deepEqual(onMock.mock.calls, [["activate", listener]]);
       assert.deepEqual(removeListenerMock.mock.calls, [["activate", listener]]);
+    }).pipe(Effect.provide(ElectronApp.layer)),
+  );
+
+  it.effect("requests the Electron single-instance lock", () =>
+    Effect.gen(function* () {
+      requestSingleInstanceLockMock.mockReturnValueOnce(false);
+
+      const electronApp = yield* ElectronApp.ElectronApp;
+      const acquired = yield* electronApp.requestSingleInstanceLock;
+
+      assert.isFalse(acquired);
+      assert.deepEqual(requestSingleInstanceLockMock.mock.calls, [[]]);
     }).pipe(Effect.provide(ElectronApp.layer)),
   );
 

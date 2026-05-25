@@ -319,6 +319,30 @@ export const layer = Layer.succeed(
       yield* electronApp.on("activate", () => {
         void runEffect(desktopWindow.activate.pipe(Effect.withSpan("desktop.lifecycle.activate")));
       });
+      yield* electronApp.on(
+        "second-instance",
+        (
+          _event: Electron.Event,
+          argv: readonly string[],
+          workingDirectory: string,
+          additionalData: unknown,
+        ) => {
+          void runEffect(
+            Effect.gen(function* () {
+              const additionalDataKeyCount =
+                typeof additionalData === "object" && additionalData !== null
+                  ? Object.keys(additionalData).length
+                  : 0;
+              yield* logLifecycleInfo("second desktop instance requested", {
+                argvCount: argv.length,
+                workingDirectoryProvided: workingDirectory.length > 0,
+                additionalDataKeyCount,
+              });
+              yield* desktopWindow.activate;
+            }).pipe(Effect.withSpan("desktop.lifecycle.secondInstance")),
+          );
+        },
+      );
       yield* electronApp.on("window-all-closed", () => {
         void runEffect(
           Effect.gen(function* () {

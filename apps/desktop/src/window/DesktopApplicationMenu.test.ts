@@ -34,6 +34,7 @@ const electronAppLayer = Layer.succeed(ElectronApp.ElectronApp, {
   whenReady: Effect.void,
   quit: Effect.void,
   exit: () => Effect.void,
+  requestSingleInstanceLock: Effect.succeed(true),
   relaunch: () => Effect.void,
   setPath: () => Effect.void,
   setName: () => Effect.void,

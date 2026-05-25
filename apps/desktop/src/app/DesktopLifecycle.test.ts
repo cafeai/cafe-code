@@ -21,6 +21,12 @@ import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
 
 type BeforeQuitListener = (event: Electron.Event) => void;
+type SecondInstanceListener = (
+  event: Electron.Event,
+  argv: readonly string[],
+  workingDirectory: string,
+  additionalData?: Record<string, unknown>,
+) => void;
 
 function makeEvent() {
   let preventDefaultCount = 0;
@@ -58,6 +64,8 @@ function makeLifecycleHarness(options?: {
   readonly providerDaemonDialogResponse?: number;
 }) {
   let beforeQuitListener: BeforeQuitListener | undefined;
+  let secondInstanceListener: SecondInstanceListener | undefined;
+  let activateCount = 0;
   let quitCount = 0;
   let shutdownOverlayCount = 0;
   let providerDaemonStopCount = 0;
@@ -74,6 +82,7 @@ function makeLifecycleHarness(options?: {
         quitCount += 1;
       }),
       exit: () => Effect.void,
+      requestSingleInstanceLock: Effect.succeed(true),
       relaunch: () => Effect.void,
       setPath: () => Effect.void,
       setName: () => Effect.void,
@@ -86,6 +95,8 @@ function makeLifecycleHarness(options?: {
         Effect.sync(() => {
           if (eventName === "before-quit") {
             beforeQuitListener = listener as unknown as BeforeQuitListener;
+          } else if (eventName === "second-instance") {
+            secondInstanceListener = listener as unknown as SecondInstanceListener;
           }
         }),
     } satisfies ElectronApp.ElectronAppShape);
@@ -136,7 +147,9 @@ function makeLifecycleHarness(options?: {
       createMain: Effect.die("unexpected createMain"),
       ensureMain: Effect.die("unexpected ensureMain"),
       revealOrCreateMain: Effect.die("unexpected revealOrCreateMain"),
-      activate: Effect.void,
+      activate: Effect.sync(() => {
+        activateCount += 1;
+      }),
       createMainIfBackendReady: Effect.void,
       handleBackendReady: Effect.void,
       dispatchMenuAction: () => Effect.void,
@@ -181,6 +194,8 @@ function makeLifecycleHarness(options?: {
       layer,
       overlaySent,
       getBeforeQuitListener: () => beforeQuitListener,
+      getSecondInstanceListener: () => secondInstanceListener,
+      getActivateCount: () => activateCount,
       getQuitCount: () => quitCount,
       getShutdownOverlayCount: () => shutdownOverlayCount,
       getProviderDaemonStopCount: () => providerDaemonStopCount,
@@ -254,6 +269,28 @@ describe("DesktopLifecycle", () => {
         yield* TestClock.adjust(DesktopLifecycle.DESKTOP_SHUTDOWN_OVERLAY_MINIMUM_DWELL);
         yield* flushMicrotasks;
         assert.equal(harness.getQuitCount(), 1);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect("activates the existing window when a second desktop instance starts", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeLifecycleHarness();
+
+      yield* Effect.gen(function* () {
+        const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+        yield* lifecycle.register;
+
+        const secondInstance = harness.getSecondInstanceListener();
+        assert.isDefined(secondInstance);
+        if (!secondInstance) {
+          throw new Error("second-instance listener was not registered.");
+        }
+
+        secondInstance({} as Electron.Event, ["Cafe Code"], "/repo", { source: "test" });
+        yield* flushMicrotasks;
+
+        assert.equal(harness.getActivateCount(), 1);
       }).pipe(Effect.scoped, Effect.provide(harness.layer));
     }),
   );
