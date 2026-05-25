@@ -65,7 +65,9 @@ import {
   type PendingUserInputDraftAnswer,
 } from "../pendingUserInput";
 import {
+  selectProjectByRef,
   selectProjectsAcrossEnvironments,
+  selectThreadByRef,
   selectThreadsAcrossEnvironments,
   useStore,
 } from "../store";
@@ -126,10 +128,12 @@ import {
   canStartQueuedFollowUpTurn,
   decideQueuedFollowUpAction,
   decideFollowUpDelivery,
+  hasQueuedFollowUpDispatchBeenObserved,
   previewQueuedFollowUpText,
   queuedFollowUpActionLabel,
   queuedFollowUpActionTitle,
   rekeyQueuedFollowUpsForActiveThread,
+  selectQueuedFollowUpDispatchCandidate,
 } from "./chat/followUpQueue";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
@@ -181,7 +185,7 @@ const IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROPOSED_PLANS: Thread["proposedPlans"] = [];
-const DEBUG_SNAPSHOT_VERSION = 7;
+const DEBUG_SNAPSHOT_VERSION = 9;
 const DEBUG_TEXT_PREVIEW_LIMIT = 240;
 const DEBUG_JSON_PREVIEW_LIMIT = 2_000;
 const DEBUG_RECENT_MESSAGE_LIMIT = 20;
@@ -1286,10 +1290,18 @@ interface ComposerSendSnapshot {
 
 interface FollowUpQueueItem extends ComposerSendSnapshot {
   id: string;
+  environmentId: EnvironmentId;
   threadId: ThreadId;
   queuedAt: string;
   expanded: boolean;
   blockedReason: string | null;
+}
+
+interface QueuedFollowUpPendingDispatch {
+  environmentId: EnvironmentId;
+  threadId: ThreadId;
+  messageId: MessageId;
+  dispatchedAt: string;
 }
 
 function revokeQueuedFollowUpPreviewUrls(item: FollowUpQueueItem): void {
@@ -1550,6 +1562,12 @@ export default function ChatView(props: ChatViewProps) {
   >({});
   const followUpQueueByThreadIdRef = useRef(followUpQueueByThreadId);
   followUpQueueByThreadIdRef.current = followUpQueueByThreadId;
+  const [queuedFollowUpPendingDispatchByThreadId, setQueuedFollowUpPendingDispatchByThreadId] =
+    useState<Record<string, QueuedFollowUpPendingDispatch>>({});
+  const queuedFollowUpPendingDispatchByThreadIdRef = useRef<
+    Record<string, QueuedFollowUpPendingDispatch>
+  >(queuedFollowUpPendingDispatchByThreadId);
+  queuedFollowUpPendingDispatchByThreadIdRef.current = queuedFollowUpPendingDispatchByThreadId;
 
   const fallbackDraftProjectRef = draftThread
     ? scopeProjectRef(draftThread.environmentId, draftThread.projectId)
@@ -1639,6 +1657,37 @@ export default function ChatView(props: ChatViewProps) {
       }),
     );
   }, [activeThreadId, knownThreadIds]);
+  const setQueuedFollowUpPendingDispatch = useCallback(
+    (pending: QueuedFollowUpPendingDispatch | null, targetThreadId: ThreadId) => {
+      const current = queuedFollowUpPendingDispatchByThreadIdRef.current;
+      if (pending === null) {
+        if (!(targetThreadId in current)) return;
+        const next = { ...current };
+        delete next[targetThreadId];
+        queuedFollowUpPendingDispatchByThreadIdRef.current = next;
+        setQueuedFollowUpPendingDispatchByThreadId(next);
+        return;
+      }
+
+      const existing = current[targetThreadId];
+      if (
+        existing?.environmentId === pending.environmentId &&
+        existing.threadId === pending.threadId &&
+        existing.messageId === pending.messageId &&
+        existing.dispatchedAt === pending.dispatchedAt
+      ) {
+        return;
+      }
+      queuedFollowUpPendingDispatchByThreadIdRef.current = {
+        ...current,
+        [targetThreadId]: pending,
+      };
+      setQueuedFollowUpPendingDispatchByThreadId(
+        queuedFollowUpPendingDispatchByThreadIdRef.current,
+      );
+    },
+    [],
+  );
   const activeLatestTurn = activeThread?.latestTurn ?? null;
   const threadPlanCatalog = useThreadPlanCatalog(
     useMemo(() => {
@@ -1671,6 +1720,10 @@ export default function ChatView(props: ChatViewProps) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const savedEnvironmentRegistry = useSavedEnvironmentRegistryStore((s) => s.byId);
   const savedEnvironmentRuntimeById = useSavedEnvironmentRuntimeStore((s) => s.byId);
+  const savedEnvironmentRegistryRef = useRef(savedEnvironmentRegistry);
+  const savedEnvironmentRuntimeByIdRef = useRef(savedEnvironmentRuntimeById);
+  savedEnvironmentRegistryRef.current = savedEnvironmentRegistry;
+  savedEnvironmentRuntimeByIdRef.current = savedEnvironmentRuntimeById;
   const activeSavedEnvironmentRecord =
     activeThread && activeThread.environmentId !== primaryEnvironmentId
       ? (savedEnvironmentRegistry[activeThread.environmentId] ?? null)
@@ -2461,10 +2514,111 @@ export default function ChatView(props: ChatViewProps) {
   }, [activeProviderInstanceId, providerStatuses, selectedProvider]);
   const activeProviderLiveSteerSupported =
     activeProviderStatus?.runtimeCapabilities?.liveSteer === "supported";
+  const resolveQueuedFollowUpThread = useCallback((item: FollowUpQueueItem): Thread | undefined => {
+    return selectThreadByRef(
+      useStore.getState(),
+      scopeThreadRef(item.environmentId, item.threadId),
+    );
+  }, []);
+  const resolveProjectForThread = useCallback(
+    (thread: Thread) =>
+      selectProjectByRef(
+        useStore.getState(),
+        scopeProjectRef(thread.environmentId, thread.projectId),
+      ),
+    [],
+  );
+  const isThreadEnvironmentUnavailable = useCallback(
+    (thread: Thread): boolean => {
+      if (thread.environmentId === primaryEnvironmentId) {
+        return false;
+      }
+      const savedEnvironment = savedEnvironmentRegistryRef.current[thread.environmentId] ?? null;
+      if (savedEnvironment === null) {
+        return false;
+      }
+      const runtime =
+        savedEnvironmentRuntimeByIdRef.current[savedEnvironment.environmentId] ?? null;
+      return (runtime?.connectionState ?? "disconnected") !== "connected";
+    },
+    [primaryEnvironmentId],
+  );
   const activeFollowUpQueue =
     activeThreadId !== null
       ? (followUpQueueByThreadId[activeThreadId] ?? EMPTY_FOLLOW_UP_QUEUE)
       : EMPTY_FOLLOW_UP_QUEUE;
+  const retainedFollowUpThreadRefs = useMemo(() => {
+    const refs: ScopedThreadRef[] = [];
+    const seen = new Set<string>();
+    const pushRef = (ref: ScopedThreadRef) => {
+      const key = scopedThreadKey(ref);
+      if (seen.has(key)) return;
+      seen.add(key);
+      refs.push(ref);
+    };
+
+    for (const items of Object.values(followUpQueueByThreadId)) {
+      const firstItem = items[0];
+      if (firstItem) {
+        pushRef(scopeThreadRef(firstItem.environmentId, firstItem.threadId));
+      }
+    }
+    for (const pending of Object.values(queuedFollowUpPendingDispatchByThreadId)) {
+      pushRef(scopeThreadRef(pending.environmentId, pending.threadId));
+    }
+    return refs;
+  }, [followUpQueueByThreadId, queuedFollowUpPendingDispatchByThreadId]);
+  const totalFollowUpQueueLength = useMemo(
+    () => Object.values(followUpQueueByThreadId).reduce((total, items) => total + items.length, 0),
+    [followUpQueueByThreadId],
+  );
+  useEffect(() => {
+    if (retainedFollowUpThreadRefs.length === 0) {
+      return;
+    }
+    const releases = retainedFollowUpThreadRefs.map((ref) =>
+      retainThreadDetailSubscription(ref.environmentId, ref.threadId),
+    );
+    return () => {
+      for (const release of releases) {
+        release();
+      }
+    };
+  }, [retainedFollowUpThreadRefs]);
+  useEffect(() => {
+    const pendingEntries = Object.entries(queuedFollowUpPendingDispatchByThreadId);
+    if (pendingEntries.length === 0) {
+      return;
+    }
+
+    let changed = false;
+    const nextPending: Record<string, QueuedFollowUpPendingDispatch> = {};
+    const state = useStore.getState();
+    for (const [threadId, pending] of pendingEntries) {
+      const thread = selectThreadByRef(
+        state,
+        scopeThreadRef(pending.environmentId, pending.threadId),
+      );
+      if (
+        !thread ||
+        hasQueuedFollowUpDispatchBeenObserved({
+          messageId: pending.messageId,
+          dispatchedAt: pending.dispatchedAt,
+          thread,
+        })
+      ) {
+        changed = true;
+        continue;
+      }
+      nextPending[threadId] = pending;
+    }
+
+    if (!changed) {
+      return;
+    }
+    queuedFollowUpPendingDispatchByThreadIdRef.current = nextPending;
+    setQueuedFollowUpPendingDispatchByThreadId(nextPending);
+  }, [allThreads, queuedFollowUpPendingDispatchByThreadId]);
   const activeQueueTurnId = activeThread?.session?.activeTurnId ?? null;
   const followUpQueuePhase = resolveFollowUpQueuePhase({
     phase,
@@ -2476,13 +2630,16 @@ export default function ChatView(props: ChatViewProps) {
     followUpQueuePhase === "running" || isComposerConnecting || isRevertingCheckpoint;
   const firstActiveFollowUpQueueItem = activeFollowUpQueue[0] ?? null;
   const followUpQueueDispatchInFlight = queueDispatchInFlightRef.current;
+  const activeQueuedFollowUpPendingDispatch =
+    activeThreadId !== null &&
+    queuedFollowUpPendingDispatchByThreadId[activeThreadId] !== undefined;
   const followUpQueueCanStartTurn = canStartQueuedFollowUpTurn({
     queueLength: activeFollowUpQueue.length,
     firstItemBlocked: firstActiveFollowUpQueueItem?.blockedReason != null,
     isWorking: followUpQueueVisibleWorking,
     isConnecting: isComposerConnecting,
     isEnvironmentUnavailable: activeEnvironmentUnavailable,
-    isDispatchInFlight: followUpQueueDispatchInFlight,
+    isDispatchInFlight: followUpQueueDispatchInFlight || activeQueuedFollowUpPendingDispatch,
   });
   const followUpQueueViewItems = useMemo<readonly FollowUpQueueViewItem[]>(
     () =>
@@ -2503,13 +2660,15 @@ export default function ChatView(props: ChatViewProps) {
     activeProviderLiveSteerSupported &&
     !isComposerConnecting &&
     !activeEnvironmentUnavailable &&
-    !followUpQueueDispatchInFlight;
+    !followUpQueueDispatchInFlight &&
+    !activeQueuedFollowUpPendingDispatch;
   const canActivateRunningFollowUpQueueAction =
     followUpQueuePhase === "running" &&
     activeThread?.session?.status === "running" &&
     !isComposerConnecting &&
     !activeEnvironmentUnavailable &&
-    !followUpQueueDispatchInFlight;
+    !followUpQueueDispatchInFlight &&
+    !activeQueuedFollowUpPendingDispatch;
   const followUpQueueActionLabel = queuedFollowUpActionLabel({
     phase: followUpQueuePhase,
     liveSteerSupported: activeProviderLiveSteerSupported,
@@ -2536,6 +2695,7 @@ export default function ChatView(props: ChatViewProps) {
     const capturedAtMs = Date.now();
     const capturedAt = new Date(capturedAtMs).toISOString();
     const localApi = readLocalApi();
+    const composerDebugState = readComposerHandle(composerRef)?.readDebugState() ?? null;
     const firstItem = firstActiveFollowUpQueueItem;
     const queueBlockers: string[] = [];
     if (activeFollowUpQueue.length === 0) {
@@ -2558,6 +2718,9 @@ export default function ChatView(props: ChatViewProps) {
     }
     if (followUpQueueDispatchInFlight) {
       queueBlockers.push("queue-dispatch-in-flight");
+    }
+    if (activeQueuedFollowUpPendingDispatch) {
+      queueBlockers.push("queued-turn-start-awaiting-thread-update");
     }
 
     const recentMessages = activeThread?.messages.slice(-DEBUG_RECENT_MESSAGE_LIMIT) ?? [];
@@ -2686,6 +2849,7 @@ export default function ChatView(props: ChatViewProps) {
             typeof localApi?.server.getProcessResourceHistory === "function",
         },
       },
+      composer: composerDebugState,
       performance: {
         rendererSnapshotBuildDurationMs: null,
         capturedAtEpochMs: capturedAtMs,
@@ -2907,6 +3071,7 @@ export default function ChatView(props: ChatViewProps) {
               items: items.map((item, index) => ({
                 index,
                 id: item.id,
+                environmentId: item.environmentId,
                 threadId: item.threadId,
                 queuedAt: item.queuedAt,
                 blockedReason: item.blockedReason,
@@ -2923,6 +3088,7 @@ export default function ChatView(props: ChatViewProps) {
         items: activeFollowUpQueue.map((item, index) => ({
           index,
           id: item.id,
+          environmentId: item.environmentId,
           threadId: item.threadId,
           queuedAt: item.queuedAt,
           blockedReason: item.blockedReason,
@@ -2953,6 +3119,7 @@ export default function ChatView(props: ChatViewProps) {
         hasDispatchFollowUpTurnStart: dispatchFollowUpTurnStartRef.current !== null,
         sendInFlightRef: sendInFlightRef.current,
         queueDispatchInFlightRef: queueDispatchInFlightRef.current,
+        queuedFollowUpPendingDispatchByThreadId,
         dispatchGateRevision,
         desktopDebugRevision,
         isComposerConnecting,
@@ -2988,10 +3155,12 @@ export default function ChatView(props: ChatViewProps) {
     activeQueueTurnId,
     activeThread,
     activeThreadId,
+    activeQueuedFollowUpPendingDispatch,
     allProjects,
     allThreads,
     canActivateRunningFollowUpQueueAction,
     canSteerFollowUpQueue,
+    composerRef,
     desktopDebugEnabled,
     desktopDebugRevision,
     dispatchGateRevision,
@@ -3015,6 +3184,7 @@ export default function ChatView(props: ChatViewProps) {
     latestTurnSettled,
     localDispatchStartedAt,
     phase,
+    queuedFollowUpPendingDispatchByThreadId,
     routeKind,
     selectedProvider,
     serverAcknowledgedLocalDispatch,
@@ -3169,26 +3339,24 @@ export default function ChatView(props: ChatViewProps) {
 
   const persistThreadSettingsForNextTurn = useCallback(
     async (input: {
+      thread: Thread;
       threadId: ThreadId;
       createdAt: string;
       modelSelection?: ModelSelection;
       runtimeMode: RuntimeMode;
       interactionMode: ProviderInteractionMode;
     }) => {
-      if (!serverThread) {
-        return;
-      }
-      const api = readEnvironmentApi(environmentId);
+      const api = readEnvironmentApi(input.thread.environmentId);
       if (!api) {
         return;
       }
 
       if (
         input.modelSelection !== undefined &&
-        (input.modelSelection.model !== serverThread.modelSelection.model ||
-          input.modelSelection.instanceId !== serverThread.modelSelection.instanceId ||
+        (input.modelSelection.model !== input.thread.modelSelection.model ||
+          input.modelSelection.instanceId !== input.thread.modelSelection.instanceId ||
           JSON.stringify(input.modelSelection.options ?? null) !==
-            JSON.stringify(serverThread.modelSelection.options ?? null))
+            JSON.stringify(input.thread.modelSelection.options ?? null))
       ) {
         await api.orchestration.dispatchCommand({
           type: "thread.meta.update",
@@ -3198,7 +3366,7 @@ export default function ChatView(props: ChatViewProps) {
         });
       }
 
-      if (input.runtimeMode !== serverThread.runtimeMode) {
+      if (input.runtimeMode !== input.thread.runtimeMode) {
         await api.orchestration.dispatchCommand({
           type: "thread.runtime-mode.set",
           commandId: newCommandId(),
@@ -3208,7 +3376,7 @@ export default function ChatView(props: ChatViewProps) {
         });
       }
 
-      if (input.interactionMode !== serverThread.interactionMode) {
+      if (input.interactionMode !== input.thread.interactionMode) {
         await api.orchestration.dispatchCommand({
           type: "thread.interaction-mode.set",
           commandId: newCommandId(),
@@ -3218,7 +3386,7 @@ export default function ChatView(props: ChatViewProps) {
         });
       }
     },
-    [environmentId, serverThread],
+    [],
   );
 
   // Debounce *showing* the scroll-to-bottom pill so it doesn't flash during
@@ -3553,6 +3721,7 @@ export default function ChatView(props: ChatViewProps) {
     promptRef.current = "";
     clearComposerDraftContent(composerDraftTarget);
     composerRef.current?.resetCursorState();
+    scheduleComposerFocus();
   };
 
   const restoreComposerSnapshotForRetry = (snapshot: ComposerSendSnapshot) => {
@@ -3566,6 +3735,7 @@ export default function ChatView(props: ChatViewProps) {
       prompt: snapshot.promptText,
       detectTrigger: true,
     });
+    scheduleComposerFocus();
   };
 
   const enqueueFollowUpSnapshot = (
@@ -3577,6 +3747,7 @@ export default function ChatView(props: ChatViewProps) {
     const item: FollowUpQueueItem = {
       ...snapshot,
       id: newMessageId(),
+      environmentId: activeThread.environmentId,
       threadId: activeThread.id,
       queuedAt,
       expanded: false,
@@ -3641,26 +3812,40 @@ export default function ChatView(props: ChatViewProps) {
   };
 
   const dispatchFollowUpTurnStart = async (item: FollowUpQueueItem) => {
-    const api = readEnvironmentApi(environmentId);
+    const queuedThread = resolveQueuedFollowUpThread(item);
+    if (!queuedThread) {
+      blockFollowUpQueueItem(item.threadId, item.id, "Thread is not loaded yet.");
+      return;
+    }
+    const api = readEnvironmentApi(queuedThread.environmentId);
     if (!api) {
       blockFollowUpQueueItem(item.threadId, item.id, "Cafe Code is not connected.");
       return;
     }
-    if (!activeThread) {
-      blockFollowUpQueueItem(item.threadId, item.id, "Open this thread before sending.");
+    if (isThreadEnvironmentUnavailable(queuedThread)) {
+      blockFollowUpQueueItem(item.threadId, item.id, "Cafe Code is not connected.");
       return;
     }
-    if (!activeProject) {
+    const queuedProject = resolveProjectForThread(queuedThread);
+    if (!queuedProject) {
       blockFollowUpQueueItem(item.threadId, item.id, "Project metadata is not loaded yet.");
       return;
     }
-    if (queueDispatchInFlightRef.current) {
+    if (
+      queueDispatchInFlightRef.current ||
+      queuedFollowUpPendingDispatchByThreadIdRef.current[item.threadId] !== undefined
+    ) {
       return;
     }
 
+    const isVisibleThread =
+      activeThread?.environmentId === queuedThread.environmentId &&
+      activeThread.id === queuedThread.id;
     setQueueDispatchInFlight(true);
-    setSendInFlight(true);
-    beginLocalDispatch({ preparingWorktree: false });
+    if (isVisibleThread) {
+      setSendInFlight(true);
+      beginLocalDispatch({ preparingWorktree: false });
+    }
 
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
@@ -3668,23 +3853,35 @@ export default function ChatView(props: ChatViewProps) {
     const optimisticAttachments = optimisticAttachmentsForSnapshot(item);
     const turnAttachmentsPromise = buildAttachmentsForSnapshot(item);
 
-    removeFollowUpQueueItem(item.threadId, item.id, false);
-    pinTimelineToEndForLocalMessage();
-    setOptimisticUserMessages((existing) => [
-      ...existing,
+    setQueuedFollowUpPendingDispatch(
       {
-        id: messageIdForSend,
-        role: "user",
-        text: outgoingMessageText,
-        ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
-        createdAt: messageCreatedAt,
-        streaming: false,
+        environmentId: queuedThread.environmentId,
+        threadId: queuedThread.id,
+        messageId: messageIdForSend,
+        dispatchedAt: messageCreatedAt,
       },
-    ]);
+      item.threadId,
+    );
+    removeFollowUpQueueItem(item.threadId, item.id, false);
+    if (isVisibleThread) {
+      pinTimelineToEndForLocalMessage();
+      setOptimisticUserMessages((existing) => [
+        ...existing,
+        {
+          id: messageIdForSend,
+          role: "user",
+          text: outgoingMessageText,
+          ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
+          createdAt: messageCreatedAt,
+          streaming: false,
+        },
+      ]);
+    }
 
     let turnStartSucceeded = false;
     try {
       await persistThreadSettingsForNextTurn({
+        thread: queuedThread,
         threadId: item.threadId,
         createdAt: messageCreatedAt,
         modelSelection: item.modelSelection,
@@ -3703,20 +3900,23 @@ export default function ChatView(props: ChatViewProps) {
           attachments: turnAttachments,
         },
         modelSelection: item.modelSelection,
-        titleSeed: activeThread.title,
+        titleSeed: queuedThread.title,
         runtimeMode: item.runtimeMode,
         interactionMode: item.interactionMode,
         createdAt: messageCreatedAt,
       });
       turnStartSucceeded = true;
+      setThreadError(item.threadId, null);
     } catch (err) {
-      setOptimisticUserMessages((existing) => {
-        const removed = existing.filter((message) => message.id === messageIdForSend);
-        for (const message of removed) {
-          revokeUserMessagePreviewUrls(message);
-        }
-        return existing.filter((message) => message.id !== messageIdForSend);
-      });
+      if (isVisibleThread) {
+        setOptimisticUserMessages((existing) => {
+          const removed = existing.filter((message) => message.id === messageIdForSend);
+          for (const message of removed) {
+            revokeUserMessagePreviewUrls(message);
+          }
+          return existing.filter((message) => message.id !== messageIdForSend);
+        });
+      }
       setFollowUpQueueByThreadId((existing) => ({
         ...existing,
         [item.threadId]: [
@@ -3732,10 +3932,17 @@ export default function ChatView(props: ChatViewProps) {
         err instanceof Error ? err.message : "Failed to send queued follow-up.",
       );
     } finally {
-      setSendInFlight(false);
+      setQueueDispatchInFlight(false);
+      if (isVisibleThread) {
+        setSendInFlight(false);
+      }
       if (!turnStartSucceeded) {
-        setQueueDispatchInFlight(false);
-        resetLocalDispatch();
+        setQueuedFollowUpPendingDispatch(null, item.threadId);
+        if (isVisibleThread) {
+          resetLocalDispatch();
+        }
+      } else if (!isVisibleThread) {
+        revokeQueuedFollowUpPreviewUrls(item);
       }
     }
   };
@@ -3871,6 +4078,7 @@ export default function ChatView(props: ChatViewProps) {
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
       composerRef.current?.resetCursorState();
+      scheduleComposerFocus();
       await onSubmitPlanFollowUp({
         text: followUp.text,
         interactionMode: followUp.interactionMode,
@@ -3884,6 +4092,7 @@ export default function ChatView(props: ChatViewProps) {
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
       composerRef.current?.resetCursorState();
+      scheduleComposerFocus();
       return;
     }
     if (!hasSendableContent) return;
@@ -3953,6 +4162,7 @@ export default function ChatView(props: ChatViewProps) {
     promptRef.current = "";
     clearComposerDraftContent(composerDraftTarget);
     composerRef.current?.resetCursorState();
+    scheduleComposerFocus();
 
     let turnStartSucceeded = false;
     await (async () => {
@@ -3990,6 +4200,7 @@ export default function ChatView(props: ChatViewProps) {
 
       if (isServerThread) {
         await persistThreadSettingsForNextTurn({
+          thread: activeThread,
           threadId: threadIdForSend,
           createdAt: messageCreatedAt,
           ...(ctxSelectedModel ? { modelSelection: ctxSelectedModelSelection } : {}),
@@ -4071,6 +4282,7 @@ export default function ChatView(props: ChatViewProps) {
           prompt: promptForSend,
           detectTrigger: true,
         });
+        scheduleComposerFocus();
       }
       setThreadError(
         threadIdForSend,
@@ -4277,46 +4489,88 @@ export default function ChatView(props: ChatViewProps) {
 
   const tryDispatchNextQueuedFollowUp = useCallback(
     (source = "state-change") => {
-      if (!activeThreadId) {
-        recordFollowUpQueueDebugAttempt(source, "no-active-thread", { threadId: null });
-        return false;
-      }
-      const firstItem = followUpQueueByThreadIdRef.current[activeThreadId]?.[0];
-      if (!firstItem) {
+      const queuesByThreadId = followUpQueueByThreadIdRef.current;
+      const queuedCount = Object.values(queuesByThreadId).reduce(
+        (total, items) => total + items.length,
+        0,
+      );
+      if (queuedCount === 0) {
         recordFollowUpQueueDebugAttempt(source, "queue-empty");
         return false;
       }
-      if (!followUpQueueCanStartTurn) {
-        recordFollowUpQueueDebugAttempt(source, firstItem.blockedReason ?? "gate-blocked", {
-          itemId: firstItem.id,
-        });
+
+      const candidate = selectQueuedFollowUpDispatchCandidate<ThreadId, FollowUpQueueItem>({
+        queuesByThreadId,
+        preferredThreadId: activeThreadId,
+        canStart: ({ item, queueLength }) => {
+          const queuedThread = resolveQueuedFollowUpThread(item);
+          if (!queuedThread) {
+            return false;
+          }
+          const queuedPhase = resolveFollowUpQueuePhase({
+            phase: derivePhase(queuedThread.session),
+            latestTurn: queuedThread.latestTurn,
+            activeTurnId: queuedThread.session?.activeTurnId ?? null,
+          });
+          return canStartQueuedFollowUpTurn({
+            queueLength,
+            firstItemBlocked: item.blockedReason != null,
+            isWorking: queuedPhase === "running",
+            isConnecting: queuedPhase === "connecting",
+            isEnvironmentUnavailable: isThreadEnvironmentUnavailable(queuedThread),
+            isDispatchInFlight:
+              queueDispatchInFlightRef.current ||
+              queuedFollowUpPendingDispatchByThreadIdRef.current[item.threadId] !== undefined,
+          });
+        },
+      });
+      if (!candidate) {
+        recordFollowUpQueueDebugAttempt(source, "no-dispatchable-queued-thread");
         return false;
       }
       const dispatchFollowUpTurnStart = dispatchFollowUpTurnStartRef.current;
       if (dispatchFollowUpTurnStart === null) {
-        recordFollowUpQueueDebugAttempt(source, "dispatch-ref-missing", { itemId: firstItem.id });
+        recordFollowUpQueueDebugAttempt(source, "dispatch-ref-missing", {
+          threadId: candidate.threadId,
+          itemId: candidate.item.id,
+        });
         return false;
       }
-      recordFollowUpQueueDebugAttempt(source, "dispatch-started", { itemId: firstItem.id });
-      void dispatchFollowUpTurnStart(firstItem);
+      recordFollowUpQueueDebugAttempt(source, "dispatch-started", {
+        threadId: candidate.threadId,
+        itemId: candidate.item.id,
+      });
+      void dispatchFollowUpTurnStart(candidate.item);
       return true;
     },
-    [activeThreadId, followUpQueueCanStartTurn, recordFollowUpQueueDebugAttempt],
+    [
+      activeThreadId,
+      isThreadEnvironmentUnavailable,
+      recordFollowUpQueueDebugAttempt,
+      resolveQueuedFollowUpThread,
+    ],
   );
 
   useEffect(() => {
     tryDispatchNextQueuedFollowUp();
-  }, [activeFollowUpQueue, dispatchGateRevision, tryDispatchNextQueuedFollowUp]);
+  }, [
+    allThreads,
+    dispatchGateRevision,
+    followUpQueueByThreadId,
+    queuedFollowUpPendingDispatchByThreadId,
+    savedEnvironmentRuntimeById,
+    tryDispatchNextQueuedFollowUp,
+  ]);
 
   useEffect(() => {
-    if (activeFollowUpQueue.length === 0) {
+    if (totalFollowUpQueueLength === 0) {
       return;
     }
     const intervalId = window.setInterval(() => {
       tryDispatchNextQueuedFollowUp("watchdog");
     }, FOLLOW_UP_QUEUE_WATCHDOG_INTERVAL_MS);
     return () => window.clearInterval(intervalId);
-  }, [activeFollowUpQueue.length, tryDispatchNextQueuedFollowUp]);
+  }, [totalFollowUpQueueLength, tryDispatchNextQueuedFollowUp]);
 
   const onInterrupt = async () => {
     const api = readEnvironmentApi(environmentId);
@@ -4560,6 +4814,7 @@ export default function ChatView(props: ChatViewProps) {
 
       try {
         await persistThreadSettingsForNextTurn({
+          thread: activeThread,
           threadId: threadIdForSend,
           createdAt: messageCreatedAt,
           modelSelection: ctxSelectedModelSelection,

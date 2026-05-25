@@ -6,6 +6,7 @@ import {
   type OrchestrationEvent,
   type OrchestrationShellSnapshot,
   type OrchestrationShellStreamEvent,
+  type OrchestrationThreadDetailSnapshot,
   type ServerConfig,
   ThreadId,
 } from "@cafecode/contracts";
@@ -121,6 +122,7 @@ const lastAppliedProjectionVersionByEnvironment = new Map<
     readonly updatedAt: string | null;
   }
 >();
+const lastAppliedThreadDetailSequenceByKey = new Map<string, number>();
 
 let activeService: EnvironmentServiceState | null = null;
 let needsProviderInvalidation = false;
@@ -292,6 +294,57 @@ function markAppliedProjectionEvent(environmentId: EnvironmentId, sequence: numb
     updatedAt: currentVersion?.updatedAt ?? null,
   });
 }
+
+function readLastAppliedThreadDetailSequence(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+): number | null {
+  return (
+    lastAppliedThreadDetailSequenceByKey.get(
+      getThreadDetailSubscriptionKey(environmentId, threadId),
+    ) ?? null
+  );
+}
+
+function shouldApplyThreadDetailSnapshot(input: {
+  readonly current: number | null;
+  readonly snapshot: Pick<OrchestrationThreadDetailSnapshot, "snapshotSequence">;
+}): boolean {
+  return input.current === null || input.snapshot.snapshotSequence > input.current;
+}
+
+function shouldApplyThreadDetailEvent(input: {
+  readonly current: number | null;
+  readonly sequence: number;
+}): boolean {
+  return input.current === null || input.sequence > input.current;
+}
+
+function markAppliedThreadDetailSequence(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  sequence: number,
+): void {
+  const key = getThreadDetailSubscriptionKey(environmentId, threadId);
+  const current = lastAppliedThreadDetailSequenceByKey.get(key);
+  if (current !== undefined && sequence <= current) {
+    return;
+  }
+  lastAppliedThreadDetailSequenceByKey.set(key, sequence);
+}
+
+function applyThreadDetailSnapshot(
+  entry: ThreadDetailSubscriptionEntry,
+  snapshot: OrchestrationThreadDetailSnapshot,
+): void {
+  const current = readLastAppliedThreadDetailSequence(entry.environmentId, entry.threadId);
+  if (!shouldApplyThreadDetailSnapshot({ current, snapshot })) {
+    return;
+  }
+
+  useStore.getState().syncServerThreadDetail(snapshot.thread, entry.environmentId);
+  markAppliedThreadDetailSequence(entry.environmentId, entry.threadId, snapshot.snapshotSequence);
+}
 function getThreadDetailSubscriptionKey(environmentId: EnvironmentId, threadId: ThreadId): string {
   return scopedThreadKey(scopeThreadRef(environmentId, threadId));
 }
@@ -373,7 +426,7 @@ function attachThreadDetailSubscription(entry: ThreadDetailSubscriptionEntry): b
     { threadId: entry.threadId },
     (item) => {
       if (item.kind === "snapshot") {
-        useStore.getState().syncServerThreadDetail(item.snapshot.thread, entry.environmentId);
+        applyThreadDetailSnapshot(entry, item.snapshot);
         return;
       }
       applyEnvironmentThreadDetailEvent(item.event, entry.environmentId);
@@ -1021,6 +1074,18 @@ export function applyEnvironmentThreadDetailEvent(
   event: OrchestrationEvent,
   environmentId: EnvironmentId,
 ) {
+  if (event.aggregateKind === "thread") {
+    const threadId = ThreadId.make(event.aggregateId);
+    const current = readLastAppliedThreadDetailSequence(environmentId, threadId);
+    if (!shouldApplyThreadDetailEvent({ current, sequence: event.sequence })) {
+      return;
+    }
+
+    applyRecoveredEventBatch([event], environmentId);
+    markAppliedThreadDetailSequence(environmentId, threadId, event.sequence);
+    return;
+  }
+
   applyRecoveredEventBatch([event], environmentId);
 }
 
@@ -1788,6 +1853,7 @@ export async function resetEnvironmentServiceForTests(): Promise<void> {
   lastBrowserHiddenAt = null;
   lastBrowserResumeReconnectAt = Number.NEGATIVE_INFINITY;
   lastAppliedProjectionVersionByEnvironment.clear();
+  lastAppliedThreadDetailSequenceByKey.clear();
   pendingSavedEnvironmentConnections.clear();
   for (const key of Array.from(threadDetailSubscriptions.keys())) {
     disposeThreadDetailSubscriptionByKey(key);

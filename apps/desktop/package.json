@@ -1,6 +1,6 @@
 {
   "name": "@cafecode/desktop",
-  "version": "0.0.30",
+  "version": "0.0.35",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "type": "module",
@@ -22,7 +22,7 @@
     "@cafecode/tailscale": "workspace:*",
     "@effect/platform-node": "catalog:",
     "effect": "catalog:",
-    "electron": "41.5.0",
+    "electron": "42.2.0",
     "electron-updater": "^6.6.2"
   },
   "devDependencies": {

@@ -88,6 +88,7 @@ Important files:
 - Distinguish every lifecycle phase explicitly: user requested, command accepted, provider session connecting, provider session ready, provider turn accepted, provider runtime started, first provider message/token/tool event, completion/interruption/failure, post-completion late event, and reconciliation.
 - Do not mark a turn as truly running merely because a send call returned. Some providers ACK a request before their runtime starts streaming. Track ACK and runtime-start as separate facts.
 - Terminal UI state must come from provider completion, interruption, failure, or a documented reconciliation path. If a provider sends content after a terminal event, preserve the content and emit diagnostics rather than silently corrupting the turn.
+- Provider runtime replay/backfill content for a completed turn is reconciliation data. Preserve any snapshot-only messages or activity, but do not reopen the thread session, mark the turn running, or restore `activeTurnId` from post-completion content/tool events.
 - Steer/follow-up behavior must respect active-turn invariants. Starting a new turn while one is starting or running is a bug unless it is explicitly queued or converted into a provider-supported steer operation.
 - Pending approvals and user-input callbacks are provider-runtime state. After restart or daemon handoff, stale callback IDs may be invalid; convert those failures into clear lifecycle events and user-visible recovery guidance.
 - Reconciliation after restart must prefer durable provider/session state and command ledgers over UI assumptions. Never automatically resend a user prompt after a crash unless the design cryptographically or durably proves the provider never received it.
@@ -181,6 +182,7 @@ If Claude behavior is unclear, check the official Claude Agent SDK docs, the ins
 - The renderer should display backend/provider truth and should not synthesize terminal, running, or active-turn state that can conflict with orchestration projections.
 - Scroll-follow behavior should be tolerant of small gaps from the bottom and must not jump to the top when steer messages, late messages, or terminal markers arrive.
 - Message timelines must handle late provider events after completion without duplicating terminal banners or losing streamed content.
+- Per-thread detail subscriptions must apply snapshots and events monotonically by orchestration sequence. Events at or below the detail snapshot sequence are stale for that subscription and must not regress focused-thread session or turn state.
 
 ## Reference Sources
 

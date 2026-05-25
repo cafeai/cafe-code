@@ -742,10 +742,59 @@ export interface ComposerPromptEditorHandle {
   focus: () => void;
   focusAt: (cursor: number) => void;
   focusAtEnd: () => void;
+  readDebugState: () => ComposerPromptEditorDebugState;
   readSnapshot: () => {
     value: string;
     cursor: number;
     expandedCursor: number;
+  };
+}
+
+interface DebugElementSummary {
+  readonly tagName: string;
+  readonly role: string | null;
+  readonly ariaLabel: string | null;
+  readonly testId: string | null;
+  readonly contentEditable: string | null;
+  readonly isContentEditable: boolean;
+  readonly disabled: boolean | null;
+  readonly connected: boolean;
+}
+
+export interface ComposerPromptEditorDebugState {
+  readonly editorEditable: boolean;
+  readonly rootElement: DebugElementSummary | null;
+  readonly activeElement: DebugElementSummary | null;
+  readonly rootIsActiveElement: boolean;
+  readonly rootContainsActiveElement: boolean;
+  readonly documentHasFocus: boolean;
+  readonly visibilityState: DocumentVisibilityState;
+  readonly domSelection: {
+    readonly rangeCount: number;
+    readonly anchorInsideRoot: boolean;
+    readonly focusInsideRoot: boolean;
+    readonly isCollapsed: boolean | null;
+  } | null;
+}
+
+function summarizeDebugElement(element: Element | null): DebugElementSummary | null {
+  if (!(element instanceof HTMLElement)) {
+    return null;
+  }
+  return {
+    tagName: element.tagName.toLowerCase(),
+    role: element.getAttribute("role"),
+    ariaLabel: element.getAttribute("aria-label"),
+    testId: element.getAttribute("data-testid"),
+    contentEditable: element.getAttribute("contenteditable"),
+    isContentEditable: element.isContentEditable,
+    disabled:
+      element instanceof HTMLButtonElement ||
+      element instanceof HTMLInputElement ||
+      element instanceof HTMLTextAreaElement
+        ? element.disabled
+        : null,
+    connected: element.isConnected,
   };
 }
 
@@ -754,6 +803,7 @@ interface ComposerPromptEditorProps {
   cursor: number;
   skills: ReadonlyArray<ServerProviderSkill>;
   disabled: boolean;
+  focusRequestRevision: number;
   placeholder: string;
   className?: string;
   onChange: (
@@ -1243,6 +1293,7 @@ function ComposerPromptEditorInner({
   cursor,
   skills,
   disabled,
+  focusRequestRevision,
   placeholder,
   className,
   onChange,
@@ -1256,6 +1307,7 @@ function ComposerPromptEditorInner({
   const skillsSignature = skillSignature(skills);
   const skillsSignatureRef = useRef(skillsSignature);
   const skillMetadataRef = useRef(skillMetadataByName(skills));
+  const lastHandledFocusRequestRevisionRef = useRef(focusRequestRevision);
   const snapshotRef = useRef({
     value,
     cursor: initialCursor,
@@ -1270,10 +1322,6 @@ function ComposerPromptEditorInner({
   useLayoutEffect(() => {
     skillMetadataRef.current = skillMetadataByName(skills);
   }, [skills]);
-
-  useEffect(() => {
-    editor.setEditable(!disabled);
-  }, [disabled, editor]);
 
   useLayoutEffect(() => {
     const normalizedCursor = clampCollapsedComposerCursor(value, cursor);
@@ -1339,6 +1387,17 @@ function ComposerPromptEditorInner({
     [editor],
   );
 
+  useLayoutEffect(() => {
+    editor.setEditable(!disabled);
+    if (disabled || lastHandledFocusRequestRevisionRef.current === focusRequestRevision) {
+      return;
+    }
+    lastHandledFocusRequestRevisionRef.current = focusRequestRevision;
+    focusAt(
+      collapseExpandedComposerCursor(snapshotRef.current.value, snapshotRef.current.value.length),
+    );
+  }, [disabled, editor, focusAt, focusRequestRevision]);
+
   const readSnapshot = useCallback((): {
     value: string;
     cursor: number;
@@ -1370,6 +1429,44 @@ function ComposerPromptEditorInner({
     return snapshot;
   }, [editor]);
 
+  const readDebugState = useCallback((): ComposerPromptEditorDebugState => {
+    const rootElement = editor.getRootElement();
+    const activeElement = document.activeElement;
+    const selection = document.getSelection();
+    const selectionAnchorNode = selection?.anchorNode ?? null;
+    const selectionFocusNode = selection?.focusNode ?? null;
+    const rootContainsSelectionAnchor =
+      rootElement !== null &&
+      selectionAnchorNode !== null &&
+      rootElement.contains(selectionAnchorNode);
+    const rootContainsSelectionFocus =
+      rootElement !== null &&
+      selectionFocusNode !== null &&
+      rootElement.contains(selectionFocusNode);
+
+    return {
+      editorEditable: editor.isEditable(),
+      rootElement: summarizeDebugElement(rootElement),
+      activeElement: summarizeDebugElement(activeElement),
+      rootIsActiveElement: rootElement !== null && activeElement === rootElement,
+      rootContainsActiveElement:
+        rootElement !== null &&
+        activeElement instanceof Node &&
+        rootElement.contains(activeElement),
+      documentHasFocus: document.hasFocus(),
+      visibilityState: document.visibilityState,
+      domSelection:
+        selection === null
+          ? null
+          : {
+              rangeCount: selection.rangeCount,
+              anchorInsideRoot: rootContainsSelectionAnchor,
+              focusInsideRoot: rootContainsSelectionFocus,
+              isCollapsed: selection.rangeCount > 0 ? selection.isCollapsed : null,
+            },
+    };
+  }, [editor]);
+
   useImperativeHandle(
     editorRef,
     () => ({
@@ -1385,9 +1482,10 @@ function ComposerPromptEditorInner({
           ),
         );
       },
+      readDebugState,
       readSnapshot,
     }),
-    [focusAt, readSnapshot],
+    [focusAt, readDebugState, readSnapshot],
   );
 
   const handleEditorChange = useCallback((editorState: EditorState) => {
@@ -1467,6 +1565,7 @@ export function ComposerPromptEditor({
   cursor,
   skills,
   disabled,
+  focusRequestRevision,
   placeholder,
   className,
   onChange,
@@ -1498,6 +1597,7 @@ export function ComposerPromptEditor({
         cursor={cursor}
         skills={skills}
         disabled={disabled}
+        focusRequestRevision={focusRequestRevision}
         placeholder={placeholder}
         onChange={onChange}
         onPaste={onPaste}

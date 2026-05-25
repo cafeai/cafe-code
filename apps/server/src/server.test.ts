@@ -20,6 +20,7 @@ import {
   ProviderInstanceId,
   ResolvedKeybindingRule,
   ThreadId,
+  TurnId,
   WS_METHODS,
   WsRpcGroup,
   EditorId,
@@ -2976,6 +2977,109 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
       assert.deepEqual(replayResult, []);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("filters thread subscription events already covered by the snapshot", () =>
+    Effect.gen(function* () {
+      const now = "2026-01-01T00:00:00.000Z";
+      const threadId = ThreadId.make("thread-1");
+      const turnId = TurnId.make("turn-1");
+      const thread = {
+        id: threadId,
+        projectId: ProjectId.make("project-a"),
+        title: "Thread A",
+        modelSelection: defaultModelSelection,
+        interactionMode: "default" as const,
+        runtimeMode: "full-access" as const,
+        branch: null,
+        worktreePath: null,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null,
+        latestTurn: {
+          turnId,
+          state: "completed" as const,
+          requestedAt: now,
+          startedAt: now,
+          completedAt: now,
+          assistantMessageId: null,
+        },
+        messages: [],
+        session: {
+          threadId,
+          status: "ready" as const,
+          providerName: "codex",
+          runtimeMode: "full-access" as const,
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        activities: [],
+        proposedPlans: [],
+        checkpoints: [],
+        deletedAt: null,
+      };
+      const makeSessionSetEvent = (
+        sequence: number,
+        status: "ready" | "running",
+      ): OrchestrationEvent => ({
+        sequence,
+        eventId: EventId.make(`event-thread-session-${sequence}`),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: now,
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "thread.session-set",
+        payload: {
+          threadId,
+          session: {
+            threadId,
+            status,
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: status === "running" ? turnId : null,
+            lastError: null,
+            updatedAt: now,
+          },
+        },
+      });
+
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            getThreadDetailById: (inputThreadId) =>
+              Effect.succeed(inputThreadId === threadId ? Option.some(thread) : Option.none()),
+            getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 10 }),
+          },
+          orchestrationEngine: {
+            streamDomainEvents: Stream.make(
+              makeSessionSetEvent(10, "running"),
+              makeSessionSetEvent(11, "ready"),
+            ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const items = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeThread]({ threadId }).pipe(
+            Stream.runCollect,
+            Effect.map((chunk) => Array.from(chunk)),
+          ),
+        ),
+      );
+
+      assert.equal(items.length, 2);
+      assert.equal(items[0]?.kind, "snapshot");
+      assert.equal(items[1]?.kind, "event");
+      if (items[1]?.kind === "event") {
+        assert.equal(items[1].event.sequence, 11);
+      }
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

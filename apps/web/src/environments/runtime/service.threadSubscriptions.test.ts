@@ -1,11 +1,15 @@
 import { QueryClient } from "@tanstack/react-query";
 import {
   EnvironmentId,
+  EventId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
   TurnId,
+  type OrchestrationEvent,
   type OrchestrationShellSnapshot,
+  type OrchestrationThread,
+  type OrchestrationThreadStreamItem,
 } from "@cafecode/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -147,6 +151,98 @@ function makeThreadShellSnapshot(params: {
   };
 }
 
+function makeThreadDetail(params: {
+  readonly threadId: ThreadId;
+  readonly sessionStatus: "ready" | "running";
+}): OrchestrationThread {
+  const projectId = ProjectId.make("project-1");
+  const turnId = TurnId.make("turn-1");
+  const now = "2026-04-13T00:00:00.000Z";
+
+  return {
+    id: params.threadId,
+    projectId,
+    title: "Thread",
+    modelSelection: {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5-codex",
+    },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    latestTurn:
+      params.sessionStatus === "running"
+        ? {
+            turnId,
+            state: "running",
+            requestedAt: now,
+            startedAt: "2026-04-13T00:00:01.000Z",
+            completedAt: null,
+            assistantMessageId: null,
+          }
+        : {
+            turnId,
+            state: "completed",
+            requestedAt: now,
+            startedAt: "2026-04-13T00:00:01.000Z",
+            completedAt: "2026-04-13T00:00:02.000Z",
+            assistantMessageId: null,
+          },
+    createdAt: now,
+    updatedAt: now,
+    archivedAt: null,
+    deletedAt: null,
+    session: {
+      threadId: params.threadId,
+      status: params.sessionStatus,
+      providerName: "codex",
+      runtimeMode: "full-access",
+      activeTurnId: params.sessionStatus === "running" ? turnId : null,
+      lastError: null,
+      updatedAt: now,
+    },
+    messages: [],
+    activities: [],
+    proposedPlans: [],
+    checkpoints: [],
+  };
+}
+
+function makeThreadSessionSetEvent(params: {
+  readonly threadId: ThreadId;
+  readonly sequence: number;
+  readonly sessionStatus: "ready" | "running";
+}): OrchestrationEvent {
+  const turnId = TurnId.make("turn-1");
+  const now = "2026-04-13T00:00:00.000Z";
+
+  return {
+    sequence: params.sequence,
+    eventId: EventId.make(`event-thread-session-${params.sequence}`),
+    aggregateKind: "thread",
+    aggregateId: params.threadId,
+    occurredAt: now,
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    type: "thread.session-set",
+    payload: {
+      threadId: params.threadId,
+      session: {
+        threadId: params.threadId,
+        status: params.sessionStatus,
+        providerName: "codex",
+        runtimeMode: "full-access",
+        activeTurnId: params.sessionStatus === "running" ? turnId : null,
+        lastError: null,
+        updatedAt: now,
+      },
+    },
+  };
+}
+
 describe("retainThreadDetailSubscription", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -217,7 +313,9 @@ describe("retainThreadDetailSubscription", () => {
 
   afterEach(async () => {
     const { resetEnvironmentServiceForTests } = await import("./service");
+    const { useStore } = await import("../../store");
     await resetEnvironmentServiceForTests();
+    useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
@@ -249,6 +347,56 @@ describe("retainThreadDetailSubscription", () => {
     await vi.advanceTimersByTimeAsync(28 * 60 * 1000);
     expect(mockThreadUnsubscribe).toHaveBeenCalledTimes(1);
 
+    stop();
+    await resetEnvironmentServiceForTests();
+  });
+
+  it("ignores stale thread detail events already covered by the snapshot", async () => {
+    const {
+      retainThreadDetailSubscription,
+      startEnvironmentConnectionService,
+      resetEnvironmentServiceForTests,
+    } = await import("./service");
+    const { useStore } = await import("../../store");
+
+    const stop = startEnvironmentConnectionService(new QueryClient());
+    const environmentId = EnvironmentId.make("env-1");
+    const threadId = ThreadId.make("thread-stale-detail");
+
+    const release = retainThreadDetailSubscription(environmentId, threadId);
+    const callback = mockSubscribeThread.mock.calls[0]?.[1] as
+      | ((item: OrchestrationThreadStreamItem) => void)
+      | undefined;
+    expect(callback).toBeDefined();
+    if (!callback) {
+      throw new Error("Expected thread subscription callback.");
+    }
+
+    callback({
+      kind: "snapshot",
+      snapshot: {
+        snapshotSequence: 20,
+        thread: makeThreadDetail({ threadId, sessionStatus: "ready" }),
+      },
+    });
+    callback({
+      kind: "event",
+      event: makeThreadSessionSetEvent({
+        threadId,
+        sequence: 19,
+        sessionStatus: "running",
+      }),
+    });
+
+    const session =
+      useStore.getState().environmentStateById[environmentId]?.threadSessionById[threadId];
+    const turnState =
+      useStore.getState().environmentStateById[environmentId]?.threadTurnStateById[threadId];
+    expect(session?.status).toBe("ready");
+    expect(session?.activeTurnId).toBeUndefined();
+    expect(turnState?.latestTurn?.state).toBe("completed");
+
+    release();
     stop();
     await resetEnvironmentServiceForTests();
   });

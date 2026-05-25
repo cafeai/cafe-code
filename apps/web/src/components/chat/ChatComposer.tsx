@@ -325,6 +325,18 @@ export interface ChatComposerHandle {
   openModelPicker: () => void;
   toggleModelPicker: () => void;
   isModelPickerOpen: () => boolean;
+  readDebugState: () => {
+    activeThreadId: ThreadId | null;
+    phase: SessionPhase;
+    composerEditorDisabled: boolean;
+    composerFocusRequestRevision: number;
+    isComposerFocused: boolean;
+    isMobileViewport: boolean;
+    isComposerCollapsedMobile: boolean;
+    isSendBusy: boolean;
+    isConnecting: boolean;
+    editor: ReturnType<ComposerPromptEditorHandle["readDebugState"]> | null;
+  };
   readSnapshot: () => {
     value: string;
     cursor: number;
@@ -586,8 +598,8 @@ export interface ChatComposerProps {
   scheduleStickToBottom: () => void;
 
   // Callbacks
-  onSend: (e?: { preventDefault: () => void }) => void;
-  onSteer: (e?: { preventDefault: () => void }) => void;
+  onSend: (e?: { preventDefault: () => void }) => void | Promise<void>;
+  onSteer: (e?: { preventDefault: () => void }) => void | Promise<void>;
   onToggleFollowUpQueueItem: (itemId: string) => void;
   onActivateFollowUpQueueItem: (itemId: string) => void;
   onRemoveFollowUpQueueItem: (itemId: string) => void;
@@ -926,6 +938,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isComposerPrimaryActionsCompact, setIsComposerPrimaryActionsCompact] = useState(false);
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
   const [isComposerFocused, setIsComposerFocused] = useState(false);
+  const [composerFocusRequestRevision, setComposerFocusRequestRevision] = useState(0);
   const isMobileViewport = useMediaQuery("max-sm");
   const isComposerCollapsedMobile = isMobileViewport && !isComposerFocused;
 
@@ -1201,6 +1214,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     : "Send message";
   const showMobilePendingAnswerActions =
     isMobileViewport && !isComposerCollapsedMobile && pendingPrimaryAction !== null;
+  const composerEditorDisabled =
+    isSendBusy ||
+    isConnecting ||
+    isComposerApprovalState ||
+    (environmentUnavailable !== null && activePendingProgress === null);
+  const previousComposerEditorDisabledRef = useRef(composerEditorDisabled);
 
   // ------------------------------------------------------------------
   // Prompt helpers
@@ -1689,55 +1708,40 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [composerHighlightedItemId, composerMenuItems],
   );
 
-  const blurMobileComposerAfterSend = useCallback(() => {
-    if (!isMobileViewport) return;
+  const requestComposerEditorFocus = useCallback(() => {
     if (composerBlurFrameRef.current !== null) {
       window.cancelAnimationFrame(composerBlurFrameRef.current);
       composerBlurFrameRef.current = null;
     }
-    const activeElement = document.activeElement;
-    if (activeElement instanceof HTMLElement) {
-      activeElement.blur();
-    }
-    setIsComposerFocused(false);
-  }, [isMobileViewport]);
-
-  const shouldBlurMobileComposerOnSubmit = useCallback(() => {
-    if (!isMobileViewport) return false;
-    if (isSendBusy || isConnecting || phase === "running") return false;
-    if (activePendingProgress) {
-      return activePendingProgress.isLastQuestion && Boolean(activePendingResolvedAnswers);
-    }
-    return showPlanFollowUpPrompt || composerSendState.hasSendableContent;
-  }, [
-    activePendingProgress,
-    activePendingResolvedAnswers,
-    composerSendState.hasSendableContent,
-    isConnecting,
-    isMobileViewport,
-    isSendBusy,
-    phase,
-    showPlanFollowUpPrompt,
-  ]);
+    setIsComposerFocused(true);
+    setComposerFocusRequestRevision((revision) => revision + 1);
+  }, []);
 
   const submitComposer = useCallback(
     (event?: { preventDefault: () => void }) => {
-      onSend(event);
-      if (shouldBlurMobileComposerOnSubmit()) {
-        blurMobileComposerAfterSend();
-      }
+      void Promise.resolve(onSend(event)).finally(() => {
+        requestComposerEditorFocus();
+      });
     },
-    [blurMobileComposerAfterSend, onSend, shouldBlurMobileComposerOnSubmit],
+    [onSend, requestComposerEditorFocus],
   );
   const steerComposer = useCallback(
     (event?: { preventDefault: () => void }) => {
-      onSteer(event);
-      if (shouldBlurMobileComposerOnSubmit()) {
-        blurMobileComposerAfterSend();
-      }
+      void Promise.resolve(onSteer(event)).finally(() => {
+        requestComposerEditorFocus();
+      });
     },
-    [blurMobileComposerAfterSend, onSteer, shouldBlurMobileComposerOnSubmit],
+    [onSteer, requestComposerEditorFocus],
   );
+
+  useEffect(() => {
+    const wasDisabled = previousComposerEditorDisabledRef.current;
+    previousComposerEditorDisabledRef.current = composerEditorDisabled;
+    if (!wasDisabled || composerEditorDisabled || activeThreadId === null) {
+      return;
+    }
+    requestComposerEditorFocus();
+  }, [activeThreadId, composerEditorDisabled, requestComposerEditorFocus]);
   const expandMobileComposer = useCallback(() => {
     if (composerBlurFrameRef.current !== null) {
       window.cancelAnimationFrame(composerBlurFrameRef.current);
@@ -1978,6 +1982,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         setIsComposerModelPickerOpen((open) => !open);
       },
       isModelPickerOpen: () => isComposerModelPickerOpen,
+      readDebugState: () => ({
+        activeThreadId,
+        phase,
+        composerEditorDisabled,
+        composerFocusRequestRevision,
+        isComposerFocused,
+        isMobileViewport,
+        isComposerCollapsedMobile,
+        isSendBusy,
+        isConnecting,
+        editor: composerEditorRef.current?.readDebugState() ?? null,
+      }),
       readSnapshot: () => {
         return readComposerSnapshot();
       },
@@ -2013,7 +2029,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [
       promptRef,
       composerImagesRef,
+      activeThreadId,
+      composerEditorDisabled,
+      composerFocusRequestRevision,
       isComposerModelPickerOpen,
+      isComposerCollapsedMobile,
+      isComposerFocused,
+      isConnecting,
+      isMobileViewport,
+      isSendBusy,
+      phase,
       readComposerSnapshot,
       selectedModel,
       selectedModelOptionsForDispatch,
@@ -2355,6 +2380,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 }
                 cursor={composerCursor}
                 skills={selectedProviderStatus?.skills ?? []}
+                focusRequestRevision={composerFocusRequestRevision}
                 {...(showMobilePendingAnswerActions ? { className: "max-sm:pb-11" } : {})}
                 onChange={onPromptChange}
                 onCommandKeyDown={onComposerCommandKey}
@@ -2376,12 +2402,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                             ? "Ask for follow-up changes or attach images"
                             : "Ask anything, @tag files/folders, $use skills, or / for commands"
                 }
-                disabled={
-                  isSendBusy ||
-                  isConnecting ||
-                  isComposerApprovalState ||
-                  (environmentUnavailable !== null && activePendingProgress === null)
-                }
+                disabled={composerEditorDisabled}
               />
               {showMobilePendingAnswerActions ? (
                 <div
@@ -2507,7 +2528,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   isPreparingWorktree={isPreparingWorktree}
                   hasSendableContent={composerSendState.hasSendableContent}
                   pendingStatusLabel={composerPendingStatusLabel}
-                  preserveComposerFocusOnPointerDown={isMobileViewport}
+                  preserveComposerFocusOnPointerDown
                   onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                   onInterrupt={handleInterruptPrimaryAction}
                   onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}

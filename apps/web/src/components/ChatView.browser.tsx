@@ -2774,6 +2774,168 @@ describe("ChatView timeline estimator parity (full app)", () => {
     }
   });
 
+  it("restores composer focus after a send completes", async () => {
+    let resolveDispatch!: (value: { sequence: number }) => void;
+    let dispatchResolved = false;
+    const dispatchPromise = new Promise<{ sequence: number }>((resolve) => {
+      resolveDispatch = resolve;
+    });
+
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-focus-after-send" as MessageId,
+        targetText: "focus after send target",
+      }),
+      resolveRpc: (body) => {
+        if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
+          return dispatchPromise;
+        }
+        return undefined;
+      },
+    });
+
+    try {
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep the composer focused");
+      await waitForLayout();
+
+      const editor = await waitForComposerEditor();
+      editor.focus();
+      await waitForLayout();
+      expect(document.activeElement).toBe(editor);
+
+      const sendButton = await waitForSendButton();
+      expect(sendButton.disabled).toBe(false);
+      sendButton.click();
+
+      await vi.waitFor(
+        () => {
+          expect(
+            wsRequests.some((request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand),
+          ).toBe(true);
+          expect(document.querySelector('button[aria-label="Sending"]')).toBeTruthy();
+          const currentEditor = document.querySelector<HTMLElement>(
+            '[data-testid="composer-editor"]',
+          );
+          expect(currentEditor?.getAttribute("contenteditable")).toBe("false");
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+
+      const acknowledgedTurnId = "turn-focus-after-send" as TurnId;
+      const baseThread = fixture.snapshot.threads[0]!;
+      const baseSession = baseThread.session!;
+      const acknowledgedThread: OrchestrationReadModel["threads"][number] = {
+        ...baseThread,
+        latestTurn: {
+          turnId: acknowledgedTurnId,
+          state: "running" as const,
+          requestedAt: isoAt(1_000),
+          startedAt: isoAt(1_001),
+          completedAt: null,
+          assistantMessageId: null,
+        },
+        session: {
+          ...baseSession,
+          status: "running" as const,
+          activeTurnId: acknowledgedTurnId,
+          updatedAt: isoAt(1_001),
+        },
+        updatedAt: isoAt(1_001),
+      };
+      fixture.snapshot = {
+        ...fixture.snapshot,
+        snapshotSequence: fixture.snapshot.snapshotSequence + 1,
+        threads: [acknowledgedThread],
+      };
+      dispatchResolved = true;
+      resolveDispatch({ sequence: fixture.snapshot.snapshotSequence });
+      rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+        kind: "snapshot",
+        snapshot: {
+          snapshotSequence: fixture.snapshot.snapshotSequence,
+          thread: acknowledgedThread,
+        },
+      });
+
+      await vi.waitFor(
+        () => {
+          const currentEditor = document.querySelector<HTMLElement>(
+            '[data-testid="composer-editor"]',
+          );
+          expect(currentEditor?.getAttribute("contenteditable")).toBe("true");
+          expect(document.activeElement).toBe(currentEditor);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      if (!dispatchResolved) {
+        resolveDispatch({ sequence: fixture.snapshot.snapshotSequence + 1 });
+      }
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps compact mobile composer focused after a send completes", async () => {
+    const mounted = await mountChatView({
+      viewport: COMPACT_FOOTER_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-mobile-focus-after-send" as MessageId,
+        targetText: "mobile focus after send target",
+      }),
+      resolveRpc: (body) => {
+        if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
+          return {
+            sequence: fixture.snapshot.snapshotSequence + 1,
+          };
+        }
+        return undefined;
+      },
+    });
+
+    try {
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep mobile composer focused");
+      await waitForLayout();
+
+      const expandButton = await waitForElement(
+        () => document.querySelector<HTMLButtonElement>('button[aria-label="Expand composer"]'),
+        "Unable to find compact composer expand button.",
+      );
+      expandButton.click();
+
+      await vi.waitFor(
+        () => {
+          const currentEditor = document.querySelector<HTMLElement>(
+            '[data-testid="composer-editor"]',
+          );
+          expect(currentEditor?.getAttribute("contenteditable")).toBe("true");
+          expect(document.activeElement).toBe(currentEditor);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+
+      const sendButton = await waitForSendButton();
+      expect(sendButton.disabled).toBe(false);
+      sendButton.click();
+
+      await vi.waitFor(
+        () => {
+          expect(
+            wsRequests.some((request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand),
+          ).toBe(true);
+          const currentEditor = document.querySelector<HTMLElement>(
+            '[data-testid="composer-editor"]',
+          );
+          expect(currentEditor?.getAttribute("contenteditable")).toBe("true");
+          expect(document.activeElement).toBe(currentEditor);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("locks the composer while the provider session is starting", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,

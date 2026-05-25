@@ -361,6 +361,73 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.lastError).toBe("turn failed");
   });
 
+  it("does not reopen a completed turn when replayed content arrives late", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const turnId = asTurnId("turn-late-replay");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-late-replay-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: now,
+      turnId,
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "running" && thread.session?.activeTurnId === turnId,
+    );
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-late-replay-turn-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      turnId,
+      payload: {
+        state: "completed",
+      },
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "ready" &&
+        thread.session?.activeTurnId === null &&
+        thread.latestTurn?.state === "completed",
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-late-replay-delta"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("item-late-replay"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "late replay text",
+      },
+    });
+
+    await harness.drain();
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === asThreadId("thread-1"));
+
+    expect(thread?.session?.status).toBe("ready");
+    expect(thread?.session?.activeTurnId).toBeNull();
+    expect(thread?.latestTurn?.state).toBe("completed");
+    expect(
+      thread?.messages.some(
+        (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-late-replay",
+      ),
+    ).toBe(true);
+  });
+
   it("clears active turn state when Codex reports an aborted turn", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -759,6 +826,111 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(message?.text).toBe("hello world");
     expect(message?.streaming).toBe(false);
+  });
+
+  it("deduplicates replayed streaming provider runtime events", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const turnId = asTurnId("turn-replayed-runtime-event");
+    const itemId = asItemId("item-replayed-runtime-event");
+    const deltaEvent = {
+      type: "content.delta",
+      eventId: asEventId("evt-replayed-delta"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId,
+      payload: {
+        streamKind: "assistant_text",
+        delta: "hello",
+      },
+    };
+    const completedEvent = {
+      type: "item.completed",
+      eventId: asEventId("evt-replayed-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId,
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+      },
+    };
+
+    harness.emit(deltaEvent);
+    harness.emit(deltaEvent);
+    harness.emit(deltaEvent);
+    harness.emit(completedEvent);
+    harness.emit(completedEvent);
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-replayed-runtime-event" && !message.streaming,
+      ),
+    );
+    const matchingMessages = thread.messages.filter(
+      (entry: ProviderRuntimeTestMessage) => entry.id === "assistant:item-replayed-runtime-event",
+    );
+
+    expect(matchingMessages).toHaveLength(1);
+    expect(matchingMessages[0]?.text).toBe("hello");
+    expect(matchingMessages[0]?.streaming).toBe(false);
+  });
+
+  it("deduplicates replayed buffered assistant deltas before finalization", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: false } });
+    const now = "2026-01-01T00:00:00.000Z";
+    const turnId = asTurnId("turn-buffered-replayed-runtime-event");
+    const itemId = asItemId("item-buffered-replayed-runtime-event");
+    const deltaEvent = {
+      type: "content.delta",
+      eventId: asEventId("evt-buffered-replayed-delta"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId,
+      payload: {
+        streamKind: "assistant_text",
+        delta: "buffered hello",
+      },
+    };
+
+    harness.emit(deltaEvent);
+    harness.emit(deltaEvent);
+    harness.emit(deltaEvent);
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-buffered-replayed-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId,
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-buffered-replayed-runtime-event" && !message.streaming,
+      ),
+    );
+    const matchingMessages = thread.messages.filter(
+      (entry: ProviderRuntimeTestMessage) =>
+        entry.id === "assistant:item-buffered-replayed-runtime-event",
+    );
+
+    expect(matchingMessages).toHaveLength(1);
+    expect(matchingMessages[0]?.text).toBe("buffered hello");
+    expect(matchingMessages[0]?.streaming).toBe(false);
   });
 
   it("uses assistant item completion detail when no assistant deltas were streamed", async () => {
@@ -2595,7 +2767,7 @@ describe("ProviderRuntimeIngestion", () => {
     expect(stillRunning.latestTurn?.completedAt).toBeNull();
   });
 
-  it("reopens a completed latest turn when same-turn provider work continues", async () => {
+  it("preserves completed latest turn state when same-turn provider content arrives late", async () => {
     const harness = await createHarness();
     const turnId = asTurnId("turn-provider-work-after-completed");
 
@@ -2642,18 +2814,20 @@ describe("ProviderRuntimeIngestion", () => {
       },
     });
 
-    const reopened = await waitForThread(
-      harness.readModel,
-      (thread) =>
-        thread.latestTurn?.turnId === turnId &&
-        thread.latestTurn.state === "running" &&
-        thread.latestTurn.completedAt === null &&
-        thread.session?.status === "running" &&
-        thread.session.activeTurnId === turnId,
-    );
+    await harness.drain();
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === asThreadId("thread-1"));
 
-    expect(reopened.latestTurn?.state).toBe("running");
-    expect(reopened.session?.status).toBe("running");
+    expect(thread?.latestTurn?.turnId).toBe(turnId);
+    expect(thread?.latestTurn?.state).toBe("completed");
+    expect(thread?.latestTurn?.completedAt).not.toBeNull();
+    expect(thread?.session?.status).toBe("ready");
+    expect(thread?.session?.activeTurnId).toBeNull();
+    expect(
+      thread?.messages.some(
+        (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-after-completed",
+      ),
+    ).toBe(true);
   });
 
   it("reopens active turn state when provider content arrives after a stale idle transition", async () => {

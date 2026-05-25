@@ -5,10 +5,12 @@ import {
   canExpandQueuedFollowUpText,
   decideQueuedFollowUpAction,
   decideFollowUpDelivery,
+  hasQueuedFollowUpDispatchBeenObserved,
   previewQueuedFollowUpText,
   queuedFollowUpActionLabel,
   queuedFollowUpActionTitle,
   rekeyQueuedFollowUpsForActiveThread,
+  selectQueuedFollowUpDispatchCandidate,
 } from "./followUpQueue";
 
 describe("followUpQueue", () => {
@@ -149,6 +151,103 @@ describe("followUpQueue", () => {
         isConnecting: false,
         isEnvironmentUnavailable: false,
         isDispatchInFlight: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("selects a dispatchable queued follow-up from a background thread", () => {
+    const queues: Record<string, TestQueuedFollowUp[]> = {
+      active: [
+        {
+          id: "blocked-active",
+          threadId: "active",
+          blockedReason: "still running",
+        },
+      ],
+      background: [
+        {
+          id: "ready-background",
+          threadId: "background",
+          blockedReason: null,
+        },
+      ],
+    };
+
+    const candidate = selectQueuedFollowUpDispatchCandidate<string, TestQueuedFollowUp>({
+      queuesByThreadId: queues,
+      preferredThreadId: "active",
+      canStart: ({ item }) => item.blockedReason === null,
+    });
+
+    expect(candidate).toEqual({
+      threadId: "background",
+      item: queues.background?.[0],
+      queueLength: 1,
+    });
+  });
+
+  it("prefers the active thread queue when it can dispatch", () => {
+    const queues: Record<string, TestQueuedFollowUp[]> = {
+      background: [
+        {
+          id: "ready-background",
+          threadId: "background",
+          blockedReason: null,
+        },
+      ],
+      active: [
+        {
+          id: "ready-active",
+          threadId: "active",
+          blockedReason: null,
+        },
+      ],
+    };
+
+    const candidate = selectQueuedFollowUpDispatchCandidate<string, TestQueuedFollowUp>({
+      queuesByThreadId: queues,
+      preferredThreadId: "active",
+      canStart: ({ item }) => item.blockedReason === null,
+    });
+
+    expect(candidate?.threadId).toBe("active");
+    expect(candidate?.item.id).toBe("ready-active");
+  });
+
+  it("detects when a queued turn start is reflected by thread state", () => {
+    expect(
+      hasQueuedFollowUpDispatchBeenObserved({
+        messageId: "msg-queued",
+        dispatchedAt: "2026-05-25T05:00:00.000Z",
+        thread: {
+          messages: [{ id: "msg-queued" }],
+          latestTurn: null,
+          session: null,
+        },
+      }),
+    ).toBe(true);
+
+    expect(
+      hasQueuedFollowUpDispatchBeenObserved({
+        messageId: "msg-queued",
+        dispatchedAt: "2026-05-25T05:00:00.000Z",
+        thread: {
+          messages: [],
+          latestTurn: { requestedAt: "2026-05-25T05:00:00.001Z" },
+          session: null,
+        },
+      }),
+    ).toBe(true);
+
+    expect(
+      hasQueuedFollowUpDispatchBeenObserved({
+        messageId: "msg-queued",
+        dispatchedAt: "2026-05-25T05:00:00.000Z",
+        thread: {
+          messages: [],
+          latestTurn: { requestedAt: "2026-05-25T04:59:59.999Z" },
+          session: { activeTurnId: null, updatedAt: "2026-05-25T05:00:01.000Z" },
+        },
       }),
     ).toBe(false);
   });

@@ -38,6 +38,87 @@ export function canStartQueuedFollowUpTurn(input: QueuedFollowUpStartInput): boo
   );
 }
 
+export interface QueuedFollowUpDispatchCandidateInput<
+  ThreadKey extends string,
+  Item extends { readonly blockedReason: string | null },
+> {
+  queuesByThreadId: Record<string, readonly Item[]>;
+  preferredThreadId: ThreadKey | null;
+  canStart: (input: { threadId: ThreadKey; item: Item; queueLength: number }) => boolean;
+}
+
+export function selectQueuedFollowUpDispatchCandidate<
+  ThreadKey extends string,
+  Item extends { readonly blockedReason: string | null },
+>(
+  input: QueuedFollowUpDispatchCandidateInput<ThreadKey, Item>,
+): {
+  threadId: ThreadKey;
+  item: Item;
+  queueLength: number;
+} | null {
+  const orderedThreadIds: ThreadKey[] = [];
+  const seen = new Set<string>();
+  const pushThreadId = (threadId: string | null | undefined) => {
+    if (!threadId || seen.has(threadId)) return;
+    seen.add(threadId);
+    orderedThreadIds.push(threadId as ThreadKey);
+  };
+
+  pushThreadId(input.preferredThreadId);
+  for (const [threadId, items] of Object.entries(input.queuesByThreadId)) {
+    if (items.length > 0) {
+      pushThreadId(threadId);
+    }
+  }
+
+  for (const threadId of orderedThreadIds) {
+    const items = input.queuesByThreadId[threadId] ?? [];
+    const item = items[0];
+    if (!item) continue;
+    if (input.canStart({ threadId, item, queueLength: items.length })) {
+      return { threadId, item, queueLength: items.length };
+    }
+  }
+
+  return null;
+}
+
+export interface QueuedFollowUpDispatchObservationInput {
+  messageId: string;
+  dispatchedAt: string;
+  thread: {
+    messages: readonly { readonly id: string }[];
+    latestTurn: { readonly requestedAt: string } | null;
+    session: {
+      readonly activeTurnId?: string | null | undefined;
+      readonly updatedAt: string;
+    } | null;
+  };
+}
+
+function isoAtOrAfter(value: string | null | undefined, minimum: string): boolean {
+  if (!value) return false;
+  const valueTime = Date.parse(value);
+  const minimumTime = Date.parse(minimum);
+  return Number.isFinite(valueTime) && Number.isFinite(minimumTime) && valueTime >= minimumTime;
+}
+
+export function hasQueuedFollowUpDispatchBeenObserved(
+  input: QueuedFollowUpDispatchObservationInput,
+): boolean {
+  if (input.thread.messages.some((message) => message.id === input.messageId)) {
+    return true;
+  }
+  if (isoAtOrAfter(input.thread.latestTurn?.requestedAt, input.dispatchedAt)) {
+    return true;
+  }
+  return (
+    input.thread.session?.activeTurnId != null &&
+    isoAtOrAfter(input.thread.session.updatedAt, input.dispatchedAt)
+  );
+}
+
 export function previewQueuedFollowUpText(text: string, fallback = "Image-only follow-up"): string {
   const normalized = text.trim().replace(/\s+/g, " ");
   return normalized.length > 0 ? normalized : fallback;

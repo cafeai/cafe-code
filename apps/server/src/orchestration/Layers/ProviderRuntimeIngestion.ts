@@ -41,8 +41,22 @@ import { sanitizeProviderToolData } from "@cafecode/shared/activityPayloadSaniti
 import { ServerSettingsService } from "../../serverSettings.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
-const providerCommandId = (event: ProviderRuntimeEvent, tag: string): CommandId =>
-  CommandId.make(`provider:${event.eventId}:${tag}:${crypto.randomUUID()}`);
+const providerRuntimeEventKey = (event: ProviderRuntimeEvent) =>
+  `${event.provider}:${event.threadId}:${event.eventId}`;
+const providerCommandId = (
+  event: ProviderRuntimeEvent,
+  tag: string,
+  discriminator?: string,
+): CommandId =>
+  // Provider daemon reconnects and session resume backfills may replay the
+  // same canonical ProviderRuntimeEvent. Keep command IDs deterministic so
+  // orchestration command receipts collapse replays instead of appending the
+  // same assistant delta, terminal marker, or activity a second time. Some
+  // provider events intentionally fan out to multiple orchestration commands,
+  // so callers pass a stable discriminator such as messageId or activityId.
+  CommandId.make(
+    `provider:${providerRuntimeEventKey(event)}:${tag}${discriminator ? `:${discriminator}` : ""}`,
+  );
 
 interface AssistantSegmentState {
   baseKey: string;
@@ -56,6 +70,8 @@ const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_CACHE_CAPACITY = 20_000;
 const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_TTL = Duration.minutes(120);
 const BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY = 10_000;
 const BUFFERED_PROPOSED_PLAN_BY_ID_TTL = Duration.minutes(120);
+const PROCESSED_RUNTIME_EVENT_IDS_CACHE_CAPACITY = 100_000;
+const PROCESSED_RUNTIME_EVENT_IDS_TTL = Duration.minutes(120);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const STRICT_PROVIDER_LIFECYCLE_GUARD =
   readCafeCodeEnv(process.env, "CAFE_CODE_STRICT_PROVIDER_LIFECYCLE_GUARD") !== "0";
@@ -734,6 +750,11 @@ const make = Effect.gen(function* () {
     timeToLive: BUFFERED_PROPOSED_PLAN_BY_ID_TTL,
     lookup: () => Effect.succeed({ text: "", createdAt: "" }),
   });
+  const processedRuntimeEventIds = yield* Cache.make<string, true>({
+    capacity: PROCESSED_RUNTIME_EVENT_IDS_CACHE_CAPACITY,
+    timeToLive: PROCESSED_RUNTIME_EVENT_IDS_TTL,
+    lookup: () => Effect.succeed(true),
+  });
 
   const resolveThreadDetail = Effect.fn("resolveThreadDetail")(function* (threadId: ThreadId) {
     return yield* projectionSnapshotQuery
@@ -974,7 +995,7 @@ const make = Effect.gen(function* () {
 
       yield* orchestrationEngine.dispatch({
         type: "thread.message.assistant.delta",
-        commandId: providerCommandId(input.event, input.commandTag),
+        commandId: providerCommandId(input.event, input.commandTag, input.messageId),
         threadId: input.threadId,
         messageId: input.messageId,
         delta: bufferedText,
@@ -1041,7 +1062,7 @@ const make = Effect.gen(function* () {
       if (hasRenderableText) {
         yield* orchestrationEngine.dispatch({
           type: "thread.message.assistant.delta",
-          commandId: providerCommandId(input.event, input.finalDeltaCommandTag),
+          commandId: providerCommandId(input.event, input.finalDeltaCommandTag, input.messageId),
           threadId: input.threadId,
           messageId: input.messageId,
           delta: text,
@@ -1053,7 +1074,7 @@ const make = Effect.gen(function* () {
       if (input.hasProjectedMessage || hasRenderableText) {
         yield* orchestrationEngine.dispatch({
           type: "thread.message.assistant.complete",
-          commandId: providerCommandId(input.event, input.commandTag),
+          commandId: providerCommandId(input.event, input.commandTag, input.messageId),
           threadId: input.threadId,
           messageId: input.messageId,
           ...(input.turnId ? { turnId: input.turnId } : {}),
@@ -1165,7 +1186,7 @@ const make = Effect.gen(function* () {
       const existingPlan = findProposedPlanById(input.threadProposedPlans, input.planId);
       yield* orchestrationEngine.dispatch({
         type: "thread.proposed-plan.upsert",
-        commandId: providerCommandId(input.event, "proposed-plan-upsert"),
+        commandId: providerCommandId(input.event, "proposed-plan-upsert", input.planId),
         threadId: input.threadId,
         proposedPlan: {
           id: input.planId,
@@ -1420,16 +1441,16 @@ const make = Effect.gen(function* () {
           : undefined;
       const eventMatchesTrackedActiveTurn =
         activeTurnId !== null && eventTurnId !== undefined && sameId(activeTurnId, eventTurnId);
-      const eventResumesLatestCompletedTurn =
-        activeTurnId === null &&
-        eventTurnId !== undefined &&
-        thread.latestTurn?.turnId === eventTurnId &&
-        thread.latestTurn.state === "completed";
+      // Replay/backfill streams can legitimately contain content/tool events
+      // for a turn that projections have already closed. Preserve the content
+      // later in this function, but do not reopen session lifecycle state from
+      // those post-completion events; otherwise renderer reconnects briefly
+      // regress completed threads back to "running".
       const eventCarriesActiveTurnWork =
         eventTurnId !== undefined &&
         !conflictsWithActiveTurn &&
         runtimeEventCarriesActiveTurnWork(event) &&
-        (eventMatchesTrackedActiveTurn || eventResumesLatestCompletedTurn);
+        eventMatchesTrackedActiveTurn;
 
       if (
         event.type === "session.started" ||
@@ -1602,7 +1623,11 @@ const make = Effect.gen(function* () {
           if (spillChunk.length > 0) {
             yield* orchestrationEngine.dispatch({
               type: "thread.message.assistant.delta",
-              commandId: providerCommandId(event, "assistant-delta-buffer-spill"),
+              commandId: providerCommandId(
+                event,
+                "assistant-delta-buffer-spill",
+                assistantMessageId,
+              ),
               threadId: thread.id,
               messageId: assistantMessageId,
               delta: spillChunk,
@@ -1613,7 +1638,7 @@ const make = Effect.gen(function* () {
         } else {
           yield* orchestrationEngine.dispatch({
             type: "thread.message.assistant.delta",
-            commandId: providerCommandId(event, "assistant-delta"),
+            commandId: providerCommandId(event, "assistant-delta", assistantMessageId),
             threadId: thread.id,
             messageId: assistantMessageId,
             delta: assistantDelta,
@@ -1892,7 +1917,7 @@ const make = Effect.gen(function* () {
       yield* Effect.forEach(activities, (activity) =>
         orchestrationEngine.dispatch({
           type: "thread.activity.append",
-          commandId: providerCommandId(event, "thread-activity-append"),
+          commandId: providerCommandId(event, "thread-activity-append", activity.id),
           threadId: thread.id,
           activity,
           createdAt: activity.createdAt,
@@ -1902,8 +1927,32 @@ const make = Effect.gen(function* () {
 
   const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
 
+  const processRuntimeEventOnce = (event: ProviderRuntimeEvent) =>
+    Effect.gen(function* () {
+      const eventKey = providerRuntimeEventKey(event);
+      const alreadyProcessed = yield* Cache.getOption(processedRuntimeEventIds, eventKey);
+      if (Option.isSome(alreadyProcessed)) {
+        yield* Effect.logDebug("skipping replayed provider runtime event").pipe(
+          Effect.annotateLogs({
+            eventId: event.eventId,
+            eventType: event.type,
+            threadId: event.threadId,
+          }),
+        );
+        return;
+      }
+
+      yield* processRuntimeEvent(event);
+      // Deterministic command IDs protect durable projections. This process-local
+      // mark also protects buffered assistant/proposed-plan state that can be
+      // mutated before an orchestration command is dispatched.
+      yield* Cache.set(processedRuntimeEventIds, eventKey, true);
+    });
+
   const processInput = (input: RuntimeIngestionInput) =>
-    input.source === "runtime" ? processRuntimeEvent(input.event) : processDomainEvent(input.event);
+    input.source === "runtime"
+      ? processRuntimeEventOnce(input.event)
+      : processDomainEvent(input.event);
 
   const processInputSafely = (input: RuntimeIngestionInput) =>
     processInput(input).pipe(
