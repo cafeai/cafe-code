@@ -429,12 +429,12 @@ export function FollowUpQueueShelf(props: {
         {steeringItems.map((item) => (
           <div
             key={item.id}
-            className="rounded-xl border border-primary/20 bg-primary/5 p-2"
+            className="rounded-xl border border-border/50 bg-muted/20 p-2"
             data-cafe-followup-steering="true"
           >
             <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
               <span
-                className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-primary"
+                className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground/75"
                 aria-hidden="true"
               >
                 <LoaderCircleIcon className="size-4 animate-spin" />
@@ -446,7 +446,7 @@ export function FollowUpQueueShelf(props: {
                 {item.preview}
               </div>
               <span
-                className="h-7 shrink-0 rounded-md border border-primary/25 px-2 py-1 text-primary text-xs"
+                className="h-7 shrink-0 rounded-md border border-border/60 px-2 py-1 text-muted-foreground/85 text-xs"
                 aria-label="Follow-up steering into active turn"
                 title="Follow-up accepted for the active turn; waiting for the provider to act on it."
               >
