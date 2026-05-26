@@ -104,6 +104,8 @@ Important files:
 
 Cafe Code's Codex adapter uses `codex app-server`, which speaks JSON-RPC over stdio by default. Official docs describe the app-server protocol as JSON-RPC-like messages where requests have `id`, responses echo the `id`, and notifications omit `id`. The official app-server websocket listener is experimental/unsupported; Cafe should keep using stdio JSONL for local app-server control unless upstream changes that recommendation.
 
+The generated `packages/effect-codex-app-server` protocol surface is currently aligned to upstream Codex `rust-v0.134.0` commit `a75c443fdb64db48c3cf4bdb247c7ee52c0144c9`. That upstream release added app-server `thread/search`, made several request booleans optional on the wire, and preserved the existing `turn/start`, `turn/steer`, `turn/completed`, and `thread/read` lifecycle contracts used by Cafe. Regenerate this package when bumping the local Codex CLI/app-server target rather than hand-editing protocol types.
+
 Cafe Code's Codex UX and lifecycle design should follow the Codex CLI/TUI command-line implementation, not Codex GUI behavior. The CLI is the primary upstream comparison point because it has the operational model Cafe Code needs: user input is accepted into local queues, live `turn/steer` is attempted only against a known active turn, stale active-turn state is reconciled automatically, non-steerable review/compact turns re-queue the user's input, and local app-server/session state is treated as disposable while durable Codex thread identity is preserved through upstream thread state.
 
 Codex lifecycle facts to preserve:
