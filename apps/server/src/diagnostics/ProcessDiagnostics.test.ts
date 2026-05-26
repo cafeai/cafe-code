@@ -66,6 +66,59 @@ describe("ProcessDiagnostics", () => {
     }),
   );
 
+  it.effect("parses Windows CIM process rows", () =>
+    Effect.sync(() => {
+      const rows = ProcessDiagnostics.parseWindowsProcessRows(
+        JSON.stringify([
+          {
+            ProcessId: 100,
+            ParentProcessId: 4,
+            CommandLine: "node.exe dist/bin.mjs",
+            Name: "node.exe",
+            WorkingSetSize: 12_345,
+            PercentProcessorTime: 7.5,
+            Status: "Running",
+          },
+          {
+            ProcessId: 101,
+            ParentProcessId: 100,
+            Name: "codex.exe",
+            WorkingSetSize: 50,
+            PercentProcessorTime: -1,
+          },
+          {
+            ProcessId: 0,
+            ParentProcessId: 100,
+            CommandLine: "invalid",
+          },
+        ]),
+      );
+
+      expect(rows).toEqual([
+        {
+          pid: 100,
+          ppid: 4,
+          pgid: null,
+          status: "Running",
+          cpuPercent: 7.5,
+          rssBytes: 12_345,
+          elapsed: "",
+          command: "node.exe dist/bin.mjs",
+        },
+        {
+          pid: 101,
+          ppid: 100,
+          pgid: null,
+          status: "Live",
+          cpuPercent: 0,
+          rssBytes: 50,
+          elapsed: "",
+          command: "codex.exe",
+        },
+      ]);
+    }),
+  );
+
   it.effect("aggregates only descendants of the server process", () =>
     Effect.sync(() => {
       const diagnostics = ProcessDiagnostics.aggregateProcessDiagnostics({

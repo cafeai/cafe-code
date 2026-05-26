@@ -139,7 +139,7 @@ import {
 } from "./chat/followUpQueue";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
-import { isTimelineScrolledToEnd, MessagesTimeline } from "./chat/MessagesTimeline";
+import { MessagesTimeline } from "./chat/MessagesTimeline";
 import { ChatHeader } from "./chat/ChatHeader";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { NoActiveThreadState } from "./NoActiveThreadState";
@@ -3637,20 +3637,12 @@ export default function ChatView(props: ChatViewProps) {
     [hideScrollToBottom],
   );
   const pinTimelineToEndForLocalMessage = useCallback(() => {
-    const state = legendListRef.current?.getState?.();
-    const currentlyNearEnd = state ? isTimelineScrolledToEnd(state) : null;
-    if (
-      !shouldPinTimelineToEndForLocalMessage({
-        lastKnownAtEnd: isAtEndRef.current,
-        currentlyNearEnd,
-        userScrollIntentSinceReset: timelineUserScrollIntentSinceResetRef.current,
-      })
-    ) {
-      isAtEndRef.current = false;
-      showScrollDebouncer.current.maybeExecute();
-      return;
-    }
-
+    // Sending a local user message is an explicit request to move to the new
+    // conversation tail. Do not trust LegendList's last scroll measurement
+    // here: composer resize, virtual row replacement, and pending work rows can
+    // briefly report "not at end" even though the user's next action should be
+    // anchored to the prompt they just submitted.
+    shouldPinTimelineToEndForLocalMessage();
     hideScrollToBottom();
     setStickTimelineToEndRevision((revision) => revision + 1);
     void legendListRef.current?.scrollToEnd?.({ animated: false });

@@ -66,6 +66,8 @@ import {
   ServerProcessDiagnosticsResult,
   ServerProcessResourceHistoryInput,
   ServerProcessResourceHistoryResult,
+  ServerRuntimeLayerDiagnosticsInput,
+  ServerRuntimeLayerDiagnosticsResult,
   ServerSignalProcessInput,
   ServerSignalProcessResult,
   ServerUpsertKeybindingInput,
@@ -123,6 +125,7 @@ export const WS_METHODS = {
   serverGetTraceDiagnostics: "server.getTraceDiagnostics",
   serverGetProcessDiagnostics: "server.getProcessDiagnostics",
   serverGetProcessResourceHistory: "server.getProcessResourceHistory",
+  serverGetRuntimeLayerDiagnostics: "server.getRuntimeLayerDiagnostics",
   serverSignalProcess: "server.signalProcess",
 
   // Source control methods
@@ -205,6 +208,14 @@ export const WsServerGetProcessResourceHistoryRpc = Rpc.make(
   {
     payload: ServerProcessResourceHistoryInput,
     success: ServerProcessResourceHistoryResult,
+  },
+);
+
+export const WsServerGetRuntimeLayerDiagnosticsRpc = Rpc.make(
+  WS_METHODS.serverGetRuntimeLayerDiagnostics,
+  {
+    payload: ServerRuntimeLayerDiagnosticsInput,
+    success: ServerRuntimeLayerDiagnosticsResult,
   },
 );
 
@@ -412,6 +423,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetTraceDiagnosticsRpc,
   WsServerGetProcessDiagnosticsRpc,
   WsServerGetProcessResourceHistoryRpc,
+  WsServerGetRuntimeLayerDiagnosticsRpc,
   WsServerSignalProcessRpc,
   WsSourceControlLookupRepositoryRpc,
   WsSourceControlCloneRepositoryRpc,

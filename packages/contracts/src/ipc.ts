@@ -36,6 +36,8 @@ import type {
   ServerProviderUpdateInput,
   ServerProviderUpdatedPayload,
   ServerRemoveKeybindingResult,
+  ServerRuntimeLayerDiagnosticsInput,
+  ServerRuntimeLayerDiagnosticsResult,
   ServerSignalProcessInput,
   ServerSignalProcessResult,
   ServerTraceDiagnosticsResult,
@@ -456,6 +458,9 @@ export interface LocalApi {
     getProcessResourceHistory: (
       input: ServerProcessResourceHistoryInput,
     ) => Promise<ServerProcessResourceHistoryResult>;
+    getRuntimeLayerDiagnostics: (
+      input?: ServerRuntimeLayerDiagnosticsInput,
+    ) => Promise<ServerRuntimeLayerDiagnosticsResult>;
     signalProcess: (input: ServerSignalProcessInput) => Promise<ServerSignalProcessResult>;
   };
 }

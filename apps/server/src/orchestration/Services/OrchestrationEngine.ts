@@ -46,6 +46,20 @@ export interface OrchestrationEngineShape {
   ) => Effect.Effect<{ sequence: number }, OrchestrationDispatchError, never>;
 
   /**
+   * Read the small in-memory command-processing counters used by diagnostics.
+   *
+   * This intentionally exposes only queue depth and aggregate command outcomes.
+   * It does not expose command payloads, prompts, or provider request data.
+   */
+  readonly diagnosticsSnapshot: Effect.Effect<{
+    readonly commandQueueDepth: number;
+    readonly acceptedCommandCount: number;
+    readonly rejectedCommandCount: number;
+    readonly failedCommandCount: number;
+    readonly commandReadModelSequence: number;
+  }>;
+
+  /**
    * Stream persisted domain events in dispatch order.
    *
    * This is a hot runtime stream (new events only), not a historical replay.

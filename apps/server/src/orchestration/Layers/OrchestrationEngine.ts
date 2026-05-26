@@ -17,6 +17,7 @@ import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -87,6 +88,11 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 
   const commandQueue = yield* Queue.unbounded<CommandEnvelope>();
   const eventPubSub = yield* PubSub.unbounded<OrchestrationEvent>();
+  const commandCounters = yield* Ref.make({
+    acceptedCommandCount: 0,
+    rejectedCommandCount: 0,
+    failedCommandCount: 0,
+  });
 
   const projectEventsOntoReadModel = (
     baseReadModel: OrchestrationReadModel,
@@ -244,11 +250,27 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           );
 
           if (Exit.isSuccess(exit)) {
+            yield* Ref.update(commandCounters, (current) => ({
+              ...current,
+              acceptedCommandCount: current.acceptedCommandCount + 1,
+            }));
             yield* Deferred.succeed(envelope.result, exit.value);
             return;
           }
 
           const error = Cause.squash(exit.cause) as OrchestrationDispatchError;
+          yield* Ref.update(commandCounters, (current) =>
+            isOrchestrationCommandInvariantError(error) ||
+            isOrchestrationCommandPreviouslyRejectedError(error)
+              ? {
+                  ...current,
+                  rejectedCommandCount: current.rejectedCommandCount + 1,
+                }
+              : {
+                  ...current,
+                  failedCommandCount: current.failedCommandCount + 1,
+                },
+          );
           if (!isOrchestrationCommandPreviouslyRejectedError(error)) {
             yield* reconcileReadModelAfterDispatchFailure.pipe(
               Effect.catch(() =>
@@ -307,9 +329,22 @@ const makeOrchestrationEngine = Effect.gen(function* () {
       return yield* Deferred.await(result);
     });
 
+  const diagnosticsSnapshot: OrchestrationEngineShape["diagnosticsSnapshot"] = Effect.gen(
+    function* () {
+      const counters = yield* Ref.get(commandCounters);
+      const commandQueueDepth = yield* Queue.size(commandQueue);
+      return {
+        ...counters,
+        commandQueueDepth,
+        commandReadModelSequence: commandReadModel.snapshotSequence,
+      };
+    },
+  );
+
   return {
     readEvents,
     dispatch,
+    diagnosticsSnapshot,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (wsServer, ProviderRuntimeIngestion, CheckpointReactor, etc.)
     // each independently receive all domain events.

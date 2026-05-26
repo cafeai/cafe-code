@@ -15,6 +15,7 @@ import {
   type ServerConfig,
   type ServerProcessResourceHistoryResult,
   type ServerProvider,
+  type ServerRuntimeLayerDiagnosticsResult,
   type SourceControlDiscoveryResult,
 } from "@cafecode/contracts";
 import * as DateTime from "effect/DateTime";
@@ -280,6 +281,156 @@ function createEmptyProcessResourceHistoryResult(): ServerProcessResourceHistory
     buckets: [],
     topProcesses: [],
     error: Option.none(),
+  };
+}
+
+function createRuntimeLayerDiagnosticsResult(): ServerRuntimeLayerDiagnosticsResult {
+  return {
+    readAt: "2036-04-07T00:00:00.000Z",
+    platform: "darwin",
+    windowMs: 15 * 60_000,
+    bucketMs: 60_000,
+    collectionSource: "test",
+    partialFailure: false,
+    runtimeLayers: [
+      {
+        role: "backend",
+        status: "online",
+        pid: 1234,
+        rssBytes: 1024,
+        cpuPercent: 1,
+        uptimeLabel: "00:10",
+        lastEventAt: "2036-04-07T00:00:00.000Z",
+        notes: ["Main backend process."],
+      },
+      {
+        role: "provider-daemon",
+        status: "online",
+        pid: 5678,
+        rssBytes: 2048,
+        cpuPercent: 2,
+        uptimeLabel: "00:05",
+        lastEventAt: "2036-04-07T00:00:00.000Z",
+        notes: ["Provider daemon health summary."],
+      },
+    ],
+    orchestrator: {
+      latestEventSequence: 10,
+      projectionSequence: 10,
+      projectionLag: 0,
+      commandQueueDepth: 0,
+      acceptedCommandCount: 1,
+      rejectedCommandCount: 0,
+      failedCommandCount: 0,
+      projectCount: 1,
+      threadCount: 1,
+      pendingTurnCount: 0,
+      runningTurnCount: 0,
+      activeTurnCount: 0,
+      recentEventTypeCounts: [
+        {
+          eventType: "thread.message-sent",
+          actorKind: "provider",
+          count: 1,
+          lastSeenAt: "2036-04-07T00:00:00.000Z",
+        },
+      ],
+      projectorCursors: [
+        {
+          projector: "thread-detail",
+          cursor: 10,
+          lag: 0,
+          updatedAt: "2036-04-07T00:00:00.000Z",
+          status: "online",
+        },
+      ],
+      staleStateFlags: [],
+    },
+    subprocesses: [
+      {
+        role: "provider-daemon",
+        ownerKind: "daemon-marker",
+        pid: 5678,
+        ppid: 1,
+        status: "S",
+        cpuPercent: 2,
+        rssBytes: 2048,
+        elapsed: "00:05",
+        commandLabel: "node",
+        sanitizedCommand: "node daemon.mjs",
+        depth: 0,
+        childPids: [],
+        attribution: "daemon health PID",
+        lastSeenAt: "2036-04-07T00:00:00.000Z",
+        notes: [],
+      },
+    ],
+    providerDaemon: {
+      available: true,
+      reachable: true,
+      status: "online",
+      pid: 5678,
+      ppid: 1,
+      mode: "provider-daemon",
+      transport: "loopback-tcp",
+      healthLatencyMs: 2,
+      startedAt: "2036-04-07T00:00:00.000Z",
+      activeSessionCount: 1,
+      activeStreamCount: 0,
+      retainedEventCount: 2,
+      eventCursor: 4,
+      leaseCount: 0,
+      commandCount: 1,
+      runningCommandCount: 0,
+      completedCommandCount: 1,
+      failedCommandCount: 0,
+      totalRpcCount: 3,
+      failedRpcCount: 0,
+      maxRpcDurationMs: 5,
+      meanRpcDurationMs: 2,
+      sqliteBusyTimeoutMs: 5_000,
+      recentCommands: [],
+      runtimeEventSummaries: [],
+      error: null,
+    },
+    providerSupervisor: {
+      configured: false,
+      reachable: false,
+      status: "offline",
+      pid: null,
+      ppid: null,
+      transport: null,
+      healthLatencyMs: null,
+      activeSessionCount: 0,
+      activeStreamCount: 0,
+      retainedEventCount: 0,
+      commandCount: 0,
+      runningCommandCount: 0,
+      completedCommandCount: 0,
+      failedCommandCount: 0,
+      sessionCounts: {},
+      error: null,
+    },
+    resources: {
+      sampleIntervalMs: 0,
+      retainedSampleCount: 1,
+      buckets: [],
+      processes: [
+        {
+          processKey: "provider-daemon:5678:node",
+          role: "provider-daemon",
+          pid: 5678,
+          currentRssBytes: 2048,
+          maxRssBytes: 2048,
+          currentCpuPercent: 2,
+          avgCpuPercent: 2,
+          maxCpuPercent: 2,
+          sampleCount: 1,
+          lastSeenAt: "2036-04-07T00:00:00.000Z",
+        },
+      ],
+    },
+    errors: [],
   };
 }
 
@@ -1202,6 +1353,9 @@ describe("GeneralSettingsPanel observability", () => {
         getProcessResourceHistory: vi
           .fn()
           .mockResolvedValue(createEmptyProcessResourceHistoryResult()),
+        getRuntimeLayerDiagnostics: vi
+          .fn()
+          .mockResolvedValue(createRuntimeLayerDiagnosticsResult()),
         getTraceDiagnostics: vi.fn().mockResolvedValue({
           traceFilePath: "/repo/project/.t3/traces.jsonl",
           scannedFilePaths: ["/repo/project/.t3/traces.jsonl"],
@@ -1235,6 +1389,18 @@ describe("GeneralSettingsPanel observability", () => {
     );
 
     const openLogsButton = page.getByLabelText("Open logs folder");
+    await expect
+      .element(page.getByRole("heading", { name: "Runtime Overview", exact: true }))
+      .toBeInTheDocument();
+    await expect
+      .element(page.getByRole("heading", { name: "Orchestrator Subprocesses", exact: true }))
+      .toBeInTheDocument();
+    await expect
+      .element(page.getByRole("heading", { name: "Provider Daemon", exact: true }))
+      .toBeInTheDocument();
+    await expect
+      .element(page.getByRole("heading", { name: "Provider Supervisor", exact: true }))
+      .toBeInTheDocument();
     await openLogsButton.click();
 
     expect(openInEditor).toHaveBeenCalledWith("/repo/project/.t3/logs", "cursor");

@@ -12,6 +12,10 @@ import type {
   ServerProcessDiagnosticsEntry,
   ServerProcessResourceHistorySummary,
   ServerProcessSignal,
+  ServerRuntimeLayerDiagnosticsError,
+  ServerRuntimeLayerDiagnosticsResult,
+  ServerRuntimeLayerProcess,
+  ServerRuntimeLayerStatus,
 } from "@cafecode/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
@@ -25,12 +29,22 @@ import {
   useProcessDiagnostics,
   useProcessResourceHistory,
 } from "../../lib/processDiagnosticsState";
+import { useRuntimeLayerDiagnostics } from "../../lib/runtimeLayerDiagnosticsState";
 import { useTraceDiagnostics } from "../../lib/traceDiagnosticsState";
 import { Button } from "../ui/button";
 import { ScrollArea } from "../ui/scroll-area";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import { SettingsPageContainer, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
+import {
+  formatRuntimeLayerRole,
+  runtimeLayerStatusClasses,
+  runtimeLayerStatusTone,
+  sortRuntimeLayers,
+  summarizeRuntimeCpu,
+  summarizeRuntimeMemory,
+  visibleRuntimeErrors,
+} from "./diagnosticsRuntimeViewModel";
 
 const NUMBER_FORMAT = new Intl.NumberFormat();
 
@@ -63,6 +77,16 @@ function formatRelative(value: DateTime.Utc | null): string {
 
 function formatRelativeNoWrap(value: DateTime.Utc | null): string {
   return formatRelative(value).replaceAll(" ", "\u00a0");
+}
+
+function formatRelativeIso(value: string | null): string {
+  if (!value) return "n/a";
+  const relative = formatRelativeTime(value);
+  return relative.suffix ? `${relative.value} ${relative.suffix}` : relative.value;
+}
+
+function formatRelativeIsoNoWrap(value: string | null): string {
+  return formatRelativeIso(value).replaceAll(" ", "\u00a0");
 }
 
 function shortenTraceId(traceId: string): string {
@@ -802,6 +826,520 @@ function DiagnosticsRefreshButton({
   );
 }
 
+function DiagnosticsLastCheckedIso({ checkedAt }: { checkedAt: string | null }) {
+  useRelativeTimeTick();
+  const relative = checkedAt ? formatRelativeTime(checkedAt) : null;
+
+  if (!relative) {
+    return <span className="text-[11px] text-muted-foreground/50">Checking</span>;
+  }
+
+  return (
+    <span className="text-[11px] text-muted-foreground/60">
+      {relative.suffix ? (
+        <>
+          Checked <span className="font-mono tabular-nums">{relative.value}</span> {relative.suffix}
+        </>
+      ) : (
+        <>Checked {relative.value}</>
+      )}
+    </span>
+  );
+}
+
+function RuntimeStatusBadge({ status }: { status: ServerRuntimeLayerStatus }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex rounded px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.08em]",
+        runtimeLayerStatusClasses(status),
+      )}
+    >
+      {status}
+    </span>
+  );
+}
+
+function RuntimeDiagnosticsErrors({
+  errors,
+}: {
+  errors: ReadonlyArray<ServerRuntimeLayerDiagnosticsError>;
+}) {
+  if (errors.length === 0) return null;
+
+  return (
+    <div className="space-y-2 border-t border-border/60 px-4 py-3 text-xs sm:px-5">
+      {errors.map((error) => (
+        <div
+          key={`${error.source}:${error.message}`}
+          className="flex items-start gap-2 text-amber-600 dark:text-amber-400"
+        >
+          <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+          <div className="min-w-0">
+            <span className="font-medium">{error.source}: </span>
+            <ExpandableText
+              text={error.message}
+              collapsedClassName="line-clamp-2"
+              expandLabel="Show full message"
+            />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RuntimeLayersTable({
+  data,
+  loading,
+}: {
+  data: ServerRuntimeLayerDiagnosticsResult | null;
+  loading: boolean;
+}) {
+  const layers = data ? sortRuntimeLayers(data.runtimeLayers) : [];
+  if (layers.length === 0) {
+    return <EmptyRows label={loading ? "Loading runtime layers..." : "No runtime layers found."} />;
+  }
+
+  return (
+    <DiagnosticsTable
+      headers={["Layer", "Status", "PID", "RSS", "CPU", "Uptime", "Last Event", "Notes"]}
+      minTableWidth="min-w-[980px]"
+      columnWidths={[
+        "w-[16%]",
+        "w-[10%]",
+        "w-[8%]",
+        "w-[10%]",
+        "w-[8%]",
+        "w-[10%]",
+        "w-[12%]",
+        "w-[26%]",
+      ]}
+    >
+      {layers.map((layer) => (
+        <tr key={layer.role} className="hover:bg-muted/15">
+          <td className="px-4 py-3 align-top font-medium text-foreground first:sm:pl-5">
+            {formatRuntimeLayerRole(layer.role)}
+          </td>
+          <td className="px-4 py-3 align-top">
+            <RuntimeStatusBadge status={layer.status} />
+          </td>
+          <td className="px-4 py-3 align-top text-right font-mono tabular-nums">
+            {layer.pid ?? "n/a"}
+          </td>
+          <td className="px-4 py-3 align-top text-right font-mono tabular-nums">
+            {formatBytes(layer.rssBytes)}
+          </td>
+          <td className="px-4 py-3 align-top text-right font-mono tabular-nums">
+            {layer.cpuPercent.toFixed(1)}%
+          </td>
+          <td className="px-4 py-3 align-top font-mono tabular-nums text-muted-foreground">
+            {layer.uptimeLabel ?? "n/a"}
+          </td>
+          <td className="px-4 py-3 align-top font-mono tabular-nums text-muted-foreground">
+            {formatRelativeIsoNoWrap(layer.lastEventAt)}
+          </td>
+          <td className="px-4 py-3 align-top text-muted-foreground last:sm:pr-5">
+            <ExpandableText
+              text={layer.notes.length > 0 ? layer.notes.join("\n") : "No notes."}
+              collapsedClassName="line-clamp-2"
+              expandLabel="Show notes"
+            />
+          </td>
+        </tr>
+      ))}
+    </DiagnosticsTable>
+  );
+}
+
+function RuntimeProcessNameCell({
+  process,
+  isExpanded,
+  onToggle,
+}: {
+  process: ServerRuntimeLayerProcess;
+  isExpanded: boolean;
+  onToggle: (pid: number) => void;
+}) {
+  const hasChildren = process.childPids.length > 0 && process.pid !== null;
+  const ChevronIcon = isExpanded ? ChevronDownIcon : ChevronRightIcon;
+
+  return (
+    <div
+      className="grid min-w-0 grid-cols-[1.25rem_0.375rem_minmax(0,1fr)] items-center gap-2"
+      style={{ paddingLeft: `${Math.min(process.depth, 6) * 10}px` }}
+    >
+      {hasChildren && process.pid !== null ? (
+        <button
+          type="button"
+          className="inline-flex size-5 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
+          aria-label={
+            isExpanded ? `Collapse ${process.commandLabel}` : `Expand ${process.commandLabel}`
+          }
+          onClick={() => onToggle(process.pid!)}
+        >
+          <ChevronIcon className="size-3.5" />
+        </button>
+      ) : (
+        <span className="size-5 shrink-0" aria-hidden="true" />
+      )}
+      <span
+        className={cn(
+          "size-1.5 shrink-0 rounded-full",
+          process.status === "missing" ? "bg-destructive/80" : "bg-cyan-500/80",
+        )}
+      />
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <span className="min-w-0 truncate font-medium text-foreground">
+              {process.commandLabel}
+            </span>
+          }
+        />
+        <TooltipPopup
+          side="top"
+          className="max-w-[min(440px,calc(100vw-2rem))] whitespace-normal break-words text-left font-mono text-[11px] leading-relaxed text-wrap"
+        >
+          {process.sanitizedCommand}
+        </TooltipPopup>
+      </Tooltip>
+    </div>
+  );
+}
+
+function RuntimeProcessTable({
+  processes,
+  loading,
+}: {
+  processes: ReadonlyArray<ServerRuntimeLayerProcess>;
+  loading: boolean;
+}) {
+  const [collapsedPids, setCollapsedPids] = useState<ReadonlySet<number>>(() => new Set());
+  const visibleProcesses = useMemo(() => {
+    const visible: ServerRuntimeLayerProcess[] = [];
+    let hiddenChildDepth: number | null = null;
+
+    for (const process of processes) {
+      if (hiddenChildDepth !== null) {
+        if (process.depth > hiddenChildDepth) continue;
+        hiddenChildDepth = null;
+      }
+
+      visible.push(process);
+      if (process.pid !== null && collapsedPids.has(process.pid)) {
+        hiddenChildDepth = process.depth;
+      }
+    }
+
+    return visible;
+  }, [collapsedPids, processes]);
+
+  const toggleProcess = useCallback((pid: number) => {
+    setCollapsedPids((previous) => {
+      const next = new Set(previous);
+      if (next.has(pid)) {
+        next.delete(pid);
+      } else {
+        next.add(pid);
+      }
+      return next;
+    });
+  }, []);
+
+  return (
+    <ScrollArea
+      chainVerticalScroll
+      scrollFade
+      hideScrollbars
+      className="max-h-[min(64vh,44rem)] w-full max-w-full rounded-none border-t border-border/60"
+    >
+      <table className="w-full min-w-[1040px] table-fixed text-left text-xs">
+        <colgroup>
+          <col className="w-[22%]" />
+          <col className="w-[14%]" />
+          <col className="w-[10%]" />
+          <col className="w-[8%]" />
+          <col className="w-[10%]" />
+          <col className="w-[8%]" />
+          <col className="w-[10%]" />
+          <col className="w-[18%]" />
+        </colgroup>
+        <thead className="sticky top-0 z-10 border-b border-border/60 bg-card text-[11px] uppercase tracking-[0.08em] text-muted-foreground/70">
+          <tr>
+            <th className="px-4 py-2 font-semibold sm:pl-5">Process</th>
+            <th className="px-3 py-2 font-semibold">Role</th>
+            <th className="px-3 py-2 font-semibold">Status</th>
+            <th className="px-3 py-2 text-right font-semibold">PID</th>
+            <th className="px-3 py-2 text-right font-semibold">RSS</th>
+            <th className="px-3 py-2 text-right font-semibold">CPU</th>
+            <th className="px-3 py-2 font-semibold">Owner</th>
+            <th className="px-3 py-2 font-semibold sm:pr-5">Command</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-border/50">
+          {visibleProcesses.length === 0 ? (
+            <tr>
+              <td colSpan={8} className="px-4 py-4 text-xs text-muted-foreground sm:px-5">
+                {loading ? "Loading orchestrator subprocesses..." : "No runtime processes found."}
+              </td>
+            </tr>
+          ) : null}
+          {visibleProcesses.map((process) => (
+            <tr
+              key={`${process.role}:${process.pid ?? "missing"}:${process.commandLabel}`}
+              className="hover:bg-muted/20"
+            >
+              <td className="px-4 py-2 align-middle sm:pl-5">
+                <RuntimeProcessNameCell
+                  process={process}
+                  isExpanded={process.pid === null ? true : !collapsedPids.has(process.pid)}
+                  onToggle={toggleProcess}
+                />
+              </td>
+              <td className="px-3 py-2 align-middle text-muted-foreground">
+                {formatRuntimeLayerRole(process.role)}
+              </td>
+              <td className="px-3 py-2 align-middle font-mono text-muted-foreground">
+                {process.status}
+              </td>
+              <td className="px-3 py-2 text-right align-middle font-mono tabular-nums">
+                {process.pid ?? "n/a"}
+              </td>
+              <td className="px-3 py-2 text-right align-middle font-mono tabular-nums">
+                {formatBytes(process.rssBytes)}
+              </td>
+              <td className="px-3 py-2 text-right align-middle font-mono tabular-nums">
+                {process.cpuPercent.toFixed(1)}%
+              </td>
+              <td className="truncate px-3 py-2 align-middle text-muted-foreground">
+                {process.attribution}
+              </td>
+              <td className="px-3 py-2 align-middle text-muted-foreground sm:pr-5">
+                <Tooltip>
+                  <TooltipTrigger
+                    render={<span className="block truncate">{process.sanitizedCommand}</span>}
+                  />
+                  <TooltipPopup
+                    side="top"
+                    className="max-w-[min(520px,calc(100vw-2rem))] whitespace-normal break-words text-left font-mono text-[11px] leading-relaxed text-wrap"
+                  >
+                    {process.sanitizedCommand}
+                  </TooltipPopup>
+                </Tooltip>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </ScrollArea>
+  );
+}
+
+function OrchestratorHealthTables({
+  data,
+  loading,
+}: {
+  data: ServerRuntimeLayerDiagnosticsResult | null;
+  loading: boolean;
+}) {
+  if (!data) {
+    return (
+      <EmptyRows label={loading ? "Loading orchestrator health..." : "No orchestrator data."} />
+    );
+  }
+
+  return (
+    <div className="grid gap-0 border-t border-border/60 lg:grid-cols-2 lg:divide-x lg:divide-border/60">
+      <div className="min-w-0">
+        <DiagnosticsTable
+          headers={["Event Type", "Count", "Actor", "Last Seen"]}
+          minTableWidth="min-w-[620px]"
+        >
+          {data.orchestrator.recentEventTypeCounts.length === 0 ? (
+            <tr>
+              <td colSpan={4} className="px-4 py-4 text-muted-foreground sm:px-5">
+                No recent orchestration events.
+              </td>
+            </tr>
+          ) : (
+            data.orchestrator.recentEventTypeCounts.map((event) => (
+              <tr key={`${event.eventType}:${event.actorKind ?? "none"}`}>
+                <td className="px-4 py-3 align-top font-mono text-[11px] first:sm:pl-5">
+                  {event.eventType}
+                </td>
+                <td className="px-4 py-3 text-right align-top font-mono tabular-nums">
+                  {formatCount(event.count)}
+                </td>
+                <td className="px-4 py-3 align-top text-muted-foreground">
+                  {event.actorKind ?? "n/a"}
+                </td>
+                <td className="px-4 py-3 align-top font-mono tabular-nums text-muted-foreground last:sm:pr-5">
+                  {formatRelativeIsoNoWrap(event.lastSeenAt)}
+                </td>
+              </tr>
+            ))
+          )}
+        </DiagnosticsTable>
+      </div>
+      <div className="min-w-0 border-t border-border/60 lg:border-t-0">
+        <DiagnosticsTable
+          headers={["Projector", "Cursor", "Lag", "Status"]}
+          minTableWidth="min-w-[520px]"
+        >
+          {data.orchestrator.projectorCursors.length === 0 ? (
+            <tr>
+              <td colSpan={4} className="px-4 py-4 text-muted-foreground sm:px-5">
+                No projector cursors found.
+              </td>
+            </tr>
+          ) : (
+            data.orchestrator.projectorCursors.map((projector) => (
+              <tr key={projector.projector}>
+                <td className="px-4 py-3 align-top font-medium first:sm:pl-5">
+                  {projector.projector}
+                </td>
+                <td className="px-4 py-3 text-right align-top font-mono tabular-nums">
+                  {formatCount(projector.cursor)}
+                </td>
+                <td className="px-4 py-3 text-right align-top font-mono tabular-nums">
+                  {formatCount(projector.lag)}
+                </td>
+                <td className="px-4 py-3 align-top last:sm:pr-5">
+                  <RuntimeStatusBadge status={projector.status} />
+                </td>
+              </tr>
+            ))
+          )}
+        </DiagnosticsTable>
+      </div>
+    </div>
+  );
+}
+
+function ProviderDaemonTables({
+  data,
+  loading,
+}: {
+  data: ServerRuntimeLayerDiagnosticsResult | null;
+  loading: boolean;
+}) {
+  if (!data) {
+    return (
+      <EmptyRows label={loading ? "Loading provider daemon..." : "No provider daemon data."} />
+    );
+  }
+
+  return (
+    <div className="grid gap-0 border-t border-border/60 lg:grid-cols-2 lg:divide-x lg:divide-border/60">
+      <DiagnosticsTable
+        headers={["Status", "Method", "Duration", "Updated", "Error"]}
+        minTableWidth="min-w-[720px]"
+      >
+        {data.providerDaemon.recentCommands.length === 0 ? (
+          <tr>
+            <td colSpan={5} className="px-4 py-4 text-muted-foreground sm:px-5">
+              No recent daemon commands.
+            </td>
+          </tr>
+        ) : (
+          data.providerDaemon.recentCommands.map((command) => (
+            <tr
+              key={`${command.status}:${command.method}:${command.updatedAt}:${
+                command.durationMs ?? "n/a"
+              }:${command.error ?? "ok"}`}
+            >
+              <td className="px-4 py-3 align-top first:sm:pl-5">
+                <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]">
+                  {command.status}
+                </span>
+              </td>
+              <td className="px-4 py-3 align-top font-mono text-[11px]">{command.method}</td>
+              <td className="px-4 py-3 text-right align-top font-mono tabular-nums">
+                {command.durationMs === null ? "n/a" : formatDuration(command.durationMs)}
+              </td>
+              <td className="px-4 py-3 align-top font-mono tabular-nums text-muted-foreground">
+                {formatRelativeIsoNoWrap(command.updatedAt)}
+              </td>
+              <td className="px-4 py-3 align-top text-muted-foreground last:sm:pr-5">
+                {command.error ? (
+                  <ExpandableText
+                    text={command.error}
+                    collapsedClassName="line-clamp-2"
+                    expandLabel="Show full error"
+                  />
+                ) : (
+                  "n/a"
+                )}
+              </td>
+            </tr>
+          ))
+        )}
+      </DiagnosticsTable>
+      <DiagnosticsTable
+        headers={["Runtime Event", "Count", "Last Seen"]}
+        minTableWidth="min-w-[520px]"
+      >
+        {data.providerDaemon.runtimeEventSummaries.length === 0 ? (
+          <tr>
+            <td colSpan={3} className="px-4 py-4 text-muted-foreground sm:px-5">
+              No recent daemon runtime events.
+            </td>
+          </tr>
+        ) : (
+          data.providerDaemon.runtimeEventSummaries.map((event) => (
+            <tr key={event.eventType}>
+              <td className="px-4 py-3 align-top font-mono text-[11px] first:sm:pl-5">
+                {event.eventType}
+              </td>
+              <td className="px-4 py-3 text-right align-top font-mono tabular-nums">
+                {formatCount(event.count)}
+              </td>
+              <td className="px-4 py-3 align-top font-mono tabular-nums text-muted-foreground last:sm:pr-5">
+                {formatRelativeIsoNoWrap(event.lastSeenAt)}
+              </td>
+            </tr>
+          ))
+        )}
+      </DiagnosticsTable>
+    </div>
+  );
+}
+
+function ProviderSupervisorTable({
+  data,
+  loading,
+}: {
+  data: ServerRuntimeLayerDiagnosticsResult | null;
+  loading: boolean;
+}) {
+  if (!data) {
+    return <EmptyRows label={loading ? "Loading provider supervisor..." : "No supervisor data."} />;
+  }
+
+  const sessionCounts = Object.entries(data.providerSupervisor.sessionCounts);
+  return (
+    <DiagnosticsTable headers={["Session State", "Count"]} minTableWidth="min-w-[420px]">
+      {sessionCounts.length === 0 ? (
+        <tr>
+          <td colSpan={2} className="px-4 py-4 text-muted-foreground sm:px-5">
+            No supervisor session counts found.
+          </td>
+        </tr>
+      ) : (
+        sessionCounts.map(([state, count]) => (
+          <tr key={state}>
+            <td className="px-4 py-3 align-top font-medium first:sm:pl-5">{state}</td>
+            <td className="px-4 py-3 text-right align-top font-mono tabular-nums last:sm:pr-5">
+              {formatCount(count)}
+            </td>
+          </tr>
+        ))
+      )}
+    </DiagnosticsTable>
+  );
+}
+
 export function DiagnosticsSettingsPanel() {
   const observability = useServerObservability();
   const availableEditors = useServerAvailableEditors();
@@ -809,6 +1347,12 @@ export function DiagnosticsSettingsPanel() {
   const selectedResourceWindow =
     RESOURCE_HISTORY_WINDOWS.find((option) => option.windowMs === resourceWindowMs) ??
     RESOURCE_HISTORY_WINDOWS[1];
+  const {
+    data: runtimeData,
+    error: runtimeError,
+    isPending: isRuntimePending,
+    refresh: refreshRuntime,
+  } = useRuntimeLayerDiagnostics();
   const { data, error, isPending, refresh } = useTraceDiagnostics();
   const {
     data: processData,
@@ -854,6 +1398,7 @@ export function DiagnosticsSettingsPanel() {
   }, [availableEditors, observability?.logsDirectoryPath]);
 
   const isInitialLoading = isPending && data === null;
+  const isRuntimeInitialLoading = isRuntimePending && runtimeData === null;
   const isProcessInitialLoading = isProcessPending && processData === null;
   const signalProcess = useCallback(
     (pid: number, signal: ServerProcessSignal) => {
@@ -910,9 +1455,239 @@ export function DiagnosticsSettingsPanel() {
   const traceDiagnosticsPartialFailure = data
     ? Option.getOrElse(data.partialFailure, () => false)
     : false;
+  const runtimeErrors = visibleRuntimeErrors(runtimeData, runtimeError);
+  const trackedRuntimeMemory = runtimeData ? summarizeRuntimeMemory(runtimeData.subprocesses) : 0;
+  const trackedRuntimeCpu = runtimeData ? summarizeRuntimeCpu(runtimeData.subprocesses) : 0;
 
   return (
     <SettingsPageContainer>
+      <SettingsSection
+        title="Runtime Overview"
+        headerAction={
+          <div className="flex items-center gap-1.5">
+            <DiagnosticsLastCheckedIso checkedAt={runtimeData?.readAt ?? null} />
+            <DiagnosticsRefreshButton
+              isPending={isRuntimePending}
+              label="Refresh runtime diagnostics"
+              onClick={refreshRuntime}
+            />
+          </div>
+        }
+      >
+        <StatsGrid>
+          <StatBlock
+            label="Backend"
+            value={runtimeData ? `PID ${processData?.serverPid ?? "n/a"}` : "..."}
+            tooltip="Main backend process that owns orchestration, persistence, and RPC routes."
+          />
+          <StatBlock
+            label="Orchestrator Lag"
+            value={runtimeData ? formatCount(runtimeData.orchestrator.projectionLag) : "..."}
+            tone={runtimeData && runtimeData.orchestrator.projectionLag > 0 ? "warning" : "default"}
+            tooltip="Latest persisted orchestration sequence minus the slowest projector cursor."
+          />
+          <StatBlock
+            label="Provider Daemon"
+            value={
+              runtimeData
+                ? runtimeData.providerDaemon.reachable
+                  ? "Online"
+                  : runtimeData.providerDaemon.available
+                    ? "Unreachable"
+                    : "Not configured"
+                : "..."
+            }
+            tone={
+              runtimeData ? runtimeLayerStatusTone(runtimeData.providerDaemon.status) : "default"
+            }
+          />
+          <StatBlock
+            label="Tracked RSS"
+            value={runtimeData ? formatBytes(trackedRuntimeMemory) : "..."}
+            tooltip="Resident memory across backend, provider daemon, provider supervisor, and attributable child processes in the current process snapshot."
+          />
+        </StatsGrid>
+        <RuntimeDiagnosticsErrors errors={runtimeErrors} />
+        <RuntimeLayersTable data={runtimeData} loading={isRuntimeInitialLoading} />
+      </SettingsSection>
+
+      <SettingsSection title="Orchestrator Subprocesses">
+        <StatsGrid>
+          <StatBlock
+            label="Processes"
+            value={runtimeData ? formatCount(runtimeData.subprocesses.length) : "..."}
+          />
+          <StatBlock label="CPU" value={runtimeData ? `${trackedRuntimeCpu.toFixed(1)}%` : "..."} />
+          <StatBlock
+            label="Memory"
+            value={runtimeData ? formatBytes(trackedRuntimeMemory) : "..."}
+          />
+          <StatBlock
+            label="Partial"
+            value={runtimeData ? (runtimeData.partialFailure ? "Yes" : "No") : "..."}
+            tone={runtimeData?.partialFailure ? "warning" : "default"}
+          />
+        </StatsGrid>
+        <RuntimeProcessTable
+          processes={runtimeData?.subprocesses ?? []}
+          loading={isRuntimeInitialLoading}
+        />
+      </SettingsSection>
+
+      <SettingsSection title="Orchestrator Health">
+        <StatsGrid>
+          <StatBlock
+            label="Event Seq"
+            value={runtimeData ? formatCount(runtimeData.orchestrator.latestEventSequence) : "..."}
+          />
+          <StatBlock
+            label="Projection Seq"
+            value={runtimeData ? formatCount(runtimeData.orchestrator.projectionSequence) : "..."}
+          />
+          <StatBlock
+            label="Queue"
+            value={runtimeData ? formatCount(runtimeData.orchestrator.commandQueueDepth) : "..."}
+            tone={
+              runtimeData && runtimeData.orchestrator.commandQueueDepth > 0 ? "warning" : "default"
+            }
+          />
+          <StatBlock
+            label="Active Turns"
+            value={runtimeData ? formatCount(runtimeData.orchestrator.activeTurnCount) : "..."}
+          />
+        </StatsGrid>
+        <StatsGrid>
+          <StatBlock
+            label="Accepted"
+            value={runtimeData ? formatCount(runtimeData.orchestrator.acceptedCommandCount) : "..."}
+          />
+          <StatBlock
+            label="Rejected"
+            value={runtimeData ? formatCount(runtimeData.orchestrator.rejectedCommandCount) : "..."}
+            tone={
+              runtimeData && runtimeData.orchestrator.rejectedCommandCount > 0
+                ? "warning"
+                : "default"
+            }
+          />
+          <StatBlock
+            label="Failed"
+            value={runtimeData ? formatCount(runtimeData.orchestrator.failedCommandCount) : "..."}
+            tone={
+              runtimeData && runtimeData.orchestrator.failedCommandCount > 0 ? "danger" : "default"
+            }
+          />
+          <StatBlock
+            label="Stale Flags"
+            value={
+              runtimeData ? formatCount(runtimeData.orchestrator.staleStateFlags.length) : "..."
+            }
+            tone={
+              runtimeData && runtimeData.orchestrator.staleStateFlags.length > 0
+                ? "warning"
+                : "default"
+            }
+          />
+        </StatsGrid>
+        {runtimeData && runtimeData.orchestrator.staleStateFlags.length > 0 ? (
+          <div className="space-y-2 border-t border-border/60 px-4 py-3 text-xs sm:px-5">
+            {runtimeData.orchestrator.staleStateFlags.map((flag) => (
+              <div
+                key={flag.kind}
+                className={cn(
+                  "flex items-start gap-2",
+                  flag.severity === "danger"
+                    ? "text-destructive"
+                    : "text-amber-600 dark:text-amber-400",
+                )}
+              >
+                <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+                <span>
+                  <span className="font-medium">{flag.kind}</span>: {flag.message} (
+                  {formatCount(flag.count)})
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        <OrchestratorHealthTables data={runtimeData} loading={isRuntimeInitialLoading} />
+      </SettingsSection>
+
+      <SettingsSection title="Provider Daemon">
+        <StatsGrid>
+          <StatBlock
+            label="Reachable"
+            value={runtimeData ? (runtimeData.providerDaemon.reachable ? "Yes" : "No") : "..."}
+            tone={
+              runtimeData ? runtimeLayerStatusTone(runtimeData.providerDaemon.status) : "default"
+            }
+          />
+          <StatBlock
+            label="PID"
+            value={runtimeData ? String(runtimeData.providerDaemon.pid ?? "n/a") : "..."}
+          />
+          <StatBlock
+            label="Sessions"
+            value={runtimeData ? formatCount(runtimeData.providerDaemon.activeSessionCount) : "..."}
+          />
+          <StatBlock
+            label="Streams"
+            value={runtimeData ? formatCount(runtimeData.providerDaemon.activeStreamCount) : "..."}
+          />
+        </StatsGrid>
+        <StatsGrid>
+          <StatBlock
+            label="Events"
+            value={runtimeData ? formatCount(runtimeData.providerDaemon.retainedEventCount) : "..."}
+          />
+          <StatBlock
+            label="Cursor"
+            value={runtimeData ? formatCount(runtimeData.providerDaemon.eventCursor) : "..."}
+          />
+          <StatBlock
+            label="Commands"
+            value={runtimeData ? formatCount(runtimeData.providerDaemon.commandCount) : "..."}
+          />
+          <StatBlock
+            label="RPC Failures"
+            value={runtimeData ? formatCount(runtimeData.providerDaemon.failedRpcCount) : "..."}
+            tone={
+              runtimeData && runtimeData.providerDaemon.failedRpcCount > 0 ? "warning" : "default"
+            }
+          />
+        </StatsGrid>
+        <ProviderDaemonTables data={runtimeData} loading={isRuntimeInitialLoading} />
+      </SettingsSection>
+
+      <SettingsSection title="Provider Supervisor">
+        <StatsGrid>
+          <StatBlock
+            label="Configured"
+            value={runtimeData ? (runtimeData.providerSupervisor.configured ? "Yes" : "No") : "..."}
+          />
+          <StatBlock
+            label="Reachable"
+            value={runtimeData ? (runtimeData.providerSupervisor.reachable ? "Yes" : "No") : "..."}
+            tone={
+              runtimeData
+                ? runtimeLayerStatusTone(runtimeData.providerSupervisor.status)
+                : "default"
+            }
+          />
+          <StatBlock
+            label="PID"
+            value={runtimeData ? String(runtimeData.providerSupervisor.pid ?? "n/a") : "..."}
+          />
+          <StatBlock
+            label="Streams"
+            value={
+              runtimeData ? formatCount(runtimeData.providerSupervisor.activeStreamCount) : "..."
+            }
+          />
+        </StatsGrid>
+        <ProviderSupervisorTable data={runtimeData} loading={isRuntimeInitialLoading} />
+      </SettingsSection>
+
       <SettingsSection
         title="Live Processes"
         headerAction={

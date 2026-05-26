@@ -172,7 +172,7 @@ function normalizeWindowsProcessRow(value: unknown): ProcessRow | null {
   };
 }
 
-function parseWindowsProcessRows(output: string): ReadonlyArray<ProcessRow> {
+export function parseWindowsProcessRows(output: string): ReadonlyArray<ProcessRow> {
   if (output.trim().length === 0) return [];
   try {
     const parsed = JSON.parse(output) as unknown;

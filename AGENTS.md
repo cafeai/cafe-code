@@ -75,6 +75,7 @@ Important files:
 - Provider daemon event replay/journal: `apps/server/src/providerDaemon/EventJournal.ts`.
 - Remote provider bridge used by the main backend: `apps/server/src/providerDaemon/RemoteProviderService.ts`.
 - Provider runtime inventory and diagnostics: `apps/server/src/providerDaemon/ProviderRuntimeInventory.ts`.
+- Lightweight settings diagnostics for runtime layers: `apps/server/src/diagnostics/RuntimeLayerDiagnostics.ts`, `apps/web/src/lib/runtimeLayerDiagnosticsState.ts`, and `apps/web/src/components/settings/DiagnosticsSettings.tsx`.
 - Supervisor process support: `apps/server/src/providerDaemon/ProviderSupervisorProcessManager.ts` and `apps/server/src/providerSupervisor/ProviderSupervisorRegistry.ts`.
 - Orchestration command handling: `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts`.
 - Provider runtime event ingestion: `apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts`.
@@ -167,6 +168,7 @@ If Claude behavior is unclear, check the official Claude Agent SDK docs, the ins
 
 - Every provider lifecycle change must leave enough debug breadcrumbs to answer: what command was sent, when it was accepted, when the provider emitted the first runtime event, when the first token/content/tool event arrived, when it completed, and what process owned it.
 - The debug endpoint should include provider daemon health, provider supervisor health, process diagnostics, RPC metrics, command ledger summaries, recent failures with stack traces where available, runtime event method counts, recent lifecycle warnings, stale active turns, provider home paths, and provider process ownership.
+- Settings diagnostics may show lightweight runtime-layer process, daemon, supervisor, and orchestration counters without `--cafe-debug`, but those summaries must stay bounded and sanitized. Keep raw prompts, full model output, bearer tokens, auth files, environment dumps, and deep event replay behind explicit local debugging flows.
 - Add new debug fields when fixing new failure classes. Do not rely on logs alone when a compact health/debug summary would make future diagnosis faster.
 - Runtime event names should be specific enough to grep, such as `codex.turnStart/accepted`, `codex.turnStart/noRuntimeEventYet`, provider stream disconnect warnings, snapshot backfill markers, and post-completion late-event diagnostics.
 - Prefer structured error diagnostics with cause chains and stack traces. If an exception crosses a daemon/RPC boundary, preserve its type, message, stack when safe, and structured context.

@@ -391,6 +391,246 @@ export const ServerProcessResourceHistoryResult = Schema.Struct({
 });
 export type ServerProcessResourceHistoryResult = typeof ServerProcessResourceHistoryResult.Type;
 
+export const ServerRuntimeLayerDiagnosticsInput = Schema.Struct({
+  windowMs: Schema.optionalKey(NonNegativeInt),
+  bucketMs: Schema.optionalKey(NonNegativeInt),
+});
+export type ServerRuntimeLayerDiagnosticsInput = typeof ServerRuntimeLayerDiagnosticsInput.Type;
+
+export const ServerRuntimeLayerStatus = Schema.Literals([
+  "online",
+  "offline",
+  "degraded",
+  "unknown",
+]);
+export type ServerRuntimeLayerStatus = typeof ServerRuntimeLayerStatus.Type;
+
+export const ServerRuntimeLayerRole = Schema.Literals([
+  "desktop",
+  "backend",
+  "orchestrator",
+  "provider-daemon",
+  "provider-supervisor",
+  "provider-runtime",
+  "provider-cli",
+  "source-control",
+  "unknown-child",
+]);
+export type ServerRuntimeLayerRole = typeof ServerRuntimeLayerRole.Type;
+
+export const ServerRuntimeLayerOwnerKind = Schema.Literals([
+  "desktop-shell",
+  "backend-root",
+  "backend-descendant",
+  "daemon-marker",
+  "daemon-descendant",
+  "supervisor-marker",
+  "supervisor-descendant",
+  "provider-reported",
+  "source-control",
+  "unknown",
+]);
+export type ServerRuntimeLayerOwnerKind = typeof ServerRuntimeLayerOwnerKind.Type;
+
+export const ServerRuntimeLayerSummary = Schema.Struct({
+  role: ServerRuntimeLayerRole,
+  status: ServerRuntimeLayerStatus,
+  pid: Schema.NullOr(PositiveInt),
+  rssBytes: NonNegativeInt,
+  cpuPercent: Schema.Number,
+  uptimeLabel: Schema.NullOr(TrimmedNonEmptyString),
+  lastEventAt: Schema.NullOr(IsoDateTime),
+  notes: Schema.Array(TrimmedNonEmptyString),
+});
+export type ServerRuntimeLayerSummary = typeof ServerRuntimeLayerSummary.Type;
+
+export const ServerRuntimeLayerProcess = Schema.Struct({
+  role: ServerRuntimeLayerRole,
+  ownerKind: ServerRuntimeLayerOwnerKind,
+  pid: Schema.NullOr(PositiveInt),
+  ppid: Schema.NullOr(NonNegativeInt),
+  status: TrimmedNonEmptyString,
+  cpuPercent: Schema.Number,
+  rssBytes: NonNegativeInt,
+  elapsed: Schema.NullOr(TrimmedNonEmptyString),
+  commandLabel: TrimmedNonEmptyString,
+  sanitizedCommand: TrimmedNonEmptyString,
+  depth: NonNegativeInt,
+  childPids: Schema.Array(PositiveInt),
+  attribution: TrimmedNonEmptyString,
+  lastSeenAt: Schema.NullOr(IsoDateTime),
+  notes: Schema.Array(TrimmedNonEmptyString),
+});
+export type ServerRuntimeLayerProcess = typeof ServerRuntimeLayerProcess.Type;
+
+export const ServerRuntimeLayerResourceBucket = Schema.Struct({
+  role: ServerRuntimeLayerRole,
+  startedAt: IsoDateTime,
+  endedAt: IsoDateTime,
+  maxRssBytes: NonNegativeInt,
+  maxCpuPercent: Schema.Number,
+  sampleCount: NonNegativeInt,
+});
+export type ServerRuntimeLayerResourceBucket = typeof ServerRuntimeLayerResourceBucket.Type;
+
+export const ServerRuntimeLayerResourceSummary = Schema.Struct({
+  processKey: TrimmedNonEmptyString,
+  role: ServerRuntimeLayerRole,
+  pid: Schema.NullOr(PositiveInt),
+  currentRssBytes: NonNegativeInt,
+  maxRssBytes: NonNegativeInt,
+  currentCpuPercent: Schema.Number,
+  avgCpuPercent: Schema.Number,
+  maxCpuPercent: Schema.Number,
+  sampleCount: NonNegativeInt,
+  lastSeenAt: Schema.NullOr(IsoDateTime),
+});
+export type ServerRuntimeLayerResourceSummary = typeof ServerRuntimeLayerResourceSummary.Type;
+
+export const ServerOrchestratorRecentEventTypeCount = Schema.Struct({
+  eventType: TrimmedNonEmptyString,
+  actorKind: Schema.NullOr(TrimmedNonEmptyString),
+  count: NonNegativeInt,
+  lastSeenAt: IsoDateTime,
+});
+export type ServerOrchestratorRecentEventTypeCount =
+  typeof ServerOrchestratorRecentEventTypeCount.Type;
+
+export const ServerOrchestratorProjectorCursor = Schema.Struct({
+  projector: TrimmedNonEmptyString,
+  cursor: NonNegativeInt,
+  lag: NonNegativeInt,
+  updatedAt: IsoDateTime,
+  status: ServerRuntimeLayerStatus,
+});
+export type ServerOrchestratorProjectorCursor = typeof ServerOrchestratorProjectorCursor.Type;
+
+export const ServerOrchestratorStaleStateFlag = Schema.Struct({
+  kind: TrimmedNonEmptyString,
+  count: NonNegativeInt,
+  severity: Schema.Literals(["info", "warning", "danger"]),
+  message: TrimmedNonEmptyString,
+});
+export type ServerOrchestratorStaleStateFlag = typeof ServerOrchestratorStaleStateFlag.Type;
+
+export const ServerOrchestratorDiagnostics = Schema.Struct({
+  latestEventSequence: NonNegativeInt,
+  projectionSequence: NonNegativeInt,
+  projectionLag: NonNegativeInt,
+  commandQueueDepth: NonNegativeInt,
+  acceptedCommandCount: NonNegativeInt,
+  rejectedCommandCount: NonNegativeInt,
+  failedCommandCount: NonNegativeInt,
+  projectCount: NonNegativeInt,
+  threadCount: NonNegativeInt,
+  pendingTurnCount: NonNegativeInt,
+  runningTurnCount: NonNegativeInt,
+  activeTurnCount: NonNegativeInt,
+  recentEventTypeCounts: Schema.Array(ServerOrchestratorRecentEventTypeCount),
+  projectorCursors: Schema.Array(ServerOrchestratorProjectorCursor),
+  staleStateFlags: Schema.Array(ServerOrchestratorStaleStateFlag),
+});
+export type ServerOrchestratorDiagnostics = typeof ServerOrchestratorDiagnostics.Type;
+
+export const ServerProviderDaemonRecentCommandSummary = Schema.Struct({
+  status: Schema.Literals(["running", "completed", "failed", "unknown"]),
+  method: TrimmedNonEmptyString,
+  durationMs: Schema.NullOr(Schema.Number),
+  updatedAt: IsoDateTime,
+  error: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type ServerProviderDaemonRecentCommandSummary =
+  typeof ServerProviderDaemonRecentCommandSummary.Type;
+
+export const ServerProviderDaemonRuntimeEventSummary = Schema.Struct({
+  eventType: TrimmedNonEmptyString,
+  count: NonNegativeInt,
+  lastSeenAt: Schema.NullOr(IsoDateTime),
+});
+export type ServerProviderDaemonRuntimeEventSummary =
+  typeof ServerProviderDaemonRuntimeEventSummary.Type;
+
+export const ServerProviderDaemonDiagnostics = Schema.Struct({
+  available: Schema.Boolean,
+  reachable: Schema.Boolean,
+  status: ServerRuntimeLayerStatus,
+  pid: Schema.NullOr(PositiveInt),
+  ppid: Schema.NullOr(NonNegativeInt),
+  mode: Schema.NullOr(TrimmedNonEmptyString),
+  transport: Schema.NullOr(TrimmedNonEmptyString),
+  healthLatencyMs: Schema.NullOr(Schema.Number),
+  startedAt: Schema.NullOr(IsoDateTime),
+  activeSessionCount: NonNegativeInt,
+  activeStreamCount: NonNegativeInt,
+  retainedEventCount: NonNegativeInt,
+  eventCursor: NonNegativeInt,
+  leaseCount: NonNegativeInt,
+  commandCount: NonNegativeInt,
+  runningCommandCount: NonNegativeInt,
+  completedCommandCount: NonNegativeInt,
+  failedCommandCount: NonNegativeInt,
+  totalRpcCount: NonNegativeInt,
+  failedRpcCount: NonNegativeInt,
+  maxRpcDurationMs: Schema.Number,
+  meanRpcDurationMs: Schema.NullOr(Schema.Number),
+  sqliteBusyTimeoutMs: Schema.NullOr(NonNegativeInt),
+  recentCommands: Schema.Array(ServerProviderDaemonRecentCommandSummary),
+  runtimeEventSummaries: Schema.Array(ServerProviderDaemonRuntimeEventSummary),
+  error: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type ServerProviderDaemonDiagnostics = typeof ServerProviderDaemonDiagnostics.Type;
+
+export const ServerProviderSupervisorDiagnostics = Schema.Struct({
+  configured: Schema.Boolean,
+  reachable: Schema.Boolean,
+  status: ServerRuntimeLayerStatus,
+  pid: Schema.NullOr(PositiveInt),
+  ppid: Schema.NullOr(NonNegativeInt),
+  transport: Schema.NullOr(TrimmedNonEmptyString),
+  healthLatencyMs: Schema.NullOr(Schema.Number),
+  activeSessionCount: NonNegativeInt,
+  activeStreamCount: NonNegativeInt,
+  retainedEventCount: NonNegativeInt,
+  commandCount: NonNegativeInt,
+  runningCommandCount: NonNegativeInt,
+  completedCommandCount: NonNegativeInt,
+  failedCommandCount: NonNegativeInt,
+  sessionCounts: Schema.Record(TrimmedNonEmptyString, NonNegativeInt),
+  error: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type ServerProviderSupervisorDiagnostics = typeof ServerProviderSupervisorDiagnostics.Type;
+
+export const ServerRuntimeLayerResources = Schema.Struct({
+  sampleIntervalMs: NonNegativeInt,
+  retainedSampleCount: NonNegativeInt,
+  buckets: Schema.Array(ServerRuntimeLayerResourceBucket),
+  processes: Schema.Array(ServerRuntimeLayerResourceSummary),
+});
+export type ServerRuntimeLayerResources = typeof ServerRuntimeLayerResources.Type;
+
+export const ServerRuntimeLayerDiagnosticsError = Schema.Struct({
+  source: TrimmedNonEmptyString,
+  message: TrimmedNonEmptyString,
+});
+export type ServerRuntimeLayerDiagnosticsError = typeof ServerRuntimeLayerDiagnosticsError.Type;
+
+export const ServerRuntimeLayerDiagnosticsResult = Schema.Struct({
+  readAt: IsoDateTime,
+  platform: TrimmedNonEmptyString,
+  windowMs: NonNegativeInt,
+  bucketMs: NonNegativeInt,
+  collectionSource: TrimmedNonEmptyString,
+  partialFailure: Schema.Boolean,
+  runtimeLayers: Schema.Array(ServerRuntimeLayerSummary),
+  orchestrator: ServerOrchestratorDiagnostics,
+  subprocesses: Schema.Array(ServerRuntimeLayerProcess),
+  providerDaemon: ServerProviderDaemonDiagnostics,
+  providerSupervisor: ServerProviderSupervisorDiagnostics,
+  resources: ServerRuntimeLayerResources,
+  errors: Schema.Array(ServerRuntimeLayerDiagnosticsError),
+});
+export type ServerRuntimeLayerDiagnosticsResult = typeof ServerRuntimeLayerDiagnosticsResult.Type;
+
 export const ServerSignalProcessInput = Schema.Struct({
   pid: PositiveInt,
   signal: ServerProcessSignal,

@@ -170,6 +170,13 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
           Ref.update(dispatchCalls, (calls) => [...calls, command.type]).pipe(
             Effect.as({ sequence: 1 }),
           ),
+        diagnosticsSnapshot: Effect.succeed({
+          commandQueueDepth: 0,
+          acceptedCommandCount: 0,
+          rejectedCommandCount: 0,
+          failedCommandCount: 0,
+          commandReadModelSequence: 0,
+        }),
         streamDomainEvents: Stream.empty,
       } satisfies OrchestrationEngineShape),
       Effect.provide(NodeServices.layer),
@@ -212,6 +219,13 @@ it.effect("resolveAutoBootstrapWelcomeTargets creates a project and thread when 
           Ref.update(dispatchCalls, (calls) => [...calls, command.type]).pipe(
             Effect.as({ sequence: 1 }),
           ),
+        diagnosticsSnapshot: Effect.succeed({
+          commandQueueDepth: 0,
+          acceptedCommandCount: 0,
+          rejectedCommandCount: 0,
+          failedCommandCount: 0,
+          commandReadModelSequence: 0,
+        }),
         streamDomainEvents: Stream.empty,
       } satisfies OrchestrationEngineShape),
       Effect.provide(NodeServices.layer),

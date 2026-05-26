@@ -24,6 +24,8 @@ import {
   WS_METHODS,
   WsRpcGroup,
   EditorId,
+  type ServerRuntimeLayerDiagnosticsInput,
+  type ServerRuntimeLayerDiagnosticsResult,
 } from "@cafecode/contracts";
 import { assert, it } from "@effect/vitest";
 import { assertFailure, assertInclude, assertTrue } from "@effect/vitest/utils";
@@ -114,6 +116,7 @@ import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore.ts";
 import { ServerAuthLive } from "./auth/Layers/ServerAuth.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
+import * as RuntimeLayerDiagnostics from "./diagnostics/RuntimeLayerDiagnostics.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as Data from "effect/Data";
 
@@ -204,6 +207,89 @@ const makeDefaultOrchestrationThreadShell = (
     ...overrides,
   };
 };
+
+const makeEmptyRuntimeLayerDiagnosticsResult = (
+  input: ServerRuntimeLayerDiagnosticsInput = {},
+): ServerRuntimeLayerDiagnosticsResult => ({
+  readAt: "1970-01-01T00:00:00.000Z",
+  platform: "test",
+  windowMs: input.windowMs ?? 300_000,
+  bucketMs: input.bucketMs ?? 30_000,
+  collectionSource: "test",
+  partialFailure: false,
+  runtimeLayers: [],
+  orchestrator: {
+    latestEventSequence: 0,
+    projectionSequence: 0,
+    projectionLag: 0,
+    commandQueueDepth: 0,
+    acceptedCommandCount: 0,
+    rejectedCommandCount: 0,
+    failedCommandCount: 0,
+    projectCount: 0,
+    threadCount: 0,
+    pendingTurnCount: 0,
+    runningTurnCount: 0,
+    activeTurnCount: 0,
+    recentEventTypeCounts: [],
+    projectorCursors: [],
+    staleStateFlags: [],
+  },
+  subprocesses: [],
+  providerDaemon: {
+    available: false,
+    reachable: false,
+    status: "offline",
+    pid: null,
+    ppid: null,
+    mode: null,
+    transport: null,
+    healthLatencyMs: null,
+    startedAt: null,
+    activeSessionCount: 0,
+    activeStreamCount: 0,
+    retainedEventCount: 0,
+    eventCursor: 0,
+    leaseCount: 0,
+    commandCount: 0,
+    runningCommandCount: 0,
+    completedCommandCount: 0,
+    failedCommandCount: 0,
+    totalRpcCount: 0,
+    failedRpcCount: 0,
+    maxRpcDurationMs: 0,
+    meanRpcDurationMs: null,
+    sqliteBusyTimeoutMs: null,
+    recentCommands: [],
+    runtimeEventSummaries: [],
+    error: null,
+  },
+  providerSupervisor: {
+    configured: false,
+    reachable: false,
+    status: "offline",
+    pid: null,
+    ppid: null,
+    transport: null,
+    healthLatencyMs: null,
+    activeSessionCount: 0,
+    activeStreamCount: 0,
+    retainedEventCount: 0,
+    commandCount: 0,
+    runningCommandCount: 0,
+    completedCommandCount: 0,
+    failedCommandCount: 0,
+    sessionCounts: {},
+    error: null,
+  },
+  resources: {
+    sampleIntervalMs: 0,
+    retainedSampleCount: 0,
+    buckets: [],
+    processes: [],
+  },
+  errors: [],
+});
 
 const browserOtlpTracingLayer = Layer.mergeAll(
   FetchHttpClient.layer,
@@ -577,6 +663,11 @@ const buildAppUnderTest = (options?: {
               topProcesses: [],
               error: Option.none(),
             }),
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(RuntimeLayerDiagnostics.RuntimeLayerDiagnostics)({
+          read: (input) => Effect.succeed(makeEmptyRuntimeLayerDiagnosticsResult(input)),
         }),
       ),
       Layer.provide(
