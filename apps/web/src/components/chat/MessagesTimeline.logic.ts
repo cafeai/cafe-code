@@ -1,5 +1,9 @@
 import * as Equal from "effect/Equal";
-import { type TimelineEntry, type WorkLogEntry } from "../../session-logic";
+import {
+  type HistoricalWorkLogSummary,
+  type TimelineEntry,
+  type WorkLogEntry,
+} from "../../session-logic";
 import { type ChatMessage, type ProposedPlan } from "../../types";
 import { type MessageId, type TurnId } from "@cafecode/contracts";
 
@@ -18,6 +22,13 @@ export type MessagesTimelineRow =
       id: string;
       createdAt: string;
       groupedEntries: WorkLogEntry[];
+    }
+  | {
+      kind: "historical-work";
+      id: string;
+      createdAt: string;
+      turnId: TurnId;
+      summary: HistoricalWorkLogSummary;
     }
   | {
       kind: "message";
@@ -97,11 +108,30 @@ export function deriveMessagesTimelineRows(input: {
   activeTurnId?: TurnId | null;
   activeTurnStartedAt: string | null;
   revertTurnCountByUserMessageId: ReadonlyMap<MessageId, number>;
+  historicalWorkLogSummariesByTurnId?: ReadonlyMap<TurnId, HistoricalWorkLogSummary>;
 }): MessagesTimelineRow[] {
   const nextRows: MessagesTimelineRow[] = [];
+  const insertedHistoricalWorkTurnIds = new Set<TurnId>();
   const durationStartByMessageId = computeMessageDurationStart(
     input.timelineEntries.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
   );
+  const pushHistoricalWorkRow = (turnId: TurnId | null | undefined, anchorCreatedAt: string) => {
+    if (turnId === null || turnId === undefined || insertedHistoricalWorkTurnIds.has(turnId)) {
+      return;
+    }
+    const summary = input.historicalWorkLogSummariesByTurnId?.get(turnId);
+    if (!summary) {
+      return;
+    }
+    insertedHistoricalWorkTurnIds.add(turnId);
+    nextRows.push({
+      kind: "historical-work",
+      id: `historical-work:${turnId}`,
+      createdAt: summary.previewEntries.at(-1)?.createdAt ?? anchorCreatedAt,
+      turnId,
+      summary,
+    });
+  };
 
   for (let index = 0; index < input.timelineEntries.length; index += 1) {
     const timelineEntry = input.timelineEntries[index];
@@ -157,28 +187,33 @@ export function deriveMessagesTimelineRows(input: {
       continue;
     }
 
+    const message = timelineEntry.message;
+    if (message.role !== "user") {
+      pushHistoricalWorkRow(message.turnId, message.createdAt);
+    }
+
     const assistantTurnStillInProgress =
-      timelineEntry.message.role === "assistant" &&
+      message.role === "assistant" &&
       input.activeTurnInProgress === true &&
       input.activeTurnId != null &&
-      timelineEntry.message.turnId === input.activeTurnId;
+      message.turnId === input.activeTurnId;
 
     nextRows.push({
       kind: "message",
       id: timelineEntry.id,
       createdAt: timelineEntry.createdAt,
-      message: timelineEntry.message,
-      durationStart:
-        durationStartByMessageId.get(timelineEntry.message.id) ?? timelineEntry.message.createdAt,
+      message,
+      durationStart: durationStartByMessageId.get(message.id) ?? message.createdAt,
       showCompletionDivider: false,
       completionSummary: null,
-      showAssistantCopyButton: timelineEntry.message.role === "assistant",
-      assistantCopyStreaming: timelineEntry.message.streaming || assistantTurnStillInProgress,
+      showAssistantCopyButton: message.role === "assistant",
+      assistantCopyStreaming: message.streaming || assistantTurnStillInProgress,
       revertTurnCount:
-        timelineEntry.message.role === "user"
-          ? input.revertTurnCountByUserMessageId.get(timelineEntry.message.id)
-          : undefined,
+        message.role === "user" ? input.revertTurnCountByUserMessageId.get(message.id) : undefined,
     });
+    if (message.role === "user") {
+      pushHistoricalWorkRow(message.turnId, message.createdAt);
+    }
     if (input.completionDividerAfterEntryId === timelineEntry.id) {
       nextRows.push({
         kind: "completion-divider",
@@ -239,6 +274,15 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
 
     case "work":
       return Equal.equals(a.groupedEntries, (b as typeof a).groupedEntries);
+
+    case "historical-work": {
+      const bh = b as typeof a;
+      return (
+        a.createdAt === bh.createdAt &&
+        a.turnId === bh.turnId &&
+        Equal.equals(a.summary, bh.summary)
+      );
+    }
 
     case "message": {
       const bm = b as typeof a;

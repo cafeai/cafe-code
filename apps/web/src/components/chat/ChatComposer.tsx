@@ -371,6 +371,9 @@ export interface FollowUpQueueViewItem {
   expanded: boolean;
   canExpand: boolean;
   blockedReason: string | null;
+  automaticSteerRetry?: {
+    readonly nonSteerableTurnKind: "review" | "compact";
+  } | null;
 }
 
 export interface SteeringFollowUpViewItem {
@@ -378,6 +381,57 @@ export interface SteeringFollowUpViewItem {
   preview: string;
   promptText: string;
   dispatchedAt: string;
+}
+
+function queuedMessageCountLabel(count: number): string | null {
+  if (count <= 0) return null;
+  return count === 1 ? "1 message queued" : `${count} messages queued`;
+}
+
+function queuedAutomaticSteerCountLabel(items: readonly FollowUpQueueViewItem[]): string | null {
+  const automaticSteerItems = items.filter((item) => item.automaticSteerRetry != null);
+  if (automaticSteerItems.length === 0) {
+    return null;
+  }
+
+  if (automaticSteerItems.length === 1) {
+    const kind = automaticSteerItems[0]?.automaticSteerRetry?.nonSteerableTurnKind;
+    return kind === "compact" ? "1 steer waiting for compact" : "1 steer waiting for review";
+  }
+
+  return `${automaticSteerItems.length} steers waiting`;
+}
+
+function steeringCountLabel(count: number): string | null {
+  if (count <= 0) return null;
+  return count === 1 ? "1 message steering" : `${count} messages steering`;
+}
+
+function automaticSteerRetryStatus(item: FollowUpQueueViewItem): {
+  readonly ariaLabel: string;
+  readonly label: string;
+  readonly title: string;
+} | null {
+  const kind = item.automaticSteerRetry?.nonSteerableTurnKind ?? null;
+  if (kind === null) {
+    return null;
+  }
+
+  if (kind === "compact") {
+    return {
+      ariaLabel: "Queued steer waiting for Codex context compaction",
+      label: "Waiting for compact",
+      title:
+        "Codex is compacting the active turn; Cafe Code will retry this steer automatically when compaction finishes.",
+    };
+  }
+
+  return {
+    ariaLabel: "Queued steer waiting for Codex review",
+    label: "Waiting for review",
+    title:
+      "Codex is reviewing the active turn; Cafe Code will send this follow-up automatically when the active turn is ready.",
+  };
 }
 
 export function FollowUpQueueShelf(props: {
@@ -395,16 +449,14 @@ export function FollowUpQueueShelf(props: {
   if (props.items.length === 0 && steeringItems.length === 0) {
     return null;
   }
-  const queuedLabel =
-    props.items.length === 1 ? "1 message queued" : `${props.items.length} messages queued`;
-  const steeringLabel =
-    steeringItems.length === 1 ? "1 message steering" : `${steeringItems.length} messages steering`;
-  const shelfLabel =
-    props.items.length > 0 && steeringItems.length > 0
-      ? `${queuedLabel}, ${steeringLabel}`
-      : props.items.length > 0
-        ? queuedLabel
-        : steeringLabel;
+  const automaticSteerCount = props.items.filter((item) => item.automaticSteerRetry != null).length;
+  const shelfLabel = [
+    queuedMessageCountLabel(props.items.length - automaticSteerCount),
+    queuedAutomaticSteerCountLabel(props.items),
+    steeringCountLabel(steeringItems.length),
+  ]
+    .filter((label): label is string => label !== null)
+    .join(", ");
 
   return (
     <div
@@ -455,108 +507,121 @@ export function FollowUpQueueShelf(props: {
             </div>
           </div>
         ))}
-        {props.items.map((item) => (
-          <div key={item.id} className="rounded-xl border border-border/45 bg-background/42 p-2">
-            <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-2">
-              {item.canExpand ? (
+        {props.items.map((item) => {
+          const retryStatus = automaticSteerRetryStatus(item);
+          return (
+            <div key={item.id} className="rounded-xl border border-border/45 bg-background/42 p-2">
+              <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-2">
+                {item.canExpand ? (
+                  <button
+                    type="button"
+                    className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent/70 hover:text-foreground"
+                    aria-label={item.expanded ? "Collapse queued message" : "Expand queued message"}
+                    onClick={() => props.onToggleExpanded(item.id)}
+                  >
+                    {item.expanded ? (
+                      <ChevronDownIcon className="size-4" />
+                    ) : (
+                      <ChevronRightIcon className="size-4" />
+                    )}
+                  </button>
+                ) : (
+                  <span className="size-6 shrink-0" aria-hidden="true" />
+                )}
                 <button
                   type="button"
-                  className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent/70 hover:text-foreground"
-                  aria-label={item.expanded ? "Collapse queued message" : "Expand queued message"}
-                  onClick={() => props.onToggleExpanded(item.id)}
+                  className="min-w-0 truncate text-left text-muted-foreground transition-colors data-[expandable=false]:cursor-default data-[expandable=true]:hover:text-foreground"
+                  data-expandable={item.canExpand ? "true" : "false"}
+                  onClick={() => {
+                    if (item.canExpand) {
+                      props.onToggleExpanded(item.id);
+                    }
+                  }}
+                  title={item.canExpand ? item.preview : undefined}
                 >
-                  {item.expanded ? (
-                    <ChevronDownIcon className="size-4" />
-                  ) : (
-                    <ChevronRightIcon className="size-4" />
-                  )}
+                  {item.preview}
                 </button>
-              ) : (
-                <span className="size-6 shrink-0" aria-hidden="true" />
-              )}
-              <button
-                type="button"
-                className="min-w-0 truncate text-left text-muted-foreground transition-colors data-[expandable=false]:cursor-default data-[expandable=true]:hover:text-foreground"
-                data-expandable={item.canExpand ? "true" : "false"}
-                onClick={() => {
-                  if (item.canExpand) {
-                    props.onToggleExpanded(item.id);
-                  }
-                }}
-                title={item.canExpand ? item.preview : undefined}
-              >
-                {item.preview}
-              </button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="cafe-followup-steer-button h-7 shrink-0 px-2 transition-colors"
-                title={props.actionTitle}
-                onClick={() => props.onAction(item.id)}
-              >
-                {props.actionLabel}
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                className="size-7 shrink-0 text-muted-foreground/75 hover:text-destructive"
-                aria-label="Remove queued message"
-                onClick={() => props.onRemove(item.id)}
-              >
-                <Trash2Icon className="size-4" />
-              </Button>
-            </div>
-            {item.canExpand && item.expanded ? (
-              <div className="mt-2 grid gap-2 rounded-lg border border-border/35 bg-background/55 p-2">
-                {item.images.length > 0 ? (
-                  <div className="grid max-h-40 grid-cols-2 gap-2 overflow-y-auto pr-1 sm:grid-cols-3">
-                    {item.images.map((image) => (
-                      <div
-                        key={image.id}
-                        className="overflow-hidden rounded-lg border border-border/70 bg-background/70"
-                      >
-                        {image.previewUrl ? (
-                          <button
-                            type="button"
-                            className="block h-full w-full cursor-zoom-in"
-                            aria-label={`Preview queued image ${image.name}`}
-                            onClick={() => {
-                              const preview = buildExpandedImagePreview(item.images, image.id);
-                              if (!preview) return;
-                              props.onExpandImage(preview);
-                            }}
-                          >
-                            <img
-                              src={image.previewUrl}
-                              alt={image.name}
-                              className="block h-24 w-full object-cover"
-                            />
-                          </button>
-                        ) : (
-                          <div className="flex min-h-20 items-center justify-center px-2 py-3 text-center text-[11px] text-muted-foreground/70">
-                            {image.name}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-                <textarea
-                  readOnly
-                  aria-label="Queued message prompt"
-                  value={item.promptText.trim().length > 0 ? item.promptText : item.preview}
-                  className="max-h-36 min-h-20 w-full resize-none overflow-y-auto rounded-md border border-border/30 bg-background/40 p-2 text-muted-foreground text-xs leading-5 outline-none [overflow-wrap:anywhere]"
-                  onChange={() => undefined}
-                />
+                {retryStatus ? (
+                  <span
+                    className="h-7 shrink-0 whitespace-nowrap rounded-md border border-border/60 px-2 py-1 text-muted-foreground/85 text-xs"
+                    aria-label={retryStatus.ariaLabel}
+                    title={retryStatus.title}
+                  >
+                    {retryStatus.label}
+                  </span>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="cafe-followup-steer-button h-7 shrink-0 px-2 transition-colors"
+                    title={props.actionTitle}
+                    onClick={() => props.onAction(item.id)}
+                  >
+                    {props.actionLabel}
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  className="size-7 shrink-0 text-muted-foreground/75 hover:text-destructive"
+                  aria-label="Remove queued message"
+                  onClick={() => props.onRemove(item.id)}
+                >
+                  <Trash2Icon className="size-4" />
+                </Button>
               </div>
-            ) : null}
-            {item.blockedReason ? (
-              <div className="mt-2 text-[11px] text-destructive/85">{item.blockedReason}</div>
-            ) : null}
-          </div>
-        ))}
+              {item.canExpand && item.expanded ? (
+                <div className="mt-2 grid gap-2 rounded-lg border border-border/35 bg-background/55 p-2">
+                  {item.images.length > 0 ? (
+                    <div className="grid max-h-40 grid-cols-2 gap-2 overflow-y-auto pr-1 sm:grid-cols-3">
+                      {item.images.map((image) => (
+                        <div
+                          key={image.id}
+                          className="overflow-hidden rounded-lg border border-border/70 bg-background/70"
+                        >
+                          {image.previewUrl ? (
+                            <button
+                              type="button"
+                              className="block h-full w-full cursor-zoom-in"
+                              aria-label={`Preview queued image ${image.name}`}
+                              onClick={() => {
+                                const preview = buildExpandedImagePreview(item.images, image.id);
+                                if (!preview) return;
+                                props.onExpandImage(preview);
+                              }}
+                            >
+                              <img
+                                src={image.previewUrl}
+                                alt={image.name}
+                                className="block h-24 w-full object-cover"
+                              />
+                            </button>
+                          ) : (
+                            <div className="flex min-h-20 items-center justify-center px-2 py-3 text-center text-[11px] text-muted-foreground/70">
+                              {image.name}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  <textarea
+                    readOnly
+                    aria-label="Queued message prompt"
+                    value={item.promptText.trim().length > 0 ? item.promptText : item.preview}
+                    className="max-h-36 min-h-20 w-full resize-none overflow-y-auto rounded-md border border-border/30 bg-background/40 p-2 text-muted-foreground text-xs leading-5 outline-none [overflow-wrap:anywhere]"
+                    onChange={() => undefined}
+                  />
+                </div>
+              ) : null}
+              {item.blockedReason ? (
+                <div className="mt-2 text-[11px] text-destructive/85">{item.blockedReason}</div>
+              ) : null}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

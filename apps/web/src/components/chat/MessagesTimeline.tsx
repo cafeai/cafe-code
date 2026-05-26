@@ -2,7 +2,9 @@ import {
   type EnvironmentId,
   type EditorId,
   type MessageId,
+  type OrchestrationThreadActivity,
   type ServerProviderSkill,
+  type ThreadId,
   type TurnId,
 } from "@cafecode/contracts";
 import {
@@ -19,7 +21,7 @@ import {
   type ReactNode,
 } from "react";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
-import { deriveTimelineEntries, formatElapsed } from "../../session-logic";
+import { deriveTimelineEntries, deriveWorkLogEntries, formatElapsed } from "../../session-logic";
 import ChatMarkdown from "../ChatMarkdown";
 import {
   BotIcon,
@@ -28,6 +30,8 @@ import {
   EyeIcon,
   GlobeIcon,
   HammerIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
   type LucideIcon,
   SquarePenIcon,
   TerminalIcon,
@@ -56,6 +60,7 @@ import { formatTimestamp } from "../../timestampFormat";
 import { SkillInlineText } from "./SkillInlineText";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
 import { readLocalApi } from "../../localApi";
+import { readEnvironmentApi } from "../../environmentApi";
 import { useSettings } from "../../hooks/useSettings";
 import { useServerAvailableEditors } from "../../rpc/serverState";
 
@@ -72,6 +77,7 @@ interface TimelineRowSharedState {
   additionalWorkspaceRoots: ReadonlyArray<string>;
   workspaceRoot: string | undefined;
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
+  activeThreadId: ThreadId | null;
   activeThreadEnvironmentId: EnvironmentId;
   onRevertUserMessage: (messageId: MessageId) => void;
   onImageExpand: (preview: ExpandedImagePreview) => void;
@@ -92,6 +98,9 @@ const TIMELINE_MAINTAIN_SCROLL_AT_END_THRESHOLD = 0.9;
 const TIMELINE_SUBMIT_STICK_TO_END_WINDOW_MS = 1_500;
 const TIMELINE_SUBMIT_STICK_TO_END_FRAME_ATTEMPTS = 8;
 const TIMELINE_SUBMIT_STICK_TO_END_SETTLE_TIMEOUTS_MS = [80, 180, 360, 720] as const;
+const HISTORICAL_WORK_LOG_PREVIEW_LIMIT = 6;
+const HISTORICAL_WORK_LOG_PAGE_SIZE = 24;
+const HISTORICAL_WORK_LOG_SHOW_ALL_LIMIT = 1_000;
 const TIMELINE_MAINTAIN_VISIBLE_CONTENT_POSITION = {
   data: false,
   size: true,
@@ -134,6 +143,9 @@ interface MessagesTimelineProps {
   activeTurnStartedAt: string | null;
   listRef: React.RefObject<LegendListRef | null>;
   timelineEntries: ReturnType<typeof deriveTimelineEntries>;
+  historicalWorkLogSummariesByTurnId?: Parameters<
+    typeof deriveMessagesTimelineRows
+  >[0]["historicalWorkLogSummariesByTurnId"];
   completionDividerAfterEntryId: string | null;
   completionSummary: string | null;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
@@ -145,6 +157,7 @@ interface MessagesTimelineProps {
   additionalWorkspaceRoots?: ReadonlyArray<string>;
   timestampFormat: TimestampFormat;
   workspaceRoot: string | undefined;
+  activeThreadId?: ThreadId;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   stickToEndRevision: number;
   onIsAtEndChange: (isAtEnd: boolean) => void;
@@ -162,6 +175,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   activeTurnStartedAt,
   listRef,
   timelineEntries,
+  historicalWorkLogSummariesByTurnId,
   completionDividerAfterEntryId,
   completionSummary,
   revertTurnCountByUserMessageId,
@@ -173,11 +187,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   additionalWorkspaceRoots = [],
   timestampFormat,
   workspaceRoot,
+  activeThreadId: activeThreadIdProp,
   skills = EMPTY_TIMELINE_SKILLS,
   stickToEndRevision,
   onIsAtEndChange,
   onUserScrollIntent,
 }: MessagesTimelineProps) {
+  const activeThreadId = activeThreadIdProp ?? null;
   const rawRows = useMemo(
     () =>
       deriveMessagesTimelineRows({
@@ -189,6 +205,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         activeTurnId: activeTurnId ?? null,
         activeTurnStartedAt,
         revertTurnCountByUserMessageId,
+        ...(historicalWorkLogSummariesByTurnId !== undefined
+          ? { historicalWorkLogSummariesByTurnId }
+          : {}),
       }),
     [
       timelineEntries,
@@ -199,6 +218,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeTurnId,
       activeTurnStartedAt,
       revertTurnCountByUserMessageId,
+      historicalWorkLogSummariesByTurnId,
     ],
   );
   const rows = useStableRows(rawRows);
@@ -394,6 +414,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       additionalWorkspaceRoots,
       workspaceRoot,
       skills,
+      activeThreadId,
       activeThreadEnvironmentId,
       onRevertUserMessage,
       onImageExpand,
@@ -404,6 +425,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       additionalWorkspaceRoots,
       workspaceRoot,
       skills,
+      activeThreadId,
       activeThreadEnvironmentId,
       onRevertUserMessage,
       onImageExpand,
@@ -495,6 +517,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       data-message-role={row.kind === "message" ? row.message.role : undefined}
     >
       {row.kind === "work" ? <WorkGroupSection groupedEntries={row.groupedEntries} /> : null}
+      {row.kind === "historical-work" ? <HistoricalWorkLogSection row={row} /> : null}
       {row.kind === "completion-divider" ? (
         <AssistantCompletionDivider completionSummary={row.completionSummary} />
       ) : null}
@@ -850,8 +873,321 @@ function LiveMessageMeta({
 // re-render only the affected row, not the entire list.
 // ---------------------------------------------------------------------------
 
+function mergeHistoricalActivityRows(
+  rows: ReadonlyArray<OrchestrationThreadActivity>,
+): OrchestrationThreadActivity[] {
+  const byId = new Map<string, OrchestrationThreadActivity>();
+  for (const row of rows) {
+    byId.set(row.id, row);
+  }
+  return [...byId.values()].toSorted(compareHistoricalActivityRows);
+}
+
+function compareHistoricalActivityRows(
+  left: OrchestrationThreadActivity,
+  right: OrchestrationThreadActivity,
+): number {
+  if (left.sequence !== undefined && right.sequence !== undefined) {
+    if (left.sequence !== right.sequence) {
+      return left.sequence - right.sequence;
+    }
+  } else if (left.sequence !== undefined) {
+    return 1;
+  } else if (right.sequence !== undefined) {
+    return -1;
+  }
+
+  const createdAtComparison = left.createdAt.localeCompare(right.createdAt);
+  if (createdAtComparison !== 0) {
+    return createdAtComparison;
+  }
+  return left.id.localeCompare(right.id);
+}
+
 /** Owns its own expand/collapse state so toggling re-renders only this row.
  *  State resets on unmount which is fine — work groups start collapsed. */
+const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
+  row,
+}: {
+  row: Extract<MessagesTimelineRow, { kind: "historical-work" }>;
+}) {
+  const ctx = use(TimelineRowCtx);
+  const { workspaceRoot } = ctx;
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [totalCount, setTotalCount] = useState<number | null>(null);
+  const [activityRows, setActivityRows] = useState<ReadonlyArray<OrchestrationThreadActivity>>([]);
+  const [loadedOffset, setLoadedOffset] = useState<number | null>(null);
+  const [initialPageLoaded, setInitialPageLoaded] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (totalCount !== null) {
+      return;
+    }
+    const api = readEnvironmentApi(ctx.activeThreadEnvironmentId);
+    const activeThreadId = ctx.activeThreadId;
+    if (!api || activeThreadId === null) {
+      return;
+    }
+
+    let cancelled = false;
+    void api.orchestration
+      .getThreadTurnActivityPage({
+        threadId: activeThreadId,
+        turnId: row.turnId,
+        offset: 0,
+        limit: 1,
+      })
+      .then((page) => {
+        if (!cancelled) {
+          setTotalCount(page.totalCount);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setTotalCount(row.summary.snapshotEntryCount > 0 ? row.summary.snapshotEntryCount : 0);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    ctx.activeThreadEnvironmentId,
+    ctx.activeThreadId,
+    row.summary.snapshotEntryCount,
+    row.turnId,
+    totalCount,
+  ]);
+
+  useEffect(() => {
+    if (!isExpanded || initialPageLoaded) {
+      return;
+    }
+    const api = readEnvironmentApi(ctx.activeThreadEnvironmentId);
+    const activeThreadId = ctx.activeThreadId;
+    if (!api || activeThreadId === null) {
+      setInitialPageLoaded(true);
+      setLoadError("Work log is unavailable while this environment is disconnected.");
+      return;
+    }
+
+    let cancelled = false;
+    const loadInitialPage = async () => {
+      setIsLoading(true);
+      setLoadError(null);
+      try {
+        const knownTotal =
+          totalCount ??
+          (
+            await api.orchestration.getThreadTurnActivityPage({
+              threadId: activeThreadId,
+              turnId: row.turnId,
+              offset: 0,
+              limit: 1,
+            })
+          ).totalCount;
+        if (cancelled) return;
+        setTotalCount(knownTotal);
+        if (knownTotal <= 0) {
+          setActivityRows([]);
+          setLoadedOffset(0);
+          setInitialPageLoaded(true);
+          return;
+        }
+        const limit = Math.min(HISTORICAL_WORK_LOG_PREVIEW_LIMIT, knownTotal);
+        const offset = Math.max(0, knownTotal - limit);
+        const page = await api.orchestration.getThreadTurnActivityPage({
+          threadId: activeThreadId,
+          turnId: row.turnId,
+          offset,
+          limit,
+        });
+        if (cancelled) return;
+        setTotalCount(page.totalCount);
+        setActivityRows(page.activities);
+        setLoadedOffset(page.offset);
+        setInitialPageLoaded(true);
+      } catch {
+        if (!cancelled) {
+          setLoadError("Unable to load this work log page.");
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    void loadInitialPage();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    ctx.activeThreadEnvironmentId,
+    ctx.activeThreadId,
+    initialPageLoaded,
+    isExpanded,
+    row.turnId,
+    totalCount,
+  ]);
+
+  const visibleEntries = useMemo(() => {
+    if (activityRows.length > 0) {
+      return deriveWorkLogEntries(activityRows, row.turnId);
+    }
+    return row.summary.previewEntries.slice(-HISTORICAL_WORK_LOG_PREVIEW_LIMIT);
+  }, [activityRows, row.summary.previewEntries, row.turnId]);
+  const displayCount = totalCount ?? row.summary.snapshotEntryCount;
+  const countLabel = displayCount > 0 ? ` (${displayCount})` : "";
+  const compactSummary =
+    row.summary.previewEntries.at(-1)?.label ??
+    (displayCount > 0 ? "Saved activity" : "Fetch on demand");
+  const hasOlder = loadedOffset !== null ? loadedOffset > 0 : displayCount > visibleEntries.length;
+  const canShowAll =
+    hasOlder && totalCount !== null && totalCount <= HISTORICAL_WORK_LOG_SHOW_ALL_LIMIT;
+
+  const loadOlderPage = useCallback(async () => {
+    if (loadedOffset === null || loadedOffset <= 0 || isLoadingOlder) {
+      return;
+    }
+    const api = readEnvironmentApi(ctx.activeThreadEnvironmentId);
+    const activeThreadId = ctx.activeThreadId;
+    if (!api || activeThreadId === null) {
+      setLoadError("Work log is unavailable while this environment is disconnected.");
+      return;
+    }
+    const nextOffset = Math.max(0, loadedOffset - HISTORICAL_WORK_LOG_PAGE_SIZE);
+    const limit = loadedOffset - nextOffset;
+    setIsLoadingOlder(true);
+    setLoadError(null);
+    try {
+      const page = await api.orchestration.getThreadTurnActivityPage({
+        threadId: activeThreadId,
+        turnId: row.turnId,
+        offset: nextOffset,
+        limit,
+      });
+      setTotalCount(page.totalCount);
+      setActivityRows((current) => mergeHistoricalActivityRows([...page.activities, ...current]));
+      setLoadedOffset(page.offset);
+    } catch {
+      setLoadError("Unable to load older work log entries.");
+    } finally {
+      setIsLoadingOlder(false);
+    }
+  }, [ctx.activeThreadEnvironmentId, ctx.activeThreadId, isLoadingOlder, loadedOffset, row.turnId]);
+
+  const loadAllPages = useCallback(async () => {
+    if (totalCount === null || totalCount <= 0 || totalCount > HISTORICAL_WORK_LOG_SHOW_ALL_LIMIT) {
+      return;
+    }
+    const api = readEnvironmentApi(ctx.activeThreadEnvironmentId);
+    const activeThreadId = ctx.activeThreadId;
+    if (!api || activeThreadId === null) {
+      setLoadError("Work log is unavailable while this environment is disconnected.");
+      return;
+    }
+    setIsLoadingOlder(true);
+    setLoadError(null);
+    try {
+      const page = await api.orchestration.getThreadTurnActivityPage({
+        threadId: activeThreadId,
+        turnId: row.turnId,
+        offset: 0,
+        limit: totalCount,
+      });
+      setTotalCount(page.totalCount);
+      setActivityRows(page.activities);
+      setLoadedOffset(page.offset);
+    } catch {
+      setLoadError("Unable to load the full work log.");
+    } finally {
+      setIsLoadingOlder(false);
+    }
+  }, [ctx.activeThreadEnvironmentId, ctx.activeThreadId, row.turnId, totalCount]);
+
+  if (!isExpanded) {
+    return (
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-2 rounded-lg border border-border/35 bg-card/15 px-2.5 py-1.5 text-left text-[11px] text-muted-foreground/70 transition-colors hover:border-border/60 hover:bg-card/25 hover:text-foreground/80"
+        data-historical-work-log-row="collapsed"
+        onClick={() => setIsExpanded(true)}
+      >
+        <span className="inline-flex min-w-0 items-center gap-1.5">
+          <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground/45" />
+          <span className="shrink-0 font-medium text-muted-foreground/75">
+            Work log{countLabel}
+          </span>
+          <span className="truncate text-muted-foreground/45">{compactSummary}</span>
+        </span>
+        <span className="shrink-0 text-[10px] uppercase tracking-[0.12em] text-muted-foreground/45">
+          Expand
+        </span>
+      </button>
+    );
+  }
+
+  return (
+    <div
+      className="rounded-xl border border-border/45 bg-card/20 px-2 py-1.5"
+      data-historical-work-log-row="expanded"
+    >
+      <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
+        <button
+          type="button"
+          className="inline-flex min-w-0 items-center gap-1.5 text-[9px] uppercase tracking-[0.16em] text-muted-foreground/60 transition-colors hover:text-foreground/75"
+          onClick={() => setIsExpanded(false)}
+        >
+          <ChevronDownIcon className="size-3 shrink-0" />
+          <span>Work log{countLabel}</span>
+        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          {canShowAll ? (
+            <button
+              type="button"
+              className="text-[9px] uppercase tracking-[0.12em] text-muted-foreground/55 transition-colors duration-150 hover:text-foreground/75 disabled:opacity-45"
+              disabled={isLoadingOlder}
+              onClick={loadAllPages}
+            >
+              Show all
+            </button>
+          ) : null}
+          {hasOlder ? (
+            <button
+              type="button"
+              className="text-[9px] uppercase tracking-[0.12em] text-muted-foreground/55 transition-colors duration-150 hover:text-foreground/75 disabled:opacity-45"
+              disabled={isLoadingOlder}
+              onClick={loadOlderPage}
+            >
+              {isLoadingOlder ? "Loading..." : "Show older"}
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {isLoading && visibleEntries.length === 0 ? (
+        <p className="px-0.5 py-1 text-[11px] text-muted-foreground/50">Loading work log...</p>
+      ) : (
+        <div className="space-y-0.5">
+          {visibleEntries.map((workEntry) => (
+            <SimpleWorkEntryRow
+              key={`historical-work-row:${workEntry.id}`}
+              workEntry={workEntry}
+              workspaceRoot={workspaceRoot}
+            />
+          ))}
+        </div>
+      )}
+      {loadError ? (
+        <p className="mt-1 px-0.5 text-[10px] text-destructive/75">{loadError}</p>
+      ) : null}
+    </div>
+  );
+});
+
 const WorkGroupSection = memo(function WorkGroupSection({
   groupedEntries,
 }: {

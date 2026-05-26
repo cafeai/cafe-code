@@ -1782,6 +1782,71 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("pages turn activity directly from SQLite outside the thread detail snapshot cap", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_thread_activities`;
+
+      yield* sql`
+        WITH RECURSIVE activity_numbers(index_value) AS (
+          SELECT 1
+          UNION ALL
+          SELECT index_value + 1
+          FROM activity_numbers
+          WHERE index_value < 10
+        )
+        INSERT INTO projection_thread_activities (
+          activity_id,
+          thread_id,
+          turn_id,
+          tone,
+          kind,
+          summary,
+          payload_json,
+          sequence,
+          created_at
+        )
+        SELECT
+          printf('turn-page-activity-%02d', index_value),
+          'thread-turn-page',
+          'turn-page',
+          'tool',
+          'tool.completed',
+          printf('activity %02d', index_value),
+          '{}',
+          index_value,
+          printf('2026-04-06T00:00:%02d.000Z', index_value)
+        FROM activity_numbers
+      `;
+
+      const page = yield* snapshotQuery.getThreadTurnActivityPage({
+        threadId: ThreadId.make("thread-turn-page"),
+        turnId: TurnId.make("turn-page"),
+        offset: 3,
+        limit: 4,
+      });
+
+      assert.equal(page.totalCount, 10);
+      assert.equal(page.offset, 3);
+      assert.equal(page.activities.length, 4);
+      assert.deepStrictEqual(
+        page.activities.map((activity) => activity.id),
+        [
+          "turn-page-activity-04",
+          "turn-page-activity-05",
+          "turn-page-activity-06",
+          "turn-page-activity-07",
+        ],
+      );
+      assert.deepStrictEqual(
+        page.activities.map((activity) => activity.sequence),
+        [4, 5, 6, 7],
+      );
+    }),
+  );
+
   it.effect("keeps deleted project and thread tombstones in the command read model", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

@@ -13,6 +13,8 @@ import type {
   OrchestrationReadModel,
   OrchestrationShellSnapshot,
   OrchestrationThread,
+  OrchestrationThreadTurnActivityPage,
+  OrchestrationThreadTurnActivityPageInput,
   OrchestrationThreadShell,
   ProjectId,
   ThreadId,
@@ -148,6 +150,17 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadDetailById: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<OrchestrationThread>, ProjectionRepositoryError>;
+
+  /**
+   * Read a bounded page of raw persisted activity for one turn.
+   *
+   * Thread detail snapshots intentionally carry only the recent activity cap.
+   * Historical work-log rows use this query to hydrate older turn activity on
+   * demand without expanding the hot subscription payload for every thread.
+   */
+  readonly getThreadTurnActivityPage: (
+    input: OrchestrationThreadTurnActivityPageInput,
+  ) => Effect.Effect<OrchestrationThreadTurnActivityPage, ProjectionRepositoryError>;
 }
 
 /**

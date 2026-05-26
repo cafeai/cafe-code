@@ -11,6 +11,7 @@ import {
   IsoDateTime,
   MessageId,
   NonNegativeInt,
+  PositiveInt,
   ProjectId,
   ProviderItemId,
   ThreadId,
@@ -24,6 +25,7 @@ export const ORCHESTRATION_WS_METHODS = {
   replayEvents: "orchestration.replayEvents",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   getDeletedShellSnapshot: "orchestration.getDeletedShellSnapshot",
+  getThreadTurnActivityPage: "orchestration.getThreadTurnActivityPage",
   hardDeleteThread: "orchestration.hardDeleteThread",
   subscribeShell: "orchestration.subscribeShell",
   subscribeThread: "orchestration.subscribeThread",
@@ -455,6 +457,29 @@ export const OrchestrationThreadDetailSnapshot = Schema.Struct({
   thread: OrchestrationThread,
 });
 export type OrchestrationThreadDetailSnapshot = typeof OrchestrationThreadDetailSnapshot.Type;
+
+export const THREAD_TURN_ACTIVITY_PAGE_MAX_LIMIT = 1_000;
+
+export const OrchestrationThreadTurnActivityPageInput = Schema.Struct({
+  threadId: ThreadId,
+  turnId: TurnId,
+  offset: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
+  limit: PositiveInt.check(Schema.isLessThanOrEqualTo(THREAD_TURN_ACTIVITY_PAGE_MAX_LIMIT)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(50)),
+  ),
+});
+export type OrchestrationThreadTurnActivityPageInput =
+  typeof OrchestrationThreadTurnActivityPageInput.Type;
+
+export const OrchestrationThreadTurnActivityPage = Schema.Struct({
+  threadId: ThreadId,
+  turnId: TurnId,
+  offset: NonNegativeInt,
+  limit: PositiveInt,
+  totalCount: NonNegativeInt,
+  activities: Schema.Array(OrchestrationThreadActivity),
+});
+export type OrchestrationThreadTurnActivityPage = typeof OrchestrationThreadTurnActivityPage.Type;
 
 export const ProjectCreateCommand = Schema.Struct({
   type: Schema.Literal("project.create"),
@@ -1262,6 +1287,10 @@ export const OrchestrationRpcSchemas = {
   hardDeleteThread: {
     input: ThreadHardDeleteInput,
     output: ThreadHardDeleteResult,
+  },
+  getThreadTurnActivityPage: {
+    input: OrchestrationThreadTurnActivityPageInput,
+    output: OrchestrationThreadTurnActivityPage,
   },
   subscribeThread: {
     input: OrchestrationSubscribeThreadInput,

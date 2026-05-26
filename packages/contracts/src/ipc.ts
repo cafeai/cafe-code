@@ -49,6 +49,8 @@ import type {
   ClientOrchestrationCommand,
   OrchestrationShellSnapshot,
   OrchestrationShellStreamItem,
+  OrchestrationThreadTurnActivityPage,
+  OrchestrationThreadTurnActivityPageInput,
   ThreadHardDeleteInput,
   ThreadHardDeleteResult,
   OrchestrationSubscribeThreadInput,
@@ -518,6 +520,9 @@ export interface EnvironmentApi {
     dispatchCommand: (command: ClientOrchestrationCommand) => Promise<{ sequence: number }>;
     getArchivedShellSnapshot: () => Promise<OrchestrationShellSnapshot>;
     getDeletedShellSnapshot: () => Promise<OrchestrationShellSnapshot>;
+    getThreadTurnActivityPage: (
+      input: OrchestrationThreadTurnActivityPageInput,
+    ) => Promise<OrchestrationThreadTurnActivityPage>;
     hardDeleteThread: (input: ThreadHardDeleteInput) => Promise<ThreadHardDeleteResult>;
     subscribeShell: (
       callback: (event: OrchestrationShellStreamItem) => void,

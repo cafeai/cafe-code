@@ -62,6 +62,12 @@ export interface WorkLogEntry {
   requestKind?: PendingApproval["requestKind"];
 }
 
+export interface HistoricalWorkLogSummary {
+  turnId: TurnId;
+  previewEntries: ReadonlyArray<WorkLogEntry>;
+  snapshotEntryCount: number;
+}
+
 interface DerivedWorkLogEntry extends WorkLogEntry {
   activityKind: OrchestrationThreadActivity["kind"];
   collapseKey?: string;
@@ -524,6 +530,64 @@ export function deriveWorkLogEntries(
   return collapseDerivedWorkLogEntries(entries).map(
     ({ activityKind: _activityKind, collapseKey: _collapseKey, ...entry }) => entry,
   );
+}
+
+export function deriveHistoricalWorkLogSummaries(input: {
+  messages: ReadonlyArray<ChatMessage>;
+  activities: ReadonlyArray<OrchestrationThreadActivity>;
+  latestTurnId?: TurnId | null | undefined;
+}): ReadonlyMap<TurnId, HistoricalWorkLogSummary> {
+  const latestTurnId = input.latestTurnId ?? null;
+  if (latestTurnId === null) {
+    return new Map();
+  }
+  const historicalTurnIds = new Set<TurnId>();
+  for (const message of input.messages) {
+    if (
+      message.turnId !== null &&
+      message.turnId !== undefined &&
+      message.turnId !== latestTurnId
+    ) {
+      historicalTurnIds.add(message.turnId);
+    }
+  }
+  for (const activity of input.activities) {
+    if (activity.turnId !== null && activity.turnId !== latestTurnId) {
+      historicalTurnIds.add(activity.turnId);
+    }
+  }
+
+  if (historicalTurnIds.size === 0) {
+    return new Map();
+  }
+
+  const entriesByTurnId = new Map<TurnId, WorkLogEntry[]>();
+  for (const entry of deriveWorkLogEntries(input.activities, undefined)) {
+    if (
+      entry.turnId === null ||
+      entry.turnId === undefined ||
+      !historicalTurnIds.has(entry.turnId)
+    ) {
+      continue;
+    }
+    const existing = entriesByTurnId.get(entry.turnId);
+    if (existing) {
+      existing.push(entry);
+    } else {
+      entriesByTurnId.set(entry.turnId, [entry]);
+    }
+  }
+
+  const summaries = new Map<TurnId, HistoricalWorkLogSummary>();
+  for (const turnId of historicalTurnIds) {
+    const entries = entriesByTurnId.get(turnId) ?? [];
+    summaries.set(turnId, {
+      turnId,
+      previewEntries: entries.slice(-6),
+      snapshotEntryCount: entries.length,
+    });
+  }
+  return summaries;
 }
 
 function isRetryableSteerDeliveryActivity(activity: OrchestrationThreadActivity): boolean {

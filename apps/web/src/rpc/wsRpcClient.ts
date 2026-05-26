@@ -131,6 +131,9 @@ export interface WsRpcClient {
     readonly getDeletedShellSnapshot: RpcUnaryNoArgMethod<
       typeof ORCHESTRATION_WS_METHODS.getDeletedShellSnapshot
     >;
+    readonly getThreadTurnActivityPage: RpcUnaryMethod<
+      typeof ORCHESTRATION_WS_METHODS.getThreadTurnActivityPage
+    >;
     readonly hardDeleteThread: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.hardDeleteThread>;
     readonly subscribeShell: RpcStreamMethod<typeof ORCHESTRATION_WS_METHODS.subscribeShell>;
     readonly subscribeThread: RpcInputStreamMethod<typeof ORCHESTRATION_WS_METHODS.subscribeThread>;
@@ -260,6 +263,10 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         ),
       getDeletedShellSnapshot: () =>
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getDeletedShellSnapshot]({})),
+      getThreadTurnActivityPage: (input) =>
+        transport.request((client) =>
+          client[ORCHESTRATION_WS_METHODS.getThreadTurnActivityPage](input),
+        ),
       hardDeleteThread: (input) =>
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.hardDeleteThread](input)),
       subscribeShell: (listener, options) =>

@@ -731,6 +731,29 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
             ),
             { "rpc.aggregate": "orchestration" },
           ),
+        [ORCHESTRATION_WS_METHODS.getThreadTurnActivityPage]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.getThreadTurnActivityPage,
+            projectionSnapshotQuery.getThreadTurnActivityPage(input).pipe(
+              Effect.tapError((cause) =>
+                Effect.logError("orchestration turn activity page load failed", {
+                  threadId: input.threadId,
+                  turnId: input.turnId,
+                  offset: input.offset,
+                  limit: input.limit,
+                  cause,
+                }),
+              ),
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationGetSnapshotError({
+                    message: `Failed to load work log activity for turn ${input.turnId}`,
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "orchestration" },
+          ),
         [ORCHESTRATION_WS_METHODS.subscribeThread]: (input) =>
           observeRpcStreamEffect(
             ORCHESTRATION_WS_METHODS.subscribeThread,

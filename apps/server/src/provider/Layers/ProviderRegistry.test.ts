@@ -2,8 +2,10 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, it, assert } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -56,6 +58,7 @@ import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMainte
 const decodeServerSettings = Schema.decodeSync(ServerSettings);
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
+const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const encodedDefaultServerSettings = encodeServerSettings(DEFAULT_SERVER_SETTINGS);
 
 const defaultClaudeSettings: ClaudeSettings = Schema.decodeSync(ClaudeSettings)({});
@@ -197,6 +200,14 @@ function mockCommandSpawnerLayer(
       return Effect.succeed(mockHandle(handler(cmd.command, cmd.args)));
     }),
   );
+}
+
+function encodeJwtPart(value: unknown): string {
+  return Buffer.from(encodeUnknownJsonString(value), "utf8").toString("base64url");
+}
+
+function makeUnsignedJwt(payload: Record<string, unknown>): string {
+  return `${encodeJwtPart({ alg: "none", typ: "JWT" })}.${encodeJwtPart(payload)}.signature`;
 }
 
 function failingSpawnerLayer(description: string) {
@@ -1363,6 +1374,99 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             ],
           );
           assert.deepStrictEqual(status.skills, []);
+        }),
+      );
+
+      it.effect("adds the Codex auth email from the local auth token metadata", () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const homePath = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "cafecode-codex-auth-email-",
+          });
+          const authPath = path.join(homePath, "auth.json");
+          yield* fileSystem.writeFileString(
+            authPath,
+            encodeUnknownJsonString({
+              auth_mode: "chatgpt",
+              tokens: {
+                id_token: makeUnsignedJwt({
+                  email: "codex-user@example.com",
+                  email_verified: true,
+                }),
+              },
+            }),
+          );
+          yield* fileSystem.chmod(authPath, 0o600);
+
+          const status = yield* checkCodexCliProviderStatus(decodeCodexSettings({ homePath })).pipe(
+            Effect.provide(
+              mockSpawnerLayer((args) => {
+                const joined = args.join(" ");
+                if (joined === "--version") {
+                  return { stdout: "codex-cli 0.133.0\n", stderr: "", code: 0 };
+                }
+                if (joined === "login status") {
+                  return { stdout: "Logged in using ChatGPT\n", stderr: "", code: 0 };
+                }
+                throw new Error(`Unexpected args: ${joined}`);
+              }),
+            ),
+          );
+
+          assert.strictEqual(status.status, "ready");
+          assert.strictEqual(status.auth.status, "authenticated");
+          assert.strictEqual(status.auth.type, "chatgpt");
+          assert.strictEqual(status.auth.label, "ChatGPT Subscription");
+          assert.strictEqual(status.auth.email, "codex-user@example.com");
+        }),
+      );
+
+      it.effect("ignores Codex auth metadata when the auth file is a symlink", () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const homePath = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "cafecode-codex-auth-symlink-home-",
+          });
+          const targetPath = path.join(
+            yield* fileSystem.makeTempDirectoryScoped({
+              prefix: "cafecode-codex-auth-symlink-target-",
+            }),
+            "auth.json",
+          );
+          yield* fileSystem.writeFileString(
+            targetPath,
+            encodeUnknownJsonString({
+              auth_mode: "chatgpt",
+              tokens: {
+                id_token: makeUnsignedJwt({
+                  email: "unsafe-symlink@example.com",
+                  email_verified: true,
+                }),
+              },
+            }),
+          );
+          yield* fileSystem.symlink(targetPath, path.join(homePath, "auth.json"));
+
+          const status = yield* checkCodexCliProviderStatus(decodeCodexSettings({ homePath })).pipe(
+            Effect.provide(
+              mockSpawnerLayer((args) => {
+                const joined = args.join(" ");
+                if (joined === "--version") {
+                  return { stdout: "codex-cli 0.133.0\n", stderr: "", code: 0 };
+                }
+                if (joined === "login status") {
+                  return { stdout: "Logged in using ChatGPT\n", stderr: "", code: 0 };
+                }
+                throw new Error(`Unexpected args: ${joined}`);
+              }),
+            ),
+          );
+
+          assert.strictEqual(status.status, "ready");
+          assert.strictEqual(status.auth.status, "authenticated");
+          assert.strictEqual(status.auth.email, undefined);
         }),
       );
 

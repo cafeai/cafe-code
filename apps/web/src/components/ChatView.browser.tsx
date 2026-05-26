@@ -214,6 +214,9 @@ function createMockEnvironmentApi(input: {
       getDeletedShellSnapshot: (() => {
         throw new Error("Not implemented in browser test.");
       }) as EnvironmentApi["orchestration"]["getDeletedShellSnapshot"],
+      getThreadTurnActivityPage: (() => {
+        throw new Error("Not implemented in browser test.");
+      }) as EnvironmentApi["orchestration"]["getThreadTurnActivityPage"],
       hardDeleteThread: (() => {
         throw new Error("Not implemented in browser test.");
       }) as EnvironmentApi["orchestration"]["hardDeleteThread"],

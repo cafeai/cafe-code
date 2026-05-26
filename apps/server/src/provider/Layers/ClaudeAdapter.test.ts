@@ -2710,7 +2710,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("passes Claude resume ids and assistant checkpoint into SDK resume options", () => {
+  it.effect("passes Claude resume ids without SDK checkpoint options for normal follow-ups", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -2731,14 +2731,13 @@ describe("ClaudeAdapterLive", () => {
       assert.deepEqual(session.resumeCursor, {
         threadId: RESUME_THREAD_ID,
         resume: "550e8400-e29b-41d4-a716-446655440000",
-        resumeSessionAt: "assistant-99",
         turnCount: 3,
       });
 
       const createInput = harness.getLastCreateQueryInput();
       assert.equal(createInput?.options.resume, "550e8400-e29b-41d4-a716-446655440000");
       assert.equal(createInput?.options.sessionId, undefined);
-      assert.equal(createInput?.options.resumeSessionAt, "assistant-99");
+      assert.equal(createInput?.options.resumeSessionAt, undefined);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -2789,6 +2788,70 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect(
+    "repairs a corrupted Claude resume session id from the stored assistant checkpoint",
+    () => {
+      const homePath = mkdtempSync(path.join(os.tmpdir(), "claude-repair-resume-home-"));
+      const cwd = path.join(homePath, "workspace");
+      const staleSessionId = "550e8400-e29b-41d4-a716-446655440000";
+      const repairedSessionId = "550e8400-e29b-41d4-a716-446655440001";
+      const assistantUuid = "assistant-99";
+      const projectDirectory = claudeProjectDirectoryForTest(homePath, cwd);
+      mkdirSync(projectDirectory, { recursive: true });
+      writeFileSync(
+        path.join(projectDirectory, `${repairedSessionId}.jsonl`),
+        `${JSON.stringify({
+          type: "assistant",
+          uuid: assistantUuid,
+          session_id: repairedSessionId,
+        })}\n`,
+      );
+
+      const harness = makeHarness({
+        cwd,
+        claudeConfig: { homePath },
+      });
+      return Effect.gen(function* () {
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() =>
+            rmSync(homePath, {
+              recursive: true,
+              force: true,
+            }),
+          ),
+        );
+
+        const adapter = yield* ClaudeAdapter;
+
+        const session = yield* adapter.startSession({
+          threadId: RESUME_THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          cwd,
+          resumeCursor: {
+            threadId: RESUME_THREAD_ID,
+            resume: staleSessionId,
+            resumeSessionAt: assistantUuid,
+            turnCount: 3,
+          },
+          runtimeMode: "full-access",
+        });
+
+        const createInput = harness.getLastCreateQueryInput();
+        assert.deepEqual(session.resumeCursor, {
+          threadId: RESUME_THREAD_ID,
+          resume: repairedSessionId,
+          turnCount: 3,
+        });
+        assert.equal(createInput?.options.resume, repairedSessionId);
+        assert.equal(createInput?.options.resumeSessionAt, undefined);
+        assert.equal(createInput?.options.sessionId, undefined);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("passes a durable Claude resume cursor when the cwd transcript exists", () => {
     const homePath = mkdtempSync(path.join(os.tmpdir(), "claude-present-resume-home-"));
     const cwd = path.join(homePath, "workspace");
@@ -2830,11 +2893,10 @@ describe("ClaudeAdapterLive", () => {
       assert.deepEqual(session.resumeCursor, {
         threadId: RESUME_THREAD_ID,
         resume: sessionId,
-        resumeSessionAt: "assistant-99",
         turnCount: 3,
       });
       assert.equal(createInput?.options.resume, sessionId);
-      assert.equal(createInput?.options.resumeSessionAt, "assistant-99");
+      assert.equal(createInput?.options.resumeSessionAt, undefined);
       assert.equal(createInput?.options.sessionId, undefined);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -3019,6 +3081,73 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("does not replace a durable Claude resume id with a zero-turn failed session", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const durableSessionId = "550e8400-e29b-41d4-a716-446655440000";
+      const failedSessionId = "7368d0c7-40a3-4d8a-bcc1-ac80c49f2719";
+
+      const session = yield* adapter.startSession({
+        threadId: RESUME_THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        resumeCursor: {
+          threadId: RESUME_THREAD_ID,
+          resume: durableSessionId,
+          turnCount: 3,
+        },
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        attachments: [],
+      });
+
+      const completedFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runHead, Effect.forkChild);
+
+      harness.query.emit({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["No message found with message.uuid of: assistant-99"],
+        session_id: failedSessionId,
+        uuid: "failed-result",
+        num_turns: 0,
+      } as unknown as SDKMessage);
+
+      const completed = yield* Fiber.join(completedFiber);
+      assert.equal(completed._tag, "Some");
+      if (completed._tag !== "Some" || completed.value.type !== "turn.completed") {
+        return;
+      }
+      const payload = completed.value.payload as {
+        readonly resumeCursor?: {
+          readonly resume?: string;
+          readonly turnCount?: number;
+        };
+      };
+      assert.equal(payload.resumeCursor?.resume, durableSessionId);
+      assert.equal(payload.resumeCursor?.turnCount, 3);
+
+      const activeSessions = yield* adapter.listSessions();
+      const resumeCursor = activeSessions[0]?.resumeCursor as
+        | {
+            readonly resume?: string;
+            readonly turnCount?: number;
+          }
+        | undefined;
+      assert.equal(resumeCursor?.resume, durableSessionId);
+      assert.equal(resumeCursor?.turnCount, 3);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("lets Claude allocate fresh session ids without persisting a zero-turn cursor", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -3123,7 +3252,7 @@ describe("ClaudeAdapterLive", () => {
       };
       assert.equal(payload.resumeCursor?.threadId, THREAD_ID);
       assert.equal(payload.resumeCursor?.resume, sessionId);
-      assert.equal(payload.resumeCursor?.resumeSessionAt, "assistant-first-turn");
+      assert.equal(payload.resumeCursor?.resumeSessionAt, undefined);
       assert.equal(payload.resumeCursor?.turnCount, 1);
 
       const activeSessions = yield* adapter.listSessions();

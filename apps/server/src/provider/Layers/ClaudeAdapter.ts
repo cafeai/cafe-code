@@ -230,7 +230,24 @@ function isSyntheticClaudeThreadId(value: string): boolean {
   return value.startsWith("claude-thread-");
 }
 
+function isZeroTurnClaudeExecutionFailure(message: SDKMessage): boolean {
+  return (
+    message.type === "result" &&
+    message.subtype !== "success" &&
+    message.is_error === true &&
+    message.num_turns === 0
+  );
+}
+
 function hasDurableClaudeSessionId(message: SDKMessage): boolean {
+  if (isZeroTurnClaudeExecutionFailure(message)) {
+    // Claude Code may allocate a brand-new session id for pre-turn failures
+    // such as an invalid resume cursor, then report `error_during_execution`
+    // with `num_turns: 0`. That id does not represent the user's durable
+    // conversation and must not replace the previous resume session.
+    return false;
+  }
+
   if (message.type !== "system") {
     return true;
   }
@@ -239,6 +256,37 @@ function hasDurableClaudeSessionId(message: SDKMessage): boolean {
     message.subtype !== "hook_started" &&
     message.subtype !== "hook_progress" &&
     message.subtype !== "hook_response"
+  );
+}
+
+function safeParseJsonObject(value: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function transcriptLineHasClaudeMessageUuid(line: string, messageUuid: string): boolean {
+  const parsed = safeParseJsonObject(line);
+  return parsed?.uuid === messageUuid;
+}
+
+function transcriptFileContainsClaudeMessageUuid(input: {
+  readonly fileSystem: FileSystem.FileSystem;
+  readonly filePath: string;
+  readonly messageUuid: string;
+}): Effect.Effect<boolean, never> {
+  return input.fileSystem.readFileString(input.filePath).pipe(
+    Effect.map((contents) =>
+      contents
+        .split(/\r?\n/)
+        .some((line) => transcriptLineHasClaudeMessageUuid(line, input.messageUuid)),
+    ),
+    Effect.catch(() => Effect.succeed(false)),
   );
 }
 
@@ -720,6 +768,46 @@ const ensureClaudeResumeArtifactsForCwd = Effect.fn(
   }
 
   return result;
+});
+
+const findClaudeSessionIdByMessageUuid = Effect.fn(
+  "ClaudeAdapter.findClaudeSessionIdByMessageUuid",
+)(function* (input: {
+  readonly fileSystem: FileSystem.FileSystem;
+  readonly path: Path.Path;
+  readonly projectDirectory: string;
+  readonly messageUuid: string | undefined;
+}): Effect.fn.Return<string | undefined, never> {
+  if (!input.messageUuid) {
+    return undefined;
+  }
+
+  const entries = yield* input.fileSystem
+    .readDirectory(input.projectDirectory)
+    .pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<string>)));
+  for (const entryName of entries.toSorted()) {
+    if (!entryName.endsWith(".jsonl")) {
+      continue;
+    }
+
+    const sessionId = entryName.slice(0, -".jsonl".length);
+    if (!isUuid(sessionId)) {
+      continue;
+    }
+
+    const filePath = input.path.join(input.projectDirectory, entryName);
+    if (
+      yield* transcriptFileContainsClaudeMessageUuid({
+        fileSystem: input.fileSystem,
+        filePath,
+        messageUuid: input.messageUuid,
+      })
+    ) {
+      return sessionId;
+    }
+  }
+
+  return undefined;
 });
 
 function classifyToolItemType(toolName: string): CanonicalItemType {
@@ -1441,7 +1529,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const resumeCursor = {
       threadId,
       ...(context.resumeSessionId ? { resume: context.resumeSessionId } : {}),
-      ...(context.lastAssistantUuid ? { resumeSessionAt: context.lastAssistantUuid } : {}),
       turnCount: context.resumeBaseTurnCount + context.turns.length,
     };
 
@@ -2013,10 +2100,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
-    context.turns.push({
-      id: turnState.turnId,
-      items: [...turnState.items],
-    });
+    const zeroTurnExecutionFailure =
+      result !== undefined && isZeroTurnClaudeExecutionFailure(result);
+    if (!zeroTurnExecutionFailure) {
+      context.turns.push({
+        id: turnState.turnId,
+        items: [...turnState.items],
+      });
+    }
     context.resumeCursorDurable = true;
     yield* updateResumeCursor(context);
 
@@ -2523,10 +2614,29 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     const status = turnStatusFromResult(message);
-    const errorMessage = message.subtype === "success" ? undefined : message.errors[0];
+    const resultErrors = "errors" in message && Array.isArray(message.errors) ? message.errors : [];
+    const errorMessage = message.subtype === "success" ? undefined : resultErrors[0];
 
     if (status === "failed") {
-      yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
+      if (isZeroTurnClaudeExecutionFailure(message)) {
+        const detail = {
+          errors: resultErrors,
+          resumeSessionId: context.resumeSessionId,
+          failedSessionId: typeof message.session_id === "string" ? message.session_id : undefined,
+        };
+        yield* emitRuntimeWarning(
+          context,
+          "Claude returned a zero-turn pre-run failure; preserving the previous resume session.",
+          detail,
+          {
+            source: "claude.sdk.message",
+            method: "claude/result/zero-turn-failure",
+            payload: message,
+          },
+        );
+      } else {
+        yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
+      }
     }
 
     yield* completeTurn(context, status, errorMessage, message);
@@ -3376,7 +3486,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ].filter((directory, index, directories) => directories.indexOf(directory) === index);
 
       const initialResumeSessionId = durableResumeState?.resume;
-      const resumeArtifactStatus =
+      let resumeArtifactStatus =
         initialResumeSessionId === undefined
           ? undefined
           : yield* ensureClaudeResumeArtifactsForCwd({
@@ -3386,6 +3496,44 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               cwd: input.cwd,
               resumeSessionId: initialResumeSessionId,
             });
+      if (resumeArtifactStatus?.checked === true && !resumeArtifactStatus.sessionFileExists) {
+        const repairedResumeSessionId = yield* findClaudeSessionIdByMessageUuid({
+          fileSystem,
+          path,
+          projectDirectory: resumeArtifactStatus.targetProjectDirectory,
+          messageUuid: durableResumeState?.resumeSessionAt,
+        });
+
+        if (repairedResumeSessionId !== undefined && durableResumeState !== undefined) {
+          // `resumeSessionAt` is an explicit Claude Agent SDK checkpoint. It is
+          // not needed for normal Claude CLI-style follow-ups and can make
+          // current Claude Code reject otherwise valid sessions when Cafe has a
+          // stale resume id. Repair from the transcript that actually contains
+          // the stored assistant message, then resume by session id only.
+          yield* Effect.logWarning("claude.resume.cursor.repaired-missing-session", {
+            threadId,
+            staleResumeSessionId: initialResumeSessionId,
+            repairedResumeSessionId,
+            resumeSessionAt: durableResumeState?.resumeSessionAt ?? "",
+            cwd: input.cwd ?? "",
+            targetProjectDirectory: resumeArtifactStatus.targetProjectDirectory,
+          });
+          const { resumeSessionAt: _ignoredResumeSessionAt, ...resumeStateWithoutCheckpoint } =
+            durableResumeState;
+          durableResumeState = {
+            ...resumeStateWithoutCheckpoint,
+            resume: repairedResumeSessionId,
+          };
+          resumeArtifactStatus = yield* ensureClaudeResumeArtifactsForCwd({
+            fileSystem,
+            path,
+            env: claudeEnvironment,
+            cwd: input.cwd,
+            resumeSessionId: repairedResumeSessionId,
+          });
+        }
+      }
+
       if (resumeArtifactStatus?.checked === true && !resumeArtifactStatus.sessionFileExists) {
         // Claude's sessions guide documents resume as loading the local
         // transcript under ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl.
@@ -3429,9 +3577,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           : {}),
         ...(Object.keys(settings).length > 0 ? { settings } : {}),
         ...(existingResumeSessionId ? { resume: existingResumeSessionId } : {}),
-        ...(durableResumeState?.resumeSessionAt
-          ? { resumeSessionAt: durableResumeState.resumeSessionAt }
-          : {}),
         // Let upstream Claude Code allocate fresh session IDs. The Agent SDK
         // documents `sessionId` as an optional override whose default is an
         // auto-generated UUID, and its sessions guide recommends capturing the
@@ -3488,7 +3633,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           initialResumeSessionId !== undefined && existingResumeSessionId === undefined,
         "claude.resume.thread_id": durableResumeState?.threadId ?? "",
         "claude.resume.session_id": existingResumeSessionId ?? initialResumeSessionId ?? "",
-        "claude.resume.session_at": durableResumeState?.resumeSessionAt ?? "",
+        "claude.resume.session_at_ignored": durableResumeState?.resumeSessionAt ?? "",
         "claude.resume.turn_count": durableResumeState?.turnCount ?? -1,
         "claude.resume.target_session_file":
           resumeArtifactStatus?.checked === true ? resumeArtifactStatus.targetSessionFile : "",
@@ -3499,7 +3644,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.base_permission_mode": permissionMode ?? "",
         "claude.query.allow_dangerously_skip_permissions": permissionMode === "bypassPermissions",
         "claude.query.resume": existingResumeSessionId ?? "",
-        "claude.query.resume_session_at": durableResumeState?.resumeSessionAt ?? "",
+        "claude.query.resume_session_at": "",
         "claude.query.session_id": "",
         "claude.query.include_partial_messages": true,
         "claude.query.additional_directories": claudeAdditionalDirectories,
@@ -3529,9 +3674,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ? {
               ...(threadId ? { threadId } : {}),
               resume: existingResumeSessionId,
-              ...(durableResumeState?.resumeSessionAt
-                ? { resumeSessionAt: durableResumeState.resumeSessionAt }
-                : {}),
               turnCount: resumeBaseTurnCount,
             }
           : undefined;
@@ -3573,7 +3715,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         turnState: undefined,
         lastKnownContextWindow: selectedContextWindowTokens,
         lastKnownTokenUsage: undefined,
-        lastAssistantUuid: durableResumeState?.resumeSessionAt,
+        lastAssistantUuid: undefined,
         lastThreadStartedId: undefined,
         hasSubmittedUserPrompt: false,
         stopped: false,

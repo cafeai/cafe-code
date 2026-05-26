@@ -51,6 +51,7 @@ import {
   derivePendingUserInputs,
   derivePhase,
   deriveTimelineEntries,
+  deriveHistoricalWorkLogSummaries,
   deriveActiveWorkStartedAt,
   deriveActivePlanState,
   findSidebarProposedPlan,
@@ -337,9 +338,39 @@ function isDebugCodexThread(thread: Thread): boolean {
   );
 }
 
-function isDebugContextCompactionActivity(activity: OrchestrationThreadActivity): boolean {
+function isContextCompactionActivity(activity: OrchestrationThreadActivity): boolean {
   const payload = readDebugRecord(activity.payload);
   return activity.kind === "context-compaction" || payload?.itemType === "context_compaction";
+}
+
+function contextCompactionActivityItemId(activity: OrchestrationThreadActivity): string {
+  const payload = readDebugRecord(activity.payload);
+  return readDebugString(payload?.itemId) ?? activity.id;
+}
+
+function threadHasActiveContextCompaction(thread: Thread, activeTurnId: TurnId | null): boolean {
+  const activeCompactionsByItemId = new Map<string, OrchestrationThreadActivity>();
+
+  for (const activity of thread.activities) {
+    if (!isContextCompactionActivity(activity)) {
+      continue;
+    }
+    if (activeTurnId !== null && activity.turnId !== activeTurnId) {
+      continue;
+    }
+
+    const itemId = contextCompactionActivityItemId(activity);
+    if (activity.kind === "tool.started") {
+      activeCompactionsByItemId.set(itemId, activity);
+      continue;
+    }
+
+    if (activity.kind === "tool.completed" || activity.kind === "context-compaction") {
+      activeCompactionsByItemId.delete(itemId);
+    }
+  }
+
+  return activeCompactionsByItemId.size > 0;
 }
 
 function summarizeDebugCodexCompaction(
@@ -350,14 +381,13 @@ function summarizeDebugCodexCompaction(
     return null;
   }
 
-  const compactionActivities = thread.activities.filter(isDebugContextCompactionActivity);
+  const compactionActivities = thread.activities.filter(isContextCompactionActivity);
   const activeCompactionsByItemId = new Map<string, OrchestrationThreadActivity>();
   let startedCount = 0;
   let completedCount = 0;
 
   for (const activity of compactionActivities) {
-    const payload = readDebugRecord(activity.payload);
-    const itemId = readDebugString(payload?.itemId) ?? activity.id;
+    const itemId = contextCompactionActivityItemId(activity);
     if (activity.kind === "tool.started") {
       startedCount += 1;
       activeCompactionsByItemId.set(itemId, activity);
@@ -1391,6 +1421,10 @@ interface FollowUpQueueItem extends ComposerSendSnapshot {
   queuedAt: string;
   expanded: boolean;
   blockedReason: string | null;
+  automaticSteerRetry?: {
+    readonly nonSteerableTurnKind: CodexNonSteerableTurnKind;
+    readonly sourceMessageId: MessageId;
+  } | null;
 }
 
 interface QueuedFollowUpPendingDispatch {
@@ -1430,6 +1464,37 @@ function readRetryableSteerFailure(
     messageId: MessageId.make(messageId),
     turnKind,
   };
+}
+
+function isAutomaticSteerRetryItem(item: FollowUpQueueItem): boolean {
+  return item.automaticSteerRetry != null;
+}
+
+function resolveAutomaticSteerRetryBlocker(input: {
+  readonly item: FollowUpQueueItem;
+  readonly thread: Thread;
+  readonly phase: SessionPhase;
+}): "context-compaction-active" | "review-active-turn" | null {
+  const retry = input.item.automaticSteerRetry ?? null;
+  if (retry === null) {
+    return null;
+  }
+
+  // Upstream Codex reports `activeTurnNotSteerable` for `/review` and
+  // `/compact`. A compact-blocked steer should be retried only after the
+  // compaction item finishes; a review-blocked steer must wait until the
+  // current active turn is no longer running and can become the next turn.
+  if (retry.nonSteerableTurnKind === "compact") {
+    if (
+      input.phase === "running" &&
+      threadHasActiveContextCompaction(input.thread, input.thread.session?.activeTurnId ?? null)
+    ) {
+      return "context-compaction-active";
+    }
+    return null;
+  }
+
+  return input.phase === "running" ? "review-active-turn" : null;
 }
 
 function readSteerFailureMessageId(activity: OrchestrationThreadActivity): MessageId | null {
@@ -1802,6 +1867,9 @@ export default function ChatView(props: ChatViewProps) {
   const dispatchFollowUpTurnStartRef = useRef<((item: FollowUpQueueItem) => Promise<void>) | null>(
     null,
   );
+  const dispatchQueuedSteerRetryRef = useRef<((item: FollowUpQueueItem) => Promise<void>) | null>(
+    null,
+  );
   const [followUpQueueByThreadId, setFollowUpQueueByThreadId] = useState<
     Record<string, FollowUpQueueItem[]>
   >({});
@@ -1967,6 +2035,10 @@ export default function ChatView(props: ChatViewProps) {
         queuedAt: activity.createdAt,
         expanded: false,
         blockedReason: null,
+        automaticSteerRetry: {
+          nonSteerableTurnKind: retryableFailure.turnKind,
+          sourceMessageId: retryableFailure.messageId,
+        },
       };
       setFollowUpQueueByThreadId((existing) => ({
         ...existing,
@@ -2727,6 +2799,15 @@ export default function ChatView(props: ChatViewProps) {
     }
     return [...serverMessagesWithPreviewHandoff, ...pendingMessages];
   }, [serverMessages, attachmentPreviewHandoffByMessageId, optimisticUserMessages]);
+  const historicalWorkLogSummariesByTurnId = useMemo(
+    () =>
+      deriveHistoricalWorkLogSummaries({
+        messages: timelineMessages,
+        activities: threadActivities,
+        latestTurnId: activeLatestTurn?.turnId ?? null,
+      }),
+    [activeLatestTurn?.turnId, threadActivities, timelineMessages],
+  );
   const timelineEntries = useMemo(
     () =>
       deriveTimelineEntries(timelineMessages, activeThread?.proposedPlans ?? [], workLogEntries),
@@ -2939,6 +3020,14 @@ export default function ChatView(props: ChatViewProps) {
   const followUpQueueVisibleWorking =
     followUpQueuePhase === "running" || isComposerConnecting || isRevertingCheckpoint;
   const firstActiveFollowUpQueueItem = activeFollowUpQueue[0] ?? null;
+  const firstActiveAutomaticSteerRetryBlocker =
+    activeThread !== undefined && firstActiveFollowUpQueueItem !== null
+      ? resolveAutomaticSteerRetryBlocker({
+          item: firstActiveFollowUpQueueItem,
+          thread: activeThread,
+          phase: followUpQueuePhase,
+        })
+      : null;
   const followUpQueueDispatchInFlight = queueDispatchInFlightRef.current;
   const activeQueuedFollowUpPendingDispatch =
     activeThreadId !== null &&
@@ -2962,6 +3051,8 @@ export default function ChatView(props: ChatViewProps) {
         expanded: item.expanded,
         canExpand: canExpandQueuedFollowUpText(item.promptText) || item.images.length > 0,
         blockedReason: item.blockedReason,
+        automaticSteerRetry:
+          item.automaticSteerRetry === undefined ? null : item.automaticSteerRetry,
       })),
     [activeFollowUpQueue],
   );
@@ -2978,20 +3069,25 @@ export default function ChatView(props: ChatViewProps) {
         })),
     [activeThreadId, pendingSteerDispatchByMessageId],
   );
+  const activeSteeringFollowUpInFlight = steeringFollowUpViewItems.length > 0;
   const canSteerFollowUpQueue =
     followUpQueuePhase === "running" &&
     activeProviderLiveSteerAvailable &&
+    firstActiveAutomaticSteerRetryBlocker === null &&
     !isComposerConnecting &&
     !activeEnvironmentUnavailable &&
     !followUpQueueDispatchInFlight &&
-    !activeQueuedFollowUpPendingDispatch;
+    !activeQueuedFollowUpPendingDispatch &&
+    !activeSteeringFollowUpInFlight;
   const canActivateRunningFollowUpQueueAction =
     followUpQueuePhase === "running" &&
     activeThread?.session?.status === "running" &&
+    firstActiveAutomaticSteerRetryBlocker === null &&
     !isComposerConnecting &&
     !activeEnvironmentUnavailable &&
     !followUpQueueDispatchInFlight &&
-    !activeQueuedFollowUpPendingDispatch;
+    !activeQueuedFollowUpPendingDispatch &&
+    !activeSteeringFollowUpInFlight;
   const followUpQueueActionLabel = queuedFollowUpActionLabel({
     phase: followUpQueuePhase,
     liveSteerSupported: activeProviderLiveSteerAvailable,
@@ -3050,6 +3146,12 @@ export default function ChatView(props: ChatViewProps) {
     }
     if (firstItem?.blockedReason) {
       queueBlockers.push("first-item-blocked");
+    }
+    if (firstActiveAutomaticSteerRetryBlocker !== null) {
+      queueBlockers.push(firstActiveAutomaticSteerRetryBlocker);
+    }
+    if (activeSteeringFollowUpInFlight) {
+      queueBlockers.push("steer-dispatch-in-flight");
     }
     if (followUpQueueVisibleWorking) {
       queueBlockers.push("thread-visible-working");
@@ -3355,7 +3457,9 @@ export default function ChatView(props: ChatViewProps) {
           activeQueueTurnId,
           activeQueueLength: activeFollowUpQueue.length,
           activeSteeringFollowUpCount: steeringFollowUpViewItems.length,
+          activeSteeringFollowUpInFlight,
           queueBlockers,
+          firstActiveAutomaticSteerRetryBlocker,
           followUpQueuePhase,
           followUpQueueUiIdle,
           followUpQueueVisibleWorking,
@@ -3448,6 +3552,7 @@ export default function ChatView(props: ChatViewProps) {
                 imageCount: item.images.length,
                 provider: item.provider,
                 model: item.model,
+                automaticSteerRetry: item.automaticSteerRetry ?? null,
               })),
             },
           ]),
@@ -3487,6 +3592,7 @@ export default function ChatView(props: ChatViewProps) {
           modelSelection: item.modelSelection,
           runtimeMode: item.runtimeMode,
           interactionMode: item.interactionMode,
+          automaticSteerRetry: item.automaticSteerRetry ?? null,
         })),
       },
       gates: {
@@ -3498,6 +3604,7 @@ export default function ChatView(props: ChatViewProps) {
         followUpQueueDispatchInFlight,
         canSteerFollowUpQueue,
         canActivateRunningFollowUpQueueAction,
+        firstActiveAutomaticSteerRetryBlocker,
         followUpQueueActionLabel,
         waitReasons: activeWaitReasons,
         isWorking,
@@ -3545,6 +3652,7 @@ export default function ChatView(props: ChatViewProps) {
     activeThread,
     activeThreadId,
     activeQueuedFollowUpPendingDispatch,
+    activeSteeringFollowUpInFlight,
     allProjects,
     allThreads,
     canActivateRunningFollowUpQueueAction,
@@ -3554,6 +3662,7 @@ export default function ChatView(props: ChatViewProps) {
     desktopDebugRevision,
     dispatchGateRevision,
     environmentId,
+    firstActiveAutomaticSteerRetryBlocker,
     firstActiveFollowUpQueueItem,
     followUpQueueActionLabel,
     followUpQueueCanStartTurn,
@@ -4426,6 +4535,52 @@ export default function ChatView(props: ChatViewProps) {
       setSendInFlight(false);
     }
   };
+  dispatchQueuedSteerRetryRef.current = (item) => dispatchSteerSnapshot(item, { queuedItem: item });
+
+  useEffect(() => {
+    if (!canSteerFollowUpQueue || !activeThread) {
+      return;
+    }
+
+    const firstItem = followUpQueueByThreadIdRef.current[activeThread.id]?.[0] ?? null;
+    if (firstItem === null || !isAutomaticSteerRetryItem(firstItem)) {
+      return;
+    }
+
+    const retryBlocker = resolveAutomaticSteerRetryBlocker({
+      item: firstItem,
+      thread: activeThread,
+      phase: followUpQueuePhase,
+    });
+    if (retryBlocker !== null) {
+      recordFollowUpQueueDebugAttempt("automatic-steer-retry", retryBlocker, {
+        threadId: firstItem.threadId,
+        itemId: firstItem.id,
+      });
+      return;
+    }
+
+    const dispatchQueuedSteerRetry = dispatchQueuedSteerRetryRef.current;
+    if (dispatchQueuedSteerRetry === null) {
+      recordFollowUpQueueDebugAttempt("automatic-steer-retry", "dispatch-ref-missing", {
+        threadId: firstItem.threadId,
+        itemId: firstItem.id,
+      });
+      return;
+    }
+
+    recordFollowUpQueueDebugAttempt("automatic-steer-retry", "dispatch-started", {
+      threadId: firstItem.threadId,
+      itemId: firstItem.id,
+    });
+    void dispatchQueuedSteerRetry(firstItem);
+  }, [
+    activeThread,
+    canSteerFollowUpQueue,
+    followUpQueueByThreadId,
+    followUpQueuePhase,
+    recordFollowUpQueueDebugAttempt,
+  ]);
 
   const onSend = async (e?: { preventDefault: () => void }) => {
     e?.preventDefault();
@@ -4836,6 +4991,21 @@ export default function ChatView(props: ChatViewProps) {
     }
 
     if (action === "steer") {
+      const retryBlocker =
+        activeThread !== undefined
+          ? resolveAutomaticSteerRetryBlocker({
+              item,
+              thread: activeThread,
+              phase: followUpQueuePhase,
+            })
+          : "review-active-turn";
+      if (retryBlocker !== null) {
+        recordFollowUpQueueDebugAttempt("manual-activate", retryBlocker, {
+          threadId: item.threadId,
+          itemId: item.id,
+        });
+        return;
+      }
       void dispatchSteerSnapshot(item, { queuedItem: item });
       return;
     }
@@ -5572,8 +5742,10 @@ export default function ChatView(props: ChatViewProps) {
               activeTurnStartedAt={activeWorkStartedAt}
               listRef={legendListRef}
               timelineEntries={timelineEntries}
+              historicalWorkLogSummariesByTurnId={historicalWorkLogSummariesByTurnId}
               completionDividerAfterEntryId={completionDividerAfterEntryId}
               completionSummary={completionSummary}
+              activeThreadId={activeThread.id}
               activeThreadEnvironmentId={activeThread.environmentId}
               revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
               onRevertUserMessage={onRevertUserMessage}

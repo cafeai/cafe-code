@@ -205,6 +205,7 @@ describe("OrchestrationEngine", () => {
           getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
           getThreadCheckpointContext: () => Effect.succeed(Option.none()),
           getThreadShellById: () => Effect.succeed(Option.none()),
+          getThreadTurnActivityPage: () => Effect.die("unused"),
           getThreadDetailById: () => Effect.succeed(Option.none()),
         }),
       ),

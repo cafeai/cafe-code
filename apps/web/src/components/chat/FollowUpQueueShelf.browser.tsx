@@ -154,6 +154,57 @@ describe("FollowUpQueueShelf", () => {
     }
   });
 
+  it("renders compact-blocked steer retries as automatic steering waits", async () => {
+    const onAction = vi.fn();
+    const onRemove = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+
+    const screen = await render(
+      <FollowUpQueueShelf
+        items={[
+          {
+            id: "queued-steer-compact",
+            preview: "keep going after compact",
+            promptText: "keep going after compact",
+            images: [],
+            queuedAt: "2026-05-27T04:12:04.000Z",
+            expanded: false,
+            canExpand: false,
+            blockedReason: null,
+            automaticSteerRetry: {
+              nonSteerableTurnKind: "compact",
+            },
+          },
+        ]}
+        actionLabel="Send"
+        actionTitle="Cafe Code will send this follow-up as soon as the active turn can accept it."
+        onToggleExpanded={vi.fn()}
+        onAction={onAction}
+        onRemove={onRemove}
+        onClear={vi.fn()}
+        onExpandImage={vi.fn()}
+      />,
+      { container: host },
+    );
+
+    try {
+      expect(document.body.textContent ?? "").toContain("1 steer waiting for compact");
+      expect(document.body.textContent ?? "").toContain("Waiting for compact");
+      await expect
+        .element(page.getByLabelText("Queued steer waiting for Codex context compaction"))
+        .toBeInTheDocument();
+      await expect.element(page.getByText("Send")).not.toBeInTheDocument();
+
+      await page.getByLabelText("Remove queued message").click();
+      expect(onRemove).toHaveBeenCalledWith("queued-steer-compact");
+      expect(onAction).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
   it("exposes expansion and image previews for queued attachments", async () => {
     const onToggleExpanded = vi.fn();
     const onExpandImage = vi.fn();

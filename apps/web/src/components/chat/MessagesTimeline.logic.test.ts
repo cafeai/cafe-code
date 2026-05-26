@@ -369,6 +369,72 @@ describe("deriveMessagesTimelineRows", () => {
     );
     expect(userRow?.revertTurnCount).toBe(1);
   });
+
+  it("inserts collapsed historical work logs between a turn's user and assistant messages", () => {
+    const turnId = "turn-1" as never;
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "user-entry",
+          kind: "message",
+          createdAt: "2026-01-01T00:00:00Z",
+          message: {
+            id: "user-1" as never,
+            role: "user",
+            text: "Do the thing",
+            turnId: null,
+            createdAt: "2026-01-01T00:00:00Z",
+            streaming: false,
+          },
+        },
+        {
+          id: "assistant-entry",
+          kind: "message",
+          createdAt: "2026-01-01T00:00:20Z",
+          message: {
+            id: "assistant-1" as never,
+            role: "assistant",
+            text: "Done",
+            turnId,
+            createdAt: "2026-01-01T00:00:20Z",
+            completedAt: "2026-01-01T00:00:30Z",
+            streaming: false,
+          },
+        },
+      ],
+      historicalWorkLogSummariesByTurnId: new Map([
+        [
+          turnId,
+          {
+            turnId,
+            snapshotEntryCount: 42,
+            previewEntries: [
+              {
+                id: "work-1",
+                turnId,
+                createdAt: "2026-01-01T00:00:10Z",
+                label: "Ran command",
+                tone: "tool",
+              },
+            ],
+          },
+        ],
+      ]),
+      completionDividerAfterEntryId: null,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    expect(rows.map((row) => row.kind)).toEqual(["message", "historical-work", "message"]);
+    expect(rows[1]).toMatchObject({
+      kind: "historical-work",
+      turnId,
+      summary: {
+        snapshotEntryCount: 42,
+      },
+    });
+  });
 });
 
 describe("computeStableMessagesTimelineRows", () => {

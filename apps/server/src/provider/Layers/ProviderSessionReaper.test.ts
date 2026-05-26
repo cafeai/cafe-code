@@ -211,6 +211,7 @@ describe("ProviderSessionReaper", () => {
                 ? Option.some(input.readModel.threads.find((thread) => thread.id === threadId)!)
                 : Option.none(),
             ),
+          getThreadTurnActivityPage: () => Effect.die("unused"),
           getThreadDetailById: () => Effect.die("unused"),
         }),
       ),

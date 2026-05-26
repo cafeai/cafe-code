@@ -9,6 +9,7 @@ import {
   OrchestrationReadModel,
   OrchestrationShellSnapshot,
   OrchestrationThread,
+  OrchestrationThreadTurnActivityPageInput,
   ProjectScript,
   TurnId,
   type OrchestrationCheckpointSummary,
@@ -116,6 +117,10 @@ const ProjectIdLookupInput = Schema.Struct({
 });
 const ThreadIdLookupInput = Schema.Struct({
   threadId: ThreadId,
+});
+const ThreadTurnActivityPageLookupInput = OrchestrationThreadTurnActivityPageInput;
+const CountRowSchema = Schema.Struct({
+  count: NonNegativeInt,
 });
 const ProjectionProjectLookupRowSchema = ProjectionProjectDbRowSchema;
 const ProjectionThreadIdLookupRowSchema = Schema.Struct({
@@ -364,6 +369,24 @@ function mapProposedPlanRow(
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
+}
+
+function mapActivityRow(
+  row: Schema.Schema.Type<typeof ProjectionThreadActivityDbRowSchema>,
+): OrchestrationThreadActivity {
+  const activity = {
+    id: row.activityId,
+    tone: row.tone,
+    kind: row.kind,
+    summary: row.summary,
+    payload: row.payload,
+    turnId: row.turnId,
+    createdAt: row.createdAt,
+  };
+  if (row.sequence !== null) {
+    return Object.assign(activity, { sequence: row.sequence });
+  }
+  return activity;
 }
 
 function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: string) {
@@ -1044,6 +1067,46 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           activities.sequence ASC,
           activities.created_at ASC,
           activities.activity_id ASC
+      `,
+  });
+
+  const countThreadActivityRowsByTurn = SqlSchema.findOne({
+    Request: ThreadTurnActivityPageLookupInput,
+    Result: CountRowSchema,
+    execute: ({ threadId, turnId }) =>
+      sql`
+        SELECT COUNT(*) AS "count"
+        FROM projection_thread_activities
+        WHERE thread_id = ${threadId}
+          AND turn_id = ${turnId}
+      `,
+  });
+
+  const listThreadActivityRowsByTurnPage = SqlSchema.findAll({
+    Request: ThreadTurnActivityPageLookupInput,
+    Result: ProjectionThreadActivityDbRowSchema,
+    execute: ({ threadId, turnId, offset, limit }) =>
+      sql`
+        SELECT
+          activity_id AS "activityId",
+          thread_id AS "threadId",
+          turn_id AS "turnId",
+          tone,
+          kind,
+          summary,
+          payload_json AS "payload",
+          sequence,
+          created_at AS "createdAt"
+        FROM projection_thread_activities
+        WHERE thread_id = ${threadId}
+          AND turn_id = ${turnId}
+        ORDER BY
+          CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,
+          sequence ASC,
+          created_at ASC,
+          activity_id ASC
+        LIMIT ${limit}
+        OFFSET ${offset}
       `,
   });
 
@@ -2213,6 +2276,43 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       } satisfies OrchestrationThreadShell);
     });
 
+  const getThreadTurnActivityPage: ProjectionSnapshotQueryShape["getThreadTurnActivityPage"] = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      const [countRow, activityRows] = yield* Effect.all([
+        countThreadActivityRowsByTurn(input).pipe(
+          Effect.mapError(
+            toPersistenceSqlOrDecodeError(
+              "ProjectionSnapshotQuery.getThreadTurnActivityPage:countActivities:query",
+              "ProjectionSnapshotQuery.getThreadTurnActivityPage:countActivities:decodeRow",
+            ),
+          ),
+        ),
+        listThreadActivityRowsByTurnPage(input).pipe(
+          Effect.mapError(
+            toPersistenceSqlOrDecodeError(
+              "ProjectionSnapshotQuery.getThreadTurnActivityPage:listActivities:query",
+              "ProjectionSnapshotQuery.getThreadTurnActivityPage:listActivities:decodeRows",
+            ),
+          ),
+        ),
+      ]);
+
+      // Keep historical work-log hydration bounded. The thread-detail snapshot
+      // already carries recent activity for live rendering; this query is the
+      // DB-backed page path for older turns and must not grow into a full
+      // thread-history read.
+      return {
+        threadId: input.threadId,
+        turnId: input.turnId,
+        offset: input.offset,
+        limit: input.limit,
+        totalCount: countRow.count,
+        activities: activityRows.map(mapActivityRow),
+      };
+    });
+
   const getThreadDetailById: ProjectionSnapshotQueryShape["getThreadDetailById"] = (threadId) =>
     Effect.gen(function* () {
       const [
@@ -2316,21 +2416,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           return message;
         }),
         proposedPlans: proposedPlanRows.map(mapProposedPlanRow),
-        activities: activityRows.map((row) => {
-          const activity = {
-            id: row.activityId,
-            tone: row.tone,
-            kind: row.kind,
-            summary: row.summary,
-            payload: row.payload,
-            turnId: row.turnId,
-            createdAt: row.createdAt,
-          };
-          if (row.sequence !== null) {
-            return Object.assign(activity, { sequence: row.sequence });
-          }
-          return activity;
-        }),
+        activities: activityRows.map(mapActivityRow),
         checkpoints: checkpointRows.map((row) => ({
           turnId: row.turnId,
           checkpointTurnCount: row.checkpointTurnCount,
@@ -2370,6 +2456,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getFirstActiveThreadIdByProjectId,
     getThreadCheckpointContext,
     getThreadShellById,
+    getThreadTurnActivityPage,
     getThreadDetailById,
   } satisfies ProjectionSnapshotQueryShape;
 });

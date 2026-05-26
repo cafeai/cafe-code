@@ -11,6 +11,7 @@ import {
   deriveCompletionDividerAfterEntryId,
   deriveActiveWorkStartedAt,
   deriveActivePlanState,
+  deriveHistoricalWorkLogSummaries,
   derivePendingApprovals,
   derivePendingUserInputs,
   deriveTimelineEntries,
@@ -584,6 +585,55 @@ describe("findSidebarProposedPlan", () => {
         threadId: ThreadId.make("thread-1"),
       })?.planMarkdown,
     ).toBe("# Latest");
+  });
+});
+
+describe("deriveHistoricalWorkLogSummaries", () => {
+  it("keeps previous turns summarized while excluding the latest turn", () => {
+    const previousTurnId = TurnId.make("turn-previous");
+    const latestTurnId = TurnId.make("turn-latest");
+
+    const summaries = deriveHistoricalWorkLogSummaries({
+      messages: [
+        {
+          id: MessageId.make("assistant-previous"),
+          role: "assistant",
+          text: "done",
+          turnId: previousTurnId,
+          createdAt: "2026-02-23T00:00:05.000Z",
+          streaming: false,
+        },
+        {
+          id: MessageId.make("assistant-latest"),
+          role: "assistant",
+          text: "active",
+          turnId: latestTurnId,
+          createdAt: "2026-02-23T00:01:05.000Z",
+          streaming: false,
+        },
+      ],
+      activities: [
+        makeActivity({
+          id: "previous-tool",
+          createdAt: "2026-02-23T00:00:03.000Z",
+          kind: "tool.completed",
+          summary: "Ran command",
+          turnId: "turn-previous",
+        }),
+        makeActivity({
+          id: "latest-tool",
+          createdAt: "2026-02-23T00:01:03.000Z",
+          kind: "tool.completed",
+          summary: "Still running",
+          turnId: "turn-latest",
+        }),
+      ],
+      latestTurnId,
+    });
+
+    expect([...summaries.keys()]).toEqual([previousTurnId]);
+    expect(summaries.get(previousTurnId)?.snapshotEntryCount).toBe(1);
+    expect(summaries.get(previousTurnId)?.previewEntries[0]?.label).toBe("Ran command");
   });
 });
 

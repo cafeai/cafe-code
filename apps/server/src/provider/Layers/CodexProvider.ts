@@ -1,8 +1,10 @@
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -41,6 +43,8 @@ const CODEX_PRESENTATION = {
   displayName: "Codex",
   showInteractionModeToggle: true,
 } as const;
+
+const MAX_PROVIDER_EMAIL_LENGTH = 320;
 
 export interface CodexAppServerProviderSnapshot {
   readonly account: CodexSchema.V2GetAccountResponse;
@@ -97,6 +101,114 @@ function codexAccountEmail(account: CodexSchema.V2GetAccountResponse["account"])
   if (!account || account.type !== "chatgpt") return undefined;
   return account.email;
 }
+
+function normalizeProviderEmail(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (
+    trimmed.length === 0 ||
+    trimmed.length > MAX_PROVIDER_EMAIL_LENGTH ||
+    !trimmed.includes("@") ||
+    hasUnsafeEmailCharacter(trimmed)
+  ) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+function hasUnsafeEmailCharacter(value: string): boolean {
+  for (const char of value) {
+    const code = char.charCodeAt(0);
+    if (char.trim().length === 0 || code <= 0x1f || code === 0x7f) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function readEmailField(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  return normalizeProviderEmail((value as Record<string, unknown>).email);
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> | undefined {
+  const parts = token.split(".");
+  const payload = parts[1];
+  if (!payload) return undefined;
+
+  try {
+    // This payload is only a local metadata source after `codex login status`
+    // says Codex is authenticated. Cafe never treats this unsigned decode as an
+    // auth proof, and `normalizeProviderEmail` bounds and sanitizes the only
+    // field that crosses into the redacted settings UI.
+    const base64 = payload.replaceAll("-", "+").replaceAll("_", "/");
+    const padded = `${base64}${"=".repeat((4 - (base64.length % 4)) % 4)}`;
+    const decoded = JSON.parse(Buffer.from(padded, "base64").toString("utf8")) as unknown;
+    return decoded && typeof decoded === "object" && !Array.isArray(decoded)
+      ? (decoded as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function extractCodexAuthEmail(authJson: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(authJson) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+
+  const record = parsed as Record<string, unknown>;
+  const directEmail = readEmailField(record) ?? readEmailField(record.account);
+  if (directEmail) return directEmail;
+
+  const tokens = record.tokens;
+  if (!tokens || typeof tokens !== "object") return undefined;
+  const idToken = (tokens as Record<string, unknown>).id_token;
+  if (typeof idToken !== "string" || idToken.length === 0) return undefined;
+  return readEmailField(decodeJwtPayload(idToken));
+}
+
+function resolveCodexAuthFilePath(input: {
+  readonly path: Path.Path;
+  readonly codexSettings: CodexSettings;
+  readonly environment: NodeJS.ProcessEnv;
+}): string | undefined {
+  const configuredHome = input.codexSettings.homePath.trim();
+  const homePath =
+    configuredHome.length > 0
+      ? expandHomePath(configuredHome)
+      : input.environment.CODEX_HOME?.trim()
+        ? expandHomePath(input.environment.CODEX_HOME)
+        : input.environment.HOME?.trim()
+          ? input.path.join(input.environment.HOME, ".codex")
+          : undefined;
+  return homePath ? input.path.join(input.path.resolve(homePath), "auth.json") : undefined;
+}
+
+const readCodexAuthEmail = Effect.fn("readCodexAuthEmail")(function* (
+  codexSettings: CodexSettings,
+  environment: NodeJS.ProcessEnv,
+): Effect.fn.Return<string | undefined, never, FileSystem.FileSystem | Path.Path> {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const authPath = resolveCodexAuthFilePath({ path, codexSettings, environment });
+  if (!authPath) return undefined;
+
+  const isSymlink = yield* fileSystem.readLink(authPath).pipe(
+    Effect.as(true),
+    Effect.catch(() => Effect.succeed(false)),
+  );
+  if (isSymlink) {
+    return undefined;
+  }
+
+  const authJson = yield* fileSystem.readFileString(authPath).pipe(Effect.option);
+  return Option.isSome(authJson) ? extractCodexAuthEmail(authJson.value) : undefined;
+});
 
 function mapCodexModelCapabilities(
   model: CodexSchema.V2ModelListResponse__Model,
@@ -445,6 +557,7 @@ function codexAuthProbeStatusFromLoginStatusResult(result: {
   readonly stdout: string;
   readonly stderr: string;
   readonly code: number;
+  readonly authEmail?: string | undefined;
 }): {
   readonly status: Exclude<ServerProviderState, "disabled">;
   readonly auth: ServerProvider["auth"];
@@ -465,6 +578,7 @@ function codexAuthProbeStatusFromLoginStatusResult(result: {
           status: "authenticated",
           type: "chatgpt",
           label: "ChatGPT Subscription",
+          ...(result.authEmail ? { email: result.authEmail } : {}),
         },
       };
     }
@@ -698,7 +812,11 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
 export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatus")(function* (
   codexSettings: CodexSettings,
   environment: NodeJS.ProcessEnv = process.env,
-): Effect.fn.Return<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> {
+): Effect.fn.Return<
+  ServerProviderDraft,
+  never,
+  ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
+> {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const models = fallbackCodexModelsFromSettings(codexSettings);
 
@@ -824,7 +942,11 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
     });
   }
 
-  const accountStatus = codexAuthProbeStatusFromLoginStatusResult(loginStatusProbe.success.value);
+  const authEmail = yield* readCodexAuthEmail(codexSettings, environment);
+  const accountStatus = codexAuthProbeStatusFromLoginStatusResult({
+    ...loginStatusProbe.success.value,
+    ...(authEmail ? { authEmail } : {}),
+  });
   return buildServerProvider({
     presentation: CODEX_PRESENTATION,
     enabled: codexSettings.enabled,
