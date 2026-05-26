@@ -372,6 +372,7 @@ interface CodexTurnStartObservation {
   readonly backfillAttemptCount: number;
   readonly noTurnEventWarningCount: number;
   readonly lastBackfillAt: string | undefined;
+  readonly lastBackfillThreadStatus: string | undefined;
   readonly lastBackfillTurnFound: boolean | undefined;
   readonly lastBackfillTurnStatus: string | undefined;
   readonly lastBackfillItemCount: number | undefined;
@@ -399,6 +400,11 @@ type CodexServerNotification = {
   readonly method: string;
   readonly params: unknown;
 };
+
+interface CodexSnapshotReadResult {
+  readonly threadStatusType: "notLoaded" | "idle" | "systemError" | "active" | undefined;
+  readonly turn: CodexSnapshotTurn | null;
+}
 
 export interface CodexActiveContextCompaction {
   readonly providerThreadId?: string;
@@ -1296,6 +1302,94 @@ function readCodexSnapshotThreadStatusType(
   return status?.type;
 }
 
+function normalizeCodexSnapshotTurnForThreadStatus(
+  turn: CodexSnapshotTurn,
+  threadStatusType: ReturnType<typeof readCodexSnapshotThreadStatusType>,
+): CodexSnapshotTurn {
+  if (
+    turn.status !== "inProgress" ||
+    threadStatusType === undefined ||
+    threadStatusType === "active"
+  ) {
+    return turn;
+  }
+
+  // Upstream Codex 0.133.0 applies this same stale-turn rule in
+  // `set_thread_status_and_interrupt_stale_turns`: if `thread/read` can see an
+  // in-progress turn but the live thread status is not Active, the turn is no
+  // longer owned by a running agent and should be exposed as Interrupted. Cafe
+  // repeats the rule defensively before mapping the snapshot into provider
+  // events so a stale app-server history row cannot keep our orchestration
+  // active forever.
+  return {
+    ...turn,
+    status: "interrupted",
+  };
+}
+
+function summarizeCodexSnapshotTurnItems(turn: CodexSnapshotTurn): {
+  readonly agentMessageCount: number;
+  readonly commandExecutionInProgressCount: number;
+  readonly commandExecutionTerminalCount: number;
+  readonly collabAgentInProgressCount: number;
+  readonly dynamicToolInProgressCount: number;
+  readonly mcpToolInProgressCount: number;
+  readonly lastItemId: string | null;
+  readonly lastItemStatus: string | null;
+  readonly lastItemType: string | null;
+} {
+  let agentMessageCount = 0;
+  let commandExecutionInProgressCount = 0;
+  let commandExecutionTerminalCount = 0;
+  let collabAgentInProgressCount = 0;
+  let dynamicToolInProgressCount = 0;
+  let mcpToolInProgressCount = 0;
+
+  for (const item of turn.items) {
+    switch (item.type) {
+      case "agentMessage":
+        agentMessageCount += item.text.trim().length > 0 ? 1 : 0;
+        break;
+      case "commandExecution":
+        if (item.status === "inProgress") {
+          commandExecutionInProgressCount += 1;
+        } else {
+          commandExecutionTerminalCount += 1;
+        }
+        break;
+      case "collabAgentToolCall":
+        collabAgentInProgressCount += item.status === "inProgress" ? 1 : 0;
+        break;
+      case "dynamicToolCall":
+        dynamicToolInProgressCount += item.status === "inProgress" ? 1 : 0;
+        break;
+      case "mcpToolCall":
+        mcpToolInProgressCount += item.status === "inProgress" ? 1 : 0;
+        break;
+      default:
+        break;
+    }
+  }
+
+  const lastItem = turn.items.at(-1);
+  const lastItemStatus =
+    lastItem && "status" in lastItem && typeof lastItem.status === "string"
+      ? lastItem.status
+      : null;
+
+  return {
+    agentMessageCount,
+    commandExecutionInProgressCount,
+    commandExecutionTerminalCount,
+    collabAgentInProgressCount,
+    dynamicToolInProgressCount,
+    mcpToolInProgressCount,
+    lastItemId: lastItem?.id ?? null,
+    lastItemStatus,
+    lastItemType: lastItem?.type ?? null,
+  };
+}
+
 export function selectCodexActiveSnapshotTurn(
   providerThread: CodexSnapshotThread,
 ): CodexSnapshotTurn | undefined {
@@ -1371,8 +1465,10 @@ export function buildCodexThreadSnapshotBackfillEvents(input: {
     turnLimit: input.turnLimit ?? CODEX_SNAPSHOT_BACKFILL_TURN_LIMIT,
   });
   const events: ProviderEvent[] = [];
+  const threadStatusType = readCodexSnapshotThreadStatusType(input.providerThread.status);
 
-  for (const turn of selectedTurns) {
+  for (const snapshotTurn of selectedTurns) {
+    const turn = normalizeCodexSnapshotTurnForThreadStatus(snapshotTurn, threadStatusType);
     const turnId = TurnId.make(turn.id);
     const startedAt = timestampSecondsToIso(turn.startedAt) ?? input.createdAt;
     const completedAt = timestampSecondsToIso(turn.completedAt) ?? input.createdAt;
@@ -1603,11 +1699,13 @@ export const makeCodexSessionRuntime = (
     const markTurnStartBackfillResult = (input: {
       readonly turnId: TurnId;
       readonly observedAt: string;
+      readonly threadStatusType: "notLoaded" | "idle" | "systemError" | "active" | undefined;
       readonly turn: CodexSnapshotTurn | null;
     }) =>
       updateTurnStartObservation(input.turnId, (observation) => ({
         ...observation,
         lastBackfillAt: input.observedAt,
+        lastBackfillThreadStatus: input.threadStatusType,
         lastBackfillTurnFound: input.turn !== null,
         lastBackfillTurnStatus: input.turn?.status,
         lastBackfillItemCount: input.turn?.items.length,
@@ -1718,6 +1816,7 @@ export const makeCodexSessionRuntime = (
             backfillAttemptCount: observation.backfillAttemptCount,
             noTurnEventWarningCount: observation.noTurnEventWarningCount,
             lastBackfillAt: observation.lastBackfillAt ?? null,
+            lastBackfillThreadStatus: observation.lastBackfillThreadStatus ?? null,
             lastBackfillTurnFound: observation.lastBackfillTurnFound ?? null,
             lastBackfillTurnStatus: observation.lastBackfillTurnStatus ?? null,
             lastBackfillItemCount: observation.lastBackfillItemCount ?? null,
@@ -1948,6 +2047,7 @@ export const makeCodexSessionRuntime = (
                   markTurnStartBackfillResult({
                     turnId: input.focusTurnId,
                     observedAt,
+                    threadStatusType: undefined,
                     turn: null,
                   }),
                 ),
@@ -1963,12 +2063,17 @@ export const makeCodexSessionRuntime = (
               ),
             onSome: (response) => {
               const turn = response.thread.turns.find((entry) => entry.id === input.focusTurnId);
+              const threadStatusType = readCodexSnapshotThreadStatusType(response.thread.status);
+              const normalizedTurn = turn
+                ? normalizeCodexSnapshotTurnForThreadStatus(turn, threadStatusType)
+                : null;
               return nowIso.pipe(
                 Effect.flatMap((observedAt) =>
                   markTurnStartBackfillResult({
                     turnId: input.focusTurnId,
                     observedAt,
-                    turn: turn ?? null,
+                    threadStatusType,
+                    turn: normalizedTurn,
                   }),
                 ),
                 Effect.andThen(
@@ -1986,11 +2091,16 @@ export const makeCodexSessionRuntime = (
                     reason: input.reason,
                     turnFound: turn !== undefined,
                     turnStatus: turn?.status ?? null,
+                    normalizedTurnStatus: normalizedTurn?.status ?? null,
+                    threadStatus: threadStatusType ?? null,
                     itemCount: turn?.items.length ?? 0,
                     itemsView: turn?.itemsView ?? null,
                   }),
                 ),
-                Effect.as(turn ?? null),
+                Effect.as({
+                  threadStatusType,
+                  turn: normalizedTurn,
+                } satisfies CodexSnapshotReadResult),
               );
             },
           }),
@@ -2001,6 +2111,7 @@ export const makeCodexSessionRuntime = (
               markTurnStartBackfillResult({
                 turnId: input.focusTurnId,
                 observedAt,
+                threadStatusType: undefined,
                 turn: null,
               }),
             ),
@@ -2161,9 +2272,11 @@ export const makeCodexSessionRuntime = (
       readonly turnId: TurnId;
       readonly reason: CodexSnapshotBackfillReason;
       readonly elapsedDelay: (typeof CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS)[number];
+      readonly threadStatusType?: "notLoaded" | "idle" | "systemError" | "active" | undefined;
       readonly turn: CodexSnapshotTurn;
     }) =>
       Effect.gen(function* () {
+        const itemSummary = summarizeCodexSnapshotTurnItems(input.turn);
         yield* Effect.logWarning("codex.turnProgress.stillInProgressAfterSnapshotPolling", {
           threadId: options.threadId,
           providerInstanceId: options.providerInstanceId ?? PROVIDER,
@@ -2171,8 +2284,10 @@ export const makeCodexSessionRuntime = (
           turnId: input.turnId,
           reason: input.reason,
           elapsedDelay: input.elapsedDelay,
+          threadStatus: input.threadStatusType ?? null,
           itemCount: input.turn.items.length,
           itemsView: input.turn.itemsView ?? null,
+          itemSummary,
         });
         yield* emitEvent({
           kind: "notification",
@@ -2186,10 +2301,12 @@ export const makeCodexSessionRuntime = (
             turnId: input.turnId,
             reason: input.reason,
             elapsedDelay: input.elapsedDelay,
+            threadStatus: input.threadStatusType ?? null,
             itemCount: input.turn.items.length,
             itemsView: input.turn.itemsView ?? null,
+            itemSummary,
             semantics:
-              "Cafe will not synthesize turn completion from diff or item events; upstream Codex must emit turn/completed or report a terminal turn status from thread/read.",
+              "Cafe follows upstream Codex app-server lifecycle semantics: turn/completed or a terminal thread/read turn closes the turn. If thread/read reports a non-active thread with an in-progress turn, Cafe applies upstream's stale-turn rule and interrupts it before this warning is emitted.",
           },
         });
       });
@@ -2228,17 +2345,18 @@ export const makeCodexSessionRuntime = (
             });
           }
           yield* markTurnStartBackfillAttempt(input.turnId);
-          const turn = yield* readAndBackfillSnapshot({
+          const snapshot = yield* readAndBackfillSnapshot({
             providerThreadId: input.providerThreadId,
             focusTurnId: input.turnId,
             reason: input.reason,
           });
+          const turn = snapshot?.turn ?? null;
           if (turn && turn.status !== "inProgress") {
             yield* reconcileTerminalActiveTurnSnapshot({
               providerThreadId: input.providerThreadId,
               turnId: input.turnId,
               reason: input.reason,
-              threadStatusType: null,
+              threadStatusType: snapshot?.threadStatusType ?? null,
               turn,
             });
             return;
@@ -2252,6 +2370,7 @@ export const makeCodexSessionRuntime = (
               turnId: input.turnId,
               reason: input.reason,
               elapsedDelay: delay,
+              threadStatusType: snapshot?.threadStatusType,
               turn,
             });
           }
@@ -3012,6 +3131,7 @@ export const makeCodexSessionRuntime = (
             backfillAttemptCount: 0,
             noTurnEventWarningCount: 0,
             lastBackfillAt: undefined,
+            lastBackfillThreadStatus: undefined,
             lastBackfillTurnFound: undefined,
             lastBackfillTurnStatus: undefined,
             lastBackfillItemCount: undefined,

@@ -848,7 +848,19 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
           providerThreadId: "provider-thread-1",
           reason: "turn-steer-follow-up",
           elapsedDelay: "300 seconds",
+          threadStatus: "active",
           itemCount: 4,
+          itemSummary: {
+            agentMessageCount: 1,
+            commandExecutionInProgressCount: 0,
+            commandExecutionTerminalCount: 1,
+            collabAgentInProgressCount: 0,
+            dynamicToolInProgressCount: 0,
+            mcpToolInProgressCount: 0,
+            lastItemId: "message-1",
+            lastItemStatus: null,
+            lastItemType: "agentMessage",
+          },
         },
       } satisfies ProviderEvent);
 
@@ -871,7 +883,19 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         providerThreadId: "provider-thread-1",
         reason: "turn-steer-follow-up",
         elapsedDelay: "300 seconds",
+        threadStatus: "active",
         itemCount: 4,
+        itemSummary: {
+          agentMessageCount: 1,
+          commandExecutionInProgressCount: 0,
+          commandExecutionTerminalCount: 1,
+          collabAgentInProgressCount: 0,
+          dynamicToolInProgressCount: 0,
+          mcpToolInProgressCount: 0,
+          lastItemId: "message-1",
+          lastItemStatus: null,
+          lastItemType: "agentMessage",
+        },
       });
     }),
   );
