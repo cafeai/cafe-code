@@ -53,22 +53,41 @@ describe("DesktopEnvironment", () => {
         },
       );
 
+      const path = environment.path;
       assert.equal(environment.isDevelopment, true);
-      assert.equal(environment.appDataDirectory, "/Users/alice/Library/Application Support");
+      assert.equal(
+        environment.appDataDirectory,
+        path.join("/Users/alice", "Library", "Application Support"),
+      );
       assert.equal(environment.baseDir, "/tmp/t3");
-      assert.equal(environment.stateDir, "/tmp/t3/dev");
-      assert.equal(environment.desktopSettingsPath, "/tmp/t3/dev/desktop-settings.json");
-      assert.equal(environment.clientSettingsPath, "/tmp/t3/dev/client-settings.json");
-      assert.equal(environment.savedEnvironmentRegistryPath, "/tmp/t3/dev/saved-environments.json");
-      assert.equal(environment.serverSettingsPath, "/tmp/t3/dev/settings.json");
-      assert.equal(environment.logDir, "/tmp/t3/dev/logs");
-      assert.equal(environment.rootDir, "/repo");
-      assert.equal(environment.appRoot, "/repo");
-      assert.equal(environment.backendEntryPath, "/repo/apps/server/dist/bin.mjs");
-      assert.equal(environment.backendCwd, "/repo");
+      assert.equal(environment.stateDir, path.join(environment.baseDir, "dev"));
+      assert.equal(
+        environment.desktopSettingsPath,
+        path.join(environment.stateDir, "desktop-settings.json"),
+      );
+      assert.equal(
+        environment.clientSettingsPath,
+        path.join(environment.stateDir, "client-settings.json"),
+      );
+      assert.equal(
+        environment.savedEnvironmentRegistryPath,
+        path.join(environment.stateDir, "saved-environments.json"),
+      );
+      assert.equal(
+        environment.serverSettingsPath,
+        path.join(environment.stateDir, "settings.json"),
+      );
+      assert.equal(environment.logDir, path.join(environment.stateDir, "logs"));
+      assert.equal(environment.rootDir, path.resolve(defaultInput.dirname, "../../.."));
+      assert.equal(environment.appRoot, environment.rootDir);
+      assert.equal(
+        environment.backendEntryPath,
+        path.join(environment.appRoot, "apps/server/dist/bin.mjs"),
+      );
+      assert.equal(environment.backendCwd, environment.appRoot);
       assert.equal(
         environment.developmentDockIconPath,
-        "/repo/assets/app-icon/cafe-code-app-icon-1024.png",
+        path.join(environment.rootDir, "assets", "app-icon", "cafe-code-app-icon-1024.png"),
       );
       assert.equal(environment.appUserModelId, "com.cafeai.cafecode.dev");
       assert.equal(environment.linuxWmClass, "cafecode-dev");
@@ -95,7 +114,7 @@ describe("DesktopEnvironment", () => {
       );
 
       assert.equal(environment.isDevelopment, false);
-      assert.equal(environment.stateDir, "/tmp/t3/userdata");
+      assert.equal(environment.stateDir, environment.path.join(environment.baseDir, "userdata"));
       assert.equal(environment.branding.stageLabel, "Alpha");
       assert.equal(environment.displayName, "Cafe Code (Alpha)");
       assert.equal(environment.userDataDirName, "cafecode");
@@ -113,9 +132,12 @@ describe("DesktopEnvironment", () => {
       );
 
       assert.equal(environment.isDevelopment, false);
-      assert.equal(environment.stateDir, "/tmp/t3/userdata");
-      assert.equal(environment.logDir, "/tmp/t3/userdata/logs");
-      assert.equal(environment.serverSettingsPath, "/tmp/t3/userdata/settings.json");
+      assert.equal(environment.stateDir, environment.path.join(environment.baseDir, "userdata"));
+      assert.equal(environment.logDir, environment.path.join(environment.stateDir, "logs"));
+      assert.equal(
+        environment.serverSettingsPath,
+        environment.path.join(environment.stateDir, "settings.json"),
+      );
     }),
   );
 
@@ -123,8 +145,8 @@ describe("DesktopEnvironment", () => {
     Effect.gen(function* () {
       const environment = yield* makeEnvironment();
 
-      assert.equal(environment.baseDir, "/Users/alice/.cafe-code");
-      assert.equal(environment.stateDir, "/Users/alice/.cafe-code/userdata");
+      assert.equal(environment.baseDir, environment.path.join("/Users/alice", ".cafe-code"));
+      assert.equal(environment.stateDir, environment.path.join(environment.baseDir, "userdata"));
     }),
   );
 
@@ -143,7 +165,7 @@ describe("DesktopEnvironment", () => {
       );
       assert.deepEqual(
         environment.resolvePickFolderDefaultPath({ initialPath: "~/project" }),
-        Option.some("/Users/alice/project"),
+        Option.some(environment.path.join("/Users/alice", "project")),
       );
     }),
   );

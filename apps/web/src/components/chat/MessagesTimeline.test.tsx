@@ -70,6 +70,7 @@ beforeAll(() => {
 
 const ACTIVE_THREAD_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const MESSAGE_CREATED_AT = "2026-03-17T19:12:28.000Z";
+const DYNAMIC_IMPORT_TEST_TIMEOUT_MS = process.platform === "win32" ? 30_000 : 10_000;
 
 function buildProps() {
   return {
@@ -133,28 +134,32 @@ function buildAssistantTimelineEntry(text: string, options?: { streaming?: boole
 }
 
 describe("MessagesTimeline file open helpers", () => {
-  it("treats near-bottom scroll positions as already at the end", async () => {
-    const { isTimelineScrolledToEnd } = await import("./MessagesTimeline");
+  it(
+    "treats near-bottom scroll positions as already at the end",
+    async () => {
+      const { isTimelineScrolledToEnd } = await import("./MessagesTimeline");
 
-    expect(isTimelineScrolledToEnd({ isAtEnd: true })).toBe(true);
-    expect(
-      isTimelineScrolledToEnd({
-        isAtEnd: false,
-        contentLength: 2_000,
-        scroll: 820,
-        scrollLength: 500,
-      }),
-    ).toBe(true);
-    expect(
-      isTimelineScrolledToEnd({
-        isAtEnd: false,
-        contentLength: 2_000,
-        scroll: 720,
-        scrollLength: 500,
-      }),
-    ).toBe(false);
-    expect(isTimelineScrolledToEnd({ isAtEnd: false })).toBe(false);
-  }, 10_000);
+      expect(isTimelineScrolledToEnd({ isAtEnd: true })).toBe(true);
+      expect(
+        isTimelineScrolledToEnd({
+          isAtEnd: false,
+          contentLength: 2_000,
+          scroll: 820,
+          scrollLength: 500,
+        }),
+      ).toBe(true);
+      expect(
+        isTimelineScrolledToEnd({
+          isAtEnd: false,
+          contentLength: 2_000,
+          scroll: 720,
+          scrollLength: 500,
+        }),
+      ).toBe(false);
+      expect(isTimelineScrolledToEnd({ isAtEnd: false })).toBe(false);
+    },
+    DYNAMIC_IMPORT_TEST_TIMEOUT_MS,
+  );
 
   it("uses the configured editor only when that editor is available", async () => {
     const { resolveFileOpenEditor } = await import("./MessagesTimeline");

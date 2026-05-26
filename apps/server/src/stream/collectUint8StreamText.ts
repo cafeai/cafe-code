@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
+import { TextDecoder } from "node:util";
 
 export interface CollectedUint8StreamText {
   readonly text: string;
@@ -11,6 +12,55 @@ interface CollectState {
   chunks: Uint8Array[];
   readonly bytes: number;
   readonly truncated: boolean;
+}
+
+export interface DecodeCollectedTextOptions {
+  readonly platform?: NodeJS.Platform;
+  readonly locale?: string;
+}
+
+function countReplacementCharacters(value: string): number {
+  return [...value].filter((character) => character === "\uFFFD").length;
+}
+
+function decodeWithLabel(buffer: Buffer, label: string): string | undefined {
+  try {
+    return new TextDecoder(label).decode(buffer);
+  } catch {
+    return undefined;
+  }
+}
+
+export function decodeCollectedText(
+  buffer: Buffer,
+  options: DecodeCollectedTextOptions = {},
+): string {
+  const platform = options.platform ?? process.platform;
+  const utf8 = buffer.toString("utf8");
+  if (platform !== "win32") {
+    return utf8;
+  }
+
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+    return utf8;
+  } catch {
+    // Windows shells can emit localized command errors in the active ANSI/OEM
+    // code page even when the parent Electron process expects UTF-8.
+  }
+
+  const locale = options.locale ?? Intl.DateTimeFormat().resolvedOptions().locale;
+  const preferredFallbacks = locale.toLowerCase().startsWith("ja")
+    ? ["shift_jis", "windows-1252"]
+    : ["windows-1252", "shift_jis"];
+  const fallback = preferredFallbacks
+    .map((label) => decodeWithLabel(buffer, label))
+    .filter((value): value is string => value !== undefined)
+    .toSorted(
+      (left, right) => countReplacementCharacters(left) - countReplacementCharacters(right),
+    )[0];
+
+  return fallback ?? utf8;
 }
 
 export const collectUint8StreamText = <E>(input: {
@@ -31,7 +81,7 @@ export const collectUint8StreamText = <E>(input: {
       (state, chunk): CollectState => {
         /*
          * keep draining after truncation so the child process can exit normally.
-         * its a know issue that on windows killing after the output cap can force an expensive taskkill operation and hurt performance
+         * its a known issue that on windows killing after the output cap can force an expensive taskkill operation and hurt performance
          */
         if (state.truncated) {
           return state;
@@ -59,7 +109,7 @@ export const collectUint8StreamText = <E>(input: {
       },
     ),
     Effect.map((state): CollectedUint8StreamText => {
-      const text = Buffer.concat(state.chunks, state.bytes).toString("utf8");
+      const text = decodeCollectedText(Buffer.concat(state.chunks, state.bytes));
       return {
         text: state.truncated && truncatedMarker.length > 0 ? `${text}${truncatedMarker}` : text,
         bytes: state.bytes,

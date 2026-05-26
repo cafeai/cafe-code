@@ -1,3 +1,8 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -321,6 +326,42 @@ describe("resolveKnownWindowsCliDirs", () => {
       "C:\\Users\\testuser\\.bun\\bin",
       "C:\\Users\\testuser\\scoop\\shims",
     ]);
+  });
+
+  it("prioritizes user-owned Codex cache bins by newest executable", () => {
+    const localAppData = mkdtempSync(join(tmpdir(), "cafe-shell-test-"));
+    try {
+      const codexBinRoot = join(localAppData, "OpenAI", "Codex", "bin");
+      const oldBin = join(codexBinRoot, "old");
+      const newBin = join(codexBinRoot, "new");
+      const missingCliBin = join(codexBinRoot, "missing-cli");
+      mkdirSync(oldBin, { recursive: true });
+      mkdirSync(newBin, { recursive: true });
+      mkdirSync(missingCliBin, { recursive: true });
+      writeFileSync(join(oldBin, "codex.exe"), "");
+      writeFileSync(join(newBin, "codex.exe"), "");
+      utimesSync(oldBin, 1_704_067_200, 1_704_067_200);
+      utimesSync(newBin, 1_735_689_600, 1_735_689_600);
+
+      expect(
+        resolveKnownWindowsCliDirs({
+          APPDATA: "C:\\Users\\testuser\\AppData\\Roaming",
+          LOCALAPPDATA: localAppData,
+          USERPROFILE: "C:\\Users\\testuser",
+        }),
+      ).toEqual([
+        "C:\\Users\\testuser\\AppData\\Roaming\\npm",
+        newBin,
+        oldBin,
+        `${localAppData}\\Programs\\nodejs`,
+        `${localAppData}\\Volta\\bin`,
+        `${localAppData}\\pnpm`,
+        "C:\\Users\\testuser\\.bun\\bin",
+        "C:\\Users\\testuser\\scoop\\shims",
+      ]);
+    } finally {
+      rmSync(localAppData, { recursive: true, force: true });
+    }
   });
 });
 

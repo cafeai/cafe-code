@@ -9,6 +9,24 @@ import { HttpClient, HttpRouter } from "effect/unstable/http";
 
 import { makeMockUpdateRouteLayer } from "./mock-update-server.ts";
 
+function hasErrorCode(value: unknown, code: string): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "code" in value &&
+    (value as { readonly code?: unknown }).code === code
+  );
+}
+
+function isWindowsSymlinkPrivilegeError(error: unknown): boolean {
+  if (process.platform !== "win32") return false;
+  const cause =
+    typeof error === "object" && error !== null && "reason" in error
+      ? (error as { readonly reason?: { readonly cause?: unknown } }).reason?.cause
+      : undefined;
+  return hasErrorCode(cause, "EPERM");
+}
+
 const withMockUpdateServer = <A, E, R>(rootRealPath: string, effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
     Effect.provide(
@@ -90,7 +108,15 @@ it.layer(NodeServices.layer)("mock-update-server", (it) => {
 
       yield* fileSystem.writeFileString(outsideFile, "version: outside\n");
       yield* fileSystem.makeDirectory(linksDir, { recursive: true });
-      yield* fileSystem.symlink(outsideFile, symlinkPath);
+      const symlinkCreated = yield* fileSystem.symlink(outsideFile, symlinkPath).pipe(
+        Effect.as(true),
+        Effect.catch((error) =>
+          isWindowsSymlinkPrivilegeError(error) ? Effect.succeed(false) : Effect.fail(error),
+        ),
+      );
+      if (!symlinkCreated) {
+        return;
+      }
 
       yield* withMockUpdateServer(
         rootRealPath,
