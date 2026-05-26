@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { describe, it } from "vitest";
-import { ProviderInstanceId, ThreadId, TurnId } from "@cafecode/contracts";
+import { ProviderInstanceId, ProviderItemId, ThreadId, TurnId } from "@cafecode/contracts";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 
@@ -13,11 +13,14 @@ import {
 } from "../CodexDeveloperInstructions.ts";
 import {
   buildCodexAppServerArgs,
+  buildCodexActiveContextCompactionSteerError,
   buildCodexThreadSnapshotBackfillEvents,
   buildTurnStartParams,
   buildTurnSteerParams,
   isRecoverableThreadResumeError,
+  isCodexContextCompactionItemType,
   openCodexThread,
+  updateCodexActiveContextCompactions,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
@@ -226,6 +229,101 @@ describe("buildTurnSteerParams", () => {
           url: "data:image/png;base64,abc",
         },
       ],
+    });
+  });
+});
+
+describe("Codex context compaction steer guard", () => {
+  it("recognizes upstream context-compaction item type spellings", () => {
+    assert.equal(isCodexContextCompactionItemType("contextCompaction"), true);
+    assert.equal(isCodexContextCompactionItemType("context_compaction"), true);
+    assert.equal(isCodexContextCompactionItemType("context-compaction"), true);
+    assert.equal(isCodexContextCompactionItemType("commandExecution"), false);
+    assert.equal(isCodexContextCompactionItemType(undefined), false);
+  });
+
+  it("tracks context compaction item lifecycle until item or turn completion", () => {
+    const turnId = TurnId.make("turn-active");
+    const itemId = ProviderItemId.make("context-1");
+
+    const started = updateCodexActiveContextCompactions(new Map(), {
+      method: "item/started",
+      providerThreadId: "provider-thread-1",
+      turnId,
+      itemId,
+      itemType: "contextCompaction",
+      observedAt: "2026-05-26T00:00:00.000Z",
+    });
+
+    assert.deepStrictEqual(Array.from(started.values()), [
+      {
+        providerThreadId: "provider-thread-1",
+        turnId,
+        itemId,
+        startedAt: "2026-05-26T00:00:00.000Z",
+      },
+    ]);
+
+    const ignored = updateCodexActiveContextCompactions(started, {
+      method: "item/started",
+      providerThreadId: "provider-thread-1",
+      turnId,
+      itemId: ProviderItemId.make("command-1"),
+      itemType: "commandExecution",
+      observedAt: "2026-05-26T00:00:01.000Z",
+    });
+    assert.equal(ignored.size, 1);
+
+    const completed = updateCodexActiveContextCompactions(started, {
+      method: "item/completed",
+      providerThreadId: "provider-thread-1",
+      turnId,
+      itemId,
+      itemType: undefined,
+      observedAt: "2026-05-26T00:00:02.000Z",
+    });
+    assert.equal(completed.size, 0);
+
+    const restarted = updateCodexActiveContextCompactions(completed, {
+      method: "item/started",
+      providerThreadId: "provider-thread-1",
+      turnId,
+      itemId,
+      itemType: "contextCompaction",
+      observedAt: "2026-05-26T00:00:03.000Z",
+    });
+    const turnCompleted = updateCodexActiveContextCompactions(restarted, {
+      method: "turn/completed",
+      providerThreadId: "provider-thread-1",
+      turnId,
+      observedAt: "2026-05-26T00:00:04.000Z",
+    });
+    assert.equal(turnCompleted.size, 0);
+  });
+
+  it("builds a structured compact-turn steer precondition error without prompt data", () => {
+    const error = buildCodexActiveContextCompactionSteerError({
+      providerThreadId: "provider-thread-1",
+      turnId: TurnId.make("turn-active"),
+      itemId: ProviderItemId.make("context-1"),
+      startedAt: "2026-05-26T00:00:00.000Z",
+    });
+
+    assert.equal(error.code, -32600);
+    assert.equal(error.errorMessage, "cannot steer a compact turn");
+    assert.deepStrictEqual(error.data, {
+      message: "cannot steer a compact turn",
+      codexErrorInfo: {
+        activeTurnNotSteerable: {
+          turnKind: "compact",
+        },
+      },
+      additionalDetails: {
+        providerThreadId: "provider-thread-1",
+        turnId: "turn-active",
+        itemId: "context-1",
+        contextCompactionStartedAt: "2026-05-26T00:00:00.000Z",
+      },
     });
   });
 });

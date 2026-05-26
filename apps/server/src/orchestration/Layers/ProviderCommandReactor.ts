@@ -213,7 +213,7 @@ function detectCodexNonSteerableTurnKind(
 }
 
 function codexNonSteerableDetail(turnKind: CodexNonSteerableTurnKind): string {
-  return `Codex rejected live steer because the active turn is a ${turnKind} turn. Cafe Code will re-queue this follow-up locally and send it after the active turn finishes.`;
+  return `Codex cannot accept live steer because the active turn is a ${turnKind} turn. Cafe Code will re-queue this follow-up locally and send it after the active turn finishes.`;
 }
 
 function isUnknownPendingApprovalRequestError(cause: Cause.Cause<ProviderServiceError>): boolean {

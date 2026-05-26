@@ -9,17 +9,23 @@ import * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
 import * as NodeHttp from "node:http";
 import type * as NodeNet from "node:net";
+import * as NodePath from "node:path";
 import { performance as nodePerformance } from "node:perf_hooks";
 
 const DEBUG_HOST = "127.0.0.1";
 const DEBUG_PATH = "/debug";
 const DEBUG_SWITCHES = new Set(["--cafe-debug", "--debug"]);
-const RENDERER_SNAPSHOT_HISTORY_LIMIT = 50;
-const PROCESS_DIAGNOSTIC_HISTORY_LIMIT = 50;
+const DEBUG_FULL_DETAIL_PARAM = "full";
+const DEBUG_COMPACT_DETAIL_PARAM = "compact";
+const RENDERER_SNAPSHOT_HISTORY_LIMIT = 20;
+const PROCESS_DIAGNOSTIC_HISTORY_LIMIT = 25;
 const EVENT_LOOP_MONITOR_INTERVAL_MS = 1_000;
 const PROVIDER_DAEMON_DEBUG_REFRESH_TIMEOUT_MS = 2_000;
+const PROVIDER_DAEMON_DEBUG_REFRESH_TTL_MS = 5_000;
 const PROCESS_DIAGNOSTIC_MESSAGE_LIMIT = 4_000;
 const PROCESS_DIAGNOSTIC_STACK_LIMIT = 16_000;
+const COMPACT_STRING_LIMIT = 240;
+const COMPACT_ARRAY_LIMIT = 12;
 const KNOWN_SLOW_VALIDATION_TARGETS = [
   {
     target: "apps/server/src/git/GitManager.test.ts",
@@ -104,6 +110,7 @@ interface DebugServerRuntimeState {
     lastError: string | null;
     attemptCount: number;
     failureCount: number;
+    inFlight: boolean;
   };
   rendererSnapshotUpdatedAt: string | null;
   rendererSnapshotHistory: RendererSnapshotHistoryEntry[];
@@ -157,6 +164,7 @@ const state: DebugServerRuntimeState = {
     lastError: null,
     attemptCount: 0,
     failureCount: 0,
+    inFlight: false,
   },
   rendererSnapshotUpdatedAt: null,
   rendererSnapshotHistory: [],
@@ -183,8 +191,13 @@ function isAddressInfo(
   return typeof address === "object" && address !== null && typeof address.port === "number";
 }
 
-function writeJson(response: NodeHttp.ServerResponse, statusCode: number, body: unknown): number {
-  const responseBody = `${JSON.stringify(body, null, 2)}\n`;
+function writeJson(
+  response: NodeHttp.ServerResponse,
+  statusCode: number,
+  body: unknown,
+  options: { readonly pretty?: boolean } = {},
+): number {
+  const responseBody = `${JSON.stringify(body, null, options.pretty === true ? 2 : undefined)}\n`;
   response.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
@@ -225,6 +238,63 @@ function estimateJsonBytes(value: unknown): number | null {
   } catch {
     return null;
   }
+}
+
+function isFullDebugRequest(url: URL): boolean {
+  const detail = url.searchParams.get("detail");
+  return (
+    detail === DEBUG_FULL_DETAIL_PARAM ||
+    url.searchParams.get(DEBUG_FULL_DETAIL_PARAM) === "1" ||
+    url.searchParams.get(DEBUG_FULL_DETAIL_PARAM) === "true"
+  );
+}
+
+function readTimestampAgeMs(value: unknown, nowMs: number = Date.now()): number | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? Math.max(0, nowMs - parsed) : null;
+}
+
+function compactString(value: string, maxLength = COMPACT_STRING_LIMIT): string {
+  return value.length <= maxLength ? value : `${value.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function compactPath(value: unknown): unknown {
+  if (typeof value !== "string" || value.length === 0) {
+    return value ?? null;
+  }
+  const normalized = NodePath.normalize(value);
+  return {
+    basename: NodePath.basename(normalized),
+    parentBasename: NodePath.basename(NodePath.dirname(normalized)),
+  };
+}
+
+function compactStringArray(value: unknown, limit = COMPACT_ARRAY_LIMIT): readonly string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((entry): entry is string => typeof entry === "string")
+    .slice(0, limit)
+    .map((entry) => compactString(entry));
+}
+
+function compactCountedArray(value: unknown, limit = COMPACT_ARRAY_LIMIT): Record<string, unknown> {
+  if (!Array.isArray(value)) {
+    return {
+      count: 0,
+      items: [],
+      omitted: 0,
+    };
+  }
+  return {
+    count: value.length,
+    items: value.slice(0, limit),
+    omitted: Math.max(0, value.length - limit),
+  };
 }
 
 function roundDebugMs(value: number): number {
@@ -324,11 +394,12 @@ async function withTimeout<T>(
 
 async function refreshProviderDaemonSnapshotForDebugRequest(): Promise<void> {
   const refresher = state.providerDaemonSnapshotRefresher;
-  if (refresher === null) {
+  if (refresher === null || state.providerDaemonSnapshotRefresh.inFlight) {
     return;
   }
 
   const refreshStartedAtMs = nodePerformance.now();
+  state.providerDaemonSnapshotRefresh.inFlight = true;
   state.providerDaemonSnapshotRefresh.lastAttemptAt = new Date().toISOString();
   state.providerDaemonSnapshotRefresh.attemptCount += 1;
   try {
@@ -347,7 +418,35 @@ async function refreshProviderDaemonSnapshotForDebugRequest(): Promise<void> {
     );
     state.providerDaemonSnapshotRefresh.lastError = errorMessage(error);
     state.providerDaemonSnapshotRefresh.failureCount += 1;
+  } finally {
+    state.providerDaemonSnapshotRefresh.inFlight = false;
   }
+}
+
+function providerDaemonSnapshotAgeMs(nowMs: number = Date.now()): number | null {
+  const snapshot = readRecord(state.providerDaemonSnapshot);
+  return readTimestampAgeMs(snapshot?.updatedAt, nowMs);
+}
+
+async function prepareProviderDaemonSnapshotForDebugRequest(fullDetail: boolean): Promise<void> {
+  if (state.providerDaemonSnapshotRefresher === null) {
+    return;
+  }
+
+  const ageMs = providerDaemonSnapshotAgeMs();
+  if (fullDetail || state.providerDaemonSnapshot === null) {
+    await refreshProviderDaemonSnapshotForDebugRequest();
+    return;
+  }
+
+  if (ageMs !== null && ageMs <= PROVIDER_DAEMON_DEBUG_REFRESH_TTL_MS) {
+    return;
+  }
+
+  // Long-running debug sessions should not block ordinary `/debug` reads on a slow daemon
+  // health refresh. Return the most recent bounded snapshot immediately and refresh in the
+  // background; explicit full-detail requests still await a fresh daemon snapshot above.
+  void refreshProviderDaemonSnapshotForDebugRequest();
 }
 
 function readEventLoopSnapshot(): Record<string, unknown> {
@@ -460,7 +559,323 @@ function buildRendererSnapshotHistoryEntry(
   };
 }
 
-function buildDebugSnapshot(): Record<string, unknown> {
+function summarizeProcessForCompactDebug(): Record<string, unknown> {
+  const memoryUsage = process.memoryUsage();
+  const resourceUsage = process.resourceUsage();
+  return {
+    pid: process.pid,
+    ppid: process.ppid,
+    platform: process.platform,
+    arch: process.arch,
+    uptimeSeconds: roundDebugMs(process.uptime()),
+    cwd: compactPath(process.cwd()),
+    execPath: compactPath(process.execPath),
+    argv: process.argv.filter((arg) => DEBUG_SWITCHES.has(arg)),
+    memoryUsage: {
+      rss: memoryUsage.rss,
+      heapTotal: memoryUsage.heapTotal,
+      heapUsed: memoryUsage.heapUsed,
+      external: memoryUsage.external,
+      arrayBuffers: memoryUsage.arrayBuffers,
+    },
+    resourceUsage: {
+      userCPUTime: resourceUsage.userCPUTime,
+      systemCPUTime: resourceUsage.systemCPUTime,
+      maxRSS: resourceUsage.maxRSS,
+      fsRead: resourceUsage.fsRead,
+      fsWrite: resourceUsage.fsWrite,
+    },
+    versions: {
+      node: process.versions.node,
+      electron: process.versions.electron ?? null,
+      chrome: process.versions.chrome ?? null,
+    },
+    diagnostics: {
+      listenerInstalled: state.processDiagnostics.listenerInstalled,
+      totalCount: state.processDiagnostics.totalCount,
+      recentLimit: PROCESS_DIAGNOSTIC_HISTORY_LIMIT,
+      recent: state.processDiagnostics.recent.slice(-5).map((entry) => ({
+        capturedAt: entry.capturedAt,
+        kind: entry.kind,
+        origin: entry.origin,
+        tag: compactString(entry.tag),
+        message: compactString(entry.message),
+        name: entry.name,
+        hasStack: entry.stack !== null,
+      })),
+    },
+  };
+}
+
+function summarizeProviderDaemonHealthForCompactDebug(
+  value: unknown,
+): Record<string, unknown> | null {
+  const health = readRecord(value);
+  if (health === null) {
+    return null;
+  }
+  const runtimeEvents = readRecord(health.runtimeEvents);
+  const rpc = readRecord(health.rpc);
+  const supervisor = readRecord(health.supervisor);
+  const supervisorProcess = readRecord(health.supervisorProcess);
+  const processDiagnostics = readRecord(health.processDiagnostics);
+
+  return {
+    ok: readBoolean(health.ok),
+    mode: readString(health.mode),
+    protocolVersion: readNumber(health.protocolVersion),
+    pid: readNumber(health.pid),
+    ppid: readNumber(health.ppid),
+    version: readString(health.version),
+    runtimeBuildId: readString(health.runtimeBuildId),
+    startedAt: readString(health.startedAt),
+    activeSessionCount: readNumber(health.activeSessionCount),
+    configuredInstanceCount: readNumber(health.configuredInstanceCount),
+    activeStreamCount: readNumber(health.activeStreamCount),
+    retainedEventCount: readNumber(health.retainedEventCount),
+    eventCursor: readNumber(health.eventCursor),
+    oldestEventCursor: readNumber(health.oldestEventCursor),
+    newestEventCursor: readNumber(health.newestEventCursor),
+    commandCount: readNumber(health.commandCount),
+    completedCommandCount: readNumber(health.completedCommandCount),
+    failedCommandCount: readNumber(health.failedCommandCount),
+    runningCommandCount: readNumber(health.runningCommandCount),
+    rpc:
+      rpc === null
+        ? null
+        : {
+            totalRpcCount: readNumber(rpc.totalRpcCount),
+            mutatingRpcCount: readNumber(rpc.mutatingRpcCount),
+            failedRpcCount: readNumber(rpc.failedRpcCount),
+            maxRpcDurationMs: readNumber(rpc.maxRpcDurationMs),
+            meanRpcDurationMs: readNumber(rpc.meanRpcDurationMs),
+            lastRpcMethod: readString(rpc.lastRpcMethod),
+            lastRpcAt: readString(rpc.lastRpcAt),
+            lastRpcDurationMs: readNumber(rpc.lastRpcDurationMs),
+            recentFailureCount: Array.isArray(rpc.recentFailures) ? rpc.recentFailures.length : 0,
+          },
+    runtimeEvents:
+      runtimeEvents === null
+        ? null
+        : {
+            retainedEventCount: readNumber(runtimeEvents.retainedEventCount),
+            recentMethodCounts: compactCountedArray(runtimeEvents.recentMethodCounts, 8),
+            recentTurnTimingCount: Array.isArray(runtimeEvents.recentTurnTimings)
+              ? runtimeEvents.recentTurnTimings.length
+              : 0,
+            lastEventAt: readString(runtimeEvents.lastEventAt),
+          },
+    supervisor:
+      supervisor === null
+        ? null
+        : {
+            sessionCount: readNumber(supervisor.sessionCount),
+            runningSessionCount: readNumber(supervisor.runningSessionCount),
+            transferringSessionCount: readNumber(supervisor.transferringSessionCount),
+            detachedSessionCount: readNumber(supervisor.detachedSessionCount),
+            stoppedSessionCount: readNumber(supervisor.stoppedSessionCount),
+            errorSessionCount: readNumber(supervisor.errorSessionCount),
+          },
+    supervisorProcess:
+      supervisorProcess === null
+        ? null
+        : {
+            pid: readNumber(supervisorProcess.pid),
+            status: readString(supervisorProcess.status),
+            adoptedExistingProcess: readBoolean(supervisorProcess.adoptedExistingProcess),
+            durationMs: readNumber(supervisorProcess.durationMs),
+            endpointTransport: readString(readRecord(supervisorProcess.endpoint)?.transport),
+          },
+    processDiagnostics:
+      processDiagnostics === null
+        ? null
+        : {
+            totalCount: readNumber(processDiagnostics.totalCount),
+            recentCount: Array.isArray(processDiagnostics.recent)
+              ? processDiagnostics.recent.length
+              : 0,
+          },
+  };
+}
+
+function summarizeProviderDaemonForCompactDebug(): Record<string, unknown> {
+  const snapshot = readRecord(state.providerDaemonSnapshot);
+  if (snapshot === null) {
+    return {
+      available: false,
+      reason: "Provider daemon manager has not published a snapshot yet.",
+    };
+  }
+  const ageMs = providerDaemonSnapshotAgeMs();
+  return {
+    available: true,
+    status: readString(snapshot.status),
+    pid: readNumber(snapshot.pid),
+    adoptedExistingProcess: readBoolean(snapshot.adoptedExistingProcess),
+    updatedAt: readString(snapshot.updatedAt),
+    ageMs,
+    stale: ageMs === null ? null : ageMs > PROVIDER_DAEMON_DEBUG_REFRESH_TTL_MS,
+    runtimeBuildId: readString(snapshot.runtimeBuildId),
+    endpoint: {
+      transport: readString(readRecord(snapshot.endpoint)?.transport),
+      hasHttpBaseUrl: typeof readRecord(snapshot.endpoint)?.httpBaseUrl === "string",
+      hasSocketPath: typeof readRecord(snapshot.endpoint)?.socketPath === "string",
+      hasLeaseId: typeof readRecord(snapshot.endpoint)?.leaseId === "string",
+    },
+    paths: {
+      markerPath: compactPath(snapshot.markerPath),
+      credentialPath: compactPath(snapshot.credentialPath),
+    },
+    lastError: readString(snapshot.lastError),
+    lastHealth: summarizeProviderDaemonHealthForCompactDebug(snapshot.lastHealth),
+    performance: readRecord(snapshot.performance),
+  };
+}
+
+function compactObjectWithoutContentPreviews(value: unknown): unknown {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === "string") {
+    return compactString(value);
+  }
+  if (typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, COMPACT_ARRAY_LIMIT).map(compactObjectWithoutContentPreviews);
+  }
+
+  const record = value as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(record)) {
+    if (
+      key === "textPreview" ||
+      key === "promptPreview" ||
+      key === "payloadPreview" ||
+      key === "promptText" ||
+      key === "messages" ||
+      key === "recentMessages" ||
+      key === "recentActivities" ||
+      key === "recentRuntimeEvents" ||
+      key === "items" ||
+      key === "allQueues" ||
+      key === "orphanQueues" ||
+      key === "turnDiffSummaries"
+    ) {
+      result[key] = "[omitted-from-compact-debug]";
+      continue;
+    }
+    result[key] = compactObjectWithoutContentPreviews(entry);
+  }
+  return result;
+}
+
+function summarizeRendererForCompactDebug(): Record<string, unknown> {
+  const snapshot = readRecord(state.rendererSnapshot);
+  if (snapshot === null) {
+    return {
+      available: false,
+      reason: "No renderer snapshot has been published yet.",
+      history: state.rendererSnapshotHistory,
+    };
+  }
+
+  const route = readRecord(snapshot.route);
+  const project = readRecord(snapshot.project);
+  const thread = readRecord(snapshot.thread);
+  const lifecycle = readRecord(snapshot.lifecycle);
+  const performance = readRecord(snapshot.performance);
+  const activeThreadPerformance = readRecord(performance?.activeThread);
+  const queue = readRecord(snapshot.queue);
+  const gates = readRecord(snapshot.gates);
+  const provider = readRecord(snapshot.provider);
+  const diagnostics = readRecord(snapshot.diagnostics);
+
+  return {
+    available: true,
+    debugSnapshotVersion: readNumber(snapshot.debugSnapshotVersion),
+    source: readString(snapshot.source),
+    capturedAt: readString(snapshot.capturedAt),
+    updatedAt: state.rendererSnapshotUpdatedAt,
+    ageMs: readTimestampAgeMs(state.rendererSnapshotUpdatedAt),
+    diagnostics: {
+      visibilityState: readString(diagnostics?.visibilityState),
+      hasFocus: readBoolean(diagnostics?.hasFocus),
+      online: readBoolean(diagnostics?.online),
+      localApi: compactObjectWithoutContentPreviews(diagnostics?.localApi),
+    },
+    route: compactObjectWithoutContentPreviews(route),
+    project:
+      project === null
+        ? null
+        : {
+            id: readString(project.id),
+            name: readString(project.name),
+            cwd: compactPath(project.cwd),
+          },
+    thread:
+      thread === null
+        ? null
+        : {
+            id: readString(thread.id),
+            title: readString(thread.title),
+            projectId: readString(thread.projectId),
+            worktreePath: compactPath(thread.worktreePath),
+            messageCount: readNumber(thread.messageCount),
+            activityCount: readNumber(thread.activityCount),
+            session: compactObjectWithoutContentPreviews(thread.session),
+            latestTurn: compactObjectWithoutContentPreviews(thread.latestTurn),
+            consistency: compactObjectWithoutContentPreviews(thread.consistency),
+          },
+    performance: {
+      rendererSnapshotBuildDurationMs: readNumber(performance?.rendererSnapshotBuildDurationMs),
+      capturedAtEpochMs: readNumber(performance?.capturedAtEpochMs),
+      activeThread: compactObjectWithoutContentPreviews(activeThreadPerformance),
+      storePressure: compactObjectWithoutContentPreviews(performance?.storePressure),
+      notableThreadCount: Array.isArray(performance?.notableThreads)
+        ? performance.notableThreads.length
+        : 0,
+      notableThreads: Array.isArray(performance?.notableThreads)
+        ? performance.notableThreads
+            .slice(0, 5)
+            .map((threadValue) => compactObjectWithoutContentPreviews(threadValue))
+        : [],
+    },
+    store: compactObjectWithoutContentPreviews(snapshot.store),
+    lifecycle: {
+      active: compactObjectWithoutContentPreviews(lifecycle?.active),
+      counts: compactObjectWithoutContentPreviews(lifecycle?.counts),
+      queueCoupling: compactObjectWithoutContentPreviews(lifecycle?.queueCoupling),
+      localDispatch: compactObjectWithoutContentPreviews(lifecycle?.localDispatch),
+      interestingThreadLimit: readNumber(lifecycle?.interestingThreadLimit),
+      interestingThreadCount: Array.isArray(lifecycle?.interestingThreads)
+        ? lifecycle.interestingThreads.length
+        : 0,
+      interestingThreads: Array.isArray(lifecycle?.interestingThreads)
+        ? lifecycle.interestingThreads
+            .slice(0, 5)
+            .map((threadValue) => compactObjectWithoutContentPreviews(threadValue))
+        : [],
+    },
+    provider: compactObjectWithoutContentPreviews(provider),
+    queue: {
+      activeThreadId: readString(queue?.activeThreadId),
+      length: readNumber(queue?.length),
+      steeringLength: readNumber(queue?.steeringLength),
+      firstItemId: readString(queue?.firstItemId),
+      firstItemBlockedReason: readString(queue?.firstItemBlockedReason),
+      canStartTurn: readBoolean(queue?.canStartTurn),
+      blockers: compactStringArray(queue?.blockers),
+      dispatchDebug: compactObjectWithoutContentPreviews(queue?.dispatchDebug),
+      itemCount: Array.isArray(queue?.items) ? queue.items.length : 0,
+    },
+    gates: compactObjectWithoutContentPreviews(gates),
+    history: state.rendererSnapshotHistory,
+  };
+}
+
+function buildCompactDebugSnapshot(): Record<string, unknown> {
   const buildStartedAtMs = nodePerformance.now();
   const now = Date.now();
   const rendererSnapshotUpdatedAt = state.rendererSnapshotUpdatedAt;
@@ -475,6 +890,7 @@ function buildDebugSnapshot(): Record<string, unknown> {
   const snapshot: Record<string, unknown> = {
     schemaVersion: 1,
     debug: {
+      detail: DEBUG_COMPACT_DETAIL_PARAM,
       enabled: state.enabled,
       bindHost: DEBUG_HOST,
       path: DEBUG_PATH,
@@ -488,6 +904,7 @@ function buildDebugSnapshot(): Record<string, unknown> {
       rendererSnapshotUpdatedAt,
       rendererSnapshotAgeMs,
       rendererSnapshotHistoryLimit: RENDERER_SNAPSHOT_HISTORY_LIMIT,
+      providerDaemonSnapshotRefreshTtlMs: PROVIDER_DAEMON_DEBUG_REFRESH_TTL_MS,
       providerDaemonSnapshotRefresh: {
         timeoutMs: PROVIDER_DAEMON_DEBUG_REFRESH_TIMEOUT_MS,
         lastAttemptAt: state.providerDaemonSnapshotRefresh.lastAttemptAt,
@@ -495,6 +912,78 @@ function buildDebugSnapshot(): Record<string, unknown> {
         lastError: state.providerDaemonSnapshotRefresh.lastError,
         attemptCount: state.providerDaemonSnapshotRefresh.attemptCount,
         failureCount: state.providerDaemonSnapshotRefresh.failureCount,
+        inFlight: state.providerDaemonSnapshotRefresh.inFlight,
+      },
+      fullDetailAvailable: true,
+      fullDetailHint: `${DEBUG_PATH}?detail=${DEBUG_FULL_DETAIL_PARAM}`,
+      omissions: {
+        rawRendererSnapshot: state.rendererSnapshot !== null,
+        rawProviderDaemonSnapshot: state.providerDaemonSnapshot !== null,
+        rawPromptAndMessagePreviews: true,
+        rawActivityPayloadPreviews: true,
+        rawCommandAndEventArrays: true,
+      },
+    },
+    performance: {
+      debugSnapshotBuildDurationMs: null,
+      rendererSnapshotBytes,
+      rendererSnapshotHistoryBytes,
+      rendererSnapshotAgeMs,
+      eventLoop: readEventLoopSnapshot(),
+      knownSlowValidationTargets: KNOWN_SLOW_VALIDATION_TARGETS,
+    },
+    process: summarizeProcessForCompactDebug(),
+    providerDaemon: summarizeProviderDaemonForCompactDebug(),
+    renderer: summarizeRendererForCompactDebug(),
+  };
+
+  (
+    snapshot.performance as {
+      debugSnapshotBuildDurationMs: number;
+    }
+  ).debugSnapshotBuildDurationMs = roundDebugMs(nodePerformance.now() - buildStartedAtMs);
+
+  return snapshot;
+}
+
+function buildFullDebugSnapshot(): Record<string, unknown> {
+  const buildStartedAtMs = nodePerformance.now();
+  const now = Date.now();
+  const rendererSnapshotUpdatedAt = state.rendererSnapshotUpdatedAt;
+  const rendererSnapshotAgeMs =
+    rendererSnapshotUpdatedAt === null
+      ? null
+      : Math.max(0, now - Date.parse(rendererSnapshotUpdatedAt));
+  const rendererSnapshotBytes =
+    state.rendererSnapshot === null ? null : estimateJsonBytes(state.rendererSnapshot);
+  const rendererSnapshotHistoryBytes = estimateJsonBytes(state.rendererSnapshotHistory);
+
+  const snapshot: Record<string, unknown> = {
+    schemaVersion: 1,
+    debug: {
+      detail: DEBUG_FULL_DETAIL_PARAM,
+      enabled: state.enabled,
+      bindHost: DEBUG_HOST,
+      path: DEBUG_PATH,
+      url: state.url,
+      launchedAt: state.launchedAt,
+      startedAt: state.startedAt,
+      requestsServed: state.requestsServed,
+      lastDebugRequestAt: state.lastDebugRequestAt,
+      lastDebugRequestDurationMs: state.lastDebugRequestDurationMs,
+      lastDebugResponseBytes: state.lastDebugResponseBytes,
+      rendererSnapshotUpdatedAt,
+      rendererSnapshotAgeMs,
+      rendererSnapshotHistoryLimit: RENDERER_SNAPSHOT_HISTORY_LIMIT,
+      providerDaemonSnapshotRefreshTtlMs: PROVIDER_DAEMON_DEBUG_REFRESH_TTL_MS,
+      providerDaemonSnapshotRefresh: {
+        timeoutMs: PROVIDER_DAEMON_DEBUG_REFRESH_TIMEOUT_MS,
+        lastAttemptAt: state.providerDaemonSnapshotRefresh.lastAttemptAt,
+        lastDurationMs: state.providerDaemonSnapshotRefresh.lastDurationMs,
+        lastError: state.providerDaemonSnapshotRefresh.lastError,
+        attemptCount: state.providerDaemonSnapshotRefresh.attemptCount,
+        failureCount: state.providerDaemonSnapshotRefresh.failureCount,
+        inFlight: state.providerDaemonSnapshotRefresh.inFlight,
       },
     },
     performance: {
@@ -585,8 +1074,14 @@ function handleRequest(request: NodeHttp.IncomingMessage, response: NodeHttp.Ser
   const requestStartedAtMs = nodePerformance.now();
   state.requestsServed += 1;
   void (async () => {
-    await refreshProviderDaemonSnapshotForDebugRequest();
-    const responseBytes = writeJson(response, 200, buildDebugSnapshot());
+    const fullDetail = isFullDebugRequest(url);
+    await prepareProviderDaemonSnapshotForDebugRequest(fullDetail);
+    const responseBytes = writeJson(
+      response,
+      200,
+      fullDetail ? buildFullDebugSnapshot() : buildCompactDebugSnapshot(),
+      { pretty: fullDetail },
+    );
     state.lastDebugRequestAt = new Date().toISOString();
     state.lastDebugRequestDurationMs = roundDebugMs(nodePerformance.now() - requestStartedAtMs);
     state.lastDebugResponseBytes = responseBytes;
@@ -644,6 +1139,83 @@ export const setProviderDaemonDebugSnapshotRefresher = (
   Effect.sync(() => {
     state.providerDaemonSnapshotRefresher = refresher;
   });
+
+export const __desktopDebugServerTestApi = {
+  reset(input: { readonly enabled?: boolean } = {}): void {
+    stopEventLoopMonitor();
+    if (state.server !== null) {
+      state.server.close();
+    }
+    (state as { enabled: boolean }).enabled = input.enabled ?? true;
+    state.startedAt = null;
+    state.url = null;
+    state.server = null;
+    state.requestsServed = 0;
+    state.lastDebugRequestAt = null;
+    state.lastDebugRequestDurationMs = null;
+    state.lastDebugResponseBytes = null;
+    state.rendererSnapshot = null;
+    state.providerDaemonSnapshot = null;
+    state.providerDaemonSnapshotRefresher = null;
+    state.providerDaemonSnapshotRefresh = {
+      lastAttemptAt: null,
+      lastDurationMs: null,
+      lastError: null,
+      attemptCount: 0,
+      failureCount: 0,
+      inFlight: false,
+    };
+    state.rendererSnapshotUpdatedAt = null;
+    state.rendererSnapshotHistory = [];
+    state.processDiagnostics = {
+      listenerInstalled: false,
+      totalCount: 0,
+      recent: [],
+    };
+    state.eventLoop.startedAt = null;
+    state.eventLoop.updatedAt = null;
+    state.eventLoop.expectedAtMs = null;
+    state.eventLoop.lastDelayMs = null;
+    state.eventLoop.maxDelayMs = 0;
+    state.eventLoop.totalDelayMs = 0;
+    state.eventLoop.sampleCount = 0;
+  },
+  publishRendererSnapshot(snapshot: DesktopRendererDebugSnapshot): void {
+    const receivedAt = new Date().toISOString();
+    state.rendererSnapshot = snapshot;
+    state.rendererSnapshotUpdatedAt = receivedAt;
+    state.rendererSnapshotHistory = [
+      ...state.rendererSnapshotHistory.slice(1 - RENDERER_SNAPSHOT_HISTORY_LIMIT),
+      buildRendererSnapshotHistoryEntry(snapshot, receivedAt),
+    ];
+  },
+  publishProviderDaemonSnapshot(snapshot: Record<string, unknown>): void {
+    state.providerDaemonSnapshot = {
+      ...snapshot,
+      updatedAt: new Date().toISOString(),
+    };
+  },
+  setProviderDaemonSnapshotUpdatedAt(updatedAt: string): void {
+    if (state.providerDaemonSnapshot !== null) {
+      state.providerDaemonSnapshot = {
+        ...state.providerDaemonSnapshot,
+        updatedAt,
+      };
+    }
+  },
+  setProviderDaemonSnapshotRefresher(refresher: (() => Promise<void>) | null): void {
+    state.providerDaemonSnapshotRefresher = refresher;
+  },
+  prepareProviderDaemonSnapshotForDebugRequest,
+  buildCompactDebugSnapshot,
+  buildFullDebugSnapshot,
+  getProviderDaemonRefreshAttemptCount(): number {
+    return state.providerDaemonSnapshotRefresh.attemptCount;
+  },
+  rendererHistoryLength(): number {
+    return state.rendererSnapshotHistory.length;
+  },
+};
 
 const startUnsafe: Effect.Effect<void, DesktopDebugServerStartError, Scope.Scope> = Effect.gen(
   function* () {

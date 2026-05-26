@@ -344,6 +344,13 @@ type CodexServerNotification = {
   readonly params: unknown;
 };
 
+export interface CodexActiveContextCompaction {
+  readonly providerThreadId?: string;
+  readonly turnId: TurnId;
+  readonly itemId: ProviderItemId;
+  readonly startedAt: string;
+}
+
 function makeCodexServerNotification(method: string, params: unknown): CodexServerNotification {
   return { method, params };
 }
@@ -551,6 +558,118 @@ export function buildTurnSteerParams(input: {
   }).pipe(
     Effect.mapError((error) => toProtocolParseError("Invalid turn/steer request payload", error)),
   );
+}
+
+function codexContextCompactionKey(turnId: TurnId, itemId: ProviderItemId): string {
+  return `${String(turnId)}:${String(itemId)}`;
+}
+
+export function isCodexContextCompactionItemType(value: string | undefined | null): boolean {
+  if (!value) {
+    return false;
+  }
+
+  const normalized = value
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[._/-]+/g, " ")
+    .trim()
+    .toLowerCase();
+  return normalized === "context compaction";
+}
+
+export function updateCodexActiveContextCompactions(
+  current: ReadonlyMap<string, CodexActiveContextCompaction>,
+  input: {
+    readonly method: string;
+    readonly providerThreadId?: string | undefined;
+    readonly turnId?: TurnId | undefined;
+    readonly itemId?: ProviderItemId | undefined;
+    readonly itemType?: string | null | undefined;
+    readonly observedAt: string;
+  },
+): Map<string, CodexActiveContextCompaction> {
+  const unchanged = () => (current instanceof Map ? current : new Map(current));
+
+  if (input.method === "turn/completed" && input.turnId) {
+    let changed = false;
+    const next = new Map(current);
+    for (const [key, compaction] of next) {
+      if (compaction.turnId === input.turnId) {
+        next.delete(key);
+        changed = true;
+      }
+    }
+    return changed ? next : unchanged();
+  }
+
+  if (!input.turnId || !input.itemId) {
+    return unchanged();
+  }
+
+  const key = codexContextCompactionKey(input.turnId, input.itemId);
+  const existing = current.get(key);
+  const isContextCompaction = isCodexContextCompactionItemType(input.itemType);
+
+  if (input.method === "item/started" && isContextCompaction) {
+    const next = new Map(current);
+    next.set(key, {
+      ...(input.providerThreadId ? { providerThreadId: input.providerThreadId } : {}),
+      turnId: input.turnId,
+      itemId: input.itemId,
+      startedAt: input.observedAt,
+    });
+    return next;
+  }
+
+  if (input.method === "item/completed" && (isContextCompaction || existing !== undefined)) {
+    if (existing === undefined) {
+      return unchanged();
+    }
+    const next = new Map(current);
+    next.delete(key);
+    return next;
+  }
+
+  return unchanged();
+}
+
+function findCodexActiveContextCompactionForTurn(
+  compactions: ReadonlyMap<string, CodexActiveContextCompaction>,
+  turnId: TurnId,
+  providerThreadId: string,
+): CodexActiveContextCompaction | undefined {
+  for (const compaction of compactions.values()) {
+    if (compaction.turnId !== turnId) {
+      continue;
+    }
+    if (compaction.providerThreadId && compaction.providerThreadId !== providerThreadId) {
+      continue;
+    }
+    return compaction;
+  }
+  return undefined;
+}
+
+export function buildCodexActiveContextCompactionSteerError(input: {
+  readonly providerThreadId: string;
+  readonly turnId: TurnId;
+  readonly itemId: ProviderItemId;
+  readonly startedAt: string;
+}): CodexErrors.CodexAppServerRequestError {
+  return CodexErrors.CodexAppServerRequestError.invalidRequest("cannot steer a compact turn", {
+    message: "cannot steer a compact turn",
+    codexErrorInfo: {
+      activeTurnNotSteerable: {
+        turnKind: "compact",
+      },
+    },
+    additionalDetails: {
+      providerThreadId: input.providerThreadId,
+      turnId: input.turnId,
+      itemId: input.itemId,
+      contextCompactionStartedAt: input.startedAt,
+    },
+  });
 }
 
 function classifyCodexStderrLine(rawLine: string): { readonly message: string } | null {
@@ -895,6 +1014,13 @@ function readNotificationItemId(notification: CodexServerNotification): Provider
   return itemId ? ProviderItemId.make(itemId) : undefined;
 }
 
+function readNotificationItemType(notification: CodexServerNotification): string | undefined {
+  return (
+    readNotificationNestedString(notification, "item", "type") ??
+    readNotificationParamString(notification, "itemType")
+  );
+}
+
 function readNotificationTurnStatus(notification: CodexServerNotification): string | undefined {
   return readNotificationNestedString(notification, "turn", "status");
 }
@@ -1120,6 +1246,9 @@ export const makeCodexSessionRuntime = (
     const closedRef = yield* Ref.make(false);
     const snapshotBackfillEventIdsRef = yield* Ref.make(new Set<string>());
     const turnStartObservationsRef = yield* Ref.make(new Map<string, CodexTurnStartObservation>());
+    const activeContextCompactionsRef = yield* Ref.make(
+      new Map<string, CodexActiveContextCompaction>(),
+    );
 
     // `~` is not shell-expanded when env vars are set via
     // `child_process.spawn`; `expandHomePath` lets a configured
@@ -1692,11 +1821,42 @@ export const makeCodexSessionRuntime = (
         }
       });
 
+    const updateActiveContextCompactionsFromNotification = (
+      notification: CodexServerNotification,
+    ) =>
+      Effect.gen(function* () {
+        if (!(yield* notificationBelongsToCurrentSession(notification))) {
+          return;
+        }
+
+        const observedAt = yield* nowIso;
+        yield* Ref.update(activeContextCompactionsRef, (current) =>
+          updateCodexActiveContextCompactions(current, {
+            method: notification.method,
+            providerThreadId: readNotificationThreadId(notification),
+            turnId: readNotificationTurnId(notification),
+            itemId: readNotificationItemId(notification),
+            itemType: readNotificationItemType(notification),
+            observedAt,
+          }),
+        );
+      });
+
     const handleRawNotification = (notification: CodexServerNotification) =>
       Effect.gen(function* () {
         yield* reconcileRawNotificationSessionState(notification).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("codex.raw.notification.session-reconcile.failed", {
+              threadId: options.threadId,
+              providerInstanceId: options.providerInstanceId ?? PROVIDER,
+              method: notification.method,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        );
+        yield* updateActiveContextCompactionsFromNotification(notification).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("codex.raw.notification.context-compaction-tracking.failed", {
               threadId: options.threadId,
               providerInstanceId: options.providerInstanceId ?? PROVIDER,
               method: notification.method,
@@ -2302,6 +2462,52 @@ export const makeCodexSessionRuntime = (
             ...(input.input ? { prompt: input.input } : {}),
             ...(input.attachments ? { attachments: input.attachments } : {}),
           });
+          const activeContextCompaction = findCodexActiveContextCompactionForTurn(
+            yield* Ref.get(activeContextCompactionsRef),
+            input.expectedTurnId,
+            providerThreadId,
+          );
+          if (activeContextCompaction !== undefined) {
+            // Upstream schema exposes compact turns as non-steerable, but
+            // automatic compaction reaches Cafe as an active
+            // `contextCompaction` item on the regular turn. Codex app-server
+            // 0.133.0 can ACK `turn/steer` during that item and then leave the
+            // turn inProgress, so Cafe preserves the prompt by returning the
+            // same structured compact precondition error before transport I/O.
+            const observedAt = yield* nowIso;
+            const diagnostics = {
+              providerThreadId,
+              turnId: input.expectedTurnId,
+              itemId: activeContextCompaction.itemId,
+              contextCompactionStartedAt: activeContextCompaction.startedAt,
+              observedAt,
+              promptByteLength: Buffer.byteLength(input.input ?? "", "utf8"),
+              attachmentCount: input.attachments?.length ?? 0,
+              semantics:
+                "Codex reports active contextCompaction as item lifecycle, while upstream non-steerable state is surfaced as compact. Cafe returns the structured compact precondition failure locally so the follow-up is queued instead of sending turn/steer during compaction.",
+            };
+            yield* Effect.logWarning("codex.turnSteer.deferredDuringContextCompaction", {
+              threadId: options.threadId,
+              providerInstanceId: options.providerInstanceId ?? PROVIDER,
+              ...diagnostics,
+            });
+            yield* emitEvent({
+              kind: "notification",
+              threadId: options.threadId,
+              method: "codex.turnSteer/deferredDuringContextCompaction",
+              turnId: input.expectedTurnId,
+              itemId: activeContextCompaction.itemId,
+              message:
+                "Codex context compaction is active; Cafe Code queued the steer as a follow-up instead of sending turn/steer.",
+              payload: diagnostics,
+            });
+            return yield* buildCodexActiveContextCompactionSteerError({
+              providerThreadId,
+              turnId: input.expectedTurnId,
+              itemId: activeContextCompaction.itemId,
+              startedAt: activeContextCompaction.startedAt,
+            });
+          }
           const steerRequestedAt = yield* nowIso;
           const steerRequestedAtMs = yield* Clock.currentTimeMillis;
           const rawResponse = yield* client.raw.request("turn/steer", params);

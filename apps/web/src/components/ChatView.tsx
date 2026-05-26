@@ -175,6 +175,7 @@ import {
 import { sanitizeThreadErrorMessage } from "~/rpc/transportError";
 import { retainThreadDetailSubscription } from "../environments/runtime/service";
 import { RightPanelSheet } from "./RightPanelSheet";
+import { deriveDebugWaitReasons } from "./chat/debugWaitReasons";
 import { Button } from "./ui/button";
 import {
   buildVersionMismatchDismissalKey,
@@ -188,14 +189,14 @@ const IMAGE_ONLY_BOOTSTRAP_PROMPT =
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROPOSED_PLANS: Thread["proposedPlans"] = [];
 const DEBUG_SNAPSHOT_VERSION = 9;
-const DEBUG_TEXT_PREVIEW_LIMIT = 240;
-const DEBUG_JSON_PREVIEW_LIMIT = 2_000;
-const DEBUG_RECENT_MESSAGE_LIMIT = 20;
-const DEBUG_RECENT_ACTIVITY_LIMIT = 30;
-const DEBUG_RECENT_RUNTIME_EVENT_LIMIT = 12;
-const DEBUG_PROVIDER_CONTINUATION_SIGNAL_LIMIT = 24;
+const DEBUG_TEXT_PREVIEW_LIMIT = 120;
+const DEBUG_JSON_PREVIEW_LIMIT = 600;
+const DEBUG_RECENT_MESSAGE_LIMIT = 6;
+const DEBUG_RECENT_ACTIVITY_LIMIT = 10;
+const DEBUG_RECENT_RUNTIME_EVENT_LIMIT = 6;
+const DEBUG_PROVIDER_CONTINUATION_SIGNAL_LIMIT = 8;
 const DEBUG_PROVIDER_COMPLETION_BOUNDARY_LIMIT = 8;
-const DEBUG_INTERESTING_THREAD_LIMIT = 40;
+const DEBUG_INTERESTING_THREAD_LIMIT = 16;
 const DEBUG_THREAD_DETAIL_MESSAGE_LIMIT = 2_000;
 const DEBUG_THREAD_DETAIL_ACTIVITY_LIMIT = 500;
 const DEBUG_LARGE_THREAD_TEXT_CHARS = 1_000_000;
@@ -383,7 +384,8 @@ function summarizeDebugActivity(activity: OrchestrationThreadActivity) {
     id: activity.id,
     kind: activity.kind,
     tone: activity.tone,
-    summary: activity.summary,
+    summaryLength: activity.summary.length,
+    summaryPreview: truncateDebugText(activity.summary),
     turnId: activity.turnId,
     sequence: activity.sequence ?? null,
     createdAt: activity.createdAt,
@@ -1122,6 +1124,7 @@ function summarizeDebugNotableThread(input: {
     performance: summarizeDebugThreadPerformance(input.thread, input.nowMs),
   };
 }
+
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
@@ -2966,6 +2969,17 @@ export default function ChatView(props: ChatViewProps) {
     const activeLifecycleSummary = activeThread
       ? (lifecycleByThreadId.get(activeThread.id) ?? null)
       : null;
+    const activeThreadPerformance =
+      activeThread == null ? null : summarizeDebugThreadPerformance(activeThread, capturedAtMs);
+    const activeWaitReasons = deriveDebugWaitReasons({
+      lifecycle: activeLifecycleSummary,
+      performance: activeThreadPerformance,
+      activeQueueLength: activeFollowUpQueue.length,
+      activeSteeringFollowUpCount: steeringFollowUpViewItems.length,
+      followUpQueueVisibleWorking,
+      followUpQueueDispatchInFlight,
+      activeTurnInProgress: isWorking || !latestTurnSettled,
+    });
     const activeProviderContinuation = activeLifecycleSummary?.providerContinuation ?? null;
     const lifecycleSummaries = Array.from(lifecycleByThreadId.values());
     const lifecycleRedFlagCounts = countBy(
@@ -3053,8 +3067,7 @@ export default function ChatView(props: ChatViewProps) {
       performance: {
         rendererSnapshotBuildDurationMs: null,
         capturedAtEpochMs: capturedAtMs,
-        activeThread:
-          activeThread == null ? null : summarizeDebugThreadPerformance(activeThread, capturedAtMs),
+        activeThread: activeThreadPerformance,
         notableThreads: notablePerformanceThreads,
         storePressure: {
           threadCount: allThreads.length,
@@ -3148,6 +3161,7 @@ export default function ChatView(props: ChatViewProps) {
         : null,
       lifecycle: {
         active: activeLifecycleSummary,
+        waitReasons: activeWaitReasons,
         counts: {
           sessionsRunning: lifecycleSummaries.filter((thread) => thread.isSessionRunning).length,
           sessionsWithActiveTurn: lifecycleSummaries.filter(
@@ -3201,6 +3215,7 @@ export default function ChatView(props: ChatViewProps) {
           canSteerFollowUpQueue,
           canActivateRunningFollowUpQueueAction,
           followUpQueueActionLabel,
+          waitReasons: activeWaitReasons,
           activeProviderLiveSteerSupported,
           activeProviderLiveSteerAvailable,
           uiWorking: isWorking,
@@ -3335,6 +3350,7 @@ export default function ChatView(props: ChatViewProps) {
         canSteerFollowUpQueue,
         canActivateRunningFollowUpQueueAction,
         followUpQueueActionLabel,
+        waitReasons: activeWaitReasons,
         isWorking,
         isSendBusy,
         hasEnvironmentApi: readEnvironmentApi(environmentId) !== null,
