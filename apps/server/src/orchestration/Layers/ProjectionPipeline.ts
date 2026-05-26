@@ -1300,6 +1300,30 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       const existingSession = yield* projectionThreadSessionRepository.getByThreadId({
         threadId: event.payload.threadId,
       });
+      const runningActiveTurn =
+        event.payload.session.status === "running" && event.payload.session.activeTurnId !== null
+          ? yield* projectionTurnRepository.getByTurnId({
+              threadId: event.payload.threadId,
+              turnId: event.payload.session.activeTurnId,
+            })
+          : Option.none<ProjectionTurnById>();
+      if (Option.isSome(runningActiveTurn) && isTerminalTurnState(runningActiveTurn.value.state)) {
+        const status = terminalSessionStatusForTurnState(runningActiveTurn.value.state);
+        yield* projectionThreadSessionRepository.upsert({
+          threadId: event.payload.threadId,
+          status,
+          providerName: event.payload.session.providerName,
+          providerInstanceId: event.payload.session.providerInstanceId ?? null,
+          runtimeMode: event.payload.session.runtimeMode,
+          activeTurnId: null,
+          lastError: status === "ready" ? null : event.payload.session.lastError,
+          updatedAt:
+            runningActiveTurn.value.completedAt !== null
+              ? maxIso(event.payload.session.updatedAt, runningActiveTurn.value.completedAt)
+              : event.payload.session.updatedAt,
+        });
+        return;
+      }
       if (
         event.payload.session.activeTurnId === null &&
         (event.payload.session.status === "ready" ||
@@ -1358,10 +1382,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         const existingRow = yield* projectionThreadRepository.getById({
           threadId: event.payload.threadId,
         });
-        const activeTurn = yield* projectionTurnRepository.getByTurnId({
-          threadId: event.payload.threadId,
-          turnId: event.payload.session.activeTurnId,
-        });
+        const activeTurn = runningActiveTurn;
         const latestTurn =
           Option.isSome(existingRow) && existingRow.value.latestTurnId !== null
             ? yield* projectionTurnRepository.getByTurnId({
@@ -1447,6 +1468,15 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             threadId: event.payload.threadId,
             turnId,
           });
+          if (Option.isSome(existingTurn) && isTerminalTurnState(existingTurn.value.state)) {
+            // Codex app-server can replay old `running` session snapshots after
+            // a checkpoint has already made the same turn terminal, especially
+            // during daemon replay/backfill. A provider-owned running turn must
+            // use a fresh turn id; never let an old session snapshot reopen a
+            // completed/interrupted/error turn or it will corrupt steering and
+            // "still running" UI gates.
+            return;
+          }
           const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
             threadId: event.payload.threadId,
           });

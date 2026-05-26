@@ -1,6 +1,6 @@
 import type { SessionPhase } from "../../types";
 
-export type FollowUpDeliveryAction = "send" | "queue" | "steer" | "queue-unsupported";
+export type FollowUpDeliveryAction = "send" | "queue" | "steer";
 
 export interface FollowUpDeliveryInput {
   phase: SessionPhase;
@@ -15,7 +15,7 @@ export function decideFollowUpDelivery(input: FollowUpDeliveryInput): FollowUpDe
   if (!input.requestedSteer) {
     return "queue";
   }
-  return input.liveSteerSupported ? "steer" : "queue-unsupported";
+  return input.liveSteerSupported ? "steer" : "queue";
 }
 
 export interface LiveSteerAvailabilityInput {
@@ -188,11 +188,11 @@ export function decideQueuedFollowUpAction(input: QueuedFollowUpActionInput): Qu
 export function queuedFollowUpActionLabel(input: {
   readonly phase: SessionPhase;
   readonly liveSteerSupported: boolean;
-}): "Steer" | "Interrupt" | "Send" {
+}): "Send" {
   if (input.phase !== "running") {
     return "Send";
   }
-  return input.liveSteerSupported ? "Steer" : "Interrupt";
+  return "Send";
 }
 
 export function queuedFollowUpActionTitle(input: {
@@ -202,9 +202,7 @@ export function queuedFollowUpActionTitle(input: {
   if (input.phase !== "running") {
     return "Send this queued follow-up now.";
   }
-  return input.liveSteerSupported
-    ? "Steer this into the active turn now."
-    : "Interrupt the active turn and send this queued follow-up next.";
+  return "Cafe Code will send this follow-up as soon as the active turn can accept it.";
 }
 
 export interface RekeyQueuedFollowUpsInput<

@@ -49,6 +49,7 @@ import {
   getModelSelectionBooleanOptionValue,
   getModelSelectionStringOptionValue,
 } from "@cafecode/shared/model";
+import { CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT } from "@cafecode/shared/codexCompaction";
 
 import {
   ProviderAdapterRequestError,
@@ -426,6 +427,7 @@ function normalizeCodexTokenUsage(
       ? { lastReasoningOutputTokens: reasoningOutputTokens }
       : {}),
     compactsAutomatically: true,
+    autoCompactTokenLimit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
   };
 }
 
@@ -497,6 +499,8 @@ function itemTitle(itemType: CanonicalItemType): string | undefined {
       return "Web search";
     case "image_view":
       return "Image view";
+    case "context_compaction":
+      return "Context compaction";
     case "error":
       return "Error";
     default:
@@ -1495,6 +1499,7 @@ function mapToRuntimeEvents(
 
   if (
     event.method === "codex.turnStart/noRuntimeEventYet" ||
+    event.method === "codex.turnSteer/noProviderItemYet" ||
     event.method === "codex.turnProgress/stillInProgressAfterSnapshotPolling"
   ) {
     return [
@@ -1506,7 +1511,9 @@ function mapToRuntimeEvents(
             event.message ??
             (event.method === "codex.turnStart/noRuntimeEventYet"
               ? "Codex app-server accepted turn/start but has not emitted a turn event yet."
-              : "Codex still reports the active turn as in progress after delayed snapshot polling."),
+              : event.method === "codex.turnSteer/noProviderItemYet"
+                ? "Codex app-server accepted turn/steer but has not emitted the steer user message yet."
+                : "Codex still reports the active turn as in progress after delayed snapshot polling."),
           ...(event.payload !== undefined ? { detail: event.payload } : {}),
         },
       },
@@ -1535,6 +1542,36 @@ function mapToRuntimeEvents(
         payload: {
           taskId: RuntimeTaskId.make(`codex-turn-steer:${event.turnId ?? event.id}`),
           description: event.message ?? "Codex app-server accepted turn/steer.",
+          ...(event.payload !== undefined ? { usage: event.payload } : {}),
+        },
+      },
+    ];
+  }
+
+  if (event.method === "codex.turnSteer/processingStarted") {
+    return [
+      {
+        type: "task.progress",
+        ...runtimeEventBase(event, canonicalThreadId),
+        payload: {
+          taskId: RuntimeTaskId.make(`codex-turn-steer-processing:${event.turnId ?? event.id}`),
+          description: event.message ?? "Codex app-server began processing turn/steer.",
+          ...(event.payload !== undefined ? { usage: event.payload } : {}),
+        },
+      },
+    ];
+  }
+
+  if (event.method === "codex.turnSteer/retryAfterActiveTurnMismatch") {
+    return [
+      {
+        type: "task.progress",
+        ...runtimeEventBase(event, canonicalThreadId),
+        payload: {
+          taskId: RuntimeTaskId.make(`codex-turn-steer-retry:${event.turnId ?? event.id}`),
+          description:
+            event.message ??
+            "Codex app-server reported a newer active turn; Cafe retried turn/steer with that turn id.",
           ...(event.payload !== undefined ? { usage: event.payload } : {}),
         },
       },
@@ -2024,8 +2061,23 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   });
 
   const interruptTurn: CodexAdapterShape["interruptTurn"] = (threadId, turnId) =>
-    requireSession(threadId).pipe(
-      Effect.flatMap((session) => session.runtime.interruptTurn(turnId)),
+    Effect.gen(function* () {
+      const session = yield* requireSession(threadId);
+      yield* session.runtime.interruptTurn(turnId);
+      // Codex app-server can remain superficially healthy after an interrupt:
+      // it may still ACK a later `turn/start` while never delivering the
+      // provider-side item stream for that new turn. Upstream Codex persists
+      // thread state independently of the app-server process, and
+      // ProviderService keeps the durable resume cursor in its session binding,
+      // so retiring the local process after a successful interrupt preserves
+      // the conversation while preventing a poisoned app-server stream from
+      // being reused for the user's next intent.
+      yield* retireSession(
+        threadId,
+        "Codex turn interrupted; retiring app-server so the next turn resumes through a fresh process.",
+        "codex.session.retired-after-turn-interrupt",
+      );
+    }).pipe(
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
           ? cause

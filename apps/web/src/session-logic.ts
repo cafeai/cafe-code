@@ -514,15 +514,27 @@ export function deriveWorkLogEntries(
   const ordered = [...activities].toSorted(compareActivitiesByOrder);
   const entries = ordered
     .filter((activity) => (latestTurnId ? activity.turnId === latestTurnId : true))
-    .filter((activity) => activity.kind !== "tool.started")
+    .filter((activity) => activity.kind !== "tool.started" || isContextCompactionActivity(activity))
     .filter((activity) => activity.kind !== "task.started")
     .filter((activity) => activity.kind !== "context-window.updated")
     .filter((activity) => activity.summary !== "Checkpoint captured")
     .filter((activity) => !isPlanBoundaryToolActivity(activity))
+    .filter((activity) => !isRetryableSteerDeliveryActivity(activity))
     .map(toDerivedWorkLogEntry);
   return collapseDerivedWorkLogEntries(entries).map(
     ({ activityKind: _activityKind, collapseKey: _collapseKey, ...entry }) => entry,
   );
+}
+
+function isRetryableSteerDeliveryActivity(activity: OrchestrationThreadActivity): boolean {
+  if (activity.kind !== "provider.turn.steer.failed") {
+    return false;
+  }
+  const payload =
+    activity.payload && typeof activity.payload === "object"
+      ? (activity.payload as Record<string, unknown>)
+      : null;
+  return payload?.retryableFollowUp === true;
 }
 
 function isPlanBoundaryToolActivity(activity: OrchestrationThreadActivity): boolean {
@@ -535,6 +547,14 @@ function isPlanBoundaryToolActivity(activity: OrchestrationThreadActivity): bool
       ? (activity.payload as Record<string, unknown>)
       : null;
   return typeof payload?.detail === "string" && payload.detail.startsWith("ExitPlanMode:");
+}
+
+function isContextCompactionActivity(activity: OrchestrationThreadActivity): boolean {
+  const payload =
+    activity.payload && typeof activity.payload === "object"
+      ? (activity.payload as Record<string, unknown>)
+      : null;
+  return payload?.itemType === "context_compaction" || activity.kind === "context-compaction";
 }
 
 function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWorkLogEntry {
@@ -632,10 +652,10 @@ function shouldCollapseToolLifecycleEntries(
   previous: DerivedWorkLogEntry,
   next: DerivedWorkLogEntry,
 ): boolean {
-  if (previous.activityKind !== "tool.updated" && previous.activityKind !== "tool.completed") {
+  if (!isCollapsibleToolLifecycleActivity(previous.activityKind)) {
     return false;
   }
-  if (next.activityKind !== "tool.updated" && next.activityKind !== "tool.completed") {
+  if (!isCollapsibleToolLifecycleActivity(next.activityKind)) {
     return false;
   }
   if (previous.turnId !== next.turnId) {
@@ -653,6 +673,14 @@ function shouldCollapseToolLifecycleEntries(
     previous.itemType === next.itemType &&
     normalizeCompactToolLabel(previous.toolTitle ?? previous.label) ===
       normalizeCompactToolLabel(next.toolTitle ?? next.label)
+  );
+}
+
+function isCollapsibleToolLifecycleActivity(activityKind: OrchestrationThreadActivity["kind"]) {
+  return (
+    activityKind === "tool.started" ||
+    activityKind === "tool.updated" ||
+    activityKind === "tool.completed"
   );
 }
 
@@ -696,7 +724,7 @@ function mergeChangedFiles(
 }
 
 function deriveToolLifecycleCollapseKey(entry: DerivedWorkLogEntry): string | undefined {
-  if (entry.activityKind !== "tool.updated" && entry.activityKind !== "tool.completed") {
+  if (!isCollapsibleToolLifecycleActivity(entry.activityKind)) {
     return undefined;
   }
   if (entry.toolCallId) {

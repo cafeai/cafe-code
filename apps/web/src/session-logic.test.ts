@@ -676,6 +676,34 @@ describe("deriveWorkLogEntries", () => {
     });
   });
 
+  it("hides retryable steer delivery failures from the normal work log", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "retryable-steer",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "provider.turn.steer.failed",
+        summary: "Provider steer failed",
+        tone: "error",
+        payload: {
+          detail: "Cafe Code preserved this follow-up for automatic delivery.",
+          messageId: "msg-1",
+          retryableFollowUp: true,
+          retryAfter: "active-turn",
+        },
+      }),
+      makeActivity({
+        id: "real-warning",
+        createdAt: "2026-02-23T00:00:03.000Z",
+        kind: "runtime.warning",
+        summary: "Runtime warning",
+        tone: "info",
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities, undefined);
+    expect(entries.map((entry) => entry.id)).toEqual(["real-warning"]);
+  });
+
   it("uses payload detail as label for task.completed and preserves error tone", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
@@ -1462,6 +1490,40 @@ describe("deriveWorkLogEntries context window handling", () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0]?.label).toBe("Context compacted");
+  });
+
+  it("shows active Codex context compaction items and collapses them when completed", () => {
+    const entries = deriveWorkLogEntries(
+      [
+        makeActivity({
+          id: "compaction-started",
+          turnId: "turn-1",
+          kind: "tool.started",
+          summary: "Context compaction started",
+          tone: "tool",
+          payload: {
+            itemType: "context_compaction",
+            title: "Context compaction",
+          },
+        }),
+        makeActivity({
+          id: "compaction-completed",
+          turnId: "turn-1",
+          kind: "tool.completed",
+          summary: "Context compacted",
+          tone: "tool",
+          payload: {
+            itemType: "context_compaction",
+            title: "Context compaction",
+          },
+        }),
+      ],
+      TurnId.make("turn-1"),
+    );
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.label).toBe("Context compacted");
+    expect(entries[0]?.tone).toBe("tool");
   });
 });
 

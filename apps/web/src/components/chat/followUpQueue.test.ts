@@ -56,7 +56,7 @@ describe("followUpQueue", () => {
         requestedSteer: true,
         liveSteerSupported: false,
       }),
-    ).toBe("queue-unsupported");
+    ).toBe("queue");
   });
 
   it("keeps Codex live steer available while the active turn is running", () => {
@@ -151,13 +151,11 @@ describe("followUpQueue", () => {
   });
 
   it("labels queued item actions by provider capability and phase", () => {
-    expect(queuedFollowUpActionLabel({ phase: "running", liveSteerSupported: true })).toBe("Steer");
-    expect(queuedFollowUpActionLabel({ phase: "running", liveSteerSupported: false })).toBe(
-      "Interrupt",
-    );
+    expect(queuedFollowUpActionLabel({ phase: "running", liveSteerSupported: true })).toBe("Send");
+    expect(queuedFollowUpActionLabel({ phase: "running", liveSteerSupported: false })).toBe("Send");
     expect(queuedFollowUpActionLabel({ phase: "ready", liveSteerSupported: false })).toBe("Send");
     expect(queuedFollowUpActionTitle({ phase: "running", liveSteerSupported: false })).toContain(
-      "Interrupt the active turn",
+      "as soon as the active turn can accept it",
     );
   });
 

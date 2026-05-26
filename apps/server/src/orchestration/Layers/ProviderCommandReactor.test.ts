@@ -1825,6 +1825,143 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  it("retries a Codex no-active-turn steer race as the next turn", async () => {
+    const harness = await createHarness({ liveSteer: "supported" });
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+    const staleTurnId = asTurnId("turn-stale");
+    const messageId = asMessageId("user-message-stale-steer");
+    harness.steerTurn.mockImplementationOnce(() =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: "provider-daemon",
+          method: "steerTurn",
+          detail: "Provider adapter request failed (codex) for turn/steer: no active turn to steer",
+        }),
+      ),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-stale-steer"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: staleTurnId,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.steer",
+        commandId: CommandId.make("cmd-turn-steer-stale"),
+        threadId,
+        message: {
+          messageId,
+          role: "user",
+          text: "continue after the stale active turn",
+          attachments: [],
+        },
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.steerTurn.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      threadId,
+      input: "continue after the stale active turn",
+    });
+
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(
+      thread?.activities.some((activity) => activity.kind === "provider.turn.steer.failed"),
+    ).toBe(false);
+    expect(
+      thread?.activities.find((activity) => activity.kind === "runtime.warning"),
+    ).toMatchObject({
+      summary: "Steer retried as next turn",
+      payload: {
+        recovery: "turn-start-after-no-active-turn",
+        messageId,
+        staleTurnId,
+      },
+      turnId: staleTurnId,
+    });
+    await waitFor(async () => {
+      const updatedThread = (await harness.readModel()).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      return (
+        updatedThread?.session?.status === "running" &&
+        updatedThread.session.activeTurnId === "turn-1" &&
+        updatedThread.latestTurn?.turnId === "turn-1" &&
+        updatedThread.latestTurn.state === "running"
+      );
+    });
+  });
+
+  it("treats a stale steer command on a ready session as the next turn", async () => {
+    const harness = await createHarness({ liveSteer: "supported" });
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-ready-for-stale-steer"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.steer",
+        commandId: CommandId.make("cmd-turn-steer-ready-session"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-ready-steer"),
+          role: "user",
+          text: "this should become the next turn",
+          attachments: [],
+        },
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.steerTurn.mock.calls.length).toBe(0);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      threadId,
+      input: "this should become the next turn",
+    });
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(
+      thread?.activities.some((activity) => activity.kind === "provider.turn.steer.failed"),
+    ).toBe(false);
+  });
+
   it("spells out Codex review steer rejection as a retryable queued follow-up", async () => {
     const harness = await createHarness({ liveSteer: "supported" });
     const now = "2026-01-01T00:00:00.000Z";
@@ -1910,7 +2047,7 @@ describe("ProviderCommandReactor", () => {
       retryAfter: "active-turn",
       codexNonSteerableTurnKind: "review",
     });
-    expect(JSON.stringify(failure?.payload)).toContain("active turn is a review turn");
+    expect(JSON.stringify(failure?.payload)).toContain("review active turn");
   });
 
   it("does not route steer requests to providers without live steering support", async () => {
@@ -1959,7 +2096,11 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.activities.at(-1)).toMatchObject({
       kind: "provider.turn.steer.failed",
       payload: {
-        detail: "The active provider does not support live steering.",
+        detail:
+          "Cafe Code preserved this follow-up for automatic delivery after the active turn is ready.",
+        messageId: "user-message-steer-unsupported",
+        retryableFollowUp: true,
+        retryAfter: "active-turn",
       },
     });
   });

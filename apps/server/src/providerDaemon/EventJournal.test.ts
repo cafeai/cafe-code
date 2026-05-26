@@ -6,11 +6,14 @@ import {
   type ProviderRuntimeEvent,
 } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { describe, expect, it } from "vitest";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import {
   createProviderDaemonEventJournal,
+  type ProviderDaemonPersistentEventJournal,
+  type ProviderDaemonEventJournalSnapshot,
   makePersistentProviderDaemonEventJournal,
 } from "./EventJournal.ts";
 
@@ -27,6 +30,41 @@ function makeRuntimeEvent(id: string): ProviderRuntimeEvent {
     },
   };
 }
+
+const waitForPersistentJournalCount = (
+  journal: ProviderDaemonPersistentEventJournal,
+  expectedCount: number,
+): Effect.Effect<ProviderDaemonEventJournalSnapshot> =>
+  Effect.gen(function* () {
+    let snapshot = yield* journal.snapshot;
+    for (
+      let attempt = 0;
+      attempt < 50 && snapshot.retainedEventCount !== expectedCount;
+      attempt += 1
+    ) {
+      yield* Effect.sleep("10 millis");
+      snapshot = yield* journal.snapshot;
+    }
+    return snapshot;
+  });
+
+const waitForPersistentEventIdIndex = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const rows = yield* sql<{ readonly exists: number }>`
+      SELECT 1 AS "exists"
+      FROM sqlite_master
+      WHERE type = 'index'
+        AND name = 'idx_provider_daemon_events_owner_event_id'
+      LIMIT 1
+    `;
+    if (rows.length > 0) {
+      return;
+    }
+    yield* Effect.sleep("10 millis");
+  }
+  return yield* Effect.die(new Error("provider daemon event id index was not created"));
+});
 
 describe("ProviderDaemonEventJournal", () => {
   it("assigns monotonic cursors and replays events after a cursor", () => {
@@ -88,6 +126,101 @@ describe("ProviderDaemonEventJournal", () => {
         expect(replayed.map((record) => record.event.eventId)).toEqual([EventId.make("event-2")]);
         expect(snapshot.eventCursor).toBe(2);
         expect(snapshot.retainedEventCount).toBe(2);
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
+
+  it("prunes the persistent journal to its configured owner capacity", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const daemonJournal = yield* makePersistentProviderDaemonEventJournal({
+          capacity: 2,
+          ownerKey: "provider-daemon",
+        });
+        const supervisorJournal = yield* makePersistentProviderDaemonEventJournal({
+          capacity: 10,
+          ownerKey: "provider-supervisor",
+        });
+
+        const first = yield* daemonJournal.publish(makeRuntimeEvent("event-daemon-1"));
+        const second = yield* daemonJournal.publish(makeRuntimeEvent("event-daemon-2"));
+        const third = yield* daemonJournal.publish(makeRuntimeEvent("event-daemon-3"));
+        yield* supervisorJournal.publish(makeRuntimeEvent("event-supervisor-1"));
+
+        expect(first.cursor).toBe(1);
+        expect(second.cursor).toBe(2);
+        expect(third.cursor).toBe(3);
+
+        const replayed = yield* daemonJournal.replayAfter(0);
+        const daemonSnapshot = yield* daemonJournal.snapshot;
+        const supervisorSnapshot = yield* supervisorJournal.snapshot;
+
+        expect(replayed.map((record) => record.event.eventId)).toEqual([
+          EventId.make("event-daemon-2"),
+          EventId.make("event-daemon-3"),
+        ]);
+        expect(daemonSnapshot).toMatchObject({
+          eventCursor: 3,
+          retainedEventCount: 2,
+          oldestCursor: 2,
+          newestCursor: 3,
+        });
+        expect(supervisorSnapshot.retainedEventCount).toBe(1);
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
+
+  it("treats repeated persistent runtime event ids as idempotent replay", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const journal = yield* makePersistentProviderDaemonEventJournal({
+          capacity: 10,
+          ownerKey: "provider-daemon",
+          startupPruneDelayMs: 0,
+        });
+        yield* waitForPersistentEventIdIndex;
+        const first = yield* journal.publish(makeRuntimeEvent("event-replayed"));
+        const duplicate = yield* journal.publish(makeRuntimeEvent("event-replayed"));
+        const replayed = yield* journal.replayAfter(0);
+        const snapshot = yield* journal.snapshot;
+
+        expect(duplicate.cursor).toBe(first.cursor);
+        expect(replayed.map((record) => record.event.eventId)).toEqual([
+          EventId.make("event-replayed"),
+        ]);
+        expect(snapshot.retainedEventCount).toBe(1);
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
+
+  it("prunes oversized persistent owner history when a journal is adopted", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const firstJournal = yield* makePersistentProviderDaemonEventJournal({
+          capacity: 10,
+          ownerKey: "provider-daemon",
+        });
+        yield* firstJournal.publish(makeRuntimeEvent("event-daemon-1"));
+        yield* firstJournal.publish(makeRuntimeEvent("event-daemon-2"));
+        yield* firstJournal.publish(makeRuntimeEvent("event-daemon-3"));
+
+        const adoptedJournal = yield* makePersistentProviderDaemonEventJournal({
+          capacity: 1,
+          ownerKey: "provider-daemon",
+          startupPruneDelayMs: 0,
+        });
+        const snapshot = yield* waitForPersistentJournalCount(adoptedJournal, 1);
+        const replayed = yield* adoptedJournal.replayAfter(0);
+
+        expect(replayed.map((record) => record.event.eventId)).toEqual([
+          EventId.make("event-daemon-3"),
+        ]);
+        expect(snapshot).toMatchObject({
+          eventCursor: 3,
+          retainedEventCount: 1,
+          oldestCursor: 3,
+          newestCursor: 3,
+        });
       }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
     );
   });

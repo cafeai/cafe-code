@@ -18,6 +18,10 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import { normalizeModelSlug } from "@cafecode/shared/model";
+import {
+  CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
+  CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT_SCOPE,
+} from "@cafecode/shared/codexCompaction";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
@@ -68,8 +72,20 @@ const CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS = [
   "60 seconds",
   "180 seconds",
   "300 seconds",
+  "600 seconds",
+  "900 seconds",
+  "1200 seconds",
+  "1800 seconds",
 ] as const;
+const CODEX_SEND_TURN_STILL_IN_PROGRESS_WARNING_DELAYS = new Set<
+  (typeof CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS)[number]
+>(["300 seconds", "600 seconds", "900 seconds", "1200 seconds", "1800 seconds"]);
 const CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT = "10 seconds" as const;
+const CODEX_TURN_STEER_PROCESSING_WARNING_DELAYS = [
+  "15 seconds",
+  "60 seconds",
+  "120 seconds",
+] as const;
 const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
   "not found",
   "missing thread",
@@ -119,14 +135,22 @@ type CodexSnapshotTurn = {
   readonly startedAt?: number | null;
   readonly status: "completed" | "interrupted" | "failed" | "inProgress";
 };
+type CodexSnapshotThreadStatus =
+  | EffectCodexSchema.V2ThreadReadResponse["thread"]["status"]
+  | EffectCodexSchema.V2ThreadResumeResponse["thread"]["status"]
+  | EffectCodexSchema.V2ThreadStartResponse["thread"]["status"]
+  | EffectCodexSchema.V2ThreadRollbackResponse["thread"]["status"];
 type CodexSnapshotThread = {
   readonly id: string;
+  readonly status?: CodexSnapshotThreadStatus | undefined;
   readonly turns: ReadonlyArray<CodexSnapshotTurn>;
 };
 type CodexSnapshotBackfillReason =
   | "session-start"
   | "session-resume"
+  | "session-resume-active-turn"
   | "send-turn-follow-up"
+  | "thread-status-idle-reconciliation"
   | "turn-steer-follow-up";
 
 export interface CodexTransportPolicy {
@@ -339,6 +363,23 @@ interface CodexTurnStartObservation {
   readonly lastBackfillItemsView: string | null | undefined;
 }
 
+export interface CodexPendingSteerProcessing {
+  readonly steerId: string;
+  readonly providerThreadId: string;
+  readonly turnId: TurnId;
+  readonly requestedAt: string;
+  readonly acknowledgedAt: string;
+  readonly acknowledgedAtMs: number;
+  readonly ackLatencyMs: number;
+  readonly promptByteLength: number;
+  readonly attachmentCount: number;
+  readonly warningCount: number;
+  readonly processedAt?: string;
+  readonly providerUserMessageItemId?: ProviderItemId;
+  readonly providerUserMessageMethod?: string;
+  readonly ackToProviderItemMs?: number;
+}
+
 type CodexServerNotification = {
   readonly method: string;
   readonly params: unknown;
@@ -407,21 +448,27 @@ function buildThreadStartParams(input: {
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
 }): EffectCodexSchema.V2ThreadStartParams {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
-  const workspaceWriteConfig =
-    input.runtimeMode === "auto-accept-edits" && input.additionalDirectories?.length
-      ? {
-          config: {
-            sandbox_workspace_write: {
-              writable_roots: input.additionalDirectories,
-            },
-          },
-        }
-      : {};
+  // Upstream Codex 0.133.0 only auto-compacts when the resolved model info or
+  // request config supplies `model_auto_compact_token_limit`. Current Codex
+  // model metadata can advertise a large context window while leaving that
+  // limit null, so Cafe passes the documented request-config override for
+  // Cafe-managed threads instead of mutating the user's shared
+  // `~/.codex/config.toml`. The shared constant documents why Cafe currently
+  // chooses 200k instead of the older 100k override.
+  const threadConfig: Record<string, unknown> = {
+    model_auto_compact_token_limit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
+    model_auto_compact_token_limit_scope: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT_SCOPE,
+  };
+  if (input.runtimeMode === "auto-accept-edits" && input.additionalDirectories?.length) {
+    threadConfig.sandbox_workspace_write = {
+      writable_roots: input.additionalDirectories,
+    };
+  }
   return {
     cwd: input.cwd,
     approvalPolicy: config.approvalPolicy,
     sandbox: config.sandbox,
-    ...workspaceWriteConfig,
+    config: threadConfig,
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
   };
@@ -564,17 +611,25 @@ function codexContextCompactionKey(turnId: TurnId, itemId: ProviderItemId): stri
   return `${String(turnId)}:${String(itemId)}`;
 }
 
-export function isCodexContextCompactionItemType(value: string | undefined | null): boolean {
+function normalizeCodexItemType(value: string | undefined | null): string | undefined {
   if (!value) {
-    return false;
+    return undefined;
   }
-
-  const normalized = value
+  return value
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .replace(/[._/-]+/g, " ")
     .trim()
     .toLowerCase();
+}
+
+export function isCodexContextCompactionItemType(value: string | undefined | null): boolean {
+  const normalized = normalizeCodexItemType(value);
   return normalized === "context compaction";
+}
+
+export function isCodexUserMessageItemType(value: string | undefined | null): boolean {
+  const normalized = normalizeCodexItemType(value);
+  return normalized === "user message";
 }
 
 export function updateCodexActiveContextCompactions(
@@ -631,6 +686,72 @@ export function updateCodexActiveContextCompactions(
   }
 
   return unchanged();
+}
+
+export function updateCodexPendingSteerProcessingFromNotification(
+  current: ReadonlyMap<string, CodexPendingSteerProcessing>,
+  input: {
+    readonly method: string;
+    readonly providerThreadId?: string | undefined;
+    readonly turnId?: TurnId | undefined;
+    readonly itemId?: ProviderItemId | undefined;
+    readonly itemType?: string | undefined;
+    readonly observedAt: string;
+    readonly observedAtMs: number;
+  },
+): {
+  readonly pending: CodexPendingSteerProcessing | undefined;
+  readonly next: Map<string, CodexPendingSteerProcessing>;
+} {
+  const unchanged = () => (current instanceof Map ? current : new Map(current));
+
+  if (
+    (input.method !== "item/started" && input.method !== "item/completed") ||
+    !input.turnId ||
+    !isCodexUserMessageItemType(input.itemType)
+  ) {
+    return { pending: undefined, next: unchanged() };
+  }
+
+  const pending = Array.from(current.values())
+    .filter(
+      (entry) =>
+        entry.processedAt === undefined &&
+        entry.turnId === input.turnId &&
+        (!input.providerThreadId || entry.providerThreadId === input.providerThreadId),
+    )
+    .toSorted((left, right) => left.acknowledgedAt.localeCompare(right.acknowledgedAt))[0];
+
+  if (!pending) {
+    return { pending: undefined, next: unchanged() };
+  }
+
+  const updated = {
+    ...pending,
+    processedAt: input.observedAt,
+    providerUserMessageMethod: input.method,
+    ackToProviderItemMs: Math.max(0, input.observedAtMs - pending.acknowledgedAtMs),
+    ...(input.itemId ? { providerUserMessageItemId: input.itemId } : {}),
+  } satisfies CodexPendingSteerProcessing;
+  const next = new Map(current);
+  next.set(pending.steerId, updated);
+  return { pending: updated, next };
+}
+
+function prunePendingSteerProcessing(
+  current: ReadonlyMap<string, CodexPendingSteerProcessing>,
+): Map<string, CodexPendingSteerProcessing> {
+  const next = new Map(current);
+  while (next.size > 50) {
+    const oldest = Array.from(next.values()).toSorted((left, right) =>
+      left.acknowledgedAt.localeCompare(right.acknowledgedAt),
+    )[0];
+    if (!oldest) {
+      break;
+    }
+    next.delete(oldest.steerId);
+  }
+  return next;
 }
 
 function findCodexActiveContextCompactionForTurn(
@@ -909,6 +1030,24 @@ function shouldSuppressChildConversationNotification(method: string): boolean {
   );
 }
 
+export function readCodexSteerExpectedTurnMismatchActualTurnId(error: unknown): TurnId | undefined {
+  const message = error instanceof Error ? error.message : String(error);
+  const prefix = "expected active turn id `";
+  const separator = "` but found `";
+  const suffix = "`";
+  const remainder = message.startsWith(prefix) ? message.slice(prefix.length) : undefined;
+  const actual = remainder?.split(separator)[1]?.trim();
+  if (!actual?.endsWith(suffix)) {
+    return undefined;
+  }
+  const actualTurnId = actual.slice(0, -suffix.length).trim();
+  return actualTurnId.length > 0 ? TurnId.make(actualTurnId) : undefined;
+}
+
+function isCodexSteerExpectedTurnMismatch(error: unknown): boolean {
+  return readCodexSteerExpectedTurnMismatchActualTurnId(error) !== undefined;
+}
+
 function toCodexUserInputAnswer(
   questionId: string,
   value: ProviderUserInputAnswers[string],
@@ -998,6 +1137,23 @@ function readNotificationParamBoolean(
   const params = readRecord(notification.params);
   const value = params?.[field];
   return typeof value === "boolean" ? value : undefined;
+}
+
+function readNotificationThreadStatusType(
+  notification: CodexServerNotification,
+): "notLoaded" | "idle" | "systemError" | "active" | undefined {
+  const params = readRecord(notification.params);
+  const status = params ? readRecord(params.status) : undefined;
+  const type = status?.type;
+  switch (type) {
+    case "notLoaded":
+    case "idle":
+    case "systemError":
+    case "active":
+      return type;
+    default:
+      return undefined;
+  }
 }
 
 function readNotificationTurnId(notification: CodexServerNotification): TurnId | undefined {
@@ -1098,8 +1254,30 @@ function isBackfillableSnapshotItem(
   }
 }
 
-function hasBackfillableSnapshotItem(turn: CodexSnapshotTurn): boolean {
-  return turn.items.some(isBackfillableSnapshotItem);
+function readCodexSnapshotThreadStatusType(
+  status: CodexSnapshotThreadStatus | undefined,
+): "notLoaded" | "idle" | "systemError" | "active" | undefined {
+  return status?.type;
+}
+
+export function selectCodexActiveSnapshotTurn(
+  providerThread: CodexSnapshotThread,
+): CodexSnapshotTurn | undefined {
+  const latestInProgressTurn = providerThread.turns.findLast(
+    (turn) => turn.status === "inProgress",
+  );
+  if (latestInProgressTurn) {
+    return latestInProgressTurn;
+  }
+
+  // Upstream `thread/resume` and `thread/read` expose the provider's
+  // authoritative thread status separately from the per-turn snapshots. If the
+  // thread is not active, Cafe must not keep or restore an active turn id from
+  // stale projection state.
+  if (readCodexSnapshotThreadStatusType(providerThread.status) !== "active") {
+    return undefined;
+  }
+  return undefined;
 }
 
 function selectSnapshotTurns(input: {
@@ -1248,6 +1426,9 @@ export const makeCodexSessionRuntime = (
     const turnStartObservationsRef = yield* Ref.make(new Map<string, CodexTurnStartObservation>());
     const activeContextCompactionsRef = yield* Ref.make(
       new Map<string, CodexActiveContextCompaction>(),
+    );
+    const pendingSteerProcessingRef = yield* Ref.make(
+      new Map<string, CodexPendingSteerProcessing>(),
     );
 
     // `~` is not shell-expanded when env vars are set via
@@ -1510,6 +1691,151 @@ export const makeCodexSessionRuntime = (
           },
         });
       });
+
+    const recordPendingSteerProcessing = (pending: CodexPendingSteerProcessing) =>
+      Ref.update(pendingSteerProcessingRef, (current) => {
+        const next = new Map(current);
+        next.set(pending.steerId, pending);
+        return prunePendingSteerProcessing(next);
+      });
+
+    const markPendingSteerProcessingWarning = (
+      steerId: string,
+      elapsedDelay: (typeof CODEX_TURN_STEER_PROCESSING_WARNING_DELAYS)[number],
+    ) =>
+      Ref.modify(pendingSteerProcessingRef, (current) => {
+        const pending = current.get(steerId);
+        if (!pending || pending.processedAt !== undefined) {
+          return [undefined, current] as const;
+        }
+        const updated = {
+          ...pending,
+          warningCount: pending.warningCount + 1,
+        } satisfies CodexPendingSteerProcessing;
+        const next = new Map(current);
+        next.set(steerId, updated);
+        return [{ pending: updated, elapsedDelay }, next] as const;
+      });
+
+    const emitPendingSteerNoProviderItemWarning = (input: {
+      readonly pending: CodexPendingSteerProcessing;
+      readonly elapsedDelay: (typeof CODEX_TURN_STEER_PROCESSING_WARNING_DELAYS)[number];
+    }) =>
+      Effect.gen(function* () {
+        yield* Effect.logWarning("codex.turnSteer.noProviderItemYet", {
+          threadId: options.threadId,
+          providerInstanceId: options.providerInstanceId ?? PROVIDER,
+          steerId: input.pending.steerId,
+          providerThreadId: input.pending.providerThreadId,
+          turnId: input.pending.turnId,
+          elapsedDelay: input.elapsedDelay,
+          acknowledgedAt: input.pending.acknowledgedAt,
+          ackLatencyMs: input.pending.ackLatencyMs,
+          promptByteLength: input.pending.promptByteLength,
+          attachmentCount: input.pending.attachmentCount,
+          warningCount: input.pending.warningCount,
+        });
+        yield* emitEvent({
+          kind: "notification",
+          threadId: options.threadId,
+          method: "codex.turnSteer/noProviderItemYet",
+          turnId: input.pending.turnId,
+          message:
+            "Codex app-server accepted turn/steer but has not emitted the steer user message yet.",
+          payload: {
+            steerId: input.pending.steerId,
+            providerThreadId: input.pending.providerThreadId,
+            turnId: input.pending.turnId,
+            elapsedDelay: input.elapsedDelay,
+            requestedAt: input.pending.requestedAt,
+            acknowledgedAt: input.pending.acknowledgedAt,
+            ackLatencyMs: input.pending.ackLatencyMs,
+            promptByteLength: input.pending.promptByteLength,
+            attachmentCount: input.pending.attachmentCount,
+            warningCount: input.pending.warningCount,
+            semantics:
+              "turn/steer is an upstream ACK plus later item notifications. Cafe has delivered the steer and is waiting for Codex to emit the injected userMessage item; this is not an interrupt and may wait behind active tool or model work.",
+          },
+        });
+      });
+
+    const schedulePendingSteerProcessingWarnings = (steerId: string) =>
+      Effect.gen(function* () {
+        for (const delay of CODEX_TURN_STEER_PROCESSING_WARNING_DELAYS) {
+          yield* Effect.sleep(delay);
+          if (yield* Ref.get(closedRef)) {
+            return;
+          }
+          const warning = yield* markPendingSteerProcessingWarning(steerId, delay);
+          if (warning) {
+            yield* emitPendingSteerNoProviderItemWarning(warning);
+          }
+        }
+      }).pipe(Effect.forkIn(runtimeScope), Effect.asVoid);
+
+    const markPendingSteerProcessingFromNotification = (notification: CodexServerNotification) =>
+      Effect.gen(function* () {
+        if (!(yield* notificationBelongsToCurrentSession(notification))) {
+          return;
+        }
+
+        const observedAt = yield* nowIso;
+        const observedAtMs = yield* Clock.currentTimeMillis;
+        const processed = yield* Ref.modify(pendingSteerProcessingRef, (current) => {
+          const result = updateCodexPendingSteerProcessingFromNotification(current, {
+            method: notification.method,
+            providerThreadId: readNotificationThreadId(notification),
+            turnId: readNotificationTurnId(notification),
+            itemId: readNotificationItemId(notification),
+            itemType: readNotificationItemType(notification),
+            observedAt,
+            observedAtMs,
+          });
+          return [result.pending, result.next] as const;
+        });
+        if (!processed) {
+          return;
+        }
+
+        yield* Effect.logInfo("codex.turnSteer.processingStarted", {
+          threadId: options.threadId,
+          providerInstanceId: options.providerInstanceId ?? PROVIDER,
+          steerId: processed.steerId,
+          providerThreadId: processed.providerThreadId,
+          turnId: processed.turnId,
+          providerUserMessageItemId: processed.providerUserMessageItemId ?? null,
+          providerUserMessageMethod: processed.providerUserMessageMethod ?? null,
+          ackToProviderItemMs: processed.ackToProviderItemMs ?? null,
+          warningCount: processed.warningCount,
+        });
+        yield* emitEvent({
+          kind: "notification",
+          threadId: options.threadId,
+          method: "codex.turnSteer/processingStarted",
+          turnId: processed.turnId,
+          ...(processed.providerUserMessageItemId
+            ? { itemId: processed.providerUserMessageItemId }
+            : {}),
+          message: "Codex app-server began processing turn/steer.",
+          payload: {
+            steerId: processed.steerId,
+            providerThreadId: processed.providerThreadId,
+            turnId: processed.turnId,
+            providerUserMessageItemId: processed.providerUserMessageItemId ?? null,
+            providerUserMessageMethod: processed.providerUserMessageMethod ?? null,
+            requestedAt: processed.requestedAt,
+            acknowledgedAt: processed.acknowledgedAt,
+            processedAt: processed.processedAt ?? null,
+            ackLatencyMs: processed.ackLatencyMs,
+            ackToProviderItemMs: processed.ackToProviderItemMs ?? null,
+            promptByteLength: processed.promptByteLength,
+            attachmentCount: processed.attachmentCount,
+            warningCount: processed.warningCount,
+            semantics:
+              "Codex emitted the userMessage item for an accepted turn/steer. This is the first provider-side proof that the appended steer has entered the active turn item stream.",
+          },
+        });
+      });
     const emitSnapshotBackfillEvents = (input: {
       readonly providerThread: CodexSnapshotThread;
       readonly reason: CodexSnapshotBackfillReason;
@@ -1648,6 +1974,144 @@ export const makeCodexSessionRuntime = (
         ),
       );
 
+    const reconcileTerminalActiveTurnSnapshot = (input: {
+      readonly providerThreadId: string;
+      readonly turnId: TurnId;
+      readonly reason: CodexSnapshotBackfillReason;
+      readonly threadStatusType: "notLoaded" | "idle" | "systemError" | "active" | null;
+      readonly turn: CodexSnapshotTurn;
+    }) =>
+      Effect.gen(function* () {
+        if (input.turn.status === "inProgress") {
+          return;
+        }
+
+        const session = yield* Ref.get(sessionRef);
+        if (session.activeTurnId !== input.turnId) {
+          return;
+        }
+
+        const observedAt = yield* nowIso;
+        yield* updateSession(sessionRef, {
+          status: input.turn.status === "failed" ? "error" : "ready",
+          activeTurnId: undefined,
+          ...(input.turn.status === "failed" && input.turn.error?.message
+            ? { lastError: input.turn.error.message }
+            : {}),
+        });
+        yield* Effect.logInfo("codex.turnProgress.reconciledFromThreadRead", {
+          threadId: options.threadId,
+          providerInstanceId: options.providerInstanceId ?? PROVIDER,
+          providerThreadId: input.providerThreadId,
+          turnId: input.turnId,
+          reason: input.reason,
+          threadStatus: input.threadStatusType,
+          turnStatus: input.turn.status,
+          itemCount: input.turn.items.length,
+          itemsView: input.turn.itemsView ?? null,
+        });
+        yield* emitEvent({
+          kind: "notification",
+          threadId: options.threadId,
+          method: "codex.turnProgress/reconciledFromThreadRead",
+          turnId: input.turnId,
+          message:
+            "Codex thread/read reported a terminal active turn; Cafe Code reconciled the session.",
+          payload: {
+            providerThreadId: input.providerThreadId,
+            turnId: input.turnId,
+            reason: input.reason,
+            threadStatus: input.threadStatusType,
+            turnStatus: input.turn.status,
+            itemCount: input.turn.items.length,
+            itemsView: input.turn.itemsView ?? null,
+            observedAt,
+            semantics:
+              "Official Codex app-server docs make turn/completed terminal, and thread/read returns authoritative turn statuses. Cafe only clears an active turn from thread-status reconciliation after thread/read reports that same turn as terminal.",
+          },
+        });
+      });
+
+    const reconcileActiveTurnFromThreadRead = (input: {
+      readonly providerThreadId: string;
+      readonly turnId: TurnId;
+      readonly reason: "session-resume-active-turn" | "thread-status-idle-reconciliation";
+    }) =>
+      Effect.logInfo("codex.turnProgress.reconciliation.read-attempt", {
+        threadId: options.threadId,
+        providerThreadId: input.providerThreadId,
+        turnId: input.turnId,
+        reason: input.reason,
+        timeout: CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT,
+      }).pipe(
+        Effect.andThen(
+          client
+            .request("thread/read", {
+              threadId: input.providerThreadId,
+              includeTurns: true,
+            })
+            .pipe(Effect.timeoutOption(CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT)),
+        ),
+        Effect.flatMap(
+          Option.match({
+            onNone: () =>
+              Effect.logWarning("codex.turnProgress.reconciliation.read-timeout", {
+                threadId: options.threadId,
+                providerInstanceId: options.providerInstanceId ?? PROVIDER,
+                providerThreadId: input.providerThreadId,
+                turnId: input.turnId,
+                reason: input.reason,
+                timeout: CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT,
+              }),
+            onSome: (response) =>
+              Effect.gen(function* () {
+                const turn = response.thread.turns.find((entry) => entry.id === input.turnId);
+                const threadStatusType = readCodexSnapshotThreadStatusType(response.thread.status);
+                yield* emitSnapshotBackfillEvents({
+                  providerThread: response.thread,
+                  reason: input.reason,
+                  focusTurnId: input.turnId,
+                });
+
+                yield* Effect.logInfo("codex.turnProgress.reconciliation.read-result", {
+                  threadId: options.threadId,
+                  providerInstanceId: options.providerInstanceId ?? PROVIDER,
+                  providerThreadId: input.providerThreadId,
+                  turnId: input.turnId,
+                  reason: input.reason,
+                  threadStatus: threadStatusType ?? null,
+                  turnFound: turn !== undefined,
+                  turnStatus: turn?.status ?? null,
+                  itemCount: turn?.items.length ?? 0,
+                  itemsView: turn?.itemsView ?? null,
+                });
+
+                if (!turn || turn.status === "inProgress") {
+                  return;
+                }
+
+                yield* reconcileTerminalActiveTurnSnapshot({
+                  providerThreadId: input.providerThreadId,
+                  turnId: input.turnId,
+                  reason: input.reason,
+                  threadStatusType: threadStatusType ?? null,
+                  turn,
+                });
+              }),
+          }),
+        ),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("codex.turnProgress.reconciliation.read-failed", {
+            threadId: options.threadId,
+            providerInstanceId: options.providerInstanceId ?? PROVIDER,
+            providerThreadId: input.providerThreadId,
+            turnId: input.turnId,
+            reason: input.reason,
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      );
+
     const emitTurnSnapshotStillInProgressWarning = (input: {
       readonly providerThreadId: string;
       readonly turnId: TurnId;
@@ -1692,10 +2156,6 @@ export const makeCodexSessionRuntime = (
       readonly reason: CodexSnapshotBackfillReason;
     }) =>
       Effect.gen(function* () {
-        const terminalDelay =
-          CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS[
-            CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS.length - 1
-          ];
         for (const delay of CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS) {
           yield* Effect.sleep(delay);
           if (yield* Ref.get(closedRef)) {
@@ -1721,10 +2181,20 @@ export const makeCodexSessionRuntime = (
             focusTurnId: input.turnId,
             reason: input.reason,
           });
-          if (turn && turn.status !== "inProgress" && hasBackfillableSnapshotItem(turn)) {
+          if (turn && turn.status !== "inProgress") {
+            yield* reconcileTerminalActiveTurnSnapshot({
+              providerThreadId: input.providerThreadId,
+              turnId: input.turnId,
+              reason: input.reason,
+              threadStatusType: null,
+              turn,
+            });
             return;
           }
-          if (turn?.status === "inProgress" && delay === terminalDelay) {
+          if (
+            turn?.status === "inProgress" &&
+            CODEX_SEND_TURN_STILL_IN_PROGRESS_WARNING_DELAYS.has(delay)
+          ) {
             yield* emitTurnSnapshotStillInProgressWarning({
               providerThreadId: input.providerThreadId,
               turnId: input.turnId,
@@ -1807,6 +2277,57 @@ export const makeCodexSessionRuntime = (
             });
             return;
           }
+          case "thread/status/changed": {
+            const statusType = readNotificationThreadStatusType(notification);
+            const providerThreadId = readNotificationThreadId(notification);
+            const session = yield* Ref.get(sessionRef);
+            if (!providerThreadId || statusType === undefined) {
+              return;
+            }
+
+            if (statusType === "idle") {
+              if (session.activeTurnId && session.status === "running") {
+                // Upstream Codex emits `thread/status/changed: idle` separately
+                // from `turn/completed`. Treat idle as a prompt to read the
+                // authoritative thread snapshot, not as terminal proof by
+                // itself; otherwise a late or out-of-order idle notification can
+                // close a live turn and break `turn/steer`'s expectedTurnId
+                // precondition.
+                yield* reconcileActiveTurnFromThreadRead({
+                  providerThreadId,
+                  turnId: session.activeTurnId,
+                  reason: "thread-status-idle-reconciliation",
+                }).pipe(Effect.forkIn(runtimeScope), Effect.asVoid);
+              } else {
+                yield* updateSession(sessionRef, {
+                  status: session.status === "error" ? "error" : "ready",
+                  activeTurnId: undefined,
+                });
+              }
+              return;
+            }
+
+            if (statusType === "active") {
+              if (session.activeTurnId) {
+                yield* updateSession(sessionRef, {
+                  status: "running",
+                });
+              }
+              return;
+            }
+
+            if (statusType === "systemError") {
+              yield* updateSession(sessionRef, {
+                status: "error",
+                activeTurnId: undefined,
+                lastError:
+                  session.lastError ?? "Codex app-server reported a systemError thread status.",
+              });
+              return;
+            }
+
+            return;
+          }
           case "error": {
             const errorMessage = readNotificationErrorMessage(notification);
             const willRetry = readNotificationParamBoolean(notification, "willRetry");
@@ -1857,6 +2378,16 @@ export const makeCodexSessionRuntime = (
         yield* updateActiveContextCompactionsFromNotification(notification).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("codex.raw.notification.context-compaction-tracking.failed", {
+              threadId: options.threadId,
+              providerInstanceId: options.providerInstanceId ?? PROVIDER,
+              method: notification.method,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        );
+        yield* markPendingSteerProcessingFromNotification(notification).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("codex.raw.notification.steer-processing-tracking.failed", {
               threadId: options.threadId,
               providerInstanceId: options.providerInstanceId ?? PROVIDER,
               method: notification.method,
@@ -2298,15 +2829,32 @@ export const makeCodexSessionRuntime = (
       });
 
       const providerThreadId = opened.thread.id;
+      const activeSnapshotTurn = selectCodexActiveSnapshotTurn(opened.thread);
+      const activeSnapshotTurnId = activeSnapshotTurn
+        ? TurnId.make(activeSnapshotTurn.id)
+        : undefined;
+      const openedThreadStatusType = readCodexSnapshotThreadStatusType(opened.thread.status);
       const session = {
         ...(yield* Ref.get(sessionRef)),
-        status: "ready",
+        status:
+          openedThreadStatusType === "systemError"
+            ? "error"
+            : activeSnapshotTurnId
+              ? "running"
+              : "ready",
         cwd: opened.cwd,
         ...(options.additionalDirectories !== undefined
           ? { additionalDirectories: options.additionalDirectories }
           : {}),
         model: opened.model,
         resumeCursor: { threadId: providerThreadId },
+        activeTurnId: activeSnapshotTurnId,
+        ...(openedThreadStatusType === "systemError"
+          ? {
+              lastError:
+                "Codex app-server reported a systemError thread status during session start.",
+            }
+          : {}),
         updatedAt: yield* nowIso,
       } satisfies ProviderSession;
       yield* Ref.set(sessionRef, session);
@@ -2315,6 +2863,18 @@ export const makeCodexSessionRuntime = (
         providerThread: opened.thread,
         reason: readResumeCursorThreadId(options.resumeCursor) ? "session-resume" : "session-start",
       });
+      if (activeSnapshotTurnId) {
+        yield* scheduleSendTurnSnapshotBackfill({
+          providerThreadId,
+          turnId: activeSnapshotTurnId,
+          reason: "session-resume-active-turn",
+        });
+        yield* reconcileActiveTurnFromThreadRead({
+          providerThreadId,
+          turnId: activeSnapshotTurnId,
+          reason: "session-resume-active-turn",
+        }).pipe(Effect.forkIn(runtimeScope), Effect.asVoid);
+      }
       return session;
     });
 
@@ -2456,61 +3016,107 @@ export const makeCodexSessionRuntime = (
       steerTurn: (input) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
-          const params = yield* buildTurnSteerParams({
-            threadId: providerThreadId,
-            expectedTurnId: input.expectedTurnId,
-            ...(input.input ? { prompt: input.input } : {}),
-            ...(input.attachments ? { attachments: input.attachments } : {}),
-          });
-          const activeContextCompaction = findCodexActiveContextCompactionForTurn(
-            yield* Ref.get(activeContextCompactionsRef),
-            input.expectedTurnId,
-            providerThreadId,
-          );
-          if (activeContextCompaction !== undefined) {
-            // Upstream schema exposes compact turns as non-steerable, but
-            // automatic compaction reaches Cafe as an active
-            // `contextCompaction` item on the regular turn. Codex app-server
-            // 0.133.0 can ACK `turn/steer` during that item and then leave the
-            // turn inProgress, so Cafe preserves the prompt by returning the
-            // same structured compact precondition error before transport I/O.
-            const observedAt = yield* nowIso;
-            const diagnostics = {
-              providerThreadId,
-              turnId: input.expectedTurnId,
-              itemId: activeContextCompaction.itemId,
-              contextCompactionStartedAt: activeContextCompaction.startedAt,
-              observedAt,
-              promptByteLength: Buffer.byteLength(input.input ?? "", "utf8"),
-              attachmentCount: input.attachments?.length ?? 0,
-              semantics:
-                "Codex reports active contextCompaction as item lifecycle, while upstream non-steerable state is surfaced as compact. Cafe returns the structured compact precondition failure locally so the follow-up is queued instead of sending turn/steer during compaction.",
-            };
-            yield* Effect.logWarning("codex.turnSteer.deferredDuringContextCompaction", {
-              threadId: options.threadId,
-              providerInstanceId: options.providerInstanceId ?? PROVIDER,
-              ...diagnostics,
+          const rejectIfContextCompactionActive = (expectedTurnId: TurnId) =>
+            Effect.gen(function* () {
+              const activeContextCompaction = findCodexActiveContextCompactionForTurn(
+                yield* Ref.get(activeContextCompactionsRef),
+                expectedTurnId,
+                providerThreadId,
+              );
+              if (activeContextCompaction === undefined) {
+                return;
+              }
+              // Upstream schema exposes compact turns as non-steerable, but
+              // automatic compaction reaches Cafe as an active
+              // `contextCompaction` item on the regular turn. Codex app-server
+              // 0.133.0 can ACK `turn/steer` during that item and then leave
+              // the turn inProgress, so Cafe preserves the prompt by returning
+              // the same structured compact precondition error before
+              // transport I/O.
+              const observedAt = yield* nowIso;
+              const diagnostics = {
+                providerThreadId,
+                turnId: expectedTurnId,
+                itemId: activeContextCompaction.itemId,
+                contextCompactionStartedAt: activeContextCompaction.startedAt,
+                observedAt,
+                promptByteLength: Buffer.byteLength(input.input ?? "", "utf8"),
+                attachmentCount: input.attachments?.length ?? 0,
+                semantics:
+                  "Codex reports active contextCompaction as item lifecycle, while upstream non-steerable state is surfaced as compact. Cafe returns the structured compact precondition failure locally so the follow-up is queued instead of sending turn/steer during compaction.",
+              };
+              yield* Effect.logWarning("codex.turnSteer.deferredDuringContextCompaction", {
+                threadId: options.threadId,
+                providerInstanceId: options.providerInstanceId ?? PROVIDER,
+                ...diagnostics,
+              });
+              yield* emitEvent({
+                kind: "notification",
+                threadId: options.threadId,
+                method: "codex.turnSteer/deferredDuringContextCompaction",
+                turnId: expectedTurnId,
+                itemId: activeContextCompaction.itemId,
+                message:
+                  "Codex context compaction is active; Cafe Code queued the steer as a follow-up instead of sending turn/steer.",
+                payload: diagnostics,
+              });
+              return yield* buildCodexActiveContextCompactionSteerError({
+                providerThreadId,
+                turnId: expectedTurnId,
+                itemId: activeContextCompaction.itemId,
+                startedAt: activeContextCompaction.startedAt,
+              });
             });
-            yield* emitEvent({
-              kind: "notification",
-              threadId: options.threadId,
-              method: "codex.turnSteer/deferredDuringContextCompaction",
-              turnId: input.expectedTurnId,
-              itemId: activeContextCompaction.itemId,
-              message:
-                "Codex context compaction is active; Cafe Code queued the steer as a follow-up instead of sending turn/steer.",
-              payload: diagnostics,
+          const requestSteer = (expectedTurnId: TurnId) =>
+            Effect.gen(function* () {
+              yield* rejectIfContextCompactionActive(expectedTurnId);
+              const params = yield* buildTurnSteerParams({
+                threadId: providerThreadId,
+                expectedTurnId,
+                ...(input.input ? { prompt: input.input } : {}),
+                ...(input.attachments ? { attachments: input.attachments } : {}),
+              });
+              return yield* client.raw.request("turn/steer", params);
             });
-            return yield* buildCodexActiveContextCompactionSteerError({
-              providerThreadId,
-              turnId: input.expectedTurnId,
-              itemId: activeContextCompaction.itemId,
-              startedAt: activeContextCompaction.startedAt,
-            });
-          }
           const steerRequestedAt = yield* nowIso;
           const steerRequestedAtMs = yield* Clock.currentTimeMillis;
-          const rawResponse = yield* client.raw.request("turn/steer", params);
+          const rawResponse = yield* requestSteer(input.expectedTurnId).pipe(
+            Effect.catchIf(isCodexSteerExpectedTurnMismatch, (error) =>
+              Effect.gen(function* () {
+                const actualTurnId = readCodexSteerExpectedTurnMismatchActualTurnId(error);
+                if (actualTurnId === undefined || actualTurnId === input.expectedTurnId) {
+                  return yield* error as CodexErrors.CodexAppServerRequestError;
+                }
+
+                const observedAt = yield* nowIso;
+                const diagnostics = {
+                  providerThreadId,
+                  requestedExpectedTurnId: input.expectedTurnId,
+                  actualTurnId,
+                  observedAt,
+                  promptByteLength: Buffer.byteLength(input.input ?? "", "utf8"),
+                  attachmentCount: input.attachments?.length ?? 0,
+                  semantics:
+                    "Codex app-server reported that Cafe's cached active turn id was stale. Upstream Codex TUI retries turn/steer once with the server-reported active turn id; Cafe mirrors that behavior before surfacing a failure.",
+                };
+                yield* Effect.logWarning("codex.turnSteer.retryAfterActiveTurnMismatch", {
+                  threadId: options.threadId,
+                  providerInstanceId: options.providerInstanceId ?? PROVIDER,
+                  ...diagnostics,
+                });
+                yield* emitEvent({
+                  kind: "notification",
+                  threadId: options.threadId,
+                  method: "codex.turnSteer/retryAfterActiveTurnMismatch",
+                  turnId: actualTurnId,
+                  message:
+                    "Codex app-server reported a newer active turn; Cafe Code retried turn/steer with that turn id.",
+                  payload: diagnostics,
+                });
+                return yield* requestSteer(actualTurnId);
+              }),
+            ),
+          );
           const steerAcknowledgedAt = yield* nowIso;
           const steerAcknowledgedAtMs = yield* Clock.currentTimeMillis;
           const response = yield* decodeV2TurnSteerResponse(rawResponse).pipe(
@@ -2519,7 +3125,9 @@ export const makeCodexSessionRuntime = (
             ),
           );
           const turnId = TurnId.make(response.turnId);
+          const steerId = yield* Random.nextUUIDv4;
           const diagnostics = {
+            steerId,
             providerThreadId,
             turnId,
             expectedTurnId: input.expectedTurnId,
@@ -2544,6 +3152,19 @@ export const makeCodexSessionRuntime = (
             message: "Codex app-server accepted turn/steer.",
             payload: diagnostics,
           });
+          yield* recordPendingSteerProcessing({
+            steerId,
+            providerThreadId,
+            turnId,
+            requestedAt: steerRequestedAt,
+            acknowledgedAt: steerAcknowledgedAt,
+            acknowledgedAtMs: steerAcknowledgedAtMs,
+            ackLatencyMs: Math.max(0, steerAcknowledgedAtMs - steerRequestedAtMs),
+            promptByteLength: Buffer.byteLength(input.input ?? "", "utf8"),
+            attachmentCount: input.attachments?.length ?? 0,
+            warningCount: 0,
+          });
+          yield* schedulePendingSteerProcessingWarnings(steerId);
           yield* updateSession(sessionRef, {
             status: "running",
             activeTurnId: turnId,

@@ -212,8 +212,24 @@ function detectCodexNonSteerableTurnKind(
   return undefined;
 }
 
+function isUnsupportedLiveSteerFailure(cause: Cause.Cause<ProviderServiceError>): boolean {
+  const providerError = findProviderAdapterRequestError(cause);
+  const detail = `${providerError?.detail ?? ""}\n${Cause.pretty(cause)}`.toLowerCase();
+  return detail.includes("does not support live steering");
+}
+
+function isCodexNoActiveTurnToSteerFailure(cause: Cause.Cause<ProviderServiceError>): boolean {
+  const providerError = findProviderAdapterRequestError(cause);
+  const detail = `${providerError?.detail ?? ""}\n${Cause.pretty(cause)}`.toLowerCase();
+  return detail.includes("turn/steer") && detail.includes("no active turn to steer");
+}
+
 function codexNonSteerableDetail(turnKind: CodexNonSteerableTurnKind): string {
-  return `Codex cannot accept live steer because the active turn is a ${turnKind} turn. Cafe Code will re-queue this follow-up locally and send it after the active turn finishes.`;
+  return `Codex reported a ${turnKind} active turn. Cafe Code preserved this follow-up for automatic delivery after the active turn is ready.`;
+}
+
+function retryableFollowUpDetail(): string {
+  return "Cafe Code preserved this follow-up for automatic delivery after the active turn is ready.";
 }
 
 function isUnknownPendingApprovalRequestError(cause: Cause.Cause<ProviderServiceError>): boolean {
@@ -333,6 +349,36 @@ const make = Effect.gen(function* () {
           ...(input.codexNonSteerableTurnKind
             ? { codexNonSteerableTurnKind: input.codexNonSteerableTurnKind }
             : {}),
+        },
+        turnId: input.turnId,
+        createdAt: input.createdAt,
+      },
+      createdAt: input.createdAt,
+    });
+
+  const appendProviderDiagnosticActivity = (input: {
+    readonly threadId: ThreadId;
+    readonly kind: string;
+    readonly summary: string;
+    readonly detail: string;
+    readonly turnId: TurnId | null;
+    readonly createdAt: string;
+    readonly tone?: "info" | "tool" | "approval" | "error";
+    readonly payload?: Record<string, unknown>;
+  }) =>
+    orchestrationEngine.dispatch({
+      type: "thread.activity.append",
+      commandId: serverCommandId("provider-diagnostic-activity"),
+      threadId: input.threadId,
+      activity: {
+        id: EventId.make(crypto.randomUUID()),
+        tone: input.tone ?? "info",
+        kind: input.kind,
+        summary: input.summary,
+        payload: {
+          message: input.summary,
+          detail: input.detail,
+          ...input.payload,
         },
         turnId: input.turnId,
         createdAt: input.createdAt,
@@ -1115,7 +1161,8 @@ const make = Effect.gen(function* () {
         createdAt: event.payload.createdAt,
       });
     }
-    if (!thread.session.activeTurnId) {
+    const activeSession = thread.session;
+    if (!activeSession.activeTurnId) {
       return yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
         kind: "provider.turn.steer.failed",
@@ -1125,14 +1172,14 @@ const make = Effect.gen(function* () {
         createdAt: event.payload.createdAt,
       });
     }
-    const providerInstanceId = thread.session.providerInstanceId;
+    const providerInstanceId = activeSession.providerInstanceId;
     if (providerInstanceId === undefined) {
       return yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
         kind: "provider.turn.steer.failed",
         summary: "Provider steer failed",
         detail: "The active provider session is missing a provider instance id.",
-        turnId: thread.session.activeTurnId,
+        turnId: activeSession.activeTurnId,
         createdAt: event.payload.createdAt,
       });
     }
@@ -1142,9 +1189,12 @@ const make = Effect.gen(function* () {
         threadId: event.payload.threadId,
         kind: "provider.turn.steer.failed",
         summary: "Provider steer failed",
-        detail: "The active provider does not support live steering.",
-        turnId: thread.session.activeTurnId,
+        detail: retryableFollowUpDetail(),
+        turnId: activeSession.activeTurnId,
         createdAt: event.payload.createdAt,
+        messageId: event.payload.messageId,
+        retryableFollowUp: true,
+        retryAfter: "active-turn",
       });
     }
 
@@ -1156,10 +1206,79 @@ const make = Effect.gen(function* () {
         kind: "provider.turn.steer.failed",
         summary: "Provider steer failed",
         detail: "Either input text or at least one attachment is required.",
-        turnId: thread.session.activeTurnId,
+        turnId: activeSession.activeTurnId,
         createdAt: event.payload.createdAt,
       });
     }
+
+    const recoverStaleCodexSteerAsTurnStart = (cause: Cause.Cause<ProviderServiceError>) =>
+      Effect.gen(function* () {
+        const observedAt = DateTime.formatIso(yield* DateTime.now);
+        const staleTurnId = activeSession.activeTurnId;
+
+        // Upstream Codex TUI handles this exact app-server race in
+        // `active_turn_steer_race`: if `turn/steer` says there is no active
+        // turn, it clears the cached active turn and immediately falls through
+        // to `turn/start` with the same user input. Cafe must do the same at the
+        // server boundary so the renderer never has to surface a recoverable
+        // provider race as a failed send.
+        yield* appendProviderDiagnosticActivity({
+          threadId: event.payload.threadId,
+          kind: "runtime.warning",
+          summary: "Steer retried as next turn",
+          detail:
+            "Codex reported that the cached active turn had already ended. Cafe Code cleared the stale active-turn pointer and submitted this message as the next turn, matching upstream Codex CLI/TUI active-turn race handling.",
+          turnId: staleTurnId,
+          createdAt: observedAt,
+          payload: {
+            provider: "codex",
+            method: "turn/steer",
+            recovery: "turn-start-after-no-active-turn",
+            messageId: event.payload.messageId,
+            staleTurnId,
+          },
+        });
+
+        yield* setThreadSession({
+          threadId: event.payload.threadId,
+          session: {
+            ...activeSession,
+            status: "ready",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: observedAt,
+          },
+          createdAt: observedAt,
+        });
+
+        yield* orchestrationEngine.dispatch({
+          type: "thread.turn.start",
+          commandId: serverCommandId("codex-stale-steer-retry-turn-start"),
+          threadId: event.payload.threadId,
+          message: {
+            messageId: event.payload.messageId,
+            role: "user",
+            text: message.text,
+            attachments: normalizedAttachments,
+          },
+          ...(thread.modelSelection !== undefined ? { modelSelection: thread.modelSelection } : {}),
+          runtimeMode: thread.runtimeMode,
+          interactionMode: thread.interactionMode,
+          createdAt: observedAt,
+        });
+      }).pipe(
+        Effect.catchCause((recoveryCause) =>
+          appendProviderFailureActivity({
+            threadId: event.payload.threadId,
+            kind: "provider.turn.start.failed",
+            summary: "Provider turn start failed",
+            detail: `Automatic stale Codex steer recovery failed after ${formatFailureDetail(cause)}: ${Cause.pretty(recoveryCause)}`,
+            turnId: activeSession.activeTurnId,
+            createdAt: event.payload.createdAt,
+            messageId: event.payload.messageId,
+          }),
+        ),
+      );
 
     // Codex app-server's `turn/steer` is intentionally not a second
     // `turn/start`: upstream requires the expected active turn id, rejects
@@ -1170,29 +1289,36 @@ const make = Effect.gen(function* () {
     yield* providerService
       .steerTurn({
         threadId: event.payload.threadId,
-        expectedTurnId: thread.session.activeTurnId,
+        expectedTurnId: activeSession.activeTurnId,
         ...(normalizedInput ? { input: normalizedInput } : {}),
         ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       })
       .pipe(
         Effect.catchCause((cause) => {
+          if (isCodexNoActiveTurnToSteerFailure(cause)) {
+            return recoverStaleCodexSteerAsTurnStart(cause);
+          }
           const codexNonSteerableTurnKind = detectCodexNonSteerableTurnKind(cause);
+          const unsupportedLiveSteer = isUnsupportedLiveSteerFailure(cause);
+          const retryableFollowUp = codexNonSteerableTurnKind !== undefined || unsupportedLiveSteer;
           return appendProviderFailureActivity({
             threadId: event.payload.threadId,
             kind: "provider.turn.steer.failed",
             summary: "Provider steer failed",
             detail:
-              codexNonSteerableTurnKind === undefined
-                ? formatFailureDetail(cause)
-                : codexNonSteerableDetail(codexNonSteerableTurnKind),
+              codexNonSteerableTurnKind !== undefined
+                ? codexNonSteerableDetail(codexNonSteerableTurnKind)
+                : unsupportedLiveSteer
+                  ? retryableFollowUpDetail()
+                  : formatFailureDetail(cause),
             turnId: thread.session?.activeTurnId ?? null,
             createdAt: event.payload.createdAt,
             messageId: event.payload.messageId,
-            ...(codexNonSteerableTurnKind !== undefined
+            ...(retryableFollowUp
               ? {
                   retryableFollowUp: true,
                   retryAfter: "active-turn" as const,
-                  codexNonSteerableTurnKind,
+                  ...(codexNonSteerableTurnKind !== undefined ? { codexNonSteerableTurnKind } : {}),
                 }
               : {}),
           });

@@ -47,7 +47,11 @@ const RECENT_EVENT_WINDOW_LIMIT = 250;
 const MAX_EVENT_TYPE_ROWS = 12;
 const MAX_DAEMON_COMMAND_ROWS = 8;
 const MAX_COMMAND_TEXT_LENGTH = 240;
-const DAEMON_HEALTH_TIMEOUT_MS = 1_500;
+// The daemon can be busy while it is streaming provider output or compacting its
+// retained event journal. Diagnostics should not falsely mark that daemon as
+// unreachable merely because a health snapshot took slightly longer than a UI
+// refresh cadence.
+const DAEMON_HEALTH_TIMEOUT_MS = 5_000;
 
 const decodeProviderDaemonHealthJson = Schema.decodeUnknownSync(
   Schema.fromJsonString(ProviderDaemonHealth),
@@ -87,7 +91,11 @@ class RuntimeLayerDiagnosticsReadError extends Schema.TaggedErrorClass<RuntimeLa
   },
 ) {
   override get message(): string {
-    return `${this.operation}: ${this.detail}`;
+    const causeMessage = describeSafeCause(this.cause);
+    if (causeMessage === null || this.detail.includes(causeMessage)) {
+      return `${this.operation}: ${this.detail}`;
+    }
+    return `${this.operation}: ${this.detail} (${causeMessage})`;
   }
 }
 
@@ -101,6 +109,19 @@ export class RuntimeLayerDiagnostics extends Context.Service<
   RuntimeLayerDiagnostics,
   RuntimeLayerDiagnosticsShape
 >()("cafecode/diagnostics/RuntimeLayerDiagnostics") {}
+
+function describeSafeCause(cause: unknown): string | null {
+  if (cause === undefined || cause === null) return null;
+  if (cause instanceof Error) return cause.message;
+  if (typeof cause === "string") return cause;
+  if (typeof cause === "object" && "message" in cause) {
+    const message = (cause as { readonly message?: unknown }).message;
+    if (typeof message === "string" && message.trim().length > 0) {
+      return message;
+    }
+  }
+  return null;
+}
 
 function sanitizeError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
@@ -473,7 +494,7 @@ export function buildStaleStateFlags(input: {
   return flags;
 }
 
-function buildLayerSummaries(input: {
+export function buildLayerSummaries(input: {
   readonly serverPid: number;
   readonly serverStartedAt: string | null;
   readonly processes: ReadonlyArray<ServerRuntimeLayerProcess>;
@@ -511,8 +532,11 @@ function buildLayerSummaries(input: {
     summarize(
       "orchestrator",
       input.orchestratorLag === 0 ? "online" : input.orchestratorLag < 25 ? "degraded" : "offline",
-      input.serverPid,
-      [`Projection lag: ${input.orchestratorLag}`],
+      null,
+      [
+        `Projection lag: ${input.orchestratorLag}`,
+        `In-process subsystem hosted by backend PID ${input.serverPid}.`,
+      ],
       input.readAt,
     ),
     summarize(

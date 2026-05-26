@@ -29,8 +29,8 @@ describe("FollowUpQueueShelf", () => {
             blockedReason: null,
           },
         ]}
-        actionLabel="Steer"
-        actionTitle="Steer this into the active turn now"
+        actionLabel="Send"
+        actionTitle="Cafe Code will send this follow-up as soon as the active turn can accept it."
         onToggleExpanded={onToggleExpanded}
         onAction={onAction}
         onRemove={onRemove}
@@ -42,11 +42,11 @@ describe("FollowUpQueueShelf", () => {
 
     try {
       expect(document.body.textContent ?? "").toContain("1 message queued");
-      expect(document.body.textContent ?? "").toContain("Steer");
+      expect(document.body.textContent ?? "").toContain("Send");
       expect(document.body.textContent ?? "").toContain("Full queued prompt");
       await expect.element(page.getByLabelText("Queued message prompt")).toBeInTheDocument();
 
-      await page.getByText("Steer").click();
+      await page.getByText("Send").click();
       expect(onAction).toHaveBeenCalledWith("queued-1");
 
       await page.getByLabelText("Remove queued message").click();
@@ -80,8 +80,8 @@ describe("FollowUpQueueShelf", () => {
             blockedReason: null,
           },
         ]}
-        actionLabel="Interrupt"
-        actionTitle="Interrupt the active turn and send this queued follow-up next"
+        actionLabel="Send"
+        actionTitle="Cafe Code will send this follow-up as soon as the active turn can accept it."
         onToggleExpanded={onToggleExpanded}
         onAction={onAction}
         onRemove={vi.fn()}
@@ -99,7 +99,7 @@ describe("FollowUpQueueShelf", () => {
       expect(onToggleExpanded).not.toHaveBeenCalled();
       expect((document.body.textContent ?? "").match(/say yes/g)).toHaveLength(1);
 
-      await page.getByText("Interrupt").click();
+      await page.getByText("Send").click();
       expect(onAction).toHaveBeenCalledWith("queued-short");
 
       const steerButton = document.querySelector(".cafe-followup-steer-button");
@@ -127,8 +127,8 @@ describe("FollowUpQueueShelf", () => {
             dispatchedAt: "2026-05-25T16:05:10.616Z",
           },
         ]}
-        actionLabel="Steer"
-        actionTitle="Steer this into the active turn now"
+        actionLabel="Send"
+        actionTitle="Cafe Code will send this follow-up as soon as the active turn can accept it."
         onToggleExpanded={vi.fn()}
         onAction={vi.fn()}
         onRemove={onRemove}
@@ -185,8 +185,8 @@ describe("FollowUpQueueShelf", () => {
             blockedReason: null,
           },
         ]}
-        actionLabel="Interrupt"
-        actionTitle="Interrupt the active turn and send this queued follow-up next"
+        actionLabel="Send"
+        actionTitle="Cafe Code will send this follow-up as soon as the active turn can accept it."
         onToggleExpanded={onToggleExpanded}
         onAction={vi.fn()}
         onRemove={vi.fn()}

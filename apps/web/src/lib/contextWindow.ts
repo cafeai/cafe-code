@@ -66,6 +66,7 @@ export function deriveLatestContextWindowSnapshot(
       toolUses: asFiniteNumber(payload?.toolUses),
       durationMs: asFiniteNumber(payload?.durationMs),
       compactsAutomatically: asBoolean(payload?.compactsAutomatically) ?? false,
+      autoCompactTokenLimit: asFiniteNumber(payload?.autoCompactTokenLimit),
       updatedAt: activity.createdAt,
     };
   }

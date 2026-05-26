@@ -100,6 +100,10 @@
       "types": "./src/compatEnv.ts",
       "import": "./src/compatEnv.ts"
     },
+    "./codexCompaction": {
+      "types": "./src/codexCompaction.ts",
+      "import": "./src/codexCompaction.ts"
+    },
     "./environmentEndpoint": {
       "types": "./src/environmentEndpoint.ts",
       "import": "./src/environmentEndpoint.ts"

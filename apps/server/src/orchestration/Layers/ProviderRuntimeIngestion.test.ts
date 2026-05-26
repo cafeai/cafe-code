@@ -362,6 +362,51 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.lastError).toBe("turn failed");
   });
 
+  it("does not write redundant session heartbeats for active content deltas", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
+    const startedAt = "2026-01-01T00:00:00.000Z";
+    const deltaAt = "2026-01-01T00:00:01.000Z";
+    const turnId = asTurnId("turn-no-token-heartbeat");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-no-token-heartbeat-started"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: startedAt,
+      turnId,
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session?.activeTurnId === "turn-no-token-heartbeat",
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-no-token-heartbeat-delta"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: deltaAt,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId: asItemId("item-no-token-heartbeat"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "visible",
+      },
+    });
+    await harness.drain();
+
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
+    expect(thread?.session?.updatedAt).toBe(startedAt);
+    expect(
+      thread?.messages.find(
+        (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-no-token-heartbeat",
+      )?.text,
+    ).toBe("visible");
+  });
+
   it("does not reopen a completed turn when replayed content arrives late", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -1194,6 +1239,57 @@ describe("ProviderRuntimeIngestion", () => {
     expect(data?.toolCallId).toBe("tool-read-1");
     expect(data?.kind).toBe("read");
     expect(rawOutput?.content).toMatch(/^\[content omitted: \d+ chars, \d+ lines\]$/);
+  });
+
+  it("projects Codex context compaction item lifecycle into visible tool activity", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "item.started",
+      eventId: asEventId("evt-compaction-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-compacting"),
+      itemId: asItemId("item-compaction"),
+      payload: {
+        itemType: "context_compaction",
+        status: "inProgress",
+        title: "Context compaction",
+      },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-compaction-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-compacting"),
+      itemId: asItemId("item-compaction"),
+      payload: {
+        itemType: "context_compaction",
+        status: "completed",
+        title: "Context compaction",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-compaction-completed",
+      ),
+    );
+    const started = thread.activities.find(
+      (entry: ProviderRuntimeTestActivity) => entry.id === "evt-compaction-started",
+    );
+    const completed = thread.activities.find(
+      (entry: ProviderRuntimeTestActivity) => entry.id === "evt-compaction-completed",
+    );
+
+    expect(started?.kind).toBe("tool.started");
+    expect(started?.summary).toBe("Context compaction started");
+    expect(completed?.kind).toBe("tool.completed");
+    expect(completed?.summary).toBe("Context compacted");
   });
 
   it("normalizes command execution activities to ran-command summaries", async () => {
@@ -2464,6 +2560,128 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(finalMessage?.text).toBe("hello live");
     expect(finalMessage?.streaming).toBe(false);
+  });
+
+  it("coalesces streaming assistant deltas after the first visible bytes", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
+    const now = "2026-01-01T00:00:00.000Z";
+    const turnId = asTurnId("turn-streaming-coalesce");
+    const itemId = asItemId("item-streaming-coalesce");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-streaming-coalesce-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session?.activeTurnId === "turn-streaming-coalesce",
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-streaming-coalesce-first"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId,
+      payload: {
+        streamKind: "assistant_text",
+        delta: "first",
+      },
+    });
+    await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-streaming-coalesce" &&
+          message.streaming &&
+          message.text === "first",
+      ),
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-streaming-coalesce-buffered"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId,
+      payload: {
+        streamKind: "assistant_text",
+        delta: " buffered",
+      },
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-streaming-coalesce-buffered-more"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId,
+      payload: {
+        streamKind: "assistant_text",
+        delta: " more",
+      },
+    });
+    await harness.drain();
+    const beforeCompletion = (await harness.readModel()).threads.find(
+      (entry) => entry.id === "thread-1",
+    );
+    expect(
+      beforeCompletion?.messages.find(
+        (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-streaming-coalesce",
+      )?.text,
+    ).toBe("first");
+
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-streaming-coalesce-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId,
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+      },
+    });
+
+    const finalThread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-streaming-coalesce" && !message.streaming,
+      ),
+    );
+    const finalMessage = finalThread.messages.find(
+      (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-streaming-coalesce",
+    );
+    expect(finalMessage?.text).toBe("first buffered more");
+    expect(finalMessage?.streaming).toBe(false);
+
+    const events = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    const assistantEvents = events.filter(
+      (event): event is Extract<(typeof events)[number], { type: "thread.message-sent" }> =>
+        event.type === "thread.message-sent" &&
+        event.payload.messageId === "assistant:item-streaming-coalesce",
+    );
+    expect(assistantEvents.map((event) => [event.payload.streaming, event.payload.text])).toEqual([
+      [true, "first"],
+      [true, " buffered more"],
+      [false, ""],
+    ]);
   });
 
   it("spills oversized buffered deltas and still finalizes full assistant text", async () => {

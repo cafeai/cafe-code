@@ -89,6 +89,13 @@ const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
 const TIMELINE_AT_END_TOLERANCE_PX = 720;
 const TIMELINE_MAINTAIN_SCROLL_AT_END_THRESHOLD = 0.9;
+const TIMELINE_SUBMIT_STICK_TO_END_WINDOW_MS = 1_500;
+const TIMELINE_SUBMIT_STICK_TO_END_FRAME_ATTEMPTS = 8;
+const TIMELINE_SUBMIT_STICK_TO_END_SETTLE_TIMEOUTS_MS = [80, 180, 360, 720] as const;
+const TIMELINE_MAINTAIN_VISIBLE_CONTENT_POSITION = {
+  data: false,
+  size: true,
+} as const;
 
 export function isTimelineScrolledToEnd(state: {
   readonly isAtEnd: boolean;
@@ -195,6 +202,28 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     ],
   );
   const rows = useStableRows(rawRows);
+  const stickToEndDeadlineMsRef = useRef(0);
+  const forceScrollToEnd = useCallback(
+    (rowCount = rows.length) => {
+      if (rowCount <= 0) {
+        return;
+      }
+      const list = listRef.current;
+      if (!list) {
+        return;
+      }
+      void list.scrollToEnd?.({ animated: false });
+      void list.scrollToIndex?.({
+        index: rowCount - 1,
+        animated: false,
+        viewPosition: 1,
+      });
+    },
+    [listRef, rows.length],
+  );
+  const cancelSubmitStickToEnd = useCallback(() => {
+    stickToEndDeadlineMsRef.current = 0;
+  }, []);
 
   const handleScroll = useCallback(() => {
     const state = listRef.current?.getState?.();
@@ -203,8 +232,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     }
   }, [listRef, onIsAtEndChange]);
   const handleUserScrollIntent = useCallback(() => {
+    cancelSubmitStickToEnd();
     onUserScrollIntent();
-  }, [onUserScrollIntent]);
+  }, [cancelSubmitStickToEnd, onUserScrollIntent]);
   const handlePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLElement>) => {
       const bounds = event.currentTarget.getBoundingClientRect();
@@ -213,10 +243,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         event.clientX >= bounds.right - scrollbarIntentPx ||
         event.clientY >= bounds.bottom - scrollbarIntentPx
       ) {
+        cancelSubmitStickToEnd();
         onUserScrollIntent();
       }
     },
-    [onUserScrollIntent],
+    [cancelSubmitStickToEnd, onUserScrollIntent],
   );
   const handleKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLElement>) => {
@@ -229,10 +260,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         event.key === "End" ||
         event.key === " "
       ) {
+        cancelSubmitStickToEnd();
         onUserScrollIntent();
       }
     },
-    [onUserScrollIntent],
+    [cancelSubmitStickToEnd, onUserScrollIntent],
   );
 
   const previousRowCountRef = useRef(0);
@@ -252,7 +284,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       const frameId = window.requestAnimationFrame(() => {
         if (cancelled) return;
         attempts += 1;
-        void listRef.current?.scrollToEnd?.({ animated: false });
+        forceScrollToEnd(rows.length);
         if (attempts < 3) {
           scheduleScroll();
         }
@@ -266,7 +298,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         window.cancelAnimationFrame(frameId);
       }
     };
-  }, [listRef, onIsAtEndChange, rows.length]);
+  }, [forceScrollToEnd, onIsAtEndChange, rows.length]);
 
   useEffect(() => {
     const frameId = window.requestAnimationFrame(() => {
@@ -288,21 +320,32 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     }
 
     handledStickToEndRevisionRef.current = stickToEndRevision;
+    stickToEndDeadlineMsRef.current = Date.now() + TIMELINE_SUBMIT_STICK_TO_END_WINDOW_MS;
     onIsAtEndChange(true);
 
     let cancelled = false;
     let attempts = 0;
     const frameIds: number[] = [];
+    const timeoutIds: number[] = [];
     const scheduleScroll = () => {
       const frameId = window.requestAnimationFrame(() => {
         if (cancelled) return;
         attempts += 1;
-        void listRef.current?.scrollToEnd?.({ animated: false });
-        if (attempts < 4) {
+        forceScrollToEnd(rows.length);
+        if (attempts < TIMELINE_SUBMIT_STICK_TO_END_FRAME_ATTEMPTS) {
           scheduleScroll();
         }
       });
       frameIds.push(frameId);
+    };
+    const scheduleSettleScroll = (delayMs: number) => {
+      const timeoutId = window.setTimeout(() => {
+        if (cancelled || Date.now() > stickToEndDeadlineMsRef.current) {
+          return;
+        }
+        forceScrollToEnd(rows.length);
+      }, delayMs);
+      timeoutIds.push(timeoutId);
     };
 
     // LegendList can briefly preserve the previous visible row while React is
@@ -310,16 +353,39 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     // submit path already decided that the user was at the bottom, so replay
     // that decision after the new rows exist instead of letting the virtualizer
     // settle at the top of the conversation.
-    void listRef.current?.scrollToEnd?.({ animated: false });
+    forceScrollToEnd(rows.length);
     scheduleScroll();
+    for (const delayMs of TIMELINE_SUBMIT_STICK_TO_END_SETTLE_TIMEOUTS_MS) {
+      scheduleSettleScroll(delayMs);
+    }
 
     return () => {
       cancelled = true;
       for (const frameId of frameIds) {
         window.cancelAnimationFrame(frameId);
       }
+      for (const timeoutId of timeoutIds) {
+        window.clearTimeout(timeoutId);
+      }
     };
-  }, [listRef, onIsAtEndChange, rows.length, stickToEndRevision]);
+  }, [forceScrollToEnd, onIsAtEndChange, rows.length, stickToEndRevision]);
+
+  useEffect(() => {
+    if (rows.length === 0 || Date.now() > stickToEndDeadlineMsRef.current) {
+      return;
+    }
+
+    let cancelled = false;
+    const frameId = window.requestAnimationFrame(() => {
+      if (!cancelled && Date.now() <= stickToEndDeadlineMsRef.current) {
+        forceScrollToEnd(rows.length);
+      }
+    });
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [forceScrollToEnd, rows, rows.length]);
 
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
@@ -384,7 +450,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           initialScrollAtEnd
           maintainScrollAtEnd
           maintainScrollAtEndThreshold={TIMELINE_MAINTAIN_SCROLL_AT_END_THRESHOLD}
-          maintainVisibleContentPosition
+          maintainVisibleContentPosition={TIMELINE_MAINTAIN_VISIBLE_CONTENT_POSITION}
           onScroll={handleScroll}
           onWheel={handleUserScrollIntent}
           onTouchMove={handleUserScrollIntent}
@@ -411,6 +477,10 @@ type TimelineEntry = ReturnType<typeof deriveTimelineEntries>[number];
 type TimelineMessage = Extract<TimelineEntry, { kind: "message" }>["message"];
 type TimelineWorkEntry = Extract<MessagesTimelineRow, { kind: "work" }>["groupedEntries"][number];
 type TimelineRow = MessagesTimelineRow;
+
+const SYNTHETIC_ASSISTANT_STREAM_MIN_JUMP_CHARS = 80;
+const SYNTHETIC_ASSISTANT_STREAM_FRAME_MS = 24;
+const SYNTHETIC_ASSISTANT_STREAM_MAX_FRAMES = 36;
 
 const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: TimelineRow }) {
   return (
@@ -518,9 +588,96 @@ function RevertUserMessageButton({ messageId }: { messageId: MessageId }) {
   );
 }
 
+function useSmoothedAssistantText(messageId: MessageId, sourceText: string) {
+  const [displayedText, setDisplayedText] = useState(sourceText);
+  const [isAnimating, setIsAnimating] = useState(false);
+  const displayedTextRef = useRef(sourceText);
+  const targetTextRef = useRef(sourceText);
+  const previousMessageIdRef = useRef<MessageId>(messageId);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopTimer = useCallback(() => {
+    if (timerRef.current !== null) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => stopTimer();
+  }, [stopTimer]);
+
+  useEffect(() => {
+    if (previousMessageIdRef.current !== messageId) {
+      previousMessageIdRef.current = messageId;
+      stopTimer();
+      targetTextRef.current = sourceText;
+      displayedTextRef.current = sourceText;
+      setDisplayedText(sourceText);
+      setIsAnimating(false);
+      return;
+    }
+
+    if (sourceText === targetTextRef.current) {
+      return;
+    }
+
+    targetTextRef.current = sourceText;
+    const currentText = displayedTextRef.current;
+    const appendedCharCount = sourceText.length - currentText.length;
+    const canSmoothAppend =
+      currentText.length > 0 &&
+      appendedCharCount >= SYNTHETIC_ASSISTANT_STREAM_MIN_JUMP_CHARS &&
+      sourceText.startsWith(currentText);
+
+    if (!canSmoothAppend) {
+      stopTimer();
+      displayedTextRef.current = sourceText;
+      setDisplayedText(sourceText);
+      setIsAnimating(false);
+      return;
+    }
+
+    setIsAnimating(true);
+    if (timerRef.current !== null) {
+      return;
+    }
+
+    timerRef.current = setInterval(() => {
+      const target = targetTextRef.current;
+      const current = displayedTextRef.current;
+      if (!target.startsWith(current)) {
+        displayedTextRef.current = target;
+        setDisplayedText(target);
+        setIsAnimating(false);
+        stopTimer();
+        return;
+      }
+
+      const remaining = target.length - current.length;
+      if (remaining <= 0) {
+        setIsAnimating(false);
+        stopTimer();
+        return;
+      }
+
+      const step = Math.max(1, Math.ceil(remaining / SYNTHETIC_ASSISTANT_STREAM_MAX_FRAMES));
+      const nextText = target.slice(0, current.length + step);
+      displayedTextRef.current = nextText;
+      setDisplayedText(nextText);
+    }, SYNTHETIC_ASSISTANT_STREAM_FRAME_MS);
+  }, [messageId, sourceText, stopTimer]);
+
+  return { displayedText, isAnimating };
+}
+
 function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
-  const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+  const sourceMessageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+  const { displayedText: messageText, isAnimating } = useSmoothedAssistantText(
+    row.message.id,
+    sourceMessageText,
+  );
 
   return (
     <div className="min-w-0 px-1 py-0.5">
@@ -528,7 +685,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
         text={messageText}
         cwd={ctx.markdownCwd}
         additionalWorkspaceRoots={ctx.additionalWorkspaceRoots}
-        isStreaming={Boolean(row.message.streaming)}
+        isStreaming={Boolean(row.message.streaming || isAnimating)}
         skills={ctx.skills}
       />
       <div className="mt-1.5 flex items-center gap-2">

@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import type { ProviderDaemonHealth } from "@cafecode/contracts";
 
 import {
+  buildLayerSummaries,
   buildProjectorCursors,
   buildRuntimeProcessEntries,
   buildStaleStateFlags,
@@ -240,5 +241,70 @@ describe("RuntimeLayerDiagnostics", () => {
       "terminal-streaming-message",
       "daemon-stream-without-active-turn",
     ]);
+  });
+
+  it("describes the orchestrator as an in-process backend subsystem", () => {
+    const processes = buildRuntimeProcessEntries({
+      readAt,
+      serverPid: 100,
+      rows: [
+        {
+          pid: 100,
+          ppid: 1,
+          pgid: 100,
+          status: "S",
+          cpuPercent: 1,
+          rssBytes: 1_000,
+          elapsed: "01:00",
+          command: "node dist/bin.mjs",
+        },
+      ],
+      targets: [
+        {
+          pid: 100,
+          role: "backend",
+          ownerKind: "backend-root",
+          attribution: "backend",
+        },
+      ],
+    });
+
+    const layers = buildLayerSummaries({
+      readAt,
+      serverPid: 100,
+      serverStartedAt: null,
+      processes,
+      daemon: mapProviderDaemonHealth({
+        health: null,
+        configured: false,
+        reachable: false,
+        healthLatencyMs: null,
+        error: null,
+      }),
+      supervisor: mapProviderSupervisorHealth({
+        daemonHealth: null,
+        daemonConfigured: false,
+        daemonReachable: false,
+      }),
+      orchestratorLag: 0,
+    });
+
+    const backend = layers.find((layer) => layer.role === "backend");
+    const orchestrator = layers.find((layer) => layer.role === "orchestrator");
+
+    expect(backend).toMatchObject({
+      role: "backend",
+      status: "online",
+      pid: 100,
+      rssBytes: 1_000,
+    });
+    expect(orchestrator).toMatchObject({
+      role: "orchestrator",
+      status: "online",
+      pid: null,
+      rssBytes: 0,
+      cpuPercent: 0,
+    });
+    expect(orchestrator?.notes.join(" ")).toContain("backend PID 100");
   });
 });

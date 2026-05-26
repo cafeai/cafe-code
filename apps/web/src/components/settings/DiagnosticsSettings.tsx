@@ -1493,7 +1493,7 @@ export function DiagnosticsSettingsPanel() {
                 ? runtimeData.providerDaemon.reachable
                   ? "Online"
                   : runtimeData.providerDaemon.available
-                    ? "Unreachable"
+                    ? "Probe failed"
                     : "Not configured"
                 : "..."
             }

@@ -546,6 +546,21 @@ describe("ProviderDaemonServer", () => {
           },
           {
             ...base,
+            eventId: asEventId("evt-timing-delta-2"),
+            type: "content.delta",
+            createdAt: "2026-01-01T00:00:06.000Z",
+            payload: {
+              streamKind: "assistant_text",
+              delta: " done",
+            },
+            raw: {
+              source: "codex.app-server.notification",
+              method: "item/agentMessage/delta",
+              payload: {},
+            },
+          },
+          {
+            ...base,
             eventId: asEventId("evt-timing-completed"),
             type: "turn.completed",
             createdAt: "2026-01-01T00:00:07.000Z",
@@ -578,6 +593,12 @@ describe("ProviderDaemonServer", () => {
         assert.equal(timing?.acceptedToTurnStartedMs, 1000);
         assert.equal(timing?.acceptedToFirstAssistantDeltaMs, 5000);
         assert.equal(timing?.acceptedToTurnCompletedMs, 7000);
+        assert.equal(timing?.lastAssistantDeltaAt, "2026-01-01T00:00:06.000Z");
+        assert.equal(timing?.firstAssistantDeltaTextBytes, 3);
+        assert.equal(timing?.assistantDeltaCount, 2);
+        assert.equal(timing?.assistantDeltaTextBytes, 8);
+        assert.equal(timing?.largestAssistantDeltaTextBytes, 5);
+        assert.equal(timing?.maxAssistantDeltaGapMs, 1000);
         assert.equal(timing?.transportRetryCount, 1);
         assert.equal(timing?.responseStreamDisconnectedCount, 1);
         assert.equal(timing?.runtimeWarningCount, 2);

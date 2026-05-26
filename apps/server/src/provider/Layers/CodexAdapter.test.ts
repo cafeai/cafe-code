@@ -966,6 +966,139 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("maps slow Codex turn-steer processing diagnostics to runtime warnings", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-turn-steer-waiting"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "codex.turnSteer/noProviderItemYet",
+        turnId: asTurnId("turn-1"),
+        message:
+          "Codex app-server accepted turn/steer but has not emitted the steer user message yet.",
+        payload: {
+          steerId: "steer-1",
+          providerThreadId: "provider-thread-1",
+          elapsedDelay: "60 seconds",
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      assert.equal(firstEvent.value.type, "runtime.warning");
+      if (firstEvent.value.type !== "runtime.warning") {
+        return;
+      }
+      assert.equal(
+        firstEvent.value.payload.message,
+        "Codex app-server accepted turn/steer but has not emitted the steer user message yet.",
+      );
+      assert.deepEqual(firstEvent.value.payload.detail, {
+        steerId: "steer-1",
+        providerThreadId: "provider-thread-1",
+        elapsedDelay: "60 seconds",
+      });
+    }),
+  );
+
+  it.effect("maps Codex turn-steer processing-start diagnostics to task progress", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-turn-steer-processing"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "codex.turnSteer/processingStarted",
+        turnId: asTurnId("turn-1"),
+        message: "Codex app-server began processing turn/steer.",
+        payload: {
+          steerId: "steer-1",
+          providerThreadId: "provider-thread-1",
+          ackToProviderItemMs: 167_000,
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      assert.equal(firstEvent.value.type, "task.progress");
+      if (firstEvent.value.type !== "task.progress") {
+        return;
+      }
+      assert.equal(firstEvent.value.payload.taskId, "codex-turn-steer-processing:turn-1");
+      assert.equal(
+        firstEvent.value.payload.description,
+        "Codex app-server began processing turn/steer.",
+      );
+      assert.deepEqual(firstEvent.value.payload.usage, {
+        steerId: "steer-1",
+        providerThreadId: "provider-thread-1",
+        ackToProviderItemMs: 167_000,
+      });
+    }),
+  );
+
+  it.effect("maps Codex turn-steer active-turn mismatch retry diagnostics to task progress", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-turn-steer-retry"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "codex.turnSteer/retryAfterActiveTurnMismatch",
+        turnId: asTurnId("turn-new"),
+        message:
+          "Codex app-server reported a newer active turn; Cafe Code retried turn/steer with that turn id.",
+        payload: {
+          providerThreadId: "provider-thread-1",
+          requestedExpectedTurnId: "turn-old",
+          actualTurnId: "turn-new",
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      assert.equal(firstEvent.value.type, "task.progress");
+      if (firstEvent.value.type !== "task.progress") {
+        return;
+      }
+      assert.equal(firstEvent.value.payload.taskId, "codex-turn-steer-retry:turn-new");
+      assert.equal(
+        firstEvent.value.payload.description,
+        "Codex app-server reported a newer active turn; Cafe Code retried turn/steer with that turn id.",
+      );
+      assert.deepEqual(firstEvent.value.payload.usage, {
+        providerThreadId: "provider-thread-1",
+        requestedExpectedTurnId: "turn-old",
+        actualTurnId: "turn-new",
+      });
+    }),
+  );
+
   it.effect("maps realtime started notifications with upstream realtime session ids", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
@@ -1318,6 +1451,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         lastOutputTokens: 6,
         lastReasoningOutputTokens: 0,
         compactsAutomatically: true,
+        autoCompactTokenLimit: 200_000,
       });
     }),
   );
@@ -1577,6 +1711,48 @@ scopedLifecycleLayer("CodexAdapterLive scoped lifecycle", (it) => {
         asThreadId("thread-stop"),
       ]);
       assert.equal(yield* adapter.hasSession(asThreadId("thread-stop")), false);
+    }),
+  );
+
+  it.effect("retires the local app-server after a successful Codex interrupt", () =>
+    Effect.gen(function* () {
+      scopedLifecycleRuntimeFactory.releasedThreadIds.length = 0;
+      const initialFactoryCallCount = scopedLifecycleRuntimeFactory.factory.mock.calls.length;
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("thread-interrupt-retire");
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const firstRuntime = scopedLifecycleRuntimeFactory.lastRuntime;
+      assert.ok(firstRuntime);
+
+      yield* adapter.interruptTurn(threadId, asTurnId("turn-active"));
+
+      assert.deepStrictEqual(
+        firstRuntime.interruptTurnImpl.mock.calls[0]?.[0],
+        asTurnId("turn-active"),
+      );
+      assert.equal(firstRuntime.closeImpl.mock.calls.length, 1);
+      assert.deepStrictEqual(scopedLifecycleRuntimeFactory.releasedThreadIds, [threadId]);
+      assert.equal(yield* adapter.hasSession(threadId), false);
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const secondRuntime = scopedLifecycleRuntimeFactory.lastRuntime;
+      assert.ok(secondRuntime);
+      assert.notEqual(secondRuntime, firstRuntime);
+      assert.equal(
+        scopedLifecycleRuntimeFactory.factory.mock.calls.length,
+        initialFactoryCallCount + 2,
+      );
     }),
   );
 });

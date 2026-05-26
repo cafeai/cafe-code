@@ -41,6 +41,14 @@ function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error"
   return "completed" as const;
 }
 
+function isLatestTurnTerminal(turn: OrchestrationThread["latestTurn"]): boolean {
+  return (
+    turn !== null &&
+    turn.completedAt !== null &&
+    (turn.state === "completed" || turn.state === "interrupted" || turn.state === "error")
+  );
+}
+
 function updateThread(
   threads: ReadonlyArray<OrchestrationThread>,
   threadId: ThreadId,
@@ -497,6 +505,16 @@ export function projectEvent(
         const existingActiveTurnId =
           thread.session?.activeTurnId ??
           (thread.latestTurn?.state === "running" ? thread.latestTurn.turnId : null);
+        const terminalLatestTurn = isLatestTurnTerminal(thread.latestTurn)
+          ? thread.latestTurn
+          : null;
+        const staleRunningSession =
+          session.status === "running" &&
+          session.activeTurnId !== null &&
+          terminalLatestTurn !== null &&
+          terminalLatestTurn.completedAt !== null &&
+          (session.activeTurnId === terminalLatestTurn.turnId ||
+            terminalLatestTurn.completedAt >= session.updatedAt);
         const closesActiveTurn =
           session.activeTurnId === null &&
           existingActiveTurnId !== null &&
@@ -514,9 +532,10 @@ export function projectEvent(
         return {
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
-            session,
-            latestTurn:
-              session.status === "running" && session.activeTurnId !== null
+            session: staleRunningSession ? thread.session : session,
+            latestTurn: staleRunningSession
+              ? thread.latestTurn
+              : session.status === "running" && session.activeTurnId !== null
                 ? (() => {
                     const isSameTurn = thread.latestTurn?.turnId === session.activeTurnId;
                     const requestedAt = isSameTurn

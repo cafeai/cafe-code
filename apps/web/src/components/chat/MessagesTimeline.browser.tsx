@@ -8,7 +8,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
 const scrollToEndSpy = vi.fn();
+const scrollToIndexSpy = vi.fn();
 const getStateSpy = vi.fn(() => ({ isAtEnd: true }));
+const legendListPropsSpy = vi.fn();
 
 vi.mock("@legendapp/list/react", async () => {
   const React = await import("react");
@@ -23,13 +25,16 @@ vi.mock("@legendapp/list/react", async () => {
     onTouchMove?: React.TouchEventHandler<HTMLDivElement>;
     onPointerDown?: React.PointerEventHandler<HTMLDivElement>;
     onKeyDown?: React.KeyboardEventHandler<HTMLDivElement>;
+    maintainVisibleContentPosition?: unknown;
     ref?: React.Ref<LegendListRef>;
   }) {
+    legendListPropsSpy(props);
     React.useImperativeHandle(
       props.ref,
       () =>
         ({
           scrollToEnd: scrollToEndSpy,
+          scrollToIndex: scrollToIndexSpy,
           getState: getStateSpy,
         }) as unknown as LegendListRef,
     );
@@ -105,7 +110,9 @@ function buildUserTimelineEntry(text: string) {
 describe("MessagesTimeline", () => {
   afterEach(() => {
     scrollToEndSpy.mockReset();
+    scrollToIndexSpy.mockReset();
     getStateSpy.mockClear();
+    legendListPropsSpy.mockReset();
     vi.restoreAllMocks();
     document.body.innerHTML = "";
   });
@@ -266,7 +273,33 @@ describe("MessagesTimeline", () => {
         .toBeVisible();
       expect(props.onIsAtEndChange).toHaveBeenCalledWith(true);
       expect(scrollToEndSpy).toHaveBeenCalledWith({ animated: false });
+      expect(scrollToIndexSpy).toHaveBeenCalledWith({
+        index: 1,
+        animated: false,
+        viewPosition: 1,
+      });
       expect(requestAnimationFrameSpy).toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("does not let data-change anchoring fight submit-time bottom pinning", async () => {
+    const screen = await render(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[buildUserTimelineEntry("existing conversation tail")]}
+      />,
+    );
+
+    try {
+      const lastProps = legendListPropsSpy.mock.calls.at(-1)?.[0] as
+        | { maintainVisibleContentPosition?: unknown }
+        | undefined;
+      expect(lastProps?.maintainVisibleContentPosition).toEqual({
+        data: false,
+        size: true,
+      });
     } finally {
       await screen.unmount();
     }

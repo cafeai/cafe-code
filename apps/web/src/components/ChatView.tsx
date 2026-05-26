@@ -25,6 +25,11 @@ import {
   createModelSelection,
   resolvePromptInjectedEffort,
 } from "@cafecode/shared/model";
+import {
+  CODEX_AUTO_COMPACT_POLICY_SOURCE,
+  CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
+  CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT_SCOPE,
+} from "@cafecode/shared/codexCompaction";
 import { truncate } from "@cafecode/shared/String";
 import { Debouncer } from "@tanstack/react-pacer";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
@@ -281,6 +286,7 @@ function summarizeDebugContextWindowUsagePayload(payloadValue: unknown) {
     toolUses: readDebugNumber(payload.toolUses),
     durationMs: readDebugNumber(payload.durationMs),
     compactsAutomatically: readDebugBoolean(payload.compactsAutomatically),
+    autoCompactTokenLimit: readDebugNumber(payload.autoCompactTokenLimit),
   };
   const tokenTypesPresent = [
     usage.inputTokens !== null || usage.lastInputTokens !== null ? "input" : null,
@@ -319,6 +325,82 @@ function summarizeDebugContextWindowActivity(activity: OrchestrationThreadActivi
   return {
     ...summarizeDebugActivity(activity),
     usage: summarizeDebugContextWindowUsagePayload(activity.payload),
+  };
+}
+
+function isDebugCodexThread(thread: Thread): boolean {
+  return (
+    String(thread.session?.provider ?? "") === "codex" ||
+    String(thread.modelSelection.instanceId).startsWith("codex")
+  );
+}
+
+function isDebugContextCompactionActivity(activity: OrchestrationThreadActivity): boolean {
+  const payload = readDebugRecord(activity.payload);
+  return activity.kind === "context-compaction" || payload?.itemType === "context_compaction";
+}
+
+function summarizeDebugCodexCompaction(
+  thread: Thread,
+  latestContextWindowPayload: Record<string, unknown> | null,
+) {
+  if (!isDebugCodexThread(thread)) {
+    return null;
+  }
+
+  const compactionActivities = thread.activities.filter(isDebugContextCompactionActivity);
+  const activeCompactionsByItemId = new Map<string, OrchestrationThreadActivity>();
+  let startedCount = 0;
+  let completedCount = 0;
+
+  for (const activity of compactionActivities) {
+    const payload = readDebugRecord(activity.payload);
+    const itemId = readDebugString(payload?.itemId) ?? activity.id;
+    if (activity.kind === "tool.started") {
+      startedCount += 1;
+      activeCompactionsByItemId.set(itemId, activity);
+      continue;
+    }
+    if (activity.kind === "tool.completed" || activity.kind === "context-compaction") {
+      completedCount += 1;
+      activeCompactionsByItemId.delete(itemId);
+    }
+  }
+
+  const latestUsedTokens =
+    readDebugNumber(latestContextWindowPayload?.lastUsedTokens) ??
+    readDebugNumber(latestContextWindowPayload?.usedTokens);
+  const latestInputTokens =
+    readDebugNumber(latestContextWindowPayload?.lastInputTokens) ??
+    readDebugNumber(latestContextWindowPayload?.inputTokens);
+  const latestPayloadLimit = readDebugNumber(latestContextWindowPayload?.autoCompactTokenLimit);
+  const latestCompactionActivity = compactionActivities.at(-1) ?? null;
+
+  return {
+    policy: {
+      enabled: true,
+      source: CODEX_AUTO_COMPACT_POLICY_SOURCE,
+      autoCompactTokenLimit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
+      autoCompactTokenLimitScope: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT_SCOPE,
+      appliesTo: ["thread/start", "thread/resume"],
+      latestTokenUsagePayloadLimit: latestPayloadLimit,
+    },
+    latestContextWindow: {
+      usedTokens: latestUsedTokens,
+      inputTokens: latestInputTokens,
+      maxTokens: readDebugNumber(latestContextWindowPayload?.maxTokens),
+      abovePolicyLimit:
+        latestUsedTokens !== null && latestUsedTokens >= CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
+    },
+    activity: {
+      contextCompactionActivityCount: compactionActivities.length,
+      startedCount,
+      completedCount,
+      activeCount: activeCompactionsByItemId.size,
+      latest:
+        latestCompactionActivity === null ? null : summarizeDebugActivity(latestCompactionActivity),
+      active: [...activeCompactionsByItemId.values()].slice(-3).map(summarizeDebugActivity),
+    },
   };
 }
 
@@ -1000,6 +1082,7 @@ function summarizeDebugThreadPerformance(thread: Thread, nowMs: number) {
   );
   const latestContextWindowActivity = contextWindowActivities.at(-1) ?? null;
   const latestContextWindowPayload = readDebugRecord(latestContextWindowActivity?.payload);
+  const codexCompaction = summarizeDebugCodexCompaction(thread, latestContextWindowPayload);
   const latestContextInputTokens =
     readDebugNumber(latestContextWindowPayload?.lastInputTokens) ??
     readDebugNumber(latestContextWindowPayload?.inputTokens);
@@ -1103,6 +1186,7 @@ function summarizeDebugThreadPerformance(thread: Thread, nowMs: number) {
       latestRuntimeActivity === null ? null : summarizeDebugActivity(latestRuntimeActivity),
     providerTransport,
     latestContextWindowActivity: summarizeDebugContextWindowActivity(latestContextWindowActivity),
+    compaction: codexCompaction,
     pressureFlags,
   };
 }
@@ -1355,6 +1439,18 @@ function readSteerFailureMessageId(activity: OrchestrationThreadActivity): Messa
   return messageId === null ? null : MessageId.make(messageId);
 }
 
+function readSteerRecoveryMessageId(activity: OrchestrationThreadActivity): MessageId | null {
+  if (activity.kind !== "runtime.warning") {
+    return null;
+  }
+  const payload = readDebugRecord(activity.payload);
+  if (readDebugString(payload?.recovery) !== "turn-start-after-no-active-turn") {
+    return null;
+  }
+  const messageId = readDebugString(payload?.messageId);
+  return messageId === null ? null : MessageId.make(messageId);
+}
+
 function threadHasAssistantResponseAfterSteer(thread: Thread, pending: PendingSteerDispatch) {
   return thread.messages.some(
     (message) =>
@@ -1378,8 +1474,13 @@ function threadHasSteerFailureForMessage(thread: Thread, messageId: MessageId) {
   return thread.activities.some((activity) => readSteerFailureMessageId(activity) === messageId);
 }
 
+function threadHasSteerRecoveryForMessage(thread: Thread, messageId: MessageId) {
+  return thread.activities.some((activity) => readSteerRecoveryMessageId(activity) === messageId);
+}
+
 function threadHasResolvedPendingSteer(thread: Thread, pending: PendingSteerDispatch) {
   return (
+    threadHasSteerRecoveryForMessage(thread, pending.messageId) ||
     threadHasSteerFailureForMessage(thread, pending.messageId) ||
     threadHasAssistantResponseAfterSteer(thread, pending) ||
     threadHasTerminalTurnAfterSteer(thread, pending)
@@ -1845,13 +1946,6 @@ export default function ChatView(props: ChatViewProps) {
         ...existing,
         [pending.threadId]: [...(existing[pending.threadId] ?? EMPTY_FOLLOW_UP_QUEUE), queuedItem],
       }));
-
-      const turnLabel = retryableFailure.turnKind === "review" ? "review" : "compact";
-      toastManager.add({
-        type: "info",
-        title: "Queued follow-up",
-        description: `Codex is running a ${turnLabel} turn, so Cafe Code will send this after the active turn finishes.`,
-      });
     }
   }, [activeThread, removePendingSteerDispatch, setFollowUpQueueByThreadId]);
   useEffect(() => {
@@ -3972,10 +4066,7 @@ export default function ChatView(props: ChatViewProps) {
     scheduleComposerFocus();
   };
 
-  const enqueueFollowUpSnapshot = (
-    snapshot: ComposerSendSnapshot,
-    options?: { unsupportedSteerToast?: boolean },
-  ) => {
+  const enqueueFollowUpSnapshot = (snapshot: ComposerSendSnapshot) => {
     if (!activeThread) return;
     const queuedAt = new Date().toISOString();
     const item: FollowUpQueueItem = {
@@ -3994,14 +4085,6 @@ export default function ChatView(props: ChatViewProps) {
     setThreadError(activeThread.id, null);
     clearActiveComposerContent();
     scheduleComposerFocus();
-    if (options?.unsupportedSteerToast) {
-      toastManager.add({
-        type: "info",
-        title: "Queued follow-up",
-        description:
-          "Live steering is not available for the current turn, so Cafe Code will send this when the active turn finishes.",
-      });
-    }
   };
 
   const removeFollowUpQueueItem = (targetThreadId: ThreadId, itemId: string, revoke: boolean) => {
@@ -4192,7 +4275,7 @@ export default function ChatView(props: ChatViewProps) {
     if (!options?.queuedItem && sendInFlightRef.current) return;
     if (!activeProviderLiveSteerAvailable || phase !== "running") {
       if (!options?.queuedItem) {
-        enqueueFollowUpSnapshot(snapshot, { unsupportedSteerToast: true });
+        enqueueFollowUpSnapshot(snapshot);
       }
       return;
     }
@@ -4586,10 +4669,6 @@ export default function ChatView(props: ChatViewProps) {
       await onSend(e);
       return;
     }
-    if (delivery === "queue-unsupported") {
-      enqueueFollowUpSnapshot(snapshot, { unsupportedSteerToast: true });
-      return;
-    }
     if (delivery === "queue") {
       enqueueFollowUpSnapshot(snapshot);
       return;
@@ -4646,11 +4725,6 @@ export default function ChatView(props: ChatViewProps) {
       recordFollowUpQueueDebugAttempt("manual-interrupt", "thread-not-active", {
         threadId: item.threadId,
         itemId: item.id,
-      });
-      toastManager.add({
-        type: "info",
-        title: "Queued follow-up",
-        description: "Open this thread before interrupting its active turn.",
       });
       return;
     }
@@ -4716,15 +4790,9 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
 
-    toastManager.add({
-      type: "info",
-      title: "Queued follow-up",
-      description:
-        followUpQueuePhase === "running"
-          ? activeProviderLiveSteerAvailable
-            ? "Cafe Code is not ready to steer this queued message yet."
-            : "Cafe Code is not ready to interrupt this turn yet."
-          : "Cafe Code will send this queued message when it is ready.",
+    recordFollowUpQueueDebugAttempt("manual-activate", "queued-follow-up-not-ready", {
+      threadId: item.threadId,
+      itemId: item.id,
     });
   };
 

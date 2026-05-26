@@ -73,6 +73,15 @@ const BUFFERED_PROPOSED_PLAN_BY_ID_TTL = Duration.minutes(120);
 const PROCESSED_RUNTIME_EVENT_IDS_CACHE_CAPACITY = 100_000;
 const PROCESSED_RUNTIME_EVENT_IDS_TTL = Duration.minutes(120);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
+const STREAMED_MESSAGE_IDS_CACHE_CAPACITY = 20_000;
+const STREAMED_MESSAGE_IDS_TTL = Duration.minutes(120);
+// When the user enables assistant streaming, keep the durable projection close
+// to the provider's live stream. We still coalesce a small amount to avoid
+// rewriting SQLite rows for every tiny token, but this threshold must stay low
+// enough that Codex output does not appear as "first token, then whole
+// paragraph" when upstream emits many fine-grained deltas.
+const STREAMING_ASSISTANT_DELTA_FLUSH_CHARS = 48;
+const STREAMING_ASSISTANT_PUNCTUATION_FLUSH_REGEX = /[.!?。！？]\s*$/u;
 const STRICT_PROVIDER_LIFECYCLE_GUARD =
   readCafeCodeEnv(process.env, "CAFE_CODE_STRICT_PROVIDER_LIFECYCLE_GUARD") !== "0";
 
@@ -272,6 +281,32 @@ function buildContextWindowActivityPayload(
     return undefined;
   }
   return event.payload.usage;
+}
+
+function itemLifecycleActivitySummary(
+  payload: ProviderRuntimeEvent["payload"],
+  lifecycle: "started" | "completed",
+): string {
+  if (
+    typeof payload === "object" &&
+    payload !== null &&
+    "itemType" in payload &&
+    payload.itemType === "context_compaction"
+  ) {
+    return lifecycle === "started" ? "Context compaction started" : "Context compacted";
+  }
+
+  if (
+    typeof payload === "object" &&
+    payload !== null &&
+    "title" in payload &&
+    typeof payload.title === "string" &&
+    payload.title.trim().length > 0
+  ) {
+    return lifecycle === "started" ? `${payload.title} started` : payload.title;
+  }
+
+  return lifecycle === "started" ? "Tool started" : "Tool";
 }
 
 function normalizeRuntimeTurnState(
@@ -677,9 +712,11 @@ function runtimeEventToActivities(
           createdAt: event.createdAt,
           tone: "tool",
           kind: "tool.completed",
-          summary: event.payload.title ?? "Tool",
+          summary: itemLifecycleActivitySummary(event.payload, "completed"),
           payload: {
             itemType: event.payload.itemType,
+            ...(event.itemId !== undefined ? { itemId: event.itemId } : {}),
+            ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(sanitizedData !== undefined ? { data: sanitizedData } : {}),
           },
@@ -699,9 +736,11 @@ function runtimeEventToActivities(
           createdAt: event.createdAt,
           tone: "tool",
           kind: "tool.started",
-          summary: `${event.payload.title ?? "Tool"} started`,
+          summary: itemLifecycleActivitySummary(event.payload, "started"),
           payload: {
             itemType: event.payload.itemType,
+            ...(event.itemId !== undefined ? { itemId: event.itemId } : {}),
+            ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
@@ -734,6 +773,11 @@ const make = Effect.gen(function* () {
     capacity: BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_CACHE_CAPACITY,
     timeToLive: BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_TTL,
     lookup: () => Effect.succeed(""),
+  });
+  const streamedAssistantMessageIds = yield* Cache.make<MessageId, true>({
+    capacity: STREAMED_MESSAGE_IDS_CACHE_CAPACITY,
+    timeToLive: STREAMED_MESSAGE_IDS_TTL,
+    lookup: () => Effect.succeed(true),
   });
 
   const assistantSegmentStateByTurnKey = yield* Cache.make<string, AssistantSegmentState>({
@@ -940,6 +984,39 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  const appendStreamingAssistantText = (messageId: MessageId, delta: string) =>
+    Effect.gen(function* () {
+      const alreadyStreamed = yield* Cache.getOption(streamedAssistantMessageIds, messageId);
+      if (Option.isNone(alreadyStreamed)) {
+        // Match the Codex CLI's perceived responsiveness by projecting the
+        // first assistant bytes immediately, then coalesce following deltas
+        // before they cross Cafe's durable event/projection boundary. The
+        // app-server emits fine-grained token deltas intended for a live
+        // terminal stream; persisting each one rewrites the accumulated
+        // message row repeatedly and turns long answers into quadratic I/O.
+        yield* Cache.set(streamedAssistantMessageIds, messageId, true);
+        return delta;
+      }
+
+      const existingText = yield* Cache.getOption(bufferedAssistantTextByMessageId, messageId);
+      const nextText = Option.match(existingText, {
+        onNone: () => delta,
+        onSome: (text) => `${text}${delta}`,
+      });
+      if (
+        nextText.length >= STREAMING_ASSISTANT_DELTA_FLUSH_CHARS ||
+        nextText.length > MAX_BUFFERED_ASSISTANT_CHARS ||
+        delta.includes("\n") ||
+        STREAMING_ASSISTANT_PUNCTUATION_FLUSH_REGEX.test(delta)
+      ) {
+        yield* Cache.invalidate(bufferedAssistantTextByMessageId, messageId);
+        return nextText;
+      }
+
+      yield* Cache.set(bufferedAssistantTextByMessageId, messageId, nextText);
+      return "";
+    });
+
   const takeBufferedAssistantText = (messageId: MessageId) =>
     Cache.getOption(bufferedAssistantTextByMessageId, messageId).pipe(
       Effect.flatMap((existingText) =>
@@ -977,7 +1054,13 @@ const make = Effect.gen(function* () {
     Cache.invalidate(bufferedProposedPlanById, planId);
 
   const clearAssistantMessageState = (messageId: MessageId) =>
-    clearBufferedAssistantText(messageId);
+    Effect.all(
+      [
+        clearBufferedAssistantText(messageId),
+        Cache.invalidate(streamedAssistantMessageIds, messageId),
+      ],
+      { discard: true },
+    );
 
   const flushBufferedAssistantMessage = (input: {
     event: ProviderRuntimeEvent;
@@ -1451,6 +1534,15 @@ const make = Effect.gen(function* () {
         !conflictsWithActiveTurn &&
         runtimeEventCarriesActiveTurnWork(event) &&
         eventMatchesTrackedActiveTurn;
+      // Once turn.started has made the provider turn active, token/tool
+      // notifications are runtime progress facts, not session heartbeats that
+      // need another durable thread.session-set. Writing a session-set for
+      // every Codex token made long streams dominate SQLite and renderer
+      // projection work, unlike the upstream CLI which consumes those deltas
+      // directly without persisting per-token lifecycle state.
+      const shouldRefreshSessionForActiveTurnWork =
+        eventCarriesActiveTurnWork &&
+        (thread.session?.status !== "running" || (thread.session?.lastError ?? null) !== null);
 
       if (
         event.type === "session.started" ||
@@ -1458,7 +1550,7 @@ const make = Effect.gen(function* () {
         event.type === "session.exited" ||
         event.type === "thread.started" ||
         sessionRelevantThreadState !== undefined ||
-        eventCarriesActiveTurnWork ||
+        shouldRefreshSessionForActiveTurnWork ||
         event.type === "turn.started" ||
         event.type === "turn.aborted" ||
         event.type === "turn.completed"
@@ -1475,7 +1567,7 @@ const make = Effect.gen(function* () {
         const nextActiveTurnId =
           event.type === "turn.started"
             ? (eventTurnId ?? null)
-            : eventCarriesActiveTurnWork
+            : shouldRefreshSessionForActiveTurnWork
               ? (eventTurnId ?? null)
               : event.type === "thread.state.changed"
                 ? sessionRelevantThreadState === "active"
@@ -1636,15 +1728,21 @@ const make = Effect.gen(function* () {
             });
           }
         } else {
-          yield* orchestrationEngine.dispatch({
-            type: "thread.message.assistant.delta",
-            commandId: providerCommandId(event, "assistant-delta", assistantMessageId),
-            threadId: thread.id,
-            messageId: assistantMessageId,
-            delta: assistantDelta,
-            ...(turnId ? { turnId } : {}),
-            createdAt: now,
-          });
+          const streamingChunk = yield* appendStreamingAssistantText(
+            assistantMessageId,
+            assistantDelta,
+          );
+          if (streamingChunk.length > 0) {
+            yield* orchestrationEngine.dispatch({
+              type: "thread.message.assistant.delta",
+              commandId: providerCommandId(event, "assistant-delta", assistantMessageId),
+              threadId: thread.id,
+              messageId: assistantMessageId,
+              delta: streamingChunk,
+              ...(turnId ? { turnId } : {}),
+              createdAt: now,
+            });
+          }
         }
       }
 
@@ -1654,23 +1752,16 @@ const make = Effect.gen(function* () {
           : undefined;
       if (pauseForUserTurnId) {
         const detailedThread = yield* getLoadedThreadDetail();
-        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
-          serverSettingsService.getSettings,
-          (settings) => (settings.enableAssistantStreaming ? "streaming" : "buffered"),
-        );
-        const flushedMessageIds =
-          assistantDeliveryMode === "buffered"
-            ? yield* flushBufferedAssistantMessagesForTurn({
-                event,
-                threadId: thread.id,
-                turnId: pauseForUserTurnId,
-                createdAt: now,
-                commandTag:
-                  event.type === "request.opened"
-                    ? "assistant-delta-flush-on-request-opened"
-                    : "assistant-delta-flush-on-user-input-requested",
-              })
-            : new Set<MessageId>();
+        const flushedMessageIds = yield* flushBufferedAssistantMessagesForTurn({
+          event,
+          threadId: thread.id,
+          turnId: pauseForUserTurnId,
+          createdAt: now,
+          commandTag:
+            event.type === "request.opened"
+              ? "assistant-delta-flush-on-request-opened"
+              : "assistant-delta-flush-on-user-input-requested",
+        });
         yield* finalizeActiveAssistantSegmentForTurn({
           event,
           threadId: thread.id,

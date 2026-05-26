@@ -708,6 +708,171 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-diff-completes-
   },
 );
 
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-terminal-session-replay-")))(
+  "OrchestrationProjectionPipeline",
+  (it) => {
+    it.effect("does not reopen a terminal turn from a late running session snapshot", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-terminal-session-replay");
+        const turnId = TurnId.make("turn-terminal-session-replay");
+        const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+          eventStore
+            .append(event)
+            .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+        yield* appendAndProject({
+          type: "project.created",
+          eventId: EventId.make("evt-terminal-replay-project"),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make("project-terminal-replay"),
+          occurredAt: "2026-05-24T17:00:00.000Z",
+          commandId: CommandId.make("cmd-terminal-replay-project"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-terminal-replay-project"),
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make("project-terminal-replay"),
+            title: "Project",
+            workspaceRoot: "/tmp/project-terminal-replay",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-05-24T17:00:00.000Z",
+            updatedAt: "2026-05-24T17:00:00.000Z",
+          },
+        });
+        yield* appendAndProject({
+          type: "thread.created",
+          eventId: EventId.make("evt-terminal-replay-thread"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-24T17:00:01.000Z",
+          commandId: CommandId.make("cmd-terminal-replay-thread"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-terminal-replay-thread"),
+          metadata: {},
+          payload: {
+            threadId,
+            projectId: ProjectId.make("project-terminal-replay"),
+            title: "Thread",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: "2026-05-24T17:00:01.000Z",
+            updatedAt: "2026-05-24T17:00:01.000Z",
+          },
+        });
+        yield* appendAndProject({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-terminal-replay-running"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-24T17:00:02.000Z",
+          commandId: CommandId.make("cmd-terminal-replay-running"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-terminal-replay-running"),
+          metadata: {},
+          payload: {
+            threadId,
+            session: {
+              threadId,
+              status: "running",
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeMode: "full-access",
+              activeTurnId: turnId,
+              lastError: null,
+              updatedAt: "2026-05-24T17:00:02.000Z",
+            },
+          },
+        });
+        yield* appendAndProject({
+          type: "thread.turn-diff-completed",
+          eventId: EventId.make("evt-terminal-replay-diff"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-24T17:00:03.000Z",
+          commandId: CommandId.make("cmd-terminal-replay-diff"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-terminal-replay-diff"),
+          metadata: {},
+          payload: {
+            threadId,
+            turnId,
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make("refs/t3/checkpoints/terminal-replay/turn/1"),
+            status: "ready",
+            files: [],
+            assistantMessageId: MessageId.make("assistant-terminal-replay"),
+            completedAt: "2026-05-24T17:00:03.000Z",
+          },
+        });
+        yield* appendAndProject({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-terminal-replay-late-running"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-24T17:00:04.500Z",
+          commandId: CommandId.make("cmd-terminal-replay-late-running"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-terminal-replay-late-running"),
+          metadata: {},
+          payload: {
+            threadId,
+            session: {
+              threadId,
+              status: "running",
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeMode: "full-access",
+              activeTurnId: turnId,
+              lastError: null,
+              updatedAt: "2026-05-24T17:00:04.500Z",
+            },
+          },
+        });
+
+        const rows = yield* sql<{
+          readonly sessionStatus: string;
+          readonly activeTurnId: string | null;
+          readonly turnState: string;
+          readonly completedAt: string | null;
+          readonly checkpointStatus: string | null;
+        }>`
+          SELECT
+            sessions.status AS "sessionStatus",
+            sessions.active_turn_id AS "activeTurnId",
+            turns.state AS "turnState",
+            turns.completed_at AS "completedAt",
+            turns.checkpoint_status AS "checkpointStatus"
+          FROM projection_thread_sessions sessions
+          JOIN projection_turns turns
+            ON turns.thread_id = sessions.thread_id
+           AND turns.turn_id = ${turnId}
+          WHERE sessions.thread_id = ${threadId}
+        `;
+
+        assert.deepEqual(rows, [
+          {
+            sessionStatus: "ready",
+            activeTurnId: null,
+            turnState: "completed",
+            completedAt: "2026-05-24T17:00:03.000Z",
+            checkpointStatus: "ready",
+          },
+        ]);
+      }),
+    );
+  },
+);
+
 it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-thread-move-")))(
   "OrchestrationProjectionPipeline",
   (it) => {

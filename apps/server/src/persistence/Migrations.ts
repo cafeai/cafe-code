@@ -58,6 +58,10 @@ import Migration0042 from "./Migrations/042_ProviderDaemonEventJournalOwnerKey.t
 import Migration0043 from "./Migrations/043_ReconcileTerminalActiveThreadSessions.ts";
 import Migration0044 from "./Migrations/044_ReconcileStaleActiveTurnPointers.ts";
 import Migration0045 from "./Migrations/045_CloseTerminalTurnStreamingMessages.ts";
+import Migration0046 from "./Migrations/046_PruneProviderDaemonEventJournalAndStreamingMessages.ts";
+import Migration0047 from "./Migrations/047_RecloseLateTerminalTurnStreamingMessages.ts";
+import Migration0048 from "./Migrations/048_CloseStaleNonLatestRunningTurns.ts";
+import Migration0049 from "./Migrations/049_RecloseReopenedTerminalTurns.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -115,6 +119,10 @@ export const migrationEntries = [
   [43, "ReconcileTerminalActiveThreadSessions", Migration0043],
   [44, "ReconcileStaleActiveTurnPointers", Migration0044],
   [45, "CloseTerminalTurnStreamingMessages", Migration0045],
+  [46, "PruneProviderDaemonEventJournalAndStreamingMessages", Migration0046],
+  [47, "RecloseLateTerminalTurnStreamingMessages", Migration0047],
+  [48, "CloseStaleNonLatestRunningTurns", Migration0048],
+  [49, "RecloseReopenedTerminalTurns", Migration0049],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

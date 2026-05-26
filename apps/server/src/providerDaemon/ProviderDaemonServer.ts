@@ -326,6 +326,12 @@ interface TurnTimingAccumulator {
   assistantCompletedAt?: string;
   turnCompletedAt?: string;
   lastEventAt?: string;
+  lastAssistantDeltaAt?: string;
+  firstAssistantDeltaTextBytes?: number;
+  assistantDeltaCount: number;
+  assistantDeltaTextBytes: number;
+  largestAssistantDeltaTextBytes: number;
+  maxAssistantDeltaGapMs?: number;
   transportRetryCount: number;
   responseStreamDisconnectedCount: number;
   runtimeWarningCount: number;
@@ -355,6 +361,9 @@ function buildTurnTimingDiagnostics(
     const created: TurnTimingAccumulator = {
       threadId,
       turnId,
+      assistantDeltaCount: 0,
+      assistantDeltaTextBytes: 0,
+      largestAssistantDeltaTextBytes: 0,
       transportRetryCount: 0,
       responseStreamDisconnectedCount: 0,
       runtimeWarningCount: 0,
@@ -401,6 +410,24 @@ function buildTurnTimingDiagnostics(
 
     if (record.event.type === "content.delta" && payload.streamKind === "assistant_text") {
       turn.firstAssistantDeltaAt = turn.firstAssistantDeltaAt ?? eventTime;
+      const delta = readString(payload.delta) ?? "";
+      const deltaBytes = Buffer.byteLength(delta, "utf8");
+      const previousAssistantDeltaAt = turn.lastAssistantDeltaAt;
+      turn.lastAssistantDeltaAt = eventTime;
+      turn.assistantDeltaCount += 1;
+      turn.assistantDeltaTextBytes += deltaBytes;
+      turn.largestAssistantDeltaTextBytes = Math.max(
+        turn.largestAssistantDeltaTextBytes,
+        deltaBytes,
+      );
+      turn.firstAssistantDeltaTextBytes ??= deltaBytes;
+      const assistantDeltaGapMs = durationBetweenIso(previousAssistantDeltaAt, eventTime);
+      if (assistantDeltaGapMs !== undefined) {
+        turn.maxAssistantDeltaGapMs = Math.max(
+          turn.maxAssistantDeltaGapMs ?? 0,
+          assistantDeltaGapMs,
+        );
+      }
     }
 
     if (record.event.type === "item.completed" && payload.itemType === "assistant_message") {
@@ -451,6 +478,9 @@ function buildTurnTimingDiagnostics(
         responseStreamDisconnectedCount: turn.responseStreamDisconnectedCount,
         runtimeWarningCount: turn.runtimeWarningCount,
         runtimeErrorCount: turn.runtimeErrorCount,
+        assistantDeltaCount: turn.assistantDeltaCount,
+        assistantDeltaTextBytes: turn.assistantDeltaTextBytes,
+        largestAssistantDeltaTextBytes: turn.largestAssistantDeltaTextBytes,
       };
       if (turn.acceptedAt) diagnostic.acceptedAt = turn.acceptedAt;
       if (turn.turnStartedAt) diagnostic.turnStartedAt = turn.turnStartedAt;
@@ -459,6 +489,15 @@ function buildTurnTimingDiagnostics(
       }
       if (turn.firstAssistantDeltaAt) {
         diagnostic.firstAssistantDeltaAt = turn.firstAssistantDeltaAt;
+      }
+      if (turn.lastAssistantDeltaAt) {
+        diagnostic.lastAssistantDeltaAt = turn.lastAssistantDeltaAt;
+      }
+      if (turn.firstAssistantDeltaTextBytes !== undefined) {
+        diagnostic.firstAssistantDeltaTextBytes = turn.firstAssistantDeltaTextBytes;
+      }
+      if (turn.maxAssistantDeltaGapMs !== undefined) {
+        diagnostic.maxAssistantDeltaGapMs = turn.maxAssistantDeltaGapMs;
       }
       if (turn.assistantCompletedAt) diagnostic.assistantCompletedAt = turn.assistantCompletedAt;
       if (turn.turnCompletedAt) diagnostic.turnCompletedAt = turn.turnCompletedAt;

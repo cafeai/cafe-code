@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { describe, it } from "vitest";
 import { ProviderInstanceId, ProviderItemId, ThreadId, TurnId } from "@cafecode/contracts";
+import { CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT } from "@cafecode/shared/codexCompaction";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 
@@ -19,8 +20,12 @@ import {
   buildTurnSteerParams,
   isRecoverableThreadResumeError,
   isCodexContextCompactionItemType,
+  isCodexUserMessageItemType,
   openCodexThread,
+  readCodexSteerExpectedTurnMismatchActualTurnId,
+  selectCodexActiveSnapshotTurn,
   updateCodexActiveContextCompactions,
+  updateCodexPendingSteerProcessingFromNotification,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
@@ -233,6 +238,26 @@ describe("buildTurnSteerParams", () => {
   });
 });
 
+describe("readCodexSteerExpectedTurnMismatchActualTurnId", () => {
+  it("extracts the app-server reported active turn id from upstream mismatch errors", () => {
+    const actualTurnId = readCodexSteerExpectedTurnMismatchActualTurnId(
+      CodexErrors.CodexAppServerRequestError.invalidRequest(
+        "expected active turn id `turn-old` but found `turn-new`",
+      ),
+    );
+
+    assert.equal(actualTurnId, "turn-new");
+  });
+
+  it("ignores unrelated turn/steer request errors", () => {
+    const actualTurnId = readCodexSteerExpectedTurnMismatchActualTurnId(
+      CodexErrors.CodexAppServerRequestError.invalidRequest("cannot steer a review turn"),
+    );
+
+    assert.equal(actualTurnId, undefined);
+  });
+});
+
 describe("Codex context compaction steer guard", () => {
   it("recognizes upstream context-compaction item type spellings", () => {
     assert.equal(isCodexContextCompactionItemType("contextCompaction"), true);
@@ -325,6 +350,93 @@ describe("Codex context compaction steer guard", () => {
         contextCompactionStartedAt: "2026-05-26T00:00:00.000Z",
       },
     });
+  });
+});
+
+describe("Codex steer processing diagnostics", () => {
+  it("recognizes upstream user-message item type spellings", () => {
+    assert.equal(isCodexUserMessageItemType("userMessage"), true);
+    assert.equal(isCodexUserMessageItemType("user_message"), true);
+    assert.equal(isCodexUserMessageItemType("user-message"), true);
+    assert.equal(isCodexUserMessageItemType("commandExecution"), false);
+    assert.equal(isCodexUserMessageItemType(undefined), false);
+  });
+
+  it("marks the oldest unprocessed steer when Codex emits the injected user message item", () => {
+    const turnId = TurnId.make("turn-active");
+    const first = {
+      steerId: "steer-1",
+      providerThreadId: "provider-thread-1",
+      turnId,
+      requestedAt: "2026-05-26T00:00:00.000Z",
+      acknowledgedAt: "2026-05-26T00:00:00.100Z",
+      acknowledgedAtMs: 100,
+      ackLatencyMs: 100,
+      promptByteLength: 10,
+      attachmentCount: 0,
+      warningCount: 0,
+    };
+    const second = {
+      ...first,
+      steerId: "steer-2",
+      requestedAt: "2026-05-26T00:00:02.000Z",
+      acknowledgedAt: "2026-05-26T00:00:02.100Z",
+      acknowledgedAtMs: 2_100,
+    };
+
+    const { pending, next } = updateCodexPendingSteerProcessingFromNotification(
+      new Map([
+        [first.steerId, first],
+        [second.steerId, second],
+      ]),
+      {
+        method: "item/started",
+        providerThreadId: "provider-thread-1",
+        turnId,
+        itemId: ProviderItemId.make("user-message-1"),
+        itemType: "userMessage",
+        observedAt: "2026-05-26T00:00:03.000Z",
+        observedAtMs: 3_000,
+      },
+    );
+
+    assert.equal(pending?.steerId, "steer-1");
+    assert.equal(pending?.providerUserMessageItemId, "user-message-1");
+    assert.equal(pending?.providerUserMessageMethod, "item/started");
+    assert.equal(pending?.ackToProviderItemMs, 2_900);
+    assert.equal(next.get("steer-2")?.processedAt, undefined);
+  });
+
+  it("ignores non-user-message notifications when tracking steer processing", () => {
+    const turnId = TurnId.make("turn-active");
+    const pendingSteer = {
+      steerId: "steer-1",
+      providerThreadId: "provider-thread-1",
+      turnId,
+      requestedAt: "2026-05-26T00:00:00.000Z",
+      acknowledgedAt: "2026-05-26T00:00:00.000Z",
+      acknowledgedAtMs: 0,
+      ackLatencyMs: 0,
+      promptByteLength: 10,
+      attachmentCount: 0,
+      warningCount: 0,
+    };
+
+    const result = updateCodexPendingSteerProcessingFromNotification(
+      new Map([[pendingSteer.steerId, pendingSteer]]),
+      {
+        method: "item/started",
+        providerThreadId: "provider-thread-1",
+        turnId,
+        itemId: ProviderItemId.make("command-1"),
+        itemType: "commandExecution",
+        observedAt: "2026-05-26T00:00:03.000Z",
+        observedAtMs: 3_000,
+      },
+    );
+
+    assert.equal(result.pending, undefined);
+    assert.equal(result.next.get("steer-1")?.processedAt, undefined);
   });
 });
 
@@ -515,6 +627,61 @@ describe("buildCodexThreadSnapshotBackfillEvents", () => {
   });
 });
 
+describe("selectCodexActiveSnapshotTurn", () => {
+  it("restores only an in-progress Codex turn from a resumed thread snapshot", () => {
+    const activeTurn = selectCodexActiveSnapshotTurn({
+      id: "provider-thread-1",
+      status: { type: "active", activeFlags: [] },
+      turns: [
+        {
+          id: "turn-completed",
+          status: "completed",
+          items: [],
+        },
+        {
+          id: "turn-running",
+          status: "inProgress",
+          items: [],
+        },
+      ],
+    });
+
+    assert.equal(activeTurn?.id, "turn-running");
+  });
+
+  it("does not restore stale active state when thread/read has no in-progress turn", () => {
+    const activeTurn = selectCodexActiveSnapshotTurn({
+      id: "provider-thread-1",
+      status: { type: "active", activeFlags: [] },
+      turns: [
+        {
+          id: "turn-completed",
+          status: "completed",
+          items: [],
+        },
+      ],
+    });
+
+    assert.equal(activeTurn, undefined);
+  });
+
+  it("does not restore active state from an idle Codex thread snapshot", () => {
+    const activeTurn = selectCodexActiveSnapshotTurn({
+      id: "provider-thread-1",
+      status: { type: "idle" },
+      turns: [
+        {
+          id: "turn-completed",
+          status: "completed",
+          items: [],
+        },
+      ],
+    });
+
+    assert.equal(activeTurn, undefined);
+  });
+});
+
 describe("openCodexThread", () => {
   it("falls back to thread/start when resume fails recoverably", async () => {
     const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
@@ -554,6 +721,50 @@ describe("openCodexThread", () => {
       calls.map((call) => call.method),
       ["thread/resume", "thread/start"],
     );
+    for (const call of calls) {
+      const payload = call.payload as { readonly config?: Record<string, unknown> };
+      assert.deepStrictEqual(payload.config, {
+        model_auto_compact_token_limit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
+        model_auto_compact_token_limit_scope: "total",
+      });
+    }
+  });
+
+  it("preserves workspace-write roots alongside Codex auto-compaction overrides", async () => {
+    const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+    const client = {
+      request: <M extends "thread/start" | "thread/resume">(
+        method: M,
+        payload: CodexRpc.ClientRequestParamsByMethod[M],
+      ) => {
+        calls.push({ method, payload });
+        return Effect.succeed(
+          makeThreadOpenResponse("fresh-thread") as CodexRpc.ClientRequestResponsesByMethod[M],
+        );
+      },
+    };
+
+    await Effect.runPromise(
+      openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "auto-accept-edits",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: undefined,
+        additionalDirectories: ["/tmp/extra"],
+      }),
+    );
+
+    const payload = calls[0]?.payload as { readonly config?: Record<string, unknown> };
+    assert.deepStrictEqual(payload.config, {
+      model_auto_compact_token_limit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
+      model_auto_compact_token_limit_scope: "total",
+      sandbox_workspace_write: {
+        writable_roots: ["/tmp/extra"],
+      },
+    });
   });
 
   it("propagates non-recoverable resume failures", async () => {

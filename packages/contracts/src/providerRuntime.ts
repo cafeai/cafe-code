@@ -109,6 +109,7 @@ export const TOOL_LIFECYCLE_ITEM_TYPES = [
   "collab_agent_tool_call",
   "web_search",
   "image_view",
+  "context_compaction",
 ] as const;
 
 export const ToolLifecycleItemType = Schema.Literals(TOOL_LIFECYCLE_ITEM_TYPES);
@@ -126,7 +127,6 @@ export const CanonicalItemType = Schema.Literals([
   ...TOOL_LIFECYCLE_ITEM_TYPES,
   "review_entered",
   "review_exited",
-  "context_compaction",
   "error",
   "unknown",
 ]);
@@ -319,6 +319,7 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
   toolUses: Schema.optional(NonNegativeInt),
   durationMs: Schema.optional(NonNegativeInt),
   compactsAutomatically: Schema.optional(Schema.Boolean),
+  autoCompactTokenLimit: Schema.optional(PositiveInt),
 });
 export type ThreadTokenUsageSnapshot = typeof ThreadTokenUsageSnapshot.Type;
 

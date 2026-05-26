@@ -5,8 +5,10 @@ import {
   type ProviderRuntimeEvent as ProviderRuntimeEventValue,
 } from "@cafecode/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 const encodeProviderRuntimeEventJson = Schema.encodeSync(
@@ -94,6 +96,12 @@ function normalizeOwnerKey(ownerKey: string | undefined): string {
   return normalized.length === 0 ? "provider-daemon" : normalized;
 }
 
+const PERSISTENT_JOURNAL_PRUNE_INTERVAL = 1_000;
+const PERSISTENT_JOURNAL_PRUNE_BATCH_SIZE = 10_000;
+const PERSISTENT_JOURNAL_PRUNE_BATCH_PAUSE_MS = 25;
+const PERSISTENT_JOURNAL_STARTUP_PRUNE_DELAY_MS = 5_000;
+const PROVIDER_DAEMON_EVENT_ID_INDEX_NAME = "idx_provider_daemon_events_owner_event_id";
+
 interface PersistedEventRow {
   readonly cursor: number;
   readonly emittedAt: string;
@@ -133,15 +141,104 @@ function rowToRecord(row: PersistedEventRow): ProviderDaemonEventRecord {
   };
 }
 
+function runtimeEventId(event: ProviderRuntimeEventValue): string {
+  return String(event.eventId);
+}
+
 export const makePersistentProviderDaemonEventJournal = (options?: {
   readonly capacity?: number;
   readonly ownerKey?: string;
-}): Effect.Effect<ProviderDaemonPersistentEventJournal, never, SqlClient.SqlClient> =>
+  readonly startupPruneDelayMs?: number;
+}): Effect.Effect<ProviderDaemonPersistentEventJournal, never, Scope.Scope | SqlClient.SqlClient> =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const capacity = Math.max(1, Math.trunc(options?.capacity ?? 50_000));
+    const pruneInterval =
+      capacity <= PERSISTENT_JOURNAL_PRUNE_INTERVAL ? 1 : PERSISTENT_JOURNAL_PRUNE_INTERVAL;
+    const startupPruneDelayMs = Math.max(
+      0,
+      Math.trunc(options?.startupPruneDelayMs ?? PERSISTENT_JOURNAL_STARTUP_PRUNE_DELAY_MS),
+    );
     const ownerKey = normalizeOwnerKey(options?.ownerKey);
     const listeners = new Set<(record: ProviderDaemonEventRecord) => void>();
+    let eventsSincePrune = 0;
+    let eventIdIndexReady = false;
+
+    const refreshEventIdIndexState = Effect.gen(function* () {
+      const rows = (yield* sql`
+        SELECT 1 AS "exists"
+        FROM sqlite_master
+        WHERE type = 'index'
+          AND name = ${PROVIDER_DAEMON_EVENT_ID_INDEX_NAME}
+        LIMIT 1
+      `.pipe(Effect.orDie)) as unknown as ReadonlyArray<{ readonly exists: number }>;
+      eventIdIndexReady = rows.length > 0;
+    });
+
+    yield* refreshEventIdIndexState;
+
+    const ensureEventIdIndex = Effect.fn("ProviderDaemonPersistentEventJournal.ensureEventIdIndex")(
+      function* () {
+        // Build this after startup pruning rather than as a migration. On large
+        // inherited journals, expression-index creation over every historical
+        // event can exceed the desktop daemon readiness deadline; after pruning,
+        // the index is small and lets restart replay dedupe by canonical eventId.
+        yield* sql`
+          CREATE INDEX IF NOT EXISTS idx_provider_daemon_events_owner_event_id
+          ON provider_daemon_events(owner_key, json_extract(event_json, '$.eventId'))
+        `.pipe(Effect.orDie);
+        eventIdIndexReady = true;
+      },
+    );
+
+    const pruneToCapacity = Effect.fn("ProviderDaemonPersistentEventJournal.pruneToCapacity")(
+      function* () {
+        // The in-memory journal has always pruned itself, but the durable journal
+        // originally only limited replay queries. That let SQLite accumulate
+        // every provider runtime event forever, which is not how the Codex CLI
+        // keeps its live session state bounded. Keep the newest `capacity`
+        // events per runtime owner and delete older rows from the same owner.
+        const boundaryRows = (yield* sql`
+          SELECT cursor
+          FROM provider_daemon_events
+          WHERE owner_key = ${ownerKey}
+          ORDER BY cursor DESC
+          LIMIT 1 OFFSET ${capacity - 1}
+        `.pipe(Effect.orDie)) as unknown as ReadonlyArray<{ readonly cursor: number }>;
+        const oldestRetainedCursor = normalizeSqlNullableNumber(boundaryRows[0]?.cursor);
+        if (oldestRetainedCursor === null) {
+          return;
+        }
+
+        let deletedCount = PERSISTENT_JOURNAL_PRUNE_BATCH_SIZE;
+        while (deletedCount >= PERSISTENT_JOURNAL_PRUNE_BATCH_SIZE) {
+          const deletedRows = (yield* sql`
+            DELETE FROM provider_daemon_events
+            WHERE cursor IN (
+              SELECT cursor
+              FROM provider_daemon_events
+              WHERE owner_key = ${ownerKey}
+                AND cursor < ${oldestRetainedCursor}
+              ORDER BY cursor ASC
+              LIMIT ${PERSISTENT_JOURNAL_PRUNE_BATCH_SIZE}
+            )
+            RETURNING cursor
+          `.pipe(Effect.orDie)) as unknown as ReadonlyArray<{ readonly cursor: number }>;
+          deletedCount = deletedRows.length;
+          if (deletedCount >= PERSISTENT_JOURNAL_PRUNE_BATCH_SIZE) {
+            yield* Effect.sleep(Duration.millis(PERSISTENT_JOURNAL_PRUNE_BATCH_PAUSE_MS));
+          }
+        }
+      },
+    );
+
+    yield* Effect.sleep(Duration.millis(startupPruneDelayMs)).pipe(
+      Effect.andThen(pruneToCapacity()),
+      Effect.andThen(ensureEventIdIndex()),
+      Effect.ignoreCause({ log: true }),
+      Effect.forkScoped,
+      Effect.asVoid,
+    );
 
     const replayAfter = (cursor: number): Effect.Effect<ReadonlyArray<ProviderDaemonEventRecord>> =>
       Effect.gen(function* () {
@@ -186,6 +283,25 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
 
     const publish = (event: ProviderRuntimeEventValue): Effect.Effect<ProviderDaemonEventRecord> =>
       Effect.gen(function* () {
+        const eventId = runtimeEventId(event);
+        if (eventIdIndexReady) {
+          const existingRows = (yield* sql`
+            SELECT
+              cursor,
+              emitted_at AS "emittedAt",
+              event_json AS "eventJson"
+            FROM provider_daemon_events
+            WHERE owner_key = ${ownerKey}
+              AND json_extract(event_json, '$.eventId') = ${eventId}
+            ORDER BY cursor DESC
+            LIMIT 1
+          `.pipe(Effect.orDie)) as unknown as ReadonlyArray<PersistedEventRow>;
+          const existingRow = existingRows[0];
+          if (existingRow !== undefined) {
+            return rowToRecord(existingRow);
+          }
+        }
+
         const emittedAt = DateTime.formatIso(yield* DateTime.now);
         const rows = (yield* sql`
           INSERT INTO provider_daemon_events (
@@ -210,6 +326,11 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
         const record = rowToRecord(row);
         for (const listener of listeners) {
           listener(record);
+        }
+        eventsSincePrune += 1;
+        if (eventsSincePrune >= pruneInterval) {
+          eventsSincePrune = 0;
+          yield* pruneToCapacity();
         }
         return record;
       });

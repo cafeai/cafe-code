@@ -104,7 +104,11 @@ export function ContextWindowMeter(props: { usage: ContextWindowSnapshot }) {
           ) : null}
           {usage.compactsAutomatically ? (
             <div className="text-xs text-muted-foreground">
-              Automatically compacts its context when needed.
+              {usage.autoCompactTokenLimit
+                ? `Automatically compacts around ${formatContextWindowTokens(
+                    usage.autoCompactTokenLimit,
+                  )} tokens.`
+                : "Automatically compacts its context when needed."}
             </div>
           ) : null}
         </div>

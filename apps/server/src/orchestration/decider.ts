@@ -545,12 +545,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      if (targetThread.session?.status !== "running") {
-        return yield* new OrchestrationCommandInvariantError({
-          commandType: command.type,
-          detail: `Thread '${command.threadId}' does not have a running provider turn to steer.`,
-        });
-      }
+      const activeTurnId =
+        targetThread.session?.status === "running" ? targetThread.session.activeTurnId : null;
       const userMessageEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...withEventBase({
           aggregateKind: "thread",
@@ -565,12 +561,33 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           role: "user",
           text: command.message.text,
           attachments: command.message.attachments,
-          turnId: targetThread.session.activeTurnId,
+          turnId: activeTurnId,
           streaming: false,
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },
       };
+      if (activeTurnId === null) {
+        const turnStartRequestedEvent: Omit<OrchestrationEvent, "sequence"> = {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          }),
+          causationEventId: userMessageEvent.eventId,
+          type: "thread.turn-start-requested",
+          payload: {
+            threadId: command.threadId,
+            messageId: command.message.messageId,
+            modelSelection: targetThread.modelSelection,
+            runtimeMode: targetThread.runtimeMode,
+            interactionMode: targetThread.interactionMode,
+            createdAt: command.createdAt,
+          },
+        };
+        return [userMessageEvent, turnStartRequestedEvent];
+      }
       const turnSteerRequestedEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...withEventBase({
           aggregateKind: "thread",
