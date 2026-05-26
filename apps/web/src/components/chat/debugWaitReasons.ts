@@ -39,18 +39,20 @@ const DEBUG_PRUNED_PRESSURE_FLAGS = new Set([
 
 export function deriveDebugWaitReasons(input: DebugWaitReasonInput): readonly string[] {
   const latestActivityKind = input.lifecycle?.latestActiveTurnActivity?.kind ?? null;
+  const lifecyclePhase = input.lifecycle?.phase ?? null;
+  const providerTurnIsRunning = lifecyclePhase === "running" || input.activeTurnInProgress;
   const pressureFlags = input.performance?.pressureFlags ?? [];
   const lastActivityAgeMs = input.performance?.latency?.lastActivityAgeMs ?? null;
   const reasons = [
-    latestActivityKind !== null && ACTIVE_TOOL_ACTIVITY_KINDS.has(latestActivityKind)
+    providerTurnIsRunning &&
+    latestActivityKind !== null &&
+    ACTIVE_TOOL_ACTIVITY_KINDS.has(latestActivityKind)
       ? "provider-running-tool"
       : null,
-    input.lifecycle?.phase === "running" && (input.lifecycle.streamingMessageCount ?? 0) > 0
+    lifecyclePhase === "running" && (input.lifecycle?.streamingMessageCount ?? 0) > 0
       ? "provider-streaming"
       : null,
-    input.lifecycle?.phase === "running" &&
-    lastActivityAgeMs !== null &&
-    lastActivityAgeMs >= 60_000
+    lifecyclePhase === "running" && lastActivityAgeMs !== null && lastActivityAgeMs >= 60_000
       ? "provider-awaiting-terminal-event"
       : null,
     input.activeSteeringFollowUpCount > 0 && input.followUpQueueVisibleWorking

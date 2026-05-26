@@ -123,6 +123,9 @@ const lastAppliedProjectionVersionByEnvironment = new Map<
   }
 >();
 const lastAppliedThreadDetailSequenceByKey = new Map<string, number>();
+const pendingThreadDetailEventsByEnvironment = new Map<EnvironmentId, OrchestrationEvent[]>();
+const pendingThreadDetailSequenceByKey = new Map<string, number>();
+let pendingThreadDetailFlushTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
 let activeService: EnvironmentServiceState | null = null;
 let needsProviderInvalidation = false;
@@ -138,6 +141,7 @@ let lastBrowserResumeReconnectAt = Number.NEGATIVE_INFINITY;
 // - Capacity eviction only targets idle cached subscriptions.
 const THREAD_DETAIL_SUBSCRIPTION_IDLE_EVICTION_MS = 15 * 60 * 1000;
 const MAX_CACHED_THREAD_DETAIL_SUBSCRIPTIONS = 32;
+const THREAD_DETAIL_UI_EVENT_BATCH_MS = 16;
 const BROWSER_RESUME_RECONNECT_COOLDOWN_MS = 2_000;
 const INITIAL_SERVER_CONFIG_SNAPSHOT_WAIT_MS = 150;
 const NOOP = () => undefined;
@@ -306,6 +310,31 @@ function readLastAppliedThreadDetailSequence(
   );
 }
 
+function readPendingThreadDetailSequence(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+): number | null {
+  return (
+    pendingThreadDetailSequenceByKey.get(getThreadDetailSubscriptionKey(environmentId, threadId)) ??
+    null
+  );
+}
+
+function readLastAppliedOrPendingThreadDetailSequence(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+): number | null {
+  const applied = readLastAppliedThreadDetailSequence(environmentId, threadId);
+  const pending = readPendingThreadDetailSequence(environmentId, threadId);
+  if (applied === null) {
+    return pending;
+  }
+  if (pending === null) {
+    return applied;
+  }
+  return Math.max(applied, pending);
+}
+
 function shouldApplyThreadDetailSnapshot(input: {
   readonly current: number | null;
   readonly snapshot: Pick<OrchestrationThreadDetailSnapshot, "snapshotSequence">;
@@ -331,6 +360,100 @@ function markAppliedThreadDetailSequence(
     return;
   }
   lastAppliedThreadDetailSequenceByKey.set(key, sequence);
+}
+
+function scheduleThreadDetailEventFlush(): void {
+  if (pendingThreadDetailFlushTimeoutId !== null) {
+    return;
+  }
+
+  pendingThreadDetailFlushTimeoutId = setTimeout(() => {
+    pendingThreadDetailFlushTimeoutId = null;
+    flushPendingThreadDetailEvents();
+  }, THREAD_DETAIL_UI_EVENT_BATCH_MS);
+}
+
+function clearPendingThreadDetailEventsForEnvironment(environmentId: EnvironmentId): void {
+  pendingThreadDetailEventsByEnvironment.delete(environmentId);
+  const keyPrefix = `${environmentId}:`;
+  for (const key of Array.from(pendingThreadDetailSequenceByKey.keys())) {
+    if (key.startsWith(keyPrefix)) {
+      pendingThreadDetailSequenceByKey.delete(key);
+    }
+  }
+}
+
+function clearPendingThreadDetailEvents(): void {
+  if (pendingThreadDetailFlushTimeoutId !== null) {
+    clearTimeout(pendingThreadDetailFlushTimeoutId);
+    pendingThreadDetailFlushTimeoutId = null;
+  }
+  pendingThreadDetailEventsByEnvironment.clear();
+  pendingThreadDetailSequenceByKey.clear();
+}
+
+function enqueueThreadDetailEvent(event: OrchestrationEvent, environmentId: EnvironmentId): void {
+  if (event.aggregateKind !== "thread") {
+    applyRecoveredEventBatch([event], environmentId);
+    return;
+  }
+
+  const threadId = ThreadId.make(event.aggregateId);
+  const current = readLastAppliedOrPendingThreadDetailSequence(environmentId, threadId);
+  if (!shouldApplyThreadDetailEvent({ current, sequence: event.sequence })) {
+    return;
+  }
+
+  pendingThreadDetailSequenceByKey.set(
+    getThreadDetailSubscriptionKey(environmentId, threadId),
+    event.sequence,
+  );
+  const pendingEvents = pendingThreadDetailEventsByEnvironment.get(environmentId) ?? [];
+  pendingEvents.push(event);
+  pendingThreadDetailEventsByEnvironment.set(environmentId, pendingEvents);
+  scheduleThreadDetailEventFlush();
+}
+
+function flushPendingThreadDetailEvents(): void {
+  if (pendingThreadDetailEventsByEnvironment.size === 0) {
+    pendingThreadDetailSequenceByKey.clear();
+    return;
+  }
+
+  const batches = Array.from(pendingThreadDetailEventsByEnvironment.entries());
+  pendingThreadDetailEventsByEnvironment.clear();
+  pendingThreadDetailSequenceByKey.clear();
+
+  for (const [environmentId, events] of batches) {
+    const applicableEvents: OrchestrationEvent[] = [];
+    for (const event of events.toSorted((left, right) => left.sequence - right.sequence)) {
+      if (event.aggregateKind !== "thread") {
+        applicableEvents.push(event);
+        continue;
+      }
+
+      const threadId = ThreadId.make(event.aggregateId);
+      const current = readLastAppliedThreadDetailSequence(environmentId, threadId);
+      if (shouldApplyThreadDetailEvent({ current, sequence: event.sequence })) {
+        applicableEvents.push(event);
+      }
+    }
+
+    if (applicableEvents.length === 0) {
+      continue;
+    }
+
+    applyRecoveredEventBatch(applicableEvents, environmentId);
+    for (const event of applicableEvents) {
+      if (event.aggregateKind === "thread") {
+        markAppliedThreadDetailSequence(
+          environmentId,
+          ThreadId.make(event.aggregateId),
+          event.sequence,
+        );
+      }
+    }
+  }
 }
 
 function applyThreadDetailSnapshot(
@@ -934,7 +1057,7 @@ function setRuntimeError(environmentId: EnvironmentId, error: unknown) {
   });
 }
 
-function coalesceOrchestrationUiEvents(
+export function coalesceOrchestrationUiEvents(
   events: ReadonlyArray<OrchestrationEvent>,
 ): OrchestrationEvent[] {
   if (events.length < 2) {
@@ -948,7 +1071,9 @@ function coalesceOrchestrationUiEvents(
       previous?.type === "thread.message-sent" &&
       event.type === "thread.message-sent" &&
       previous.payload.threadId === event.payload.threadId &&
-      previous.payload.messageId === event.payload.messageId
+      previous.payload.messageId === event.payload.messageId &&
+      previous.payload.streaming &&
+      event.payload.streaming
     ) {
       coalesced[coalesced.length - 1] = {
         ...event,
@@ -1074,19 +1199,7 @@ export function applyEnvironmentThreadDetailEvent(
   event: OrchestrationEvent,
   environmentId: EnvironmentId,
 ) {
-  if (event.aggregateKind === "thread") {
-    const threadId = ThreadId.make(event.aggregateId);
-    const current = readLastAppliedThreadDetailSequence(environmentId, threadId);
-    if (!shouldApplyThreadDetailEvent({ current, sequence: event.sequence })) {
-      return;
-    }
-
-    applyRecoveredEventBatch([event], environmentId);
-    markAppliedThreadDetailSequence(environmentId, threadId, event.sequence);
-    return;
-  }
-
-  applyRecoveredEventBatch([event], environmentId);
+  enqueueThreadDetailEvent(event, environmentId);
 }
 
 function applyShellEvent(event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) {
@@ -1300,6 +1413,7 @@ async function removeConnection(environmentId: EnvironmentId): Promise<boolean> 
   }
 
   lastAppliedProjectionVersionByEnvironment.delete(environmentId);
+  clearPendingThreadDetailEventsForEnvironment(environmentId);
   environmentConnections.delete(environmentId);
   emitEnvironmentConnectionRegistryChange();
   detachThreadDetailSubscriptionsForEnvironment(environmentId);
@@ -1854,6 +1968,7 @@ export async function resetEnvironmentServiceForTests(): Promise<void> {
   lastBrowserResumeReconnectAt = Number.NEGATIVE_INFINITY;
   lastAppliedProjectionVersionByEnvironment.clear();
   lastAppliedThreadDetailSequenceByKey.clear();
+  clearPendingThreadDetailEvents();
   pendingSavedEnvironmentConnections.clear();
   for (const key of Array.from(threadDetailSubscriptions.keys())) {
     disposeThreadDetailSubscriptionByKey(key);

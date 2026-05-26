@@ -204,6 +204,8 @@ const DEBUG_PROVIDER_COMPLETION_BOUNDARY_LIMIT = 8;
 const DEBUG_INTERESTING_THREAD_LIMIT = 16;
 const DEBUG_THREAD_DETAIL_MESSAGE_LIMIT = 2_000;
 const DEBUG_THREAD_DETAIL_ACTIVITY_LIMIT = 500;
+const DEBUG_RENDERER_HEARTBEAT_INTERVAL_MS = 5_000;
+const DEBUG_RENDERER_SNAPSHOT_MIN_INTERVAL_MS = 250;
 const DEBUG_LARGE_THREAD_TEXT_CHARS = 1_000_000;
 const DEBUG_LARGE_ACTIVITY_PAYLOAD_CHARS = 1_000_000;
 const DEBUG_SECRET_REDACTIONS: ReadonlyArray<readonly [RegExp, string]> = [
@@ -1696,6 +1698,8 @@ export default function ChatView(props: ChatViewProps) {
   >({});
   const [desktopDebugEnabled, setDesktopDebugEnabled] = useState(false);
   const [desktopDebugRevision, setDesktopDebugRevision] = useState(0);
+  const lastDesktopDebugSnapshotPublishedAtMsRef = useRef(0);
+  const desktopDebugSnapshotThrottleTimeoutRef = useRef<number | null>(null);
   const followUpQueueDebugRef = useRef({
     watchdogIntervalMs: FOLLOW_UP_QUEUE_WATCHDOG_INTERVAL_MS,
     watchdogTickCount: 0,
@@ -1773,6 +1777,28 @@ export default function ChatView(props: ChatViewProps) {
       cancelled = true;
     };
   }, []);
+  useEffect(() => {
+    if (!desktopDebugEnabled) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      setDesktopDebugRevision((revision) => revision + 1);
+    }, DEBUG_RENDERER_HEARTBEAT_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [desktopDebugEnabled]);
+  useEffect(
+    () => () => {
+      if (desktopDebugSnapshotThrottleTimeoutRef.current !== null) {
+        window.clearTimeout(desktopDebugSnapshotThrottleTimeoutRef.current);
+        desktopDebugSnapshotThrottleTimeoutRef.current = null;
+      }
+    },
+    [],
+  );
   const dispatchFollowUpTurnStartRef = useRef<((item: FollowUpQueueItem) => Promise<void>) | null>(
     null,
   );
@@ -2988,6 +3014,30 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
 
+    const nowMs = performance.now();
+    const msSinceLastPublish = nowMs - lastDesktopDebugSnapshotPublishedAtMsRef.current;
+    if (
+      lastDesktopDebugSnapshotPublishedAtMsRef.current > 0 &&
+      msSinceLastPublish < DEBUG_RENDERER_SNAPSHOT_MIN_INTERVAL_MS
+    ) {
+      if (desktopDebugSnapshotThrottleTimeoutRef.current === null) {
+        desktopDebugSnapshotThrottleTimeoutRef.current = window.setTimeout(
+          () => {
+            desktopDebugSnapshotThrottleTimeoutRef.current = null;
+            setDesktopDebugRevision((revision) => revision + 1);
+          },
+          Math.max(0, DEBUG_RENDERER_SNAPSHOT_MIN_INTERVAL_MS - msSinceLastPublish),
+        );
+      }
+      return;
+    }
+
+    if (desktopDebugSnapshotThrottleTimeoutRef.current !== null) {
+      window.clearTimeout(desktopDebugSnapshotThrottleTimeoutRef.current);
+      desktopDebugSnapshotThrottleTimeoutRef.current = null;
+    }
+    lastDesktopDebugSnapshotPublishedAtMsRef.current = nowMs;
+
     const snapshotBuildStartedAt = performance.now();
     const capturedAtMs = Date.now();
     const capturedAt = new Date(capturedAtMs).toISOString();
@@ -3140,6 +3190,11 @@ export default function ChatView(props: ChatViewProps) {
       debugSnapshotVersion: DEBUG_SNAPSHOT_VERSION,
       source: "ChatView",
       capturedAt,
+      debugPublisher: {
+        heartbeatIntervalMs: DEBUG_RENDERER_HEARTBEAT_INTERVAL_MS,
+        minSnapshotIntervalMs: DEBUG_RENDERER_SNAPSHOT_MIN_INTERVAL_MS,
+        revision: desktopDebugRevision,
+      },
       diagnostics: {
         location: {
           pathname: window.location.pathname,

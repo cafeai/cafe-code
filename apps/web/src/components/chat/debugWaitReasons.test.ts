@@ -60,6 +60,56 @@ describe("deriveDebugWaitReasons", () => {
     ).toEqual([]);
   });
 
+  it("does not report provider tool work after the turn has settled", () => {
+    expect(
+      deriveDebugWaitReasons({
+        lifecycle: {
+          phase: "ready",
+          streamingMessageCount: 0,
+          latestActiveTurnActivity: {
+            kind: "task.progress",
+          },
+        },
+        performance: {
+          pressureFlags: ["large-context-input-token-count"],
+          latency: {
+            lastActivityAgeMs: 5_000,
+          },
+        },
+        activeQueueLength: 0,
+        activeSteeringFollowUpCount: 0,
+        followUpQueueVisibleWorking: false,
+        followUpQueueDispatchInFlight: false,
+        activeTurnInProgress: false,
+      }),
+    ).toEqual(["large-context"]);
+  });
+
+  it("keeps provider tool work visible while orchestration still owns an active turn", () => {
+    expect(
+      deriveDebugWaitReasons({
+        lifecycle: {
+          phase: "ready",
+          streamingMessageCount: 0,
+          latestActiveTurnActivity: {
+            kind: "task.progress",
+          },
+        },
+        performance: {
+          pressureFlags: [],
+          latency: {
+            lastActivityAgeMs: 5_000,
+          },
+        },
+        activeQueueLength: 0,
+        activeSteeringFollowUpCount: 0,
+        followUpQueueVisibleWorking: false,
+        followUpQueueDispatchInFlight: false,
+        activeTurnInProgress: true,
+      }),
+    ).toEqual(["provider-running-tool"]);
+  });
+
   it("deduplicates overlapping running states", () => {
     expect(
       deriveDebugWaitReasons({

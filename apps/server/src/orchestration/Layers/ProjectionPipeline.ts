@@ -151,23 +151,38 @@ function shouldPromoteLatestTurnFromSessionSet(input: {
   readonly candidateActiveTurnId: string;
   readonly sessionUpdatedAt: string;
 }): boolean {
+  return shouldPromoteLatestTurn({
+    currentLatestTurn: input.currentLatestTurn,
+    candidateTurn: input.candidateActiveTurn,
+    candidateTurnId: input.candidateActiveTurnId,
+    candidateObservedAt: input.sessionUpdatedAt,
+  });
+}
+
+function shouldPromoteLatestTurn(input: {
+  readonly currentLatestTurn: Option.Option<ProjectionTurnById>;
+  readonly candidateTurn: Option.Option<ProjectionTurnById>;
+  readonly candidateTurnId: string;
+  readonly candidateObservedAt: string;
+}): boolean {
   if (Option.isNone(input.currentLatestTurn)) {
     return true;
   }
 
-  if (input.currentLatestTurn.value.turnId === input.candidateActiveTurnId) {
+  if (input.currentLatestTurn.value.turnId === input.candidateTurnId) {
     return true;
   }
 
-  const candidateRequestedAt = Option.isSome(input.candidateActiveTurn)
-    ? input.candidateActiveTurn.value.requestedAt
-    : input.sessionUpdatedAt;
+  const candidateRequestedAt = Option.isSome(input.candidateTurn)
+    ? input.candidateTurn.value.requestedAt
+    : input.candidateObservedAt;
 
   // Provider session snapshots can arrive after a newer turn has already been
-  // projected, especially during daemon handoff or backfill. A stale
-  // thread.session-set must not move the thread shell back to an older active
-  // turn, because that makes the renderer offer steer/interrupt for a turn the
-  // provider no longer owns.
+  // projected, especially during daemon handoff or backfill. The same is true
+  // for checkpoint/diff reconciliation emitted after restart. A stale provider
+  // event must not move the thread shell back to an older active/completed turn,
+  // because that makes the renderer offer steer/interrupt or latency diagnostics
+  // for a turn the provider no longer owns.
   return input.currentLatestTurn.value.requestedAt <= candidateRequestedAt;
 }
 
@@ -757,7 +772,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               : {}),
             runtimeMode: event.payload.runtimeMode,
             interactionMode: event.payload.interactionMode,
-            updatedAt: event.payload.createdAt,
+            updatedAt: maxIso(existingRow.value.updatedAt, event.payload.createdAt),
           });
           return;
         }
@@ -805,7 +820,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           }
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
-            updatedAt: event.occurredAt,
+            updatedAt: maxIso(existingRow.value.updatedAt, event.occurredAt),
           });
           if (event.payload.role === "user") {
             yield* refreshThreadShellSummary(event.payload.threadId);
@@ -824,7 +839,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           }
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
-            updatedAt: event.occurredAt,
+            updatedAt: maxIso(existingRow.value.updatedAt, event.occurredAt),
           });
           yield* refreshThreadShellSummary(event.payload.threadId);
           return;
@@ -842,7 +857,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           }
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
-            updatedAt: event.occurredAt,
+            updatedAt: maxIso(existingRow.value.updatedAt, event.occurredAt),
           });
           yield* refreshThreadShellSummary(event.payload.threadId);
           return;
@@ -883,7 +898,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
             latestTurnId,
-            updatedAt: event.occurredAt,
+            updatedAt: maxIso(existingRow.value.updatedAt, event.occurredAt),
           });
           yield* refreshThreadShellSummary(event.payload.threadId);
           return;
@@ -896,10 +911,29 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           if (Option.isNone(existingRow)) {
             return;
           }
+          const currentLatestTurn =
+            existingRow.value.latestTurnId === null
+              ? Option.none<ProjectionTurnById>()
+              : yield* projectionTurnRepository.getByTurnId({
+                  threadId: event.payload.threadId,
+                  turnId: existingRow.value.latestTurnId,
+                });
+          const candidateTurn = yield* projectionTurnRepository.getByTurnId({
+            threadId: event.payload.threadId,
+            turnId: event.payload.turnId,
+          });
+          const latestTurnId = shouldPromoteLatestTurn({
+            currentLatestTurn,
+            candidateTurn,
+            candidateTurnId: event.payload.turnId,
+            candidateObservedAt: event.payload.completedAt,
+          })
+            ? event.payload.turnId
+            : existingRow.value.latestTurnId;
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
-            latestTurnId: event.payload.turnId,
-            updatedAt: event.occurredAt,
+            latestTurnId,
+            updatedAt: maxIso(existingRow.value.updatedAt, event.occurredAt),
           });
           yield* refreshThreadShellSummary(event.payload.threadId);
           return;
@@ -1228,7 +1262,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           runtimeMode: event.payload.runtimeMode,
           activeTurnId: null,
           lastError: null,
-          updatedAt: event.payload.createdAt,
+          updatedAt: Option.isSome(existingSession)
+            ? maxIso(existingSession.value.updatedAt, event.payload.createdAt)
+            : event.payload.createdAt,
         });
         return;
       }
@@ -1264,7 +1300,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           runtimeMode: existingSession.value.runtimeMode,
           activeTurnId: null,
           lastError: existingSession.value.lastError,
-          updatedAt: event.payload.createdAt,
+          updatedAt: maxIso(existingSession.value.updatedAt, event.payload.createdAt),
         });
         return;
       }
@@ -1317,10 +1353,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           runtimeMode: event.payload.session.runtimeMode,
           activeTurnId: null,
           lastError: status === "ready" ? null : event.payload.session.lastError,
-          updatedAt:
+          updatedAt: maxIso(
+            Option.isSome(existingSession)
+              ? existingSession.value.updatedAt
+              : event.payload.session.updatedAt,
             runningActiveTurn.value.completedAt !== null
               ? maxIso(event.payload.session.updatedAt, runningActiveTurn.value.completedAt)
               : event.payload.session.updatedAt,
+          ),
         });
         return;
       }
@@ -1410,10 +1450,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             runtimeMode: event.payload.session.runtimeMode,
             activeTurnId: null,
             lastError: status === "ready" ? null : event.payload.session.lastError,
-            updatedAt:
+            updatedAt: maxIso(
+              Option.isSome(existingSession)
+                ? existingSession.value.updatedAt
+                : event.payload.session.updatedAt,
               latestTurn.value.completedAt !== null
                 ? maxIso(event.payload.session.updatedAt, latestTurn.value.completedAt)
                 : event.payload.session.updatedAt,
+            ),
           });
           return;
         }
@@ -1427,7 +1471,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         runtimeMode: event.payload.session.runtimeMode,
         activeTurnId: event.payload.session.activeTurnId,
         lastError: event.payload.session.lastError,
-        updatedAt: event.payload.session.updatedAt,
+        updatedAt: Option.isSome(existingSession)
+          ? maxIso(existingSession.value.updatedAt, event.payload.session.updatedAt)
+          : event.payload.session.updatedAt,
       });
     });
 

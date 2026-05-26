@@ -18,6 +18,8 @@ import {
   buildCodexThreadSnapshotBackfillEvents,
   buildTurnStartParams,
   buildTurnSteerParams,
+  codexElapsedDelayMilliseconds,
+  codexElapsedDelayRemainingMilliseconds,
   isRecoverableThreadResumeError,
   isCodexContextCompactionItemType,
   isCodexUserMessageItemType,
@@ -55,6 +57,28 @@ describe("buildCodexAppServerArgs", () => {
       "-c",
       "model_providers.cafecode-openai-http.supports_websockets=false",
     ]);
+  });
+});
+
+describe("codex elapsed watchdog scheduling", () => {
+  it("treats delay labels as elapsed deadlines instead of cumulative sleeps", () => {
+    assert.equal(codexElapsedDelayMilliseconds("60 seconds"), 60_000);
+    assert.equal(
+      codexElapsedDelayRemainingMilliseconds({
+        startedAtMs: 1_000,
+        nowMs: 31_000,
+        delay: "60 seconds",
+      }),
+      30_000,
+    );
+    assert.equal(
+      codexElapsedDelayRemainingMilliseconds({
+        startedAtMs: 1_000,
+        nowMs: 90_000,
+        delay: "60 seconds",
+      }),
+      0,
+    );
   });
 });
 

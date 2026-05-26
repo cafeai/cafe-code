@@ -125,6 +125,7 @@ const MAX_THREAD_MESSAGES = 2_000;
 const MAX_THREAD_CHECKPOINTS = 500;
 const MAX_THREAD_PROPOSED_PLANS = 200;
 const MAX_THREAD_ACTIVITIES = 500;
+const EMPTY_MESSAGE_IDS: MessageId[] = [];
 const EMPTY_THREAD_IDS: ThreadId[] = [];
 
 function arraysEqual<T>(left: readonly T[], right: readonly T[]): boolean {
@@ -865,6 +866,58 @@ function latestTurnStateIsTerminal(state: NonNullable<Thread["latestTurn"]>["sta
   return state === "completed" || state === "error" || state === "interrupted";
 }
 
+function shouldIgnoreStaleSessionSet(thread: Thread, incomingSession: ThreadSession): boolean {
+  const previousSession = thread.session;
+  if (previousSession === null) {
+    return false;
+  }
+
+  const latestTurn = thread.latestTurn;
+  if (
+    latestTurn !== null &&
+    latestTurnStateIsTerminal(latestTurn.state) &&
+    incomingSession.activeTurnId === latestTurn.turnId
+  ) {
+    // Provider replay can deliver an old `running` snapshot for the same turn
+    // after the terminal session snapshot. Terminal same-turn lifecycle state is
+    // immutable; a real follow-up must use a fresh provider turn id.
+    return true;
+  }
+
+  if (incomingSession.updatedAt >= previousSession.updatedAt) {
+    return false;
+  }
+
+  if (
+    latestTurn !== null &&
+    latestTurnStateIsTerminal(latestTurn.state) &&
+    (incomingSession.activeTurnId === undefined ||
+      incomingSession.activeTurnId === latestTurn.turnId)
+  ) {
+    return true;
+  }
+
+  return (
+    incomingSession.activeTurnId === previousSession.activeTurnId &&
+    incomingSession.orchestrationStatus === previousSession.orchestrationStatus
+  );
+}
+
+function mergeSessionSnapshot(
+  previousSession: ThreadSession | null,
+  incomingSession: ThreadSession,
+): ThreadSession {
+  if (previousSession === null) {
+    return incomingSession;
+  }
+
+  return {
+    ...incomingSession,
+    createdAt: previousSession.createdAt,
+    updatedAt: maxIso(previousSession.updatedAt, incomingSession.updatedAt),
+  };
+}
+
 function sessionStatusToSettledLatestTurnState(status: OrchestrationSessionStatus) {
   if (status === "error") {
     return "error" as const;
@@ -918,25 +971,6 @@ function buildLatestTurn(params: {
     assistantMessageId: params.assistantMessageId,
     ...(resolvedPlan ? { sourceProposedPlan: resolvedPlan } : {}),
   };
-}
-
-function rebindTurnDiffSummariesForAssistantMessage(
-  turnDiffSummaries: ReadonlyArray<TurnDiffSummary>,
-  turnId: TurnId,
-  assistantMessageId: NonNullable<Thread["latestTurn"]>["assistantMessageId"],
-): TurnDiffSummary[] {
-  let changed = false;
-  const nextSummaries = turnDiffSummaries.map((summary) => {
-    if (summary.turnId !== turnId || summary.assistantMessageId === assistantMessageId) {
-      return summary;
-    }
-    changed = true;
-    return {
-      ...summary,
-      assistantMessageId: assistantMessageId ?? undefined,
-    };
-  });
-  return changed ? nextSummaries : [...turnDiffSummaries];
 }
 
 function retainThreadMessagesAfterRevert(
@@ -1072,6 +1106,237 @@ function updateThreadState(
     return state;
   }
   return writeThreadState(state, nextThread, currentThread);
+}
+
+function mergeThreadMessage(previous: ChatMessage, incoming: ChatMessage): ChatMessage {
+  const next: ChatMessage = {
+    ...previous,
+    text: incoming.streaming
+      ? `${previous.text}${incoming.text}`
+      : incoming.text.length > 0
+        ? incoming.text
+        : previous.text,
+    streaming: incoming.streaming,
+    ...(incoming.turnId !== undefined ? { turnId: incoming.turnId } : {}),
+    ...(incoming.attachments !== undefined ? { attachments: incoming.attachments } : {}),
+  };
+
+  if (incoming.streaming) {
+    if (previous.completedAt !== undefined) {
+      next.completedAt = previous.completedAt;
+    } else {
+      delete next.completedAt;
+    }
+    return next;
+  }
+
+  if (incoming.completedAt !== undefined) {
+    next.completedAt = incoming.completedAt;
+  }
+  return next;
+}
+
+function upsertThreadMessageSlice(
+  state: EnvironmentState,
+  threadId: ThreadId,
+  message: ChatMessage,
+): EnvironmentState {
+  const previousById: Record<MessageId, ChatMessage> = state.messageByThreadId[threadId] ?? {};
+  const previousIds = state.messageIdsByThreadId[threadId] ?? EMPTY_MESSAGE_IDS;
+  const previousMessage = previousById[message.id];
+  const nextMessage = previousMessage ? mergeThreadMessage(previousMessage, message) : message;
+
+  if (previousMessage === nextMessage) {
+    return state;
+  }
+
+  const nextById: Record<MessageId, ChatMessage> = {
+    ...previousById,
+    [message.id]: nextMessage,
+  };
+  let nextIds = previousIds;
+
+  if (!previousMessage) {
+    nextIds = [...previousIds, message.id];
+    const overflowCount = Math.max(0, nextIds.length - MAX_THREAD_MESSAGES);
+    if (overflowCount > 0) {
+      for (const removedId of nextIds.slice(0, overflowCount)) {
+        delete nextById[removedId];
+      }
+      nextIds = nextIds.slice(overflowCount);
+    }
+  }
+
+  return {
+    ...state,
+    messageIdsByThreadId:
+      nextIds === previousIds
+        ? state.messageIdsByThreadId
+        : {
+            ...state.messageIdsByThreadId,
+            [threadId]: nextIds,
+          },
+    messageByThreadId: {
+      ...state.messageByThreadId,
+      [threadId]: nextById,
+    },
+  };
+}
+
+function rebindTurnDiffSummaryForAssistantMessage(
+  state: EnvironmentState,
+  threadId: ThreadId,
+  turnId: TurnId,
+  assistantMessageId: MessageId,
+): EnvironmentState {
+  const previousById = state.turnDiffSummaryByThreadId[threadId];
+  const previousSummary = previousById?.[turnId];
+  if (
+    !previousById ||
+    !previousSummary ||
+    previousSummary.assistantMessageId === assistantMessageId
+  ) {
+    return state;
+  }
+
+  return {
+    ...state,
+    turnDiffSummaryByThreadId: {
+      ...state.turnDiffSummaryByThreadId,
+      [threadId]: {
+        ...previousById,
+        [turnId]: {
+          ...previousSummary,
+          assistantMessageId,
+        },
+      },
+    },
+  };
+}
+
+function updateLatestTurnForAssistantMessage(
+  state: EnvironmentState,
+  input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId | null | undefined;
+    readonly messageId: MessageId;
+    readonly createdAt: string;
+    readonly updatedAt: string;
+  },
+): EnvironmentState {
+  if (input.turnId === null || input.turnId === undefined) {
+    return state;
+  }
+
+  const previousTurnState = state.threadTurnStateById[input.threadId];
+  const currentLatestTurn = previousTurnState?.latestTurn ?? null;
+  if (currentLatestTurn !== null && currentLatestTurn.turnId !== input.turnId) {
+    return state;
+  }
+
+  const previousState = currentLatestTurn?.state;
+  const terminalState =
+    previousState === "completed" || previousState === "error" || previousState === "interrupted"
+      ? previousState
+      : null;
+  const nextLatestTurn = buildLatestTurn({
+    previous: currentLatestTurn,
+    turnId: input.turnId,
+    state: terminalState ?? "running",
+    requestedAt:
+      currentLatestTurn?.turnId === input.turnId ? currentLatestTurn.requestedAt : input.createdAt,
+    startedAt:
+      currentLatestTurn?.turnId === input.turnId
+        ? (currentLatestTurn.startedAt ?? input.createdAt)
+        : input.createdAt,
+    sourceProposedPlan: previousTurnState?.pendingSourceProposedPlan,
+    completedAt:
+      terminalState !== null
+        ? maxIso(currentLatestTurn?.completedAt ?? null, input.updatedAt)
+        : null,
+    assistantMessageId: input.messageId,
+  });
+  const nextTurnState: ThreadTurnState = {
+    latestTurn: nextLatestTurn,
+    ...(previousTurnState?.pendingSourceProposedPlan
+      ? { pendingSourceProposedPlan: previousTurnState.pendingSourceProposedPlan }
+      : {}),
+  };
+
+  if (threadTurnStatesEqual(previousTurnState, nextTurnState)) {
+    return state;
+  }
+
+  return {
+    ...state,
+    threadTurnStateById: {
+      ...state.threadTurnStateById,
+      [input.threadId]: nextTurnState,
+    },
+  };
+}
+
+function markThreadShellUpdated(
+  state: EnvironmentState,
+  threadId: ThreadId,
+  updatedAt: string,
+): EnvironmentState {
+  const shell = state.threadShellById[threadId];
+  if (!shell || shell.updatedAt === updatedAt) {
+    return state;
+  }
+
+  return {
+    ...state,
+    threadShellById: {
+      ...state.threadShellById,
+      [threadId]: {
+        ...shell,
+        updatedAt,
+      },
+    },
+  };
+}
+
+function applyThreadMessageSentEvent(
+  state: EnvironmentState,
+  event: Extract<OrchestrationEvent, { type: "thread.message-sent" }>,
+  environmentId: EnvironmentId,
+): EnvironmentState {
+  if (!state.threadShellById[event.payload.threadId]) {
+    return state;
+  }
+
+  const message = mapMessage(environmentId, {
+    id: event.payload.messageId,
+    role: event.payload.role,
+    text: event.payload.text,
+    ...(event.payload.attachments !== undefined ? { attachments: event.payload.attachments } : {}),
+    turnId: event.payload.turnId,
+    streaming: event.payload.streaming,
+    createdAt: event.payload.createdAt,
+    updatedAt: event.payload.updatedAt,
+  });
+
+  let nextState = upsertThreadMessageSlice(state, event.payload.threadId, message);
+
+  if (event.payload.role === "assistant" && event.payload.turnId !== null) {
+    nextState = rebindTurnDiffSummaryForAssistantMessage(
+      nextState,
+      event.payload.threadId,
+      event.payload.turnId,
+      event.payload.messageId,
+    );
+    nextState = updateLatestTurnForAssistantMessage(nextState, {
+      threadId: event.payload.threadId,
+      turnId: event.payload.turnId,
+      messageId: event.payload.messageId,
+      createdAt: event.payload.createdAt,
+      updatedAt: event.payload.updatedAt,
+    });
+  }
+
+  return markThreadShellUpdated(nextState, event.payload.threadId, event.occurredAt);
 }
 
 function buildProjectState(
@@ -1445,100 +1710,15 @@ function applyEnvironmentOrchestrationEvent(
     }
 
     case "thread.message-sent":
-      return updateThreadState(state, event.payload.threadId, (thread) => {
-        const message = mapMessage(thread.environmentId, {
-          id: event.payload.messageId,
-          role: event.payload.role,
-          text: event.payload.text,
-          ...(event.payload.attachments !== undefined
-            ? { attachments: event.payload.attachments }
-            : {}),
-          turnId: event.payload.turnId,
-          streaming: event.payload.streaming,
-          createdAt: event.payload.createdAt,
-          updatedAt: event.payload.updatedAt,
-        });
-        const existingMessage = thread.messages.find((entry) => entry.id === message.id);
-        const messages = existingMessage
-          ? thread.messages.map((entry) =>
-              entry.id !== message.id
-                ? entry
-                : {
-                    ...entry,
-                    text: message.streaming
-                      ? `${entry.text}${message.text}`
-                      : message.text.length > 0
-                        ? message.text
-                        : entry.text,
-                    streaming: message.streaming,
-                    ...(message.turnId !== undefined ? { turnId: message.turnId } : {}),
-                    ...(message.streaming
-                      ? entry.completedAt !== undefined
-                        ? { completedAt: entry.completedAt }
-                        : {}
-                      : message.completedAt !== undefined
-                        ? { completedAt: message.completedAt }
-                        : {}),
-                    ...(message.attachments !== undefined
-                      ? { attachments: message.attachments }
-                      : {}),
-                  },
-            )
-          : [...thread.messages, message];
-        const cappedMessages = messages.slice(-MAX_THREAD_MESSAGES);
-        const turnDiffSummaries =
-          event.payload.role === "assistant" && event.payload.turnId !== null
-            ? rebindTurnDiffSummariesForAssistantMessage(
-                thread.turnDiffSummaries,
-                event.payload.turnId,
-                event.payload.messageId,
-              )
-            : thread.turnDiffSummaries;
-        const latestTurn: Thread["latestTurn"] =
-          event.payload.role === "assistant" &&
-          event.payload.turnId !== null &&
-          (thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId)
-            ? (() => {
-                const previousState = thread.latestTurn?.state;
-                const terminalState =
-                  previousState === "completed" ||
-                  previousState === "error" ||
-                  previousState === "interrupted"
-                    ? previousState
-                    : null;
-                return buildLatestTurn({
-                  previous: thread.latestTurn,
-                  turnId: event.payload.turnId,
-                  state: terminalState ?? "running",
-                  requestedAt:
-                    thread.latestTurn?.turnId === event.payload.turnId
-                      ? thread.latestTurn.requestedAt
-                      : event.payload.createdAt,
-                  startedAt:
-                    thread.latestTurn?.turnId === event.payload.turnId
-                      ? (thread.latestTurn.startedAt ?? event.payload.createdAt)
-                      : event.payload.createdAt,
-                  sourceProposedPlan: thread.pendingSourceProposedPlan,
-                  completedAt:
-                    terminalState !== null
-                      ? maxIso(thread.latestTurn?.completedAt ?? null, event.payload.updatedAt)
-                      : null,
-                  assistantMessageId: event.payload.messageId,
-                });
-              })()
-            : thread.latestTurn;
-        return {
-          ...thread,
-          messages: cappedMessages,
-          turnDiffSummaries,
-          latestTurn,
-          updatedAt: event.occurredAt,
-        };
-      });
+      return applyThreadMessageSentEvent(state, event, environmentId);
 
     case "thread.session-set":
       return updateThreadState(state, event.payload.threadId, (thread) => {
         const previousSession = thread.session;
+        const incomingSession = mapSession(event.payload.session);
+        if (shouldIgnoreStaleSessionSet(thread, incomingSession)) {
+          return thread;
+        }
         const previousActiveTurnId = thread.session?.activeTurnId ?? null;
         const settledState = sessionStatusToSettledLatestTurnState(event.payload.session.status);
         const currentLatestTurn = thread.latestTurn;
@@ -1577,14 +1757,17 @@ function applyEnvironmentOrchestrationEvent(
                       : settledState,
                   requestedAt: currentLatestTurn.requestedAt,
                   startedAt: currentLatestTurn.startedAt ?? event.payload.session.updatedAt,
-                  completedAt: currentLatestTurn.completedAt ?? event.payload.session.updatedAt,
+                  completedAt:
+                    currentLatestTurn.completedAt === null
+                      ? event.payload.session.updatedAt
+                      : maxIso(currentLatestTurn.completedAt, event.payload.session.updatedAt),
                   assistantMessageId: currentLatestTurn.assistantMessageId,
                   sourceProposedPlan: thread.pendingSourceProposedPlan,
                 })
               : currentLatestTurn;
         return {
           ...thread,
-          session: mapSession(event.payload.session),
+          session: mergeSessionSnapshot(previousSession, incomingSession),
           error: sanitizeThreadErrorMessage(event.payload.session.lastError),
           latestTurn,
           updatedAt: event.occurredAt,

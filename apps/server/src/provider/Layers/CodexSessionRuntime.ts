@@ -26,6 +26,7 @@ import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -70,6 +71,7 @@ const CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS = [
   "10 seconds",
   "30 seconds",
   "60 seconds",
+  "120 seconds",
   "180 seconds",
   "300 seconds",
   "600 seconds",
@@ -79,7 +81,16 @@ const CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS = [
 ] as const;
 const CODEX_SEND_TURN_STILL_IN_PROGRESS_WARNING_DELAYS = new Set<
   (typeof CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS)[number]
->(["300 seconds", "600 seconds", "900 seconds", "1200 seconds", "1800 seconds"]);
+>([
+  "60 seconds",
+  "120 seconds",
+  "180 seconds",
+  "300 seconds",
+  "600 seconds",
+  "900 seconds",
+  "1200 seconds",
+  "1800 seconds",
+]);
 const CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT = "10 seconds" as const;
 const CODEX_TURN_STEER_PROCESSING_WARNING_DELAYS = [
   "15 seconds",
@@ -152,6 +163,10 @@ type CodexSnapshotBackfillReason =
   | "send-turn-follow-up"
   | "thread-status-idle-reconciliation"
   | "turn-steer-follow-up";
+
+type CodexElapsedDelayLabel =
+  | (typeof CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS)[number]
+  | (typeof CODEX_TURN_STEER_PROCESSING_WARNING_DELAYS)[number];
 
 export interface CodexTransportPolicy {
   readonly responsesWebsockets: "auto" | "disabled";
@@ -1237,6 +1252,27 @@ function timestampSecondsToMillis(
   return Math.trunc(timestampSeconds * 1_000);
 }
 
+export function codexElapsedDelayMilliseconds(delay: CodexElapsedDelayLabel): number {
+  const match = /^(\d+) seconds$/.exec(delay);
+  if (!match) {
+    throw new Error(`Unsupported Codex elapsed delay label: ${delay}`);
+  }
+  return Number.parseInt(match[1]!, 10) * 1_000;
+}
+
+export function codexElapsedDelayRemainingMilliseconds(input: {
+  readonly startedAtMs: number;
+  readonly nowMs: number;
+  readonly delay: CodexElapsedDelayLabel;
+}): number {
+  // The labels are elapsed checkpoints from the original turn/steer ACK, not
+  // incremental sleeps. Upstream Codex treats app-server turn state as
+  // authoritative and keeps waiting for `turn/completed`; Cafe mirrors that
+  // model while polling `thread/read` at predictable elapsed times so a missed
+  // terminal notification can be reconciled quickly without inventing one.
+  return Math.max(0, input.startedAtMs + codexElapsedDelayMilliseconds(input.delay) - input.nowMs);
+}
+
 function snapshotEventId(parts: ReadonlyArray<string>): EventId {
   return EventId.make(["codex-snapshot", ...parts].join(":"));
 }
@@ -1761,8 +1797,16 @@ export const makeCodexSessionRuntime = (
 
     const schedulePendingSteerProcessingWarnings = (steerId: string) =>
       Effect.gen(function* () {
+        const scheduledAtMs = yield* Clock.currentTimeMillis;
         for (const delay of CODEX_TURN_STEER_PROCESSING_WARNING_DELAYS) {
-          yield* Effect.sleep(delay);
+          const sleepMs = codexElapsedDelayRemainingMilliseconds({
+            startedAtMs: scheduledAtMs,
+            nowMs: yield* Clock.currentTimeMillis,
+            delay,
+          });
+          if (sleepMs > 0) {
+            yield* Effect.sleep(Duration.millis(sleepMs));
+          }
           if (yield* Ref.get(closedRef)) {
             return;
           }
@@ -2156,8 +2200,16 @@ export const makeCodexSessionRuntime = (
       readonly reason: CodexSnapshotBackfillReason;
     }) =>
       Effect.gen(function* () {
+        const scheduledAtMs = yield* Clock.currentTimeMillis;
         for (const delay of CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS) {
-          yield* Effect.sleep(delay);
+          const sleepMs = codexElapsedDelayRemainingMilliseconds({
+            startedAtMs: scheduledAtMs,
+            nowMs: yield* Clock.currentTimeMillis,
+            delay,
+          });
+          if (sleepMs > 0) {
+            yield* Effect.sleep(Duration.millis(sleepMs));
+          }
           if (yield* Ref.get(closedRef)) {
             return;
           }

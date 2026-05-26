@@ -873,6 +873,200 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-terminal-sessio
   },
 );
 
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-late-backfill-latest-turn-")))(
+  "OrchestrationProjectionPipeline",
+  (it) => {
+    it.effect("does not regress the shell latest turn from late older checkpoint backfill", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-late-backfill-latest-turn");
+        const oldTurnId = TurnId.make("turn-late-backfill-old");
+        const newTurnId = TurnId.make("turn-late-backfill-new");
+        const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+          eventStore
+            .append(event)
+            .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+        yield* appendAndProject({
+          type: "project.created",
+          eventId: EventId.make("evt-late-backfill-project"),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make("project-late-backfill"),
+          occurredAt: "2026-05-26T10:00:00.000Z",
+          commandId: CommandId.make("cmd-late-backfill-project"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-late-backfill-project"),
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make("project-late-backfill"),
+            title: "Project",
+            workspaceRoot: "/tmp/project-late-backfill",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-05-26T10:00:00.000Z",
+            updatedAt: "2026-05-26T10:00:00.000Z",
+          },
+        });
+        yield* appendAndProject({
+          type: "thread.created",
+          eventId: EventId.make("evt-late-backfill-thread"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-26T10:00:01.000Z",
+          commandId: CommandId.make("cmd-late-backfill-thread"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-late-backfill-thread"),
+          metadata: {},
+          payload: {
+            threadId,
+            projectId: ProjectId.make("project-late-backfill"),
+            title: "Thread",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: "2026-05-26T10:00:01.000Z",
+            updatedAt: "2026-05-26T10:00:01.000Z",
+          },
+        });
+
+        for (const [eventId, turnId, updatedAt] of [
+          ["evt-late-backfill-old-running", oldTurnId, "2026-05-26T11:00:00.000Z"],
+          ["evt-late-backfill-new-running", newTurnId, "2026-05-26T12:00:00.000Z"],
+        ] as const) {
+          yield* appendAndProject({
+            type: "thread.session-set",
+            eventId: EventId.make(eventId),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: updatedAt,
+            commandId: CommandId.make(eventId.replace("evt", "cmd")),
+            causationEventId: null,
+            correlationId: CommandId.make(eventId.replace("evt", "cmd")),
+            metadata: {},
+            payload: {
+              threadId,
+              session: {
+                threadId,
+                status: "running",
+                providerName: "codex",
+                providerInstanceId: ProviderInstanceId.make("codex"),
+                runtimeMode: "full-access",
+                activeTurnId: turnId,
+                lastError: null,
+                updatedAt,
+              },
+            },
+          });
+        }
+
+        yield* appendAndProject({
+          type: "thread.turn-diff-completed",
+          eventId: EventId.make("evt-late-backfill-new-diff"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-26T12:10:00.000Z",
+          commandId: CommandId.make("cmd-late-backfill-new-diff"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-late-backfill-new-diff"),
+          metadata: {},
+          payload: {
+            threadId,
+            turnId: newTurnId,
+            checkpointTurnCount: 2,
+            checkpointRef: CheckpointRef.make("refs/t3/checkpoints/backfill/new"),
+            status: "ready",
+            files: [],
+            assistantMessageId: MessageId.make("assistant-late-backfill-new"),
+            completedAt: "2026-05-26T12:10:00.000Z",
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.turn-diff-completed",
+          eventId: EventId.make("evt-late-backfill-old-diff"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-26T11:15:00.000Z",
+          commandId: CommandId.make("cmd-late-backfill-old-diff"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-late-backfill-old-diff"),
+          metadata: {},
+          payload: {
+            threadId,
+            turnId: oldTurnId,
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make("refs/t3/checkpoints/backfill/old"),
+            status: "ready",
+            files: [],
+            assistantMessageId: MessageId.make("assistant-late-backfill-old"),
+            completedAt: "2026-05-26T11:15:00.000Z",
+          },
+        });
+        yield* appendAndProject({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-late-backfill-old-ready"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-26T11:16:00.000Z",
+          commandId: CommandId.make("cmd-late-backfill-old-ready"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-late-backfill-old-ready"),
+          metadata: {},
+          payload: {
+            threadId,
+            session: {
+              threadId,
+              status: "ready",
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: "2026-05-26T11:16:00.000Z",
+            },
+          },
+        });
+
+        const rows = yield* sql<{
+          readonly latestTurnId: string | null;
+          readonly threadUpdatedAt: string;
+          readonly sessionStatus: string;
+          readonly activeTurnId: string | null;
+          readonly sessionUpdatedAt: string;
+        }>`
+          SELECT
+            threads.latest_turn_id AS "latestTurnId",
+            threads.updated_at AS "threadUpdatedAt",
+            sessions.status AS "sessionStatus",
+            sessions.active_turn_id AS "activeTurnId",
+            sessions.updated_at AS "sessionUpdatedAt"
+          FROM projection_threads threads
+          JOIN projection_thread_sessions sessions
+            ON sessions.thread_id = threads.thread_id
+          WHERE threads.thread_id = ${threadId}
+        `;
+
+        assert.deepEqual(rows, [
+          {
+            latestTurnId: "turn-late-backfill-new",
+            threadUpdatedAt: "2026-05-26T12:10:00.000Z",
+            sessionStatus: "ready",
+            activeTurnId: null,
+            sessionUpdatedAt: "2026-05-26T12:10:00.000Z",
+          },
+        ]);
+      }),
+    );
+  },
+);
+
 it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-thread-move-")))(
   "OrchestrationProjectionPipeline",
   (it) => {

@@ -821,6 +821,12 @@ describe("incremental orchestration updates", () => {
     expect(threadsOf(next)[0]?.latestTurn?.state).toBe("running");
     const nextEnvironmentState = next.environmentStateById[localEnvironmentId];
     const previousEnvironmentState = state.environmentStateById[localEnvironmentId];
+    expect(nextEnvironmentState?.messageIdsByThreadId[thread1.id]).toBe(
+      previousEnvironmentState?.messageIdsByThreadId[thread1.id],
+    );
+    expect(nextEnvironmentState?.messageByThreadId[thread1.id]).not.toBe(
+      previousEnvironmentState?.messageByThreadId[thread1.id],
+    );
     expect(nextEnvironmentState?.threadShellById[thread2.id]).toBe(
       previousEnvironmentState?.threadShellById[thread2.id],
     );
@@ -833,6 +839,50 @@ describe("incremental orchestration updates", () => {
     expect(nextEnvironmentState?.messageByThreadId[thread2.id]).toBe(
       previousEnvironmentState?.messageByThreadId[thread2.id],
     );
+  });
+
+  it("preserves streamed assistant text when an empty completion marker closes the message", () => {
+    const turnId = TurnId.make("turn-1");
+    const messageId = MessageId.make("message-1");
+    const thread = makeThread({
+      latestTurn: {
+        turnId,
+        state: "running",
+        requestedAt: "2026-02-27T00:00:00.000Z",
+        startedAt: "2026-02-27T00:00:00.000Z",
+        completedAt: null,
+        assistantMessageId: messageId,
+      },
+      messages: [
+        {
+          id: messageId,
+          role: "assistant",
+          text: "That makes sense",
+          turnId,
+          createdAt: "2026-02-27T00:00:01.000Z",
+          streaming: true,
+        },
+      ],
+    });
+    const state = makeState(thread);
+
+    const next = applyOrchestrationEvent(
+      state,
+      makeEvent("thread.message-sent", {
+        threadId: thread.id,
+        messageId,
+        role: "assistant",
+        text: "",
+        turnId,
+        streaming: false,
+        createdAt: "2026-02-27T00:00:02.000Z",
+        updatedAt: "2026-02-27T00:00:02.000Z",
+      }),
+      localEnvironmentId,
+    );
+
+    expect(threadsOf(next)[0]?.messages[0]?.text).toBe("That makes sense");
+    expect(threadsOf(next)[0]?.messages[0]?.streaming).toBe(false);
   });
 
   it("applies replay batches in sequence and updates session state", () => {
@@ -915,6 +965,106 @@ describe("incremental orchestration updates", () => {
     expect(threadsOf(afterSessionReady)[0]?.latestTurn?.completedAt).toBe(
       "2026-02-27T00:00:04.000Z",
     );
+  });
+
+  it("ignores stale same-turn session replays after terminal readiness", () => {
+    const turnId = TurnId.make("turn-1");
+    const messageId = MessageId.make("assistant-1");
+    const thread = makeThread({
+      session: {
+        provider: "codex" as never,
+        status: "running",
+        orchestrationStatus: "running",
+        activeTurnId: turnId,
+        createdAt: "2026-02-27T00:00:00.000Z",
+        updatedAt: "2026-02-27T00:00:10.000Z",
+      },
+      latestTurn: {
+        turnId,
+        state: "running",
+        requestedAt: "2026-02-27T00:00:00.000Z",
+        startedAt: "2026-02-27T00:00:01.000Z",
+        completedAt: null,
+        assistantMessageId: messageId,
+      },
+    });
+    const state = makeState(thread);
+
+    const next = applyOrchestrationEvents(
+      state,
+      [
+        makeEvent("thread.message-sent", {
+          threadId: thread.id,
+          messageId,
+          role: "assistant",
+          text: "",
+          turnId,
+          streaming: false,
+          createdAt: "2026-02-27T00:00:39.671Z",
+          updatedAt: "2026-02-27T00:00:39.671Z",
+        }),
+        makeEvent("thread.session-set", {
+          threadId: thread.id,
+          session: {
+            threadId: thread.id,
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: turnId,
+            lastError: null,
+            updatedAt: "2026-02-27T00:00:39.802Z",
+          },
+        }),
+        makeEvent("thread.session-set", {
+          threadId: thread.id,
+          session: {
+            threadId: thread.id,
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: "2026-02-27T00:00:39.803Z",
+          },
+        }),
+        makeEvent("thread.session-set", {
+          threadId: thread.id,
+          session: {
+            threadId: thread.id,
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: turnId,
+            lastError: null,
+            updatedAt: "2026-02-27T00:00:39.000Z",
+          },
+        }),
+        makeEvent("thread.session-set", {
+          threadId: thread.id,
+          session: {
+            threadId: thread.id,
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: "2026-02-27T00:00:39.000Z",
+          },
+        }),
+      ],
+      localEnvironmentId,
+    );
+
+    const nextThread = threadsOf(next)[0];
+    expect(nextThread?.session?.status).toBe("ready");
+    expect(nextThread?.session?.activeTurnId).toBeUndefined();
+    expect(nextThread?.session?.updatedAt).toBe("2026-02-27T00:00:39.803Z");
+    expect(nextThread?.latestTurn).toMatchObject({
+      turnId,
+      state: "completed",
+      completedAt: "2026-02-27T00:00:39.803Z",
+      assistantMessageId: messageId,
+    });
   });
 
   it("marks a turn start request as a starting session before provider events arrive", () => {
