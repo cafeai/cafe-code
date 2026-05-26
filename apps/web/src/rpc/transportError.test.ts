@@ -34,4 +34,12 @@ describe("transportError", () => {
       ),
     ).toBeNull();
   });
+
+  it("drops Claude execution diagnostics from thread error surfaces", () => {
+    expect(
+      sanitizeThreadErrorMessage(
+        "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
+      ),
+    ).toBeNull();
+  });
 });

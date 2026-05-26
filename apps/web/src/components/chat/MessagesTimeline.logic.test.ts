@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   computeStableMessagesTimelineRows,
   computeMessageDurationStart,
+  deriveHistoricalWorkLogDisplayState,
   deriveMessagesTimelineRows,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
@@ -147,6 +148,42 @@ describe("normalizeCompactToolLabel", () => {
 
   it("removes trailing completion wording from other labels", () => {
     expect(normalizeCompactToolLabel("Read file completed")).toBe("Read file");
+  });
+});
+
+describe("deriveHistoricalWorkLogDisplayState", () => {
+  it("shows raw DB counts as a lower bound until all activity has been loaded and rendered", () => {
+    expect(
+      deriveHistoricalWorkLogDisplayState({
+        snapshotEntryCount: 2,
+        previewEntryCount: 2,
+        visibleEntryCount: 2,
+        loadedRawActivityCount: 0,
+        rawTotalCount: 9,
+        loadedOffset: null,
+      }),
+    ).toEqual({
+      countIsLowerBound: true,
+      countLabel: " (2+)",
+      displayCount: 2,
+    });
+  });
+
+  it("uses the exact visible count after Show all loads every raw activity row", () => {
+    expect(
+      deriveHistoricalWorkLogDisplayState({
+        snapshotEntryCount: 2,
+        previewEntryCount: 2,
+        visibleEntryCount: 2,
+        loadedRawActivityCount: 9,
+        rawTotalCount: 9,
+        loadedOffset: 0,
+      }),
+    ).toEqual({
+      countIsLowerBound: false,
+      countLabel: " (2)",
+      displayCount: 2,
+    });
   });
 });
 

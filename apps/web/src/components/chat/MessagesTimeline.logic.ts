@@ -99,6 +99,46 @@ export function resolveAssistantMessageCopyState({
   };
 }
 
+export interface HistoricalWorkLogDisplayStateInput {
+  readonly snapshotEntryCount: number;
+  readonly previewEntryCount: number;
+  readonly visibleEntryCount: number;
+  readonly loadedRawActivityCount: number;
+  readonly rawTotalCount: number | null;
+  readonly loadedOffset: number | null;
+}
+
+export interface HistoricalWorkLogDisplayState {
+  readonly countLabel: string;
+  readonly displayCount: number;
+  readonly countIsLowerBound: boolean;
+}
+
+export function deriveHistoricalWorkLogDisplayState(
+  input: HistoricalWorkLogDisplayStateInput,
+): HistoricalWorkLogDisplayState {
+  const hasLoadedRawRows = input.loadedOffset !== null || input.loadedRawActivityCount > 0;
+  const loadedAllRawRows =
+    input.rawTotalCount !== null &&
+    input.loadedOffset === 0 &&
+    input.loadedRawActivityCount >= input.rawTotalCount;
+  const displayCount = hasLoadedRawRows ? input.visibleEntryCount : input.snapshotEntryCount;
+  const countIsLowerBound = loadedAllRawRows
+    ? false
+    : input.loadedOffset !== null
+      ? input.loadedOffset > 0
+      : input.rawTotalCount !== null
+        ? input.rawTotalCount > input.previewEntryCount
+        : false;
+  const countLabel = displayCount > 0 ? ` (${displayCount}${countIsLowerBound ? "+" : ""})` : "";
+
+  return {
+    countLabel,
+    displayCount,
+    countIsLowerBound,
+  };
+}
+
 export function deriveMessagesTimelineRows(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
   completionDividerAfterEntryId: string | null;

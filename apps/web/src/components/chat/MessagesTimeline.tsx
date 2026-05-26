@@ -46,6 +46,7 @@ import { MessageCopyButton } from "./MessageCopyButton";
 import {
   computeStableMessagesTimelineRows,
   MAX_VISIBLE_WORK_LOG_ENTRIES,
+  deriveHistoricalWorkLogDisplayState,
   deriveMessagesTimelineRows,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
@@ -1040,12 +1041,25 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
     }
     return row.summary.previewEntries.slice(-HISTORICAL_WORK_LOG_PREVIEW_LIMIT);
   }, [activityRows, row.summary.previewEntries, row.turnId]);
-  const displayCount = totalCount ?? row.summary.snapshotEntryCount;
-  const countLabel = displayCount > 0 ? ` (${displayCount})` : "";
+  const historicalWorkLogDisplayState = deriveHistoricalWorkLogDisplayState({
+    snapshotEntryCount: row.summary.snapshotEntryCount,
+    previewEntryCount: row.summary.previewEntries.length,
+    visibleEntryCount: visibleEntries.length,
+    loadedRawActivityCount: activityRows.length,
+    rawTotalCount: totalCount,
+    loadedOffset,
+  });
+  const displayCount = historicalWorkLogDisplayState.displayCount;
+  const countLabel = historicalWorkLogDisplayState.countLabel;
   const compactSummary =
     row.summary.previewEntries.at(-1)?.label ??
     (displayCount > 0 ? "Saved activity" : "Fetch on demand");
-  const hasOlder = loadedOffset !== null ? loadedOffset > 0 : displayCount > visibleEntries.length;
+  const hasOlder =
+    loadedOffset !== null
+      ? loadedOffset > 0
+      : totalCount !== null
+        ? totalCount > Math.max(activityRows.length, row.summary.previewEntries.length)
+        : false;
   const canShowAll =
     hasOlder && totalCount !== null && totalCount <= HISTORICAL_WORK_LOG_SHOW_ALL_LIMIT;
 

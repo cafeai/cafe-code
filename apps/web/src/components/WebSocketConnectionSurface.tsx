@@ -1,12 +1,10 @@
 import { type ReactNode, useEffect, useEffectEvent, useRef, useState } from "react";
 
-import { type SlowRpcAckRequest, useSlowRpcAckRequests } from "../rpc/requestLatencyState";
 import {
   getWsConnectionStatus,
   getWsConnectionUiState,
   setBrowserOnlineStatus,
   type WsConnectionStatus,
-  type WsConnectionUiState,
   useWsConnectionStatus,
   WS_RECONNECT_MAX_ATTEMPTS,
 } from "../rpc/wsConnectionState";
@@ -15,22 +13,6 @@ import { getPrimaryEnvironmentConnection } from "../environments/runtime";
 
 const FORCED_WS_RECONNECT_DEBOUNCE_MS = 5_000;
 type WsAutoReconnectTrigger = "focus" | "online";
-
-const connectionTimeFormatter = new Intl.DateTimeFormat(undefined, {
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-  month: "short",
-  second: "2-digit",
-});
-
-function formatConnectionMoment(isoDate: string | null): string | null {
-  if (!isoDate) {
-    return null;
-  }
-
-  return connectionTimeFormatter.format(new Date(isoDate));
-}
 
 function formatRetryCountdown(nextRetryAt: string, nowMs: number): string {
   const remainingMs = Math.max(0, new Date(nextRetryAt).getTime() - nowMs);
@@ -59,56 +41,6 @@ function getConnectionDisplayName(status: WsConnectionStatus): string {
 
 function buildReconnectTitle(status: WsConnectionStatus): string {
   return `Disconnected from ${getConnectionDisplayName(status)}`;
-}
-
-function buildRecoveredTitle(status: WsConnectionStatus): string {
-  return `Reconnected to ${getConnectionDisplayName(status)}`;
-}
-
-function describeRecoveredToast(
-  previousDisconnectedAt: string | null,
-  connectedAt: string | null,
-): string {
-  const reconnectedAtLabel = formatConnectionMoment(connectedAt);
-  const disconnectedAtLabel = formatConnectionMoment(previousDisconnectedAt);
-
-  if (disconnectedAtLabel && reconnectedAtLabel) {
-    return `Disconnected at ${disconnectedAtLabel} and reconnected at ${reconnectedAtLabel}.`;
-  }
-
-  if (reconnectedAtLabel) {
-    return `Connection restored at ${reconnectedAtLabel}.`;
-  }
-
-  return "Connection restored.";
-}
-
-function describeSlowRpcAckToast(requests: ReadonlyArray<SlowRpcAckRequest>): string {
-  const count = requests.length;
-  const thresholdSeconds = Math.round((requests[0]?.thresholdMs ?? 0) / 1000);
-
-  return `${count} request${count === 1 ? "" : "s"} waiting longer than ${thresholdSeconds}s.`;
-}
-
-function SlowRpcAckRequestDetails({ requests }: { requests: ReadonlyArray<SlowRpcAckRequest> }) {
-  return (
-    <ul className="space-y-2.5 text-xs text-muted-foreground">
-      {requests.map((req) => (
-        <li
-          className="min-w-0 border-border/50 border-b pb-2 last:border-b-0 last:pb-0"
-          key={req.requestId}
-        >
-          <div className="wrap-break-word font-medium text-foreground">{req.tag}</div>
-          <div className="mt-0.5 font-mono text-[10px] leading-snug opacity-90">
-            {req.requestId}
-          </div>
-          <div className="mt-0.5 text-[10px] opacity-75">
-            Started {formatConnectionMoment(req.startedAt) ?? req.startedAt}
-          </div>
-        </li>
-      ))}
-    </ul>
-  );
 }
 
 export function shouldAutoReconnect(
@@ -150,15 +82,8 @@ export function WebSocketConnectionCoordinator() {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const lastForcedReconnectAtRef = useRef(0);
   const toastIdRef = useRef<ReturnType<typeof toastManager.add> | null>(null);
-  const toastResetTimerRef = useRef<number | null>(null);
-  const previousUiStateRef = useRef<WsConnectionUiState>(getWsConnectionUiState(status));
-  const previousDisconnectedAtRef = useRef<string | null>(status.disconnectedAt);
 
   const runReconnect = useEffectEvent((showFailureToast: boolean) => {
-    if (toastResetTimerRef.current !== null) {
-      window.clearTimeout(toastResetTimerRef.current);
-      toastResetTimerRef.current = null;
-    }
     lastForcedReconnectAtRef.current = Date.now();
     void getPrimaryEnvironmentConnection()
       .reconnect()
@@ -269,19 +194,9 @@ export function WebSocketConnectionCoordinator() {
 
   useEffect(() => {
     const uiState = getWsConnectionUiState(status);
-    const previousUiState = previousUiStateRef.current;
-    const previousDisconnectedAt = previousDisconnectedAtRef.current;
     const shouldShowReconnectToast = status.hasConnected && uiState === "reconnecting";
     const shouldShowOfflineToast = uiState === "offline" && status.disconnectedAt !== null;
     const shouldShowExhaustedToast = status.hasConnected && status.reconnectPhase === "exhausted";
-
-    if (
-      toastResetTimerRef.current !== null &&
-      (shouldShowReconnectToast || shouldShowOfflineToast || shouldShowExhaustedToast)
-    ) {
-      window.clearTimeout(toastResetTimerRef.current);
-      toastResetTimerRef.current = null;
-    }
 
     if (shouldShowReconnectToast || shouldShowOfflineToast || shouldShowExhaustedToast) {
       const toastPayload = shouldShowOfflineToast
@@ -335,89 +250,11 @@ export function WebSocketConnectionCoordinator() {
       toastIdRef.current = null;
     }
 
-    if (
-      uiState === "connected" &&
-      (previousUiState === "offline" || previousUiState === "reconnecting") &&
-      previousDisconnectedAt !== null
-    ) {
-      const successToast = {
-        description: describeRecoveredToast(previousDisconnectedAt, status.connectedAt),
-        title: buildRecoveredTitle(status),
-        type: "success" as const,
-        timeout: 0,
-        data: {
-          dismissAfterVisibleMs: 8_000,
-          hideCopyButton: true,
-        },
-      };
-
-      if (toastIdRef.current) {
-        toastManager.update(toastIdRef.current, successToast);
-      } else {
-        toastIdRef.current = toastManager.add(successToast);
-      }
-
-      toastResetTimerRef.current = window.setTimeout(() => {
-        toastIdRef.current = null;
-        toastResetTimerRef.current = null;
-      }, 8_250);
-    }
-
-    previousUiStateRef.current = uiState;
-    previousDisconnectedAtRef.current = status.disconnectedAt;
+    // Successful automatic reconnects are intentionally quiet. During a long
+    // coding session, reconnect/recovered success toasts become noise even when
+    // the transport did exactly what it should. Active outages still surface
+    // above; recovered state remains available through connection diagnostics.
   }, [nowMs, status]);
-
-  useEffect(() => {
-    return () => {
-      if (toastResetTimerRef.current !== null) {
-        window.clearTimeout(toastResetTimerRef.current);
-      }
-    };
-  }, []);
-
-  return null;
-}
-
-export function SlowRpcAckToastCoordinator() {
-  const slowRequests = useSlowRpcAckRequests();
-  const status = useWsConnectionStatus();
-  const toastIdRef = useRef<ReturnType<typeof toastManager.add> | null>(null);
-
-  useEffect(() => {
-    if (getWsConnectionUiState(status) !== "connected") {
-      if (toastIdRef.current) {
-        toastManager.close(toastIdRef.current);
-        toastIdRef.current = null;
-      }
-      return;
-    }
-
-    if (slowRequests.length === 0) {
-      if (toastIdRef.current) {
-        toastManager.close(toastIdRef.current);
-        toastIdRef.current = null;
-      }
-      return;
-    }
-
-    const nextToast = {
-      data: {
-        expandableContent: <SlowRpcAckRequestDetails requests={slowRequests} />,
-        expandableDescriptionTrigger: true,
-        expandableLabels: { collapse: "Hide requests", expand: "Show requests" },
-      },
-      description: describeSlowRpcAckToast(slowRequests),
-      timeout: 0,
-      title: "Some requests are slow",
-      type: "warning" as const,
-    };
-
-    if (toastIdRef.current) {
-      toastManager.update(toastIdRef.current, nextToast);
-    } else {
-      toastIdRef.current = toastManager.add(nextToast);
-    }
-  }, [slowRequests, status]);
 
   return null;
 }
