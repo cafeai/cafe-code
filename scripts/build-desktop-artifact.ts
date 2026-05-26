@@ -539,6 +539,11 @@ function resolveGitHubPublishConfig(updateChannel: "latest" | "nightly"):
   };
 }
 
+function omitElectronDependency(dependencies: Record<string, string>): Record<string, string> {
+  const { electron: _electron, ...runtimeDependencies } = dependencies;
+  return runtimeDependencies;
+}
+
 export function resolveDesktopUpdateChannel(version: string): "latest" | "nightly" {
   return /-nightly\.\d{8}\.\d+$/.test(version) ? "nightly" : "latest";
 }
@@ -806,7 +811,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       options.mockUpdateServerPort,
     ),
     dependencies: {
-      ...resolvedServerDependencies,
+      ...omitElectronDependency(resolvedServerDependencies),
       ...resolvedDesktopRuntimeDependencies,
     },
     devDependencies: {

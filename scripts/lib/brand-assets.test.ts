@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import { fileURLToPath } from "node:url";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -42,7 +45,7 @@ describe("brand-assets", () => {
     await Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const repoRoot = path.resolve(new URL("../..", import.meta.url).pathname);
+      const repoRoot = path.resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
       for (const assetPath of new Set(Object.values(BRAND_ASSET_PATHS))) {
         const absolutePath = path.join(repoRoot, assetPath);

@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeOS from "node:os";
 import { execFileSync } from "node:child_process";
-import { accessSync, constants, statSync } from "node:fs";
+import { accessSync, constants, readdirSync, statSync } from "node:fs";
 import { extname, join } from "node:path";
 
 const PATH_CAPTURE_START = "__CAFE_CODE_PATH_START__";
@@ -427,10 +427,35 @@ export function resolveKnownWindowsCliDirs(env: NodeJS.ProcessEnv): ReadonlyArra
 
   return [
     ...(appData ? [`${appData}\\npm`] : []),
+    ...resolveOpenAICodexWindowsCliDirs(localAppData),
     ...(localAppData ? [`${localAppData}\\Programs\\nodejs`, `${localAppData}\\Volta\\bin`] : []),
     ...(localAppData ? [`${localAppData}\\pnpm`] : []),
     ...(userProfile ? [`${userProfile}\\.bun\\bin`, `${userProfile}\\scoop\\shims`] : []),
   ];
+}
+
+function resolveOpenAICodexWindowsCliDirs(localAppData: string | undefined): ReadonlyArray<string> {
+  if (!localAppData) return [];
+
+  const codexBinRoot = join(localAppData, "OpenAI", "Codex", "bin");
+  try {
+    return readdirSync(codexBinRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => {
+        const dirPath = join(codexBinRoot, entry.name);
+        return {
+          dirPath,
+          mtimeMs: statSync(dirPath).mtimeMs,
+        };
+      })
+      .filter(({ dirPath }) =>
+        isExecutableFile(join(dirPath, "codex.exe"), "win32", [".EXE", ".CMD", ".BAT", ".COM"]),
+      )
+      .toSorted((left, right) => right.mtimeMs - left.mtimeMs)
+      .map(({ dirPath }) => dirPath);
+  } catch {
+    return [];
+  }
 }
 
 export interface WindowsEnvironmentResolverOptions {

@@ -1,4 +1,13 @@
+// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeOS from "node:os";
+import {
+  copyFile,
+  link as createHardLink,
+  lstat,
+  rm,
+  stat as statFile,
+  symlink as createNodeSymlink,
+} from "node:fs/promises";
 
 import { ProviderDriverKind, type CodexSettings } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
@@ -46,6 +55,7 @@ const KNOWN_SHARED_FILES = [
   "version.json",
 ] as const;
 
+const KNOWN_SHARED_DIRECTORY_NAMES = new Set<string>(KNOWN_SHARED_DIRECTORIES);
 const PRIVATE_ENTRY_NAMES = new Set(["auth.json", "models_cache.json"]);
 const SHADOW_LOCAL_ENTRY_NAMES = new Set([".tmp", "log", "memories", "tmp"]);
 const KNOWN_SHARED_ENTRY_NAMES = new Set<string>([
@@ -152,6 +162,30 @@ function isNotSymlinkError(error: PlatformError.PlatformError): boolean {
   );
 }
 
+function stripWindowsExtendedPathPrefix(value: string): string {
+  if (value.startsWith("\\\\?\\UNC\\")) {
+    return `\\\\${value.slice("\\\\?\\UNC\\".length)}`;
+  }
+  if (value.startsWith("\\\\?\\")) {
+    return value.slice("\\\\?\\".length);
+  }
+  return value;
+}
+
+function resolveLinkTarget(path: Path.Path, link: string, target: string): string {
+  return stripWindowsExtendedPathPrefix(
+    path.resolve(path.dirname(link), stripWindowsExtendedPathPrefix(target)),
+  );
+}
+
+function areSameResolvedPath(path: Path.Path, left: string, right: string): boolean {
+  const normalizedLeft = stripWindowsExtendedPathPrefix(path.resolve(left));
+  const normalizedRight = stripWindowsExtendedPathPrefix(path.resolve(right));
+  return process.platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
 const readLinkState = Effect.fn("CodexHomeLayout.readLinkState")(function* (
   fileSystem: FileSystem.FileSystem,
   linkPath: string,
@@ -183,16 +217,104 @@ const removePrivateSymlink = Effect.fn("CodexHomeLayout.removePrivateSymlink")(f
   }
 });
 
+function runNodeFs<A>(operation: () => Promise<A>): Effect.Effect<A, CodexShadowHomeError> {
+  return Effect.tryPromise({
+    try: operation,
+    catch: toShadowHomeError,
+  });
+}
+
+function isSameFile(left: { dev: number; ino: number }, right: { dev: number; ino: number }) {
+  return left.dev === right.dev && left.ino === right.ino && left.ino !== 0;
+}
+
+const ensureWindowsFileLink = Effect.fn("CodexHomeLayout.ensureWindowsFileLink")(function* (
+  target: string,
+  link: string,
+) {
+  const existing = yield* runNodeFs(() =>
+    lstat(link).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    }),
+  );
+
+  if (existing) {
+    if (existing.isDirectory() && !existing.isSymbolicLink()) {
+      return yield* new CodexShadowHomeError({
+        detail: `Cannot create Codex shadow home because '${link}' already exists and is not a file.`,
+      });
+    }
+
+    const [targetStat, linkStat] = yield* runNodeFs(() =>
+      Promise.all([statFile(target), statFile(link)]),
+    );
+    if (isSameFile(targetStat, linkStat)) {
+      return;
+    }
+
+    yield* runNodeFs(() => rm(link, { force: true }));
+  }
+
+  yield* runNodeFs(async () => {
+    try {
+      await createHardLink(target, link);
+    } catch {
+      await copyFile(target, link);
+    }
+  });
+});
+
+const ensureWindowsDirectoryJunction = Effect.fn("CodexHomeLayout.ensureWindowsDirectoryJunction")(
+  function* (input: {
+    readonly path: Path.Path;
+    readonly target: string;
+    readonly link: string;
+    readonly state: LinkState;
+  }) {
+    if (input.state._tag === "NotSymlink") {
+      return yield* new CodexShadowHomeError({
+        detail: `Cannot create Codex shadow home because '${input.link}' already exists and is not a Windows junction.`,
+      });
+    }
+
+    if (input.state._tag === "Missing") {
+      return yield* runNodeFs(() => createNodeSymlink(input.target, input.link, "junction"));
+    }
+
+    const resolvedExisting = resolveLinkTarget(input.path, input.link, input.state.target);
+    if (!areSameResolvedPath(input.path, resolvedExisting, input.target)) {
+      yield* runNodeFs(() => rm(input.link, { force: true }));
+      yield* runNodeFs(() => createNodeSymlink(input.target, input.link, "junction"));
+    }
+  },
+);
+
 const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (input: {
   readonly fileSystem: FileSystem.FileSystem;
   readonly shadowPath: string;
   readonly sharedPath: string;
   readonly entryName: string;
+  readonly entryType: "directory" | "file";
 }): Effect.fn.Return<void, CodexShadowHomeError, Path.Path> {
   const path = yield* Path.Path;
   const target = path.join(input.sharedPath, input.entryName);
   const link = path.join(input.shadowPath, input.entryName);
   const state = yield* readLinkState(input.fileSystem, link);
+
+  if (process.platform === "win32") {
+    if (input.entryType === "directory") {
+      return yield* ensureWindowsDirectoryJunction({ path, target, link, state });
+    }
+    if (state._tag === "Symlink") {
+      const resolvedExisting = resolveLinkTarget(path, link, state.target);
+      if (areSameResolvedPath(path, resolvedExisting, target)) {
+        return;
+      }
+      yield* runNodeFs(() => rm(link, { force: true }));
+    }
+    return yield* ensureWindowsFileLink(target, link);
+  }
 
   if (state._tag === "NotSymlink") {
     return yield* new CodexShadowHomeError({
@@ -205,7 +327,7 @@ const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (inpu
   }
 
   const resolvedExisting = path.resolve(path.dirname(link), state.target);
-  if (resolvedExisting !== target) {
+  if (!areSameResolvedPath(path, resolvedExisting, target)) {
     yield* normalizeShadowHomeError(input.fileSystem.remove(link));
     yield* normalizeShadowHomeError(input.fileSystem.symlink(target, link));
   }
@@ -306,6 +428,7 @@ export const materializeCodexShadowHome = Effect.fn("materializeCodexShadowHome"
         shadowPath: effectiveHomePath,
         sharedPath: layout.sharedHomePath,
         entryName,
+        entryType: KNOWN_SHARED_DIRECTORY_NAMES.has(entryName) ? "directory" : "file",
       });
     },
     { discard: true },
