@@ -34,7 +34,10 @@ import { ServerConfig } from "./config.ts";
 import { Keybindings } from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
-import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine.ts";
+import {
+  OrchestrationEngineService,
+  type OrchestrationEngineShape,
+} from "./orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
   observeRpcEffect,
@@ -85,6 +88,7 @@ const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchComma
 const isWorkspacePathOutsideRootError = Schema.is(WorkspacePathOutsideRootError);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+const ORCHESTRATION_SUBSCRIPTION_BACKFILL_POLL_MS = 1_000;
 
 function isThreadDetailEvent(event: OrchestrationEvent): event is Extract<
   OrchestrationEvent,
@@ -105,6 +109,59 @@ function isThreadDetailEvent(event: OrchestrationEvent): event is Extract<
     event.type === "thread.turn-diff-completed" ||
     event.type === "thread.reverted" ||
     event.type === "thread.session-set"
+  );
+}
+
+function streamReplayableDomainEvents(
+  orchestrationEngine: OrchestrationEngineShape,
+  fromSequenceExclusive: number,
+): Stream.Stream<OrchestrationEvent, OrchestrationGetSnapshotError, never> {
+  return Stream.unwrap(
+    Effect.gen(function* () {
+      const cursorRef = yield* Ref.make(fromSequenceExclusive);
+      const readAndAdvanceCursor = Ref.get(cursorRef).pipe(
+        Effect.flatMap((fromSequence) =>
+          Stream.runCollect(orchestrationEngine.readEvents(fromSequence)).pipe(
+            Effect.map((chunk) => Array.from(chunk)),
+          ),
+        ),
+        Effect.flatMap((events) =>
+          Ref.modify(cursorRef, (currentSequence) => {
+            const freshEvents = events.filter((event) => event.sequence > currentSequence);
+            const nextSequence = freshEvents.at(-1)?.sequence ?? currentSequence;
+            return [freshEvents, nextSequence] as const;
+          }),
+        ),
+        Effect.mapError(
+          (cause) =>
+            new OrchestrationGetSnapshotError({
+              message: "Failed to backfill orchestration subscription events",
+              cause,
+            }),
+        ),
+      );
+      const backfillStream = Stream.concat(
+        Stream.make(undefined),
+        Stream.tick(Duration.millis(ORCHESTRATION_SUBSCRIPTION_BACKFILL_POLL_MS)),
+      ).pipe(Stream.flatMap(() => Stream.fromIterableEffect(readAndAdvanceCursor)));
+      const liveStream = orchestrationEngine.streamDomainEvents.pipe(
+        Stream.mapEffect((event) =>
+          Ref.modify(cursorRef, (currentSequence) => {
+            if (event.sequence <= currentSequence) {
+              return [Option.none<OrchestrationEvent>(), currentSequence] as const;
+            }
+            return [Option.some(event), event.sequence] as const;
+          }),
+        ),
+        Stream.flatMap((event) => (Option.isSome(event) ? Stream.make(event.value) : Stream.empty)),
+      );
+
+      // The PubSub stream gives normal low-latency delivery, while the bounded
+      // event-store poller repairs the classic snapshot/subscribe race and any
+      // transient client stream stall. The shared cursor suppresses duplicates
+      // regardless of whether live or backfill observes an event first.
+      return Stream.merge(backfillStream, liveStream);
+    }),
   );
 }
 
@@ -666,7 +723,10 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
                 ),
               );
 
-              const liveStream = orchestrationEngine.streamDomainEvents.pipe(
+              const liveStream = streamReplayableDomainEvents(
+                orchestrationEngine,
+                snapshot.snapshotSequence,
+              ).pipe(
                 Stream.mapEffect(toShellStreamEvent),
                 Stream.flatMap((event) =>
                   Option.isSome(event) ? Stream.succeed(event.value) : Stream.empty,
@@ -758,8 +818,9 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
           observeRpcStreamEffect(
             ORCHESTRATION_WS_METHODS.subscribeThread,
             Effect.gen(function* () {
-              const [threadDetail, snapshotSequence] = yield* Effect.all([
-                projectionSnapshotQuery.getThreadDetailById(input.threadId).pipe(
+              const threadDetailSnapshot = yield* projectionSnapshotQuery
+                .getThreadDetailSnapshotById(input.threadId)
+                .pipe(
                   Effect.mapError(
                     (cause) =>
                       new OrchestrationGetSnapshotError({
@@ -767,30 +828,21 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
                         cause,
                       }),
                   ),
-                ),
-                projectionSnapshotQuery.getSnapshotSequence().pipe(
-                  Effect.map(({ snapshotSequence }) => snapshotSequence),
-                  Effect.mapError(
-                    (cause) =>
-                      new OrchestrationGetSnapshotError({
-                        message: "Failed to load orchestration snapshot sequence",
-                        cause,
-                      }),
-                  ),
-                ),
-              ]);
+                );
 
-              if (Option.isNone(threadDetail)) {
+              if (Option.isNone(threadDetailSnapshot)) {
                 return yield* new OrchestrationGetSnapshotError({
                   message: `Thread ${input.threadId} was not found`,
                   cause: input.threadId,
                 });
               }
 
-              const liveStream = orchestrationEngine.streamDomainEvents.pipe(
+              const liveStream = streamReplayableDomainEvents(
+                orchestrationEngine,
+                threadDetailSnapshot.value.snapshotSequence,
+              ).pipe(
                 Stream.filter(
                   (event) =>
-                    event.sequence > snapshotSequence &&
                     event.aggregateKind === "thread" &&
                     event.aggregateId === input.threadId &&
                     isThreadDetailEvent(event),
@@ -804,10 +856,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
               return Stream.concat(
                 Stream.make({
                   kind: "snapshot" as const,
-                  snapshot: {
-                    snapshotSequence,
-                    thread: threadDetail.value,
-                  },
+                  snapshot: threadDetailSnapshot.value,
                 }),
                 liveStream,
               );

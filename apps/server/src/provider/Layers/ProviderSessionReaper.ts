@@ -4,8 +4,10 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { reconcileStoppedRuntimeSessions } from "../../persistence/RuntimeSessionReconciliation.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
   ProviderSessionReaper,
@@ -26,6 +28,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
     const providerService = yield* ProviderService;
     const directory = yield* ProviderSessionDirectory;
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+    const sql = yield* SqlClient.SqlClient;
 
     const inactivityThresholdMs = Math.max(
       1,
@@ -33,7 +36,18 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
     );
     const sweepIntervalMs = Math.max(1, options?.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS);
 
+    const reconcileStoppedRuntimeProjection = reconcileStoppedRuntimeSessions.pipe(
+      Effect.provideService(SqlClient.SqlClient, sql),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider.session.reaper.reconcile-stopped-runtime-failed", {
+          cause,
+        }),
+      ),
+    );
+
     const sweep = Effect.gen(function* () {
+      yield* reconcileStoppedRuntimeProjection;
+
       const bindings = yield* directory.listBindings();
       const now = yield* Clock.currentTimeMillis;
       let reapedCount = 0;
@@ -105,6 +119,10 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
 
     const start: ProviderSessionReaperShape["start"] = () =>
       Effect.gen(function* () {
+        // Repair stale projection state synchronously during startup so a
+        // renderer reconnect cannot observe a stopped provider process as an
+        // indefinitely running turn.
+        yield* reconcileStoppedRuntimeProjection;
         yield* Effect.forkScoped(
           sweep.pipe(
             Effect.catch((error: unknown) =>

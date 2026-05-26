@@ -23,7 +23,8 @@ Core priorities:
 1. Performance first.
 2. Reliability first.
 3. Security first.
-4. Keep behavior predictable under load and during failures such as restarts, provider crashes, partial streams, delayed provider wakeups, and reconnects.
+4. Treat 16+ hour provider prompts as a normal target workload, not an edge case.
+5. Keep behavior predictable under load and during failures such as restarts, provider crashes, partial streams, delayed provider wakeups, and reconnects.
 
 If a tradeoff is required, choose correctness, durability, and debuggability over short-term convenience.
 
@@ -98,7 +99,9 @@ Important files:
 - Steer/follow-up behavior must respect active-turn invariants. Starting a new turn while one is starting or running is a bug unless it is explicitly queued or converted into a provider-supported steer operation.
 - Pending approvals and user-input callbacks are provider-runtime state. After restart or daemon handoff, stale callback IDs may be invalid; convert those failures into clear lifecycle events and user-visible recovery guidance.
 - Reconciliation after restart must prefer durable provider/session state and command ledgers over UI assumptions. Never automatically resend a user prompt after a crash unless the design cryptographically or durably proves the provider never received it.
+- WebSocket shell/detail subscriptions must be replayable from persisted orchestration-event cursors, not hot PubSub-only. A thread detail snapshot's `snapshotSequence` must be read in the same database transaction as the detail payload; never stamp stale detail rows with a newer cursor because the client will correctly skip events at or below that cursor.
 - When durable provider runtime state says a session is `stopped`, that runtime record is authoritative over stale projection state. Clear any projected active turn, mark the abandoned projected turn `interrupted` rather than completed, preserve provider resume cursors, and let the next user send resume through a fresh provider process. This follows the Codex CLI/app-server ownership model: a stopped app-server process cannot still own a steerable turn.
+- Shutdown/finalizer code must persist `status = stopped` and `activeTurnId = null` before calling provider adapter stop/stopAll methods. If a malformed shutdown leaves `lastRuntimeEvent = provider.stopAll` behind with a stale `running` status, startup reconciliation must treat that marker as authoritative stopped runtime state and repair projections before the renderer can show a phantom active turn.
 
 ## Codex Integration
 
@@ -195,7 +198,7 @@ If Claude behavior is unclear, check the official Claude Agent SDK docs, the ins
 - Add new debug fields when fixing new failure classes. Do not rely on logs alone when a compact health/debug summary would make future diagnosis faster.
 - Runtime event names should be specific enough to grep, such as `codex.turnStart/accepted`, `codex.turnStart/noRuntimeEventYet`, provider stream disconnect warnings, snapshot backfill markers, and post-completion late-event diagnostics.
 - Prefer structured error diagnostics with cause chains and stack traces. If an exception crosses a daemon/RPC boundary, preserve its type, message, stack when safe, and structured context.
-- For performance issues, instrument before guessing. Track send-to-ACK latency, ACK-to-runtime-start latency, runtime-start-to-first-token latency, tool-call duration, database wait/busy time, projection latency, WebSocket push latency, and renderer receipt timing.
+- For performance issues, instrument before guessing. Track send-to-ACK latency, ACK-to-runtime-start latency, runtime-start-to-first-token latency, tool-call duration, database wait/busy time, projection latency, WebSocket push latency, renderer receipt timing, store/reducer time, render commit time, and token-to-screen latency.
 
 ## Persistence And SQLite
 
@@ -208,8 +211,10 @@ If Claude behavior is unclear, check the official Claude Agent SDK docs, the ins
 
 ## Performance Rules
 
+- Cafe Code must be designed as a long-running provider stream processor, not a conventional short chat UI. Multi-hour and 16+ hour turns are expected. Small per-token costs compound into user-visible lag over those runs, so every token/event hot path must account for token-to-screen time, render-loop pressure, and accumulated projection cost.
 - Provider token streaming must stay streaming. It is acceptable to coalesce tiny token deltas into small bounded projection chunks after the first visible bytes, but never batch tokens behind expensive projection work, full-history reads, synchronous filesystem scans, or renderer-only timers.
 - Keep hot paths allocation-conscious and query-bounded. Any per-token or per-tool-call code should be reviewed as a performance-critical path.
+- Provider event ingestion, projection, WebSocket fanout, renderer state updates, markdown rendering, scroll anchoring, and debug publication must stay independently bounded. Do not introduce work that scales with full chat history, full activity history, or total turn duration on each token/tool update.
 - Do not perform broad process scans, recursive filesystem traversal, or source-control operations inside message send or provider event ingestion paths unless explicitly debounced and instrumented.
 - When comparing performance to Codex CLI or Claude CLI, identify the comparable phase first: process startup, session resume, prompt submission ACK, provider runtime start, model first token, tool execution, or UI projection.
 
@@ -219,6 +224,7 @@ If Claude behavior is unclear, check the official Claude Agent SDK docs, the ins
 - Scroll-follow behavior should be tolerant of small gaps from the bottom and must not jump to the top when steer messages, late messages, or terminal markers arrive.
 - Message timelines must handle late provider events after completion without duplicating terminal banners or losing streamed content.
 - Per-thread detail subscriptions must apply snapshots and events monotonically by orchestration sequence. Events at or below the detail snapshot sequence are stale for that subscription and must not regress focused-thread session or turn state.
+- UI disconnects, focus changes, reloads, or renderer stalls must be projection-catch-up events, never provider-session truth. The renderer should reconnect from a cursor or bounded snapshot, preserve queued follow-up/steer intent, and must not restart, interrupt, or orphan provider work merely because the local render loop lagged.
 - Work-log rendering keeps the latest/current turn inline from the thread detail snapshot. Older turns render as collapsed inline `Work log` rows between that turn's user/assistant messages and hydrate their activity pages on demand through `orchestration.getThreadTurnActivityPage`; do not expand the thread detail snapshot activity cap to show historical logs.
 - Retryable Codex `activeTurnNotSteerable` follow-ups for `review` or `compact` are automatic steer retries, not ordinary queued messages. The renderer should label them as waiting to steer, hide manual Send actions that could duplicate the user bubble, retry compact-blocked steers only after the active context compaction item completes, and retry review-blocked follow-ups only when the active turn is ready for the next message.
 - Renderer session reducers must treat same-turn `running` snapshots after terminal `ready`/`error`/`interrupted` state as stale provider replay. Preserve the terminal latest turn, active-turn clearing, and newest lifecycle timestamp; otherwise debug/work-state can falsely report post-completion messages or a stale steerable active turn even though the backend projection is correct.

@@ -13,6 +13,7 @@ import type {
   OrchestrationReadModel,
   OrchestrationShellSnapshot,
   OrchestrationThread,
+  OrchestrationThreadDetailSnapshot,
   OrchestrationThreadTurnActivityPage,
   OrchestrationThreadTurnActivityPageInput,
   OrchestrationThreadShell,
@@ -150,6 +151,19 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadDetailById: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<OrchestrationThread>, ProjectionRepositoryError>;
+
+  /**
+   * Read a single active thread detail snapshot and the projection sequence
+   * from the same read transaction.
+   *
+   * WebSocket subscriptions use this cursor as the replay boundary. Reading
+   * detail and sequence separately can stamp an older detail payload with a
+   * newer cursor, causing the client to skip exactly the events it needs after
+   * a reconnect or renderer stall.
+   */
+  readonly getThreadDetailSnapshotById: (
+    threadId: ThreadId,
+  ) => Effect.Effect<Option.Option<OrchestrationThreadDetailSnapshot>, ProjectionRepositoryError>;
 
   /**
    * Read a bounded page of raw persisted activity for one turn.

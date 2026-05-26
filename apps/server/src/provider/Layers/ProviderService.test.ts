@@ -366,7 +366,6 @@ it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
       ),
       directoryLayer,
       runtimeRepositoryLayer,
-      NodeServices.layer,
     );
     const scope = yield* Scope.make();
     const runtimeServices = yield* Layer.build(providerLayer).pipe(Scope.provide(scope));
@@ -379,6 +378,80 @@ it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
     assert.equal(Exit.isSuccess(closeExit), true);
     assert.equal(codex.stopAll.mock.calls.length, 1);
   }),
+);
+
+it.effect("ProviderServiceLive persists stopped runtime state before adapter stopAll", () =>
+  Effect.gen(function* () {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-provider-stopall-"));
+    const dbPath = path.join(tempDir, "orchestration.sqlite");
+    const codex = makeFakeCodexAdapter();
+    codex.stopAll.mockImplementation(() =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: String(CODEX_DRIVER),
+          method: "stopAll",
+          detail: "simulated stopAll failure",
+        }),
+      ),
+    );
+    const registry = makeAdapterRegistryMock({
+      [CODEX_DRIVER]: codex.adapter,
+    });
+    const providerAdapterLayer = Layer.succeed(ProviderAdapterRegistry, registry);
+    const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+      Layer.provide(makeSqlitePersistenceLive(dbPath)),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+    const providerLayer = Layer.mergeAll(
+      makeProviderServiceLive().pipe(
+        Layer.provide(providerAdapterLayer),
+        Layer.provide(directoryLayer),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provideMerge(AnalyticsService.layerTest),
+        Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+      ),
+      directoryLayer,
+      runtimeRepositoryLayer,
+    );
+    const scope = yield* Scope.make();
+    const runtimeServices = yield* Layer.build(providerLayer).pipe(Scope.provide(scope));
+
+    const threadId = asThreadId("thread-stopall-before-adapter-failure");
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const session = yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* provider.sendTurn({
+        threadId: session.threadId,
+        input: "before shutdown",
+        attachments: [],
+      });
+    }).pipe(Effect.provide(runtimeServices));
+
+    const closeExit = yield* Scope.close(scope, Exit.void).pipe(Effect.exit);
+    assert.equal(Exit.isSuccess(closeExit), true);
+
+    const persisted = yield* Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntimeRepository;
+      return yield* repository.getByThreadId({ threadId });
+    }).pipe(Effect.provide(runtimeRepositoryLayer));
+
+    assert.equal(Option.isSome(persisted), true);
+    if (Option.isNone(persisted)) {
+      return;
+    }
+
+    assert.equal(persisted.value.status, "stopped");
+    const runtimePayload = persisted.value.runtimePayload as Record<string, unknown>;
+    assert.equal(runtimePayload.activeTurnId, null);
+    assert.equal(runtimePayload.lastRuntimeEvent, "provider.stopAll");
+
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }).pipe(Effect.provide(NodeServices.layer)),
 );
 
 it.effect("ProviderServiceLive rejects new sessions for disabled providers", () =>

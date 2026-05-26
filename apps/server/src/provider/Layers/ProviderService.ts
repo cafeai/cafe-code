@@ -1213,6 +1213,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const runStopAll = Effect.fn("runStopAll")(function* () {
     const threadIds = yield* directory.listThreadIds();
     const currentAdapters = yield* getAdapterEntries;
+    const stopAllTimestamp = yield* nowIso;
     const activeSessions = yield* Effect.forEach(currentAdapters, ([instanceId, adapter]) =>
       adapter.listSessions().pipe(
         Effect.map((sessions) =>
@@ -1223,15 +1224,32 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ),
       ),
     ).pipe(Effect.map((sessionsByAdapter) => sessionsByAdapter.flatMap((sessions) => sessions)));
+
+    // Persist the stop boundary before asking adapters to tear down processes.
+    // Finalizers can be interrupted by desktop shutdown, process death, or an
+    // adapter-specific stop failure. Writing "stopped + no active turn" first
+    // prevents the next backend from advertising a live steerable turn for a
+    // Codex/Claude process Cafe no longer owns; the durable resume cursor still
+    // lets the next user message reopen the provider thread in a fresh runtime.
     yield* Effect.forEach(activeSessions, (session) =>
-      Effect.flatMap(nowIso, (lastRuntimeEventAt) =>
-        upsertSessionBinding(session, session.threadId, {
+      directory.upsert({
+        threadId: session.threadId,
+        provider: session.provider,
+        providerInstanceId: session.providerInstanceId,
+        runtimeMode: session.runtimeMode,
+        status: "stopped",
+        ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),
+        runtimePayload: {
+          cwd: session.cwd ?? null,
+          additionalDirectories: session.additionalDirectories ?? [],
+          model: session.model ?? null,
+          activeTurnId: null,
+          lastError: session.lastError ?? null,
           lastRuntimeEvent: "provider.stopAll",
-          lastRuntimeEventAt,
-        }),
-      ),
+          lastRuntimeEventAt: stopAllTimestamp,
+        },
+      }),
     ).pipe(Effect.asVoid);
-    yield* Effect.forEach(currentAdapters, ([, adapter]) => adapter.stopAll()).pipe(Effect.asVoid);
     const bindings = yield* directory.listBindings().pipe(Effect.orElseSucceed(() => []));
     yield* Effect.forEach(bindings, (binding) =>
       Effect.gen(function* () {
@@ -1247,11 +1265,25 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           runtimePayload: {
             activeTurnId: null,
             lastRuntimeEvent: "provider.stopAll",
-            lastRuntimeEventAt: yield* nowIso,
+            lastRuntimeEventAt: stopAllTimestamp,
           },
         });
       }),
     ).pipe(Effect.asVoid);
+    yield* Effect.forEach(
+      currentAdapters,
+      ([instanceId, adapter]) =>
+        adapter.stopAll().pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("provider.session.stop-all-failed", {
+              provider: adapter.provider,
+              providerInstanceId: instanceId,
+              cause,
+            }),
+          ),
+        ),
+      { discard: true },
+    );
     yield* analytics.record("provider.sessions.stopped_all", {
       sessionCount: threadIds.length,
     });

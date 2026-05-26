@@ -213,8 +213,10 @@ describe("ProviderSessionReaper", () => {
             ),
           getThreadTurnActivityPage: () => Effect.die("unused"),
           getThreadDetailById: () => Effect.die("unused"),
+          getThreadDetailSnapshotById: () => Effect.die("unused"),
         }),
       ),
+      Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(NodeServices.layer),
     );
 

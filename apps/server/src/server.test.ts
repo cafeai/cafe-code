@@ -750,6 +750,7 @@ const buildAppUnderTest = (options?: {
           getThreadShellById: () => Effect.succeed(Option.none()),
           getThreadTurnActivityPage: () => Effect.die("unused"),
           getThreadDetailById: () => Effect.succeed(Option.none()),
+          getThreadDetailSnapshotById: () => Effect.succeed(Option.none()),
           getCounts: () => Effect.succeed({ projectCount: 0, threadCount: 0 }),
           getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
           getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
@@ -3145,7 +3146,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           projectionSnapshotQuery: {
             getThreadDetailById: (inputThreadId) =>
               Effect.succeed(inputThreadId === threadId ? Option.some(thread) : Option.none()),
-            getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 10 }),
+            getThreadDetailSnapshotById: (inputThreadId) =>
+              Effect.succeed(
+                inputThreadId === threadId
+                  ? Option.some({ snapshotSequence: 10, thread })
+                  : Option.none(),
+              ),
           },
           orchestrationEngine: {
             streamDomainEvents: Stream.make(
