@@ -149,6 +149,30 @@ export function cloneComposerImageForRetry(
   }
 }
 
+export function mergePendingSteerSnapshotsForInterruptedTurn(
+  snapshots: readonly {
+    readonly promptText: string;
+    readonly images: readonly ComposerImageAttachment[];
+  }[],
+): { readonly promptText: string; readonly images: ComposerImageAttachment[] } | null {
+  if (snapshots.length === 0) {
+    return null;
+  }
+
+  return {
+    // Codex TUI drains pending steers after an interrupt and submits them as a
+    // single merged user turn. Empty text snapshots can still carry images, so
+    // omit blank text from the newline join while preserving every attachment.
+    promptText: snapshots
+      .map((snapshot) => snapshot.promptText)
+      .filter((promptText) => promptText.length > 0)
+      .join("\n"),
+    images: snapshots.flatMap((snapshot) =>
+      snapshot.images.map((image) => cloneComposerImageForRetry(image)),
+    ),
+  };
+}
+
 export function deriveComposerSendState(options: { prompt: string; imageCount: number }): {
   trimmedPrompt: string;
   hasSendableContent: boolean;

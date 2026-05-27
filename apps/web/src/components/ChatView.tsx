@@ -163,6 +163,7 @@ import {
   PullRequestDialogState,
   cloneComposerImageForRetry,
   deriveLockedProvider,
+  mergePendingSteerSnapshotsForInterruptedTurn,
   readFileAsDataUrl,
   resolveFollowUpQueuePhase,
   resolveSendEnvMode,
@@ -194,7 +195,7 @@ const IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROPOSED_PLANS: Thread["proposedPlans"] = [];
-const DEBUG_SNAPSHOT_VERSION = 9;
+const DEBUG_SNAPSHOT_VERSION = 10;
 const DEBUG_TEXT_PREVIEW_LIMIT = 120;
 const DEBUG_JSON_PREVIEW_LIMIT = 600;
 const DEBUG_RECENT_MESSAGE_LIMIT = 6;
@@ -1454,6 +1455,53 @@ interface PendingSteerDispatch {
   readonly dispatchedAt: string;
 }
 
+interface PendingSteerInterruptRecovery {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly interruptedTurnId: TurnId | null;
+  readonly pendingMessageIds: readonly MessageId[];
+  readonly requestedAt: string;
+}
+
+function pendingSteerDispatchesForThread(
+  current: Record<string, PendingSteerDispatch>,
+  threadId: ThreadId,
+): PendingSteerDispatch[] {
+  return Object.values(current)
+    .filter((pending) => pending.threadId === threadId)
+    .toSorted((left, right) => left.dispatchedAt.localeCompare(right.dispatchedAt));
+}
+
+function threadHasProviderInterruptCompletedForRecovery(
+  thread: Thread,
+  recovery: PendingSteerInterruptRecovery,
+): boolean {
+  return thread.activities.some((activity) => {
+    if (activity.kind !== "provider.turn.interrupt.completed") {
+      return false;
+    }
+    if (activity.createdAt < recovery.requestedAt) {
+      return false;
+    }
+    return recovery.interruptedTurnId === null || activity.turnId === recovery.interruptedTurnId;
+  });
+}
+
+function threadHasProviderInterruptFailedForRecovery(
+  thread: Thread,
+  recovery: PendingSteerInterruptRecovery,
+): boolean {
+  return thread.activities.some((activity) => {
+    if (activity.kind !== "provider.turn.interrupt.failed") {
+      return false;
+    }
+    if (activity.createdAt < recovery.requestedAt) {
+      return false;
+    }
+    return recovery.interruptedTurnId === null || activity.turnId === recovery.interruptedTurnId;
+  });
+}
+
 function readRetryableSteerFailure(
   activity: OrchestrationThreadActivity,
 ): { readonly messageId: MessageId; readonly turnKind: CodexNonSteerableTurnKind } | null {
@@ -1808,6 +1856,11 @@ export default function ChatView(props: ChatViewProps) {
   const [pendingSteerDispatchByMessageId, setPendingSteerDispatchByMessageId] = useState<
     Record<string, PendingSteerDispatch>
   >({});
+  const pendingSteerInterruptRecoveryByThreadIdRef = useRef<
+    Record<string, PendingSteerInterruptRecovery>
+  >({});
+  const [pendingSteerInterruptRecoveryByThreadId, setPendingSteerInterruptRecoveryByThreadId] =
+    useState<Record<string, PendingSteerInterruptRecovery>>({});
   const [desktopDebugEnabled, setDesktopDebugEnabled] = useState(false);
   const [desktopDebugRevision, setDesktopDebugRevision] = useState(0);
   const lastDesktopDebugSnapshotPublishedAtMsRef = useRef(0);
@@ -1864,6 +1917,25 @@ export default function ChatView(props: ChatViewProps) {
       });
     },
     [updatePendingSteerDispatches],
+  );
+  const updatePendingSteerInterruptRecoveries = useCallback(
+    (
+      updater: (
+        current: Record<string, PendingSteerInterruptRecovery>,
+      ) => Record<string, PendingSteerInterruptRecovery>,
+    ) => {
+      const current = pendingSteerInterruptRecoveryByThreadIdRef.current;
+      const next = updater(current);
+      if (next === current) {
+        return;
+      }
+      pendingSteerInterruptRecoveryByThreadIdRef.current = next;
+      setPendingSteerInterruptRecoveryByThreadId(next);
+      if (desktopDebugEnabled) {
+        setDesktopDebugRevision((revision) => revision + 1);
+      }
+    },
+    [desktopDebugEnabled],
   );
   useEffect(() => {
     const bridge = window.desktopBridge;
@@ -2094,6 +2166,127 @@ export default function ChatView(props: ChatViewProps) {
     }
   }, [activeThread, removePendingSteerDispatch, setFollowUpQueueByThreadId]);
   useEffect(() => {
+    const recoveries = Object.values(pendingSteerInterruptRecoveryByThreadId);
+    if (recoveries.length === 0) {
+      return;
+    }
+
+    const threadsById = new Map(allThreads.map((thread) => [thread.id, thread]));
+
+    for (const recovery of recoveries) {
+      const thread = threadsById.get(recovery.threadId);
+      if (thread === undefined) {
+        continue;
+      }
+
+      if (threadHasProviderInterruptFailedForRecovery(thread, recovery)) {
+        recordFollowUpQueueDebugAttempt("pending-steer-interrupt", "provider-interrupt-failed", {
+          threadId: recovery.threadId,
+        });
+        updatePendingSteerInterruptRecoveries((current) => {
+          if (!(recovery.threadId in current)) {
+            return current;
+          }
+          const next = { ...current };
+          delete next[recovery.threadId];
+          return next;
+        });
+        continue;
+      }
+
+      if (!threadHasProviderInterruptCompletedForRecovery(thread, recovery)) {
+        continue;
+      }
+
+      const pendingSteers = recovery.pendingMessageIds
+        .map((messageId) => pendingSteerDispatchByMessageIdRef.current[String(messageId)])
+        .filter((pending): pending is PendingSteerDispatch => pending !== undefined);
+      const merged = mergePendingSteerSnapshotsForInterruptedTurn(
+        pendingSteers.map((pending) => pending.snapshot),
+      );
+
+      updatePendingSteerInterruptRecoveries((current) => {
+        if (!(recovery.threadId in current)) {
+          return current;
+        }
+        const next = { ...current };
+        delete next[recovery.threadId];
+        return next;
+      });
+
+      if (merged === null || (merged.promptText.length === 0 && merged.images.length === 0)) {
+        recordFollowUpQueueDebugAttempt("pending-steer-interrupt", "no-pending-steers-to-replay", {
+          threadId: recovery.threadId,
+        });
+        continue;
+      }
+
+      updatePendingSteerDispatches((current) => {
+        let next: Record<string, PendingSteerDispatch> | null = null;
+        for (const messageId of recovery.pendingMessageIds) {
+          if (!(String(messageId) in current)) {
+            continue;
+          }
+          next ??= { ...current };
+          delete next[String(messageId)];
+        }
+        return next ?? current;
+      });
+      setOptimisticUserMessages((existing) => {
+        const pendingIds = new Set(recovery.pendingMessageIds.map(String));
+        const removed = existing.filter((message) => pendingIds.has(String(message.id)));
+        for (const message of removed) {
+          revokeUserMessagePreviewUrls(message);
+        }
+        return existing.filter((message) => !pendingIds.has(String(message.id)));
+      });
+
+      const firstPendingSteer = pendingSteers[0];
+      if (firstPendingSteer === undefined) {
+        recordFollowUpQueueDebugAttempt("pending-steer-interrupt", "pending-steers-already-clear", {
+          threadId: recovery.threadId,
+        });
+        continue;
+      }
+
+      const queuedItem: FollowUpQueueItem = {
+        ...firstPendingSteer.snapshot,
+        promptText: merged.promptText,
+        images: merged.images,
+        id: newMessageId(),
+        environmentId: recovery.environmentId,
+        threadId: recovery.threadId,
+        queuedAt: new Date().toISOString(),
+        expanded: false,
+        blockedReason: null,
+      };
+
+      // This mirrors upstream Codex TUI's Esc path: once the interrupted turn
+      // reaches the UI, drain all pending steers and submit the merged steer
+      // before ordinary queued follow-ups. The provider has already cleared its
+      // pending input by this point, so the replay cannot duplicate an ACKed
+      // steer still waiting inside Codex.
+      setFollowUpQueueByThreadId((existing) => ({
+        ...existing,
+        [recovery.threadId]: [
+          queuedItem,
+          ...(existing[recovery.threadId] ?? EMPTY_FOLLOW_UP_QUEUE),
+        ],
+      }));
+      recordFollowUpQueueDebugAttempt("pending-steer-interrupt", "requeued-merged-steers", {
+        threadId: recovery.threadId,
+        itemId: queuedItem.id,
+      });
+    }
+  }, [
+    allThreads,
+    pendingSteerInterruptRecoveryByThreadId,
+    recordFollowUpQueueDebugAttempt,
+    setFollowUpQueueByThreadId,
+    updatePendingSteerDispatches,
+    updatePendingSteerInterruptRecoveries,
+  ]);
+  useEffect(() => {
     if (Object.keys(pendingSteerDispatchByMessageId).length === 0) {
       return;
     }
@@ -2103,6 +2296,15 @@ export default function ChatView(props: ChatViewProps) {
       let next: Record<string, PendingSteerDispatch> | null = null;
       for (const [messageId, pending] of Object.entries(current)) {
         const thread = threadsById.get(pending.threadId);
+        const interruptRecovery =
+          pendingSteerInterruptRecoveryByThreadIdRef.current[pending.threadId];
+        if (
+          interruptRecovery?.pendingMessageIds.some((pendingMessageId) => {
+            return String(pendingMessageId) === messageId;
+          }) === true
+        ) {
+          continue;
+        }
         if (thread === undefined || !threadHasResolvedPendingSteer(thread, pending)) {
           continue;
         }
@@ -2111,7 +2313,12 @@ export default function ChatView(props: ChatViewProps) {
       }
       return next ?? current;
     });
-  }, [allThreads, pendingSteerDispatchByMessageId, updatePendingSteerDispatches]);
+  }, [
+    allThreads,
+    pendingSteerDispatchByMessageId,
+    pendingSteerInterruptRecoveryByThreadId,
+    updatePendingSteerDispatches,
+  ]);
   const threadPlanCatalog = useThreadPlanCatalog(
     useMemo(() => {
       const threadIds: ThreadId[] = [];
@@ -3187,6 +3394,10 @@ export default function ChatView(props: ChatViewProps) {
     const localApi = readLocalApi();
     const composerDebugState = readComposerHandle(composerRef)?.readDebugState() ?? null;
     const firstItem = firstActiveFollowUpQueueItem;
+    const activePendingSteerInterruptRecovery =
+      activeThreadId !== null
+        ? (pendingSteerInterruptRecoveryByThreadIdRef.current[activeThreadId] ?? null)
+        : null;
     const queueBlockers: string[] = [];
     if (activeFollowUpQueue.length === 0) {
       queueBlockers.push("queue-empty");
@@ -3199,6 +3410,9 @@ export default function ChatView(props: ChatViewProps) {
     }
     if (activeSteeringFollowUpInFlight) {
       queueBlockers.push("steer-dispatch-in-flight");
+    }
+    if (activePendingSteerInterruptRecovery !== null) {
+      queueBlockers.push("pending-steer-interrupt-recovery");
     }
     if (followUpQueueVisibleWorking) {
       queueBlockers.push("thread-visible-working");
@@ -3507,6 +3721,15 @@ export default function ChatView(props: ChatViewProps) {
           activeSteeringFollowUpInFlight,
           queueBlockers,
           firstActiveAutomaticSteerRetryBlocker,
+          activePendingSteerInterruptRecovery:
+            activePendingSteerInterruptRecovery === null
+              ? null
+              : {
+                  threadId: activePendingSteerInterruptRecovery.threadId,
+                  interruptedTurnId: activePendingSteerInterruptRecovery.interruptedTurnId,
+                  pendingMessageCount: activePendingSteerInterruptRecovery.pendingMessageIds.length,
+                  requestedAt: activePendingSteerInterruptRecovery.requestedAt,
+                },
           followUpQueuePhase,
           followUpQueueUiIdle,
           followUpQueueVisibleWorking,
@@ -3607,6 +3830,21 @@ export default function ChatView(props: ChatViewProps) {
         steering: {
           length: Object.keys(pendingSteerDispatchByMessageId).length,
           activeThreadLength: steeringFollowUpViewItems.length,
+          interruptRecoveries: Object.fromEntries(
+            Object.entries(pendingSteerInterruptRecoveryByThreadIdRef.current).map(
+              ([recoveryThreadId, recovery]) => [
+                recoveryThreadId,
+                {
+                  environmentId: recovery.environmentId,
+                  threadId: recovery.threadId,
+                  interruptedTurnId: recovery.interruptedTurnId,
+                  pendingMessageIds: recovery.pendingMessageIds,
+                  pendingMessageCount: recovery.pendingMessageIds.length,
+                  requestedAt: recovery.requestedAt,
+                },
+              ],
+            ),
+          ),
           items: Object.values(pendingSteerDispatchByMessageId)
             .toSorted((left, right) => left.dispatchedAt.localeCompare(right.dispatchedAt))
             .map((pending) => ({
@@ -4964,6 +5202,35 @@ export default function ChatView(props: ChatViewProps) {
     });
   };
 
+  const armPendingSteerInterruptRecovery = (thread: Thread): void => {
+    if (thread.session?.provider !== "codex") {
+      return;
+    }
+    const pendingSteers = pendingSteerDispatchesForThread(
+      pendingSteerDispatchByMessageIdRef.current,
+      thread.id,
+    );
+    if (pendingSteers.length === 0) {
+      return;
+    }
+
+    const requestedAt = new Date().toISOString();
+    const recovery: PendingSteerInterruptRecovery = {
+      environmentId: thread.environmentId,
+      threadId: thread.id,
+      interruptedTurnId: thread.session?.activeTurnId ?? thread.latestTurn?.turnId ?? null,
+      pendingMessageIds: pendingSteers.map((pending) => pending.messageId),
+      requestedAt,
+    };
+    updatePendingSteerInterruptRecoveries((current) => ({
+      ...current,
+      [thread.id]: recovery,
+    }));
+    recordFollowUpQueueDebugAttempt("pending-steer-interrupt", "armed", {
+      threadId: thread.id,
+    });
+  };
+
   const dispatchFollowUpQueueInterrupt = async (item: FollowUpQueueItem) => {
     const api = readEnvironmentApi(environmentId);
     if (!api) {
@@ -4987,6 +5254,7 @@ export default function ChatView(props: ChatViewProps) {
     }
 
     const turnId = activeThread.session?.activeTurnId ?? undefined;
+    armPendingSteerInterruptRecovery(activeThread);
     recordFollowUpQueueDebugAttempt("manual-interrupt", "interrupt-requested", {
       threadId: item.threadId,
       itemId: item.id,
@@ -5002,6 +5270,14 @@ export default function ChatView(props: ChatViewProps) {
       });
       setThreadError(item.threadId, null);
     } catch (error) {
+      updatePendingSteerInterruptRecoveries((current) => {
+        if (!(item.threadId in current)) {
+          return current;
+        }
+        const next = { ...current };
+        delete next[item.threadId];
+        return next;
+      });
       const message = error instanceof Error ? error.message : "Failed to interrupt active turn.";
       recordFollowUpQueueDebugAttempt("manual-interrupt", "interrupt-failed", {
         threadId: item.threadId,
@@ -5176,13 +5452,29 @@ export default function ChatView(props: ChatViewProps) {
     const api = readEnvironmentApi(environmentId);
     if (!api || !activeThread) return;
     const turnId = activeThread.session?.activeTurnId ?? undefined;
-    await api.orchestration.dispatchCommand({
-      type: "thread.turn.interrupt",
-      commandId: newCommandId(),
-      threadId: activeThread.id,
-      ...(turnId !== undefined ? { turnId } : {}),
-      createdAt: new Date().toISOString(),
-    });
+    armPendingSteerInterruptRecovery(activeThread);
+    try {
+      await api.orchestration.dispatchCommand({
+        type: "thread.turn.interrupt",
+        commandId: newCommandId(),
+        threadId: activeThread.id,
+        ...(turnId !== undefined ? { turnId } : {}),
+        createdAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      updatePendingSteerInterruptRecoveries((current) => {
+        if (!(activeThread.id in current)) {
+          return current;
+        }
+        const next = { ...current };
+        delete next[activeThread.id];
+        return next;
+      });
+      setThreadError(
+        activeThread.id,
+        error instanceof Error ? error.message : "Failed to interrupt active turn.",
+      );
+    }
   };
 
   const onRespondToApproval = useCallback(

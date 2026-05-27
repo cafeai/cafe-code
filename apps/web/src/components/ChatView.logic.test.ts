@@ -15,6 +15,7 @@ import {
   createLocalDispatchSnapshot,
   deriveComposerSendState,
   hasServerAcknowledgedLocalDispatch,
+  mergePendingSteerSnapshotsForInterruptedTurn,
   resolveFollowUpQueuePhase,
   resolveSendEnvMode,
   shouldPinTimelineToEndForLocalMessage,
@@ -43,6 +44,39 @@ describe("deriveComposerSendState", () => {
 
     expect(state.trimmedPrompt).toBe("yoo  waddup");
     expect(state.hasSendableContent).toBe(true);
+  });
+});
+
+describe("mergePendingSteerSnapshotsForInterruptedTurn", () => {
+  it("matches Codex TUI by merging pending steer text into one next turn", () => {
+    const merged = mergePendingSteerSnapshotsForInterruptedTurn([
+      { promptText: "first pending steer", images: [] },
+      { promptText: "second pending steer", images: [] },
+    ]);
+
+    expect(merged?.promptText).toBe("first pending steer\nsecond pending steer");
+    expect(merged?.images).toEqual([]);
+  });
+
+  it("preserves image-only steers without adding empty newline padding", () => {
+    const file = new File(["image"], "image.png", { type: "image/png" });
+    const image = {
+      type: "image" as const,
+      id: "image-1",
+      name: "image.png",
+      mimeType: "image/png",
+      sizeBytes: file.size,
+      file,
+      previewUrl: "memory:image-1",
+    };
+
+    const merged = mergePendingSteerSnapshotsForInterruptedTurn([
+      { promptText: "", images: [image] },
+      { promptText: "describe this", images: [] },
+    ]);
+
+    expect(merged?.promptText).toBe("describe this");
+    expect(merged?.images).toEqual([image]);
   });
 });
 

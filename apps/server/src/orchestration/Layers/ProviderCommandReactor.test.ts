@@ -1678,6 +1678,17 @@ describe("ProviderCommandReactor", () => {
       threadId: "thread-1",
       turnId: "turn-1",
     });
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return (
+        thread?.activities.some(
+          (activity) =>
+            activity.kind === "provider.turn.interrupt.completed" &&
+            activity.turnId === asTurnId("turn-1"),
+        ) ?? false
+      );
+    });
   });
 
   it("falls back to the session active turn id for provider interrupts", async () => {

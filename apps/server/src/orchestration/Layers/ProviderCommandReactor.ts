@@ -1127,10 +1127,43 @@ const make = Effect.gen(function* () {
     // upstream Codex requires `turn/interrupt` to name the exact active turn id
     // and rejects session-only interrupts.
     const activeTurnId = event.payload.turnId ?? thread.session?.activeTurnId ?? undefined;
-    yield* providerService.interruptTurn({
-      threadId: event.payload.threadId,
-      ...(activeTurnId !== undefined ? { turnId: activeTurnId } : {}),
-    });
+    yield* providerService
+      .interruptTurn({
+        threadId: event.payload.threadId,
+        ...(activeTurnId !== undefined ? { turnId: activeTurnId } : {}),
+      })
+      .pipe(
+        Effect.flatMap(() =>
+          Effect.gen(function* () {
+            const interruptedAt = DateTime.formatIso(yield* DateTime.now);
+            yield* appendProviderDiagnosticActivity({
+              threadId: event.payload.threadId,
+              kind: "provider.turn.interrupt.completed",
+              summary: "Provider turn interrupt completed",
+              detail:
+                "Provider accepted the active turn interrupt; pending Codex steers may now be replayed safely as a new turn.",
+              turnId: activeTurnId ?? null,
+              createdAt: interruptedAt,
+              payload: {
+                requestedAt: event.payload.createdAt,
+              },
+            });
+          }),
+        ),
+        Effect.catchCause((cause) =>
+          Effect.gen(function* () {
+            const failedAt = DateTime.formatIso(yield* DateTime.now);
+            yield* appendProviderFailureActivity({
+              threadId: event.payload.threadId,
+              kind: "provider.turn.interrupt.failed",
+              summary: "Provider turn interrupt failed",
+              detail: formatFailureDetail(cause),
+              turnId: activeTurnId ?? null,
+              createdAt: failedAt,
+            });
+          }),
+        ),
+      );
   });
 
   const processTurnSteerRequested = Effect.fn("processTurnSteerRequested")(function* (
