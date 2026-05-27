@@ -175,6 +175,164 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
   );
 });
 
+it.layer(
+  Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-terminal-late-streaming-replay-")),
+)("OrchestrationProjectionPipeline", (it) => {
+  it.effect(
+    "does not reopen assistant streaming when a stale delta arrives after turn terminal",
+    () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const projectId = ProjectId.make("project-terminal-replay");
+        const threadId = ThreadId.make("thread-terminal-replay");
+        const turnId = TurnId.make("turn-terminal-replay");
+        const messageId = MessageId.make("assistant-terminal-replay");
+        const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+          eventStore
+            .append(event)
+            .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+        yield* appendAndProject({
+          type: "project.created",
+          eventId: EventId.make("evt-terminal-replay-project"),
+          aggregateKind: "project",
+          aggregateId: projectId,
+          occurredAt: "2026-05-27T01:00:00.000Z",
+          commandId: CommandId.make("cmd-terminal-replay-project"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-terminal-replay-project"),
+          metadata: {},
+          payload: {
+            projectId,
+            title: "Terminal Replay Project",
+            workspaceRoot: "/tmp/terminal-replay-project",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-05-27T01:00:00.000Z",
+            updatedAt: "2026-05-27T01:00:00.000Z",
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.created",
+          eventId: EventId.make("evt-terminal-replay-thread"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-27T01:00:01.000Z",
+          commandId: CommandId.make("cmd-terminal-replay-thread"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-terminal-replay-thread"),
+          metadata: {},
+          payload: {
+            threadId,
+            projectId,
+            title: "Terminal Replay Thread",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5.5",
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: "2026-05-27T01:00:01.000Z",
+            updatedAt: "2026-05-27T01:00:01.000Z",
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-terminal-replay-complete-message"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-27T01:00:02.000Z",
+          commandId: CommandId.make("cmd-terminal-replay-complete-message"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-terminal-replay-complete-message"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId,
+            role: "assistant",
+            text: "complete text",
+            turnId,
+            streaming: false,
+            createdAt: "2026-05-27T01:00:02.000Z",
+            updatedAt: "2026-05-27T01:00:02.000Z",
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.turn-diff-completed",
+          eventId: EventId.make("evt-terminal-replay-turn-complete"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-27T01:00:03.000Z",
+          commandId: CommandId.make("cmd-terminal-replay-turn-complete"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-terminal-replay-turn-complete"),
+          metadata: {},
+          payload: {
+            threadId,
+            turnId,
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make("refs/t3/checkpoints/terminal-replay/turn/1"),
+            status: "ready",
+            files: [],
+            assistantMessageId: messageId,
+            completedAt: "2026-05-27T01:00:03.000Z",
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-terminal-replay-stale-delta"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-27T01:00:01.500Z",
+          commandId: CommandId.make("cmd-terminal-replay-stale-delta"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-terminal-replay-stale-delta"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId,
+            role: "assistant",
+            text: " duplicate",
+            turnId,
+            streaming: true,
+            createdAt: "2026-05-27T01:00:01.500Z",
+            updatedAt: "2026-05-27T01:00:01.500Z",
+          },
+        });
+
+        const rows = yield* sql<{
+          readonly text: string;
+          readonly isStreaming: number;
+          readonly updatedAt: string;
+        }>`
+        SELECT
+          text,
+          is_streaming AS "isStreaming",
+          updated_at AS "updatedAt"
+        FROM projection_thread_messages
+        WHERE thread_id = ${threadId}
+          AND message_id = ${messageId}
+      `;
+
+        assert.deepEqual(rows, [
+          {
+            text: "complete text",
+            isStreaming: 0,
+            updatedAt: "2026-05-27T01:00:03.000Z",
+          },
+        ]);
+      }),
+  );
+});
+
 it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-clear-pending-turn-start-")))(
   "OrchestrationProjectionPipeline",
   (it) => {

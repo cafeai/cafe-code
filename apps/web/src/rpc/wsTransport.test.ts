@@ -406,6 +406,47 @@ describe("WsTransport", () => {
     await transport.dispose();
   });
 
+  it("recycles the websocket session when heartbeat recovery is requested", async () => {
+    const transport = createTransport("ws://localhost:3020");
+
+    await waitFor(() => {
+      expect(sockets).toHaveLength(1);
+    });
+
+    const firstSocket = getSocket();
+    firstSocket.open();
+
+    await waitFor(() => {
+      expect(getWsConnectionStatus()).toMatchObject({
+        hasConnected: true,
+        phase: "connected",
+      });
+    });
+
+    (
+      transport as unknown as {
+        scheduleHeartbeatRecovery: () => void;
+      }
+    ).scheduleHeartbeatRecovery();
+
+    await waitFor(() => {
+      expect(sockets).toHaveLength(2);
+    });
+
+    const secondSocket = getSocket();
+    expect(secondSocket).not.toBe(firstSocket);
+    expect(firstSocket.readyState).toBe(MockWebSocket.CLOSED);
+
+    secondSocket.open();
+    await waitFor(() => {
+      expect(getWsConnectionStatus()).toMatchObject({
+        phase: "connected",
+      });
+    });
+
+    await transport.dispose();
+  });
+
   it("ignores stale socket lifecycle events after a reconnect starts a new session", async () => {
     const onClose = vi.fn();
     const transport = createTransport("ws://localhost:3020", { onClose });
@@ -1004,11 +1045,45 @@ describe("WsTransport", () => {
     expect(attempts).toBe(1);
     expect(warnSpy).toHaveBeenCalledWith("WebSocket RPC subscription failed", {
       error: "Git command failed in GitCore.statusDetails",
+      retrying: false,
     });
     expect(warnSpy).not.toHaveBeenCalledWith(
       "WebSocket RPC subscription disconnected",
       expect.anything(),
     );
+
+    unsubscribe();
+    await transport.dispose();
+  });
+
+  it("retries stream subscriptions after application-level failures when requested", async () => {
+    const transport = createTransport("ws://localhost:3020");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    let attempts = 0;
+
+    const unsubscribe = transport.subscribe(
+      () =>
+        Stream.suspend(() => {
+          attempts += 1;
+          return Stream.fail(new Error("Server stream projection failed"));
+        }),
+      vi.fn(),
+      { retryDelay: 10, retryNonTransportErrors: true },
+    );
+
+    await waitFor(() => {
+      expect(sockets).toHaveLength(1);
+    });
+
+    getSocket().open();
+
+    await waitFor(() => {
+      expect(attempts).toBeGreaterThanOrEqual(2);
+    });
+    expect(warnSpy).toHaveBeenCalledWith("WebSocket RPC subscription failed", {
+      error: "Server stream projection failed",
+      retrying: true,
+    });
 
     unsubscribe();
     await transport.dispose();

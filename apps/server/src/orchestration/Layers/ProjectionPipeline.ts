@@ -119,6 +119,13 @@ function isStreamingAssistantMessageEvent(event: OrchestrationEvent): boolean {
   );
 }
 
+function completedAtForTerminalTurn(turn: ProjectionTurnById | undefined): string | null {
+  if (turn === undefined || !isTerminalTurnState(turn.state)) {
+    return null;
+  }
+  return turn.completedAt;
+}
+
 function maxIso(left: string | null, right: string): string {
   return left !== null && left > right ? left : right;
 }
@@ -1006,9 +1013,29 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             messageId: event.payload.messageId,
           });
           const previousMessage = Option.getOrUndefined(existingMessage);
+          const eventTurn =
+            event.payload.turnId === null
+              ? Option.none<ProjectionTurnById>()
+              : yield* projectionTurnRepository.getByTurnId({
+                  threadId: event.payload.threadId,
+                  turnId: event.payload.turnId,
+                });
+          const terminalTurnCompletedAt = completedAtForTerminalTurn(
+            Option.getOrUndefined(eventTurn),
+          );
+          const streamingReplayForTerminalTurn =
+            event.payload.streaming && terminalTurnCompletedAt !== null;
+          const shouldKeepCompletedMessageText =
+            streamingReplayForTerminalTurn &&
+            previousMessage !== undefined &&
+            !previousMessage.isStreaming &&
+            previousMessage.text.length > 0;
           const nextText = Option.match(existingMessage, {
             onNone: () => event.payload.text,
             onSome: (message) => {
+              if (shouldKeepCompletedMessageText) {
+                return message.text;
+              }
               if (event.payload.streaming) {
                 return `${message.text}${event.payload.text}`;
               }
@@ -1031,9 +1058,20 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             role: event.payload.role,
             text: nextText,
             ...(nextAttachments !== undefined ? { attachments: [...nextAttachments] } : {}),
-            isStreaming: event.payload.streaming,
+            // App-server replay/backfill can deliver old streaming deltas after
+            // Cafe has already projected the provider turn as terminal. Preserve
+            // snapshot-only text when useful, but never let those reconciliation
+            // events reopen renderer streaming/work indicators for a completed
+            // turn; the CLI's terminal lifecycle is authoritative here.
+            isStreaming: event.payload.streaming && terminalTurnCompletedAt === null,
             createdAt: previousMessage?.createdAt ?? event.payload.createdAt,
-            updatedAt: event.payload.updatedAt,
+            updatedAt:
+              terminalTurnCompletedAt === null
+                ? maxIso(previousMessage?.updatedAt ?? null, event.payload.updatedAt)
+                : maxIso(
+                    maxIso(previousMessage?.updatedAt ?? null, event.payload.updatedAt),
+                    terminalTurnCompletedAt,
+                  ),
           });
           return;
         }

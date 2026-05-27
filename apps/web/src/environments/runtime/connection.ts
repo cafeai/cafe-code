@@ -138,6 +138,11 @@ export function createEnvironmentConnection(
         }
         bootstrapGate.reset();
       },
+      // The shell stream is renderer-critical state. If it dies while the
+      // provider keeps running, the UI can show a stale active turn even though
+      // the backend projection has already advanced. Keep retrying and require
+      // a fresh snapshot before considering reconnect complete.
+      retryNonTransportErrors: true,
     },
   );
 

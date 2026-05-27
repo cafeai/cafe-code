@@ -38,7 +38,10 @@ function createTestClient() {
     orchestration: {
       dispatchCommand: vi.fn(async () => undefined),
       subscribeShell: vi.fn(
-        (listener: (event: any) => void, options?: { onResubscribe?: () => void }) => {
+        (
+          listener: (event: any) => void,
+          options?: { onResubscribe?: () => void; retryNonTransportErrors?: boolean },
+        ) => {
           shellListeners.add(listener);
           shellResubscribe = options?.onResubscribe;
           queueMicrotask(() => {
@@ -77,6 +80,10 @@ function createTestClient() {
 
   return {
     client,
+    readShellSubscribeOptions: () =>
+      (client.orchestration.subscribeShell as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1] as
+        | { onResubscribe?: () => void; retryNonTransportErrors?: boolean }
+        | undefined,
     emitWelcome: (environmentId: EnvironmentId) => {
       for (const listener of lifecycleListeners) {
         listener({
@@ -120,7 +127,7 @@ function createTestClient() {
 describe("createEnvironmentConnection", () => {
   it("bootstraps from the shell subscription snapshot", async () => {
     const environmentId = EnvironmentId.make("env-1");
-    const { client } = createTestClient();
+    const { client, readShellSubscribeOptions } = createTestClient();
     const syncShellSnapshot = vi.fn();
 
     const connection = createEnvironmentConnection({
@@ -146,6 +153,9 @@ describe("createEnvironmentConnection", () => {
       expect.objectContaining({ snapshotSequence: 1 }),
       environmentId,
     );
+    expect(readShellSubscribeOptions()).toMatchObject({
+      retryNonTransportErrors: true,
+    });
 
     await connection.dispose();
   });

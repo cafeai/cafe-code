@@ -333,6 +333,9 @@ describe("retainThreadDetailSubscription", () => {
 
     const releaseFirst = retainThreadDetailSubscription(environmentId, threadId);
     expect(mockSubscribeThread).toHaveBeenCalledTimes(1);
+    expect(mockSubscribeThread).toHaveBeenLastCalledWith({ threadId }, expect.any(Function), {
+      retryNonTransportErrors: true,
+    });
 
     releaseFirst();
     expect(mockThreadUnsubscribe).not.toHaveBeenCalled();

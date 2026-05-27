@@ -20,6 +20,7 @@ type RpcInput<TTag extends RpcTag> = Parameters<RpcMethod<TTag>>[0];
 
 interface StreamSubscriptionOptions {
   readonly onResubscribe?: () => void;
+  readonly retryNonTransportErrors?: boolean;
 }
 
 type RpcUnaryMethod<TTag extends RpcTag> =

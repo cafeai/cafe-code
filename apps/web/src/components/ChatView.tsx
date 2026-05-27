@@ -688,7 +688,16 @@ function summarizeDebugProviderContinuation(thread: Thread, nowMs: number) {
     // durable checkpoint exists; treating them as completion boundaries makes
     // ordinary later tool events look like post-completion lifecycle corruption.
     ...sameTurnDiffSummaries
-      .filter((summary) => summary.status !== "missing")
+      .filter(
+        (summary) =>
+          summary.status !== "missing" &&
+          // The provider turn terminal event is the authoritative lifecycle
+          // boundary. Checkpoint summaries can be captured, replayed, or
+          // backfilled with older timestamps while Codex is still producing
+          // tools and assistant items; those older summaries are useful
+          // artifact metadata but not a provider-completion boundary.
+          (latestTurnCompletedAt === null || summary.completedAt >= latestTurnCompletedAt),
+      )
       .map((summary) => ({
         source: "turnDiff.completedAt" as const,
         completedAt: summary.completedAt,

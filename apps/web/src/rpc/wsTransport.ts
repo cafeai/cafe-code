@@ -22,6 +22,7 @@ import { isTransportConnectionErrorMessage } from "./transportError";
 
 interface SubscribeOptions {
   readonly retryDelay?: Duration.Input;
+  readonly retryNonTransportErrors?: boolean;
   readonly onResubscribe?: () => void;
   readonly tag?: string;
 }
@@ -63,6 +64,7 @@ export class WsTransport {
   private activeSessionId = 0;
   private session: TransportSession;
   private lastHeartbeatPongAt = 0;
+  private heartbeatRecoveryInFlight = false;
   private readonly streamRequestStartListeners = new Set<(info: StreamRequestStartInfo) => void>();
 
   constructor(
@@ -175,8 +177,13 @@ export class WsTransport {
           if (!isTransportConnectionErrorMessage(formattedError)) {
             console.warn("WebSocket RPC subscription failed", {
               error: formattedError,
+              retrying: options?.retryNonTransportErrors === true,
             });
-            return;
+            if (options?.retryNonTransportErrors !== true) {
+              return;
+            }
+            await sleep(retryDelayMs);
+            continue;
           }
 
           if (!this.hasReportedTransportDisconnect) {
@@ -217,6 +224,27 @@ export class WsTransport {
     await reconnectOperation;
   }
 
+  private scheduleHeartbeatRecovery() {
+    if (this.disposed || this.heartbeatRecoveryInFlight) {
+      return;
+    }
+
+    this.heartbeatRecoveryInFlight = true;
+    queueMicrotask(() => {
+      void this.reconnect()
+        .catch((error) => {
+          if (!this.disposed) {
+            console.warn("WebSocket heartbeat recovery failed", {
+              error: formatErrorMessage(error),
+            });
+          }
+        })
+        .finally(() => {
+          this.heartbeatRecoveryInFlight = false;
+        });
+    });
+  }
+
   isHeartbeatFresh(maxAgeMs = 15_000): boolean {
     return this.lastHeartbeatPongAt > 0 && Date.now() - this.lastHeartbeatPongAt <= maxAgeMs;
   }
@@ -253,6 +281,10 @@ export class WsTransport {
           onHeartbeatPong: () => {
             this.lastHeartbeatPongAt = Date.now();
             this.lifecycleHandlers?.onHeartbeatPong?.();
+          },
+          onHeartbeatTimeout: () => {
+            this.lifecycleHandlers?.onHeartbeatTimeout?.();
+            this.scheduleHeartbeatRecovery();
           },
           onRequestStart: (info) => {
             this.lifecycleHandlers?.onRequestStart?.(info);

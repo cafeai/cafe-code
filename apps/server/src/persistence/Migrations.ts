@@ -65,6 +65,7 @@ import Migration0049 from "./Migrations/049_RecloseReopenedTerminalTurns.ts";
 import Migration0050 from "./Migrations/050_ReconcileStoppedRuntimeSessions.ts";
 import Migration0051 from "./Migrations/051_ReconcileBackfilledLatestTurnPointers.ts";
 import Migration0052 from "./Migrations/052_ReconcileStopAllRuntimeMarkers.ts";
+import Migration0053 from "./Migrations/053_CloseLateTerminalStreamingReplays.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -129,6 +130,7 @@ export const migrationEntries = [
   [50, "ReconcileStoppedRuntimeSessions", Migration0050],
   [51, "ReconcileBackfilledLatestTurnPointers", Migration0051],
   [52, "ReconcileStopAllRuntimeMarkers", Migration0052],
+  [53, "CloseLateTerminalStreamingReplays", Migration0053],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

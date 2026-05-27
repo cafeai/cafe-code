@@ -554,6 +554,12 @@ function attachThreadDetailSubscription(entry: ThreadDetailSubscriptionEntry): b
       }
       applyEnvironmentThreadDetailEvent(item.event, entry.environmentId);
     },
+    {
+      // Detail streams carry assistant text, tool logs, and turn terminal
+      // markers. A one-off stream failure must never leave the visible thread
+      // pinned to an old snapshot while the backend projection keeps moving.
+      retryNonTransportErrors: true,
+    },
   );
   return true;
 }
