@@ -3166,6 +3166,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const items = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.subscribeThread]({ threadId }).pipe(
+            // Thread subscriptions are intentionally long-lived: the server
+            // merges the live event stream with a polling backfill stream so a
+            // client cannot lose events in the snapshot/subscribe race. This
+            // assertion only needs the initial snapshot and the first fresh
+            // event after the snapshot cursor.
+            Stream.take(2),
             Stream.runCollect,
             Effect.map((chunk) => Array.from(chunk)),
           ),
