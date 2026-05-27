@@ -65,22 +65,46 @@ This is the practical working list. It will probably get cleaned up later.
   resume metadata, and null checkpoint timestamps.
 - Removed or hid features that do not belong in a minimal coding-agent shell.
 
-## Run From npm
+## Run From Bun For Now
 
 For now there are no desktop packages. No DMG, no updater, no notarized bundle,
 no "drag this into Applications" ceremony.
 
-Run Cafe Code directly from npm:
+The npm package exists, but do not treat it as the fresh install path yet. It
+will probably be out of date until Cafe Code settles down a little more. The app
+is in pretty good shape now, but the fastest-moving build is still the repo
+itself.
+
+Mostly tested on macOS. Windows seems to work. Linux may need a little tweaking;
+I have not had enough time on it yet.
+
+Install [Bun](https://bun.sh/docs/installation) first if it is not already on
+your machine, then run Cafe Code from a checkout:
+
+```bash
+git clone https://github.com/cafeai/cafe-code.git
+cd cafe-code
+bun install
+bun run build:desktop
+bun run --cwd apps/desktop start
+```
+
+Debug mode:
+
+```bash
+bun run --cwd apps/desktop start -- --cafe-debug
+```
+
+If you want Codex or Claude to do it for you, paste this into the CLI:
+
+```text
+Install Cafe Code from source with Bun. Clone https://github.com/cafeai/cafe-code.git, install Bun if it is missing, run bun install, run bun run build:desktop, then start it with bun run --cwd apps/desktop start. Also verify Codex CLI is installed and logged in with codex login, and Claude Code is installed and logged in with claude auth login if I want Claude support.
+```
+
+The old npm path is still here for later, but it may lag behind current work:
 
 ```bash
 npx @cafeai/cafe-code
-```
-
-`npx` downloads the package if needed and starts Cafe Code immediately.
-
-If you want a normal command on your machine:
-
-```bash
 npm install -g @cafeai/cafe-code
 cafe-code
 ```
@@ -168,17 +192,46 @@ Cafe Code は、チャットする。
 邪魔しない。
 それだけ。えらい。
 
-### npm から動かす
+### いまは Bun から動かす
 
 まだ DMG とか、インストーラーとか、アップデーターとかはないよ。
-今は npm からそのまま起動するのがいちばん素直。
+npm のパッケージもあるけど、今はそれを信じすぎないでね。
+Cafe Code がもう少し落ち着くまでは、npm はたぶん少し古くなる。
+
+Bun がなければ先に入れてね。入れ方は
+[Bun の公式ページ](https://bun.sh/docs/installation) がいちばん確か。
+
+```bash
+git clone https://github.com/cafeai/cafe-code.git
+cd cafe-code
+bun install
+bun run build:desktop
+bun run --cwd apps/desktop start
+```
+
+デバッグしたいならこれ。
+
+```bash
+bun run --cwd apps/desktop start -- --cafe-debug
+```
+
+だいたい macOS で見てる。Windows も動いてそう。
+Linux はまだあまり見れてないから、ちょっと調整がいるかも。
+でも今の Cafe Code は、けっこういいところまで来てる。
+
+Codex とか Claude に丸投げするなら、これを投げてもいいよ。
+
+```text
+Cafe Code を Bun でソースから入れてください。https://github.com/cafeai/cafe-code.git を clone して、Bun がなければ入れて、bun install、bun run build:desktop、bun run --cwd apps/desktop start まで実行してください。Codex を使うなら codex login、Claude を使うなら claude auth login も確認してください。
+```
+
+npm 版は残しておくけど、今は古いかもしれない。
 
 ```bash
 npx @cafeai/cafe-code
+npm install -g @cafeai/cafe-code
+cafe-code
 ```
-
-`npx` は、必要ならパッケージを取ってきて、そのまま Cafe Code を起動するよ。
-「インストールだけ」じゃなくて、これで起動までいく。
 
 Codex を使うなら先に `codex login`。
 Claude を使うなら先に `claude auth login`。
