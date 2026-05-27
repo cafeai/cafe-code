@@ -26,6 +26,7 @@ import {
   openCodexThread,
   readCodexSteerExpectedTurnMismatchActualTurnId,
   selectCodexActiveSnapshotTurn,
+  summarizeCodexAppServerChildProcesses,
   updateCodexActiveContextCompactions,
   updateCodexPendingSteerProcessingFromNotification,
 } from "./CodexSessionRuntime.ts";
@@ -384,6 +385,78 @@ describe("Codex steer processing diagnostics", () => {
     assert.equal(isCodexUserMessageItemType("user-message"), true);
     assert.equal(isCodexUserMessageItemType("commandExecution"), false);
     assert.equal(isCodexUserMessageItemType(undefined), false);
+  });
+
+  it("summarizes active app-server child processes without leaking credential material", () => {
+    const diagnostics = summarizeCodexAppServerChildProcesses({
+      appServerPid: 100,
+      diagnosticsRootPid: 1,
+      rows: [
+        {
+          pid: 100,
+          ppid: 1,
+          pgid: 100,
+          status: "S",
+          cpuPercent: 0.1,
+          rssBytes: 10_000,
+          elapsed: "12:00",
+          command: "codex app-server",
+        },
+        {
+          pid: 101,
+          ppid: 100,
+          pgid: 100,
+          status: "S",
+          cpuPercent: 1.5,
+          rssBytes: 20_000,
+          elapsed: "21:50",
+          command:
+            "/opt/anaconda3/bin/python /opt/anaconda3/bin/selene burst . 262 --token npm_abcdEFGHijklMNOPqrstUVWX",
+        },
+        {
+          pid: 102,
+          ppid: 101,
+          pgid: 100,
+          status: "R",
+          cpuPercent: 2.25,
+          rssBytes: 30_000,
+          elapsed: "00:05",
+          command: "codex exec --model gpt-5.5 --auth-file /Users/mike/.codex/auth.json",
+        },
+        {
+          pid: 200,
+          ppid: 1,
+          pgid: 200,
+          status: "S",
+          cpuPercent: 99,
+          rssBytes: 99_000,
+          elapsed: "00:01",
+          command: "unrelated",
+        },
+      ],
+    });
+
+    assert.equal(diagnostics.status, "available");
+    if (diagnostics.status !== "available") return;
+    assert.equal(diagnostics.processCount, 2);
+    assert.equal(diagnostics.totalCpuPercent, 3.75);
+    assert.equal(diagnostics.totalRssBytes, 50_000);
+    assert.equal(diagnostics.longestElapsed, "21:50");
+    assert.deepStrictEqual(
+      diagnostics.processes.map((process) => [
+        process.pid,
+        process.ppid,
+        process.depth,
+        process.command,
+      ]),
+      [
+        [101, 100, 0, "selene burst . 262"],
+        [102, 101, 1, "codex exec --model gpt-5.5"],
+      ],
+    );
+    assert.equal(diagnostics.processes[0]?.childPids[0], 102);
+    assert.ok(!diagnostics.processes[0]?.command.includes("npm_abcd"));
+    assert.ok(!diagnostics.processes[1]?.command.includes("auth.json"));
   });
 
   it("marks the oldest unprocessed steer when Codex emits the injected user message item", () => {

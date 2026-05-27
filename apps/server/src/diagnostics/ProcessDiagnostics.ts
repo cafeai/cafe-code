@@ -29,6 +29,7 @@ export interface ProcessRow {
 const PROCESS_QUERY_TIMEOUT_MS = 1_000;
 const POSIX_PROCESS_QUERY_COMMAND = "pid=,ppid=,pgid=,stat=,pcpu=,rss=,etime=,command=";
 const PROCESS_QUERY_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+const PROCESS_COMMAND_TEXT_MAX_LENGTH = 240;
 
 export interface ProcessDiagnosticsShape {
   readonly read: Effect.Effect<ServerProcessDiagnosticsResult>;
@@ -72,6 +73,39 @@ function parseNonNegativeInt(value: string): number | null {
 function parseNumber(value: string): number | null {
   const parsed = Number.parseFloat(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function truncateText(value: string, maxLength = PROCESS_COMMAND_TEXT_MAX_LENGTH): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized || "n/a";
+  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+export function sanitizeProcessCommand(
+  command: string,
+  options: { readonly maxLength?: number } = {},
+): string {
+  const maxLength = options.maxLength ?? PROCESS_COMMAND_TEXT_MAX_LENGTH;
+  let sanitized = command;
+
+  sanitized = sanitized.replace(/(authorization:\s*bearer\s+)[^\s"']+/gi, "$1[redacted]");
+  sanitized = sanitized.replace(/(bearer\s+)[A-Za-z0-9._~+/=-]{16,}/gi, "$1[redacted]");
+  sanitized = sanitized.replace(/(npm_[A-Za-z0-9]{20,})/g, "[redacted-npm-token]");
+  sanitized = sanitized.replace(/(sk-[A-Za-z0-9_-]{16,})/g, "[redacted-api-key]");
+  sanitized = sanitized.replace(
+    /((?:--|[-_A-Za-z0-9]+[._-])?(?:token|secret|password|credential|api[-_]?key)(?:=|\s+))(["']?)[^\s"']+/gi,
+    "$1$2[redacted]",
+  );
+  sanitized = sanitized.replace(
+    /((?:--)?(?:bootstrap-fd|credential-path|auth-file|key-file)(?:=|\s+))(["']?)[^\s"']+/gi,
+    "$1$2[redacted]",
+  );
+  sanitized = sanitized.replace(
+    /\/[^ "'\n]*(?:secrets|credentials|auth)[^ "'\n]*/gi,
+    "[redacted-path]",
+  );
+
+  return truncateText(sanitized, maxLength);
 }
 
 export function parsePosixProcessRows(output: string): ReadonlyArray<ProcessRow> {

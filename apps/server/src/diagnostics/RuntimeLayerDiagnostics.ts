@@ -37,16 +37,18 @@ import { OrchestrationEngineService } from "../orchestration/Services/Orchestrat
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
   isDiagnosticsQueryProcess,
+  sanitizeProcessCommand,
   type ProcessRow,
   readProcessRows,
 } from "./ProcessDiagnostics.ts";
+
+export { sanitizeProcessCommand } from "./ProcessDiagnostics.ts";
 
 const DEFAULT_WINDOW_MS = 5 * 60_000;
 const DEFAULT_BUCKET_MS = 30_000;
 const RECENT_EVENT_WINDOW_LIMIT = 250;
 const MAX_EVENT_TYPE_ROWS = 12;
 const MAX_DAEMON_COMMAND_ROWS = 8;
-const MAX_COMMAND_TEXT_LENGTH = 240;
 // The daemon can be busy while it is streaming provider output or compacting its
 // retained event journal. Diagnostics should not falsely mark that daemon as
 // unreachable merely because a health snapshot took slightly longer than a UI
@@ -126,39 +128,6 @@ function describeSafeCause(cause: unknown): string | null {
 function sanitizeError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return sanitizeProcessCommand(message, { maxLength: 360 });
-}
-
-function truncateText(value: string, maxLength = MAX_COMMAND_TEXT_LENGTH): string {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxLength) return normalized || "n/a";
-  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
-}
-
-export function sanitizeProcessCommand(
-  command: string,
-  options: { readonly maxLength?: number } = {},
-): string {
-  const maxLength = options.maxLength ?? MAX_COMMAND_TEXT_LENGTH;
-  let sanitized = command;
-
-  sanitized = sanitized.replace(/(authorization:\s*bearer\s+)[^\s"']+/gi, "$1[redacted]");
-  sanitized = sanitized.replace(/(bearer\s+)[A-Za-z0-9._~+/=-]{16,}/gi, "$1[redacted]");
-  sanitized = sanitized.replace(/(npm_[A-Za-z0-9]{20,})/g, "[redacted-npm-token]");
-  sanitized = sanitized.replace(/(sk-[A-Za-z0-9_-]{16,})/g, "[redacted-api-key]");
-  sanitized = sanitized.replace(
-    /((?:--|[-_A-Za-z0-9]+[._-])?(?:token|secret|password|credential|api[-_]?key)(?:=|\s+))(["']?)[^\s"']+/gi,
-    "$1$2[redacted]",
-  );
-  sanitized = sanitized.replace(
-    /((?:--)?(?:bootstrap-fd|credential-path|auth-file|key-file)(?:=|\s+))(["']?)[^\s"']+/gi,
-    "$1$2[redacted]",
-  );
-  sanitized = sanitized.replace(
-    /\/[^ "'\n]*(?:secrets|credentials|auth)[^ "'\n]*/gi,
-    "[redacted-path]",
-  );
-
-  return truncateText(sanitized, maxLength);
 }
 
 function commandLabel(command: string, fallback: string): string {

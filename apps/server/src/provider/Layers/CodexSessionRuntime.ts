@@ -50,6 +50,12 @@ import {
   CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
   CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
 } from "../CodexDeveloperInstructions.ts";
+import {
+  isDiagnosticsQueryProcess,
+  readProcessRows,
+  sanitizeProcessCommand,
+  type ProcessRow,
+} from "../../diagnostics/ProcessDiagnostics.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 const decodeV2TurnSteerParams = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnSteerParams);
 const decodeV2TurnSteerResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnSteerResponse);
@@ -97,6 +103,8 @@ const CODEX_TURN_STEER_PROCESSING_WARNING_DELAYS = [
   "60 seconds",
   "120 seconds",
 ] as const;
+const CODEX_APP_SERVER_CHILD_PROCESS_WARNING_LIMIT = 8;
+const CODEX_APP_SERVER_CHILD_PROCESS_COMMAND_PREVIEW_LENGTH = 180;
 const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
   "not found",
   "missing thread",
@@ -412,6 +420,39 @@ export interface CodexActiveContextCompaction {
   readonly itemId: ProviderItemId;
   readonly startedAt: string;
 }
+
+export interface CodexAppServerChildProcessEntry {
+  readonly pid: number;
+  readonly ppid: number;
+  readonly depth: number;
+  readonly status: string;
+  readonly cpuPercent: number;
+  readonly rssBytes: number;
+  readonly elapsed: string;
+  readonly elapsedSeconds: number | null;
+  readonly commandLabel: string;
+  readonly command: string;
+  readonly childPids: ReadonlyArray<number>;
+}
+
+export type CodexAppServerChildProcessDiagnostics =
+  | {
+      readonly status: "available";
+      readonly appServerPid: number;
+      readonly processCount: number;
+      readonly listedProcessCount: number;
+      readonly hiddenProcessCount: number;
+      readonly totalCpuPercent: number;
+      readonly totalRssBytes: number;
+      readonly longestElapsed: string | null;
+      readonly longestElapsedSeconds: number | null;
+      readonly processes: ReadonlyArray<CodexAppServerChildProcessEntry>;
+    }
+  | {
+      readonly status: "unavailable";
+      readonly appServerPid?: number;
+      readonly error: string;
+    };
 
 function makeCodexServerNotification(method: string, params: unknown): CodexServerNotification {
   return { method, params };
@@ -773,6 +814,203 @@ function prunePendingSteerProcessing(
     next.delete(oldest.steerId);
   }
   return next;
+}
+
+function parseCodexProcessElapsedSeconds(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "n/a") return null;
+
+  const [dayPart, timePart = dayPart] = trimmed.includes("-")
+    ? (trimmed.split("-", 2) as [string, string])
+    : ["0", trimmed];
+  const days = Number.parseInt(dayPart, 10);
+  if (!Number.isInteger(days) || days < 0) return null;
+
+  const parts = timePart.split(":");
+  const secondsText = parts.at(-1);
+  if (!secondsText) return null;
+  const seconds = Number.parseFloat(secondsText);
+  if (!Number.isFinite(seconds) || seconds < 0) return null;
+
+  const minutesText = parts.length >= 2 ? parts.at(-2) : "0";
+  const hoursText = parts.length >= 3 ? parts.at(-3) : "0";
+  const minutes = Number.parseInt(minutesText ?? "0", 10);
+  const hours = Number.parseInt(hoursText ?? "0", 10);
+  if (!Number.isInteger(minutes) || minutes < 0 || !Number.isInteger(hours) || hours < 0) {
+    return null;
+  }
+
+  return days * 86_400 + hours * 3_600 + minutes * 60 + seconds;
+}
+
+function codexProcessChildrenByParent(rows: ReadonlyArray<ProcessRow>): Map<number, ProcessRow[]> {
+  const childrenByParent = new Map<number, ProcessRow[]>();
+  for (const row of rows) {
+    const children = childrenByParent.get(row.ppid) ?? [];
+    children.push(row);
+    childrenByParent.set(row.ppid, children);
+  }
+  for (const children of childrenByParent.values()) {
+    children.sort((left, right) => left.pid - right.pid);
+  }
+  return childrenByParent;
+}
+
+function tokenizeProcessCommandPreview(command: string): ReadonlyArray<string> {
+  const matches = command.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+  return matches.map((token) => token.replace(/^["']|["']$/g, ""));
+}
+
+function processTokenBasename(token: string): string {
+  return token.split(/[\\/]/).findLast((segment) => segment.length > 0) ?? token;
+}
+
+function isSafeProcessToken(token: string): boolean {
+  return /^[A-Za-z0-9._:@=/-]{1,96}$/.test(token) && !token.includes("[redacted]");
+}
+
+function summarizeCodexChildProcessCommand(command: string): {
+  readonly label: string;
+  readonly preview: string;
+} {
+  const sanitized = sanitizeProcessCommand(command, {
+    maxLength: CODEX_APP_SERVER_CHILD_PROCESS_COMMAND_PREVIEW_LENGTH * 2,
+  });
+  const tokens = tokenizeProcessCommandPreview(sanitized);
+  const basenames = tokens.map(processTokenBasename);
+  const seleneIndex = basenames.findIndex((token) => token.toLowerCase() === "selene");
+  if (seleneIndex >= 0) {
+    const args = tokens
+      .slice(seleneIndex + 1, seleneIndex + 4)
+      .filter(isSafeProcessToken)
+      .map((token) => token);
+    return {
+      label: "selene",
+      preview: ["selene", ...args].join(" "),
+    };
+  }
+
+  const codexIndex = basenames.findIndex((token) => token.toLowerCase() === "codex");
+  if (codexIndex >= 0) {
+    const preview = ["codex"];
+    const subcommand = tokens[codexIndex + 1];
+    let index = codexIndex + 1;
+    if (subcommand && ["app-server", "exec"].includes(subcommand)) {
+      preview.push(subcommand);
+      index += 1;
+    }
+
+    while (index < tokens.length && preview.length < 8) {
+      const token = tokens[index];
+      if (token === "--model" && isSafeProcessToken(tokens[index + 1] ?? "")) {
+        preview.push(token, tokens[index + 1] as string);
+        index += 2;
+        continue;
+      }
+      if (token === "--sandbox" && isSafeProcessToken(tokens[index + 1] ?? "")) {
+        preview.push(token, tokens[index + 1] as string);
+        index += 2;
+        continue;
+      }
+      if (token === "--cd" && isSafeProcessToken(tokens[index + 1] ?? "")) {
+        preview.push(token, tokens[index + 1] as string);
+        index += 2;
+        continue;
+      }
+      if (token === "--skip-git-repo-check") {
+        preview.push(token);
+      }
+      index += 1;
+    }
+
+    return {
+      label: "codex",
+      preview: preview.join(" "),
+    };
+  }
+
+  const label = processTokenBasename(tokens[0] ?? "process");
+  return {
+    label,
+    preview: label,
+  };
+}
+
+export function summarizeCodexAppServerChildProcesses(input: {
+  readonly rows: ReadonlyArray<ProcessRow>;
+  readonly appServerPid: number;
+  readonly diagnosticsRootPid?: number;
+  readonly limit?: number;
+}): CodexAppServerChildProcessDiagnostics {
+  if (!Number.isSafeInteger(input.appServerPid) || input.appServerPid <= 0) {
+    return {
+      status: "unavailable",
+      error: "Codex app-server PID is unavailable.",
+    };
+  }
+
+  const diagnosticsRootPid = input.diagnosticsRootPid ?? process.pid;
+  const rows = input.rows.filter((row) => !isDiagnosticsQueryProcess(row, diagnosticsRootPid));
+  const childrenByParent = codexProcessChildrenByParent(rows);
+  const entries: Array<{ readonly row: ProcessRow; readonly depth: number }> = [];
+  const queue: Array<{ readonly row: ProcessRow; readonly depth: number }> = (
+    childrenByParent.get(input.appServerPid) ?? []
+  ).map((row) => ({ row, depth: 0 }));
+  const seen = new Set<number>();
+
+  while (queue.length > 0) {
+    const next = queue.shift();
+    if (!next || seen.has(next.row.pid)) continue;
+    seen.add(next.row.pid);
+    entries.push(next);
+    queue.push(
+      ...(childrenByParent.get(next.row.pid) ?? []).map((row) => ({
+        row,
+        depth: next.depth + 1,
+      })),
+    );
+  }
+
+  const allProcesses = entries.map(({ row, depth }) => {
+    const elapsedSeconds = parseCodexProcessElapsedSeconds(row.elapsed);
+    const command = summarizeCodexChildProcessCommand(row.command);
+    return {
+      pid: row.pid,
+      ppid: row.ppid,
+      depth,
+      status: row.status || "unknown",
+      cpuPercent: Math.max(0, row.cpuPercent),
+      rssBytes: Math.max(0, row.rssBytes),
+      elapsed: row.elapsed || "n/a",
+      elapsedSeconds,
+      commandLabel: command.label,
+      command: command.preview,
+      childPids: (childrenByParent.get(row.pid) ?? []).map((child) => child.pid),
+    } satisfies CodexAppServerChildProcessEntry;
+  });
+  const longest = allProcesses
+    .filter((process) => process.elapsedSeconds !== null)
+    .toSorted((left, right) => (right.elapsedSeconds ?? 0) - (left.elapsedSeconds ?? 0))[0];
+  const limit = Math.max(0, input.limit ?? CODEX_APP_SERVER_CHILD_PROCESS_WARNING_LIMIT);
+  const processes = allProcesses.slice(0, limit);
+
+  return {
+    status: "available",
+    appServerPid: input.appServerPid,
+    processCount: allProcesses.length,
+    listedProcessCount: processes.length,
+    hiddenProcessCount: Math.max(0, allProcesses.length - processes.length),
+    totalCpuPercent:
+      Math.round(allProcesses.reduce((sum, row) => sum + row.cpuPercent, 0) * 100) / 100,
+    totalRssBytes: allProcesses.reduce((sum, row) => sum + row.rssBytes, 0),
+    longestElapsed: longest?.elapsed ?? null,
+    longestElapsedSeconds: longest?.elapsedSeconds ?? null,
+    processes,
+  };
+}
+
+function codexActiveChildProcessCount(diagnostics: CodexAppServerChildProcessDiagnostics): number {
+  return diagnostics.status === "available" ? diagnostics.processCount : 0;
 }
 
 function findCodexActiveContextCompactionForTurn(
@@ -1645,6 +1883,37 @@ export const makeCodexSessionRuntime = (
         method,
         message,
       });
+    const appServerPid = (() => {
+      const pid = Number(child.pid);
+      return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
+    })();
+    const readCodexAppServerChildProcessDiagnostics =
+      (): Effect.Effect<CodexAppServerChildProcessDiagnostics> =>
+        Effect.gen(function* () {
+          if (appServerPid === undefined) {
+            return {
+              status: "unavailable",
+              error: "Codex app-server PID is unavailable.",
+            } satisfies CodexAppServerChildProcessDiagnostics;
+          }
+
+          const rows = yield* readProcessRows().pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          );
+          return summarizeCodexAppServerChildProcesses({
+            rows,
+            appServerPid,
+            diagnosticsRootPid: process.pid,
+          });
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.succeed({
+              status: "unavailable",
+              ...(appServerPid === undefined ? {} : { appServerPid }),
+              error: sanitizeProcessCommand(Cause.pretty(cause), { maxLength: 360 }),
+            } satisfies CodexAppServerChildProcessDiagnostics),
+          ),
+        );
 
     const recordTurnStartObservation = (observation: CodexTurnStartObservation) =>
       Ref.update(turnStartObservationsRef, (current) => {
@@ -1857,6 +2126,12 @@ export const makeCodexSessionRuntime = (
       readonly elapsedDelay: (typeof CODEX_TURN_STEER_PROCESSING_WARNING_DELAYS)[number];
     }) =>
       Effect.gen(function* () {
+        const childProcesses = yield* readCodexAppServerChildProcessDiagnostics();
+        const activeChildProcessCount = codexActiveChildProcessCount(childProcesses);
+        const message =
+          activeChildProcessCount > 0
+            ? `Codex accepted turn/steer; it is queued until the active turn finishes current child-process work (${activeChildProcessCount} live descendant process${activeChildProcessCount === 1 ? "" : "es"}).`
+            : "Codex app-server accepted turn/steer but has not emitted the steer user message yet.";
         yield* Effect.logWarning("codex.turnSteer.noProviderItemYet", {
           threadId: options.threadId,
           providerInstanceId: options.providerInstanceId ?? PROVIDER,
@@ -1869,14 +2144,14 @@ export const makeCodexSessionRuntime = (
           promptByteLength: input.pending.promptByteLength,
           attachmentCount: input.pending.attachmentCount,
           warningCount: input.pending.warningCount,
+          appServerChildProcesses: childProcesses,
         });
         yield* emitEvent({
           kind: "notification",
           threadId: options.threadId,
           method: "codex.turnSteer/noProviderItemYet",
           turnId: input.pending.turnId,
-          message:
-            "Codex app-server accepted turn/steer but has not emitted the steer user message yet.",
+          message,
           payload: {
             steerId: input.pending.steerId,
             providerThreadId: input.pending.providerThreadId,
@@ -1888,8 +2163,9 @@ export const makeCodexSessionRuntime = (
             promptByteLength: input.pending.promptByteLength,
             attachmentCount: input.pending.attachmentCount,
             warningCount: input.pending.warningCount,
+            appServerChildProcesses: childProcesses,
             semantics:
-              "turn/steer is an upstream ACK plus later item notifications. Cafe has delivered the steer and is waiting for Codex to emit the injected userMessage item; this is not an interrupt and may wait behind active tool or model work.",
+              "Upstream Codex 0.134.0 stores turn/steer input in the active turn queue and emits the injected userMessage only when the turn loop drains pending input. Cafe has delivered the steer; when child processes are listed here, the steer is waiting behind active tool or model work rather than being lost.",
           },
         });
       });
@@ -2277,6 +2553,12 @@ export const makeCodexSessionRuntime = (
     }) =>
       Effect.gen(function* () {
         const itemSummary = summarizeCodexSnapshotTurnItems(input.turn);
+        const childProcesses = yield* readCodexAppServerChildProcessDiagnostics();
+        const activeChildProcessCount = codexActiveChildProcessCount(childProcesses);
+        const message =
+          activeChildProcessCount > 0
+            ? `Codex still reports the active turn as in progress; app-server has ${activeChildProcessCount} live descendant process${activeChildProcessCount === 1 ? "" : "es"} still running.`
+            : "Codex still reports the active turn as in progress after delayed snapshot polling.";
         yield* Effect.logWarning("codex.turnProgress.stillInProgressAfterSnapshotPolling", {
           threadId: options.threadId,
           providerInstanceId: options.providerInstanceId ?? PROVIDER,
@@ -2288,14 +2570,14 @@ export const makeCodexSessionRuntime = (
           itemCount: input.turn.items.length,
           itemsView: input.turn.itemsView ?? null,
           itemSummary,
+          appServerChildProcesses: childProcesses,
         });
         yield* emitEvent({
           kind: "notification",
           threadId: options.threadId,
           method: "codex.turnProgress/stillInProgressAfterSnapshotPolling",
           turnId: input.turnId,
-          message:
-            "Codex still reports the active turn as in progress after delayed snapshot polling.",
+          message,
           payload: {
             providerThreadId: input.providerThreadId,
             turnId: input.turnId,
@@ -2305,8 +2587,9 @@ export const makeCodexSessionRuntime = (
             itemCount: input.turn.items.length,
             itemsView: input.turn.itemsView ?? null,
             itemSummary,
+            appServerChildProcesses: childProcesses,
             semantics:
-              "Cafe follows upstream Codex app-server lifecycle semantics: turn/completed or a terminal thread/read turn closes the turn. If thread/read reports a non-active thread with an in-progress turn, Cafe applies upstream's stale-turn rule and interrupts it before this warning is emitted.",
+              "Cafe follows upstream Codex app-server lifecycle semantics: turn/completed or a terminal thread/read turn closes the turn. If thread/read reports a non-active thread with an in-progress turn, Cafe applies upstream's stale-turn rule and interrupts it before this warning is emitted. Live app-server child processes mean the turn is still busy with provider-owned work, so Cafe keeps waiting instead of interrupting.",
           },
         });
       });
