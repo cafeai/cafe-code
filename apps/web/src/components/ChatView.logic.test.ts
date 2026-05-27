@@ -18,6 +18,7 @@ import {
   mergePendingSteerSnapshotsForInterruptedTurn,
   resolveFollowUpQueuePhase,
   resolveSendEnvMode,
+  shouldReplayCodexPendingSteerAfterTerminal,
   shouldPinTimelineToEndForLocalMessage,
   shouldWriteThreadErrorToCurrentServerThread,
   waitForStartedServerThread,
@@ -77,6 +78,44 @@ describe("mergePendingSteerSnapshotsForInterruptedTurn", () => {
 
     expect(merged?.promptText).toBe("describe this");
     expect(merged?.images).toEqual([image]);
+  });
+});
+
+describe("shouldReplayCodexPendingSteerAfterTerminal", () => {
+  it("replays Codex steers when a turn ended before the steer entered provider items", () => {
+    expect(
+      shouldReplayCodexPendingSteerAfterTerminal({
+        provider: "codex",
+        terminalTurnAfterSteer: true,
+        steerProcessingStarted: false,
+        steerFailureRecorded: false,
+        steerRecoveryRecorded: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not replay once Codex emitted the steer processing marker", () => {
+    expect(
+      shouldReplayCodexPendingSteerAfterTerminal({
+        provider: "codex",
+        terminalTurnAfterSteer: true,
+        steerProcessingStarted: true,
+        steerFailureRecorded: false,
+        steerRecoveryRecorded: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("does not replay non-Codex terminal turns", () => {
+    expect(
+      shouldReplayCodexPendingSteerAfterTerminal({
+        provider: "claude",
+        terminalTurnAfterSteer: true,
+        steerProcessingStarted: false,
+        steerFailureRecorded: false,
+        steerRecoveryRecorded: false,
+      }),
+    ).toBe(false);
   });
 });
 

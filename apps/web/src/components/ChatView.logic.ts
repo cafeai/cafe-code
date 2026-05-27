@@ -173,6 +173,22 @@ export function mergePendingSteerSnapshotsForInterruptedTurn(
   };
 }
 
+export function shouldReplayCodexPendingSteerAfterTerminal(input: {
+  readonly provider: string | null | undefined;
+  readonly terminalTurnAfterSteer: boolean;
+  readonly steerProcessingStarted: boolean;
+  readonly steerFailureRecorded: boolean;
+  readonly steerRecoveryRecorded: boolean;
+}): boolean {
+  return (
+    input.provider === "codex" &&
+    input.terminalTurnAfterSteer &&
+    !input.steerProcessingStarted &&
+    !input.steerFailureRecorded &&
+    !input.steerRecoveryRecorded
+  );
+}
+
 export function deriveComposerSendState(options: { prompt: string; imageCount: number }): {
   trimmedPrompt: string;
   hasSendableContent: boolean;
