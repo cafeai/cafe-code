@@ -439,6 +439,8 @@ describe("Codex steer processing diagnostics", () => {
     assert.equal(diagnostics.status, "available");
     if (diagnostics.status !== "available") return;
     assert.equal(diagnostics.processCount, 2);
+    assert.equal(diagnostics.activeProcessCount, 2);
+    assert.equal(diagnostics.supportProcessCount, 0);
     assert.equal(diagnostics.totalCpuPercent, 3.75);
     assert.equal(diagnostics.totalRssBytes, 50_000);
     assert.equal(diagnostics.longestElapsed, "21:50");
@@ -447,16 +449,103 @@ describe("Codex steer processing diagnostics", () => {
         process.pid,
         process.ppid,
         process.depth,
+        process.role,
         process.command,
       ]),
       [
-        [101, 100, 0, "selene burst . 262"],
-        [102, 101, 1, "codex exec --model gpt-5.5"],
+        [101, 100, 0, "active", "selene burst . 262"],
+        [102, 101, 1, "active", "codex exec --model gpt-5.5"],
       ],
     );
     assert.equal(diagnostics.processes[0]?.childPids[0], 102);
     assert.ok(!diagnostics.processes[0]?.command.includes("npm_abcd"));
     assert.ok(!diagnostics.processes[1]?.command.includes("auth.json"));
+  });
+
+  it("classifies persistent Codex helper processes as support instead of active turn work", () => {
+    const diagnostics = summarizeCodexAppServerChildProcesses({
+      appServerPid: 100,
+      diagnosticsRootPid: 1,
+      rows: [
+        {
+          pid: 100,
+          ppid: 1,
+          pgid: 100,
+          status: "S",
+          cpuPercent: 0,
+          rssBytes: 10_000,
+          elapsed: "12:00",
+          command: "codex app-server",
+        },
+        {
+          pid: 101,
+          ppid: 100,
+          pgid: 100,
+          status: "S",
+          cpuPercent: 0,
+          rssBytes: 20_000,
+          elapsed: "11:50",
+          command: "/Applications/Codex.app/Contents/Resources/SkyComputerUseClient mcp",
+        },
+        {
+          pid: 102,
+          ppid: 100,
+          pgid: 100,
+          status: "S",
+          cpuPercent: 0,
+          rssBytes: 30_000,
+          elapsed: "11:45",
+          command: "/Applications/Codex.app/Contents/Resources/node_repl",
+        },
+        {
+          pid: 103,
+          ppid: 100,
+          pgid: 100,
+          status: "S",
+          cpuPercent: 0,
+          rssBytes: 40_000,
+          elapsed: "11:40",
+          command: "/Applications/Codex.app/Contents/Resources/codex app-server --listen stdio://",
+        },
+        {
+          pid: 104,
+          ppid: 100,
+          pgid: 100,
+          status: "R",
+          cpuPercent: 5,
+          rssBytes: 50_000,
+          elapsed: "00:02",
+          command: "bash -lc bun run build",
+        },
+        {
+          pid: 105,
+          ppid: 100,
+          pgid: 100,
+          status: "S",
+          cpuPercent: 0,
+          rssBytes: 60_000,
+          elapsed: "11:35",
+          command:
+            "/Users/mike/.nvm/versions/node/v25.9.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex app-server",
+        },
+      ],
+    });
+
+    assert.equal(diagnostics.status, "available");
+    if (diagnostics.status !== "available") return;
+    assert.equal(diagnostics.processCount, 5);
+    assert.equal(diagnostics.activeProcessCount, 1);
+    assert.equal(diagnostics.supportProcessCount, 4);
+    assert.deepStrictEqual(
+      diagnostics.processes.map((process) => [process.pid, process.role, process.supportReason]),
+      [
+        [101, "support", "codex-bundled-computer-use-mcp"],
+        [102, "support", "codex-bundled-node-repl"],
+        [103, "support", "codex-bundled-nested-app-server"],
+        [104, "active", undefined],
+        [105, "support", "codex-app-server-runtime"],
+      ],
+    );
   });
 
   it("marks the oldest unprocessed steer when Codex emits the injected user message item", () => {

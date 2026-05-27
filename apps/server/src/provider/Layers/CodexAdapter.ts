@@ -81,6 +81,7 @@ const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 
 const PROVIDER = ProviderDriverKind.make("codex");
 const CODEX_TRANSPORT_POLICY_FILENAME = "codex-transport-policy.json";
+const CODEX_TRANSPORT_POLICY_PERSISTENCE_ENV = "CAFE_CODE_PERSIST_CODEX_HTTP_FALLBACK";
 const CODEX_WEBSOCKET_FALLBACK_REASON = "responses_websocket_stream_disconnected";
 
 class CodexTransportPolicyFileError extends Data.TaggedError("CodexTransportPolicyFileError")<{
@@ -238,11 +239,17 @@ function isCodexResponsesWebsocketFallbackEvent(event: ProviderEvent): boolean {
   // Match upstream Codex exactly: retry notifications such as
   // "Reconnecting... 5/5" are not the transport decision. Codex only switches a
   // session to HTTP after its fallback branch activates and emits the
-  // WebSockets-to-HTTPS/HTTP warning. Cafe only persists that official decision.
+  // WebSockets-to-HTTPS/HTTP warning. Cafe observes that official decision but
+  // does not persist it by default because upstream keeps it session-scoped.
   return (
     containsNormalized(combined, "falling back from websockets to https transport") ||
     containsNormalized(combined, "falling back to http")
   );
+}
+
+function isCodexTransportPolicyPersistenceEnabled(environment: NodeJS.ProcessEnv): boolean {
+  const value = environment[CODEX_TRANSPORT_POLICY_PERSISTENCE_ENV]?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
 }
 
 function isCodexTurnTerminalEvent(event: ProviderEvent): boolean {
@@ -1712,10 +1719,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     binaryPath: codexConfig.binaryPath,
     ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
   });
-  const initialTransportPolicy = yield* loadCodexTransportPolicy(
-    transportPolicyPath,
-    transportPolicyKey,
+  const transportPolicyPersistenceEnabled = isCodexTransportPolicyPersistenceEnabled(
+    options?.environment ?? process.env,
   );
+  const initialTransportPolicy = transportPolicyPersistenceEnabled
+    ? yield* loadCodexTransportPolicy(transportPolicyPath, transportPolicyKey)
+    : undefined;
   const transportPolicyRef = yield* Ref.make<CodexTransportPolicyEntry | undefined>(
     initialTransportPolicy,
   );
@@ -1734,6 +1743,29 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const disableResponsesWebsocketsFromEvent = (event: ProviderEvent): Effect.Effect<void> =>
     Effect.gen(function* () {
       const observedAt = DateTime.formatIso(yield* DateTime.now);
+      if (!transportPolicyPersistenceEnabled) {
+        // Upstream Codex 0.134.0 keeps Responses WebSocket fallback as
+        // session-scoped runtime state: the built-in OpenAI provider still has
+        // `supports_websockets = true`, and the fallback flag sticks inside the
+        // live session after the official warning. Cafe used to persist this
+        // across backend/app-server restarts, which meant a single historical
+        // disconnect could permanently launch future Codex sessions with a
+        // Cafe-scoped HTTP-only provider. That diverges from the TUI and can
+        // make current-provider behavior impossible to compare with upstream.
+        yield* Effect.logWarning("codex.transportPolicy.responsesWebsocketsFallbackObserved", {
+          instanceId: boundInstanceId,
+          reason: CODEX_WEBSOCKET_FALLBACK_REASON,
+          observedAt,
+          threadId: event.threadId,
+          turnId: event.turnId,
+          eventId: event.id,
+          persistence: "disabled",
+          semantics:
+            "Cafe matches upstream Codex TUI by leaving fallback scoped to the live app-server session. Set CAFE_CODE_PERSIST_CODEX_HTTP_FALLBACK=1 only for local diagnostics that intentionally force future launches onto HTTPS.",
+        });
+        return;
+      }
+
       const previous = yield* Ref.get(transportPolicyRef);
       const next: CodexTransportPolicyEntry = {
         responsesWebsockets: "disabled",

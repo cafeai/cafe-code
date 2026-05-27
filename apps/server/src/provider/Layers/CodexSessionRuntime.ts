@@ -425,6 +425,8 @@ export interface CodexAppServerChildProcessEntry {
   readonly pid: number;
   readonly ppid: number;
   readonly depth: number;
+  readonly role: "active" | "support";
+  readonly supportReason?: string;
   readonly status: string;
   readonly cpuPercent: number;
   readonly rssBytes: number;
@@ -440,6 +442,8 @@ export type CodexAppServerChildProcessDiagnostics =
       readonly status: "available";
       readonly appServerPid: number;
       readonly processCount: number;
+      readonly activeProcessCount: number;
+      readonly supportProcessCount: number;
       readonly listedProcessCount: number;
       readonly hiddenProcessCount: number;
       readonly totalCpuPercent: number;
@@ -936,6 +940,49 @@ function summarizeCodexChildProcessCommand(command: string): {
   };
 }
 
+function classifyCodexAppServerChildProcess(
+  row: ProcessRow,
+  command: ReturnType<typeof summarizeCodexChildProcessCommand>,
+): Pick<CodexAppServerChildProcessEntry, "role" | "supportReason"> {
+  const normalizedCommand = row.command.toLowerCase();
+  const normalizedLabel = command.label.toLowerCase();
+
+  // These processes are long-lived support servers launched by Codex.app's
+  // bundled MCP/runtime stack. They can remain alive for the whole app-server
+  // session, so counting them as active turn work makes a quiescent or wedged
+  // turn look legitimately busy. Upstream TUI waits on app-server turn events,
+  // not on these helper process lifetimes.
+  if (
+    normalizedLabel === "node_repl" ||
+    normalizedCommand.includes("/node_repl") ||
+    normalizedCommand.includes("\\node_repl")
+  ) {
+    return {
+      role: "support",
+      supportReason: "codex-bundled-node-repl",
+    };
+  }
+
+  if (normalizedCommand.includes("skycomputeruseclient")) {
+    return {
+      role: "support",
+      supportReason: "codex-bundled-computer-use-mcp",
+    };
+  }
+
+  if (normalizedCommand.includes("codex") && normalizedCommand.includes("app-server")) {
+    return {
+      role: "support",
+      supportReason:
+        normalizedCommand.includes("--listen") || normalizedCommand.includes("stdio://")
+          ? "codex-bundled-nested-app-server"
+          : "codex-app-server-runtime",
+    };
+  }
+
+  return { role: "active" };
+}
+
 export function summarizeCodexAppServerChildProcesses(input: {
   readonly rows: ReadonlyArray<ProcessRow>;
   readonly appServerPid: number;
@@ -974,10 +1021,12 @@ export function summarizeCodexAppServerChildProcesses(input: {
   const allProcesses = entries.map(({ row, depth }) => {
     const elapsedSeconds = parseCodexProcessElapsedSeconds(row.elapsed);
     const command = summarizeCodexChildProcessCommand(row.command);
-    return {
+    const classification = classifyCodexAppServerChildProcess(row, command);
+    const entry: CodexAppServerChildProcessEntry = {
       pid: row.pid,
       ppid: row.ppid,
       depth,
+      role: classification.role,
       status: row.status || "unknown",
       cpuPercent: Math.max(0, row.cpuPercent),
       rssBytes: Math.max(0, row.rssBytes),
@@ -986,18 +1035,25 @@ export function summarizeCodexAppServerChildProcesses(input: {
       commandLabel: command.label,
       command: command.preview,
       childPids: (childrenByParent.get(row.pid) ?? []).map((child) => child.pid),
-    } satisfies CodexAppServerChildProcessEntry;
+    };
+    return classification.supportReason === undefined
+      ? entry
+      : Object.assign(entry, { supportReason: classification.supportReason });
   });
   const longest = allProcesses
     .filter((process) => process.elapsedSeconds !== null)
     .toSorted((left, right) => (right.elapsedSeconds ?? 0) - (left.elapsedSeconds ?? 0))[0];
   const limit = Math.max(0, input.limit ?? CODEX_APP_SERVER_CHILD_PROCESS_WARNING_LIMIT);
   const processes = allProcesses.slice(0, limit);
+  const activeProcessCount = allProcesses.filter((process) => process.role === "active").length;
+  const supportProcessCount = allProcesses.length - activeProcessCount;
 
   return {
     status: "available",
     appServerPid: input.appServerPid,
     processCount: allProcesses.length,
+    activeProcessCount,
+    supportProcessCount,
     listedProcessCount: processes.length,
     hiddenProcessCount: Math.max(0, allProcesses.length - processes.length),
     totalCpuPercent:
@@ -1010,7 +1066,7 @@ export function summarizeCodexAppServerChildProcesses(input: {
 }
 
 function codexActiveChildProcessCount(diagnostics: CodexAppServerChildProcessDiagnostics): number {
-  return diagnostics.status === "available" ? diagnostics.processCount : 0;
+  return diagnostics.status === "available" ? diagnostics.activeProcessCount : 0;
 }
 
 function findCodexActiveContextCompactionForTurn(
@@ -2165,7 +2221,7 @@ export const makeCodexSessionRuntime = (
             warningCount: input.pending.warningCount,
             appServerChildProcesses: childProcesses,
             semantics:
-              "Upstream Codex 0.134.0 stores turn/steer input in the active turn queue and emits the injected userMessage only when the turn loop drains pending input. Cafe has delivered the steer; when child processes are listed here, the steer is waiting behind active tool or model work rather than being lost.",
+              "Upstream Codex 0.134.0 stores turn/steer input in the active turn queue and emits the injected userMessage only when the turn loop drains pending input. Cafe has delivered the steer; only child processes classified as active count as turn work. Persistent Codex helper/MCP processes are reported as support processes and do not explain a delayed steer.",
           },
         });
       });
@@ -2589,7 +2645,7 @@ export const makeCodexSessionRuntime = (
             itemSummary,
             appServerChildProcesses: childProcesses,
             semantics:
-              "Cafe follows upstream Codex app-server lifecycle semantics: turn/completed or a terminal thread/read turn closes the turn. If thread/read reports a non-active thread with an in-progress turn, Cafe applies upstream's stale-turn rule and interrupts it before this warning is emitted. Live app-server child processes mean the turn is still busy with provider-owned work, so Cafe keeps waiting instead of interrupting.",
+              "Cafe follows upstream Codex app-server lifecycle semantics: turn/completed or a terminal thread/read turn closes the turn. If thread/read reports a non-active thread with an in-progress turn, Cafe applies upstream's stale-turn rule and interrupts it before this warning is emitted. Only child processes classified as active count as turn work; persistent Codex helper/MCP processes are reported as support processes and do not explain a delayed terminal event.",
           },
         });
       });

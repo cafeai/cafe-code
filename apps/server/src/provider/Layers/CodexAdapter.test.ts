@@ -1481,7 +1481,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
   );
 });
 
-it.effect("persists Codex HTTP fallback policy and applies it to a restarted adapter", () =>
+it.effect("keeps Codex HTTP fallback scoped to the live app-server by default", () =>
   Effect.gen(function* () {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cafecode-codex-transport-policy-"));
     const policyPath = path.join(tempDir, "userdata", "codex-transport-policy.json");
@@ -1562,10 +1562,7 @@ it.effect("persists Codex HTTP fallback policy and applies it to a restarted ada
 
       const warning = yield* Fiber.join(warningFiber);
       assert.equal(warning._tag, "Some");
-      assert.equal(fs.existsSync(policyPath), true);
-      const persisted = fs.readFileSync(policyPath, "utf8");
-      assert.match(persisted, /"responsesWebsockets": "disabled"/);
-      assert.doesNotMatch(persisted, /prompt text/i);
+      assert.equal(fs.existsSync(policyPath), false);
 
       yield* Scope.close(scope1, Exit.void);
       scope1Closed = true;
@@ -1581,11 +1578,7 @@ it.effect("persists Codex HTTP fallback policy and applies it to a restarted ada
       });
 
       const launchOptions = runtimeFactory2.factory.mock.calls[0]?.[0];
-      assert.equal(launchOptions?.transportPolicy?.responsesWebsockets, "disabled");
-      assert.equal(
-        launchOptions?.transportPolicy?.reason,
-        "responses_websocket_stream_disconnected",
-      );
+      assert.equal(launchOptions?.transportPolicy, undefined);
     } finally {
       if (!scope1Closed) {
         yield* Scope.close(scope1, Exit.void).pipe(Effect.ignore);
@@ -1598,7 +1591,7 @@ it.effect("persists Codex HTTP fallback policy and applies it to a restarted ada
   }),
 );
 
-it.effect("retires pre-policy Codex sessions after a fallback turn completes", () =>
+it.effect("can opt in to persisted Codex HTTP fallback retirement for diagnostics", () =>
   Effect.gen(function* () {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cafecode-codex-transport-retire-"));
     const threadId = asThreadId("thread-policy-retire");
@@ -1612,6 +1605,9 @@ it.effect("retires pre-policy Codex sessions after a fallback turn completes", (
         Effect.gen(function* () {
           const codexConfig = decodeCodexSettings({});
           return yield* makeCodexAdapter(codexConfig, {
+            environment: {
+              CAFE_CODE_PERSIST_CODEX_HTTP_FALLBACK: "1",
+            },
             makeRuntime: runtimeFactory.factory,
           });
         }),
