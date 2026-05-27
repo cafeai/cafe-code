@@ -1554,10 +1554,48 @@ function threadHasSteerRecoveryForMessage(thread: Thread, messageId: MessageId) 
   return thread.activities.some((activity) => readSteerRecoveryMessageId(activity) === messageId);
 }
 
+function threadHasSteerProcessingStarted(thread: Thread, pending: PendingSteerDispatch) {
+  return thread.activities.some((activity) => {
+    if (activity.kind !== "task.progress") {
+      return false;
+    }
+    if (activity.createdAt < pending.dispatchedAt) {
+      return false;
+    }
+    if (pending.turnId !== null && activity.turnId !== pending.turnId) {
+      return false;
+    }
+
+    const payload = readDebugRecord(activity.payload);
+    const taskId = readDebugString(payload?.taskId);
+    const description = readDebugString(payload?.description);
+    return (
+      taskId?.startsWith("codex-turn-steer-processing:") === true ||
+      description === "Codex app-server began processing turn/steer."
+    );
+  });
+}
+
 function threadHasResolvedPendingSteer(thread: Thread, pending: PendingSteerDispatch) {
-  return (
+  const hasExplicitProcessingStarted = threadHasSteerProcessingStarted(thread, pending);
+  if (
     threadHasSteerRecoveryForMessage(thread, pending.messageId) ||
     threadHasSteerFailureForMessage(thread, pending.messageId) ||
+    threadHasTerminalTurnAfterSteer(thread, pending)
+  ) {
+    return true;
+  }
+
+  if (thread.session?.provider === "codex") {
+    // Upstream Codex app-server ACKs `turn/steer` before the steer is visible in
+    // the active turn. Keep Cafe's UI in a pending "steering" state until the
+    // provider emits the explicit processing-start signal instead of clearing on
+    // unrelated assistant text that was already in flight.
+    return hasExplicitProcessingStarted;
+  }
+
+  return (
+    hasExplicitProcessingStarted ||
     threadHasAssistantResponseAfterSteer(thread, pending) ||
     threadHasTerminalTurnAfterSteer(thread, pending)
   );
