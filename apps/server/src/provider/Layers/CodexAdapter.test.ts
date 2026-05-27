@@ -1157,7 +1157,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
-  it.effect("maps fatal websocket stderr notifications to runtime.error", () =>
+  it.effect("maps websocket stderr notifications to runtime.warning", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
       const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
@@ -1180,12 +1180,11 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       if (firstEvent._tag !== "Some") {
         return;
       }
-      assert.equal(firstEvent.value.type, "runtime.error");
-      if (firstEvent.value.type !== "runtime.error") {
+      assert.equal(firstEvent.value.type, "runtime.warning");
+      if (firstEvent.value.type !== "runtime.warning") {
         return;
       }
       assert.equal(firstEvent.value.turnId, "turn-1");
-      assert.equal(firstEvent.value.payload.class, "provider_error");
       assert.equal(
         firstEvent.value.payload.message,
         "2026-03-31T18:14:06.833399Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: HTTP error: 503 Service Unavailable, url: wss://chatgpt.com/backend-api/codex/responses",

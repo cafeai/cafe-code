@@ -174,13 +174,6 @@ function trimText(value: string | undefined | null): string | undefined {
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
 }
 
-const FATAL_CODEX_STDERR_SNIPPETS = ["failed to connect to websocket"];
-
-function isFatalCodexProcessStderrMessage(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return FATAL_CODEX_STDERR_SNIPPETS.some((snippet) => normalized.includes(snippet));
-}
-
 interface CodexTransportPolicyEntry {
   readonly responsesWebsockets: CodexTransportPolicy["responsesWebsockets"];
   readonly reason?: string;
@@ -1617,26 +1610,20 @@ function mapToRuntimeEvents(
 
   if (event.method === "process/stderr") {
     const message = event.message ?? "Codex process stderr";
-    const isFatal = isFatalCodexProcessStderrMessage(message);
+    // Upstream Codex logs some retryable Responses WebSocket failures on stderr while the
+    // normal stream retry loop is still alive. Treat stderr as diagnostic output and rely on
+    // Codex's structured `error` notification with `willRetry: false`, process exit, or terminal
+    // turn events to mark actual failure. This keeps transient reconnect noise in the work log
+    // instead of surfacing it as a user-visible fatal provider error.
     return [
-      isFatal
-        ? {
-            type: "runtime.error",
-            ...runtimeEventBase(event, canonicalThreadId),
-            payload: {
-              message,
-              class: "provider_error" as const,
-              ...(event.payload !== undefined ? { detail: event.payload } : {}),
-            },
-          }
-        : {
-            type: "runtime.warning",
-            ...runtimeEventBase(event, canonicalThreadId),
-            payload: {
-              message,
-              ...(event.payload !== undefined ? { detail: event.payload } : {}),
-            },
-          },
+      {
+        type: "runtime.warning",
+        ...runtimeEventBase(event, canonicalThreadId),
+        payload: {
+          message,
+          ...(event.payload !== undefined ? { detail: event.payload } : {}),
+        },
+      },
     ];
   }
 
