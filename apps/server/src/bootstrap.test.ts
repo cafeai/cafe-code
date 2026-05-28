@@ -15,14 +15,36 @@ import { vi } from "vitest";
 import { readBootstrapEnvelope, resolveFdPath } from "./bootstrap.ts";
 import { assertNone, assertSome } from "@effect/vitest/utils";
 
-const openSyncInterceptor = vi.hoisted(() => ({ failPath: null as string | null }));
+const openSyncInterceptor = vi.hoisted(() => ({
+  failPath: null as string | null,
+  socketLikeFd: null as number | null,
+  openedPaths: [] as ReadonlyArray<string>,
+}));
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
     ...actual,
+    fstatSync: (...args: Parameters<typeof actual.fstatSync>) => {
+      const [fd] = args;
+      const stat = (actual.fstatSync as (...a: typeof args) => NFS.Stats)(...args);
+      if (fd !== openSyncInterceptor.socketLikeFd) {
+        return stat;
+      }
+      return {
+        ...stat,
+        isFile: () => false,
+        isFIFO: () => false,
+        isCharacterDevice: () => false,
+        isBlockDevice: () => false,
+        isSocket: () => true,
+      };
+    },
     openSync: (...args: Parameters<typeof actual.openSync>) => {
       const [filePath, flags] = args;
+      if (typeof filePath === "string") {
+        openSyncInterceptor.openedPaths = [...openSyncInterceptor.openedPaths, filePath];
+      }
       if (
         typeof filePath === "string" &&
         filePath === openSyncInterceptor.failPath &&
@@ -68,6 +90,39 @@ it.layer(NodeServices.layer)("readBootstrapEnvelope", (it) => {
       assertSome(payload, {
         mode: "desktop",
       });
+    }),
+  );
+
+  it.effect("reads socket-like bootstrap fds directly without fd-path duplication", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const filePath = yield* fs.makeTempFileScoped({ prefix: "t3-bootstrap-", suffix: ".ndjson" });
+
+      yield* fs.writeFileString(
+        filePath,
+        `${yield* encodeTestEnvelopeSchema({ mode: "provider-daemon" })}\n`,
+      );
+
+      // Electron/Node child_process pipes on macOS are reported as sockets.
+      // Pretend this ordinary temp file fd has the same fstat shape so the test
+      // verifies that bootstrap does not attempt the blocking `/dev/fd/<n>`
+      // duplication path for socket descriptors.
+      const fd = NFS.openSync(filePath, "r");
+      openSyncInterceptor.socketLikeFd = fd;
+      openSyncInterceptor.openedPaths = [];
+
+      try {
+        const payload = yield* readBootstrapEnvelope(TestEnvelopeSchema, fd, { timeoutMs: 100 });
+        assertSome(payload, {
+          mode: "provider-daemon",
+        });
+        assert.deepEqual(
+          openSyncInterceptor.openedPaths.filter((openedPath) => openedPath.endsWith(`/fd/${fd}`)),
+          [],
+        );
+      } finally {
+        openSyncInterceptor.socketLikeFd = null;
+      }
     }),
   );
 

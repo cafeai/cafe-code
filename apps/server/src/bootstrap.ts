@@ -109,9 +109,23 @@ const isFdReady = (fd: number) =>
     ),
   );
 
+const shouldDuplicateBootstrapFd = (stat: NFS.Stats): boolean =>
+  // macOS exposes inherited child_process pipe descriptors as sockets. Opening
+  // `/dev/fd/<n>` for those descriptors can block before our bootstrap timeout
+  // is installed, which leaves provider-daemon startup waiting forever for a
+  // socket it never creates. File-like descriptors are still duplicated so the
+  // stream can own its lifecycle without surprising callers that may keep the
+  // original fd open.
+  stat.isFile() || stat.isFIFO() || stat.isCharacterDevice() || stat.isBlockDevice();
+
 const makeBootstrapInputStream = (fd: number) =>
   Effect.try<Readable, BootstrapError>({
     try: () => {
+      const stat = NFS.fstatSync(fd);
+      if (!shouldDuplicateBootstrapFd(stat)) {
+        return makeDirectBootstrapStream(fd);
+      }
+
       const fdPath = resolveFdPath(fd);
       if (fdPath === undefined) {
         return makeDirectBootstrapStream(fd);
