@@ -7,6 +7,7 @@ import * as Schedule from "effect/Schedule";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ThreadDetailSubscriptionRegistry } from "../../orchestration/Services/ThreadDetailSubscriptionRegistry.ts";
 import { reconcileStoppedRuntimeSessions } from "../../persistence/RuntimeSessionReconciliation.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
@@ -28,6 +29,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
     const providerService = yield* ProviderService;
     const directory = yield* ProviderSessionDirectory;
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+    const threadDetailSubscriptionRegistry = yield* ThreadDetailSubscriptionRegistry;
     const sql = yield* SqlClient.SqlClient;
 
     const inactivityThresholdMs = Math.max(
@@ -78,10 +80,49 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
         if (thread?.session?.activeTurnId != null) {
           yield* Effect.logDebug("provider.session.reaper.skipped-active-turn", {
             threadId: binding.threadId,
+            provider: binding.provider,
             activeTurnId: thread.session.activeTurnId,
             idleDurationMs,
           });
           continue;
+        }
+
+        let reapReason = "inactivity_threshold";
+        let noSubscriberDurationMs: number | null = null;
+        if (String(binding.provider) === "codex") {
+          const subscription = yield* threadDetailSubscriptionRegistry.snapshot(binding.threadId);
+          if (subscription.subscriberCount > 0) {
+            yield* Effect.logDebug("provider.session.reaper.skipped-codex-subscribed", {
+              threadId: binding.threadId,
+              subscriberCount: subscription.subscriberCount,
+              idleDurationMs,
+            });
+            continue;
+          }
+
+          const noSubscribersSinceMs = subscription.noSubscribersSinceMs ?? now;
+          noSubscriberDurationMs = now - noSubscribersSinceMs;
+          const unloadEligibleAtMs =
+            Math.max(lastSeenMs, noSubscribersSinceMs) + inactivityThresholdMs;
+
+          // Upstream Codex app-server unloads TUI sessions only after both
+          // conditions have been true for the unload window: no subscribers
+          // and no thread activity. It computes the target as
+          // max(no_subscribers_since, inactive_since) + THREAD_UNLOADING_DELAY.
+          // Cafe's persisted `lastSeenAt` is the closest backend-side
+          // equivalent of app-server thread activity, so Codex sessions use
+          // that same two-clock gate instead of the generic provider reaper.
+          if (now < unloadEligibleAtMs) {
+            yield* Effect.logDebug("provider.session.reaper.skipped-codex-unload-window", {
+              threadId: binding.threadId,
+              idleDurationMs,
+              noSubscriberDurationMs,
+              unloadEligibleInMs: unloadEligibleAtMs - now,
+            });
+            continue;
+          }
+
+          reapReason = "codex_no_subscribers_inactive_threshold";
         }
 
         const reaped = yield* providerService.stopSession({ threadId: binding.threadId }).pipe(
@@ -90,7 +131,8 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
               threadId: binding.threadId,
               provider: binding.provider,
               idleDurationMs,
-              reason: "inactivity_threshold",
+              noSubscriberDurationMs,
+              reason: reapReason,
             }),
           ),
           Effect.as(true),

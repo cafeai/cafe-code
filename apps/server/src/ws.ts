@@ -39,6 +39,7 @@ import {
   type OrchestrationEngineShape,
 } from "./orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ThreadDetailSubscriptionRegistry } from "./orchestration/Services/ThreadDetailSubscriptionRegistry.ts";
 import {
   observeRpcEffect,
   observeRpcStream,
@@ -236,6 +237,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
     Effect.gen(function* () {
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
       const orchestrationEngine = yield* OrchestrationEngineService;
+      const threadDetailSubscriptionRegistry = yield* ThreadDetailSubscriptionRegistry;
       const keybindings = yield* Keybindings;
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
       const gitWorkflow = yield* GitWorkflowService;
@@ -836,6 +838,11 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
                   cause: input.threadId,
                 });
               }
+
+              yield* threadDetailSubscriptionRegistry.retain(input.threadId);
+              yield* Effect.addFinalizer(() =>
+                threadDetailSubscriptionRegistry.release(input.threadId),
+              );
 
               const liveStream = streamReplayableDomainEvents(
                 orchestrationEngine,
