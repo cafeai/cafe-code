@@ -79,21 +79,21 @@ describe("ProviderSessionStartInput", () => {
     expect(parsed.runtimeMode).toBe("full-access");
   });
 
-  it("accepts cursor provider", () => {
+  it("accepts fork-provided provider options", () => {
     const parsed = decodeProviderSessionStartInput({
       threadId: "thread-1",
-      provider: "cursor",
+      provider: "ollama",
       cwd: "/tmp/workspace",
       runtimeMode: "full-access",
       modelSelection: {
-        provider: "cursor",
-        model: "composer-2",
+        provider: "ollama",
+        model: "llama3.3",
         options: [{ id: "fastMode", value: true }],
       },
     });
-    expect(parsed.provider).toBe("cursor");
-    expect(parsed.modelSelection?.instanceId).toBe("cursor");
-    expect(parsed.modelSelection?.model).toBe("composer-2");
+    expect(parsed.provider).toBe("ollama");
+    expect(parsed.modelSelection?.instanceId).toBe("ollama");
+    expect(parsed.modelSelection?.model).toBe("llama3.3");
     expect(getOptionValue(parsed.modelSelection?.options, "fastMode")).toBe(true);
   });
 

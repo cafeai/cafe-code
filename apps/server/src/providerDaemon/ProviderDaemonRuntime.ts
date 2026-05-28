@@ -3,7 +3,6 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import { AnalyticsServiceLayerLive } from "../telemetry/Layers/AnalyticsService.ts";
-import { OpenCodeRuntimeLive } from "../provider/opencodeRuntime.ts";
 import { ProviderAdapterRegistryLive } from "../provider/Layers/ProviderAdapterRegistry.ts";
 import { ProviderEventLoggersLive } from "../provider/Layers/ProviderEventLoggers.ts";
 import { ProviderInstanceRegistryHydrationLive } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
@@ -62,7 +61,6 @@ export const ProviderDaemonRuntimeLive = Layer.unwrap(
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(ServerSettingsLive),
   Layer.provideMerge(ProviderEventLoggersLive),
-  Layer.provideMerge(OpenCodeRuntimeLive),
   Layer.provideMerge(AnalyticsServiceLayerLive),
   Layer.provideMerge(FetchHttpClient.layer),
 );

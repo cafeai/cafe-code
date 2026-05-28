@@ -212,7 +212,7 @@ const TEST_PROVIDERS: ReadonlyArray<ServerProvider> = [
 
 const CODEX_INSTANCE_ID = ProviderInstanceId.make("codex");
 const CLAUDE_INSTANCE_ID = ProviderInstanceId.make("claudeAgent");
-const OPENCODE_INSTANCE_ID = ProviderInstanceId.make("opencode");
+const CLAUDE_COPILOT_INSTANCE_ID = ProviderInstanceId.make("claude_copilot");
 
 function buildCodexProvider(models: ServerProvider["models"]): ServerProvider {
   return {
@@ -231,10 +231,11 @@ function buildCodexProvider(models: ServerProvider["models"]): ServerProvider {
   };
 }
 
-function buildOpenCodeProvider(models: ServerProvider["models"]): ServerProvider {
+function buildClaudeCopilotProvider(models: ServerProvider["models"]): ServerProvider {
   return {
-    driver: ProviderDriverKind.make("opencode"),
-    instanceId: ProviderInstanceId.make("opencode"),
+    driver: ProviderDriverKind.make("claudeAgent"),
+    instanceId: CLAUDE_COPILOT_INSTANCE_ID,
+    displayName: "Claude Copilot",
     enabled: true,
     installed: true,
     version: "1.0.0",
@@ -593,8 +594,6 @@ describe("ProviderModelPicker", () => {
         ],
       ],
       ["codex" as ProviderInstanceId, [{ slug: "gpt-5-codex", name: "GPT-5 Codex" }]],
-      ["cursor" as ProviderInstanceId, []],
-      ["opencode" as ProviderInstanceId, []],
     ]);
     const instanceEntries = sortProviderInstanceEntries(
       deriveProviderInstanceEntries(TEST_PROVIDERS),
@@ -625,9 +624,9 @@ describe("ProviderModelPicker", () => {
     }
   });
 
-  it("uses the trigger label for locked opencode rows", async () => {
+  it("uses the trigger label for locked Claude subprovider rows", async () => {
     const providers: ReadonlyArray<ServerProvider> = [
-      buildOpenCodeProvider([
+      buildClaudeCopilotProvider([
         {
           slug: "github-copilot/claude-opus-4.5",
           name: "Claude Opus 4.5",
@@ -647,9 +646,9 @@ describe("ProviderModelPicker", () => {
       ]),
     ];
     const mounted = await mountPicker({
-      activeInstanceId: OPENCODE_INSTANCE_ID,
+      activeInstanceId: CLAUDE_COPILOT_INSTANCE_ID,
       model: "github-copilot/claude-opus-4.5",
-      lockedProvider: ProviderDriverKind.make("opencode"),
+      lockedProvider: ProviderDriverKind.make("claudeAgent"),
       providers,
     });
 
@@ -842,7 +841,7 @@ describe("ProviderModelPicker", () => {
           }),
         },
       ]),
-      buildOpenCodeProvider([
+      buildClaudeCopilotProvider([
         {
           slug: "github-copilot/claude-opus-4.7",
           name: "Claude Opus 4.7",
@@ -861,7 +860,7 @@ describe("ProviderModelPicker", () => {
       ]),
     ];
     const mounted = await mountPicker({
-      activeInstanceId: OPENCODE_INSTANCE_ID,
+      activeInstanceId: CLAUDE_COPILOT_INSTANCE_ID,
       model: "github-copilot/claude-opus-4.7",
       lockedProvider: null,
       providers,
@@ -883,7 +882,7 @@ describe("ProviderModelPicker", () => {
 
   it("renders each search result with its own provider branding", async () => {
     const providers: ReadonlyArray<ServerProvider> = [
-      buildOpenCodeProvider([
+      buildClaudeCopilotProvider([
         {
           slug: "github-copilot/claude-opus-4.7",
           name: "Claude Opus 4.7",
@@ -923,7 +922,7 @@ describe("ProviderModelPicker", () => {
       },
     ];
     const mounted = await mountPicker({
-      activeInstanceId: OPENCODE_INSTANCE_ID,
+      activeInstanceId: CLAUDE_COPILOT_INSTANCE_ID,
       model: "github-copilot/claude-opus-4.7",
       lockedProvider: null,
       providers,
@@ -935,9 +934,9 @@ describe("ProviderModelPicker", () => {
 
       await vi.waitFor(() => {
         const listText = getModelPickerListText();
-        expect(listText).toContain("OpenCode · GitHub Copilot");
+        expect(listText).toContain("Claude Copilot · GitHub Copilot");
         expect(listText).toContain("Claude");
-        expect(listText).not.toContain("OpenCodeClaude Opus 4.6");
+        expect(listText).not.toContain("Claude CopilotClaude Opus 4.6");
       });
     } finally {
       await mounted.cleanup();

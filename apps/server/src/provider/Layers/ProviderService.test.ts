@@ -75,7 +75,7 @@ const codexInstanceId = ProviderInstanceId.make("codex");
 const claudeAgentInstanceId = ProviderInstanceId.make("claudeAgent");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_AGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
-const CURSOR_DRIVER = ProviderDriverKind.make("cursor");
+const TEST_DRIVER = ProviderDriverKind.make("testDriver");
 
 type LegacyProviderRuntimeEvent = {
   readonly type: string;
@@ -299,11 +299,11 @@ const hasMetricSnapshot = (
 function makeProviderServiceLayer() {
   const codex = makeFakeCodexAdapter();
   const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
-  const cursor = makeFakeCodexAdapter(CURSOR_DRIVER);
+  const testDriver = makeFakeCodexAdapter(TEST_DRIVER);
   const registry = makeAdapterRegistryMock({
     [ProviderDriverKind.make("codex")]: codex.adapter,
     [ProviderDriverKind.make("claudeAgent")]: claude.adapter,
-    [ProviderDriverKind.make("cursor")]: cursor.adapter,
+    [TEST_DRIVER]: testDriver.adapter,
   });
 
   const providerAdapterLayer = Layer.succeed(ProviderAdapterRegistry, registry);
@@ -331,7 +331,7 @@ function makeProviderServiceLayer() {
   return {
     codex,
     claude,
-    cursor,
+    testDriver,
     layer,
   };
 }

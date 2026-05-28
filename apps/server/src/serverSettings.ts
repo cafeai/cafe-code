@@ -15,6 +15,7 @@ import {
   DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   DEFAULT_SERVER_SETTINGS,
   isProviderDriverKind,
+  isRetiredProviderDriverKind,
   type ModelSelection,
   type ProviderInstanceConfig,
   type ProviderInstanceEnvironmentVariable,
@@ -138,7 +139,7 @@ export class ServerSettingsService extends Context.Service<
         const { automaticGitFetchInterval, ...overridesForMerge } = overrides;
         const merged = deepMerge(DEFAULT_SERVER_SETTINGS, overridesForMerge);
         const initialSettings = yield* normalizeServerSettings({
-          ...merged,
+          ...stripRetiredProviderInstances(merged),
           ...(automaticGitFetchInterval !== undefined
             ? { automaticGitFetchInterval: automaticGitFetchInterval as Duration.Duration }
             : {}),
@@ -152,6 +153,7 @@ export class ServerSettingsService extends Context.Service<
           updateSettings: (patch) =>
             Ref.get(currentSettingsRef).pipe(
               Effect.map((currentSettings) => applyServerSettingsPatch(currentSettings, patch)),
+              Effect.map(stripRetiredProviderInstances),
               Effect.flatMap(normalizeServerSettings),
               Effect.tap((nextSettings) => Ref.set(currentSettingsRef, nextSettings)),
             ),
@@ -172,6 +174,23 @@ const getLegacyProviderSettings = (
 ): LegacyProviderSettings | undefined =>
   (settings.providers as Record<string, LegacyProviderSettings | undefined>)[provider];
 
+function stripRetiredProviderInstances(settings: ServerSettings): ServerSettings {
+  const providerInstances = Object.fromEntries(
+    Object.entries(settings.providerInstances).filter(
+      ([, instance]) => !isRetiredProviderDriverKind(instance.driver),
+    ),
+  ) as ServerSettings["providerInstances"];
+
+  if (Object.keys(providerInstances).length === Object.keys(settings.providerInstances).length) {
+    return settings;
+  }
+
+  return {
+    ...settings,
+    providerInstances,
+  };
+}
+
 /**
  * Ensure the `textGenerationModelSelection` points to an enabled provider.
  * If the selected provider is disabled, fall back to the first enabled
@@ -182,11 +201,14 @@ function resolveTextGenerationProvider(settings: ServerSettings): ServerSettings
   const selection = settings.textGenerationModelSelection;
   const instanceConfig = settings.providerInstances[selection.instanceId];
   if (instanceConfig !== undefined) {
-    return (instanceConfig.enabled ?? true) ? settings : fallbackTextGenerationProvider(settings);
+    return (instanceConfig.enabled ?? true) && !isRetiredProviderDriverKind(instanceConfig.driver)
+      ? settings
+      : fallbackTextGenerationProvider(settings);
   }
 
   if (
     isProviderDriverKind(selection.instanceId) &&
+    !isRetiredProviderDriverKind(selection.instanceId) &&
     getLegacyProviderSettings(settings, selection.instanceId)?.enabled
   ) {
     return settings;
@@ -196,7 +218,9 @@ function resolveTextGenerationProvider(settings: ServerSettings): ServerSettings
 }
 
 function fallbackTextGenerationProvider(settings: ServerSettings): ServerSettings {
-  const fallbackEntry = Object.entries(settings.providers).find(([, provider]) => provider.enabled);
+  const fallbackEntry = Object.entries(settings.providers).find(
+    ([provider, config]) => config.enabled && !isRetiredProviderDriverKind(provider),
+  );
   const fallback = fallbackEntry ? ProviderDriverKind.make(fallbackEntry[0]) : undefined;
   if (!fallback) {
     return settings;
@@ -305,7 +329,7 @@ const makeServerSettings = Effect.gen(function* () {
       });
       return DEFAULT_SERVER_SETTINGS;
     }
-    return decoded.value;
+    return stripRetiredProviderInstances(decoded.value);
   });
 
   const settingsCache = yield* Cache.make<typeof cacheKey, ServerSettings, ServerSettingsError>({
@@ -552,7 +576,7 @@ const makeServerSettings = Effect.gen(function* () {
           const current = yield* getSettingsFromCache;
           const nextPersisted = yield* persistProviderEnvironmentSecrets(
             current,
-            applyServerSettingsPatch(current, patch),
+            stripRetiredProviderInstances(applyServerSettingsPatch(current, patch)),
           );
           const next = yield* normalizeServerSettings(nextPersisted);
           yield* writeSettingsAtomically(next);

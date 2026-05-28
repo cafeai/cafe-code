@@ -115,8 +115,7 @@ authenticated:
 - Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
 - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
 
-OpenCode exists in the codebase, but Cafe Code is currently developed around
-Codex and Claude first.
+Cafe Code currently ships Codex and Claude provider integrations.
 
 ## Local Development
 

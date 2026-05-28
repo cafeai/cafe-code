@@ -6,7 +6,8 @@
  *
  *   1. `settings.providerInstances` — the new driver-agnostic map the
  *      registry expects. Keyed by `ProviderInstanceId`, values are
- *      `ProviderInstanceConfig` envelopes.
+ *      `ProviderInstanceConfig` envelopes. Retired first-party driver entries
+ *      are ignored so old settings do not surface as broken provider cards.
  *   2. `settings.providers.<kind>` — the legacy single-instance-per-driver
  *      fields (`providers.codex`, `providers.claudeAgent`, …). These are
  *      the source of truth for every deployment that hasn't been migrated
@@ -43,6 +44,7 @@
  */
 import {
   defaultInstanceIdForDriver,
+  isRetiredProviderDriverKind,
   type ProviderInstanceConfig,
   type ProviderInstanceConfigMap,
   ServerSettings,
@@ -61,7 +63,7 @@ import { ProviderInstanceRegistryMutableLayer } from "./ProviderInstanceRegistry
  * Synthesize a `ProviderInstanceConfigMap` from a `ServerSettings` snapshot.
  *
  * Strategy:
- *   1. Copy all explicit `settings.providerInstances` entries verbatim.
+ *   1. Copy explicit `settings.providerInstances` entries for active drivers.
  *   2. For each built-in driver whose `defaultInstanceIdForDriver(id)` key
  *      is *not* already in the explicit map, synthesize an entry from the
  *      matching legacy `settings.providers.<kind>` blob.
@@ -73,7 +75,11 @@ import { ProviderInstanceRegistryMutableLayer } from "./ProviderInstanceRegistry
 export const deriveProviderInstanceConfigMap = (
   settings: ServerSettings,
 ): ProviderInstanceConfigMap => {
-  const merged: Record<string, ProviderInstanceConfig> = { ...settings.providerInstances };
+  const merged: Record<string, ProviderInstanceConfig> = Object.fromEntries(
+    Object.entries(settings.providerInstances).filter(
+      ([, instance]) => !isRetiredProviderDriverKind(instance.driver),
+    ),
+  );
 
   for (const driver of BUILT_IN_DRIVERS) {
     const instanceId = defaultInstanceIdForDriver(driver.driverKind);

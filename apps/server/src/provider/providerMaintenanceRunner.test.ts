@@ -28,11 +28,9 @@ import {
 const isServerProviderUpdateError = Schema.is(ServerProviderUpdateError);
 
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
-const CURSOR_DRIVER = ProviderDriverKind.make("cursor");
-const OPENCODE_DRIVER = ProviderDriverKind.make("opencode");
+const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
 const CODEX_INSTANCE_ID = ProviderInstanceId.make("codex");
-const CURSOR_INSTANCE_ID = ProviderInstanceId.make("cursor");
-const OPENCODE_INSTANCE_ID = ProviderInstanceId.make("opencode");
+const CLAUDE_INSTANCE_ID = ProviderInstanceId.make("claudeAgent");
 const encoder = new TextEncoder();
 
 afterEach(() => {
@@ -40,22 +38,13 @@ afterEach(() => {
 });
 
 function lifecycleFor(provider: ProviderDriverKind): ProviderMaintenanceCapabilities {
-  if (provider === CURSOR_DRIVER) {
-    return makeProviderMaintenanceCapabilities({
-      provider,
-      packageName: null,
-      updateExecutable: "agent",
-      updateArgs: ["update"],
-      updateLockKey: "cursor-agent",
-    });
-  }
   return makeProviderMaintenanceCapabilities({
     provider,
-    packageName: provider === OPENCODE_DRIVER ? "opencode-ai" : "@openai/codex",
+    packageName: provider === CLAUDE_DRIVER ? "@anthropic-ai/claude-code" : "@openai/codex",
     updateExecutable: "npm",
     updateArgs:
-      provider === OPENCODE_DRIVER
-        ? ["install", "-g", "opencode-ai@latest"]
+      provider === CLAUDE_DRIVER
+        ? ["install", "-g", "@anthropic-ai/claude-code@latest"]
         : ["install", "-g", "@openai/codex@latest"],
     updateLockKey: "npm-global",
   });
@@ -75,16 +64,10 @@ const baseProvider: ServerProvider = {
   skills: [],
 };
 
-const baseCursorProvider: ServerProvider = {
+const baseClaudeProvider: ServerProvider = {
   ...baseProvider,
-  instanceId: CURSOR_INSTANCE_ID,
-  driver: CURSOR_DRIVER,
-};
-
-const baseOpenCodeProvider: ServerProvider = {
-  ...baseProvider,
-  instanceId: OPENCODE_INSTANCE_ID,
-  driver: OPENCODE_DRIVER,
+  instanceId: CLAUDE_INSTANCE_ID,
+  driver: CLAUDE_DRIVER,
 };
 
 const latestVersionHttpClient = (version: string) =>
@@ -211,14 +194,14 @@ describe("providerMaintenanceRunner", () => {
   it.effect("runs the allowlisted provider update command and records success", () => {
     const calls: Array<{ command: string; args: ReadonlyArray<string> }> = [];
     return Effect.gen(function* () {
-      const { registry, updateStatesRef } = yield* makeRegistry(baseCursorProvider);
+      const { registry, updateStatesRef } = yield* makeRegistry(baseProvider);
       const updater = yield* makeTestRunner(registry);
 
-      const result = yield* updater.updateProvider(CURSOR_DRIVER);
+      const result = yield* updater.updateProvider(CODEX_DRIVER);
       assert.deepStrictEqual(calls, [
         {
-          command: "agent",
-          args: ["update"],
+          command: "npm",
+          args: ["install", "-g", "@openai/codex@latest"],
         },
       ]);
       assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
@@ -493,18 +476,19 @@ describe("providerMaintenanceRunner", () => {
     });
     const calls: Array<string> = [];
     return Effect.gen(function* () {
-      const { registry } = yield* makeRegistry([baseProvider, baseOpenCodeProvider]);
+      const { registry } = yield* makeRegistry([baseProvider, baseClaudeProvider]);
       const updater = yield* makeTestRunner({
         ...registry,
         getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
           Effect.succeed(
             makeProviderMaintenanceCapabilities({
               provider,
-              packageName: provider === OPENCODE_DRIVER ? "opencode-ai" : "@openai/codex",
+              packageName:
+                provider === CLAUDE_DRIVER ? "@anthropic-ai/claude-code" : "@openai/codex",
               updateExecutable: "npm",
               updateArgs:
-                provider === OPENCODE_DRIVER
-                  ? ["install", "-g", "opencode-ai@latest"]
+                provider === CLAUDE_DRIVER
+                  ? ["install", "-g", "@anthropic-ai/claude-code@latest"]
                   : ["install", "-g", "@openai/codex@latest"],
               updateLockKey: "npm-global",
             }),
@@ -514,12 +498,12 @@ describe("providerMaintenanceRunner", () => {
       const first = yield* updater.updateProvider(CODEX_DRIVER).pipe(Effect.forkScoped);
       yield* Effect.promise(() => firstStarted);
 
-      const second = yield* updater.updateProvider(OPENCODE_DRIVER).pipe(Effect.forkScoped);
+      const second = yield* updater.updateProvider(CLAUDE_DRIVER).pipe(Effect.forkScoped);
       let providersWhileQueued: ReadonlyArray<ServerProvider> = [];
       for (let attempt = 0; attempt < 20; attempt += 1) {
         providersWhileQueued = yield* registry.getProviders;
         const queuedStatus = providersWhileQueued.find(
-          (provider) => provider.instanceId === OPENCODE_INSTANCE_ID,
+          (provider) => provider.instanceId === CLAUDE_INSTANCE_ID,
         )?.updateState?.status;
         if (queuedStatus === "queued") {
           break;
@@ -528,7 +512,7 @@ describe("providerMaintenanceRunner", () => {
       }
       assert.deepStrictEqual(calls, ["install -g @openai/codex@latest"]);
       assert.strictEqual(
-        providersWhileQueued.find((provider) => provider.instanceId === OPENCODE_INSTANCE_ID)
+        providersWhileQueued.find((provider) => provider.instanceId === CLAUDE_INSTANCE_ID)
           ?.updateState?.status,
         "queued",
       );
@@ -538,7 +522,7 @@ describe("providerMaintenanceRunner", () => {
       yield* Fiber.join(second);
       assert.deepStrictEqual(calls, [
         "install -g @openai/codex@latest",
-        "install -g opencode-ai@latest",
+        "install -g @anthropic-ai/claude-code@latest",
       ]);
     }).pipe(
       Effect.provide(

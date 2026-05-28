@@ -23,9 +23,9 @@
  *
  * The rule: parsing any of those payloads must always succeed, and the
  * runtime is responsible for marking the unknown driver/instance as
- * "unavailable" rather than crashing. Built-in drivers shipped by the core
- * product happens to register in a given build is not part of the contract
- * layer. Driver availability is discovered through the runtime registry.
+ * "unavailable" rather than crashing. The set of built-in drivers the core
+ * product registers in a given build is not part of the contract layer.
+ * Driver availability is discovered through the runtime registry.
  *
  * Driver-specific configuration is similarly opaque at the contracts layer:
  * drivers live in (or will be extracted to) their own packages and own their
@@ -73,6 +73,20 @@ export type ProviderDriverKind = typeof ProviderDriverKind.Type;
 const isProviderDriverKindValue = Schema.is(ProviderDriverKind);
 export const isProviderDriverKind = (value: unknown): value is ProviderDriverKind =>
   isProviderDriverKindValue(value);
+
+const RETIRED_PROVIDER_DRIVER_KIND_VALUES = new Set(["cursor", "opencode"]);
+
+/**
+ * First-party drivers that this build intentionally no longer ships.
+ *
+ * `ProviderDriverKind` stays open so old settings and persisted threads can
+ * still decode, but runtime/UI code should drop these retired built-ins instead
+ * of surfacing them as user-configurable or unavailable provider cards.
+ */
+export const isRetiredProviderDriverKind = (value: unknown): value is ProviderDriverKind =>
+  typeof value === "string" &&
+  isProviderDriverKindValue(value) &&
+  RETIRED_PROVIDER_DRIVER_KIND_VALUES.has(value);
 
 /**
  * `ProviderInstanceId` — user-defined routing key for a configured provider

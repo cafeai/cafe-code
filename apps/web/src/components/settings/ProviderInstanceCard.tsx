@@ -22,7 +22,7 @@ import {
 } from "@cafecode/contracts";
 
 import { cn } from "../../lib/utils";
-import { formatCodexRateLimitInlineText } from "../../lib/codexRateLimits";
+import { formatCodexRateLimitSummary } from "../../lib/codexRateLimits";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { normalizeProviderAccentColor } from "../../providerInstances";
 import { Badge } from "../ui/badge";
@@ -481,10 +481,15 @@ export function ProviderInstanceCard({
   const authenticatedDetail = hasAuthenticatedEmail
     ? (liveProvider?.auth.label ?? liveProvider?.auth.type ?? null)
     : null;
-  const codexRateLimitText =
+  const codexRateLimitSummary =
     liveProvider?.driver === "codex" && liveProvider.auth.status === "authenticated"
-      ? formatCodexRateLimitInlineText(liveProvider.accountRateLimits)
+      ? formatCodexRateLimitSummary(liveProvider.accountRateLimits)
       : null;
+  const codexRateLimitWindowText = codexRateLimitSummary
+    ? [codexRateLimitSummary.primary?.text, codexRateLimitSummary.secondary?.text]
+        .filter((part): part is string => Boolean(part))
+        .join(" · ")
+    : null;
   const summary = rawSummary;
   const versionLabel = getProviderVersionLabel(liveProvider?.version);
   const versionAdvisory = getProviderVersionAdvisoryPresentation(liveProvider?.versionAdvisory);
@@ -781,10 +786,17 @@ export function ProviderInstanceCard({
               {titleTailNode}
             </div>
             {authRowNode}
-            {codexRateLimitText ? (
-              <p className="text-xs leading-snug text-muted-foreground/80">
-                Usage: {codexRateLimitText}
-              </p>
+            {codexRateLimitSummary ? (
+              <div className="grid gap-0.5 text-xs leading-snug text-muted-foreground/80">
+                {codexRateLimitWindowText ? <p>Usage: {codexRateLimitWindowText}</p> : null}
+                {codexRateLimitSummary.weeklyReset ? (
+                  <p>
+                    {codexRateLimitWindowText
+                      ? codexRateLimitSummary.weeklyReset
+                      : `Usage: ${codexRateLimitSummary.weeklyReset}`}
+                  </p>
+                ) : null}
+              </div>
             ) : null}
           </div>
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">

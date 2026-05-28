@@ -11,6 +11,8 @@ import {
 } from "./AcpCoreRuntimeEvents.ts";
 
 describe("AcpCoreRuntimeEvents", () => {
+  const acpProvider = ProviderDriverKind.make("acpAgent");
+
   it("maps ACP permission requests to canonical runtime events", () => {
     const stamp = { eventId: "event-1" as never, createdAt: "2026-03-27T00:00:00.000Z" };
     const turnId = TurnId.make("turn-1");
@@ -30,7 +32,7 @@ describe("AcpCoreRuntimeEvents", () => {
     expect(
       makeAcpRequestOpenedEvent({
         stamp,
-        provider: ProviderDriverKind.make("cursor"),
+        provider: acpProvider,
         threadId: "thread-1" as never,
         turnId,
         requestId: RuntimeRequestId.make("request-1"),
@@ -52,7 +54,7 @@ describe("AcpCoreRuntimeEvents", () => {
     expect(
       makeAcpRequestResolvedEvent({
         stamp,
-        provider: ProviderDriverKind.make("cursor"),
+        provider: acpProvider,
         threadId: "thread-1" as never,
         turnId,
         requestId: RuntimeRequestId.make("request-1"),
@@ -75,27 +77,27 @@ describe("AcpCoreRuntimeEvents", () => {
     expect(
       makeAcpPlanUpdatedEvent({
         stamp,
-        provider: ProviderDriverKind.make("cursor"),
+        provider: acpProvider,
         threadId: "thread-1" as never,
         turnId,
         payload: {
           plan: [{ step: "Inspect state", status: "inProgress" }],
         },
-        source: "acp.cursor.extension",
-        method: "cursor/update_todos",
+        source: "acp.jsonrpc",
+        method: "session/update_todos",
         rawPayload: { todos: [] },
       }),
     ).toMatchObject({
       type: "turn.plan.updated",
       raw: {
-        method: "cursor/update_todos",
+        method: "session/update_todos",
       },
     });
 
     expect(
       makeAcpToolCallEvent({
         stamp,
-        provider: ProviderDriverKind.make("cursor"),
+        provider: acpProvider,
         threadId: "thread-1" as never,
         turnId,
         toolCall: {
@@ -119,7 +121,7 @@ describe("AcpCoreRuntimeEvents", () => {
     expect(
       makeAcpContentDeltaEvent({
         stamp,
-        provider: ProviderDriverKind.make("cursor"),
+        provider: acpProvider,
         threadId: "thread-1" as never,
         turnId,
         itemId: "assistant:session-1:segment:0",
@@ -137,7 +139,7 @@ describe("AcpCoreRuntimeEvents", () => {
     expect(
       makeAcpAssistantItemEvent({
         stamp,
-        provider: ProviderDriverKind.make("cursor"),
+        provider: acpProvider,
         threadId: "thread-1" as never,
         turnId,
         itemId: "assistant:session-1:segment:0",

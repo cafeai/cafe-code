@@ -122,14 +122,6 @@ function createBaseServerConfig(): ServerConfig {
           customModels: [],
           launchArgs: "",
         },
-        cursor: { enabled: true, binaryPath: "", apiEndpoint: "", customModels: [] },
-        opencode: {
-          enabled: true,
-          binaryPath: "",
-          serverUrl: "",
-          serverPassword: "",
-          customModels: [],
-        },
       },
     },
   };

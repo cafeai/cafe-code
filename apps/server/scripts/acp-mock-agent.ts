@@ -18,7 +18,6 @@ const emitInterleavedAssistantToolCalls =
   process.env.CAFE_CODE_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS === "1";
 const emitGenericToolPlaceholders =
   process.env.CAFE_CODE_ACP_EMIT_GENERIC_TOOL_PLACEHOLDERS === "1";
-const emitAskQuestion = process.env.CAFE_CODE_ACP_EMIT_ASK_QUESTION === "1";
 const failSetConfigOption = process.env.CAFE_CODE_ACP_FAIL_SET_CONFIG_OPTION === "1";
 const exitOnSetConfigOption = process.env.CAFE_CODE_ACP_EXIT_ON_SET_CONFIG_OPTION === "1";
 const promptResponseText = process.env.CAFE_CODE_ACP_PROMPT_RESPONSE_TEXT;
@@ -462,25 +461,6 @@ const program = Effect.gen(function* () {
               content: "package.json\n",
             },
           },
-        });
-
-        return { stopReason: "end_turn" };
-      }
-
-      if (emitAskQuestion) {
-        yield* agent.client.extRequest("cursor/ask_question", {
-          toolCallId: "ask-question-tool-call-1",
-          title: "Question",
-          questions: [
-            {
-              id: "scope",
-              prompt: "Which scope?",
-              options: [
-                { id: "workspace", label: "Workspace" },
-                { id: "session", label: "Session" },
-              ],
-            },
-          ],
         });
 
         return { stopReason: "end_turn" };

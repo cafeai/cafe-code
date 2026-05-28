@@ -22,10 +22,10 @@ import { createModelSelection } from "@cafecode/shared/model";
 // in production; these aliases keep the legacy-key migration tests concise.
 const CODEX_INSTANCE = ProviderInstanceId.make("codex");
 const CLAUDE_AGENT_INSTANCE = ProviderInstanceId.make("claudeAgent");
-const CURSOR_INSTANCE = ProviderInstanceId.make("cursor");
+const EXTERNAL_PROVIDER_INSTANCE = ProviderInstanceId.make("externalDriver");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_AGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
-const CURSOR_DRIVER = ProviderDriverKind.make("cursor");
+const EXTERNAL_PROVIDER_DRIVER = ProviderDriverKind.make("externalDriver");
 
 type ProviderOptionSelectionBag = ReadonlyArray<ProviderOptionSelection>;
 type ProviderOptionSelectionsByProvider = Partial<Record<string, ProviderOptionSelectionBag>>;
@@ -848,12 +848,12 @@ describe("composerDraftStore modelSelection", () => {
     );
   });
 
-  it("keeps explicit Cursor reset overrides on the selection", () => {
+  it("keeps explicit external provider reset overrides on the selection", () => {
     const store = useComposerDraftStore.getState();
 
     store.setModelSelection(
       threadRef,
-      modelSelection(CURSOR_DRIVER, "claude-opus-4-6", {
+      modelSelection(EXTERNAL_PROVIDER_DRIVER, "external-opus-4-6", {
         reasoning: "xhigh",
         fastMode: true,
         thinking: false,
@@ -862,14 +862,14 @@ describe("composerDraftStore modelSelection", () => {
 
     store.setProviderModelOptions(
       threadRef,
-      CURSOR_DRIVER,
+      EXTERNAL_PROVIDER_DRIVER,
       toSelections({ reasoning: "medium", fastMode: false, thinking: true }),
     );
 
     expect(
-      draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[CURSOR_INSTANCE],
+      draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[EXTERNAL_PROVIDER_INSTANCE],
     ).toEqual(
-      modelSelection(CURSOR_DRIVER, "claude-opus-4-6", {
+      modelSelection(EXTERNAL_PROVIDER_DRIVER, "external-opus-4-6", {
         reasoning: "medium",
         fastMode: false,
         thinking: true,
@@ -877,25 +877,30 @@ describe("composerDraftStore modelSelection", () => {
     );
   });
 
-  it("preserves the selected Cursor model when only traits change", () => {
+  it("preserves the selected external provider model when only traits change", () => {
     const store = useComposerDraftStore.getState();
 
-    store.setProviderModelOptions(threadRef, CURSOR_DRIVER, toSelections({ reasoning: "high" }), {
-      model: "gpt-5.4",
-      persistSticky: true,
-    });
+    store.setProviderModelOptions(
+      threadRef,
+      EXTERNAL_PROVIDER_DRIVER,
+      toSelections({ reasoning: "high" }),
+      {
+        model: "external-model",
+        persistSticky: true,
+      },
+    );
 
     expect(
-      draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[CURSOR_INSTANCE],
+      draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[EXTERNAL_PROVIDER_INSTANCE],
     ).toEqual(
-      modelSelection(CURSOR_DRIVER, "gpt-5.4", {
+      modelSelection(EXTERNAL_PROVIDER_DRIVER, "external-model", {
         reasoning: "high",
       }),
     );
     expect(
-      useComposerDraftStore.getState().stickyModelSelectionByProvider[CURSOR_INSTANCE],
+      useComposerDraftStore.getState().stickyModelSelectionByProvider[EXTERNAL_PROVIDER_INSTANCE],
     ).toEqual(
-      modelSelection(CURSOR_DRIVER, "gpt-5.4", {
+      modelSelection(EXTERNAL_PROVIDER_DRIVER, "external-model", {
         reasoning: "high",
       }),
     );
@@ -1085,11 +1090,11 @@ describe("composerDraftStore sticky composer settings", () => {
     expect(useComposerDraftStore.getState().stickyActiveProvider).toBe("codex");
   });
 
-  it("drops empty cursor model options when normalizing sticky state", () => {
+  it("drops empty external provider model options when normalizing sticky state", () => {
     const store = useComposerDraftStore.getState();
 
     store.setStickyModelSelection(
-      modelSelection(CURSOR_DRIVER, "gpt-5.4", {
+      modelSelection(EXTERNAL_PROVIDER_DRIVER, "external-model", {
         reasoning: undefined,
         fastMode: undefined,
         thinking: undefined,
@@ -1098,9 +1103,9 @@ describe("composerDraftStore sticky composer settings", () => {
     );
 
     expect(
-      useComposerDraftStore.getState().stickyModelSelectionByProvider[CURSOR_INSTANCE],
-    ).toEqual(modelSelection(CURSOR_DRIVER, "gpt-5.4"));
-    expect(useComposerDraftStore.getState().stickyActiveProvider).toBe("cursor");
+      useComposerDraftStore.getState().stickyModelSelectionByProvider[EXTERNAL_PROVIDER_INSTANCE],
+    ).toEqual(modelSelection(EXTERNAL_PROVIDER_DRIVER, "external-model"));
+    expect(useComposerDraftStore.getState().stickyActiveProvider).toBe("externalDriver");
   });
 
   it("applies sticky activeProvider to new drafts", () => {

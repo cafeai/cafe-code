@@ -4,7 +4,7 @@ import { createModelCapabilities } from "@cafecode/shared/model";
 
 import { providerModelsFromSettings } from "./providerSnapshot.ts";
 
-const OPENCODE_CUSTOM_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
+const CUSTOM_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [
     {
       id: "variant",
@@ -27,9 +27,9 @@ describe("providerModelsFromSettings", () => {
   it("applies the provided capabilities to custom models", () => {
     const models = providerModelsFromSettings(
       [],
-      ProviderDriverKind.make("opencode"),
+      ProviderDriverKind.make("codex"),
       ["openai/gpt-5"],
-      OPENCODE_CUSTOM_MODEL_CAPABILITIES,
+      CUSTOM_MODEL_CAPABILITIES,
     );
 
     expect(models).toEqual([
@@ -37,7 +37,7 @@ describe("providerModelsFromSettings", () => {
         slug: "openai/gpt-5",
         name: "openai/gpt-5",
         isCustom: true,
-        capabilities: OPENCODE_CUSTOM_MODEL_CAPABILITIES,
+        capabilities: CUSTOM_MODEL_CAPABILITIES,
       },
     ]);
   });

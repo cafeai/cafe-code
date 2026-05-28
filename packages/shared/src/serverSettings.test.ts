@@ -129,13 +129,13 @@ describe("serverSettings helpers", () => {
     expect(
       applyServerSettingsPatch(current, {
         textGenerationModelSelection: {
-          instanceId: ProviderInstanceId.make("opencode"),
-          model: "openai/gpt-5",
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-4-6",
         },
       }).textGenerationModelSelection,
     ).toEqual({
-      instanceId: "opencode",
-      model: "openai/gpt-5",
+      instanceId: "claudeAgent",
+      model: "claude-opus-4-6",
     });
   });
 
@@ -143,8 +143,8 @@ describe("serverSettings helpers", () => {
     expect(
       applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
         textGenerationModelSelection: {
-          instanceId: ProviderInstanceId.make("opencode"),
-          model: "openai/gpt-5",
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-4-6",
           options: [
             { id: "variant", value: "prod" },
             { id: "agent", value: "build" },
@@ -152,8 +152,8 @@ describe("serverSettings helpers", () => {
         },
       }).textGenerationModelSelection,
     ).toEqual({
-      instanceId: "opencode",
-      model: "openai/gpt-5",
+      instanceId: "claudeAgent",
+      model: "claude-opus-4-6",
       options: [
         { id: "variant", value: "prod" },
         { id: "agent", value: "build" },

@@ -38,7 +38,6 @@ import {
   type CodexAppServerProviderSnapshot,
 } from "./CodexProvider.ts";
 import { checkClaudeProviderStatus } from "./ClaudeProvider.ts";
-import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { ProviderInstanceRegistryHydrationLive } from "./ProviderInstanceRegistryHydration.ts";
 import {
@@ -66,8 +65,6 @@ const defaultCodexSettings: CodexSettings = decodeCodexSettings({});
 const disabledCodexSettings: CodexSettings = decodeCodexSettings({
   enabled: false,
 });
-
-process.env.CAFE_CODE_CURSOR_ENABLED = "1";
 
 // ── Test helpers ────────────────────────────────────────────────────
 
@@ -182,24 +179,6 @@ function recordingMockSpawnerLayer(
     }),
   );
   return { layer, commands };
-}
-
-function mockCommandSpawnerLayer(
-  handler: (
-    command: string,
-    args: ReadonlyArray<string>,
-  ) => { stdout: string; stderr: string; code: number },
-) {
-  return Layer.succeed(
-    ChildProcessSpawner.ChildProcessSpawner,
-    ChildProcessSpawner.make((command) => {
-      const cmd = command as unknown as {
-        command: string;
-        args: ReadonlyArray<string>;
-      };
-      return Effect.succeed(mockHandle(handler(cmd.command, cmd.args)));
-    }),
-  );
 }
 
 function encodeJwtPart(value: unknown): string {
@@ -523,8 +502,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
 
       it("preserves previously discovered provider models when a refresh returns none", () => {
         const previousProvider = {
-          instanceId: ProviderInstanceId.make("cursor"),
-          driver: ProviderDriverKind.make("cursor"),
+          instanceId: ProviderInstanceId.make("external_provider"),
+          driver: ProviderDriverKind.make("externalDriver"),
           status: "ready",
           enabled: true,
           installed: true,
@@ -563,8 +542,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
 
       it("fills missing capabilities from the previous provider snapshot", () => {
         const previousProvider = {
-          instanceId: ProviderInstanceId.make("cursor"),
-          driver: ProviderDriverKind.make("cursor"),
+          instanceId: ProviderInstanceId.make("external_provider"),
+          driver: ProviderDriverKind.make("externalDriver"),
           status: "ready",
           enabled: true,
           installed: true,
@@ -613,8 +592,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
       it("persists merged provider snapshots for the providers that were refreshed", () => {
         const previousProviders = [
           {
-            instanceId: ProviderInstanceId.make("cursor"),
-            driver: ProviderDriverKind.make("cursor"),
+            instanceId: ProviderInstanceId.make("external_provider"),
+            driver: ProviderDriverKind.make("externalDriver"),
             status: "ready",
             enabled: true,
             installed: true,
@@ -654,21 +633,23 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             skills: [],
           },
         ] as const satisfies ReadonlyArray<ServerProvider>;
-        const refreshedCursor = {
+        const refreshedExternalProvider = {
           ...previousProviders[0],
           checkedAt: "2026-04-14T00:01:00.000Z",
           models: [],
         } satisfies ServerProvider;
 
-        const mergedProviders = mergeProviderSnapshots(previousProviders, [refreshedCursor]);
+        const mergedProviders = mergeProviderSnapshots(previousProviders, [
+          refreshedExternalProvider,
+        ]);
         const persistedProviders = selectProvidersByKind(
           mergedProviders,
-          new Set([ProviderDriverKind.make("cursor")]),
+          new Set([ProviderDriverKind.make("externalDriver")]),
         );
 
         assert.deepStrictEqual(persistedProviders, [
           {
-            ...refreshedCursor,
+            ...refreshedExternalProvider,
             models: [...previousProviders[0].models],
           },
         ]);
@@ -676,11 +657,11 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
 
       it.effect("persists the merged snapshot when a live update has empty models", () =>
         Effect.gen(function* () {
-          const cursorDriver = ProviderDriverKind.make("cursor");
-          const cursorInstanceId = ProviderInstanceId.make("cursor");
+          const externalDriver = ProviderDriverKind.make("externalDriver");
+          const externalInstanceId = ProviderInstanceId.make("external_provider");
           const initialProvider = {
-            instanceId: cursorInstanceId,
-            driver: cursorDriver,
+            instanceId: externalInstanceId,
+            driver: externalDriver,
             status: "ready",
             enabled: true,
             installed: true,
@@ -711,17 +692,17 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           } satisfies ServerProvider;
           const changes = yield* PubSub.unbounded<ServerProvider>();
           const instance = {
-            instanceId: cursorInstanceId,
-            driverKind: cursorDriver,
+            instanceId: externalInstanceId,
+            driverKind: externalDriver,
             continuationIdentity: {
-              driverKind: cursorDriver,
-              continuationKey: "cursor:instance:cursor",
+              driverKind: externalDriver,
+              continuationKey: "externalDriver:instance:external_provider",
             },
             displayName: undefined,
             enabled: true,
             snapshot: {
               maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
-                provider: cursorDriver,
+                provider: externalDriver,
                 packageName: null,
               }),
               getSnapshot: Effect.succeed(initialProvider),
@@ -733,7 +714,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           } satisfies ProviderInstance;
           const instanceRegistryLayer = Layer.succeed(ProviderInstanceRegistry, {
             getInstance: (instanceId) =>
-              Effect.succeed(instanceId === cursorInstanceId ? instance : undefined),
+              Effect.succeed(instanceId === externalInstanceId ? instance : undefined),
             listInstances: Effect.succeed([instance]),
             listUnavailable: Effect.succeed([]),
             streamChanges: Stream.empty,
@@ -760,7 +741,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             const config = yield* ServerConfig;
             const filePath = yield* resolveProviderStatusCachePath({
               cacheDir: config.providerStatusCacheDir,
-              instanceId: cursorInstanceId,
+              instanceId: externalInstanceId,
             });
 
             assert.deepStrictEqual((yield* registry.getProviders)[0]?.models, [
@@ -1003,8 +984,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                   // machine's PATH.
                   codex: { enabled: false },
                   claudeAgent: { enabled: false },
-                  cursor: { enabled: false },
-                  opencode: { enabled: false },
                 },
                 // `providerInstances` keys are branded `ProviderInstanceId`;
                 // the branded index signature rejects plain string literals
@@ -1040,7 +1019,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             ),
             Layer.provideMerge(TestHttpClientLive),
             Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
-            Layer.provideMerge(OpenCodeRuntimeLive),
             // NO spawner mock — `ChildProcessSpawner` is supplied by the
             // outer `NodeServices.layer` on `it.layer(...)` and will
             // genuinely spawn a subprocess. The missing-binary ENOENT is
@@ -1097,8 +1075,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                 providers: {
                   codex: { enabled: true, binaryPath: firstMissing },
                   claudeAgent: { enabled: false },
-                  cursor: { enabled: false },
-                  opencode: { enabled: false },
                 },
               }),
             ),
@@ -1115,7 +1091,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             ),
             Layer.provideMerge(TestHttpClientLive),
             Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
-            Layer.provideMerge(OpenCodeRuntimeLive),
             // `it.live` does not inherit layers from the outer `it.layer`
             // wrapper, so provide `NodeServices.layer` inline. This is the
             // same real `ChildProcessSpawner` + `FileSystem` + `Path`
@@ -1192,8 +1167,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                 providers: {
                   codex: { enabled: false },
                   claudeAgent: { enabled: false },
-                  cursor: { enabled: false },
-                  opencode: { enabled: false },
                 },
                 providerInstances: {
                   ghost_main: {
@@ -1218,7 +1191,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             ),
             Layer.provideMerge(TestHttpClientLive),
             Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
-            Layer.provideMerge(OpenCodeRuntimeLive),
             Layer.provideMerge(NodeServices.layer),
           );
           const runtimeServices = yield* Layer.build(providerRegistryLayer).pipe(
@@ -1236,93 +1208,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             assert.match(ghost?.unavailableReason ?? "", /ghostDriver/);
           }).pipe(Effect.provide(runtimeServices));
         }),
-      );
-
-      it.effect(
-        "keeps cursor disabled and skips probing when the provider setting is disabled",
-        () =>
-          Effect.gen(function* () {
-            const serverSettings = yield* makeMutableServerSettingsService(
-              decodeServerSettings(
-                deepMerge(encodedDefaultServerSettings, {
-                  providers: {
-                    codex: {
-                      enabled: false,
-                    },
-                    cursor: {
-                      enabled: false,
-                    },
-                  },
-                }),
-              ),
-            );
-            let cursorSpawned = false;
-            const scope = yield* Scope.make();
-            yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
-            const providerRegistryLayer = ProviderRegistryLive.pipe(
-              Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
-              Layer.provideMerge(Layer.succeed(ServerSettingsService, serverSettings)),
-              Layer.provideMerge(
-                ServerConfig.layerTest(process.cwd(), {
-                  prefix: "t3-provider-registry-",
-                }),
-              ),
-              Layer.provideMerge(TestHttpClientLive),
-              Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
-              Layer.provideMerge(OpenCodeRuntimeLive),
-              Layer.provideMerge(
-                mockCommandSpawnerLayer((command, args) => {
-                  if (command === "agent") {
-                    cursorSpawned = true;
-                  }
-                  const joined = args.join(" ");
-                  if (joined === "--version") {
-                    return {
-                      stdout: `${command} 1.0.0\n`,
-                      stderr: "",
-                      code: 0,
-                    };
-                  }
-                  if (joined === "auth status") {
-                    return {
-                      stdout: '{"authenticated":true}\n',
-                      stderr: "",
-                      code: 0,
-                    };
-                  }
-                  throw new Error(`Unexpected args: ${command} ${joined}`);
-                }),
-              ),
-            );
-            const runtimeServices = yield* Layer.build(
-              Layer.mergeAll(
-                Layer.succeed(ServerSettingsService, serverSettings),
-                providerRegistryLayer,
-              ),
-            ).pipe(Scope.provide(scope));
-
-            yield* Effect.gen(function* () {
-              const registry = yield* ProviderRegistry;
-              const providers = yield* registry.getProviders;
-              const cursorProvider = providers.find(
-                (provider) => provider.instanceId === ProviderInstanceId.make("cursor"),
-              );
-
-              assert.deepStrictEqual(providers.map((provider) => provider.instanceId).toSorted(), [
-                "claudeAgent",
-                "codex",
-                "cursor",
-                "opencode",
-              ]);
-              assert.strictEqual(cursorProvider?.enabled, false);
-              assert.strictEqual(cursorProvider?.status, "disabled");
-              assert.strictEqual(
-                cursorProvider?.message,
-                "Cursor is disabled in Cafe Code settings.",
-              );
-              assert.strictEqual(cursorSpawned, false);
-            }).pipe(Effect.provide(runtimeServices));
-          }),
       );
 
       it.effect("skips codex probes entirely when the provider is disabled", () =>
