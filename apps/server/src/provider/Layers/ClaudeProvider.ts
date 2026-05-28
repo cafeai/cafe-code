@@ -3,6 +3,7 @@ import {
   type ModelCapabilities,
   type ModelSelection,
   ProviderDriverKind,
+  ServerProviderModel as ServerProviderModelSchema,
   type ServerProviderModel,
   type ServerProviderSlashCommand,
 } from "@cafecode/contracts";
@@ -11,6 +12,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import {
   createModelCapabilities,
@@ -25,8 +27,6 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 
 import {
-  buildBooleanOptionDescriptor,
-  buildSelectOptionDescriptor,
   buildServerProvider,
   DEFAULT_TIMEOUT_MS,
   detailFromResult,
@@ -37,6 +37,7 @@ import {
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import claudeModelCatalog from "./ClaudeModelCatalog.json" with { type: "json" };
 
 const DEFAULT_CLAUDE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
@@ -47,153 +48,66 @@ const CLAUDE_PRESENTATION = {
   displayName: "Claude",
   showInteractionModeToggle: true,
 } as const;
-const MINIMUM_CLAUDE_OPUS_4_7_VERSION = "2.1.111";
-const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
-  {
-    slug: "claude-opus-4-7",
-    name: "Claude Opus 4.7",
-    isCustom: false,
-    capabilities: createModelCapabilities({
-      optionDescriptors: [
-        buildSelectOptionDescriptor({
-          id: "effort",
-          label: "Reasoning",
-          options: [
-            { value: "low", label: "Low" },
-            { value: "medium", label: "Medium" },
-            { value: "high", label: "High" },
-            { value: "xhigh", label: "Extra High", isDefault: true },
-            { value: "max", label: "Max" },
-            { value: "ultrathink", label: "Ultrathink" },
-          ],
-          promptInjectedValues: ["ultrathink"],
-        }),
-        buildSelectOptionDescriptor({
-          id: "contextWindow",
-          label: "Context Window",
-          options: [
-            { value: "200k", label: "200k", isDefault: true },
-            { value: "1m", label: "1M" },
-          ],
-        }),
-      ],
-    }),
-  },
-  {
-    slug: "claude-opus-4-6",
-    name: "Claude Opus 4.6",
-    isCustom: false,
-    capabilities: createModelCapabilities({
-      optionDescriptors: [
-        buildSelectOptionDescriptor({
-          id: "effort",
-          label: "Reasoning",
-          options: [
-            { value: "low", label: "Low" },
-            { value: "medium", label: "Medium" },
-            { value: "high", label: "High", isDefault: true },
-            { value: "max", label: "Max" },
-            { value: "ultrathink", label: "Ultrathink" },
-          ],
-          promptInjectedValues: ["ultrathink"],
-        }),
-        buildBooleanOptionDescriptor({
-          id: "fastMode",
-          label: "Fast Mode",
-        }),
-        buildSelectOptionDescriptor({
-          id: "contextWindow",
-          label: "Context Window",
-          options: [
-            { value: "200k", label: "200k", isDefault: true },
-            { value: "1m", label: "1M" },
-          ],
-        }),
-      ],
-    }),
-  },
-  {
-    slug: "claude-opus-4-5",
-    name: "Claude Opus 4.5",
-    isCustom: false,
-    capabilities: createModelCapabilities({
-      optionDescriptors: [
-        buildSelectOptionDescriptor({
-          id: "effort",
-          label: "Reasoning",
-          options: [
-            { value: "low", label: "Low" },
-            { value: "medium", label: "Medium" },
-            { value: "high", label: "High", isDefault: true },
-            { value: "max", label: "Max" },
-          ],
-        }),
-        buildBooleanOptionDescriptor({
-          id: "fastMode",
-          label: "Fast Mode",
-        }),
-      ],
-    }),
-  },
-  {
-    slug: "claude-sonnet-4-6",
-    name: "Claude Sonnet 4.6",
-    isCustom: false,
-    capabilities: createModelCapabilities({
-      optionDescriptors: [
-        buildSelectOptionDescriptor({
-          id: "effort",
-          label: "Reasoning",
-          options: [
-            { value: "low", label: "Low" },
-            { value: "medium", label: "Medium" },
-            { value: "high", label: "High", isDefault: true },
-            { value: "ultrathink", label: "Ultrathink" },
-          ],
-          promptInjectedValues: ["ultrathink"],
-        }),
-        buildSelectOptionDescriptor({
-          id: "contextWindow",
-          label: "Context Window",
-          options: [
-            { value: "200k", label: "200k", isDefault: true },
-            { value: "1m", label: "1M" },
-          ],
-        }),
-      ],
-    }),
-  },
-  {
-    slug: "claude-haiku-4-5",
-    name: "Claude Haiku 4.5",
-    isCustom: false,
-    capabilities: createModelCapabilities({
-      optionDescriptors: [
-        buildBooleanOptionDescriptor({
-          id: "thinking",
-          label: "Thinking",
-        }),
-      ],
-    }),
-  },
-];
 
-function supportsClaudeOpus47(version: string | null | undefined): boolean {
-  return version ? compareSemverVersions(version, MINIMUM_CLAUDE_OPUS_4_7_VERSION) >= 0 : false;
+interface VersionedClaudeModel extends ServerProviderModel {
+  readonly minimumClaudeCodeVersion?: string;
+}
+
+const decodeServerProviderModel = Schema.decodeUnknownSync(ServerProviderModelSchema);
+
+function decodeVersionedClaudeModel(raw: unknown): VersionedClaudeModel {
+  const model = decodeServerProviderModel(raw);
+  const minimumClaudeCodeVersion =
+    raw && typeof raw === "object" && "minimumClaudeCodeVersion" in raw
+      ? (raw as { readonly minimumClaudeCodeVersion?: unknown }).minimumClaudeCodeVersion
+      : undefined;
+  return typeof minimumClaudeCodeVersion === "string" && minimumClaudeCodeVersion.trim().length > 0
+    ? { ...model, minimumClaudeCodeVersion: minimumClaudeCodeVersion.trim() }
+    : model;
+}
+
+function decodeClaudeModelCatalog(raw: unknown): ReadonlyArray<VersionedClaudeModel> {
+  if (!raw || typeof raw !== "object" || !("models" in raw)) {
+    throw new Error("Claude model catalog must be an object with a models array.");
+  }
+  const models = (raw as { readonly models?: unknown }).models;
+  if (!Array.isArray(models)) {
+    throw new Error("Claude model catalog models field must be an array.");
+  }
+  return models.map(decodeVersionedClaudeModel);
+}
+
+const VERSIONED_BUILT_IN_MODELS = decodeClaudeModelCatalog(claudeModelCatalog);
+const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = VERSIONED_BUILT_IN_MODELS.map(
+  ({ minimumClaudeCodeVersion: _minimumClaudeCodeVersion, ...model }) => model,
+);
+
+function isClaudeModelSupportedByVersion(
+  model: VersionedClaudeModel,
+  version: string | null | undefined,
+): boolean {
+  return model.minimumClaudeCodeVersion
+    ? !!version && compareSemverVersions(version, model.minimumClaudeCodeVersion) >= 0
+    : true;
 }
 
 function getBuiltInClaudeModelsForVersion(
   version: string | null | undefined,
 ): ReadonlyArray<ServerProviderModel> {
-  if (supportsClaudeOpus47(version)) {
-    return BUILT_IN_MODELS;
-  }
-  return BUILT_IN_MODELS.filter((model) => model.slug !== "claude-opus-4-7");
+  return VERSIONED_BUILT_IN_MODELS.filter((model) =>
+    isClaudeModelSupportedByVersion(model, version),
+  ).map(({ minimumClaudeCodeVersion: _minimumClaudeCodeVersion, ...model }) => model);
 }
 
-function formatClaudeOpus47UpgradeMessage(version: string | null): string {
+function formatClaudeModelUpgradeMessage(version: string | null): string | undefined {
+  const unavailableModel = VERSIONED_BUILT_IN_MODELS.find(
+    (model) => !isClaudeModelSupportedByVersion(model, version),
+  );
+  if (!unavailableModel?.minimumClaudeCodeVersion) {
+    return undefined;
+  }
   const versionLabel = version ? `v${version}` : "the installed version";
-  return `Claude Code ${versionLabel} is too old for Claude Opus 4.7. Upgrade to v${MINIMUM_CLAUDE_OPUS_4_7_VERSION} or newer to access it.`;
+  return `Claude Code ${versionLabel} is too old for ${unavailableModel.name}. Upgrade to v${unavailableModel.minimumClaudeCodeVersion} or newer to access it.`;
 }
 
 export function getClaudeModelCapabilities(model: string | null | undefined): ModelCapabilities {
@@ -250,17 +164,14 @@ export function resolveClaudeSelectedContextWindowTokens(
  * CLI's `--effort` flag.
  *
  * Mirrors the mapping used when invoking the Claude Agent SDK
- * ({@link getEffectiveClaudeAgentEffort} in ClaudeAdapter): the Opus 4.7
- * capability `"xhigh"` is rewritten to the accepted CLI value `"max"`, and
- * `"ultrathink"` is filtered out because it is a prompt-prefix mode rather
- * than a CLI-effort value. Returns `undefined` when no flag should be passed.
+ * ({@link getEffectiveClaudeAgentEffort} in ClaudeAdapter): `xhigh` is passed
+ * through for Claude Code versions that expose it, and `"ultrathink"` is
+ * filtered out because it is a prompt-prefix mode rather than a CLI-effort
+ * value. Returns `undefined` when no flag should be passed.
  */
 export function normalizeClaudeCliEffort(effort: string | null | undefined): string | undefined {
   if (!effort || effort === "ultrathink") {
     return undefined;
-  }
-  if (effort === "xhigh") {
-    return "max";
   }
   return effort;
 }
@@ -644,9 +555,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     claudeSettings.customModels,
     DEFAULT_CLAUDE_MODEL_CAPABILITIES,
   );
-  const opus47UpgradeMessage = supportsClaudeOpus47(parsedVersion)
-    ? undefined
-    : formatClaudeOpus47UpgradeMessage(parsedVersion);
+  const modelUpgradeMessage = formatClaudeModelUpgradeMessage(parsedVersion);
 
   const capabilities = resolveCapabilities
     ? yield* resolveCapabilities(claudeSettings).pipe(Effect.orElseSucceed(() => undefined))
@@ -690,7 +599,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         ...(capabilities.email ? { email: capabilities.email } : {}),
         ...(authMetadata ? authMetadata : {}),
       },
-      ...(opus47UpgradeMessage ? { message: opus47UpgradeMessage } : {}),
+      ...(modelUpgradeMessage ? { message: modelUpgradeMessage } : {}),
     },
   });
 });

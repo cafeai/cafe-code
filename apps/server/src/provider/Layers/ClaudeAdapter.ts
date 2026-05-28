@@ -3578,8 +3578,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         pathToClaudeCodeExecutable: claudeBinaryPath,
         systemPrompt: { type: "preset", preset: "claude_code" },
         settingSources: [...CLAUDE_SETTING_SOURCES],
-        // The SDK type lags the CLI here: Opus 4.7 accepts `xhigh` even though
-        // the published `Options["effort"]` union currently stops at `max`.
+        // The SDK type can lag the CLI here: current Claude Code exposes
+        // `xhigh`, but older published Agent SDK unions may not include it yet.
         ...(effectiveEffort
           ? {
               effort: effectiveEffort as unknown as NonNullable<ClaudeQueryOptions["effort"]>,

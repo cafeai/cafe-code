@@ -211,12 +211,13 @@ Claude lifecycle facts to preserve:
 - Claude can emit delayed messages or wake back up after apparent quiescence. UI and projections must tolerate late provider events and should expose diagnostics when a provider speaks after a terminal-looking state.
 - Claude SDK `system/thinking_tokens` messages are approximate live telemetry from redacted thinking deltas, not authoritative billed token usage. Cafe should keep the raw native event for logs but must not emit an unhandled-subtype runtime warning or project it as context-window usage.
 - Claude Code stderr lines beginning with `[ede_diagnostic]` are internal execution summaries that can appear during healthy tool-use turns. Cafe must drop them before runtime warnings, work logs, toasts, and thread error surfaces instead of treating `stop_reason` values such as `tool_use` as user-visible failures.
+- Claude built-in model metadata is data-driven from `apps/server/src/provider/Layers/ClaudeModelCatalog.json`. Add new first-party Claude model slugs, display names, option descriptors, context-window selectors, and minimum Claude Code version gates there rather than hard-coding another model entry in `ClaudeProvider.ts`. Cafe decodes that catalog at startup, hides entries whose `minimumClaudeCodeVersion` is newer than the installed CLI, and shows an upgrade message for the newest hidden model. Keep `packages/contracts/src/model.ts` aliases in sync when upstream changes moving aliases such as `opus`. As of Claude Code v2.1.154, upstream maps `opus` to `claude-opus-4-8`; Cafe's catalog exposes `claude-opus-4-8` with `xhigh` as its default effort, `max` as the highest effort, `xhigh`/`max` passed through to the CLI/SDK when selected, and 200k/1M context-window choices.
 
 Important local files:
 
 - Claude SDK adapter and canonical event mapping: `apps/server/src/provider/Layers/ClaudeAdapter.ts`.
 - Claude home/environment handling: `apps/server/src/provider/Drivers/ClaudeHome.ts`.
-- Claude provider settings/model capability mapping: `apps/server/src/provider/Layers/ClaudeProvider.ts`.
+- Claude provider settings/model capability mapping: `apps/server/src/provider/Layers/ClaudeProvider.ts` and `apps/server/src/provider/Layers/ClaudeModelCatalog.json`.
 
 If Claude behavior is unclear, check the official Claude Agent SDK docs, the installed `@anthropic-ai/claude-agent-sdk` package types, and the SDK changelog before changing lifecycle assumptions.
 
