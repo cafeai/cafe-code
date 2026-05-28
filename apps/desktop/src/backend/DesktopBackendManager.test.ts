@@ -574,6 +574,58 @@ describe("DesktopBackendManager", () => {
     }),
   );
 
+  it.effect("restarts a health-failed backend even when the child process does not exit", () =>
+    Effect.gen(function* () {
+      const starts = yield* Queue.unbounded<number>();
+      const firstReady = yield* Deferred.make<void>();
+      let startCount = 0;
+      let killCount = 0;
+      let healthy = true;
+
+      const spawnerLayer = Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make(() =>
+          Effect.gen(function* () {
+            startCount += 1;
+            yield* Queue.offer(starts, startCount);
+            return makeProcess({
+              exitCode: Effect.never,
+              kill: () =>
+                Effect.sync(() => {
+                  killCount += 1;
+                }).pipe(Effect.asVoid),
+            });
+          }),
+        ),
+      );
+
+      const managerLayer = makeManagerLayer({
+        spawnerLayer,
+        httpClientLayer: httpClientLayer((request) =>
+          Effect.succeed(responseForRequest(request, healthy ? 200 : 503)),
+        ),
+        desktopWindow: {
+          handleBackendReady: Deferred.succeed(firstReady, void 0).pipe(Effect.asVoid),
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        const manager = yield* DesktopBackendManager.DesktopBackendManager;
+        yield* manager.start;
+        assert.equal(yield* Queue.take(starts), 1);
+        yield* Deferred.await(firstReady);
+
+        healthy = false;
+        yield* TestClock.adjust(Duration.seconds(45));
+        yield* Effect.yieldNow;
+        assert.equal(killCount > 0, true);
+
+        yield* TestClock.adjust(Duration.millis(500));
+        assert.equal(yield* Queue.take(starts), 2);
+      }).pipe(Effect.provide(Layer.merge(TestClock.layer(), managerLayer)));
+    }),
+  );
+
   it.effect("cancels a scheduled restart when start is requested manually", () =>
     Effect.gen(function* () {
       const starts = yield* Queue.unbounded<number>();

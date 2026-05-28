@@ -79,6 +79,7 @@ Cafe Code has three important runtime layers:
 - Electron desktop process: starts the UI, starts/adopts the main backend, starts/adopts the provider daemon, exposes a local debug endpoint, and performs process cleanup when the user exits.
 - Main backend/server: owns app-level orchestration, event sourcing, projections, settings, WebSocket pushes, HTTP routes, and durable persistence.
 - Provider runtime process: a provider daemon, and optionally a persistent provider supervisor, owns long-running provider adapters and live sessions so provider work can survive UI/backend restarts when possible.
+- The desktop backend manager treats repeated backend HTTP health failures as a terminal backend run condition even if the child process remains alive. This prevents a split-brain state where the backend PID is still present but the HTTP listener is gone, leaving the renderer unable to reconnect. On replacement startup, stale desktop backend children are reaped before binding the new backend; provider daemon/supervisor processes are intentionally excluded so provider sessions can survive the recovery.
 
 Important files:
 

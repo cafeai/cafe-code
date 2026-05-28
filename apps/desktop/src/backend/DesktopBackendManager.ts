@@ -67,7 +67,6 @@ export interface DesktopBackendStartConfig {
 interface BackendProcessExit {
   readonly code: Option.Option<number>;
   readonly reason: string;
-  readonly result: Result.Result<ChildProcessSpawner.ExitCode, PlatformError.PlatformError>;
 }
 
 export class BackendTimeoutError extends Data.TaggedError("BackendTimeoutError")<{
@@ -351,14 +350,19 @@ function describeProcessExit(
     return {
       code: Option.some(result.success),
       reason: `code=${result.success}`,
-      result,
     };
   }
 
   return {
     code: Option.none(),
     reason: result.failure.message,
-    result,
+  };
+}
+
+function describeSyntheticProcessExit(reason: string): BackendProcessExit {
+  return {
+    code: Option.none(),
+    reason,
   };
 }
 
@@ -412,6 +416,7 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     .pipe(Effect.mapError((cause) => new BackendProcessSpawnError({ cause })));
 
   const terminate = handle.kill().pipe(Effect.ignore);
+  const healthFailureExit = yield* Deferred.make<BackendProcessExit>();
   yield* options.onStarted?.(handle.pid, terminate) ?? Effect.void;
   if (options.captureOutput) {
     yield* drainBackendOutput("stdout", handle.stdout, onOutput).pipe(Effect.forkScoped);
@@ -429,9 +434,19 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     Effect.tap(() => options.onReady?.() ?? Effect.void),
     Effect.tap(() =>
       monitorHttpHealth(options.httpBaseUrl, healthCheckInterval, healthFailureThreshold, (error) =>
-        (options.onHealthFailure?.(error) ?? Effect.void).pipe(
-          Effect.andThen(handle.kill().pipe(Effect.ignore)),
-        ),
+        Effect.gen(function* () {
+          yield* (options.onHealthFailure?.(error) ?? Effect.void).pipe(Effect.ignore);
+          yield* handle.kill().pipe(Effect.ignore);
+          // A backend can lose its HTTP listener while process-level liveness remains true. In
+          // that split-brain state the renderer cannot reconnect, and waiting only for exitCode can
+          // wedge the desktop manager forever if the child ignores SIGTERM or has lingering fibers.
+          // Treat the health failure itself as a terminal run signal so the manager clears active
+          // state and starts a fresh backend; the next spawn reaps the stale child before binding.
+          yield* Deferred.succeed(
+            healthFailureExit,
+            describeSyntheticProcessExit(error.message),
+          ).pipe(Effect.ignore);
+        }),
       ).pipe(Effect.forkIn(processScope)),
     ),
     Effect.catch((error) =>
@@ -447,7 +462,10 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     Effect.forkIn(processScope),
   );
 
-  return describeProcessExit(yield* Effect.result(handle.exitCode));
+  return yield* Effect.race(
+    Effect.result(handle.exitCode).pipe(Effect.map(describeProcessExit)),
+    Deferred.await(healthFailureExit),
+  );
 });
 
 const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(function* () {
@@ -519,6 +537,18 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
           yield* scheduleRestart(`missing server entry at ${config.entryPath}`);
           return;
         }
+
+        // If the previous backend lost its HTTP listener but kept the process alive, it may still
+        // hold SQLite files, inherited pipes, or the intended port. Clear stale backend children
+        // before spawning the replacement. Provider daemon/supervisor processes are excluded by the
+        // matcher, so long-running provider sessions are left alone.
+        yield* reapStaleDesktopBackendProcesses(config.entryPath, []).pipe(
+          Effect.catchCause((cause) =>
+            logBackendManagerWarning("failed to reap stale desktop backend processes", {
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        );
 
         const runScope = yield* Scope.make("sequential");
         const runScopeClosed = yield* Ref.make(false);
