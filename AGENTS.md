@@ -72,6 +72,11 @@ If a tradeoff is required, choose correctness, durability, and debuggability ove
 - `packages/effect-codex-app-server`: Typed Codex app-server JSON-RPC client/protocol surface. Keep this aligned with the Codex version we are targeting.
 - `packages/effect-acp`: ACP protocol support used by compatible providers.
 
+## Renderer Markdown Math
+
+- Chat messages render Markdown through `apps/web/src/components/ChatMarkdown.tsx`. Provider math output is intentionally normalized before Markdown parsing by `apps/web/src/lib/chatMarkdownMath.ts`: Codex commonly emits fenced `math`/`tex`/`latex` blocks, while Claude commonly emits `$...$`, `$$...$$`, `\(...\)`, `\[...\]`, and TeX macros in prose. Preserve all of those shapes when changing message rendering.
+- Math rendering uses `remark-math` plus KaTeX through `rehype-katex`; keep KaTeX configured with `trust: false` and non-throwing error handling so malformed or hostile math cannot crash chat rendering or enable trusted HTML-style extensions. Real code fences must remain code fences and must not be reinterpreted as math.
+
 ## Current Runtime Architecture
 
 Cafe Code has three important runtime layers:

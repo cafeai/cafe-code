@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "katex/dist/katex.min.css";
 
 @custom-variant dark (&:is(.dark, .dark *));
 /* Window Controls Overlay: active when Electron exposes native titlebar control geometry. */
@@ -851,7 +852,8 @@ label:has(> select#reasoning-effort) select {
 .chat-markdown ol,
 .chat-markdown blockquote,
 .chat-markdown pre,
-.chat-markdown table {
+.chat-markdown table,
+.chat-markdown .katex-display {
   margin: 0.65rem 0;
 }
 
@@ -965,6 +967,23 @@ label:has(> select#reasoning-effort) select {
   background: transparent;
   padding: 0;
   font-size: 0.75rem;
+}
+
+.chat-markdown .katex {
+  color: var(--foreground);
+  font-size: 1.04em;
+}
+
+.chat-markdown .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.15rem 0.1rem;
+}
+
+.chat-markdown .katex-display > .katex {
+  display: inline-block;
+  min-width: min-content;
 }
 
 .markdown-file-link-tooltip-scroll {

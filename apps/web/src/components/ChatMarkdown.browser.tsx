@@ -151,6 +151,39 @@ describe("ChatMarkdown", () => {
     }
   });
 
+  it("renders Codex math fences with KaTeX instead of code highlighting", async () => {
+    const screen = await render(
+      <ChatMarkdown text={["```math", "E = mc^2", "```"].join("\n")} cwd="/repo/project" />,
+    );
+
+    try {
+      await vi.waitFor(() => {
+        expect(document.querySelector(".katex")).not.toBeNull();
+      });
+      expect(document.querySelector(".chat-markdown-codeblock")).toBeNull();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("renders Claude inline and display math delimiters with KaTeX", async () => {
+    const screen = await render(
+      <ChatMarkdown
+        text={"For every \\(x\\), use the identity.\\n\\n\\[x=\\frac{-b\\pm\\sqrt{b^2-4ac}}{2a}\\]"}
+        cwd="/repo/project"
+      />,
+    );
+
+    try {
+      await vi.waitFor(() => {
+        expect(document.querySelector(".katex")).not.toBeNull();
+      });
+      expect(document.querySelector(".katex-display")).not.toBeNull();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("asks before opening markdown file links outside the workspace", async () => {
     confirmMock.mockResolvedValueOnce(false);
     const screen = await render(
