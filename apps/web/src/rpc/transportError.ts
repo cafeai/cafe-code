@@ -7,9 +7,10 @@ const TRANSPORT_ERROR_PATTERNS = [
 
 const RECOVERABLE_PROVIDER_ERROR_PATTERNS = [
   // Claude SDK execution diagnostics can arrive as `lastError` even when the
-  // turn continues through normal assistant/tool activity. Keep that forensic
-  // marker in debug/work-log data instead of showing it as a user-facing error.
-  /^\[ede_diagnostic\]\s+result_type=user\s+last_content_type=n\/a\s+stop_reason=null\b/i,
+  // turn continues through normal assistant/tool activity. These are internal
+  // execution summaries, not user-actionable failures, and may use stop reasons
+  // such as `null` or `tool_use` depending on the Claude Code release.
+  /\[ede_diagnostic\](?:\s|$)/i,
   /\bProvider adapter process error \(claudeAgent\)[\s\S]*No message found with message\.uuid\b/i,
   /\bProvider adapter process error \(claudeAgent\)[\s\S]*No conversation found with session ID\b/i,
   /\bProvider adapter request failed \(claudeAgent\)[\s\S]*No conversation found with session ID\b/i,

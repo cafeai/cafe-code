@@ -1,5 +1,8 @@
+import type { ServerProviderAccountRateLimits } from "@cafecode/contracts";
+
 import { cn } from "~/lib/utils";
 import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/contextWindow";
+import { formatCodexRateLimitSummary } from "~/lib/codexRateLimits";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 
 function formatPercentage(value: number | null): string | null {
@@ -12,8 +15,12 @@ function formatPercentage(value: number | null): string | null {
   return `${Math.round(value)}%`;
 }
 
-export function ContextWindowMeter(props: { usage: ContextWindowSnapshot }) {
+export function ContextWindowMeter(props: {
+  usage: ContextWindowSnapshot;
+  codexRateLimits?: ServerProviderAccountRateLimits | null | undefined;
+}) {
   const { usage } = props;
+  const codexRateLimitSummary = formatCodexRateLimitSummary(props.codexRateLimits);
   const usedPercentage = formatPercentage(usage.usedPercentage);
   const normalizedPercentage = Math.max(0, Math.min(100, usage.usedPercentage ?? 0));
   const radius = 9.75;
@@ -109,6 +116,35 @@ export function ContextWindowMeter(props: { usage: ContextWindowSnapshot }) {
                     usage.autoCompactTokenLimit,
                   )} tokens.`
                 : "Automatically compacts its context when needed."}
+            </div>
+          ) : null}
+          {codexRateLimitSummary ? (
+            <div className="mt-2 space-y-1 border-t border-border/60 pt-2 text-xs">
+              {codexRateLimitSummary.primary ? (
+                <div className="grid grid-cols-[auto_auto] gap-x-3 whitespace-nowrap">
+                  <span className="text-muted-foreground">
+                    {codexRateLimitSummary.primary.label}
+                  </span>
+                  <span className="text-right font-medium text-foreground">
+                    {codexRateLimitSummary.primary.value}
+                  </span>
+                </div>
+              ) : null}
+              {codexRateLimitSummary.secondary ? (
+                <div className="grid grid-cols-[auto_auto] gap-x-3 whitespace-nowrap">
+                  <span className="text-muted-foreground">
+                    {codexRateLimitSummary.secondary.label}
+                  </span>
+                  <span className="text-right font-medium text-foreground">
+                    {codexRateLimitSummary.secondary.value}
+                  </span>
+                </div>
+              ) : null}
+              {codexRateLimitSummary.weeklyReset ? (
+                <div className="whitespace-nowrap text-muted-foreground">
+                  {codexRateLimitSummary.weeklyReset}
+                </div>
+              ) : null}
             </div>
           ) : null}
         </div>

@@ -977,6 +977,7 @@ const CLAUDE_TURN_START_WATCHDOG_DELAYS = [
 ] as const;
 const MAX_CLAUDE_STDERR_DIAGNOSTIC_CHARS = 2_000;
 const ANSI_ESCAPE_SEQUENCE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-?]*[ -/]*[@-~]`, "g");
+const CLAUDE_EXECUTION_DIAGNOSTIC_PREFIX = "[ede_diagnostic]";
 
 function makeClaudeTurnState(input: {
   readonly turnId: TurnId;
@@ -1010,11 +1011,22 @@ function sanitizeDiagnosticLine(value: string): string {
   return withoutControlCharacters.trim().slice(0, MAX_CLAUDE_STDERR_DIAGNOSTIC_CHARS);
 }
 
+function isClaudeExecutionDiagnosticLine(line: string): boolean {
+  // Claude Code emits these stderr-only execution summaries during healthy
+  // tool-use flows. They are SDK telemetry, not actionable provider failures,
+  // so Cafe drops them before they can become work-log warnings or toasts.
+  const normalized = line.toLowerCase();
+  return (
+    normalized === CLAUDE_EXECUTION_DIAGNOSTIC_PREFIX ||
+    normalized.startsWith(`${CLAUDE_EXECUTION_DIAGNOSTIC_PREFIX} `)
+  );
+}
+
 function splitClaudeStderrLines(data: string): ReadonlyArray<string> {
   return data
     .split(/\r?\n/)
     .map(sanitizeDiagnosticLine)
-    .filter((line) => line.length > 0);
+    .filter((line) => line.length > 0 && !isClaudeExecutionDiagnosticLine(line));
 }
 
 function buildPromptText(

@@ -168,6 +168,12 @@ Codex transport behavior to preserve:
 - `thread/status/changed` with `status.type = "idle"` is a reconciliation trigger, not terminal proof. Cafe must call `thread/read` and clear `activeTurnId` only when the same active turn has a terminal status in that authoritative snapshot; this avoids both stale active-turn warnings and premature closure of a live turn.
 - After `turn/start`, `turn/steer`, and active-turn `thread/resume`, delayed `thread/read` polling may backfill missed Codex terminal events, but only when upstream returns a terminal turn status. Upstream documents `turn/diff/updated` as a diff snapshot, so Cafe must not treat provider-diff placeholders or completed items as authoritative turn completion. If polling still sees `inProgress`, emit `codex.turnProgress/stillInProgressAfterSnapshotPolling` diagnostics and keep the turn running until Codex emits `turn/completed`, `turn/interrupt` finishes, or `thread/read` reports a terminal status. Polling continues past the first 300-second warning so late terminal snapshots can still reconcile the session.
 
+Codex account usage behavior to preserve:
+
+- Upstream Codex app-server exposes `account/rateLimits/read` and emits `account/rateLimits/updated`; both are backed by `BackendClient::get_rate_limits_many()`, which reads ChatGPT-backed usage from `/backend-api/wham/usage` and Codex API-backed usage from `/api/codex/usage`.
+- Cafe Code provider snapshots may expose a redacted `accountRateLimits` summary for authenticated Codex ChatGPT accounts: primary/secondary used percentages, window durations, reset timestamps, plan metadata, and credit metadata only. Never expose access tokens, refresh tokens, account IDs, raw auth JSON, or raw usage payloads to the renderer.
+- The normal provider settings badge path intentionally avoids spawning hidden Codex app-server processes. When it needs rate-limit metadata before a session exists, it may perform the same authenticated ChatGPT usage request shape upstream uses, with the provider's effective shadow `CODEX_HOME` auth copy and bounded timeout. Active app-server sessions should still prefer upstream `account/rateLimits/read`/`updated` protocol data when available.
+
 Important local files:
 
 - Runtime process and raw Codex protocol handling: `apps/server/src/provider/Layers/CodexSessionRuntime.ts`.
@@ -203,6 +209,7 @@ Claude lifecycle facts to preserve:
 - Claude Agent SDK sessions persist by default unless configured otherwise. Resume/session identifiers must be treated as durable provider state, not UI state.
 - Claude can emit delayed messages or wake back up after apparent quiescence. UI and projections must tolerate late provider events and should expose diagnostics when a provider speaks after a terminal-looking state.
 - Claude SDK `system/thinking_tokens` messages are approximate live telemetry from redacted thinking deltas, not authoritative billed token usage. Cafe should keep the raw native event for logs but must not emit an unhandled-subtype runtime warning or project it as context-window usage.
+- Claude Code stderr lines beginning with `[ede_diagnostic]` are internal execution summaries that can appear during healthy tool-use turns. Cafe must drop them before runtime warnings, work logs, toasts, and thread error surfaces instead of treating `stop_reason` values such as `tool_use` as user-visible failures.
 
 Important local files:
 

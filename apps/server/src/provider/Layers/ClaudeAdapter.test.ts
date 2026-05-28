@@ -3000,6 +3000,8 @@ describe("ClaudeAdapterLive", () => {
       if (typeof stderr !== "function") {
         return;
       }
+      stderr("[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use\n");
+      yield* Effect.yieldNow;
       stderr("\u001B[31mWARN slow stream path\u001B[0m\n");
 
       const warning = yield* Fiber.join(warningFiber);

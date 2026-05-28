@@ -41,5 +41,15 @@ describe("transportError", () => {
         "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
       ),
     ).toBeNull();
+    expect(
+      sanitizeThreadErrorMessage(
+        "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use",
+      ),
+    ).toBeNull();
+    expect(
+      sanitizeThreadErrorMessage(
+        "Provider adapter process error (claudeAgent): [ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use",
+      ),
+    ).toBeNull();
   });
 });

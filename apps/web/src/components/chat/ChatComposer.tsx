@@ -269,6 +269,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
 const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(props: {
   compact: boolean;
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
+  codexRateLimits: ServerProvider["accountRateLimits"] | null;
   isPreparingWorktree: boolean;
   pendingAction: {
     questionIndex: number;
@@ -292,7 +293,12 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
 }) {
   return (
     <>
-      {props.activeContextWindow ? <ContextWindowMeter usage={props.activeContextWindow} /> : null}
+      {props.activeContextWindow ? (
+        <ContextWindowMeter
+          usage={props.activeContextWindow}
+          codexRateLimits={props.codexRateLimits}
+        />
+      ) : null}
       {props.pendingStatusLabel ? (
         <span className="text-muted-foreground/70 text-xs">{props.pendingStatusLabel}</span>
       ) : null}
@@ -975,6 +981,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () => selectedProviderEntry?.snapshot ?? null,
     [selectedProviderEntry],
   );
+  const selectedCodexRateLimits =
+    selectedProviderStatus?.driver === "codex" &&
+    selectedProviderStatus.auth.status === "authenticated"
+      ? (selectedProviderStatus.accountRateLimits ?? null)
+      : null;
   const selectedProviderModels = useMemo<ReadonlyArray<ServerProvider["models"][number]>>(
     () => selectedProviderEntry?.models ?? [],
     [selectedProviderEntry],
@@ -2635,6 +2646,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 <ComposerFooterPrimaryActions
                   compact={isComposerPrimaryActionsCompact}
                   activeContextWindow={activeContextWindow}
+                  codexRateLimits={selectedCodexRateLimits}
                   pendingAction={pendingPrimaryAction}
                   isRunning={phase === "running"}
                   showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}

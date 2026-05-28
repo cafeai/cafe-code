@@ -73,6 +73,51 @@ describe("ServerProvider", () => {
     expect(parsed.continuation?.groupKey).toBe("codex:home:/Users/julius/.codex");
   });
 
+  it("decodes optional Codex account rate limit snapshots", () => {
+    const parsed = decodeServerProvider({
+      instanceId: "codex",
+      driver: "codex",
+      enabled: true,
+      installed: true,
+      version: "1.0.0",
+      status: "ready",
+      auth: {
+        status: "authenticated",
+        type: "chatgpt",
+      },
+      checkedAt: "2026-04-10T00:00:00.000Z",
+      models: [],
+      accountRateLimits: {
+        checkedAt: "2026-04-10T00:00:00.000Z",
+        rateLimits: {
+          limitId: "codex",
+          planType: "pro",
+          primary: {
+            usedPercent: 42.5,
+            windowDurationMins: 300,
+            resetsAt: 1_780_000_000,
+          },
+          secondary: {
+            usedPercent: 84,
+            windowDurationMins: 10_080,
+            resetsAt: 1_780_100_000,
+          },
+        },
+        rateLimitsByLimitId: {
+          codex: {
+            limitId: "codex",
+            primary: {
+              usedPercent: 42.5,
+            },
+          },
+        },
+      },
+    });
+
+    expect(parsed.accountRateLimits?.rateLimits.primary?.windowDurationMins).toBe(300);
+    expect(parsed.accountRateLimits?.rateLimitsByLimitId?.codex?.primary?.usedPercent).toBe(42.5);
+  });
+
   it("decodes lightweight runtime layer diagnostics", () => {
     const parsed = decodeRuntimeLayerDiagnostics({
       readAt: "2026-05-26T00:00:00.000Z",

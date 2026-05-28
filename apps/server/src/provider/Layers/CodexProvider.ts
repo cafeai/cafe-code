@@ -21,6 +21,9 @@ import type {
   ModelCapabilities,
   ServerProviderModel,
   ServerProviderSkill,
+  ServerProviderAccountRateLimits,
+  ServerProviderAccountRateLimitSnapshot,
+  ServerProviderAccountRateLimitWindow,
 } from "@cafecode/contracts";
 import { ServerSettingsError } from "@cafecode/contracts";
 
@@ -45,9 +48,13 @@ const CODEX_PRESENTATION = {
 } as const;
 
 const MAX_PROVIDER_EMAIL_LENGTH = 320;
+const CODEX_ACCOUNT_RATE_LIMIT_TIMEOUT_MS = 3_000;
+const CODEX_CHATGPT_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const CODEX_ORIGINATOR = "cafecode_desktop";
 
 export interface CodexAppServerProviderSnapshot {
   readonly account: CodexSchema.V2GetAccountResponse;
+  readonly accountRateLimits?: ServerProviderAccountRateLimits;
   readonly version: string | undefined;
   readonly models: ReadonlyArray<ServerProviderModel>;
   readonly skills: ReadonlyArray<ServerProviderSkill>;
@@ -208,6 +215,345 @@ const readCodexAuthEmail = Effect.fn("readCodexAuthEmail")(function* (
 
   const authJson = yield* fileSystem.readFileString(authPath).pipe(Effect.option);
   return Option.isSome(authJson) ? extractCodexAuthEmail(authJson.value) : undefined;
+});
+
+interface CodexUsageCredentials {
+  readonly accessToken: string;
+  readonly accountId?: string;
+  readonly isFedrampAccount: boolean;
+}
+
+function readRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function readSafeHeaderValue(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > 16_384) return undefined;
+  for (const char of trimmed) {
+    const code = char.charCodeAt(0);
+    if (code <= 0x1f || code === 0x7f) {
+      return undefined;
+    }
+  }
+  return trimmed;
+}
+
+function readTrimmedMetadata(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 && trimmed.length <= 256 ? trimmed : undefined;
+}
+
+function readFiniteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function readPositiveInteger(value: unknown): number | undefined {
+  const numeric = readFiniteNumber(value);
+  return numeric !== undefined && Number.isInteger(numeric) && numeric > 0 ? numeric : undefined;
+}
+
+function windowMinutesFromSeconds(seconds: number | undefined): number | undefined {
+  if (seconds === undefined || seconds <= 0) return undefined;
+  return Math.ceil(seconds / 60);
+}
+
+function readChatGptAuthClaims(idToken: unknown): Record<string, unknown> | undefined {
+  if (typeof idToken !== "string" || idToken.length === 0) return undefined;
+  return readRecord(decodeJwtPayload(idToken)?.["https://api.openai.com/auth"]);
+}
+
+function extractCodexUsageCredentials(authJson: string): CodexUsageCredentials | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(authJson) as unknown;
+  } catch {
+    return undefined;
+  }
+
+  const record = readRecord(parsed);
+  if (!record || record.auth_mode !== "chatgpt") return undefined;
+
+  const tokens = readRecord(record.tokens);
+  const accessToken = readSafeHeaderValue(tokens?.access_token);
+  if (!tokens || !accessToken) return undefined;
+
+  const authClaims = readChatGptAuthClaims(tokens.id_token);
+  const accountId =
+    readSafeHeaderValue(tokens.account_id) ?? readSafeHeaderValue(authClaims?.chatgpt_account_id);
+  const isFedrampAccount = authClaims?.chatgpt_account_is_fedramp === true;
+  return {
+    accessToken,
+    ...(accountId ? { accountId } : {}),
+    isFedrampAccount,
+  };
+}
+
+const readCodexUsageCredentials = Effect.fn("readCodexUsageCredentials")(function* (
+  codexSettings: CodexSettings,
+  environment: NodeJS.ProcessEnv,
+): Effect.fn.Return<CodexUsageCredentials | undefined, never, FileSystem.FileSystem | Path.Path> {
+  // Provider snapshots normally receive the effective shadow CODEX_HOME from
+  // `CodexDriver`; avoid reading a user's default ~/.codex during isolated
+  // status tests or low-level helper calls that have not opted into a home.
+  if (codexSettings.homePath.trim().length === 0 && !environment.CODEX_HOME?.trim()) {
+    return undefined;
+  }
+
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const authPath = resolveCodexAuthFilePath({ path, codexSettings, environment });
+  if (!authPath) return undefined;
+
+  const isSymlink = yield* fileSystem.readLink(authPath).pipe(
+    Effect.as(true),
+    Effect.catch(() => Effect.succeed(false)),
+  );
+  if (isSymlink) {
+    return undefined;
+  }
+
+  const authJson = yield* fileSystem.readFileString(authPath).pipe(Effect.option);
+  return Option.isSome(authJson) ? extractCodexUsageCredentials(authJson.value) : undefined;
+});
+
+function mapGeneratedRateLimitWindow(
+  window: CodexSchema.V2GetAccountRateLimitsResponse__RateLimitWindow | null | undefined,
+): ServerProviderAccountRateLimitWindow | null {
+  if (!window) return null;
+  return {
+    usedPercent: window.usedPercent,
+    ...(window.windowDurationMins !== undefined
+      ? { windowDurationMins: window.windowDurationMins }
+      : {}),
+    ...(window.resetsAt !== undefined ? { resetsAt: window.resetsAt } : {}),
+  };
+}
+
+function mapGeneratedCredits(
+  credits: CodexSchema.V2GetAccountRateLimitsResponse__CreditsSnapshot | null,
+): Exclude<ServerProviderAccountRateLimitSnapshot["credits"], undefined> {
+  if (credits === null) return null;
+  return {
+    hasCredits: credits.hasCredits,
+    unlimited: credits.unlimited,
+    ...(credits.balance !== undefined ? { balance: credits.balance } : {}),
+  };
+}
+
+function mapGeneratedRateLimitSnapshot(
+  snapshot: CodexSchema.V2GetAccountRateLimitsResponse__RateLimitSnapshot,
+): ServerProviderAccountRateLimitSnapshot {
+  return {
+    ...(snapshot.limitId !== undefined ? { limitId: snapshot.limitId } : {}),
+    ...(snapshot.limitName !== undefined ? { limitName: snapshot.limitName } : {}),
+    ...(snapshot.planType !== undefined ? { planType: snapshot.planType } : {}),
+    ...(snapshot.rateLimitReachedType !== undefined
+      ? { rateLimitReachedType: snapshot.rateLimitReachedType }
+      : {}),
+    ...(snapshot.primary !== undefined
+      ? { primary: mapGeneratedRateLimitWindow(snapshot.primary) }
+      : {}),
+    ...(snapshot.secondary !== undefined
+      ? { secondary: mapGeneratedRateLimitWindow(snapshot.secondary) }
+      : {}),
+    ...(snapshot.credits !== undefined ? { credits: mapGeneratedCredits(snapshot.credits) } : {}),
+  };
+}
+
+function codexAppServerRateLimitsToServer(
+  response: CodexSchema.V2GetAccountRateLimitsResponse,
+  checkedAt: string,
+): ServerProviderAccountRateLimits {
+  const byLimitId =
+    response.rateLimitsByLimitId === null || response.rateLimitsByLimitId === undefined
+      ? undefined
+      : Object.fromEntries(
+          Object.entries(response.rateLimitsByLimitId).map(([limitId, snapshot]) => [
+            limitId,
+            mapGeneratedRateLimitSnapshot(snapshot),
+          ]),
+        );
+
+  return {
+    rateLimits: mapGeneratedRateLimitSnapshot(response.rateLimits),
+    ...(byLimitId ? { rateLimitsByLimitId: byLimitId } : {}),
+    checkedAt,
+  };
+}
+
+function mapRawRateLimitWindow(value: unknown): ServerProviderAccountRateLimitWindow | null {
+  const record = readRecord(value);
+  if (!record) return null;
+
+  const usedPercent = readFiniteNumber(record.used_percent ?? record.usedPercent);
+  if (usedPercent === undefined) return null;
+
+  const resetAt = readPositiveInteger(record.reset_at ?? record.resetsAt);
+  const windowSeconds = readPositiveInteger(
+    record.limit_window_seconds ?? record.limitWindowSeconds,
+  );
+  const windowDurationMins =
+    readPositiveInteger(record.window_duration_mins ?? record.windowDurationMins) ??
+    windowMinutesFromSeconds(windowSeconds);
+
+  return {
+    usedPercent,
+    ...(windowDurationMins !== undefined ? { windowDurationMins } : {}),
+    ...(resetAt !== undefined ? { resetsAt: resetAt } : {}),
+  };
+}
+
+function mapRawCredits(value: unknown): ServerProviderAccountRateLimitSnapshot["credits"] {
+  const record = readRecord(value);
+  if (!record) return undefined;
+  const hasCredits = record.has_credits ?? record.hasCredits;
+  const unlimited = record.unlimited;
+  if (typeof hasCredits !== "boolean" || typeof unlimited !== "boolean") {
+    return undefined;
+  }
+  const balance = readTrimmedMetadata(record.balance);
+  return {
+    hasCredits,
+    unlimited,
+    ...(balance ? { balance } : {}),
+  };
+}
+
+function mapRawRateLimitReachedType(value: unknown): string | undefined {
+  const direct = readTrimmedMetadata(value);
+  if (direct) return direct;
+  const record = readRecord(value);
+  return readTrimmedMetadata(record?.kind ?? record?.type);
+}
+
+function mapRawRateLimitSnapshot(input: {
+  readonly limitId: string;
+  readonly limitName?: string | undefined;
+  readonly rateLimit: unknown;
+  readonly credits?: unknown;
+  readonly planType?: string | undefined;
+  readonly rateLimitReachedType?: string | undefined;
+}): ServerProviderAccountRateLimitSnapshot {
+  const rateLimit = readRecord(input.rateLimit);
+  const primary = mapRawRateLimitWindow(rateLimit?.primary_window ?? rateLimit?.primary);
+  const secondary = mapRawRateLimitWindow(rateLimit?.secondary_window ?? rateLimit?.secondary);
+  const credits = mapRawCredits(input.credits);
+
+  return {
+    limitId: input.limitId,
+    ...(input.limitName ? { limitName: input.limitName } : {}),
+    ...(input.planType ? { planType: input.planType } : {}),
+    ...(input.rateLimitReachedType ? { rateLimitReachedType: input.rateLimitReachedType } : {}),
+    ...(primary ? { primary } : {}),
+    ...(secondary ? { secondary } : {}),
+    ...(credits ? { credits } : {}),
+  };
+}
+
+function parseCodexAccountRateLimitsPayload(
+  payload: unknown,
+  checkedAt: string,
+): ServerProviderAccountRateLimits | undefined {
+  const record = readRecord(payload);
+  if (!record) return undefined;
+
+  const planType = readTrimmedMetadata(record.plan_type ?? record.planType);
+  const rateLimitReachedType = mapRawRateLimitReachedType(
+    record.rate_limit_reached_type ?? record.rateLimitReachedType,
+  );
+  const primarySnapshot = mapRawRateLimitSnapshot({
+    limitId: "codex",
+    rateLimit: record.rate_limit ?? record.rateLimit,
+    credits: record.credits,
+    ...(planType ? { planType } : {}),
+    ...(rateLimitReachedType ? { rateLimitReachedType } : {}),
+  });
+  const rateLimitsByLimitId: Record<string, ServerProviderAccountRateLimitSnapshot> = {
+    codex: primarySnapshot,
+  };
+
+  const additionalRateLimits = record.additional_rate_limits ?? record.additionalRateLimits;
+  if (Array.isArray(additionalRateLimits)) {
+    for (const entry of additionalRateLimits) {
+      const additional = readRecord(entry);
+      const limitId = readTrimmedMetadata(
+        additional?.metered_feature ?? additional?.meteredFeature,
+      );
+      if (!additional || !limitId) {
+        continue;
+      }
+      rateLimitsByLimitId[limitId] = mapRawRateLimitSnapshot({
+        limitId,
+        limitName: readTrimmedMetadata(additional.limit_name ?? additional.limitName),
+        rateLimit: additional.rate_limit ?? additional.rateLimit,
+        ...(planType ? { planType } : {}),
+      });
+    }
+  }
+
+  return {
+    rateLimits: rateLimitsByLimitId.codex ?? primarySnapshot,
+    rateLimitsByLimitId,
+    checkedAt,
+  };
+}
+
+async function fetchCodexAccountRateLimits(input: {
+  readonly credentials: CodexUsageCredentials;
+  readonly checkedAt: string;
+}): Promise<ServerProviderAccountRateLimits | undefined> {
+  try {
+    // Upstream Codex 0.134.0 fetches ChatGPT-backed account usage from
+    // `{chatgpt_base_url}/wham/usage` via BackendClient::get_rate_limits_many
+    // and sends Authorization plus ChatGPT-Account-ID when available. Cafe's
+    // provider badge path intentionally avoids spawning a hidden app-server, so
+    // this lightweight probe mirrors that HTTP request shape without logging or
+    // returning any credential-bearing fields.
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${input.credentials.accessToken}`,
+      originator: CODEX_ORIGINATOR,
+      "user-agent": `${CODEX_ORIGINATOR}/${packageJson.version}`,
+    };
+    if (input.credentials.accountId) {
+      headers["ChatGPT-Account-ID"] = input.credentials.accountId;
+    }
+    if (input.credentials.isFedrampAccount) {
+      headers["X-OpenAI-Fedramp"] = "true";
+    }
+
+    const response = await fetch(CODEX_CHATGPT_USAGE_URL, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(CODEX_ACCOUNT_RATE_LIMIT_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      return undefined;
+    }
+    return parseCodexAccountRateLimitsPayload(await response.json(), input.checkedAt);
+  } catch {
+    return undefined;
+  }
+}
+
+const readCodexAccountRateLimits = Effect.fn("readCodexAccountRateLimits")(function* (
+  codexSettings: CodexSettings,
+  environment: NodeJS.ProcessEnv,
+  checkedAt: string,
+): Effect.fn.Return<
+  ServerProviderAccountRateLimits | undefined,
+  never,
+  FileSystem.FileSystem | Path.Path
+> {
+  const credentials = yield* readCodexUsageCredentials(codexSettings, environment);
+  if (!credentials) {
+    return undefined;
+  }
+  return yield* Effect.promise(() => fetchCodexAccountRateLimits({ credentials, checkedAt }));
 });
 
 function mapCodexModelCapabilities(
@@ -505,6 +851,14 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
     } satisfies CodexAppServerProviderSnapshot;
   }
 
+  const rateLimitsCheckedAt = DateTime.formatIso(yield* DateTime.now);
+  const accountRateLimits = accountResponse.account
+    ? yield* client.request("account/rateLimits/read", undefined).pipe(
+        Effect.map((response) => codexAppServerRateLimitsToServer(response, rateLimitsCheckedAt)),
+        Effect.option,
+      )
+    : Option.none<ServerProviderAccountRateLimits>();
+
   const [skillsResponse, models] = yield* Effect.all(
     [
       client.request("skills/list", {
@@ -517,6 +871,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
 
   return {
     account: accountResponse,
+    ...(Option.isSome(accountRateLimits) ? { accountRateLimits: accountRateLimits.value } : {}),
     version,
     models: appendCustomCodexModels(models, input.customModels ?? []),
     skills: parseCodexSkillsListResponse(skillsResponse, input.cwd),
@@ -804,6 +1159,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
       version: snapshot.version ?? null,
       status: accountStatus.status,
       auth: accountStatus.auth,
+      ...(snapshot.accountRateLimits ? { accountRateLimits: snapshot.accountRateLimits } : {}),
       ...(accountStatus.message ? { message: accountStatus.message } : {}),
     },
   });
@@ -947,6 +1303,10 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
     ...loginStatusProbe.success.value,
     ...(authEmail ? { authEmail } : {}),
   });
+  const accountRateLimits =
+    accountStatus.auth.status === "authenticated" && accountStatus.auth.type === "chatgpt"
+      ? yield* readCodexAccountRateLimits(codexSettings, environment, checkedAt)
+      : undefined;
   return buildServerProvider({
     presentation: CODEX_PRESENTATION,
     enabled: codexSettings.enabled,
@@ -958,6 +1318,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
       version: parsedVersion,
       status: accountStatus.status,
       auth: accountStatus.auth,
+      ...(accountRateLimits ? { accountRateLimits } : {}),
       ...(accountStatus.message ? { message: accountStatus.message } : {}),
     },
   });

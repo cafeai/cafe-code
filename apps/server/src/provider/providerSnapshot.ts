@@ -8,6 +8,7 @@ import type {
   ServerProviderModel,
   ServerProviderState,
   ServerProviderRuntimeCapabilities,
+  ServerProviderAccountRateLimits,
 } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as Data from "effect/Data";
@@ -40,6 +41,7 @@ export interface ProviderProbeResult {
   readonly status: Exclude<ServerProviderState, "disabled">;
   readonly auth: ServerProviderAuth;
   readonly message?: string;
+  readonly accountRateLimits?: ServerProviderAccountRateLimits;
 }
 
 export interface ServerProviderPresentation {
@@ -226,6 +228,7 @@ export function buildServerProvider(input: {
     models: input.models,
     slashCommands: [...(input.slashCommands ?? [])],
     skills: [...(input.skills ?? [])],
+    ...(input.probe.accountRateLimits ? { accountRateLimits: input.probe.accountRateLimits } : {}),
     runtimeCapabilities: input.runtimeCapabilities ?? { liveSteer: "unsupported" },
     ...(versionAdvisory ? { versionAdvisory } : {}),
   };

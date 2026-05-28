@@ -22,6 +22,7 @@ import {
 } from "@cafecode/contracts";
 
 import { cn } from "../../lib/utils";
+import { formatCodexRateLimitInlineText } from "../../lib/codexRateLimits";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { normalizeProviderAccentColor } from "../../providerInstances";
 import { Badge } from "../ui/badge";
@@ -480,6 +481,10 @@ export function ProviderInstanceCard({
   const authenticatedDetail = hasAuthenticatedEmail
     ? (liveProvider?.auth.label ?? liveProvider?.auth.type ?? null)
     : null;
+  const codexRateLimitText =
+    liveProvider?.driver === "codex" && liveProvider.auth.status === "authenticated"
+      ? formatCodexRateLimitInlineText(liveProvider.accountRateLimits)
+      : null;
   const summary = rawSummary;
   const versionLabel = getProviderVersionLabel(liveProvider?.version);
   const versionAdvisory = getProviderVersionAdvisoryPresentation(liveProvider?.versionAdvisory);
@@ -776,6 +781,11 @@ export function ProviderInstanceCard({
               {titleTailNode}
             </div>
             {authRowNode}
+            {codexRateLimitText ? (
+              <p className="text-xs leading-snug text-muted-foreground/80">
+                Usage: {codexRateLimitText}
+              </p>
+            ) : null}
           </div>
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
             <Button

@@ -1422,6 +1422,116 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         }),
       );
 
+      it.effect("adds redacted Codex account usage from the upstream ChatGPT usage endpoint", () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const homePath = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "cafecode-codex-rate-limits-",
+          });
+          const authPath = path.join(homePath, "auth.json");
+          yield* fileSystem.writeFileString(
+            authPath,
+            encodeUnknownJsonString({
+              auth_mode: "chatgpt",
+              tokens: {
+                id_token: makeUnsignedJwt({
+                  email: "codex-user@example.com",
+                  "https://api.openai.com/auth": {
+                    chatgpt_account_id: "account-id",
+                    chatgpt_account_is_fedramp: true,
+                  },
+                }),
+                access_token: "access-token",
+                refresh_token: "refresh-token",
+                account_id: "account-id",
+              },
+            }),
+          );
+          yield* fileSystem.chmod(authPath, 0o600);
+
+          const originalFetch = globalThis.fetch;
+          const seenHeaders: Array<Record<string, string>> = [];
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              globalThis.fetch = originalFetch;
+            }),
+          );
+          globalThis.fetch = Object.assign(
+            async (_input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
+              seenHeaders.push(init?.headers as Record<string, string>);
+              return Response.json({
+                plan_type: "pro",
+                rate_limit: {
+                  primary_window: {
+                    used_percent: 25,
+                    limit_window_seconds: 18_000,
+                    reset_at: 1_780_000_000,
+                  },
+                  secondary_window: {
+                    used_percent: 75,
+                    limit_window_seconds: 604_800,
+                    reset_at: 1_780_100_000,
+                  },
+                },
+                credits: {
+                  has_credits: true,
+                  unlimited: false,
+                  balance: "9.99",
+                },
+                additional_rate_limits: [
+                  {
+                    limit_name: "Spark",
+                    metered_feature: "codex_bengalfox",
+                    rate_limit: {
+                      primary_window: {
+                        used_percent: 10,
+                        limit_window_seconds: 3_600,
+                        reset_at: 1_780_000_100,
+                      },
+                    },
+                  },
+                ],
+              });
+            },
+            {
+              preconnect: originalFetch.preconnect,
+            },
+          ) as typeof fetch;
+
+          const status = yield* checkCodexCliProviderStatus(decodeCodexSettings({ homePath })).pipe(
+            Effect.provide(
+              mockSpawnerLayer((args) => {
+                const joined = args.join(" ");
+                if (joined === "--version") {
+                  return { stdout: "codex-cli 0.134.0\n", stderr: "", code: 0 };
+                }
+                if (joined === "login status") {
+                  return { stdout: "Logged in using ChatGPT\n", stderr: "", code: 0 };
+                }
+                throw new Error(`Unexpected args: ${joined}`);
+              }),
+            ),
+          );
+
+          assert.strictEqual(seenHeaders[0]?.authorization, "Bearer access-token");
+          assert.strictEqual(seenHeaders[0]?.["ChatGPT-Account-ID"], "account-id");
+          assert.strictEqual(seenHeaders[0]?.["X-OpenAI-Fedramp"], "true");
+          assert.strictEqual(status.accountRateLimits?.rateLimits.planType, "pro");
+          assert.strictEqual(status.accountRateLimits?.rateLimits.primary?.windowDurationMins, 300);
+          assert.strictEqual(status.accountRateLimits?.rateLimits.secondary?.usedPercent, 75);
+          assert.strictEqual(
+            status.accountRateLimits?.rateLimitsByLimitId?.codex_bengalfox?.primary
+              ?.windowDurationMins,
+            60,
+          );
+          const encodedStatus = encodeUnknownJsonString(status);
+          assert.strictEqual(encodedStatus.includes("access-token"), false);
+          assert.strictEqual(encodedStatus.includes("refresh-token"), false);
+          assert.strictEqual(encodedStatus.includes("account-id"), false);
+        }),
+      );
+
       it.effect("ignores Codex auth metadata when the auth file is a symlink", () =>
         Effect.gen(function* () {
           const fileSystem = yield* FileSystem.FileSystem;
