@@ -2697,6 +2697,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         });
         return;
+      case "thinking_tokens":
+        // Claude Agent SDK 0.3.153 added this system subtype as live,
+        // approximate progress telemetry digested from redacted thinking
+        // deltas. It is explicitly not authoritative billed token usage, so
+        // Cafe records the raw native event but does not project a work-log
+        // warning or context-window update from it.
+        return;
       case "hook_started":
         yield* offerRuntimeEvent({
           ...base,

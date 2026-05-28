@@ -201,6 +201,7 @@ Claude lifecycle facts to preserve:
 - Claude permissions flow through SDK permission callbacks such as `canUseTool`; respect the supplied abort signal, tool-use id, suggested permission updates, and deny/allow semantics.
 - Claude Agent SDK sessions persist by default unless configured otherwise. Resume/session identifiers must be treated as durable provider state, not UI state.
 - Claude can emit delayed messages or wake back up after apparent quiescence. UI and projections must tolerate late provider events and should expose diagnostics when a provider speaks after a terminal-looking state.
+- Claude SDK `system/thinking_tokens` messages are approximate live telemetry from redacted thinking deltas, not authoritative billed token usage. Cafe should keep the raw native event for logs but must not emit an unhandled-subtype runtime warning or project it as context-window usage.
 
 Important local files:
 

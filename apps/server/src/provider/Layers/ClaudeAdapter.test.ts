@@ -1619,6 +1619,82 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("silently ignores Claude thinking token telemetry", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const context = yield* Effect.context<never>();
+      const runFork = Effect.runForkWith(context);
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+
+      const runtimeEventsFiber = runFork(
+        Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            runtimeEvents.push(event);
+          }),
+        ),
+      );
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEvents.length = 0;
+
+      harness.query.emit({
+        type: "system",
+        subtype: "thinking_tokens",
+        estimated_tokens: 50,
+        estimated_tokens_delta: 50,
+        session_id: "sdk-session-thinking-tokens",
+        uuid: "thinking-tokens-1",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      assert.equal(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "runtime.warning" || event.type === "thread.token-usage.updated",
+        ),
+        false,
+      );
+
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "task-after-thinking-tokens",
+        description: "Visible work",
+        session_id: "sdk-session-thinking-tokens",
+        uuid: "task-after-thinking-tokens",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      assert.equal(
+        runtimeEvents.some((event) => event.type === "task.started"),
+        true,
+      );
+      assert.equal(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "runtime.warning" || event.type === "thread.token-usage.updated",
+        ),
+        false,
+      );
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("emits Claude context window on result completion usage snapshots", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
