@@ -22,6 +22,7 @@
  * @module provider/Drivers/CodexDriver
  */
 import { CodexSettings, ProviderDriverKind, type ServerProvider } from "@cafecode/contracts";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -53,10 +54,11 @@ import {
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("codex");
-// Snapshot refresh remains manual because even the lightweight CLI status
-// path can touch local auth state. Real chat turns own the app-server
-// lifecycle and should be the only path that starts long-lived Codex RPC.
-const PERIODIC_SNAPSHOT_REFRESH_INTERVAL: null = null;
+// Keep account usage reasonably fresh without using the heavy app-server
+// metadata path. The Codex status probe intentionally stays on the cheap
+// `codex --version` / `codex login status` / redacted usage-request path, so
+// this periodic refresh does not create hidden Codex app-server sessions.
+const PERIODIC_SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
 const UPDATE = makePackageManagedProviderMaintenanceResolver({
   provider: DRIVER_KIND,
   npmPackageName: "@openai/codex",

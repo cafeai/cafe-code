@@ -18,6 +18,7 @@ import {
   type OrchestrationShellStreamEvent,
   OrchestrationGetSnapshotError,
   ORCHESTRATION_WS_METHODS,
+  type ProviderInstanceId,
   ProjectSearchEntriesError,
   ProjectWriteFileError,
   OrchestrationReplayEventsError,
@@ -191,6 +192,7 @@ function doesActivityAffectShellStream(
 }
 
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
+const CODEX_PROMPT_USAGE_REFRESH_THROTTLE_MS = 60_000;
 
 function toAuthAccessStreamEvent(
   change: BootstrapCredentialChange | SessionCredentialChange,
@@ -263,6 +265,9 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
             detail: cause.message,
           }).pipe(Effect.as(DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL)),
         ),
+      );
+      const codexPromptUsageRefreshAtRef = yield* Ref.make<ReadonlyMap<ProviderInstanceId, number>>(
+        new Map(),
       );
       const sourceControlRepositories = yield* SourceControlRepositoryService;
       const bootstrapCredentials = yield* BootstrapCredentialService;
@@ -569,6 +574,79 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
           );
         });
 
+      const resolvePromptProviderInstanceId = (
+        command: Extract<
+          OrchestrationCommand,
+          { readonly type: "thread.turn.start" | "thread.turn.steer" }
+        >,
+      ): Effect.Effect<ProviderInstanceId | undefined> => {
+        if (command.type === "thread.turn.start") {
+          const explicitInstanceId =
+            command.modelSelection?.instanceId ??
+            command.bootstrap?.createThread?.modelSelection.instanceId;
+          if (explicitInstanceId !== undefined) {
+            return Effect.succeed(explicitInstanceId);
+          }
+        }
+
+        return projectionSnapshotQuery.getThreadShellById(command.threadId).pipe(
+          Effect.map((thread) =>
+            Option.match(thread, {
+              onNone: () => undefined,
+              onSome: (value) =>
+                value.session?.providerInstanceId ?? value.modelSelection.instanceId,
+            }),
+          ),
+          Effect.catch(() => Effect.sync((): ProviderInstanceId | undefined => undefined)),
+        );
+      };
+
+      const refreshCodexUsageAfterPrompt = (command: OrchestrationCommand): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          if (command.type !== "thread.turn.start" && command.type !== "thread.turn.steer") {
+            return;
+          }
+
+          const instanceId = yield* resolvePromptProviderInstanceId(command);
+          if (instanceId === undefined) {
+            return;
+          }
+
+          const providers = yield* providerRegistry.getProviders;
+          const provider = providers.find((candidate) => candidate.instanceId === instanceId);
+          if (provider?.driver !== "codex") {
+            return;
+          }
+
+          const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+          const shouldRefresh = yield* Ref.modify(codexPromptUsageRefreshAtRef, (previous) => {
+            const previousRefreshAt = previous.get(instanceId) ?? 0;
+            if (nowMs - previousRefreshAt < CODEX_PROMPT_USAGE_REFRESH_THROTTLE_MS) {
+              return [false, previous] as const;
+            }
+            const next = new Map(previous);
+            next.set(instanceId, nowMs);
+            return [true, next] as const;
+          });
+          if (!shouldRefresh) {
+            return;
+          }
+
+          // Provider account usage is display metadata, never part of the
+          // prompt-send critical path. Refresh it in the background and let the
+          // normal provider snapshot stream update the renderer when it lands.
+          yield* providerRegistry.refreshInstance(instanceId).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("codex prompt usage refresh failed", {
+                commandType: command.type,
+                instanceId,
+                cause: Cause.pretty(cause),
+              }),
+            ),
+            Effect.asVoid,
+          );
+        });
+
       const dispatchNormalizedCommand = (
         normalizedCommand: OrchestrationCommand,
       ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> => {
@@ -583,13 +661,17 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
                   ),
                 );
 
-        return startup
-          .enqueueCommand(dispatchEffect)
-          .pipe(
-            Effect.mapError((cause) =>
-              toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
+        return startup.enqueueCommand(dispatchEffect).pipe(
+          Effect.tap(() =>
+            refreshCodexUsageAfterPrompt(normalizedCommand).pipe(
+              Effect.ignoreCause({ log: true }),
+              Effect.forkDetach,
             ),
-          );
+          ),
+          Effect.mapError((cause) =>
+            toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
+          ),
+        );
       };
 
       const loadServerConfig = Effect.gen(function* () {

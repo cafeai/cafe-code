@@ -179,6 +179,7 @@ Codex account usage behavior to preserve:
 - Upstream Codex app-server exposes `account/rateLimits/read` and emits `account/rateLimits/updated`; both are backed by `BackendClient::get_rate_limits_many()`, which reads ChatGPT-backed usage from `/backend-api/wham/usage` and Codex API-backed usage from `/api/codex/usage`.
 - Cafe Code provider snapshots may expose a redacted `accountRateLimits` summary for authenticated Codex ChatGPT accounts: primary/secondary used percentages, window durations, reset timestamps, plan metadata, and credit metadata only. Never expose access tokens, refresh tokens, account IDs, raw auth JSON, or raw usage payloads to the renderer.
 - The normal provider settings badge path intentionally avoids spawning hidden Codex app-server processes. When it needs rate-limit metadata before a session exists, it may perform the same authenticated ChatGPT usage request shape upstream uses, with the provider's effective shadow `CODEX_HOME` auth copy and bounded timeout. Active app-server sessions should still prefer upstream `account/rateLimits/read`/`updated` protocol data when available.
+- Codex account-usage snapshots must stay fresh during long work sessions. Refresh Codex provider snapshots every five minutes, and after `thread.turn.start` or `thread.turn.steer` enqueue a non-blocking refresh for the selected Codex provider instance, throttled to at most once per minute per instance. These refreshes must not block prompt dispatch or expose raw usage/auth payloads.
 
 Important local files:
 
