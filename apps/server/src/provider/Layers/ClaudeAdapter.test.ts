@@ -264,6 +264,43 @@ async function readFirstPromptMessage(
   return next.value;
 }
 
+async function readPromptMessages(
+  input:
+    | {
+        readonly prompt: AsyncIterable<SDKUserMessage>;
+      }
+    | undefined,
+  count: number,
+): Promise<SDKUserMessage[]> {
+  const iterator = input?.prompt[Symbol.asyncIterator]();
+  if (!iterator) {
+    return [];
+  }
+  const messages: SDKUserMessage[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const next = await iterator.next();
+    if (next.done) {
+      break;
+    }
+    messages.push(next.value);
+  }
+  return messages;
+}
+
+function promptMessageText(message: SDKUserMessage | undefined): string | undefined {
+  if (!message) {
+    return undefined;
+  }
+  if (typeof message.message.content === "string") {
+    return message.message.content;
+  }
+  const content = message.message.content[0];
+  if (!content || content.type !== "text") {
+    return undefined;
+  }
+  return content.text;
+}
+
 function claudeProjectDirectoryForTest(homePath: string, cwd: string): string {
   return path.join(homePath, ".claude", "projects", path.resolve(cwd).replaceAll(path.sep, "-"));
 }
@@ -713,6 +750,76 @@ describe("ClaudeAdapterLive", () => {
           },
         },
       ]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("queues Claude steer input into the active streaming prompt", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      assert.equal(adapter.capabilities.liveSteer, "supported");
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "first prompt",
+        attachments: [],
+      });
+      const steered = yield* adapter.steerTurn({
+        threadId: session.threadId,
+        expectedTurnId: turn.turnId,
+        input: "follow-up while active",
+        attachments: [],
+      });
+
+      assert.equal(steered.turnId, turn.turnId);
+      const messages = yield* Effect.promise(() =>
+        readPromptMessages(harness.getLastCreateQueryInput(), 2),
+      );
+      assert.equal(promptMessageText(messages[0]), "first prompt");
+      assert.equal(promptMessageText(messages[1]), "follow-up while active");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("rejects Claude steer input for a stale active turn id", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "first prompt",
+        attachments: [],
+      });
+
+      const exit = yield* Effect.exit(
+        adapter.steerTurn({
+          threadId: session.threadId,
+          expectedTurnId: "turn-stale" as never,
+          input: "wrong turn",
+          attachments: [],
+        }),
+      );
+      assert.isTrue(exit._tag === "Failure");
+      if (exit._tag === "Failure") {
+        assert.include(String(exit.cause), "active turn mismatch");
+      }
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

@@ -389,6 +389,104 @@ describe("OrchestrationEngine", () => {
     await system.dispose();
   });
 
+  it("routes a turn start on a projected active turn into a steer request", async () => {
+    const createdAt = now();
+    const system = await createOrchestrationSystem();
+    const { engine } = system;
+    const threadId = ThreadId.make("thread-start-routes-to-steer");
+    const activeTurnId = TurnId.make("turn-active");
+
+    await system.run(
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-project-start-routes-to-steer-create"),
+        projectId: asProjectId("project-start-routes-to-steer"),
+        title: "Project Start Routes To Steer",
+        workspaceRoot: "/tmp/project-start-routes-to-steer",
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-4-8",
+        },
+        createdAt,
+      }),
+    );
+    await system.run(
+      engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-thread-start-routes-to-steer-create"),
+        threadId,
+        projectId: asProjectId("project-start-routes-to-steer"),
+        title: "Thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-4-8",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      }),
+    );
+    await system.run(
+      engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-start-routes-to-steer"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "claudeAgent",
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          runtimeMode: "approval-required",
+          activeTurnId,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+
+    await system.run(
+      engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-routes-to-steer"),
+        threadId,
+        message: {
+          messageId: asMessageId("msg-start-routes-to-steer"),
+          role: "user",
+          text: "queued while Claude is active",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+
+    const events = await system.run(
+      Stream.runCollect(engine.readEvents(0)).pipe(
+        Effect.map((chunk): OrchestrationEvent[] => Array.from(chunk)),
+      ),
+    );
+    expect(events.filter((event) => event.type === "thread.turn-steer-requested")).toHaveLength(1);
+    const routedMessage = events.find(
+      (event): event is Extract<OrchestrationEvent, { type: "thread.message-sent" }> =>
+        event.type === "thread.message-sent" &&
+        event.payload.messageId === "msg-start-routes-to-steer",
+    );
+    expect(routedMessage?.payload.turnId).toBe(activeTurnId);
+    expect(
+      events.filter(
+        (event): event is Extract<OrchestrationEvent, { type: "thread.turn-start-requested" }> =>
+          event.type === "thread.turn-start-requested" &&
+          event.payload.messageId === "msg-start-routes-to-steer",
+      ),
+    ).toHaveLength(0);
+
+    await system.dispose();
+  });
+
   it("archives and unarchives threads through orchestration commands", async () => {
     const system = await createOrchestrationSystem();
     const { engine } = system;

@@ -56,6 +56,18 @@ function threadHasUnsettledTurnStart(thread: OrchestrationReadModel["threads"][n
   return thread.latestTurn?.state === "running" && thread.latestTurn.completedAt === null;
 }
 
+function activeTurnIdForSteer(
+  thread: OrchestrationReadModel["threads"][number],
+): NonNullable<OrchestrationReadModel["threads"][number]["latestTurn"]>["turnId"] | null {
+  if (thread.session?.activeTurnId !== null && thread.session?.activeTurnId !== undefined) {
+    return thread.session.activeTurnId;
+  }
+  if (thread.latestTurn?.state === "running" && thread.latestTurn.completedAt === null) {
+    return thread.latestTurn.turnId;
+  }
+  return null;
+}
+
 const decideCommandSequence = Effect.fn("decideCommandSequence")(function* ({
   commands,
   readModel,
@@ -435,6 +447,45 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         threadId: command.threadId,
       });
       if (threadHasUnsettledTurnStart(targetThread)) {
+        const activeTurnId = activeTurnIdForSteer(targetThread);
+        if (activeTurnId !== null) {
+          const userMessageEvent: Omit<OrchestrationEvent, "sequence"> = {
+            ...withEventBase({
+              aggregateKind: "thread",
+              aggregateId: command.threadId,
+              occurredAt: command.createdAt,
+              commandId: command.commandId,
+            }),
+            type: "thread.message-sent",
+            payload: {
+              threadId: command.threadId,
+              messageId: command.message.messageId,
+              role: "user",
+              text: command.message.text,
+              attachments: command.message.attachments,
+              turnId: activeTurnId,
+              streaming: false,
+              createdAt: command.createdAt,
+              updatedAt: command.createdAt,
+            },
+          };
+          const turnSteerRequestedEvent: Omit<OrchestrationEvent, "sequence"> = {
+            ...withEventBase({
+              aggregateKind: "thread",
+              aggregateId: command.threadId,
+              occurredAt: command.createdAt,
+              commandId: command.commandId,
+            }),
+            causationEventId: userMessageEvent.eventId,
+            type: "thread.turn-steer-requested",
+            payload: {
+              threadId: command.threadId,
+              messageId: command.message.messageId,
+              createdAt: command.createdAt,
+            },
+          };
+          return [userMessageEvent, turnSteerRequestedEvent];
+        }
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
           detail: `Thread '${command.threadId}' already has a turn starting or running. Queue a follow-up or steer the active turn instead of starting another turn.`,

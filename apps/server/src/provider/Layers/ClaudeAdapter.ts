@@ -35,6 +35,7 @@ import {
   type ProviderSendTurnInput,
   type ProviderSession,
   type ThreadTokenUsageSnapshot,
+  type ProviderSteerTurnInput,
   type ProviderUserInputAnswers,
   type RuntimeContentStreamKind,
   RuntimeItemId,
@@ -95,6 +96,8 @@ type ClaudeToolResultStreamKind = Extract<
   "command_output" | "file_change_output"
 >;
 type ClaudeSdkEffort = NonNullable<ClaudeQueryOptions["effort"]>;
+type ClaudePromptInput = Pick<ProviderSendTurnInput, "input" | "attachments"> &
+  Partial<Pick<ProviderSendTurnInput, "modelSelection">>;
 
 function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
   const result = encodeUnknownJsonStringExit(input);
@@ -1029,10 +1032,7 @@ function splitClaudeStderrLines(data: string): ReadonlyArray<string> {
     .filter((line) => line.length > 0 && !isClaudeExecutionDiagnosticLine(line));
 }
 
-function buildPromptText(
-  input: ProviderSendTurnInput,
-  boundInstanceId: ProviderInstanceId,
-): string {
+function buildPromptText(input: ClaudePromptInput, boundInstanceId: ProviderInstanceId): string {
   const rawEffort =
     input.modelSelection?.instanceId === boundInstanceId
       ? getModelSelectionStringOptionValue(input.modelSelection, "effort")
@@ -1074,11 +1074,12 @@ function buildClaudeImageContentBlock(input: {
 }
 
 const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
-  input: ProviderSendTurnInput,
+  input: ClaudePromptInput,
   dependencies: {
     readonly fileSystem: FileSystem.FileSystem;
     readonly attachmentsDir: string;
     readonly boundInstanceId: ProviderInstanceId;
+    readonly method: "turn/start" | "turn/steer";
   },
 ) {
   const text = buildPromptText(input, dependencies.boundInstanceId);
@@ -1096,7 +1097,7 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
     if (!SUPPORTED_CLAUDE_IMAGE_MIME_TYPES.has(attachment.mimeType)) {
       return yield* new ProviderAdapterRequestError({
         provider: PROVIDER,
-        method: "turn/start",
+        method: dependencies.method,
         detail: `Unsupported Claude image attachment type '${attachment.mimeType}'.`,
       });
     }
@@ -1108,7 +1109,7 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
     if (!attachmentPath) {
       return yield* new ProviderAdapterRequestError({
         provider: PROVIDER,
-        method: "turn/start",
+        method: dependencies.method,
         detail: `Invalid attachment id '${attachment.id}'.`,
       });
     }
@@ -1118,7 +1119,7 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
         (cause) =>
           new ProviderAdapterRequestError({
             provider: PROVIDER,
-            method: "turn/start",
+            method: dependencies.method,
             detail: toMessage(cause, "Failed to read attachment file."),
             cause,
           }),
@@ -3884,6 +3885,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       fileSystem,
       attachmentsDir: serverConfig.attachmentsDir,
       boundInstanceId,
+      method: "turn/start",
     });
 
     const turnId = TurnId.make(yield* Random.nextUUIDv4);
@@ -4016,14 +4018,62 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return context !== undefined && !context.stopped;
     });
 
-  const steerTurn: ClaudeAdapterShape["steerTurn"] = (input) =>
-    Effect.fail(
-      new ProviderAdapterRequestError({
+  const steerTurn: ClaudeAdapterShape["steerTurn"] = Effect.fn("steerTurn")(function* (
+    input: ProviderSteerTurnInput,
+  ) {
+    const context = yield* requireSession(input.threadId);
+    const activeTurnId = context.session.activeTurnId ?? context.turnState?.turnId;
+
+    if (context.session.status !== "running" || !context.turnState || !activeTurnId) {
+      return yield* new ProviderAdapterRequestError({
         provider: PROVIDER,
         method: "turn/steer",
-        detail: `Claude session '${input.threadId}' does not support live steering.`,
-      }),
-    );
+        detail: `Claude session '${input.threadId}' has no active turn to steer.`,
+      });
+    }
+
+    if (activeTurnId !== input.expectedTurnId) {
+      return yield* new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "turn/steer",
+        detail: `Claude active turn mismatch: expected '${input.expectedTurnId}' but session is running '${activeTurnId}'.`,
+      });
+    }
+
+    const message = yield* buildUserMessageEffect(input, {
+      fileSystem,
+      attachmentsDir: serverConfig.attachmentsDir,
+      boundInstanceId,
+      method: "turn/steer",
+    });
+
+    // Official Claude Agent SDK streaming input mode is the long-lived,
+    // interactive path: `query({ prompt: AsyncIterable<SDKUserMessage> })`
+    // supports dynamic message queueing and interruption, and the local
+    // package types document `streamInput()` as the multi-turn input pipe.
+    // Claude does not expose a Codex-style expected-turn RPC, so Cafe binds the
+    // steer to its own active turn id before queueing exactly one SDK user
+    // message into the already-running prompt stream.
+    yield* Queue.offer(context.promptQueue, {
+      type: "message",
+      message,
+    }).pipe(Effect.mapError((cause) => toRequestError(input.threadId, "turn/steer", cause)));
+
+    context.hasSubmittedUserPrompt = true;
+    context.turnState.promptTextBytes =
+      (context.turnState.promptTextBytes ?? 0) +
+      Buffer.byteLength(input.input?.trim() ?? "", "utf8");
+    context.turnState.promptAttachmentCount =
+      (context.turnState.promptAttachmentCount ?? 0) + (input.attachments?.length ?? 0);
+
+    return {
+      threadId: context.session.threadId,
+      turnId: activeTurnId,
+      ...(context.session.resumeCursor !== undefined
+        ? { resumeCursor: context.session.resumeCursor }
+        : {}),
+    };
+  });
 
   const stopAll: ClaudeAdapterShape["stopAll"] = () =>
     Effect.forEach(
@@ -4050,7 +4100,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     provider: PROVIDER,
     capabilities: {
       sessionModelSwitch: "in-session",
-      liveSteer: "unsupported",
+      liveSteer: "supported",
     },
     startSession,
     sendTurn,
