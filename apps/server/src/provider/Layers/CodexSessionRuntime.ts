@@ -1345,22 +1345,39 @@ function shouldSuppressChildConversationNotification(method: string): boolean {
   );
 }
 
-export function readCodexSteerExpectedTurnMismatchActualTurnId(error: unknown): TurnId | undefined {
+export function readCodexExpectedActiveTurnMismatchActualTurnId(
+  error: unknown,
+): TurnId | undefined {
   const message = error instanceof Error ? error.message : String(error);
-  const prefix = "expected active turn id `";
-  const separator = "` but found `";
-  const suffix = "`";
-  const remainder = message.startsWith(prefix) ? message.slice(prefix.length) : undefined;
-  const actual = remainder?.split(separator)[1]?.trim();
-  if (!actual?.endsWith(suffix)) {
-    return undefined;
+  const quoted = /^expected active turn id `[^`]+` but found `([^`]+)`$/.exec(message);
+  if (quoted?.[1]) {
+    return TurnId.make(quoted[1]);
   }
-  const actualTurnId = actual.slice(0, -suffix.length).trim();
-  return actualTurnId.length > 0 ? TurnId.make(actualTurnId) : undefined;
+
+  // Upstream Codex app-server currently formats `turn/steer` mismatches with
+  // backticks and `turn/interrupt` mismatches without them. Treat both as the
+  // same active-turn reconciliation signal so Cafe can retry against the
+  // app-server-reported turn instead of surfacing a recoverable stale projection.
+  const unquoted = /^expected active turn id \S+ but found (\S+)$/.exec(message);
+  const actualTurnId = unquoted?.[1]?.trim();
+  return actualTurnId && actualTurnId.length > 0 ? TurnId.make(actualTurnId) : undefined;
 }
 
+export const readCodexSteerExpectedTurnMismatchActualTurnId =
+  readCodexExpectedActiveTurnMismatchActualTurnId;
+
 function isCodexSteerExpectedTurnMismatch(error: unknown): boolean {
-  return readCodexSteerExpectedTurnMismatchActualTurnId(error) !== undefined;
+  return readCodexExpectedActiveTurnMismatchActualTurnId(error) !== undefined;
+}
+
+function isCodexNoActiveTurnToSteerError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message === "no active turn to steer";
+}
+
+function isCodexNoActiveTurnToInterruptError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message === "no active turn to interrupt";
 }
 
 function toCodexUserInputAnswer(
@@ -3592,11 +3609,43 @@ export const makeCodexSessionRuntime = (
           const steerRequestedAt = yield* nowIso;
           const steerRequestedAtMs = yield* Clock.currentTimeMillis;
           const rawResponse = yield* requestSteer(input.expectedTurnId).pipe(
+            Effect.catchIf(isCodexNoActiveTurnToSteerError, (error) =>
+              Effect.gen(function* () {
+                const observedAt = yield* nowIso;
+                yield* updateSession(sessionRef, {
+                  status: "ready",
+                  activeTurnId: undefined,
+                });
+                yield* Effect.logWarning("codex.turnSteer.noActiveTurnReconciled", {
+                  threadId: options.threadId,
+                  providerInstanceId: options.providerInstanceId ?? PROVIDER,
+                  providerThreadId,
+                  requestedExpectedTurnId: input.expectedTurnId,
+                  observedAt,
+                });
+                yield* emitEvent({
+                  kind: "notification",
+                  threadId: options.threadId,
+                  method: "codex.turnSteer/noActiveTurnReconciled",
+                  turnId: input.expectedTurnId,
+                  message:
+                    "Codex app-server reported no active turn for turn/steer; Cafe Code cleared the active-turn pointer so the message can be retried as a new turn.",
+                  payload: {
+                    providerThreadId,
+                    requestedExpectedTurnId: input.expectedTurnId,
+                    observedAt,
+                    semantics:
+                      "Upstream Codex TUI treats this as an active-turn race: it clears the cached active turn and falls through to turn/start with the same input. Cafe mirrors that by reconciling the runtime session before returning the recoverable error to orchestration.",
+                  },
+                });
+                return yield* error;
+              }),
+            ),
             Effect.catchIf(isCodexSteerExpectedTurnMismatch, (error) =>
               Effect.gen(function* () {
                 const actualTurnId = readCodexSteerExpectedTurnMismatchActualTurnId(error);
                 if (actualTurnId === undefined || actualTurnId === input.expectedTurnId) {
-                  return yield* error as CodexErrors.CodexAppServerRequestError;
+                  return yield* error;
                 }
 
                 const observedAt = yield* nowIso;
@@ -3702,10 +3751,83 @@ export const makeCodexSessionRuntime = (
           if (!effectiveTurnId) {
             return;
           }
-          yield* client.request("turn/interrupt", {
-            threadId: providerThreadId,
-            turnId: effectiveTurnId,
-          });
+          const requestInterrupt = (targetTurnId: TurnId) =>
+            client.request("turn/interrupt", {
+              threadId: providerThreadId,
+              turnId: targetTurnId,
+            });
+
+          yield* requestInterrupt(effectiveTurnId).pipe(
+            Effect.catchIf(isCodexNoActiveTurnToInterruptError, (error) =>
+              Effect.gen(function* () {
+                const observedAt = yield* nowIso;
+                yield* updateSession(sessionRef, {
+                  status: "ready",
+                  activeTurnId: undefined,
+                });
+                yield* Effect.logWarning("codex.turnInterrupt.noActiveTurnReconciled", {
+                  threadId: options.threadId,
+                  providerInstanceId: options.providerInstanceId ?? PROVIDER,
+                  providerThreadId,
+                  requestedTurnId: effectiveTurnId,
+                  observedAt,
+                });
+                yield* emitEvent({
+                  kind: "notification",
+                  threadId: options.threadId,
+                  method: "codex.turnInterrupt/noActiveTurnReconciled",
+                  turnId: effectiveTurnId,
+                  message:
+                    "Codex app-server reported no active turn for turn/interrupt; Cafe Code cleared the active-turn pointer.",
+                  payload: {
+                    providerThreadId,
+                    requestedTurnId: effectiveTurnId,
+                    observedAt,
+                    semantics:
+                      "Codex app-server is authoritative for active turn ownership. A no-active interrupt means Cafe's cached active turn was stale and must not gate future input.",
+                  },
+                });
+                return yield* error;
+              }),
+            ),
+            Effect.catchIf(isCodexSteerExpectedTurnMismatch, (error) =>
+              Effect.gen(function* () {
+                const actualTurnId = readCodexExpectedActiveTurnMismatchActualTurnId(error);
+                if (actualTurnId === undefined || actualTurnId === effectiveTurnId) {
+                  return yield* error;
+                }
+
+                const observedAt = yield* nowIso;
+                const diagnostics = {
+                  providerThreadId,
+                  requestedTurnId: effectiveTurnId,
+                  actualTurnId,
+                  observedAt,
+                  semantics:
+                    "Codex app-server reported that Cafe's interrupt target was stale. Upstream Codex TUI interrupts the current active task without depending on projected turn ids; Cafe mirrors that by retrying once with the server-reported active turn id.",
+                };
+                yield* Effect.logWarning("codex.turnInterrupt.retryAfterActiveTurnMismatch", {
+                  threadId: options.threadId,
+                  providerInstanceId: options.providerInstanceId ?? PROVIDER,
+                  ...diagnostics,
+                });
+                yield* emitEvent({
+                  kind: "notification",
+                  threadId: options.threadId,
+                  method: "codex.turnInterrupt/retryAfterActiveTurnMismatch",
+                  turnId: actualTurnId,
+                  message:
+                    "Codex app-server reported a different active turn; Cafe Code retried turn/interrupt with that turn id.",
+                  payload: diagnostics,
+                });
+                yield* updateSession(sessionRef, {
+                  status: "running",
+                  activeTurnId: actualTurnId,
+                });
+                return yield* requestInterrupt(actualTurnId);
+              }),
+            ),
+          );
         }),
       readThread: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;

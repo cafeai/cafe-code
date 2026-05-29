@@ -24,6 +24,7 @@ import {
   isCodexContextCompactionItemType,
   isCodexUserMessageItemType,
   openCodexThread,
+  readCodexExpectedActiveTurnMismatchActualTurnId,
   readCodexSteerExpectedTurnMismatchActualTurnId,
   selectCodexActiveSnapshotTurn,
   summarizeCodexAppServerChildProcesses,
@@ -268,6 +269,16 @@ describe("readCodexSteerExpectedTurnMismatchActualTurnId", () => {
     const actualTurnId = readCodexSteerExpectedTurnMismatchActualTurnId(
       CodexErrors.CodexAppServerRequestError.invalidRequest(
         "expected active turn id `turn-old` but found `turn-new`",
+      ),
+    );
+
+    assert.equal(actualTurnId, "turn-new");
+  });
+
+  it("extracts the app-server reported active turn id from upstream interrupt mismatches", () => {
+    const actualTurnId = readCodexExpectedActiveTurnMismatchActualTurnId(
+      CodexErrors.CodexAppServerRequestError.invalidRequest(
+        "expected active turn id turn-old but found turn-new",
       ),
     );
 

@@ -534,6 +534,83 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
 
+  it("routes turn starts through live steer when the Codex runtime still owns an active turn", async () => {
+    const harness = await createHarness({ liveSteer: "supported" });
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+    const runtimeActiveTurnId = asTurnId("runtime-active-turn");
+    harness.steerTurn.mockImplementationOnce((input) =>
+      Effect.succeed({
+        threadId: input.threadId,
+        turnId: input.expectedTurnId,
+      }),
+    );
+    harness.runtimeSessions.push({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId,
+      activeTurnId: runtimeActiveTurnId,
+      resumeCursor: { opaque: "resume-runtime-active" },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-routed-to-steer"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-routed-to-steer"),
+          role: "user",
+          text: "this should steer the active turn",
+          attachments: [],
+        },
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.5",
+          options: [{ id: "reasoningEffort", value: "xhigh" }],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.steerTurn.mock.calls.length === 1);
+    expect(harness.startSession.mock.calls.length).toBe(0);
+    expect(harness.sendTurn.mock.calls.length).toBe(0);
+    expect(harness.steerTurn.mock.calls[0]?.[0]).toEqual({
+      threadId,
+      expectedTurnId: runtimeActiveTurnId,
+      input: "this should steer the active turn",
+    });
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === threadId);
+      return (
+        thread?.session?.status === "running" &&
+        thread.session.activeTurnId === runtimeActiveTurnId &&
+        thread.activities.some(
+          (activity) =>
+            activity.kind === "runtime.warning" &&
+            activity.summary === "Turn start routed to active steer",
+        )
+      );
+    });
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.latestTurn).toMatchObject({
+      turnId: runtimeActiveTurnId,
+      state: "running",
+    });
+    expect(thread?.messages.some((message) => message.id === "user-message-routed-to-steer")).toBe(
+      true,
+    );
+  });
+
   it("marks the turn running from sendTurn success when the provider omits turn.started", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -1688,6 +1765,75 @@ describe("ProviderCommandReactor", () => {
             activity.turnId === asTurnId("turn-1"),
         ) ?? false
       );
+    });
+  });
+
+  it("retargets provider interrupts to the runtime active turn when projection is stale", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+    const projectedTurnId = asTurnId("projected-stale-turn");
+    const runtimeActiveTurnId = asTurnId("runtime-active-turn");
+
+    harness.runtimeSessions.push({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId,
+      activeTurnId: runtimeActiveTurnId,
+      resumeCursor: { opaque: "resume-runtime-active" },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-stale-interrupt"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: projectedTurnId,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("cmd-turn-interrupt-retarget"),
+        threadId,
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
+    expect(harness.interruptTurn.mock.calls[0]?.[0]).toEqual({
+      threadId,
+      turnId: runtimeActiveTurnId,
+    });
+
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(
+      thread?.activities.find(
+        (activity) =>
+          activity.kind === "runtime.warning" &&
+          activity.summary === "Interrupt retargeted to provider active turn",
+      ),
+    ).toMatchObject({
+      turnId: runtimeActiveTurnId,
+      payload: {
+        projectedTurnId,
+        runtimeActiveTurnId,
+      },
     });
   });
 

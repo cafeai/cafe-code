@@ -23,7 +23,7 @@ import {
   type TurnId,
   type ProviderSessionRuntimeStatus,
   type ProviderInstanceId,
-  type ProviderDriverKind,
+  ProviderDriverKind,
   type ProviderRuntimeEvent,
   type ProviderSession,
 } from "@cafecode/contracts";
@@ -815,6 +815,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.kind": routed.adapter.provider,
         ...(input.modelSelection?.model ? { "provider.model": input.modelSelection.model } : {}),
       });
+      if (routed.adapter.provider === ProviderDriverKind.make("codex")) {
+        const activeSessions = yield* routed.adapter.listSessions();
+        const activeSession = activeSessions.find((session) => session.threadId === input.threadId);
+        if (activeSession?.status === "running" && activeSession.activeTurnId !== undefined) {
+          return yield* toValidationError(
+            "ProviderService.sendTurn",
+            `Cannot start a new Codex turn while active turn '${activeSession.activeTurnId}' is running; route the input through steerTurn or queue it until the active turn completes.`,
+          );
+        }
+      }
       const turn = yield* routed.adapter.sendTurn(input);
       yield* directory.upsert({
         threadId: input.threadId,

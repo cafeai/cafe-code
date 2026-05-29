@@ -967,6 +967,37 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect("rejects direct Codex sendTurn while the adapter still owns an active turn", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+
+      const session = yield* provider.startSession(asThreadId("thread-active"), {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId: asThreadId("thread-active"),
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      routing.codex.updateSession(session.threadId, (current) => ({
+        ...current,
+        status: "running",
+        activeTurnId: asTurnId("turn-active"),
+      }));
+      routing.codex.sendTurn.mockClear();
+
+      const exit = yield* Effect.exit(
+        provider.sendTurn({
+          threadId: session.threadId,
+          input: "this must be steered or queued",
+          attachments: [],
+        }),
+      );
+
+      assert.equal(Exit.isFailure(exit), true);
+      assert.equal(routing.codex.sendTurn.mock.calls.length, 0);
+    }),
+  );
+
   it.effect("recovers stale persisted sessions for rollback by resuming thread identity", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
