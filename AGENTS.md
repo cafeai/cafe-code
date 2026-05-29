@@ -254,6 +254,7 @@ If Claude behavior is unclear, check the official Claude Agent SDK docs, the ins
 - Keep hot paths allocation-conscious and query-bounded. Any per-token or per-tool-call code should be reviewed as a performance-critical path.
 - Provider event ingestion, projection, WebSocket fanout, renderer state updates, markdown rendering, scroll anchoring, and debug publication must stay independently bounded. Do not introduce work that scales with full chat history, full activity history, or total turn duration on each token/tool update.
 - Do not perform broad process scans, recursive filesystem traversal, or source-control operations inside message send or provider event ingestion paths unless explicitly debounced and instrumented.
+- Hidden checkpoint ref pruning can run after turn completion, so it must stay bounded: delete refs in batches with `git update-ref --stdin`, validate generated checkpoint ref names before stdin use, and log only counts plus small samples on prune failure. Never spawn one git process per historical checkpoint ref or emit thousands of refs into runtime logs.
 - When comparing performance to Codex CLI or Claude CLI, identify the comparable phase first: process startup, session resume, prompt submission ACK, provider runtime start, model first token, tool execution, or UI projection.
 
 ## Frontend Lifecycle Rules

@@ -7,7 +7,7 @@ import * as PlatformError from "effect/PlatformError";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { assert, it } from "@effect/vitest";
 
-import { GitCommandError } from "@cafecode/contracts";
+import { CheckpointRef, GitCommandError } from "@cafecode/contracts";
 import { ServerConfig } from "../config.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
@@ -95,6 +95,99 @@ it.effect("GitVcsDriver forwards execute env to the VCS process", () => {
             Effect.sync(() => {
               observedEnv = input.env;
               observedAppendTruncationMarker = input.appendTruncationMarker;
+              return {
+                exitCode: ChildProcessSpawner.ExitCode(0),
+                stdout: "",
+                stderr: "",
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              };
+            }),
+        }),
+      ),
+    ),
+  );
+});
+
+it.effect("GitVcsDriver deletes checkpoint refs with bounded update-ref stdin batches", () => {
+  const observedInputs: VcsProcess.VcsProcessInput[] = [];
+
+  return Effect.gen(function* () {
+    const driver = yield* GitVcsDriver.makeVcsDriverShape();
+    if (!driver.checkpoints) {
+      throw new Error("Git VCS driver did not expose checkpoint operations.");
+    }
+
+    yield* driver.checkpoints.deleteCheckpointRefs({
+      cwd: "/repo",
+      checkpointRefs: Array.from({ length: 260 }, (_, index) =>
+        CheckpointRef.make(`refs/cafe/checkpoints/thread/turn/${index}`),
+      ),
+    });
+
+    assert.strictEqual(observedInputs.length, 2);
+    assert.deepStrictEqual(observedInputs[0]?.args, ["-C", "/repo", "update-ref", "--stdin"]);
+    assert.strictEqual(observedInputs[0]?.allowNonZeroExit, true);
+    assert.strictEqual(
+      observedInputs[0]?.stdin?.split("\n").filter((line) => line.length > 0).length,
+      512,
+    );
+    assert.ok(observedInputs[0]?.stdin?.includes("delete refs/cafe/checkpoints/thread/turn/0\n"));
+    assert.ok(observedInputs[0]?.stdin?.includes("delete refs/t3/checkpoints/thread/turn/0\n"));
+    assert.strictEqual(
+      observedInputs[1]?.stdin?.split("\n").filter((line) => line.length > 0).length,
+      8,
+    );
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(VcsProcess.VcsProcess)({
+          run: (input) =>
+            Effect.sync(() => {
+              observedInputs.push(input);
+              return {
+                exitCode: ChildProcessSpawner.ExitCode(0),
+                stdout: "",
+                stderr: "",
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              };
+            }),
+        }),
+      ),
+    ),
+  );
+});
+
+it.effect("GitVcsDriver rejects unsafe checkpoint refs before update-ref stdin", () => {
+  let observedProcessRuns = 0;
+
+  return Effect.gen(function* () {
+    const driver = yield* GitVcsDriver.makeVcsDriverShape();
+    if (!driver.checkpoints) {
+      throw new Error("Git VCS driver did not expose checkpoint operations.");
+    }
+
+    const error = yield* driver.checkpoints
+      .deleteCheckpointRefs({
+        cwd: "/repo",
+        checkpointRefs: [
+          CheckpointRef.make("refs/cafe/checkpoints/thread/turn/1\n delete refs/heads/main"),
+        ],
+      })
+      .pipe(Effect.flip);
+
+    assert.match(error.message, /unsafe checkpoint ref/u);
+    assert.strictEqual(observedProcessRuns, 0);
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(VcsProcess.VcsProcess)({
+          run: () =>
+            Effect.sync(() => {
+              observedProcessRuns += 1;
               return {
                 exitCode: ChildProcessSpawner.ExitCode(0),
                 stdout: "",

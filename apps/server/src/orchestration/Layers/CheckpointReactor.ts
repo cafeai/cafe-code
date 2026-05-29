@@ -36,6 +36,7 @@ import { WorkspaceEntries } from "../../workspace/Services/WorkspaceEntries.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const CHECKPOINT_REFS_RETAINED_PER_THREAD = 3;
+const CHECKPOINT_REF_PRUNE_WARNING_SAMPLE_SIZE = 20;
 
 type ReactorInput =
   | {
@@ -246,7 +247,15 @@ const make = Effect.gen(function* () {
               threadId: input.threadId,
               cwd: input.cwd,
               retainedTurnCounts: [...retainedTurnCounts],
-              checkpointRefsToDelete,
+              checkpointRefDeleteCount: checkpointRefsToDelete.length,
+              checkpointRefsToDeleteSample: checkpointRefsToDelete.slice(
+                0,
+                CHECKPOINT_REF_PRUNE_WARNING_SAMPLE_SIZE,
+              ),
+              checkpointRefsToDeleteOmitted: Math.max(
+                0,
+                checkpointRefsToDelete.length - CHECKPOINT_REF_PRUNE_WARNING_SAMPLE_SIZE,
+              ),
               detail: error.message,
             }),
           ),

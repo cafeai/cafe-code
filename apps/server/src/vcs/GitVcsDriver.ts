@@ -29,7 +29,11 @@ import {
 import * as GitVcsDriverCore from "./GitVcsDriverCore.ts";
 import * as VcsDriver from "./VcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
-import { legacyCheckpointRefAlias } from "../checkpointing/Utils.ts";
+import {
+  CHECKPOINT_REFS_PREFIX,
+  LEGACY_CHECKPOINT_REFS_PREFIX,
+  legacyCheckpointRefAlias,
+} from "../checkpointing/Utils.ts";
 
 export interface ExecuteGitInput {
   readonly operation: string;
@@ -228,12 +232,88 @@ export class GitVcsDriver extends Context.Service<GitVcsDriver, GitVcsDriverShap
 const WORKSPACE_FILES_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const GIT_CHECK_IGNORE_MAX_STDIN_BYTES = 256 * 1024;
 const CHECKPOINT_DIFF_MAX_OUTPUT_BYTES = 10_000_000;
+const CHECKPOINT_REF_DELETE_BATCH_SIZE = 512;
+const CHECKPOINT_REF_DELETE_TIMEOUT_MS = 10_000;
 const WORKSPACE_GIT_HARDENED_CONFIG_ARGS = [
   "-c",
   "core.fsmonitor=false",
   "-c",
   "core.untrackedCache=false",
 ] as const;
+
+function chunkArray<T>(items: ReadonlyArray<T>, size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function checkpointRefsWithLegacyAliases(
+  checkpointRefs: ReadonlyArray<string>,
+): ReadonlyArray<string> {
+  const seen = new Set<string>();
+  const refs: string[] = [];
+
+  for (const checkpointRef of checkpointRefs) {
+    const legacyAlias = legacyCheckpointRefAlias(checkpointRef);
+    const candidates = legacyAlias === null ? [checkpointRef] : [checkpointRef, legacyAlias];
+    for (const candidate of candidates) {
+      if (seen.has(candidate)) {
+        continue;
+      }
+      seen.add(candidate);
+      refs.push(candidate);
+    }
+  }
+
+  return refs;
+}
+
+function isSafeCheckpointRefForUpdateRefStdin(ref: string): boolean {
+  if (ref.length === 0 || ref.length > 4096) {
+    return false;
+  }
+  if (
+    !(
+      ref.startsWith(`${CHECKPOINT_REFS_PREFIX}/`) ||
+      ref.startsWith(`${LEGACY_CHECKPOINT_REFS_PREFIX}/`)
+    )
+  ) {
+    return false;
+  }
+
+  // `git update-ref --stdin` is a command language. Cafe checkpoint refs are
+  // generated as refs/<namespace>/checkpoints/<base64url-thread-id>/turn/<n>;
+  // reject everything outside that grammar before writing stdin so a corrupted
+  // persisted ref cannot inject extra update-ref commands.
+  if (!/^refs\/(?:cafe|t3)\/checkpoints\/[A-Za-z0-9_-]+\/turn\/(?:0|[1-9][0-9]*)$/.test(ref)) {
+    return false;
+  }
+  if (
+    hasControlOrWhitespace(ref) ||
+    ref.includes("..") ||
+    ref.includes("//") ||
+    ref.includes("@{") ||
+    ref.endsWith("/") ||
+    ref.endsWith(".") ||
+    ref.endsWith(".lock")
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function hasControlOrWhitespace(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) {
+      return true;
+    }
+  }
+  return /\s/u.test(value);
+}
 
 const nowFreshness = Effect.fn("GitVcsDriver.nowFreshness")(function* () {
   const now = yield* DateTime.now;
@@ -796,19 +876,33 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
 
     deleteCheckpointRefs: Effect.fn("GitVcsDriver.checkpoints.deleteCheckpointRefs")(
       function* (input) {
+        const checkpointRefs = checkpointRefsWithLegacyAliases(input.checkpointRefs);
+        const unsafeCheckpointRef = checkpointRefs.find(
+          (checkpointRef) => !isSafeCheckpointRefForUpdateRefStdin(checkpointRef),
+        );
+        if (unsafeCheckpointRef !== undefined) {
+          return yield* new VcsProcessExitError({
+            operation: "GitVcsDriver.checkpoints.deleteCheckpointRefs",
+            command: "git update-ref --stdin",
+            cwd: input.cwd,
+            exitCode: ChildProcessSpawner.ExitCode(1),
+            detail: `Refusing to batch-delete unsafe checkpoint ref '${unsafeCheckpointRef}'.`,
+          });
+        }
+
         yield* Effect.forEach(
-          input.checkpointRefs.flatMap((checkpointRef) => [
-            checkpointRef,
-            ...(legacyCheckpointRefAlias(checkpointRef)
-              ? [legacyCheckpointRefAlias(checkpointRef)!]
-              : []),
-          ]),
-          (checkpointRef) =>
+          chunkArray(checkpointRefs, CHECKPOINT_REF_DELETE_BATCH_SIZE),
+          (checkpointRefBatch) =>
             execute({
               operation: "GitVcsDriver.checkpoints.deleteCheckpointRefs",
               cwd: input.cwd,
-              args: ["update-ref", "-d", checkpointRef],
+              args: ["update-ref", "--stdin"],
+              stdin: checkpointRefBatch
+                .map((checkpointRef) => `delete ${checkpointRef}\n`)
+                .join(""),
               allowNonZeroExit: true,
+              timeoutMs: CHECKPOINT_REF_DELETE_TIMEOUT_MS,
+              maxOutputBytes: 64_000,
             }),
           { discard: true },
         );
