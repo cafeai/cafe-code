@@ -15,12 +15,10 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
     return null;
   }
 
-  const statusDismissKey = [
-    status.instanceId,
-    status.status,
-    status.checkedAt ?? "",
-    status.message ?? "",
-  ].join("\u0000");
+  // Health checks can refresh checkedAt while reporting the same actionable
+  // state. Keep a dismissal stable across those polls so a transient provider
+  // probe timeout does not keep reappearing over the active chat.
+  const statusDismissKey = [status.instanceId, status.status, status.message ?? ""].join("\u0000");
   const isDismissed = dismissedStatusKey === statusDismissKey;
   const providerLabel = status.displayName?.trim() || formatProviderDriverKindLabel(status.driver);
   const defaultMessage =
