@@ -270,6 +270,10 @@ function checkpointRefsWithLegacyAliases(
   return refs;
 }
 
+function isNoTrackedPathspecError(stderr: string): boolean {
+  return /pathspec ['"]?\.['"]? did not match any file\(s\) known to git/u.test(stderr);
+}
+
 function isSafeCheckpointRefForUpdateRefStdin(ref: string): boolean {
   if (ref.length === 0 || ref.length > 4096) {
     return false;
@@ -720,12 +724,25 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           });
         }
 
-        yield* execute({
+        const addTrackedResult = yield* execute({
           operation,
           cwd: input.cwd,
           args: ["add", "-u", "--", "."],
           env: commitEnv,
+          allowNonZeroExit: true,
         });
+        if (addTrackedResult.exitCode !== 0) {
+          const detail = addTrackedResult.stderr.trim();
+          if (!isNoTrackedPathspecError(detail)) {
+            return yield* new VcsProcessExitError({
+              operation,
+              command: "git add -u -- .",
+              cwd: input.cwd,
+              exitCode: addTrackedResult.exitCode,
+              detail: detail || "git add -u -- . failed.",
+            });
+          }
+        }
 
         const writeTreeResult = yield* execute({
           operation,

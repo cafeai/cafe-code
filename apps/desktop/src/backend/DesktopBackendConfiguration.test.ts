@@ -146,6 +146,7 @@ describe("DesktopBackendConfiguration", () => {
         assert.equal(first.cwd, environment.backendCwd);
         assert.equal(first.captureOutput, true);
         assert.equal(first.env.ELECTRON_RUN_AS_NODE, "1");
+        assert.equal(first.env.CAFE_CODE_SHELL_ENV_HYDRATED, "1");
         assert.isUndefined(first.env.CAFE_CODE_PORT);
         assert.isUndefined(first.env.CAFE_CODE_MODE);
         assert.isUndefined(first.env.CAFE_CODE_DESKTOP_LAN_HOST);

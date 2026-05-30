@@ -2,6 +2,7 @@ import * as NodeOS from "node:os";
 import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
 import {
+  CAFE_CODE_SHELL_ENV_HYDRATED,
   readPathFromLoginShell,
   readEnvironmentFromWindowsShell,
   resolveWindowsEnvironment,
@@ -41,6 +42,10 @@ export function fixPath(
   const readPath = options.readPath ?? readPathFromLoginShell;
 
   try {
+    if (env[CAFE_CODE_SHELL_ENV_HYDRATED] === "1") {
+      return;
+    }
+
     if (platform === "win32") {
       const repairedEnvironment = resolveWindowsEnvironment(env, {
         readEnvironment: options.readWindowsEnvironment ?? readEnvironmentFromWindowsShell,

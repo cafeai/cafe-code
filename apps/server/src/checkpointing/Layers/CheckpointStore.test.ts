@@ -238,5 +238,32 @@ it.layer(TestLayer)("CheckpointStoreLive", (it) => {
         expect(diff).not.toContain("super secret token");
       }),
     );
+
+    it.effect("captures an empty checkpoint for repositories with only untracked files", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* git(tmp, ["init"]);
+        yield* writeTextFile(path.join(tmp, "UNTRACKED_SECRET.txt"), "super secret token\n");
+        const checkpointStore = yield* CheckpointStore;
+        const threadId = ThreadId.make("thread-checkpoint-store-empty-untracked");
+        const checkpointRef = checkpointRefForThreadTurn(threadId, 0);
+
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef,
+        });
+
+        const commitOid = yield* git(tmp, ["rev-parse", "--verify", `${checkpointRef}^{commit}`]);
+        const checkpointTree = yield* git(tmp, [
+          "show",
+          "--pretty=format:",
+          "--name-only",
+          commitOid,
+        ]);
+
+        expect(commitOid).toMatch(/^[0-9a-f]{40}$/u);
+        expect(checkpointTree).toBe("");
+      }),
+    );
   });
 });

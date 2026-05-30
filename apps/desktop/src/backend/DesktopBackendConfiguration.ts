@@ -1,4 +1,5 @@
 import { parsePersistedServerObservabilitySettings } from "@cafecode/shared/serverSettings";
+import { CAFE_CODE_SHELL_ENV_HYDRATED } from "@cafecode/shared/shell";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -125,6 +126,7 @@ const resolveBackendStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       env: {
         ...backendChildEnvPatch(),
         ELECTRON_RUN_AS_NODE: "1",
+        [CAFE_CODE_SHELL_ENV_HYDRATED]: "1",
       },
       bootstrap: {
         mode: "desktop",

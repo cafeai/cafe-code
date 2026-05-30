@@ -17,6 +17,7 @@ import {
   type ProviderDaemonMarker as ProviderDaemonMarkerValue,
 } from "@cafecode/contracts";
 import { requestProviderDaemonJson } from "@cafecode/shared/providerDaemonHttp";
+import { CAFE_CODE_SHELL_ENV_HYDRATED } from "@cafecode/shared/shell";
 import * as Context from "effect/Context";
 import * as Clock from "effect/Clock";
 import * as Data from "effect/Data";
@@ -639,6 +640,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         env: {
           ...providerDaemonChildEnvPatch(),
           ELECTRON_RUN_AS_NODE: "1",
+          [CAFE_CODE_SHELL_ENV_HYDRATED]: "1",
         },
         extendEnv: true,
         stdin: "ignore",

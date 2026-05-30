@@ -11,6 +11,8 @@ const WINDOWS_PATH_DELIMITER = ";";
 const POSIX_PATH_DELIMITER = ":";
 const WINDOWS_SHELL_CANDIDATES = ["pwsh.exe", "powershell.exe"] as const;
 
+export const CAFE_CODE_SHELL_ENV_HYDRATED = "CAFE_CODE_SHELL_ENV_HYDRATED";
+
 type ExecFileSyncLike = (
   file: string,
   args: ReadonlyArray<string>,
