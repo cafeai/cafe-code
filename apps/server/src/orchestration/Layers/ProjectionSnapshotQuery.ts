@@ -1079,6 +1079,22 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         FROM projection_thread_activities
         WHERE thread_id = ${threadId}
           AND turn_id = ${turnId}
+          AND kind != 'context-window.updated'
+          AND kind != 'checkpoint.captured'
+          AND kind != 'task.started'
+          AND summary != 'Checkpoint captured'
+          AND (
+            kind != 'tool.started'
+            OR json_extract(payload_json, '$.itemType') = 'context_compaction'
+          )
+          AND NOT (
+            kind IN ('tool.updated', 'tool.completed')
+            AND COALESCE(json_extract(payload_json, '$.detail'), '') LIKE 'ExitPlanMode:%'
+          )
+          AND NOT (
+            kind = 'provider.turn.steer.failed'
+            AND json_extract(payload_json, '$.retryableFollowUp') = 1
+          )
       `,
   });
 
@@ -1100,6 +1116,22 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         FROM projection_thread_activities
         WHERE thread_id = ${threadId}
           AND turn_id = ${turnId}
+          AND kind != 'context-window.updated'
+          AND kind != 'checkpoint.captured'
+          AND kind != 'task.started'
+          AND summary != 'Checkpoint captured'
+          AND (
+            kind != 'tool.started'
+            OR json_extract(payload_json, '$.itemType') = 'context_compaction'
+          )
+          AND NOT (
+            kind IN ('tool.updated', 'tool.completed')
+            AND COALESCE(json_extract(payload_json, '$.detail'), '') LIKE 'ExitPlanMode:%'
+          )
+          AND NOT (
+            kind = 'provider.turn.steer.failed'
+            AND json_extract(payload_json, '$.retryableFollowUp') = 1
+          )
         ORDER BY
           CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,
           sequence ASC,

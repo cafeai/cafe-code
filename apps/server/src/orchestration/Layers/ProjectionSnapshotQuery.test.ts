@@ -1847,6 +1847,131 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("excludes non-rendered work-log activity from turn activity pages", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_thread_activities`;
+
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id,
+          thread_id,
+          turn_id,
+          tone,
+          kind,
+          summary,
+          payload_json,
+          sequence,
+          created_at
+        )
+        VALUES
+          (
+            'hidden-context-window',
+            'thread-turn-visible-page',
+            'turn-visible-page',
+            'info',
+            'context-window.updated',
+            'Context window updated',
+            '{}',
+            1,
+            '2026-04-06T00:00:01.000Z'
+          ),
+          (
+            'hidden-checkpoint',
+            'thread-turn-visible-page',
+            'turn-visible-page',
+            'info',
+            'checkpoint.captured',
+            'Checkpoint captured',
+            '{}',
+            2,
+            '2026-04-06T00:00:02.000Z'
+          ),
+          (
+            'hidden-task-started',
+            'thread-turn-visible-page',
+            'turn-visible-page',
+            'info',
+            'task.started',
+            'Task started',
+            '{}',
+            3,
+            '2026-04-06T00:00:03.000Z'
+          ),
+          (
+            'hidden-tool-started',
+            'thread-turn-visible-page',
+            'turn-visible-page',
+            'tool',
+            'tool.started',
+            'Read started',
+            '{"itemType":"file_read"}',
+            4,
+            '2026-04-06T00:00:04.000Z'
+          ),
+          (
+            'hidden-plan-boundary',
+            'thread-turn-visible-page',
+            'turn-visible-page',
+            'tool',
+            'tool.completed',
+            'Exit plan mode',
+            '{"detail":"ExitPlanMode: proposed plan"}',
+            5,
+            '2026-04-06T00:00:05.000Z'
+          ),
+          (
+            'hidden-retryable-steer',
+            'thread-turn-visible-page',
+            'turn-visible-page',
+            'info',
+            'provider.turn.steer.failed',
+            'Provider steer queued',
+            '{"retryableFollowUp":true}',
+            6,
+            '2026-04-06T00:00:06.000Z'
+          ),
+          (
+            'visible-context-compaction',
+            'thread-turn-visible-page',
+            'turn-visible-page',
+            'tool',
+            'tool.started',
+            'Context compaction started',
+            '{"itemType":"context_compaction"}',
+            7,
+            '2026-04-06T00:00:07.000Z'
+          ),
+          (
+            'visible-tool-completed',
+            'thread-turn-visible-page',
+            'turn-visible-page',
+            'tool',
+            'tool.completed',
+            'Read file',
+            '{"detail":"Read src/index.ts"}',
+            8,
+            '2026-04-06T00:00:08.000Z'
+          )
+      `;
+
+      const page = yield* snapshotQuery.getThreadTurnActivityPage({
+        threadId: ThreadId.make("thread-turn-visible-page"),
+        turnId: TurnId.make("turn-visible-page"),
+        offset: 0,
+        limit: 10,
+      });
+
+      assert.equal(page.totalCount, 2);
+      assert.deepStrictEqual(
+        page.activities.map((activity) => activity.id),
+        ["visible-context-compaction", "visible-tool-completed"],
+      );
+    }),
+  );
+
   it.effect("keeps deleted project and thread tombstones in the command read model", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

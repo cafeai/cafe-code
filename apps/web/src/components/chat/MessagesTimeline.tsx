@@ -1123,6 +1123,15 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
     }
   }, [ctx.activeThreadEnvironmentId, ctx.activeThreadId, row.turnId, totalCount]);
 
+  const knownEmpty =
+    totalCount === 0 &&
+    row.summary.snapshotEntryCount === 0 &&
+    row.summary.previewEntries.length === 0;
+
+  if (knownEmpty) {
+    return null;
+  }
+
   if (!isExpanded) {
     return (
       <button
