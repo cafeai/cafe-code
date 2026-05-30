@@ -231,6 +231,8 @@ export class GitVcsDriver extends Context.Service<GitVcsDriver, GitVcsDriverShap
 
 const WORKSPACE_FILES_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const GIT_CHECK_IGNORE_MAX_STDIN_BYTES = 256 * 1024;
+const CHECKPOINT_CHANGED_PATHS_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+const CHECKPOINT_ADD_PATHS_MAX_ARG_BYTES = 64 * 1024;
 const CHECKPOINT_DIFF_MAX_OUTPUT_BYTES = 10_000_000;
 const CHECKPOINT_REF_DELETE_BATCH_SIZE = 512;
 const CHECKPOINT_REF_DELETE_TIMEOUT_MS = 10_000;
@@ -356,6 +358,39 @@ function chunkPathsForGitCheckIgnore(relativePaths: ReadonlyArray<string>): stri
     chunkBytes += relativePathBytes;
 
     if (chunkBytes >= GIT_CHECK_IGNORE_MAX_STDIN_BYTES) {
+      chunks.push(chunk);
+      chunk = [];
+      chunkBytes = 0;
+    }
+  }
+
+  if (chunk.length > 0) {
+    chunks.push(chunk);
+  }
+
+  return chunks;
+}
+
+function chunkPathsForGitArgs(
+  relativePaths: ReadonlyArray<string>,
+  maxArgBytes: number,
+): string[][] {
+  const chunks: string[][] = [];
+  let chunk: string[] = [];
+  let chunkBytes = 0;
+
+  for (const relativePath of relativePaths) {
+    const relativePathBytes = Buffer.byteLength(relativePath) + 1;
+    if (chunk.length > 0 && chunkBytes + relativePathBytes > maxArgBytes) {
+      chunks.push(chunk);
+      chunk = [];
+      chunkBytes = 0;
+    }
+
+    chunk.push(relativePath);
+    chunkBytes += relativePathBytes;
+
+    if (chunkBytes >= maxArgBytes) {
       chunks.push(chunk);
       chunk = [];
       chunkBytes = 0;
@@ -722,25 +757,56 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
             args: ["read-tree", "HEAD"],
             env: commitEnv,
           });
-        }
 
-        const addTrackedResult = yield* execute({
-          operation,
-          cwd: input.cwd,
-          args: ["add", "-u", "--", "."],
-          env: commitEnv,
-          allowNonZeroExit: true,
-        });
-        if (addTrackedResult.exitCode !== 0) {
-          const detail = addTrackedResult.stderr.trim();
-          if (!isNoTrackedPathspecError(detail)) {
-            return yield* new VcsProcessExitError({
+          // Keep checkpoint capture proportional to the number of changed tracked files.
+          // `git add -u -- .` is semantically correct, but in large worktrees it scans the
+          // entire repo every time a provider turn starts or finishes. We first ask Git for
+          // the tracked paths whose worktree content differs from HEAD, then update only
+          // those paths in Cafe's temporary checkpoint index. Added/untracked paths stay
+          // excluded, matching the old `add -u` behavior and avoiding accidental secret
+          // capture.
+          const changedPathsResult = yield* execute({
+            operation,
+            cwd: input.cwd,
+            args: [
+              "diff",
+              "--name-only",
+              "-z",
+              "--no-renames",
+              "--diff-filter=DMTUXB",
+              "HEAD",
+              "--",
+            ],
+            maxOutputBytes: CHECKPOINT_CHANGED_PATHS_MAX_OUTPUT_BYTES,
+          });
+          const changedTrackedPaths = splitNullSeparatedPaths(
+            changedPathsResult.stdout,
+            changedPathsResult.stdoutTruncated,
+          );
+
+          for (const changedPathChunk of chunkPathsForGitArgs(
+            changedTrackedPaths,
+            CHECKPOINT_ADD_PATHS_MAX_ARG_BYTES,
+          )) {
+            const addTrackedResult = yield* execute({
               operation,
-              command: "git add -u -- .",
               cwd: input.cwd,
-              exitCode: addTrackedResult.exitCode,
-              detail: detail || "git add -u -- . failed.",
+              args: ["add", "-u", "--", ...changedPathChunk],
+              env: commitEnv,
+              allowNonZeroExit: true,
             });
+            if (addTrackedResult.exitCode !== 0) {
+              const detail = addTrackedResult.stderr.trim();
+              if (!isNoTrackedPathspecError(detail)) {
+                return yield* new VcsProcessExitError({
+                  operation,
+                  command: "git add -u -- <changed-paths>",
+                  cwd: input.cwd,
+                  exitCode: addTrackedResult.exitCode,
+                  detail: detail || "git add -u -- <changed-paths> failed.",
+                });
+              }
+            }
           }
         }
 

@@ -109,6 +109,96 @@ it.effect("GitVcsDriver forwards execute env to the VCS process", () => {
   );
 });
 
+it.effect("GitVcsDriver checkpoint capture stages only changed tracked paths", () => {
+  const observedInputs: VcsProcess.VcsProcessInput[] = [];
+
+  return Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const pathService = yield* Path.Path;
+    const cwd = yield* fileSystem.makeTempDirectoryScoped({
+      prefix: "cafecode-git-checkpoint-paths-",
+    });
+    yield* fileSystem.makeDirectory(pathService.join(cwd, ".git"));
+
+    const driver = yield* GitVcsDriver.makeVcsDriverShape();
+    if (!driver.checkpoints) {
+      throw new Error("Git VCS driver did not expose checkpoint operations.");
+    }
+
+    yield* driver.checkpoints.captureCheckpoint({
+      cwd,
+      checkpointRef: CheckpointRef.make("refs/cafe/checkpoints/thread/turn/1"),
+    });
+
+    assert.equal(
+      observedInputs.some((input) =>
+        input.args.some(
+          (arg, index, args) =>
+            arg === "add" &&
+            args[index + 1] === "-u" &&
+            args[index + 2] === "--" &&
+            args[index + 3] === ".",
+        ),
+      ),
+      false,
+    );
+
+    const diffInput = observedInputs.find((input) => input.args.includes("diff"));
+    assert.deepStrictEqual(diffInput?.args.slice(2), [
+      "diff",
+      "--name-only",
+      "-z",
+      "--no-renames",
+      "--diff-filter=DMTUXB",
+      "HEAD",
+      "--",
+    ]);
+    assert.equal(diffInput?.env?.GIT_INDEX_FILE, undefined);
+
+    const addInput = observedInputs.find((input) => input.args.includes("add"));
+    assert.deepStrictEqual(addInput?.args.slice(2), [
+      "add",
+      "-u",
+      "--",
+      "README.md",
+      "dir/nested file.ts",
+    ]);
+    assert.match(addInput?.env?.GIT_INDEX_FILE ?? "", /cafecode-checkpoint-index-/u);
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(VcsProcess.VcsProcess)({
+          run: (input) =>
+            Effect.sync(() => {
+              observedInputs.push(input);
+              const gitArgs = input.args.slice(2);
+              const stdout =
+                gitArgs[0] === "rev-parse" && gitArgs[1] === "--git-common-dir"
+                  ? ".git\n"
+                  : gitArgs[0] === "rev-parse" && gitArgs[1] === "--verify"
+                    ? "0123456789012345678901234567890123456789\n"
+                    : gitArgs[0] === "diff"
+                      ? "README.md\0dir/nested file.ts\0"
+                      : gitArgs[0] === "write-tree"
+                        ? "tree-oid\n"
+                        : gitArgs[0] === "commit-tree"
+                          ? "commit-oid\n"
+                          : "";
+              return {
+                exitCode: ChildProcessSpawner.ExitCode(0),
+                stdout,
+                stderr: "",
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              };
+            }),
+        }),
+      ),
+    ),
+  );
+});
+
 it.effect("GitVcsDriver deletes checkpoint refs with bounded update-ref stdin batches", () => {
   const observedInputs: VcsProcess.VcsProcessInput[] = [];
 
