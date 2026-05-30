@@ -20,6 +20,7 @@ import {
 import { readCafeCodeEnv } from "@cafecode/shared/compatEnv";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -28,9 +29,15 @@ import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@cafecode/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { ProjectionStateRepository } from "../../persistence/Services/ProjectionState.ts";
+import { ProjectionStateRepositoryLive } from "../../persistence/Layers/ProjectionState.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";
+import {
+  PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
+  readProviderDaemonRuntimeEventCursor,
+} from "../../providerDaemon/ProviderDaemonRuntimeCursor.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
@@ -72,6 +79,7 @@ const BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY = 10_000;
 const BUFFERED_PROPOSED_PLAN_BY_ID_TTL = Duration.minutes(120);
 const PROCESSED_RUNTIME_EVENT_IDS_CACHE_CAPACITY = 100_000;
 const PROCESSED_RUNTIME_EVENT_IDS_TTL = Duration.minutes(120);
+const PROVIDER_DAEMON_RUNTIME_CURSOR_PERSIST_INTERVAL = 1_000;
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const STREAMED_MESSAGE_IDS_CACHE_CAPACITY = 20_000;
 const STREAMED_MESSAGE_IDS_TTL = Duration.minutes(120);
@@ -760,8 +768,57 @@ const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
+  const projectionStateRepository = yield* ProjectionStateRepository;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
+  let lastPersistedProviderDaemonCursor = 0;
+  let pendingProviderDaemonCursor = 0;
+
+  const persistProviderDaemonCursor = (
+    cursor: number,
+    options?: { readonly force?: boolean },
+  ): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      const normalizedCursor = Number.isFinite(cursor) ? Math.max(0, Math.trunc(cursor)) : 0;
+      if (normalizedCursor <= lastPersistedProviderDaemonCursor) {
+        return;
+      }
+
+      pendingProviderDaemonCursor = Math.max(pendingProviderDaemonCursor, normalizedCursor);
+      const shouldPersist =
+        options?.force === true ||
+        pendingProviderDaemonCursor - lastPersistedProviderDaemonCursor >=
+          PROVIDER_DAEMON_RUNTIME_CURSOR_PERSIST_INTERVAL;
+      if (!shouldPersist) {
+        return;
+      }
+
+      const cursorToPersist = pendingProviderDaemonCursor;
+      yield* projectionStateRepository
+        .upsert({
+          projector: PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
+          lastAppliedSequence: cursorToPersist,
+          updatedAt: DateTime.formatIso(yield* DateTime.now),
+        })
+        .pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              lastPersistedProviderDaemonCursor = cursorToPersist;
+            }),
+          ),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("provider runtime ingestion cursor persist failed", {
+              projector: PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
+              cursor: cursorToPersist,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        );
+    });
+
+  yield* Effect.addFinalizer(() =>
+    persistProviderDaemonCursor(pendingProviderDaemonCursor, { force: true }),
+  );
 
   const turnMessageIdsByTurnKey = yield* Cache.make<string, Set<MessageId>>({
     capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
@@ -2038,6 +2095,10 @@ const make = Effect.gen(function* () {
       // mark also protects buffered assistant/proposed-plan state that can be
       // mutated before an orchestration command is dispatched.
       yield* Cache.set(processedRuntimeEventIds, eventKey, true);
+      const providerDaemonCursor = readProviderDaemonRuntimeEventCursor(event);
+      if (providerDaemonCursor !== undefined) {
+        yield* persistProviderDaemonCursor(providerDaemonCursor);
+      }
     });
 
   const processInput = (input: RuntimeIngestionInput) =>
@@ -2088,4 +2149,4 @@ const make = Effect.gen(function* () {
 export const ProviderRuntimeIngestionLive = Layer.effect(
   ProviderRuntimeIngestionService,
   make,
-).pipe(Layer.provide(ProjectionTurnRepositoryLive));
+).pipe(Layer.provide(ProjectionTurnRepositoryLive), Layer.provide(ProjectionStateRepositoryLive));

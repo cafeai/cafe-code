@@ -20,6 +20,7 @@ import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -36,6 +37,13 @@ import {
   type ProviderServiceShape,
 } from "../provider/Services/ProviderService.ts";
 import { ServerConfig } from "../config.ts";
+import { ProjectionStateRepository } from "../persistence/Services/ProjectionState.ts";
+import { ProjectionStateRepositoryLive } from "../persistence/Layers/ProjectionState.ts";
+import {
+  attachProviderDaemonRuntimeEventCursor,
+  PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
+  rewindProviderDaemonCursorForReplay,
+} from "./ProviderDaemonRuntimeCursor.ts";
 
 const decodeRpcEnvelopeJson = Schema.decodeUnknownSync(
   Schema.fromJsonString(ProviderDaemonRpcEnvelope),
@@ -63,6 +71,7 @@ const MUTATING_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "stopSession",
   "rollbackConversation",
 ]);
+const PROVIDER_DAEMON_REPLAY_OVERLAP_EVENTS = 1_000;
 
 function providerDaemonUrl(config: ProviderDaemonClientConfig, path: string): URL {
   return new URL(
@@ -139,6 +148,7 @@ async function readEventStream(
 
 const makeRemoteProviderService = Effect.gen(function* () {
   const config = yield* ServerConfig;
+  const projectionStateRepository = yield* ProjectionStateRepository;
   const daemonConfig = config.providerDaemon ?? config.providerSupervisor;
   if (daemonConfig === undefined) {
     return yield* toProviderRuntimeEndpointUnavailable();
@@ -147,7 +157,31 @@ const makeRemoteProviderService = Effect.gen(function* () {
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const publishContext = yield* Effect.context<never>();
   const publishRuntimeEvent = Effect.runSyncWith(publishContext);
-  let eventCursor = 0;
+  const initialProjectionState = yield* projectionStateRepository
+    .getByProjector({ projector: PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR })
+    .pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider daemon event cursor read failed", {
+          cause: Cause.pretty(cause),
+        }).pipe(Effect.as(Option.none())),
+      ),
+    );
+  let eventCursor = Option.match(initialProjectionState, {
+    onNone: () => 0,
+    onSome: (state) =>
+      rewindProviderDaemonCursorForReplay(
+        state.lastAppliedSequence,
+        PROVIDER_DAEMON_REPLAY_OVERLAP_EVENTS,
+      ),
+  });
+
+  if (eventCursor > 0) {
+    yield* Effect.logInfo("provider daemon event stream resuming from persisted cursor", {
+      projector: PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
+      afterCursor: eventCursor,
+      replayOverlapEvents: PROVIDER_DAEMON_REPLAY_OVERLAP_EVENTS,
+    });
+  }
 
   yield* Effect.gen(function* () {
     while (true) {
@@ -155,7 +189,12 @@ const makeRemoteProviderService = Effect.gen(function* () {
         try: () =>
           readEventStream(daemonConfig, eventCursor, (record) => {
             eventCursor = Math.max(eventCursor, record.cursor);
-            publishRuntimeEvent(PubSub.publish(runtimeEventPubSub, record.event));
+            publishRuntimeEvent(
+              PubSub.publish(
+                runtimeEventPubSub,
+                attachProviderDaemonRuntimeEventCursor(record.event, record.cursor),
+              ),
+            );
           }),
         catch: (cause) => toRemoteRequestError("streamEvents", cause),
       }).pipe(
@@ -211,6 +250,9 @@ const makeRemoteProviderService = Effect.gen(function* () {
   return service;
 });
 
-export const RemoteProviderServiceLive = Layer.effect(ProviderService, makeRemoteProviderService);
+export const RemoteProviderServiceLive = Layer.effect(
+  ProviderService,
+  makeRemoteProviderService,
+).pipe(Layer.provide(ProjectionStateRepositoryLive));
 
 export type RemoteProviderServiceError = ProviderServiceError;
