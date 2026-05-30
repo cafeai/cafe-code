@@ -6,11 +6,21 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   Columns2Icon,
+  ExternalLinkIcon,
   PilcrowIcon,
   Rows3Icon,
   TextWrapIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Component,
+  type ErrorInfo,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { openInPreferredEditor } from "../editorPreferences";
 import { refreshGitStatus, useGitStatus } from "~/lib/gitStatusState";
 import { cn } from "~/lib/utils";
@@ -25,6 +35,11 @@ import { selectProjectByRef, useStore } from "../store";
 import { createThreadSelectorByRef } from "../storeSelectors";
 import { resolveThreadRouteRef } from "../threadRoutes";
 import { useSettings } from "../hooks/useSettings";
+import {
+  type FileDiffRenderGuard,
+  formatDiffMetric,
+  resolveFileDiffRenderGuard,
+} from "./DiffPanel.logic";
 import { DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
 import { ToggleGroup, Toggle } from "./ui/toggle-group";
 
@@ -163,6 +178,92 @@ function getDiffCollapseIconClassName(fileDiff: FileDiffMetadata): string {
     default:
       return "text-muted-foreground/80";
   }
+}
+
+class DiffFileRenderBoundary extends Component<
+  {
+    readonly children: ReactNode;
+    readonly filePath: string;
+    readonly onOpenFile: () => void;
+  },
+  { readonly errorMessage: string | null }
+> {
+  override state = { errorMessage: null };
+
+  static getDerivedStateFromError(error: unknown) {
+    return {
+      errorMessage: error instanceof Error ? error.message : "The file diff renderer failed.",
+    };
+  }
+
+  override componentDidCatch(error: unknown, errorInfo: ErrorInfo) {
+    console.warn("Diff file renderer failed.", {
+      componentStack: errorInfo.componentStack,
+      error,
+      filePath: this.props.filePath,
+    });
+  }
+
+  override render() {
+    if (this.state.errorMessage) {
+      return (
+        <DiffFileFallback
+          filePath={this.props.filePath}
+          onOpenFile={this.props.onOpenFile}
+          reason="The rich diff renderer failed for this file."
+          details={this.state.errorMessage}
+        />
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+function DiffFileFallback(props: {
+  readonly details?: string;
+  readonly filePath: string;
+  readonly guard?: FileDiffRenderGuard;
+  readonly onOpenFile: () => void;
+  readonly reason: string;
+}) {
+  const { details, filePath, guard, onOpenFile, reason } = props;
+  const metrics =
+    guard && !guard.shouldRenderRichDiff
+      ? [
+          `${formatDiffMetric(guard.visualLineCount)} visual lines`,
+          `${formatDiffMetric(guard.changedLineCount)} changed lines`,
+          `${formatDiffMetric(guard.totalChangedChars)} changed chars`,
+          `${formatDiffMetric(guard.maxChangedLineChars)} max line chars`,
+        ]
+      : [];
+
+  return (
+    <div className="my-2 rounded-md border border-border/70 bg-card/35 px-3 py-2 text-xs">
+      <div className="flex min-w-0 items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-medium text-foreground">{filePath || "Unnamed file"}</div>
+          <p className="mt-1 leading-5 text-muted-foreground">
+            {reason} Cafe skipped rich rendering for this file to keep the chat window responsive.
+          </p>
+          {metrics.length > 0 ? (
+            <p className="mt-1 text-[11px] text-muted-foreground/75">{metrics.join(" · ")}</p>
+          ) : null}
+          {details ? (
+            <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground/75">{details}</p>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border/70 px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+          onClick={onOpenFile}
+        >
+          <ExternalLinkIcon className="size-3" />
+          Open
+        </button>
+      </div>
+    </div>
+  );
 }
 
 interface DiffPanelProps {
@@ -445,6 +546,8 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                   const fileKey = buildFileDiffRenderKey(fileDiff);
                   const themedFileKey = `${fileKey}:${resolvedTheme}`;
                   const collapsed = collapsedDiffFileKeys.has(fileKey);
+                  const renderGuard = resolveFileDiffRenderGuard(fileDiff);
+                  const onOpenFile = () => openDiffFileInEditor(filePath);
                   return (
                     <div
                       key={themedFileKey}
@@ -458,43 +561,56 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                           return node.hasAttribute("data-title");
                         });
                         if (!clickedHeader) return;
-                        openDiffFileInEditor(filePath);
+                        onOpenFile();
                       }}
                     >
-                      <FileDiff
-                        fileDiff={fileDiff}
-                        renderHeaderPrefix={() => (
-                          <button
-                            type="button"
-                            className={cn(
-                              "inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-sm border-0 bg-transparent p-0 transition-colors hover:bg-foreground/10 focus-visible:outline-hidden",
-                              getDiffCollapseIconClassName(fileDiff),
+                      {!renderGuard.shouldRenderRichDiff ? (
+                        <DiffFileFallback
+                          filePath={filePath}
+                          guard={renderGuard}
+                          onOpenFile={onOpenFile}
+                          reason={renderGuard.reason ?? "This file diff is too large."}
+                        />
+                      ) : (
+                        <DiffFileRenderBoundary filePath={filePath} onOpenFile={onOpenFile}>
+                          <FileDiff
+                            fileDiff={fileDiff}
+                            renderHeaderPrefix={() => (
+                              <button
+                                type="button"
+                                className={cn(
+                                  "inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-sm border-0 bg-transparent p-0 transition-colors hover:bg-foreground/10 focus-visible:outline-hidden",
+                                  getDiffCollapseIconClassName(fileDiff),
+                                )}
+                                aria-label={
+                                  collapsed ? `Expand ${filePath}` : `Collapse ${filePath}`
+                                }
+                                aria-expanded={!collapsed}
+                                title={collapsed ? "Expand diff" : "Collapse diff"}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  toggleDiffFileCollapsed(fileKey);
+                                }}
+                              >
+                                {collapsed ? (
+                                  <ChevronRightIcon className="size-4" />
+                                ) : (
+                                  <ChevronDownIcon className="size-4" />
+                                )}
+                              </button>
                             )}
-                            aria-label={collapsed ? `Expand ${filePath}` : `Collapse ${filePath}`}
-                            aria-expanded={!collapsed}
-                            title={collapsed ? "Expand diff" : "Collapse diff"}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              toggleDiffFileCollapsed(fileKey);
+                            options={{
+                              collapsed,
+                              diffStyle: diffRenderMode === "split" ? "split" : "unified",
+                              lineDiffType: "none",
+                              overflow: diffWordWrap ? "wrap" : "scroll",
+                              theme: resolveDiffThemeName(resolvedTheme),
+                              themeType: resolvedTheme as DiffThemeType,
+                              unsafeCSS: DIFF_PANEL_UNSAFE_CSS,
                             }}
-                          >
-                            {collapsed ? (
-                              <ChevronRightIcon className="size-4" />
-                            ) : (
-                              <ChevronDownIcon className="size-4" />
-                            )}
-                          </button>
-                        )}
-                        options={{
-                          collapsed,
-                          diffStyle: diffRenderMode === "split" ? "split" : "unified",
-                          lineDiffType: "none",
-                          overflow: diffWordWrap ? "wrap" : "scroll",
-                          theme: resolveDiffThemeName(resolvedTheme),
-                          themeType: resolvedTheme as DiffThemeType,
-                          unsafeCSS: DIFF_PANEL_UNSAFE_CSS,
-                        }}
-                      />
+                          />
+                        </DiffFileRenderBoundary>
+                      )}
                     </div>
                   );
                 })}

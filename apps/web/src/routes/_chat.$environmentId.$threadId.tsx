@@ -1,5 +1,15 @@
 import { createFileRoute, retainSearchParams, useNavigate } from "@tanstack/react-router";
-import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Component,
+  type ErrorInfo,
+  type ReactNode,
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 
 import ChatView from "../components/ChatView";
 import { threadHasStarted } from "../components/ChatView.logic";
@@ -39,12 +49,74 @@ const DiffLoadingFallback = (props: { mode: DiffPanelMode }) => {
   );
 };
 
+class DiffPanelRouteBoundary extends Component<
+  { readonly children: ReactNode; readonly mode: DiffPanelMode },
+  { readonly errorMessage: string | null }
+> {
+  override state = { errorMessage: null };
+
+  static getDerivedStateFromError(error: unknown) {
+    return {
+      errorMessage: error instanceof Error ? error.message : "The diff panel failed to render.",
+    };
+  }
+
+  override componentDidCatch(error: unknown, errorInfo: ErrorInfo) {
+    console.warn("Diff panel route boundary caught an error.", {
+      componentStack: errorInfo.componentStack,
+      error,
+    });
+  }
+
+  override render() {
+    if (this.state.errorMessage) {
+      return (
+        <DiffPanelShell
+          mode={this.props.mode}
+          header={
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-xs font-semibold text-foreground">Current changes</div>
+              <div className="truncate text-[10px] text-muted-foreground/75">
+                Diff viewer recovered from a render error
+              </div>
+            </div>
+          }
+        >
+          <div className="flex min-h-0 flex-1 items-center justify-center px-5 text-center">
+            <div className="max-w-sm rounded-md border border-border/70 bg-card/35 px-4 py-3">
+              <p className="text-sm font-medium text-foreground">Could not render changes.</p>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                The chat stayed open. Close and reopen the diff shelf after the current git state
+                changes.
+              </p>
+              <button
+                type="button"
+                className="mt-3 rounded-md border border-border/70 px-2 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                onClick={() => this.setState({ errorMessage: null })}
+              >
+                Try again
+              </button>
+              <p className="mt-2 line-clamp-2 text-[11px] text-muted-foreground/75">
+                {this.state.errorMessage}
+              </p>
+            </div>
+          </div>
+        </DiffPanelShell>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
 const LazyDiffPanel = (props: { mode: DiffPanelMode }) => {
   return (
     <DiffWorkerPoolProvider>
-      <Suspense fallback={<DiffLoadingFallback mode={props.mode} />}>
-        <DiffPanel mode={props.mode} />
-      </Suspense>
+      <DiffPanelRouteBoundary mode={props.mode}>
+        <Suspense fallback={<DiffLoadingFallback mode={props.mode} />}>
+          <DiffPanel mode={props.mode} />
+        </Suspense>
+      </DiffPanelRouteBoundary>
     </DiffWorkerPoolProvider>
   );
 };
