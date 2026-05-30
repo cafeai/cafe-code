@@ -1774,6 +1774,10 @@ export default function ChatView(props: ChatViewProps) {
   const activeThreadLastVisitedAt = useUiStateStore((store) =>
     routeKind === "server" ? store.threadLastVisitedAtById[routeThreadKey] : undefined,
   );
+  const persistedPlanSidebarOpen = useUiStateStore((store) =>
+    routeKind === "server" ? store.threadPlanSidebarOpenById[routeThreadKey] : undefined,
+  );
+  const setPersistedPlanSidebarOpen = useUiStateStore((store) => store.setThreadPlanSidebarOpen);
   const settings = useSettings();
   const setStickyComposerModelSelection = useComposerDraftStore(
     (store) => store.setStickyModelSelection,
@@ -1843,10 +1847,15 @@ export default function ChatView(props: ChatViewProps) {
   >({});
   const [pendingUserInputQuestionIndexByRequestId, setPendingUserInputQuestionIndexByRequestId] =
     useState<Record<string, number>>({});
-  const [planSidebarOpen, setPlanSidebarOpen] = useState(false);
+  const [draftPlanSidebarOpenByThreadKey, setDraftPlanSidebarOpenByThreadKey] = useState<
+    Record<string, boolean>
+  >({});
   const shouldUsePlanSidebarSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
-  // Tracks whether the user explicitly dismissed the sidebar for the active turn.
-  const planSidebarDismissedForTurnRef = useRef<string | null>(null);
+  const draftPlanSidebarOpen =
+    routeKind === "draft" ? draftPlanSidebarOpenByThreadKey[routeThreadKey] : undefined;
+  const planSidebarOpenPreference =
+    routeKind === "server" ? persistedPlanSidebarOpen : draftPlanSidebarOpen;
+  const planSidebarOpen = planSidebarOpenPreference === true;
   // When set, the thread-change reset effect will open the sidebar instead of closing it.
   // Used by "Implement in a new thread" to carry the sidebar-open intent across navigation.
   const planSidebarOpenOnNextThreadRef = useRef(false);
@@ -2950,6 +2959,7 @@ export default function ChatView(props: ChatViewProps) {
     () => deriveActivePlanState(threadActivities, activeLatestTurn?.turnId ?? undefined),
     [activeLatestTurn?.turnId, threadActivities],
   );
+  const hasPlanSidebarContent = Boolean(activePlan || sidebarProposedPlan);
   const planSidebarLabel = sidebarProposedPlan || interactionMode === "plan" ? "Plan" : "Tasks";
   const showPlanFollowUpPrompt =
     pendingUserInputs.length === 0 &&
@@ -4236,22 +4246,31 @@ export default function ChatView(props: ChatViewProps) {
   const toggleInteractionMode = useCallback(() => {
     handleInteractionModeChange(interactionMode === "plan" ? "default" : "plan");
   }, [handleInteractionModeChange, interactionMode]);
-  const togglePlanSidebar = useCallback(() => {
-    setPlanSidebarOpen((open) => {
-      if (open) {
-        planSidebarDismissedForTurnRef.current =
-          activePlan?.turnId ?? sidebarProposedPlan?.turnId ?? "__dismissed__";
-      } else {
-        planSidebarDismissedForTurnRef.current = null;
+
+  const setPlanSidebarOpenForCurrentThread = useCallback(
+    (open: boolean) => {
+      if (routeKind === "server") {
+        setPersistedPlanSidebarOpen(routeThreadKey, open);
+        return;
       }
-      return !open;
-    });
-  }, [activePlan?.turnId, sidebarProposedPlan?.turnId]);
+      setDraftPlanSidebarOpenByThreadKey((previous) =>
+        previous[routeThreadKey] === open
+          ? previous
+          : {
+              ...previous,
+              [routeThreadKey]: open,
+            },
+      );
+    },
+    [routeKind, routeThreadKey, setPersistedPlanSidebarOpen],
+  );
+
+  const togglePlanSidebar = useCallback(() => {
+    setPlanSidebarOpenForCurrentThread(!planSidebarOpen);
+  }, [planSidebarOpen, setPlanSidebarOpenForCurrentThread]);
   const closePlanSidebar = useCallback(() => {
-    setPlanSidebarOpen(false);
-    planSidebarDismissedForTurnRef.current =
-      activePlan?.turnId ?? sidebarProposedPlan?.turnId ?? "__dismissed__";
-  }, [activePlan?.turnId, sidebarProposedPlan?.turnId]);
+    setPlanSidebarOpenForCurrentThread(false);
+  }, [setPlanSidebarOpenForCurrentThread]);
 
   const persistThreadSettingsForNextTurn = useCallback(
     async (input: {
@@ -4374,31 +4393,31 @@ export default function ChatView(props: ChatViewProps) {
     setShowScrollToBottom(false);
     if (planSidebarOpenOnNextThreadRef.current) {
       planSidebarOpenOnNextThreadRef.current = false;
-      setPlanSidebarOpen(true);
-    } else {
-      planSidebarOpenOnNextThreadRef.current = false;
-      setPlanSidebarOpen(false);
+      setPlanSidebarOpenForCurrentThread(true);
     }
-    planSidebarDismissedForTurnRef.current = null;
-  }, [activeThread?.id]);
+  }, [activeThread?.id, setPlanSidebarOpenForCurrentThread]);
 
   // Auto-open the plan sidebar when plan/todo steps arrive for the current turn.
   // Don't auto-open for plans carried over from a previous turn (the user can open manually).
   useEffect(() => {
     if (!autoOpenPlanSidebar) return;
     if (!activePlan) return;
+    if (!hasPlanSidebarContent) return;
     if (planSidebarOpen) return;
+    // Once the user has explicitly opened or closed the sidebar for this
+    // thread, that thread-local preference wins over later task updates.
+    if (planSidebarOpenPreference !== undefined) return;
     const latestTurnId = activeLatestTurn?.turnId ?? null;
     if (latestTurnId && activePlan.turnId !== latestTurnId) return;
-    const turnKey = activePlan.turnId ?? sidebarProposedPlan?.turnId ?? "__dismissed__";
-    if (planSidebarDismissedForTurnRef.current === turnKey) return;
-    setPlanSidebarOpen(true);
+    setPlanSidebarOpenForCurrentThread(true);
   }, [
     activePlan,
     activeLatestTurn?.turnId,
     autoOpenPlanSidebar,
+    hasPlanSidebarContent,
     planSidebarOpen,
-    sidebarProposedPlan?.turnId,
+    planSidebarOpenPreference,
+    setPlanSidebarOpenForCurrentThread,
   ]);
 
   useEffect(() => {
@@ -5879,9 +5898,12 @@ export default function ChatView(props: ChatViewProps) {
         // Optimistically open the plan sidebar when implementing (not refining).
         // "default" mode here means the agent is executing the plan, which produces
         // step-tracking activities that the sidebar will display.
-        if (nextInteractionMode === "default" && autoOpenPlanSidebar) {
-          planSidebarDismissedForTurnRef.current = null;
-          setPlanSidebarOpen(true);
+        if (
+          nextInteractionMode === "default" &&
+          autoOpenPlanSidebar &&
+          planSidebarOpenPreference === undefined
+        ) {
+          setPlanSidebarOpenForCurrentThread(true);
         }
         setSendInFlight(false);
       } catch (err) {
@@ -5911,6 +5933,8 @@ export default function ChatView(props: ChatViewProps) {
       setSendInFlight,
       setThreadError,
       autoOpenPlanSidebar,
+      planSidebarOpenPreference,
+      setPlanSidebarOpenForCurrentThread,
       composerRef,
       environmentId,
     ],
@@ -6162,6 +6186,8 @@ export default function ChatView(props: ChatViewProps) {
     return <NoActiveThreadState />;
   }
 
+  const shouldRenderPlanSidebar = planSidebarOpen && hasPlanSidebarContent;
+
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
       {/* Top bar */}
@@ -6289,7 +6315,7 @@ export default function ChatView(props: ChatViewProps) {
                   activePlan={activePlan as { turnId?: TurnId } | null}
                   sidebarProposedPlan={sidebarProposedPlan as { turnId?: TurnId } | null}
                   planSidebarLabel={planSidebarLabel}
-                  planSidebarOpen={planSidebarOpen}
+                  planSidebarOpen={shouldRenderPlanSidebar}
                   runtimeMode={runtimeMode}
                   interactionMode={interactionMode}
                   lockedProvider={lockedProvider}
@@ -6382,7 +6408,7 @@ export default function ChatView(props: ChatViewProps) {
         {/* end chat column */}
 
         {/* Plan sidebar */}
-        {planSidebarOpen && !shouldUsePlanSidebarSheet ? (
+        {shouldRenderPlanSidebar && !shouldUsePlanSidebarSheet ? (
           <PlanSidebar
             activePlan={activePlan}
             activeProposedPlan={sidebarProposedPlan}
@@ -6398,8 +6424,8 @@ export default function ChatView(props: ChatViewProps) {
       </div>
       {/* end horizontal flex container */}
 
-      {shouldUsePlanSidebarSheet ? (
-        <RightPanelSheet open={planSidebarOpen} onClose={closePlanSidebar}>
+      {shouldUsePlanSidebarSheet && hasPlanSidebarContent ? (
+        <RightPanelSheet open={shouldRenderPlanSidebar} onClose={closePlanSidebar}>
           <PlanSidebar
             activePlan={activePlan}
             activeProposedPlan={sidebarProposedPlan}

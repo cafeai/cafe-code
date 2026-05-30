@@ -1023,7 +1023,7 @@ export function GeneralSettingsPanel() {
 
         <SettingsRow
           title="Auto-open task panel"
-          description="Open the right-side plan and task panel automatically when steps appear."
+          description="Open the right-side plan and task panel the first time steps appear, until a thread is manually opened or closed."
           resetAction={
             settings.autoOpenPlanSidebar !== DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar ? (
               <SettingResetButton

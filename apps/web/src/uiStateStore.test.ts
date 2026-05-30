@@ -10,7 +10,9 @@ import {
   persistState,
   reorderProjects,
   setDefaultAdvertisedEndpointKey,
+  setNavigationSidebarOpen,
   setProjectExpanded,
+  setThreadPlanSidebarOpen,
   syncProjects,
   syncThreads,
   type UiState,
@@ -21,7 +23,9 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     projectExpandedById: {},
     projectOrder: [],
     threadLastVisitedAtById: {},
+    threadPlanSidebarOpenById: {},
     defaultAdvertisedEndpointKey: null,
+    navigationSidebarOpen: true,
     ...overrides,
   };
 }
@@ -84,6 +88,17 @@ describe("uiStateStore pure functions", () => {
     expect(setDefaultAdvertisedEndpointKey(next, "")).toMatchObject({
       defaultAdvertisedEndpointKey: null,
     });
+  });
+
+  it("setNavigationSidebarOpen stores the global focus-mode sidebar preference", () => {
+    const initialState = makeUiState();
+
+    const collapsed = setNavigationSidebarOpen(initialState, false);
+    const expanded = setNavigationSidebarOpen(collapsed, true);
+
+    expect(collapsed.navigationSidebarOpen).toBe(false);
+    expect(expanded.navigationSidebarOpen).toBe(true);
+    expect(setNavigationSidebarOpen(expanded, true)).toBe(expanded);
   });
 
   it("reorderProjects moves all member keys of a multi-member group together", () => {
@@ -314,12 +329,19 @@ describe("uiStateStore pure functions", () => {
         [thread1]: "2026-02-25T12:35:00.000Z",
         [thread2]: "2026-02-25T12:36:00.000Z",
       },
+      threadPlanSidebarOpenById: {
+        [thread1]: false,
+        [thread2]: true,
+      },
     });
 
     const next = syncThreads(initialState, [{ key: thread1 }]);
 
     expect(next.threadLastVisitedAtById).toEqual({
       [thread1]: "2026-02-25T12:35:00.000Z",
+    });
+    expect(next.threadPlanSidebarOpenById).toEqual({
+      [thread1]: false,
     });
   });
 
@@ -354,17 +376,33 @@ describe("uiStateStore pure functions", () => {
     expect(next.projectOrder).toEqual([project1]);
   });
 
-  it("clearThreadUi removes visit state for deleted threads", () => {
+  it("setThreadPlanSidebarOpen stores explicit per-thread sidebar preference", () => {
+    const thread1 = ThreadId.make("thread-1");
+    const initialState = makeUiState();
+
+    const closed = setThreadPlanSidebarOpen(initialState, thread1, false);
+    const opened = setThreadPlanSidebarOpen(closed, thread1, true);
+
+    expect(closed.threadPlanSidebarOpenById).toEqual({ [thread1]: false });
+    expect(opened.threadPlanSidebarOpenById).toEqual({ [thread1]: true });
+    expect(setThreadPlanSidebarOpen(opened, thread1, true)).toBe(opened);
+  });
+
+  it("clearThreadUi removes visit and sidebar state for deleted threads", () => {
     const thread1 = ThreadId.make("thread-1");
     const initialState = makeUiState({
       threadLastVisitedAtById: {
         [thread1]: "2026-02-25T12:35:00.000Z",
+      },
+      threadPlanSidebarOpenById: {
+        [thread1]: false,
       },
     });
 
     const next = clearThreadUi(initialState, thread1);
 
     expect(next.threadLastVisitedAtById).toEqual({});
+    expect(next.threadPlanSidebarOpenById).toEqual({});
   });
 });
 
@@ -500,6 +538,38 @@ describe("uiStateStore persistence round-trip", () => {
       localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}",
     ) as PersistedUiState;
     expect(persisted.defaultAdvertisedEndpointKey).toBe("desktop-core:lan:http");
+  });
+
+  it("persists the global navigation sidebar visibility choice", () => {
+    const state = setNavigationSidebarOpen(makeUiState(), false);
+
+    persistState(state);
+
+    const persisted = JSON.parse(
+      localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}",
+    ) as PersistedUiState;
+    expect(persisted.navigationSidebarOpen).toBe(false);
+  });
+
+  it("persists explicit per-thread plan sidebar choices", () => {
+    const thread1 = ThreadId.make("thread-1");
+    const thread2 = ThreadId.make("thread-2");
+    const state = makeUiState({
+      threadPlanSidebarOpenById: {
+        [thread1]: false,
+        [thread2]: true,
+      },
+    });
+
+    persistState(state);
+
+    const persisted = JSON.parse(
+      localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}",
+    ) as PersistedUiState;
+    expect(persisted.threadPlanSidebarOpenById).toEqual({
+      [thread1]: false,
+      [thread2]: true,
+    });
   });
 
   it("preserves expand state across restart when project's logical key changes", () => {

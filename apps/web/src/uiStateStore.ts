@@ -21,6 +21,8 @@ export interface PersistedUiState {
   expandedProjectCwds?: string[];
   projectOrderCwds?: string[];
   defaultAdvertisedEndpointKey?: string | null;
+  navigationSidebarOpen?: boolean;
+  threadPlanSidebarOpenById?: Record<string, boolean>;
 }
 
 export interface UiProjectState {
@@ -30,13 +32,25 @@ export interface UiProjectState {
 
 export interface UiThreadState {
   threadLastVisitedAtById: Record<string, string>;
+  /**
+   * Explicit per-thread plan/task sidebar preference keyed by scoped thread key.
+   * Absence means "no user choice yet", so ChatView may apply the global
+   * initial auto-open setting. Both `true` and `false` are meaningful user
+   * choices and must survive new task updates for that thread.
+   */
+  threadPlanSidebarOpenById: Record<string, boolean>;
 }
 
 export interface UiEndpointState {
   defaultAdvertisedEndpointKey: string | null;
 }
 
-export interface UiState extends UiProjectState, UiThreadState, UiEndpointState {}
+export interface UiNavigationState {
+  navigationSidebarOpen: boolean;
+}
+
+export interface UiState
+  extends UiProjectState, UiThreadState, UiEndpointState, UiNavigationState {}
 
 export interface SyncProjectInput {
   /** Physical project key (env + cwd). Used for manual sort order. */
@@ -55,7 +69,9 @@ const initialState: UiState = {
   projectExpandedById: {},
   projectOrder: [],
   threadLastVisitedAtById: {},
+  threadPlanSidebarOpenById: {},
   defaultAdvertisedEndpointKey: null,
+  navigationSidebarOpen: true,
 };
 
 const persistedCollapsedProjectCwds = new Set<string>();
@@ -97,10 +113,24 @@ function readPersistedState(): UiState {
         parsed.defaultAdvertisedEndpointKey.length > 0
           ? parsed.defaultAdvertisedEndpointKey
           : null,
+      navigationSidebarOpen:
+        typeof parsed.navigationSidebarOpen === "boolean" ? parsed.navigationSidebarOpen : true,
+      threadPlanSidebarOpenById: sanitizeBooleanRecord(parsed.threadPlanSidebarOpenById),
     };
   } catch {
     return initialState;
   }
+}
+
+function sanitizeBooleanRecord(input: unknown): Record<string, boolean> {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(input as Record<string, unknown>).filter(
+      (entry): entry is [string, boolean] => entry[0].length > 0 && typeof entry[1] === "boolean",
+    ),
+  );
 }
 
 export function hydratePersistedProjectState(parsed: PersistedUiState): void {
@@ -150,6 +180,8 @@ export function persistState(state: UiState): void {
         expandedProjectCwds,
         projectOrderCwds,
         defaultAdvertisedEndpointKey: state.defaultAdvertisedEndpointKey,
+        navigationSidebarOpen: state.navigationSidebarOpen,
+        threadPlanSidebarOpenById: state.threadPlanSidebarOpenById,
       } satisfies PersistedUiState),
     );
     if (!legacyKeysCleanedUp) {
@@ -343,6 +375,11 @@ export function syncThreads(state: UiState, threads: readonly SyncThreadInput[])
       retainedThreadIds.has(threadId),
     ),
   );
+  const nextThreadPlanSidebarOpenById = Object.fromEntries(
+    Object.entries(state.threadPlanSidebarOpenById).filter(([threadId]) =>
+      retainedThreadIds.has(threadId),
+    ),
+  );
   for (const thread of threads) {
     if (
       nextThreadLastVisitedAtById[thread.key] === undefined &&
@@ -352,12 +389,16 @@ export function syncThreads(state: UiState, threads: readonly SyncThreadInput[])
       nextThreadLastVisitedAtById[thread.key] = thread.seedVisitedAt;
     }
   }
-  if (recordsEqual(state.threadLastVisitedAtById, nextThreadLastVisitedAtById)) {
+  if (
+    recordsEqual(state.threadLastVisitedAtById, nextThreadLastVisitedAtById) &&
+    recordsEqual(state.threadPlanSidebarOpenById, nextThreadPlanSidebarOpenById)
+  ) {
     return state;
   }
   return {
     ...state,
     threadLastVisitedAtById: nextThreadLastVisitedAtById,
+    threadPlanSidebarOpenById: nextThreadPlanSidebarOpenById,
   };
 }
 
@@ -384,14 +425,31 @@ export function markThreadVisited(state: UiState, threadId: string, visitedAt?: 
 
 export function clearThreadUi(state: UiState, threadId: string): UiState {
   const hasVisitedState = threadId in state.threadLastVisitedAtById;
-  if (!hasVisitedState) {
+  const hasPlanSidebarState = threadId in state.threadPlanSidebarOpenById;
+  if (!hasVisitedState && !hasPlanSidebarState) {
     return state;
   }
   const nextThreadLastVisitedAtById = { ...state.threadLastVisitedAtById };
+  const nextThreadPlanSidebarOpenById = { ...state.threadPlanSidebarOpenById };
   delete nextThreadLastVisitedAtById[threadId];
+  delete nextThreadPlanSidebarOpenById[threadId];
   return {
     ...state,
     threadLastVisitedAtById: nextThreadLastVisitedAtById,
+    threadPlanSidebarOpenById: nextThreadPlanSidebarOpenById,
+  };
+}
+
+export function setThreadPlanSidebarOpen(state: UiState, threadId: string, open: boolean): UiState {
+  if (state.threadPlanSidebarOpenById[threadId] === open) {
+    return state;
+  }
+  return {
+    ...state,
+    threadPlanSidebarOpenById: {
+      ...state.threadPlanSidebarOpenById,
+      [threadId]: open,
+    },
   };
 }
 
@@ -403,6 +461,16 @@ export function setDefaultAdvertisedEndpointKey(state: UiState, key: string | nu
   return {
     ...state,
     defaultAdvertisedEndpointKey: nextKey,
+  };
+}
+
+export function setNavigationSidebarOpen(state: UiState, open: boolean): UiState {
+  if (state.navigationSidebarOpen === open) {
+    return state;
+  }
+  return {
+    ...state,
+    navigationSidebarOpen: open,
   };
 }
 
@@ -478,7 +546,9 @@ interface UiStateStore extends UiState {
   syncThreads: (threads: readonly SyncThreadInput[]) => void;
   markThreadVisited: (threadId: string, visitedAt?: string) => void;
   clearThreadUi: (threadId: string) => void;
+  setThreadPlanSidebarOpen: (threadId: string, open: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
+  setNavigationSidebarOpen: (open: boolean) => void;
   toggleProject: (projectId: string) => void;
   setProjectExpanded: (projectId: string, expanded: boolean) => void;
   reorderProjects: (
@@ -494,8 +564,11 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
   markThreadVisited: (threadId, visitedAt) =>
     set((state) => markThreadVisited(state, threadId, visitedAt)),
   clearThreadUi: (threadId) => set((state) => clearThreadUi(state, threadId)),
+  setThreadPlanSidebarOpen: (threadId, open) =>
+    set((state) => setThreadPlanSidebarOpen(state, threadId, open)),
   setDefaultAdvertisedEndpointKey: (key) =>
     set((state) => setDefaultAdvertisedEndpointKey(state, key)),
+  setNavigationSidebarOpen: (open) => set((state) => setNavigationSidebarOpen(state, open)),
   toggleProject: (projectId) => set((state) => toggleProject(state, projectId)),
   setProjectExpanded: (projectId, expanded) =>
     set((state) => setProjectExpanded(state, projectId, expanded)),

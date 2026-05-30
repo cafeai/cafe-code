@@ -4,6 +4,8 @@ import {
   ChevronRightIcon,
   CloudIcon,
   FolderPlusIcon,
+  PanelLeftCloseIcon,
+  PanelLeftIcon,
   PlusIcon,
   SearchIcon,
   SettingsIcon,
@@ -63,7 +65,7 @@ import {
 import { usePrimaryEnvironmentId } from "../environments/primary";
 import { isElectron } from "../env";
 import { APP_STAGE_LABEL, APP_VERSION } from "../branding";
-import { isMacPlatform, newCommandId } from "../lib/utils";
+import { cn, isMacPlatform, newCommandId } from "../lib/utils";
 import {
   selectProjectByRef,
   selectProjectsAcrossEnvironments,
@@ -2831,8 +2833,11 @@ const SidebarChromeHeader = memo(function SidebarChromeHeader({
 }: {
   isElectron: boolean;
 }) {
+  const { open, setOpen } = useSidebar();
+  const ToggleIcon = open ? PanelLeftCloseIcon : PanelLeftIcon;
+  const toggleLabel = open ? "Hide sidebar" : "Show sidebar";
   const wordmark = (
-    <div className="flex items-center gap-2">
+    <div className="flex min-w-0 flex-1 items-center gap-2">
       <SidebarTrigger className="shrink-0 md:hidden" />
       <Tooltip>
         <TooltipTrigger
@@ -2853,15 +2858,47 @@ const SidebarChromeHeader = memo(function SidebarChromeHeader({
           Version {APP_VERSION}
         </TooltipPopup>
       </Tooltip>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              aria-label={toggleLabel}
+              className="ml-auto hidden size-7 shrink-0 text-muted-foreground/70 hover:bg-accent hover:text-foreground md:inline-flex"
+              onClick={() => {
+                void setOpen(!open);
+              }}
+              size="icon"
+              type="button"
+              variant="ghost"
+            />
+          }
+        >
+          <ToggleIcon className="size-4" />
+        </TooltipTrigger>
+        <TooltipPopup side="bottom" sideOffset={2}>
+          {toggleLabel}
+        </TooltipPopup>
+      </Tooltip>
     </div>
   );
+  const persistentHeaderClassName =
+    "relative z-30 bg-card transition-transform duration-200 ease-linear group-data-[collapsible=offcanvas]:translate-x-[var(--sidebar-width)] group-data-[collapsible=offcanvas]:border-r group-data-[collapsible=offcanvas]:border-border";
 
   return isElectron ? (
-    <SidebarHeader className="drag-region h-[52px] flex-row items-center gap-2 px-4 py-0 pl-[90px] wco:h-[env(titlebar-area-height)] wco:pl-[calc(env(titlebar-area-x)+1em)]">
+    <SidebarHeader
+      className={cn(
+        persistentHeaderClassName,
+        "drag-region h-[52px] flex-row items-center gap-2 px-4 py-0 pl-[90px] wco:h-[env(titlebar-area-height)] wco:pl-[calc(env(titlebar-area-x)+1em)]",
+      )}
+    >
       {wordmark}
     </SidebarHeader>
   ) : (
-    <SidebarHeader className="gap-3 px-3 py-2 sm:gap-2.5 sm:px-4 sm:py-3">{wordmark}</SidebarHeader>
+    <SidebarHeader
+      className={cn(persistentHeaderClassName, "gap-3 px-3 py-2 sm:gap-2.5 sm:px-4 sm:py-3")}
+    >
+      {wordmark}
+    </SidebarHeader>
   );
 });
 
