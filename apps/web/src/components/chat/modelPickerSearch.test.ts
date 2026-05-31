@@ -9,9 +9,9 @@ describe("buildModelPickerSearchText", () => {
         driverKind: "claudeAgent",
         providerDisplayName: "Claude",
         name: "Claude Opus 4.7",
-        subProvider: "GitHub Copilot",
+        subProvider: "Acme Models",
       }),
-    ).toBe("claude opus 4.7 github copilot claudeagent claude");
+    ).toBe("claude opus 4.7 acme models claudeagent claude");
   });
 });
 
@@ -23,9 +23,9 @@ describe("scoreModelPickerSearch", () => {
           driverKind: "claudeAgent",
           providerDisplayName: "Claude",
           name: "Claude Opus 4.7",
-          subProvider: "GitHub Copilot",
+          subProvider: "Acme Models",
         },
-        "coplt op",
+        "acm op",
       ),
     ).not.toBeNull();
   });
@@ -38,7 +38,7 @@ describe("scoreModelPickerSearch", () => {
           providerDisplayName: "codex",
           name: "GPT-5 Codex",
         },
-        "coplt op",
+        "acm op",
       ),
     ).toBeNull();
   });
@@ -49,18 +49,18 @@ describe("scoreModelPickerSearch", () => {
         driverKind: "claudeAgent",
         providerDisplayName: "Claude",
         name: "Claude Opus 4.7",
-        subProvider: "GitHub Copilot",
+        subProvider: "Acme Models",
       },
-      "copilot opus",
+      "acme opus",
     );
     const fuzzyScore = scoreModelPickerSearch(
       {
         driverKind: "claudeAgent",
         providerDisplayName: "Claude",
         name: "Claude Opus 4.7",
-        subProvider: "GitHub Copilot",
+        subProvider: "Acme Models",
       },
-      "coplt op",
+      "acm op",
     );
 
     expect(exactScore).not.toBeNull();

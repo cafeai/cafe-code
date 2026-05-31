@@ -212,7 +212,7 @@ const TEST_PROVIDERS: ReadonlyArray<ServerProvider> = [
 
 const CODEX_INSTANCE_ID = ProviderInstanceId.make("codex");
 const CLAUDE_INSTANCE_ID = ProviderInstanceId.make("claudeAgent");
-const CLAUDE_COPILOT_INSTANCE_ID = ProviderInstanceId.make("claude_copilot");
+const CLAUDE_PARTNER_INSTANCE_ID = ProviderInstanceId.make("claude_partner");
 
 function buildCodexProvider(models: ServerProvider["models"]): ServerProvider {
   return {
@@ -231,11 +231,11 @@ function buildCodexProvider(models: ServerProvider["models"]): ServerProvider {
   };
 }
 
-function buildClaudeCopilotProvider(models: ServerProvider["models"]): ServerProvider {
+function buildClaudePartnerProvider(models: ServerProvider["models"]): ServerProvider {
   return {
     driver: ProviderDriverKind.make("claudeAgent"),
-    instanceId: CLAUDE_COPILOT_INSTANCE_ID,
-    displayName: "Claude Copilot",
+    instanceId: CLAUDE_PARTNER_INSTANCE_ID,
+    displayName: "Claude Partner",
     enabled: true,
     installed: true,
     version: "1.0.0",
@@ -626,11 +626,11 @@ describe("ProviderModelPicker", () => {
 
   it("uses the trigger label for locked Claude subprovider rows", async () => {
     const providers: ReadonlyArray<ServerProvider> = [
-      buildClaudeCopilotProvider([
+      buildClaudePartnerProvider([
         {
-          slug: "github-copilot/claude-opus-4.5",
+          slug: "acme-models/claude-opus-4.5",
           name: "Claude Opus 4.5",
-          subProvider: "GitHub Copilot",
+          subProvider: "Acme Models",
           shortName: "Opus 4.5",
           isCustom: false,
           capabilities: createModelCapabilities({
@@ -646,8 +646,8 @@ describe("ProviderModelPicker", () => {
       ]),
     ];
     const mounted = await mountPicker({
-      activeInstanceId: CLAUDE_COPILOT_INSTANCE_ID,
-      model: "github-copilot/claude-opus-4.5",
+      activeInstanceId: CLAUDE_PARTNER_INSTANCE_ID,
+      model: "acme-models/claude-opus-4.5",
       lockedProvider: ProviderDriverKind.make("claudeAgent"),
       providers,
     });
@@ -657,14 +657,14 @@ describe("ProviderModelPicker", () => {
         const trigger = document.querySelector<HTMLElement>(
           '[data-chat-provider-model-picker="true"]',
         );
-        expect(trigger?.textContent).toContain("GitHub Copilot");
+        expect(trigger?.textContent).toContain("Acme Models");
         expect(trigger?.textContent).toContain("Opus 4.5");
       });
 
       await page.getByRole("button").click();
 
       await vi.waitFor(() => {
-        expect(getVisibleModelNames()).toEqual(["GitHub Copilot · Opus 4.5"]);
+        expect(getVisibleModelNames()).toEqual(["Acme Models · Opus 4.5"]);
       });
     } finally {
       await mounted.cleanup();
@@ -841,11 +841,11 @@ describe("ProviderModelPicker", () => {
           }),
         },
       ]),
-      buildClaudeCopilotProvider([
+      buildClaudePartnerProvider([
         {
-          slug: "github-copilot/claude-opus-4.7",
+          slug: "acme-models/claude-opus-4.7",
           name: "Claude Opus 4.7",
-          subProvider: "GitHub Copilot",
+          subProvider: "Acme Models",
           isCustom: false,
           capabilities: createModelCapabilities({
             optionDescriptors: [
@@ -860,15 +860,15 @@ describe("ProviderModelPicker", () => {
       ]),
     ];
     const mounted = await mountPicker({
-      activeInstanceId: CLAUDE_COPILOT_INSTANCE_ID,
-      model: "github-copilot/claude-opus-4.7",
+      activeInstanceId: CLAUDE_PARTNER_INSTANCE_ID,
+      model: "acme-models/claude-opus-4.7",
       lockedProvider: null,
       providers,
     });
 
     try {
       await page.getByRole("button").click();
-      await page.getByPlaceholder("Search models...").fill("coplt op");
+      await page.getByPlaceholder("Search models...").fill("acm op");
 
       await vi.waitFor(() => {
         const listText = getModelPickerListText();
@@ -882,11 +882,11 @@ describe("ProviderModelPicker", () => {
 
   it("renders each search result with its own provider branding", async () => {
     const providers: ReadonlyArray<ServerProvider> = [
-      buildClaudeCopilotProvider([
+      buildClaudePartnerProvider([
         {
-          slug: "github-copilot/claude-opus-4.7",
+          slug: "acme-models/claude-opus-4.7",
           name: "Claude Opus 4.7",
-          subProvider: "GitHub Copilot",
+          subProvider: "Acme Models",
           isCustom: false,
           capabilities: createModelCapabilities({
             optionDescriptors: [
@@ -922,8 +922,8 @@ describe("ProviderModelPicker", () => {
       },
     ];
     const mounted = await mountPicker({
-      activeInstanceId: CLAUDE_COPILOT_INSTANCE_ID,
-      model: "github-copilot/claude-opus-4.7",
+      activeInstanceId: CLAUDE_PARTNER_INSTANCE_ID,
+      model: "acme-models/claude-opus-4.7",
       lockedProvider: null,
       providers,
     });
@@ -934,9 +934,9 @@ describe("ProviderModelPicker", () => {
 
       await vi.waitFor(() => {
         const listText = getModelPickerListText();
-        expect(listText).toContain("Claude Copilot · GitHub Copilot");
+        expect(listText).toContain("Claude Partner · Acme Models");
         expect(listText).toContain("Claude");
-        expect(listText).not.toContain("Claude CopilotClaude Opus 4.6");
+        expect(listText).not.toContain("Claude PartnerClaude Opus 4.6");
       });
     } finally {
       await mounted.cleanup();
