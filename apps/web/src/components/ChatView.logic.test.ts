@@ -172,6 +172,26 @@ describe("resolveFollowUpQueuePhase", () => {
       }),
     ).toBe("ready");
   });
+
+  it("keeps a post-completion running session with no active turn non-dispatchable", () => {
+    const completedAt = "2026-03-29T00:01:30.000Z";
+
+    expect(
+      resolveFollowUpQueuePhase({
+        phase: "running",
+        latestTurn: {
+          turnId: TurnId.make("turn-completed"),
+          state: "completed",
+          requestedAt: "2026-03-29T00:01:00.000Z",
+          startedAt: "2026-03-29T00:01:01.000Z",
+          completedAt,
+          assistantMessageId: null,
+        },
+        activeTurnId: null,
+        sessionUpdatedAt: "2026-03-29T00:01:31.000Z",
+      }),
+    ).toBe("running");
+  });
 });
 
 describe("shouldWriteThreadErrorToCurrentServerThread", () => {

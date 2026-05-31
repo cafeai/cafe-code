@@ -3410,6 +3410,7 @@ export default function ChatView(props: ChatViewProps) {
     phase,
     latestTurn: activeLatestTurn,
     activeTurnId: activeQueueTurnId,
+    sessionUpdatedAt: activeThread?.session?.updatedAt ?? null,
   });
   const followUpQueueUiIdle = followUpQueuePhase !== "running";
   const followUpQueueVisibleWorking =
@@ -5537,6 +5538,7 @@ export default function ChatView(props: ChatViewProps) {
             phase: derivePhase(queuedThread.session),
             latestTurn: queuedThread.latestTurn,
             activeTurnId: queuedThread.session?.activeTurnId ?? null,
+            sessionUpdatedAt: queuedThread.session?.updatedAt ?? null,
           });
           return canStartQueuedFollowUpTurn({
             queueLength,

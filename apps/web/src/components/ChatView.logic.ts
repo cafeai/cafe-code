@@ -335,12 +335,33 @@ export function resolveFollowUpQueuePhase(input: {
   phase: SessionPhase;
   latestTurn: Thread["latestTurn"] | null;
   activeTurnId: TurnId | null | undefined;
+  sessionUpdatedAt?: string | null | undefined;
 }): SessionPhase {
   if (input.phase !== "running") {
     return input.phase;
   }
   if (!input.latestTurn?.completedAt) {
     return input.phase;
+  }
+  // Claude can report a fresh `running` session snapshot with no active turn id
+  // while the next SDK prompt is being queued. If that snapshot is newer than
+  // the last completed turn, starting another turn immediately would race the
+  // backend's one-active-turn invariant; keep the follow-up in the queue until
+  // the provider reports either a real active turn id or a settled session.
+  if (
+    input.activeTurnId == null &&
+    input.sessionUpdatedAt !== undefined &&
+    input.sessionUpdatedAt !== null
+  ) {
+    const sessionUpdatedAtMs = Date.parse(input.sessionUpdatedAt);
+    const latestTurnCompletedAtMs = Date.parse(input.latestTurn.completedAt);
+    if (
+      Number.isFinite(sessionUpdatedAtMs) &&
+      Number.isFinite(latestTurnCompletedAtMs) &&
+      sessionUpdatedAtMs > latestTurnCompletedAtMs
+    ) {
+      return input.phase;
+    }
   }
   return "ready";
 }
