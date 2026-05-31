@@ -2833,69 +2833,56 @@ const SidebarChromeHeader = memo(function SidebarChromeHeader({
 }: {
   isElectron: boolean;
 }) {
-  const { open, setOpen } = useSidebar();
-  const ToggleIcon = open ? PanelLeftCloseIcon : PanelLeftIcon;
-  const toggleLabel = open ? "Hide sidebar" : "Show sidebar";
+  const { open } = useSidebar();
   const wordmark = (
-    <div className="flex min-w-0 flex-1 items-center gap-2">
-      <SidebarTrigger className="shrink-0 md:hidden" />
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Link
-              aria-label="Go to threads"
-              className="ml-1 flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-md outline-hidden ring-ring transition-colors hover:text-foreground focus-visible:ring-2"
-              to="/"
-            >
-              <CafeCodeWordmark />
-              <span className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60">
-                {APP_STAGE_LABEL}
-              </span>
-            </Link>
-          }
-        />
-        <TooltipPopup side="bottom" sideOffset={2}>
-          Version {APP_VERSION}
-        </TooltipPopup>
-      </Tooltip>
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Button
-              aria-label={toggleLabel}
-              className="ml-auto hidden size-7 shrink-0 text-muted-foreground/70 hover:bg-accent hover:text-foreground md:inline-flex"
-              onClick={() => {
-                void setOpen(!open);
-              }}
-              size="icon"
-              type="button"
-              variant="ghost"
+    <div className="flex min-w-0 flex-1 items-center gap-2 group-data-[collapsible=icon]:justify-center">
+      {open ? (
+        <>
+          <SidebarTrigger className="shrink-0 md:hidden" />
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Link
+                  aria-label="Go to threads"
+                  className="ml-1 flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-md outline-hidden ring-ring transition-colors hover:text-foreground focus-visible:ring-2"
+                  to="/"
+                >
+                  <CafeCodeWordmark />
+                  <span className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60">
+                    {APP_STAGE_LABEL}
+                  </span>
+                </Link>
+              }
             />
-          }
-        >
-          <ToggleIcon className="size-4" />
-        </TooltipTrigger>
-        <TooltipPopup side="bottom" sideOffset={2}>
-          {toggleLabel}
-        </TooltipPopup>
-      </Tooltip>
+            <TooltipPopup side="bottom" sideOffset={2}>
+              Version {APP_VERSION}
+            </TooltipPopup>
+          </Tooltip>
+        </>
+      ) : null}
     </div>
   );
-  const persistentHeaderClassName =
-    "relative z-30 bg-card transition-transform duration-200 ease-linear group-data-[collapsible=offcanvas]:translate-x-[var(--sidebar-width)] group-data-[collapsible=offcanvas]:border-r group-data-[collapsible=offcanvas]:border-border";
+  const persistentHeaderClassName = "relative z-30 transition-[padding] duration-200 ease-linear";
 
   return isElectron ? (
     <SidebarHeader
       className={cn(
         persistentHeaderClassName,
-        "drag-region h-[52px] flex-row items-center gap-2 px-4 py-0 pl-[90px] wco:h-[env(titlebar-area-height)] wco:pl-[calc(env(titlebar-area-x)+1em)]",
+        "drag-region flex-row items-center gap-2 py-0",
+        open
+          ? "h-[52px] px-4 pl-[90px] wco:h-[env(titlebar-area-height)] wco:pl-[calc(env(titlebar-area-x)+1em)]"
+          : "h-[52px] justify-center px-2",
       )}
     >
       {wordmark}
     </SidebarHeader>
   ) : (
     <SidebarHeader
-      className={cn(persistentHeaderClassName, "gap-3 px-3 py-2 sm:gap-2.5 sm:px-4 sm:py-3")}
+      className={cn(
+        persistentHeaderClassName,
+        "gap-3 py-2 sm:gap-2.5 sm:py-3",
+        open ? "px-3 sm:px-4" : "items-center px-2",
+      )}
     >
       {wordmark}
     </SidebarHeader>
@@ -2904,7 +2891,9 @@ const SidebarChromeHeader = memo(function SidebarChromeHeader({
 
 const SidebarChromeFooter = memo(function SidebarChromeFooter() {
   const navigate = useNavigate();
-  const { isMobile, setOpenMobile } = useSidebar();
+  const { isMobile, open, setOpen, setOpenMobile } = useSidebar();
+  const ToggleIcon = open ? PanelLeftCloseIcon : PanelLeftIcon;
+  const toggleLabel = open ? "Hide sidebar" : "Show sidebar";
   const handleSettingsClick = useCallback(() => {
     if (isMobile) {
       setOpenMobile(false);
@@ -2913,19 +2902,48 @@ const SidebarChromeFooter = memo(function SidebarChromeFooter() {
   }, [isMobile, navigate, setOpenMobile]);
 
   return (
-    <SidebarFooter className="p-2">
-      <SidebarProviderUpdatePill />
-      <SidebarUpdatePill />
-      <SidebarMenu>
-        <SidebarMenuItem>
-          <SidebarMenuButton
-            size="sm"
-            className="gap-2 px-2 py-1.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground"
-            onClick={handleSettingsClick}
-          >
-            <SettingsIcon className="size-3.5" />
-            <span className="text-xs">Settings</span>
-          </SidebarMenuButton>
+    <SidebarFooter className="p-2 group-data-[collapsible=icon]:items-center">
+      {open ? (
+        <>
+          <SidebarProviderUpdatePill />
+          <SidebarUpdatePill />
+        </>
+      ) : null}
+      <SidebarMenu className="group-data-[collapsible=icon]:items-center">
+        <SidebarMenuItem
+          className={cn("flex items-center gap-1", open ? "w-full" : "justify-center")}
+        >
+          {open ? (
+            <SidebarMenuButton
+              size="sm"
+              className="min-w-0 flex-1 gap-2 px-2 py-1.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground"
+              onClick={handleSettingsClick}
+            >
+              <SettingsIcon className="size-3.5" />
+              <span className="text-xs">Settings</span>
+            </SidebarMenuButton>
+          ) : null}
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  aria-label={toggleLabel}
+                  className="hidden size-7 shrink-0 text-muted-foreground/70 hover:bg-accent hover:text-foreground md:inline-flex"
+                  onClick={() => {
+                    void setOpen(!open);
+                  }}
+                  size="icon"
+                  type="button"
+                  variant="ghost"
+                />
+              }
+            >
+              <ToggleIcon className="size-4" />
+            </TooltipTrigger>
+            <TooltipPopup side="top" sideOffset={2}>
+              {toggleLabel}
+            </TooltipPopup>
+          </Tooltip>
         </SidebarMenuItem>
       </SidebarMenu>
     </SidebarFooter>
@@ -3839,49 +3857,60 @@ export default function Sidebar() {
       <SidebarChromeHeader isElectron={isElectron} />
 
       {isOnSettings ? (
-        <SettingsSidebarNav pathname={pathname} />
+        <>
+          <div className="flex min-h-0 flex-1 flex-col group-data-[collapsible=icon]:hidden">
+            <SettingsSidebarNav pathname={pathname} />
+          </div>
+          <div aria-hidden="true" className="hidden flex-1 group-data-[collapsible=icon]:block" />
+          <div className="hidden group-data-[collapsible=icon]:block">
+            <SidebarChromeFooter />
+          </div>
+        </>
       ) : (
         <>
-          <SidebarProjectsContent
-            showArm64IntelBuildWarning={showArm64IntelBuildWarning}
-            arm64IntelBuildWarningDescription={arm64IntelBuildWarningDescription}
-            desktopUpdateButtonAction={desktopUpdateButtonAction}
-            desktopUpdateButtonDisabled={desktopUpdateButtonDisabled}
-            handleDesktopUpdateButtonClick={handleDesktopUpdateButtonClick}
-            projectSortOrder={sidebarProjectSortOrder}
-            threadSortOrder={sidebarThreadSortOrder}
-            projectGroupingMode={sidebarProjectGroupingMode}
-            threadPreviewCount={sidebarThreadPreviewCount}
-            updateSettings={updateSettings}
-            openAddProject={openAddProjectCommandPalette}
-            isManualProjectSorting={isManualProjectSorting}
-            projectDnDSensors={projectDnDSensors}
-            projectCollisionDetection={projectCollisionDetection}
-            handleProjectDragStart={handleProjectDragStart}
-            handleProjectDragEnd={handleProjectDragEnd}
-            handleProjectDragCancel={handleProjectDragCancel}
-            handleNewThread={handleNewThread}
-            archiveThread={archiveThread}
-            deleteThread={deleteThread}
-            sortedProjects={sortedProjects}
-            expandedThreadListsByProject={expandedThreadListsByProject}
-            activeRouteProjectKey={activeRouteProjectKey}
-            routeThreadKey={routeThreadKey}
-            newThreadShortcutLabel={newThreadShortcutLabel}
-            commandPaletteShortcutLabel={commandPaletteShortcutLabel}
-            threadJumpLabelByKey={visibleThreadJumpLabelByKey}
-            attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
-            expandThreadListForProject={expandThreadListForProject}
-            collapseThreadListForProject={collapseThreadListForProject}
-            dragInProgressRef={dragInProgressRef}
-            suppressProjectClickAfterDragRef={suppressProjectClickAfterDragRef}
-            suppressProjectClickForContextMenuRef={suppressProjectClickForContextMenuRef}
-            attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
-            projectsLength={projects.length}
-            showSidebarMascot={showSidebarMascot}
-          />
+          <div className="flex min-h-0 flex-1 flex-col group-data-[collapsible=icon]:hidden">
+            <SidebarProjectsContent
+              showArm64IntelBuildWarning={showArm64IntelBuildWarning}
+              arm64IntelBuildWarningDescription={arm64IntelBuildWarningDescription}
+              desktopUpdateButtonAction={desktopUpdateButtonAction}
+              desktopUpdateButtonDisabled={desktopUpdateButtonDisabled}
+              handleDesktopUpdateButtonClick={handleDesktopUpdateButtonClick}
+              projectSortOrder={sidebarProjectSortOrder}
+              threadSortOrder={sidebarThreadSortOrder}
+              projectGroupingMode={sidebarProjectGroupingMode}
+              threadPreviewCount={sidebarThreadPreviewCount}
+              updateSettings={updateSettings}
+              openAddProject={openAddProjectCommandPalette}
+              isManualProjectSorting={isManualProjectSorting}
+              projectDnDSensors={projectDnDSensors}
+              projectCollisionDetection={projectCollisionDetection}
+              handleProjectDragStart={handleProjectDragStart}
+              handleProjectDragEnd={handleProjectDragEnd}
+              handleProjectDragCancel={handleProjectDragCancel}
+              handleNewThread={handleNewThread}
+              archiveThread={archiveThread}
+              deleteThread={deleteThread}
+              sortedProjects={sortedProjects}
+              expandedThreadListsByProject={expandedThreadListsByProject}
+              activeRouteProjectKey={activeRouteProjectKey}
+              routeThreadKey={routeThreadKey}
+              newThreadShortcutLabel={newThreadShortcutLabel}
+              commandPaletteShortcutLabel={commandPaletteShortcutLabel}
+              threadJumpLabelByKey={visibleThreadJumpLabelByKey}
+              attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
+              expandThreadListForProject={expandThreadListForProject}
+              collapseThreadListForProject={collapseThreadListForProject}
+              dragInProgressRef={dragInProgressRef}
+              suppressProjectClickAfterDragRef={suppressProjectClickAfterDragRef}
+              suppressProjectClickForContextMenuRef={suppressProjectClickForContextMenuRef}
+              attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
+              projectsLength={projects.length}
+              showSidebarMascot={showSidebarMascot}
+            />
 
-          <SidebarSeparator />
+            <SidebarSeparator />
+          </div>
+          <div aria-hidden="true" className="hidden flex-1 group-data-[collapsible=icon]:block" />
           <SidebarChromeFooter />
         </>
       )}
