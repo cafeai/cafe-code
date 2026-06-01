@@ -11,6 +11,7 @@ import { Toggle } from "../ui/toggle";
 import { SidebarTrigger } from "../ui/sidebar";
 import { OpenInPicker } from "./OpenInPicker";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
+import { useDesktopSourceUpdateState } from "../../lib/desktopSourceUpdateReactQuery";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -50,11 +51,20 @@ export const ChatHeader = memo(function ChatHeader({
   onToggleDiff,
 }: ChatHeaderProps) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const sourceUpdateState = useDesktopSourceUpdateState().data ?? null;
   const showOpenInPicker = shouldShowOpenInPicker({
     activeProjectName,
     activeThreadEnvironmentId,
     primaryEnvironmentId,
   });
+  const shouldShowSourceUpdateBadge =
+    sourceUpdateState?.status === "behind" && sourceUpdateState.trackedBranch !== null;
+  const sourceUpdateTooltip =
+    shouldShowSourceUpdateBadge && sourceUpdateState.remoteHash
+      ? `Newer origin/${sourceUpdateState.trackedBranch} commit available: ${sourceUpdateState.remoteHash.slice(0, 12)}`
+      : shouldShowSourceUpdateBadge
+        ? `Newer origin/${sourceUpdateState.trackedBranch} commit available.`
+        : null;
 
   return (
     <div className="@container/header-actions flex min-w-0 flex-1 items-center gap-2">
@@ -78,6 +88,16 @@ export const ChatHeader = memo(function ChatHeader({
         )}
       </div>
       <div className="flex shrink-0 items-center justify-end gap-2 @3xl/header-actions:gap-3">
+        {shouldShowSourceUpdateBadge && (
+          <Badge
+            variant="outline"
+            size="sm"
+            className="hidden border-muted-foreground/20 bg-muted/20 text-[10px] font-medium text-muted-foreground sm:inline-flex"
+            title={sourceUpdateTooltip ?? undefined}
+          >
+            Newer {sourceUpdateState.trackedBranch}
+          </Badge>
+        )}
         {showOpenInPicker && (
           <OpenInPicker
             keybindings={keybindings}

@@ -3,9 +3,11 @@ import "../index.css";
 
 import {
   EventId,
+  type DesktopBridge,
   ORCHESTRATION_WS_METHODS,
   EnvironmentId,
   type EnvironmentApi,
+  type DesktopSourceUpdateState,
   type MessageId,
   type OrchestrationReadModel,
   type ProjectId,
@@ -1519,6 +1521,90 @@ async function dispatchInputKey(
   await waitForLayout();
 }
 
+function createDesktopBridgeForChatViewTests(
+  sourceUpdateState: DesktopSourceUpdateState,
+): DesktopBridge {
+  return {
+    getAppBranding: () => null,
+    getLocalEnvironmentBootstrap: () => null,
+    getDebugEndpointState: async () => ({ enabled: false, url: null }),
+    publishDebugSnapshot: async () => undefined,
+    getClientSettings: async () => null,
+    setClientSettings: async () => undefined,
+    setPowerSaveBlockerState: async () => undefined,
+    getSavedEnvironmentRegistry: async () => [],
+    setSavedEnvironmentRegistry: async () => undefined,
+    getSavedEnvironmentSecret: async () => null,
+    setSavedEnvironmentSecret: async () => true,
+    removeSavedEnvironmentSecret: async () => undefined,
+    discoverSshHosts: async () => [],
+    ensureSshEnvironment: async () => {
+      throw new Error("ensureSshEnvironment not implemented in ChatView browser test");
+    },
+    disconnectSshEnvironment: async () => undefined,
+    fetchSshEnvironmentDescriptor: async () => {
+      throw new Error("fetchSshEnvironmentDescriptor not implemented in ChatView browser test");
+    },
+    bootstrapSshBearerSession: async () => {
+      throw new Error("bootstrapSshBearerSession not implemented in ChatView browser test");
+    },
+    fetchSshSessionState: async () => {
+      throw new Error("fetchSshSessionState not implemented in ChatView browser test");
+    },
+    issueSshWebSocketToken: async () => {
+      throw new Error("issueSshWebSocketToken not implemented in ChatView browser test");
+    },
+    getServerExposureState: async () => ({
+      mode: "local-only",
+      endpointUrl: null,
+      advertisedHost: null,
+      tailscaleServeEnabled: false,
+      tailscaleServePort: 443,
+    }),
+    setServerExposureMode: async () => ({
+      mode: "local-only",
+      endpointUrl: null,
+      advertisedHost: null,
+      tailscaleServeEnabled: false,
+      tailscaleServePort: 443,
+    }),
+    setTailscaleServeEnabled: async (input) => ({
+      mode: "local-only",
+      endpointUrl: null,
+      advertisedHost: null,
+      tailscaleServeEnabled: input.enabled,
+      tailscaleServePort: input.port ?? 443,
+    }),
+    getAdvertisedEndpoints: async () => [],
+    pickFolder: async () => null,
+    confirm: async () => true,
+    setTheme: async () => undefined,
+    showContextMenu: async () => null,
+    openExternal: async () => true,
+    openPath: async () => true,
+    onMenuAction: () => () => undefined,
+    getUpdateState: async () => {
+      throw new Error("getUpdateState not implemented in ChatView browser test");
+    },
+    setUpdateChannel: async () => {
+      throw new Error("setUpdateChannel not implemented in ChatView browser test");
+    },
+    checkForUpdate: async () => {
+      throw new Error("checkForUpdate not implemented in ChatView browser test");
+    },
+    downloadUpdate: async () => {
+      throw new Error("downloadUpdate not implemented in ChatView browser test");
+    },
+    installUpdate: async () => {
+      throw new Error("installUpdate not implemented in ChatView browser test");
+    },
+    onUpdateState: () => () => undefined,
+    getSourceUpdateState: vi.fn().mockResolvedValue(sourceUpdateState),
+    checkSourceUpdate: vi.fn().mockResolvedValue(sourceUpdateState),
+    onSourceUpdateState: vi.fn(() => () => undefined),
+  };
+}
+
 async function mountChatView(options: {
   viewport: ViewportSpec;
   snapshot: OrchestrationReadModel;
@@ -1841,6 +1927,57 @@ describe("ChatView timeline estimator parity (full app)", () => {
         },
         { timeout: 8_000, interval: 16 },
       );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("shows a passive source update badge before the Open button when the tracked branch is behind", async () => {
+    setDraftThreadWithoutWorktree();
+    const sourceUpdateState: DesktopSourceUpdateState = {
+      status: "behind",
+      branch: "dev",
+      trackedBranch: "dev",
+      localHash: "1111111111111111111111111111111111111111",
+      remoteHash: "2222222222222222222222222222222222222222",
+      mergeBaseHash: "1111111111111111111111111111111111111111",
+      dirty: false,
+      checkedAt: "2026-06-02T00:00:00.000Z",
+      message: null,
+    };
+    window.desktopBridge = createDesktopBridgeForChatViewTests(sourceUpdateState);
+
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createDraftOnlySnapshot(),
+      configureFixture: (nextFixture) => {
+        nextFixture.serverConfig = {
+          ...nextFixture.serverConfig,
+          availableEditors: ["vscode"],
+        };
+      },
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      const updateBadge = await waitForElement(
+        () =>
+          Array.from(document.querySelectorAll("[data-slot='badge']")).find(
+            (element) => element.textContent?.trim() === "Newer dev",
+          ) as HTMLElement | null,
+        "Unable to find passive source update badge.",
+      );
+      const openButton = await waitForElement(
+        () =>
+          Array.from(document.querySelectorAll("button")).find(
+            (button) => button.textContent?.trim() === "Open",
+          ) as HTMLButtonElement | null,
+        "Unable to find Open button.",
+      );
+
+      const relativePosition = updateBadge.compareDocumentPosition(openButton);
+      expect(relativePosition & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(updateBadge.getAttribute("title")).toContain("Newer origin/dev commit available");
     } finally {
       await mounted.cleanup();
     }
