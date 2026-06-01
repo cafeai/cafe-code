@@ -67,6 +67,7 @@ import Migration0051 from "./Migrations/051_ReconcileBackfilledLatestTurnPointer
 import Migration0052 from "./Migrations/052_ReconcileStopAllRuntimeMarkers.ts";
 import Migration0053 from "./Migrations/053_CloseLateTerminalStreamingReplays.ts";
 import Migration0054 from "./Migrations/054_BackpressureHotPathIndexes.ts";
+import Migration0055 from "./Migrations/055_ProjectionThreadActivityTurnPageIndexes.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -133,6 +134,7 @@ export const migrationEntries = [
   [52, "ReconcileStopAllRuntimeMarkers", Migration0052],
   [53, "CloseLateTerminalStreamingReplays", Migration0053],
   [54, "BackpressureHotPathIndexes", Migration0054],
+  [55, "ProjectionThreadActivityTurnPageIndexes", Migration0055],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

@@ -129,7 +129,7 @@ export function deriveHistoricalWorkLogDisplayState(
       ? input.loadedOffset > 0
       : input.rawTotalCount !== null
         ? input.rawTotalCount > input.previewEntryCount
-        : false;
+        : input.snapshotEntryCount > 0;
   const countLabel = displayCount > 0 ? ` (${displayCount}${countIsLowerBound ? "+" : ""})` : "";
 
   return {

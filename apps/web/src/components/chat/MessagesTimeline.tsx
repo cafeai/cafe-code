@@ -924,46 +924,6 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (totalCount !== null) {
-      return;
-    }
-    const api = readEnvironmentApi(ctx.activeThreadEnvironmentId);
-    const activeThreadId = ctx.activeThreadId;
-    if (!api || activeThreadId === null) {
-      return;
-    }
-
-    let cancelled = false;
-    void api.orchestration
-      .getThreadTurnActivityPage({
-        threadId: activeThreadId,
-        turnId: row.turnId,
-        offset: 0,
-        limit: 1,
-      })
-      .then((page) => {
-        if (!cancelled) {
-          setTotalCount(page.totalCount);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setTotalCount(row.summary.snapshotEntryCount > 0 ? row.summary.snapshotEntryCount : 0);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    ctx.activeThreadEnvironmentId,
-    ctx.activeThreadId,
-    row.summary.snapshotEntryCount,
-    row.turnId,
-    totalCount,
-  ]);
-
-  useEffect(() => {
     if (!isExpanded || initialPageLoaded) {
       return;
     }

@@ -185,6 +185,23 @@ describe("deriveHistoricalWorkLogDisplayState", () => {
       displayCount: 2,
     });
   });
+
+  it("marks snapshot-only historical counts as lower bounds to avoid collapsed-row DB fetches", () => {
+    expect(
+      deriveHistoricalWorkLogDisplayState({
+        snapshotEntryCount: 2,
+        previewEntryCount: 2,
+        visibleEntryCount: 2,
+        loadedRawActivityCount: 0,
+        rawTotalCount: null,
+        loadedOffset: null,
+      }),
+    ).toEqual({
+      countIsLowerBound: true,
+      countLabel: " (2+)",
+      displayCount: 2,
+    });
+  });
 });
 
 describe("resolveAssistantMessageCopyState", () => {
