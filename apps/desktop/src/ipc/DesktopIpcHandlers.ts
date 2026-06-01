@@ -31,6 +31,7 @@ import {
   installUpdate,
   setUpdateChannel,
 } from "./methods/updates.ts";
+import { checkSourceUpdate, getSourceUpdateState } from "./methods/sourceUpdates.ts";
 import { setPowerSaveBlockerState } from "./methods/powerSaveBlocker.ts";
 import { getDebugEndpointState, publishDebugSnapshot } from "./methods/debug.ts";
 import {
@@ -87,4 +88,6 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
   yield* ipc.handle(downloadUpdate);
   yield* ipc.handle(installUpdate);
   yield* ipc.handle(checkForUpdate);
+  yield* ipc.handle(getSourceUpdateState);
+  yield* ipc.handle(checkSourceUpdate);
 }).pipe(Effect.withSpan("desktop.ipc.installHandlers"));

@@ -228,6 +228,29 @@ function makeDesktopBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridg
       throw new Error("installUpdate not implemented in test");
     },
     onUpdateState: () => () => undefined,
+    getSourceUpdateState: async () => ({
+      status: "ignored",
+      branch: "feature-test",
+      trackedBranch: null,
+      localHash: "abc123",
+      remoteHash: null,
+      mergeBaseHash: null,
+      dirty: false,
+      checkedAt: "2026-01-01T00:00:00.000Z",
+      message: "Only branches main and dev are tracked.",
+    }),
+    checkSourceUpdate: async () => ({
+      status: "ignored",
+      branch: "feature-test",
+      trackedBranch: null,
+      localHash: "abc123",
+      remoteHash: null,
+      mergeBaseHash: null,
+      dirty: false,
+      checkedAt: "2026-01-01T00:00:00.000Z",
+      message: "Only branches main and dev are tracked.",
+    }),
+    onSourceUpdateState: () => () => undefined,
     ...overrides,
   };
 }

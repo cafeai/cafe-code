@@ -12,7 +12,7 @@ import { Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   defaultInstanceIdForDriver,
-  type DesktopUpdateChannel,
+  type DesktopSourceUpdateState,
   isRetiredProviderDriverKind,
   PROVIDER_DISPLAY_NAMES,
   ProviderDriverKind,
@@ -34,23 +34,15 @@ import { createModelSelection } from "@cafecode/shared/model";
 import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
 import { APP_VERSION } from "../../branding";
-import {
-  canCheckForUpdate,
-  getDesktopUpdateButtonTooltip,
-  getDesktopUpdateInstallConfirmationMessage,
-  isDesktopUpdateButtonDisabled,
-  resolveDesktopUpdateButtonAction,
-} from "../../components/desktopUpdate.logic";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { TraitsPicker } from "../chat/TraitsPicker";
-import { isElectron } from "../../env";
 import { useTheme } from "../../hooks/useTheme";
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { useThreadActions } from "../../hooks/useThreadActions";
 import {
-  setDesktopUpdateStateQueryData,
-  useDesktopUpdateState,
-} from "../../lib/desktopUpdateReactQuery";
+  setDesktopSourceUpdateStateQueryData,
+  useDesktopSourceUpdateState,
+} from "../../lib/desktopSourceUpdateReactQuery";
 import {
   getCustomModelOptionsByInstance,
   resolveAppModelSelectionState,
@@ -135,8 +127,6 @@ const POWER_SAVE_BLOCKER_LABELS = {
 } as const satisfies Record<PowerSaveBlockerMode, string>;
 
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
-const DESKTOP_UPDATES_DISABLED_IN_THIS_BUILD = true;
-const DESKTOP_UPDATES_DISABLED_COPY = "Update checks are disabled in this Cafe Code build.";
 
 function DefaultEditorOptionLabel({
   Icon,
@@ -203,11 +193,58 @@ function ProviderLastChecked({ lastCheckedAt }: { lastCheckedAt: string | null }
   );
 }
 
-function AboutVersionTitle() {
+function getSourceUpdateBranchLabel(state: DesktopSourceUpdateState | null) {
+  if (state?.trackedBranch) {
+    return `${state.trackedBranch} branch`;
+  }
+  if (state?.status === "ignored") {
+    return "ignored - not main or dev";
+  }
+  return "source unavailable";
+}
+
+function formatSourceHash(hash: string | null) {
+  return hash ? hash.slice(0, 12) : "unknown";
+}
+
+function getSourceUpdateDescription(
+  state: DesktopSourceUpdateState | null,
+  hasDesktopBridge: boolean,
+) {
+  if (!hasDesktopBridge) {
+    return "Source branch update checks are only available in the desktop app.";
+  }
+  if (!state || state.status === "idle") {
+    return "Branch hash has not been checked yet.";
+  }
+  if (state.status === "checking") {
+    return "Checking latest branch hash.";
+  }
+
+  const dirtyLabel = state.dirty === null ? "dirty state unknown" : state.dirty ? "dirty" : "clean";
+  const localLine = `Current: ${formatSourceHash(state.localHash)} (${dirtyLabel})`;
+  if (!state.trackedBranch) {
+    return `${localLine}\n${state.message ?? "Only branches main and dev are tracked."}`;
+  }
+
+  const remoteLine = `Latest origin/${state.trackedBranch}: ${formatSourceHash(state.remoteHash)}`;
+  const statusLine =
+    state.status === "behind"
+      ? `Newer ${state.trackedBranch} commit available: ${formatSourceHash(state.remoteHash)}`
+      : state.status === "current"
+        ? "This checkout is current with origin."
+        : state.message;
+
+  return [localLine, remoteLine, statusLine].filter(Boolean).join("\n");
+}
+
+function AboutVersionTitle({ state }: { readonly state: DesktopSourceUpdateState | null }) {
   return (
     <span className="inline-flex items-center gap-2">
       <span>Version</span>
-      <code className="text-[11px] font-medium text-muted-foreground">{APP_VERSION}</code>
+      <code className="text-[11px] font-medium text-muted-foreground">
+        {APP_VERSION} ({getSourceUpdateBranchLabel(state)})
+      </code>
     </span>
   );
 }
@@ -273,216 +310,53 @@ function ColorWheelPicker(props: {
 
 function AboutVersionSection() {
   const queryClient = useQueryClient();
-  const updateStateQuery = useDesktopUpdateState();
-  const [isChangingUpdateChannel, setIsChangingUpdateChannel] = useState(false);
+  const sourceUpdateStateQuery = useDesktopSourceUpdateState();
 
-  const updateState = updateStateQuery.data ?? null;
   const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
-  const selectedUpdateChannel = updateState?.channel ?? "latest";
-
-  const handleUpdateChannelChange = useCallback(
-    (channel: DesktopUpdateChannel) => {
-      if (DESKTOP_UPDATES_DISABLED_IN_THIS_BUILD) {
-        return;
-      }
-
-      const bridge = window.desktopBridge;
-      if (
-        !bridge ||
-        typeof bridge.setUpdateChannel !== "function" ||
-        channel === selectedUpdateChannel
-      ) {
-        return;
-      }
-
-      setIsChangingUpdateChannel(true);
-      void bridge
-        .setUpdateChannel(channel)
-        .then((state) => {
-          setDesktopUpdateStateQueryData(queryClient, state);
-        })
-        .catch((error: unknown) => {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not change update track",
-              description: error instanceof Error ? error.message : "Update track change failed.",
-            }),
-          );
-        })
-        .finally(() => {
-          setIsChangingUpdateChannel(false);
-        });
-    },
-    [queryClient, selectedUpdateChannel],
-  );
+  const sourceUpdateState = sourceUpdateStateQuery.data ?? null;
 
   const handleButtonClick = useCallback(() => {
-    if (DESKTOP_UPDATES_DISABLED_IN_THIS_BUILD) {
-      return;
-    }
-
     const bridge = window.desktopBridge;
-    if (!bridge) return;
-
-    const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
-
-    if (action === "download") {
-      void bridge
-        .downloadUpdate()
-        .then((result) => {
-          setDesktopUpdateStateQueryData(queryClient, result.state);
-        })
-        .catch((error: unknown) => {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not download update",
-              description: error instanceof Error ? error.message : "Download failed.",
-            }),
-          );
-        });
-      return;
-    }
-
-    if (action === "install") {
-      const confirmed = window.confirm(
-        getDesktopUpdateInstallConfirmationMessage(
-          updateState ?? { availableVersion: null, downloadedVersion: null },
-        ),
-      );
-      if (!confirmed) return;
-      void bridge
-        .installUpdate()
-        .then((result) => {
-          setDesktopUpdateStateQueryData(queryClient, result.state);
-        })
-        .catch((error: unknown) => {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not install update",
-              description: error instanceof Error ? error.message : "Install failed.",
-            }),
-          );
-        });
-      return;
-    }
-
-    if (typeof bridge.checkForUpdate !== "function") return;
+    if (!bridge || typeof bridge.checkSourceUpdate !== "function") return;
     void bridge
-      .checkForUpdate()
-      .then((result) => {
-        setDesktopUpdateStateQueryData(queryClient, result.state);
-        if (!result.checked) {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not check for updates",
-              description:
-                result.state.message ?? "Automatic updates are not available in this build.",
-            }),
-          );
-        }
+      .checkSourceUpdate()
+      .then((state) => {
+        setDesktopSourceUpdateStateQueryData(queryClient, state);
       })
       .catch((error: unknown) => {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Could not check for updates",
-            description: error instanceof Error ? error.message : "Update check failed.",
-          }),
-        );
+        console.warn("Source update check failed", error);
       });
-  }, [queryClient, updateState]);
+  }, [queryClient]);
 
-  const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
-  const buttonTooltip = DESKTOP_UPDATES_DISABLED_IN_THIS_BUILD
-    ? DESKTOP_UPDATES_DISABLED_COPY
-    : updateState
-      ? getDesktopUpdateButtonTooltip(updateState)
-      : null;
-  const buttonDisabled =
-    DESKTOP_UPDATES_DISABLED_IN_THIS_BUILD ||
-    (action === "none"
-      ? !canCheckForUpdate(updateState)
-      : isDesktopUpdateButtonDisabled(updateState));
-
-  const actionLabel: Record<string, string> = { download: "Download", install: "Install" };
-  const statusLabel: Record<string, string> = {
-    checking: "Checking…",
-    downloading: "Downloading…",
-    "up-to-date": "Up to Date",
-  };
-  const buttonLabel = DESKTOP_UPDATES_DISABLED_IN_THIS_BUILD
-    ? "Check for Updates"
-    : (actionLabel[action] ?? statusLabel[updateState?.status ?? ""] ?? "Check for Updates");
-  const description = DESKTOP_UPDATES_DISABLED_IN_THIS_BUILD
-    ? DESKTOP_UPDATES_DISABLED_COPY
-    : action === "download" || action === "install"
-      ? "Update available."
-      : "Current version of the application.";
+  const isChecking = sourceUpdateState?.status === "checking";
+  const buttonDisabled = !hasDesktopBridge || isChecking;
+  const buttonLabel = isChecking ? "Checking…" : "Check for Updates";
+  const description = getSourceUpdateDescription(sourceUpdateState, hasDesktopBridge);
 
   return (
-    <>
-      <SettingsRow
-        title={<AboutVersionTitle />}
-        description={description}
-        control={
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  size="xs"
-                  variant={action === "install" ? "default" : "outline"}
-                  disabled={buttonDisabled}
-                  onClick={handleButtonClick}
-                >
-                  {buttonLabel}
-                </Button>
-              }
-            />
-            {buttonTooltip ? <TooltipPopup>{buttonTooltip}</TooltipPopup> : null}
-          </Tooltip>
-        }
-      />
-      {hasDesktopBridge ? (
-        <SettingsRow
-          title="Update track"
-          description={
-            DESKTOP_UPDATES_DISABLED_IN_THIS_BUILD
-              ? "Update tracks are disabled until Cafe Code has an update feed."
-              : "Stable follows full releases. Nightly follows the nightly desktop channel and can switch back to stable immediately."
-          }
-          control={
-            <Select
-              value={selectedUpdateChannel}
-              onValueChange={(value) => {
-                handleUpdateChannelChange(value as DesktopUpdateChannel);
-              }}
-            >
-              <SelectTrigger
-                className="w-full sm:w-40"
-                aria-label="Update track"
-                disabled={DESKTOP_UPDATES_DISABLED_IN_THIS_BUILD || isChangingUpdateChannel}
+    <SettingsRow
+      title={<AboutVersionTitle state={sourceUpdateState} />}
+      description={<span className="whitespace-pre-line">{description}</span>}
+      control={
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={buttonDisabled}
+                onClick={handleButtonClick}
               >
-                <SelectValue>
-                  {selectedUpdateChannel === "nightly" ? "Nightly" : "Stable"}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value="latest">
-                  Stable
-                </SelectItem>
-                <SelectItem hideIndicator value="nightly">
-                  Nightly
-                </SelectItem>
-              </SelectPopup>
-            </Select>
-          }
-        />
-      ) : null}
-    </>
+                {buttonLabel}
+              </Button>
+            }
+          />
+          {!hasDesktopBridge ? (
+            <TooltipPopup>Source update checks are only available in the desktop app.</TooltipPopup>
+          ) : null}
+        </Tooltip>
+      }
+    />
   );
 }
 
@@ -1244,14 +1118,7 @@ export function GeneralSettingsPanel() {
       </SettingsSection>
 
       <SettingsSection title="About">
-        {isElectron ? (
-          <AboutVersionSection />
-        ) : (
-          <SettingsRow
-            title={<AboutVersionTitle />}
-            description="Current version of the application."
-          />
-        )}
+        <AboutVersionSection />
         <SettingsRow
           title="Diagnostics"
           description={diagnosticsDescription}

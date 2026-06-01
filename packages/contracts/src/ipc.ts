@@ -209,6 +209,56 @@ export const DesktopUpdateCheckResultSchema = Schema.Struct({
   state: DesktopUpdateStateSchema,
 });
 
+export type DesktopSourceUpdateStatus =
+  | "idle"
+  | "checking"
+  | "current"
+  | "behind"
+  | "ahead"
+  | "diverged"
+  | "ignored"
+  | "unavailable"
+  | "error";
+
+export type DesktopSourceUpdateTrackedBranch = "main" | "dev";
+
+export const DesktopSourceUpdateStatusSchema = Schema.Literals([
+  "idle",
+  "checking",
+  "current",
+  "behind",
+  "ahead",
+  "diverged",
+  "ignored",
+  "unavailable",
+  "error",
+]);
+export const DesktopSourceUpdateTrackedBranchSchema = Schema.Literals(["main", "dev"]);
+
+export interface DesktopSourceUpdateState {
+  status: DesktopSourceUpdateStatus;
+  branch: string | null;
+  trackedBranch: DesktopSourceUpdateTrackedBranch | null;
+  localHash: string | null;
+  remoteHash: string | null;
+  mergeBaseHash: string | null;
+  dirty: boolean | null;
+  checkedAt: string | null;
+  message: string | null;
+}
+
+export const DesktopSourceUpdateStateSchema = Schema.Struct({
+  status: DesktopSourceUpdateStatusSchema,
+  branch: Schema.NullOr(Schema.String),
+  trackedBranch: Schema.NullOr(DesktopSourceUpdateTrackedBranchSchema),
+  localHash: Schema.NullOr(Schema.String),
+  remoteHash: Schema.NullOr(Schema.String),
+  mergeBaseHash: Schema.NullOr(Schema.String),
+  dirty: Schema.NullOr(Schema.Boolean),
+  checkedAt: Schema.NullOr(Schema.String),
+  message: Schema.NullOr(Schema.String),
+});
+
 export interface DesktopEnvironmentBootstrap {
   label: string;
   httpBaseUrl: string | null;
@@ -400,6 +450,9 @@ export interface DesktopBridge {
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   installUpdate: () => Promise<DesktopUpdateActionResult>;
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void;
+  getSourceUpdateState: () => Promise<DesktopSourceUpdateState>;
+  checkSourceUpdate: () => Promise<DesktopSourceUpdateState>;
+  onSourceUpdateState: (listener: (state: DesktopSourceUpdateState) => void) => () => void;
 }
 
 /**

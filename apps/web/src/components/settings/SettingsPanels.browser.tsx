@@ -7,6 +7,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   type DesktopBridge,
+  type DesktopSourceUpdateState,
   type DesktopUpdateChannel,
   type DesktopUpdateState,
   type LocalApi,
@@ -31,6 +32,7 @@ import {
   createRoute,
   createRouter,
 } from "@tanstack/react-router";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { __resetLocalApiForTests } from "../../localApi";
 import { AppAtomRegistryProvider, resetAppAtomRegistryForTests } from "../../rpc/atomRegistry";
@@ -42,8 +44,14 @@ import { GeneralSettingsPanel, ProviderSettingsPanel } from "./SettingsPanels";
 import { SourceControlSettingsPanel } from "./SourceControlSettings";
 
 function renderWithTestRouter(children: ReactNode) {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
   const rootRoute = createRootRoute({
-    component: () => children,
+    component: () => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>,
   });
   const indexRoute = createRoute({
     getParentRoute: () => rootRoute,
@@ -491,6 +499,8 @@ const createDesktopBridgeStub = (overrides?: {
   readonly advertisedEndpoints?: Awaited<ReturnType<DesktopBridge["getAdvertisedEndpoints"]>>;
   readonly setServerExposureMode?: DesktopBridge["setServerExposureMode"];
   readonly setUpdateChannel?: DesktopBridge["setUpdateChannel"];
+  readonly sourceUpdateState?: DesktopSourceUpdateState;
+  readonly checkSourceUpdate?: DesktopBridge["checkSourceUpdate"];
 }): DesktopBridge => {
   const idleUpdateState: DesktopUpdateState = {
     enabled: false,
@@ -507,6 +517,17 @@ const createDesktopBridgeStub = (overrides?: {
     message: null,
     errorContext: null,
     canRetry: false,
+  };
+  const sourceUpdateState: DesktopSourceUpdateState = overrides?.sourceUpdateState ?? {
+    status: "ignored",
+    branch: "feature-test",
+    trackedBranch: null,
+    localHash: "abc123",
+    remoteHash: null,
+    mergeBaseHash: null,
+    dirty: false,
+    checkedAt: "2026-01-01T00:00:00.000Z",
+    message: "Only branches main and dev are tracked.",
   };
 
   return {
@@ -618,6 +639,9 @@ const createDesktopBridgeStub = (overrides?: {
       .fn()
       .mockResolvedValue({ accepted: false, completed: false, state: idleUpdateState }),
     onUpdateState: () => () => {},
+    getSourceUpdateState: vi.fn().mockResolvedValue(sourceUpdateState),
+    checkSourceUpdate: overrides?.checkSourceUpdate ?? vi.fn().mockResolvedValue(sourceUpdateState),
+    onSourceUpdateState: () => () => {},
   };
 };
 
@@ -892,6 +916,53 @@ describe("GeneralSettingsPanel observability", () => {
         ),
       )
       .toBeInTheDocument();
+  });
+
+  it("shows source branch update status in About and refreshes it on demand", async () => {
+    const checkSourceUpdate = vi.fn().mockResolvedValue({
+      status: "behind",
+      branch: "dev",
+      trackedBranch: "dev",
+      localHash: "1111111111111111111111111111111111111111",
+      remoteHash: "2222222222222222222222222222222222222222",
+      mergeBaseHash: "1111111111111111111111111111111111111111",
+      dirty: true,
+      checkedAt: "2026-01-01T00:00:00.000Z",
+      message: "A newer dev commit is available at 222222222222.",
+    } satisfies DesktopSourceUpdateState);
+    window.desktopBridge = createDesktopBridgeStub({
+      sourceUpdateState: {
+        status: "behind",
+        branch: "dev",
+        trackedBranch: "dev",
+        localHash: "1111111111111111111111111111111111111111",
+        remoteHash: "2222222222222222222222222222222222222222",
+        mergeBaseHash: "1111111111111111111111111111111111111111",
+        dirty: true,
+        checkedAt: "2026-01-01T00:00:00.000Z",
+        message: "A newer dev commit is available at 222222222222.",
+      },
+      checkSourceUpdate,
+    });
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <GeneralSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByText("(dev branch)", { exact: false })).toBeInTheDocument();
+    await expect.element(page.getByText("Current: 111111111111 (dirty)")).toBeInTheDocument();
+    await expect.element(page.getByText("Latest origin/dev: 222222222222")).toBeInTheDocument();
+    await expect
+      .element(page.getByText("Newer dev commit available: 222222222222"))
+      .toBeInTheDocument();
+
+    await page.getByRole("button", { name: "Check for Updates" }).click();
+    await vi.waitFor(() => {
+      expect(checkSourceUpdate).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("persists the keep-awake preference from General settings", async () => {
