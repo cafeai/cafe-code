@@ -12,8 +12,10 @@ import {
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@cafecode/shared/DrainableWorker";
 
@@ -83,6 +85,9 @@ const make = Effect.gen(function* () {
   const receiptBus = yield* RuntimeReceiptBus;
   const workspaceEntries = yield* WorkspaceEntries;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
+  const cleanupScope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
+    Scope.close(scope, Exit.void),
+  );
 
   const appendRevertFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -399,12 +404,17 @@ const make = Effect.gen(function* () {
       createdAt: input.createdAt,
     });
 
+    // Pruning old refs is cleanup, not provider-turn completion truth. Keep it
+    // out of the synchronous completion path: traces from long-running Cafe
+    // sessions showed ref deletion taking multiple seconds, which delayed
+    // projection/receipt processing even though the current checkpoint had
+    // already been captured and published.
     yield* pruneOldCheckpointRefs({
       threadId: input.threadId,
       cwd: input.cwd,
       currentTurnCount: input.turnCount,
       checkpoints: input.thread.checkpoints,
-    });
+    }).pipe(Effect.ignoreCause({ log: true }), Effect.forkIn(cleanupScope), Effect.asVoid);
   });
 
   // Captures a real git checkpoint when a turn completes via a runtime event.

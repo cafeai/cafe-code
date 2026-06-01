@@ -1,4 +1,4 @@
-import { ProjectId, ThreadId, ProviderInstanceId } from "@cafecode/contracts";
+import { EventId, ProjectId, ThreadId, ProviderInstanceId } from "@cafecode/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -7,14 +7,17 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
 import { ProjectionProjectRepositoryLive } from "./ProjectionProjects.ts";
+import { ProjectionThreadActivityRepositoryLive } from "./ProjectionThreadActivities.ts";
 import { ProjectionThreadRepositoryLive } from "./ProjectionThreads.ts";
 import { ProjectionProjectRepository } from "../Services/ProjectionProjects.ts";
+import { ProjectionThreadActivityRepository } from "../Services/ProjectionThreadActivities.ts";
 import { ProjectionThreadRepository } from "../Services/ProjectionThreads.ts";
 
 const projectionRepositoriesLayer = it.layer(
   Layer.mergeAll(
     ProjectionProjectRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
     ProjectionThreadRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+    ProjectionThreadActivityRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
     SqlitePersistenceMemory,
   ),
 );
@@ -127,6 +130,72 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         instanceId: ProviderInstanceId.make("claudeAgent"),
         model: "claude-opus-4-6",
       });
+    }),
+  );
+
+  it.effect("counts pending user-input callbacks without loading activity rows", () =>
+    Effect.gen(function* () {
+      const activities = yield* ProjectionThreadActivityRepository;
+      const threadId = ThreadId.make("thread-user-input-count");
+      const now = "2026-03-24T00:00:00.000Z";
+
+      yield* activities.upsert({
+        activityId: EventId.make("activity-user-input-requested-open"),
+        threadId,
+        turnId: null,
+        tone: "info",
+        kind: "user-input.requested",
+        summary: "Input requested",
+        payload: { requestId: "request-open" },
+        createdAt: now,
+      });
+      yield* activities.upsert({
+        activityId: EventId.make("activity-user-input-requested-resolved"),
+        threadId,
+        turnId: null,
+        tone: "info",
+        kind: "user-input.requested",
+        summary: "Input requested",
+        payload: { requestId: "request-resolved" },
+        createdAt: "2026-03-24T00:00:01.000Z",
+      });
+      yield* activities.upsert({
+        activityId: EventId.make("activity-user-input-resolved"),
+        threadId,
+        turnId: null,
+        tone: "info",
+        kind: "user-input.resolved",
+        summary: "Input resolved",
+        payload: { requestId: "request-resolved" },
+        createdAt: "2026-03-24T00:00:02.000Z",
+      });
+      yield* activities.upsert({
+        activityId: EventId.make("activity-user-input-requested-stale"),
+        threadId,
+        turnId: null,
+        tone: "info",
+        kind: "user-input.requested",
+        summary: "Input requested",
+        payload: { requestId: "request-stale" },
+        createdAt: "2026-03-24T00:00:03.000Z",
+      });
+      yield* activities.upsert({
+        activityId: EventId.make("activity-user-input-stale-failure"),
+        threadId,
+        turnId: null,
+        tone: "error",
+        kind: "provider.user-input.respond.failed",
+        summary: "Input response failed",
+        payload: {
+          requestId: "request-stale",
+          detail: "stale pending user-input request",
+        },
+        createdAt: "2026-03-24T00:00:04.000Z",
+      });
+
+      const count = yield* activities.countPendingUserInputByThreadId({ threadId });
+
+      assert.strictEqual(count, 1);
     }),
   );
 });

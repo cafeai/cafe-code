@@ -47,6 +47,11 @@ export const ProjectionUserInputActivityAccountingRow = Schema.Struct({
 export type ProjectionUserInputActivityAccountingRow =
   typeof ProjectionUserInputActivityAccountingRow.Type;
 
+export const ProjectionPendingUserInputCountRow = Schema.Struct({
+  count: NonNegativeInt,
+});
+export type ProjectionPendingUserInputCountRow = typeof ProjectionPendingUserInputCountRow.Type;
+
 export const DeleteProjectionThreadActivitiesInput = Schema.Struct({
   threadId: ThreadId,
 });
@@ -89,6 +94,16 @@ export interface ProjectionThreadActivityRepositoryShape {
     ReadonlyArray<ProjectionUserInputActivityAccountingRow>,
     ProjectionRepositoryError
   >;
+
+  /**
+   * Count pending user-input callbacks without materializing every matching
+   * activity payload in JavaScript. Long-lived threads can contain hundreds of
+   * megabytes of activity JSON, so shell summary projection must keep this as a
+   * small SQL aggregate.
+   */
+  readonly countPendingUserInputByThreadId: (
+    input: ListProjectionThreadActivitiesInput,
+  ) => Effect.Effect<number, ProjectionRepositoryError>;
 
   /**
    * Delete projected thread activity rows by thread.

@@ -44,6 +44,13 @@ export const GetProjectionThreadMessageInput = Schema.Struct({
 });
 export type GetProjectionThreadMessageInput = typeof GetProjectionThreadMessageInput.Type;
 
+export const GetProjectionThreadMessageByThreadInput = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+});
+export type GetProjectionThreadMessageByThreadInput =
+  typeof GetProjectionThreadMessageByThreadInput.Type;
+
 export const DeleteProjectionThreadMessagesInput = Schema.Struct({
   threadId: ThreadId,
 });
@@ -75,6 +82,15 @@ export interface ProjectionThreadMessageRepositoryShape {
    */
   readonly getByMessageId: (
     input: GetProjectionThreadMessageInput,
+  ) => Effect.Effect<Option.Option<ProjectionThreadMessage>, ProjectionRepositoryError>;
+
+  /**
+   * Read a projected thread message using the table's thread-scoped primary
+   * key. Streaming assistant deltas already carry both ids; using both keeps
+   * the hot path off a global message-id scan on large local databases.
+   */
+  readonly getByThreadAndMessageId: (
+    input: GetProjectionThreadMessageByThreadInput,
   ) => Effect.Effect<Option.Option<ProjectionThreadMessage>, ProjectionRepositoryError>;
 
   /**

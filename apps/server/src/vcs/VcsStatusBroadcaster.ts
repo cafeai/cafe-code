@@ -10,6 +10,7 @@ import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 import type {
@@ -26,6 +27,7 @@ import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 
 const DEFAULT_VCS_STATUS_REFRESH_INTERVAL = Duration.minutes(5);
 const DISABLED_REMOTE_REFRESH_RECHECK_INTERVAL = Duration.minutes(5);
+const VCS_REMOTE_REFRESH_MIN_INTERVAL = Duration.seconds(30);
 const VCS_STATUS_REFRESH_FAILURE_BASE_DELAY = Duration.seconds(30);
 const VCS_STATUS_REFRESH_FAILURE_MAX_DELAY = Duration.minutes(15);
 const VCS_STATUS_REFRESH_SLOW_CALL_MULTIPLIER = 5;
@@ -124,6 +126,10 @@ export const layer = Layer.effect(
     );
     const cacheRef = yield* Ref.make(new Map<string, CachedVcsStatus>());
     const pollersRef = yield* SynchronizedRef.make(new Map<string, ActiveRemotePoller>());
+    const remoteRefreshSemaphoresRef = yield* Ref.make<ReadonlyMap<string, Semaphore.Semaphore>>(
+      new Map(),
+    );
+    const lastRemoteRefreshStartedAtRef = yield* Ref.make<ReadonlyMap<string, number>>(new Map());
 
     const getCachedStatus = Effect.fn("VcsStatusBroadcaster.getCachedStatus")(function* (
       cwd: string,
@@ -209,6 +215,26 @@ export const layer = Layer.effect(
       return yield* updateCachedRemoteStatus(cwd, remote);
     });
 
+    const getRemoteRefreshSemaphore = Effect.fn("VcsStatusBroadcaster.getRemoteRefreshSemaphore")(
+      function* (cwd: string) {
+        const existing = (yield* Ref.get(remoteRefreshSemaphoresRef)).get(cwd);
+        if (existing) {
+          return existing;
+        }
+
+        const semaphore = yield* Semaphore.make(1);
+        return yield* Ref.modify(remoteRefreshSemaphoresRef, (semaphores) => {
+          const current = semaphores.get(cwd);
+          if (current) {
+            return [current, semaphores] as const;
+          }
+          const next = new Map(semaphores);
+          next.set(cwd, semaphore);
+          return [semaphore, next] as const;
+        });
+      },
+    );
+
     const getOrLoadLocalStatus = Effect.fn("VcsStatusBroadcaster.getOrLoadLocalStatus")(function* (
       cwd: string,
     ) {
@@ -254,9 +280,32 @@ export const layer = Layer.effect(
     const refreshRemoteStatus = Effect.fn("VcsStatusBroadcaster.refreshRemoteStatus")(function* (
       cwd: string,
     ) {
-      yield* workflow.invalidateRemoteStatus(cwd);
-      const remote = yield* workflow.remoteStatus({ cwd });
-      return yield* updateCachedRemoteStatus(cwd, remote, { publish: true });
+      const semaphore = yield* getRemoteRefreshSemaphore(cwd);
+      return yield* semaphore.withPermits(1)(
+        Effect.gen(function* () {
+          const nowMs = yield* Clock.currentTimeMillis;
+          const cached = yield* getCachedStatus(cwd);
+          const lastStartedAtMs = (yield* Ref.get(lastRemoteRefreshStartedAtRef)).get(cwd) ?? 0;
+          const minIntervalMs = Duration.toMillis(VCS_REMOTE_REFRESH_MIN_INTERVAL);
+
+          // Remote status refresh can involve fetch/hosting-provider lookups.
+          // Trace data showed this blocking for seconds during provider work,
+          // so collapse refresh storms per workspace and serve the fresh cached
+          // value for a short interval. Local status still refreshes normally.
+          if (cached?.remote && nowMs - lastStartedAtMs < minIntervalMs) {
+            return cached.remote.value;
+          }
+
+          yield* Ref.update(lastRemoteRefreshStartedAtRef, (lastStartedAt) => {
+            const next = new Map(lastStartedAt);
+            next.set(cwd, nowMs);
+            return next;
+          });
+          yield* workflow.invalidateRemoteStatus(cwd);
+          const remote = yield* workflow.remoteStatus({ cwd });
+          return yield* updateCachedRemoteStatus(cwd, remote, { publish: true });
+        }),
+      );
     });
 
     const refreshStatus: VcsStatusBroadcasterShape["refreshStatus"] = Effect.fn(

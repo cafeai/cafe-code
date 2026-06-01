@@ -21,7 +21,6 @@ import { ProjectionStateRepository } from "../../persistence/Services/Projection
 import {
   type ProjectionThreadActivity,
   ProjectionThreadActivityRepository,
-  type ProjectionUserInputActivityAccountingRow,
 } from "../../persistence/Services/ProjectionThreadActivities.ts";
 import {
   type ProjectionThreadMessage,
@@ -217,50 +216,6 @@ function doesActivityAffectThreadShellSummary(
     default:
       return false;
   }
-}
-
-function derivePendingUserInputCountFromAccountingRows(
-  activities: ReadonlyArray<ProjectionUserInputActivityAccountingRow>,
-): number {
-  const openRequestIds = new Set<string>();
-  const ordered = [...activities].toSorted(
-    (left, right) =>
-      left.createdAt.localeCompare(right.createdAt) ||
-      left.activityId.localeCompare(right.activityId),
-  );
-
-  for (const activity of ordered) {
-    const requestId = extractActivityRequestId(activity.payload);
-    if (requestId === null) {
-      continue;
-    }
-    const payload =
-      typeof activity.payload === "object" && activity.payload !== null
-        ? (activity.payload as Record<string, unknown>)
-        : null;
-    const detail = typeof payload?.detail === "string" ? payload.detail.toLowerCase() : null;
-
-    if (activity.kind === "user-input.requested") {
-      openRequestIds.add(requestId);
-      continue;
-    }
-
-    if (activity.kind === "user-input.resolved") {
-      openRequestIds.delete(requestId);
-      continue;
-    }
-
-    if (
-      activity.kind === "provider.user-input.respond.failed" &&
-      detail !== null &&
-      (detail.includes("stale pending user-input request") ||
-        detail.includes("unknown pending user-input request"))
-    ) {
-      openRequestIds.delete(requestId);
-    }
-  }
-
-  return openRequestIds.size;
 }
 
 function retainProjectionMessagesAfterRevert(
@@ -624,7 +579,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         latestUserMessageAt,
         latestPlanForTurn,
         latestPlan,
-        userInputActivities,
+        pendingUserInputCount,
         pendingApprovalCount,
       ] = yield* Effect.all([
         projectionThreadMessageRepository.getLatestUserMessageAtByThreadId({ threadId }),
@@ -635,13 +590,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               turnId: existingRow.value.latestTurnId,
             }),
         projectionThreadProposedPlanRepository.getLatestByThreadId({ threadId }),
-        projectionThreadActivityRepository.listUserInputAccountingByThreadId({ threadId }),
+        projectionThreadActivityRepository.countPendingUserInputByThreadId({ threadId }),
         projectionPendingApprovalRepository.countPendingByThreadId({ threadId }),
       ]);
 
       const selectedPlan = Option.isSome(latestPlanForTurn) ? latestPlanForTurn : latestPlan;
-      const pendingUserInputCount =
-        derivePendingUserInputCountFromAccountingRows(userInputActivities);
       const hasActionableProposedPlan =
         Option.isSome(selectedPlan) && selectedPlan.value.implementedAt === null;
 
@@ -1009,7 +962,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     )(function* (event, attachmentSideEffects) {
       switch (event.type) {
         case "thread.message-sent": {
-          const existingMessage = yield* projectionThreadMessageRepository.getByMessageId({
+          const existingMessage = yield* projectionThreadMessageRepository.getByThreadAndMessageId({
+            threadId: event.payload.threadId,
             messageId: event.payload.messageId,
           });
           const previousMessage = Option.getOrUndefined(existingMessage);
