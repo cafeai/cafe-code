@@ -487,6 +487,123 @@ describe("OrchestrationEngine", () => {
     await system.dispose();
   });
 
+  it("starts a new turn when only a stale latest running turn remains", async () => {
+    const createdAt = now();
+    const system = await createOrchestrationSystem();
+    const { engine } = system;
+    const threadId = ThreadId.make("thread-stale-latest-running-starts-new-turn");
+
+    await system.run(
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-project-stale-latest-create"),
+        projectId: asProjectId("project-stale-latest"),
+        title: "Project Stale Latest",
+        workspaceRoot: "/tmp/project-stale-latest",
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.5",
+        },
+        createdAt,
+      }),
+    );
+    await system.run(
+      engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-thread-stale-latest-create"),
+        threadId,
+        projectId: asProjectId("project-stale-latest"),
+        title: "Thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.5",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      }),
+    );
+    await system.run(
+      engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-stale-latest-first"),
+        threadId,
+        message: {
+          messageId: asMessageId("msg-stale-latest-first"),
+          role: "user",
+          text: "first",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+    await system.run(
+      engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-stale-latest-ready"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: "2026-01-01T00:00:02.000Z",
+        },
+        createdAt: "2026-01-01T00:00:02.000Z",
+      }),
+    );
+
+    await system.run(
+      engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-stale-latest-second"),
+        threadId,
+        message: {
+          messageId: asMessageId("msg-stale-latest-second"),
+          role: "user",
+          text: "second",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: "2026-01-01T00:00:03.000Z",
+      }),
+    );
+
+    const events = await system.run(
+      Stream.runCollect(engine.readEvents(0)).pipe(
+        Effect.map((chunk): OrchestrationEvent[] => Array.from(chunk)),
+      ),
+    );
+    expect(
+      events.filter(
+        (event): event is Extract<OrchestrationEvent, { type: "thread.turn-start-requested" }> =>
+          event.type === "thread.turn-start-requested",
+      ),
+    ).toHaveLength(2);
+    expect(
+      events.filter(
+        (event): event is Extract<OrchestrationEvent, { type: "thread.turn-steer-requested" }> =>
+          event.type === "thread.turn-steer-requested",
+      ),
+    ).toHaveLength(0);
+    const secondMessage = events.find(
+      (event): event is Extract<OrchestrationEvent, { type: "thread.message-sent" }> =>
+        event.type === "thread.message-sent" &&
+        event.payload.messageId === "msg-stale-latest-second",
+    );
+    expect(secondMessage?.payload.turnId).toBeNull();
+
+    await system.dispose();
+  });
+
   it("archives and unarchives threads through orchestration commands", async () => {
     const system = await createOrchestrationSystem();
     const { engine } = system;

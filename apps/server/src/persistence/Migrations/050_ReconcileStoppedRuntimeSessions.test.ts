@@ -9,7 +9,7 @@ import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
 layer("050_ReconcileStoppedRuntimeSessions", (it) => {
-  it.effect("stops projected active turns when the provider runtime is already stopped", () =>
+  it.effect("interrupts orphan running turns when the runtime is stopped", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
 
@@ -28,34 +28,24 @@ layer("050_ReconcileStoppedRuntimeSessions", (it) => {
         )
         VALUES
           (
-            'thread-runtime-stopped',
+            'thread-orphan-stopped',
             'project',
-            'runtime stopped',
+            'orphan stopped',
             NULL,
             NULL,
-            'turn-stale-active',
-            '2026-05-26T15:22:39.176Z',
-            '2026-05-26T15:22:39.734Z'
+            'turn-orphan',
+            '2026-06-01T09:00:00.000Z',
+            '2026-06-01T09:59:00.000Z'
           ),
           (
-            'thread-runtime-running',
+            'thread-runtime-active',
             'project',
-            'runtime running',
+            'runtime active',
             NULL,
             NULL,
-            'turn-live-active',
-            '2026-05-26T15:30:00.000Z',
-            '2026-05-26T15:30:01.000Z'
-          ),
-          (
-            'thread-already-stopped',
-            'project',
-            'already stopped',
-            NULL,
-            NULL,
-            'turn-already-stopped',
-            '2026-05-26T15:10:00.000Z',
-            '2026-05-26T15:10:10.000Z'
+            'turn-active',
+            '2026-06-01T09:00:00.000Z',
+            '2026-06-01T09:59:00.000Z'
           )
       `;
 
@@ -72,34 +62,61 @@ layer("050_ReconcileStoppedRuntimeSessions", (it) => {
         )
         VALUES
           (
-            'thread-runtime-stopped',
-            'running',
+            'thread-orphan-stopped',
+            'ready',
             'codex',
-            'codex_astrea',
+            'codex',
             'full-access',
-            'turn-stale-active',
             NULL,
-            '2026-05-26T15:22:39.734Z'
+            NULL,
+            '2026-06-01T09:51:00.000Z'
           ),
           (
-            'thread-runtime-running',
+            'thread-runtime-active',
             'running',
             'codex',
-            'codex_astrea',
+            'codex',
             'full-access',
-            'turn-live-active',
+            'turn-active',
             NULL,
-            '2026-05-26T15:30:01.000Z'
-          ),
+            '2026-06-01T09:51:00.000Z'
+          )
+      `;
+
+      yield* sql`
+        INSERT INTO provider_session_runtime (
+          thread_id,
+          provider_name,
+          adapter_key,
+          runtime_mode,
+          status,
+          last_seen_at,
+          resume_cursor_json,
+          runtime_payload_json,
+          provider_instance_id
+        )
+        VALUES
           (
-            'thread-already-stopped',
+            'thread-orphan-stopped',
+            'codex',
+            'codex',
+            'full-access',
             'stopped',
+            '2026-06-01T09:51:00.000Z',
+            '{"threadId":"codex-thread"}',
+            '{"activeTurnId":null,"lastRuntimeEvent":"provider.stopAll"}',
+            'codex'
+          ),
+          (
+            'thread-runtime-active',
             'codex',
-            'codex_astrea',
+            'codex',
             'full-access',
-            NULL,
-            NULL,
-            '2026-05-26T15:10:10.000Z'
+            'running',
+            '2026-06-01T09:51:00.000Z',
+            '{"threadId":"codex-thread-active"}',
+            '{"activeTurnId":"turn-active","lastRuntimeEvent":"turn.started"}',
+            'codex'
           )
       `;
 
@@ -120,13 +137,13 @@ layer("050_ReconcileStoppedRuntimeSessions", (it) => {
         )
         VALUES
           (
-            'thread-runtime-stopped',
-            'turn-stale-active',
-            'user-stale',
-            'assistant-stale',
+            'thread-orphan-stopped',
+            'turn-orphan',
+            'user-orphan',
+            'assistant-orphan-streaming',
             'running',
-            '2026-05-26T15:22:39.176Z',
-            '2026-05-26T15:22:39.734Z',
+            '2026-06-01T09:20:00.000Z',
+            '2026-06-01T09:20:01.000Z',
             NULL,
             NULL,
             NULL,
@@ -134,13 +151,13 @@ layer("050_ReconcileStoppedRuntimeSessions", (it) => {
             '[]'
           ),
           (
-            'thread-runtime-running',
-            'turn-live-active',
-            'user-live',
-            'assistant-live',
+            'thread-orphan-stopped',
+            'turn-after-stop',
+            'user-after-stop',
+            'assistant-after-stop',
             'running',
-            '2026-05-26T15:30:00.000Z',
-            '2026-05-26T15:30:01.000Z',
+            '2026-06-01T09:52:00.000Z',
+            '2026-06-01T09:52:01.000Z',
             NULL,
             NULL,
             NULL,
@@ -148,14 +165,14 @@ layer("050_ReconcileStoppedRuntimeSessions", (it) => {
             '[]'
           ),
           (
-            'thread-already-stopped',
-            'turn-already-stopped',
-            'user-already-stopped',
-            'assistant-already-stopped',
-            'completed',
-            '2026-05-26T15:10:00.000Z',
-            '2026-05-26T15:10:01.000Z',
-            '2026-05-26T15:10:10.000Z',
+            'thread-runtime-active',
+            'turn-active',
+            'user-active',
+            'assistant-active-streaming',
+            'running',
+            '2026-06-01T09:20:00.000Z',
+            '2026-06-01T09:20:01.000Z',
+            NULL,
             NULL,
             NULL,
             NULL,
@@ -177,114 +194,41 @@ layer("050_ReconcileStoppedRuntimeSessions", (it) => {
         )
         VALUES
           (
-            'assistant-stale',
-            'thread-runtime-stopped',
-            'turn-stale-active',
+            'assistant-orphan-streaming',
+            'thread-orphan-stopped',
+            'turn-orphan',
             'assistant',
-            'partial text',
+            'orphan partial text',
             NULL,
             1,
-            '2026-05-26T15:22:45.000Z',
-            '2026-05-26T15:22:56.000Z'
+            '2026-06-01T09:20:02.000Z',
+            '2026-06-01T09:20:03.000Z'
           ),
           (
-            'assistant-live',
-            'thread-runtime-running',
-            'turn-live-active',
+            'assistant-after-stop',
+            'thread-orphan-stopped',
+            'turn-after-stop',
             'assistant',
-            'live text',
+            'newer partial text',
             NULL,
             1,
-            '2026-05-26T15:30:02.000Z',
-            '2026-05-26T15:30:03.000Z'
-          )
-      `;
-
-      yield* sql`
-        INSERT INTO provider_session_runtime (
-          thread_id,
-          provider_name,
-          adapter_key,
-          runtime_mode,
-          status,
-          last_seen_at,
-          resume_cursor_json,
-          runtime_payload_json,
-          provider_instance_id
-        )
-        VALUES
-          (
-            'thread-runtime-stopped',
-            'codex',
-            'codex',
-            'full-access',
-            'stopped',
-            '2026-05-26T15:38:46.866Z',
-            '{"threadId":"codex-thread"}',
-            '{"activeTurnId":null,"lastRuntimeEvent":"provider.stopAll"}',
-            'codex_astrea'
+            '2026-06-01T09:52:02.000Z',
+            '2026-06-01T09:52:03.000Z'
           ),
           (
-            'thread-runtime-running',
-            'codex',
-            'codex',
-            'full-access',
-            'running',
-            '2026-05-26T15:31:00.000Z',
-            '{"threadId":"codex-live-thread"}',
-            '{"activeTurnId":"turn-live-active"}',
-            'codex_astrea'
-          ),
-          (
-            'thread-already-stopped',
-            'codex',
-            'codex',
-            'full-access',
-            'stopped',
-            '2026-05-26T15:40:00.000Z',
-            '{"threadId":"codex-already-stopped-thread"}',
-            '{"activeTurnId":null,"lastRuntimeEvent":"provider.stopAll"}',
-            'codex_astrea'
+            'assistant-active-streaming',
+            'thread-runtime-active',
+            'turn-active',
+            'assistant',
+            'active partial text',
+            NULL,
+            1,
+            '2026-06-01T09:20:02.000Z',
+            '2026-06-01T09:20:03.000Z'
           )
       `;
 
       yield* runMigrations({ toMigrationInclusive: 50 });
-
-      const sessions = yield* sql<{
-        readonly threadId: string;
-        readonly status: string;
-        readonly activeTurnId: string | null;
-        readonly updatedAt: string;
-      }>`
-        SELECT
-          thread_id AS "threadId",
-          status,
-          active_turn_id AS "activeTurnId",
-          updated_at AS "updatedAt"
-        FROM projection_thread_sessions
-        ORDER BY thread_id ASC
-      `;
-
-      assert.deepStrictEqual(sessions, [
-        {
-          threadId: "thread-already-stopped",
-          status: "stopped",
-          activeTurnId: null,
-          updatedAt: "2026-05-26T15:10:10.000Z",
-        },
-        {
-          threadId: "thread-runtime-running",
-          status: "running",
-          activeTurnId: "turn-live-active",
-          updatedAt: "2026-05-26T15:30:01.000Z",
-        },
-        {
-          threadId: "thread-runtime-stopped",
-          status: "stopped",
-          activeTurnId: null,
-          updatedAt: "2026-05-26T15:38:46.866Z",
-        },
-      ]);
 
       const turns = yield* sql<{
         readonly threadId: string;
@@ -298,27 +242,27 @@ layer("050_ReconcileStoppedRuntimeSessions", (it) => {
           state,
           completed_at AS "completedAt"
         FROM projection_turns
-        ORDER BY thread_id ASC
+        ORDER BY thread_id ASC, turn_id ASC
       `;
 
       assert.deepStrictEqual(turns, [
         {
-          threadId: "thread-already-stopped",
-          turnId: "turn-already-stopped",
-          state: "completed",
-          completedAt: "2026-05-26T15:10:10.000Z",
-        },
-        {
-          threadId: "thread-runtime-running",
-          turnId: "turn-live-active",
+          threadId: "thread-orphan-stopped",
+          turnId: "turn-after-stop",
           state: "running",
           completedAt: null,
         },
         {
-          threadId: "thread-runtime-stopped",
-          turnId: "turn-stale-active",
+          threadId: "thread-orphan-stopped",
+          turnId: "turn-orphan",
           state: "interrupted",
-          completedAt: "2026-05-26T15:38:46.866Z",
+          completedAt: "2026-06-01T09:51:00.000Z",
+        },
+        {
+          threadId: "thread-runtime-active",
+          turnId: "turn-active",
+          state: "running",
+          completedAt: null,
         },
       ]);
 
@@ -337,40 +281,19 @@ layer("050_ReconcileStoppedRuntimeSessions", (it) => {
 
       assert.deepStrictEqual(messages, [
         {
-          messageId: "assistant-live",
+          messageId: "assistant-active-streaming",
           isStreaming: 1,
-          updatedAt: "2026-05-26T15:30:03.000Z",
+          updatedAt: "2026-06-01T09:20:03.000Z",
         },
         {
-          messageId: "assistant-stale",
+          messageId: "assistant-after-stop",
+          isStreaming: 1,
+          updatedAt: "2026-06-01T09:52:03.000Z",
+        },
+        {
+          messageId: "assistant-orphan-streaming",
           isStreaming: 0,
-          updatedAt: "2026-05-26T15:38:46.866Z",
-        },
-      ]);
-
-      const threads = yield* sql<{
-        readonly threadId: string;
-        readonly updatedAt: string;
-      }>`
-        SELECT
-          thread_id AS "threadId",
-          updated_at AS "updatedAt"
-        FROM projection_threads
-        ORDER BY thread_id ASC
-      `;
-
-      assert.deepStrictEqual(threads, [
-        {
-          threadId: "thread-already-stopped",
-          updatedAt: "2026-05-26T15:10:10.000Z",
-        },
-        {
-          threadId: "thread-runtime-running",
-          updatedAt: "2026-05-26T15:30:01.000Z",
-        },
-        {
-          threadId: "thread-runtime-stopped",
-          updatedAt: "2026-05-26T15:38:46.866Z",
+          updatedAt: "2026-06-01T09:51:00.000Z",
         },
       ]);
     }),

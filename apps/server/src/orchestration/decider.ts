@@ -53,7 +53,7 @@ function threadHasUnsettledTurnStart(thread: OrchestrationReadModel["threads"][n
   if (thread.session?.activeTurnId !== null && thread.session?.activeTurnId !== undefined) {
     return true;
   }
-  return thread.latestTurn?.state === "running" && thread.latestTurn.completedAt === null;
+  return false;
 }
 
 function activeTurnIdForSteer(
@@ -62,7 +62,13 @@ function activeTurnIdForSteer(
   if (thread.session?.activeTurnId !== null && thread.session?.activeTurnId !== undefined) {
     return thread.session.activeTurnId;
   }
-  if (thread.latestTurn?.state === "running" && thread.latestTurn.completedAt === null) {
+  // A running projection row is not enough proof that a provider turn is still
+  // steerable. After a restart or stop-all, durable runtime state can be
+  // stopped while a stale `projection_turns.state = running` row remains. In
+  // that case upstream Codex CLI/TUI would start/resume fresh local app-server
+  // state instead of steering a dead turn, so only use the latest-turn fallback
+  // while the session itself still claims an active running provider boundary.
+  if (thread.session?.status === "running" && thread.latestTurn?.state === "running") {
     return thread.latestTurn.turnId;
   }
   return null;

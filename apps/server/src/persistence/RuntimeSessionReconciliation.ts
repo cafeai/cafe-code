@@ -94,6 +94,112 @@ export const reconcileStoppedRuntimeSessions = Effect.gen(function* () {
       )
   `;
 
+  // A stopped runtime row with no active turn means Cafe no longer has a live
+  // provider process that can produce more output for pre-stop turns. Older
+  // versions only closed the projected session's active_turn_id; that missed
+  // cases where interrupt/stop cleared the session while one or more
+  // projection_turns rows remained `running`. Those orphan running rows make
+  // the renderer believe work is still active and cause new prompts to be
+  // routed as steers to a dead app-server. Close every pre-stop running turn for
+  // the stopped runtime owner, matching the Codex CLI/TUI model where local
+  // app-server state is disposable after stop/interrupt.
+  yield* sql`
+    WITH stopped_runtime_sessions AS (
+      SELECT
+        runtime.thread_id,
+        runtime.last_seen_at AS stopped_at,
+        CASE
+          WHEN runtime.runtime_payload_json IS NOT NULL
+           AND json_valid(runtime.runtime_payload_json)
+          THEN json_extract(runtime.runtime_payload_json, '$.activeTurnId')
+          ELSE NULL
+        END AS runtime_active_turn_id
+      FROM provider_session_runtime runtime
+      WHERE runtime.status = 'stopped'
+    ),
+    orphan_running_turns AS (
+      SELECT
+        turns.thread_id,
+        turns.turn_id,
+        stopped.stopped_at
+      FROM projection_turns turns
+      JOIN stopped_runtime_sessions stopped
+        ON stopped.thread_id = turns.thread_id
+      WHERE stopped.runtime_active_turn_id IS NULL
+        AND turns.state IN ('pending', 'running')
+        AND turns.requested_at <= stopped.stopped_at
+    )
+    UPDATE projection_turns
+    SET
+      state = 'interrupted',
+      started_at = COALESCE(started_at, requested_at),
+      completed_at = COALESCE(completed_at, (
+        SELECT orphan.stopped_at
+        FROM orphan_running_turns orphan
+        WHERE orphan.thread_id = projection_turns.thread_id
+          AND orphan.turn_id = projection_turns.turn_id
+        LIMIT 1
+      ))
+    WHERE EXISTS (
+      SELECT 1
+      FROM orphan_running_turns orphan
+      WHERE orphan.thread_id = projection_turns.thread_id
+        AND orphan.turn_id = projection_turns.turn_id
+    )
+  `;
+
+  yield* sql`
+    WITH stopped_runtime_sessions AS (
+      SELECT
+        runtime.thread_id,
+        runtime.last_seen_at AS stopped_at,
+        CASE
+          WHEN runtime.runtime_payload_json IS NOT NULL
+           AND json_valid(runtime.runtime_payload_json)
+          THEN json_extract(runtime.runtime_payload_json, '$.activeTurnId')
+          ELSE NULL
+        END AS runtime_active_turn_id
+      FROM provider_session_runtime runtime
+      WHERE runtime.status = 'stopped'
+    ),
+    closed_orphan_turns AS (
+      SELECT
+        turns.thread_id,
+        turns.turn_id,
+        turns.completed_at AS closed_at
+      FROM projection_turns turns
+      JOIN stopped_runtime_sessions stopped
+        ON stopped.thread_id = turns.thread_id
+      WHERE stopped.runtime_active_turn_id IS NULL
+        AND turns.state IN ('completed', 'interrupted', 'error')
+        AND turns.completed_at IS NOT NULL
+        AND turns.requested_at <= stopped.stopped_at
+    )
+    UPDATE projection_thread_messages
+    SET
+      is_streaming = 0,
+      updated_at = COALESCE((
+        SELECT CASE
+          WHEN closed.closed_at > projection_thread_messages.updated_at
+          THEN closed.closed_at
+          ELSE projection_thread_messages.updated_at
+        END
+        FROM closed_orphan_turns closed
+        WHERE closed.thread_id = projection_thread_messages.thread_id
+          AND closed.turn_id = projection_thread_messages.turn_id
+        LIMIT 1
+      ), projection_thread_messages.updated_at)
+    WHERE is_streaming = 1
+      AND role = 'assistant'
+      AND turn_id IS NOT NULL
+      AND EXISTS (
+        SELECT 1
+        FROM closed_orphan_turns closed
+        WHERE closed.thread_id = projection_thread_messages.thread_id
+          AND closed.turn_id = projection_thread_messages.turn_id
+      )
+  `;
+
   yield* sql`
     WITH stopped_runtime_sessions AS (
       SELECT
