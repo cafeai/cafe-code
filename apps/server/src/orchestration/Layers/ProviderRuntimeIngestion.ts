@@ -1533,6 +1533,31 @@ const make = Effect.gen(function* () {
       const conflictsWithActiveTurn =
         activeTurnId !== null && eventTurnId !== undefined && !sameId(activeTurnId, eventTurnId);
       const missingTurnForActiveTurn = activeTurnId !== null && eventTurnId === undefined;
+      const conflictingEventCanRepairActiveTurn =
+        conflictsWithActiveTurn &&
+        eventTurnId !== undefined &&
+        (event.type === "turn.started" || runtimeEventCarriesActiveTurnWork(event));
+      const providerRuntimeActiveTurnIdForConflict = conflictingEventCanRepairActiveTurn
+        ? yield* getExpectedProviderTurnIdForThread(thread.id).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning(
+                "provider runtime ingestion could not read runtime active turn for conflicting provider event",
+                {
+                  eventId: event.eventId,
+                  eventType: event.type,
+                  threadId: thread.id,
+                  projectedActiveTurnId: activeTurnId,
+                  eventTurnId,
+                  cause: Cause.pretty(cause),
+                },
+              ).pipe(Effect.as(undefined)),
+            ),
+          )
+        : undefined;
+      const providerRuntimeOwnsConflictingTurn = sameId(
+        providerRuntimeActiveTurnIdForConflict,
+        eventTurnId,
+      );
 
       const shouldApplyThreadLifecycle = (() => {
         if (!STRICT_PROVIDER_LIFECYCLE_GUARD) {
@@ -1547,7 +1572,16 @@ const make = Effect.gen(function* () {
           case "thread.state.changed":
             return eventTurnId === undefined || !conflictsWithActiveTurn;
           case "turn.started":
-            return !conflictsWithActiveTurn;
+            // Codex `turn/start` returns a submission ACK before the app-server
+            // event stream has established the concrete active turn. On resume
+            // or restart, that ACK turn id can differ from the later
+            // `turn/started` notification that Codex itself reports as active.
+            // When the provider runtime directory agrees with the conflicting
+            // notification, treat the notification as authoritative and repair
+            // the projected active turn instead of keeping Cafe pinned to the
+            // provisional ACK. This follows the CLI/TUI model: local request
+            // ACKs are not provider lifecycle truth.
+            return !conflictsWithActiveTurn || providerRuntimeOwnsConflictingTurn;
           case "turn.aborted":
             if (conflictsWithActiveTurn) {
               return false;
@@ -1588,9 +1622,8 @@ const make = Effect.gen(function* () {
       // regress completed threads back to "running".
       const eventCarriesActiveTurnWork =
         eventTurnId !== undefined &&
-        !conflictsWithActiveTurn &&
         runtimeEventCarriesActiveTurnWork(event) &&
-        eventMatchesTrackedActiveTurn;
+        (eventMatchesTrackedActiveTurn || providerRuntimeOwnsConflictingTurn);
       // Once turn.started has made the provider turn active, token/tool
       // notifications are runtime progress facts, not session heartbeats that
       // need another durable thread.session-set. Writing a session-set for
@@ -1599,7 +1632,9 @@ const make = Effect.gen(function* () {
       // directly without persisting per-token lifecycle state.
       const shouldRefreshSessionForActiveTurnWork =
         eventCarriesActiveTurnWork &&
-        (thread.session?.status !== "running" || (thread.session?.lastError ?? null) !== null);
+        (thread.session?.status !== "running" ||
+          (thread.session?.lastError ?? null) !== null ||
+          providerRuntimeOwnsConflictingTurn);
 
       if (
         event.type === "session.started" ||

@@ -1501,6 +1501,47 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         }
       }
 
+      if (
+        event.payload.session.status === "running" &&
+        event.payload.session.activeTurnId !== null &&
+        Option.isSome(existingSession) &&
+        existingSession.value.activeTurnId !== null &&
+        existingSession.value.activeTurnId !== event.payload.session.activeTurnId
+      ) {
+        const previousActiveTurn = yield* projectionTurnRepository.getByTurnId({
+          threadId: event.payload.threadId,
+          turnId: existingSession.value.activeTurnId,
+        });
+        const shouldRetirePreviousActiveTurn =
+          Option.isSome(previousActiveTurn) &&
+          previousActiveTurn.value.state === "running" &&
+          shouldPromoteLatestTurnFromSessionSet({
+            currentLatestTurn: previousActiveTurn,
+            candidateActiveTurn: runningActiveTurn,
+            candidateActiveTurnId: event.payload.session.activeTurnId,
+            sessionUpdatedAt: event.payload.session.updatedAt,
+          });
+
+        if (shouldRetirePreviousActiveTurn) {
+          // A later concrete provider-owned turn is durable evidence that the
+          // prior active turn id was only provisional or stale. Close it here so
+          // renderer gates, interrupt targeting, and streaming markers follow
+          // the same single-active-turn invariant as the Codex CLI/TUI.
+          yield* projectionTurnRepository.upsertByTurnId({
+            ...previousActiveTurn.value,
+            state: "interrupted",
+            completedAt: previousActiveTurn.value.completedAt ?? event.payload.session.updatedAt,
+            startedAt: previousActiveTurn.value.startedAt ?? event.payload.session.updatedAt,
+            requestedAt: previousActiveTurn.value.requestedAt ?? event.payload.session.updatedAt,
+          });
+          yield* projectionThreadMessageRepository.closeStreamingByTurnId({
+            threadId: event.payload.threadId,
+            turnId: existingSession.value.activeTurnId,
+            updatedAt: event.payload.session.updatedAt,
+          });
+        }
+      }
+
       yield* projectionThreadSessionRepository.upsert({
         threadId: event.payload.threadId,
         status: event.payload.session.status,

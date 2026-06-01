@@ -1611,16 +1611,32 @@ function threadHasSteerProcessingStarted(thread: Thread, pending: PendingSteerDi
     if (activity.createdAt < pending.dispatchedAt) {
       return false;
     }
-    if (pending.turnId !== null && activity.turnId !== pending.turnId) {
-      return false;
-    }
 
     const payload = readDebugRecord(activity.payload);
     const taskId = readDebugString(payload?.taskId);
     const description = readDebugString(payload?.description);
-    return (
+    const isSteerProcessingActivity =
       taskId?.startsWith("codex-turn-steer-processing:") === true ||
-      description === "Codex app-server began processing turn/steer."
+      description === "Codex app-server began processing turn/steer.";
+    if (!isSteerProcessingActivity) {
+      return false;
+    }
+    if (pending.turnId === null || activity.turnId === pending.turnId) {
+      return true;
+    }
+
+    // Codex can ACK a turn/start or steer against Cafe's provisional active
+    // turn id, then report the concrete app-server active turn under a
+    // different id. The backend repairs that projection, but the renderer may
+    // still be holding an older pending-steer marker from before the repair.
+    // Treat the explicit Codex steer-processing marker as enough to clear that
+    // marker when it lands on the current provider-owned turn for the same
+    // thread; unrelated task.progress rows still cannot clear it.
+    return (
+      thread.session?.provider === "codex" &&
+      activity.turnId !== null &&
+      (activity.turnId === thread.session.activeTurnId ||
+        activity.turnId === thread.latestTurn?.turnId)
     );
   });
 }

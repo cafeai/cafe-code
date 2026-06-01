@@ -3384,6 +3384,139 @@ describe("ProviderRuntimeIngestion", () => {
     expect(running.latestTurn?.startedAt).toBe(startedAt);
   });
 
+  it("lets Codex turn.started repair a provisional ACK active turn id", async () => {
+    const harness = await createHarness();
+    const provisionalTurnId = asTurnId("turn-provisional-ack");
+    const concreteTurnId = asTurnId("turn-provider-active");
+    const sessionAt = "2026-01-01T00:00:01.000Z";
+    const startedAt = "2026-01-01T00:00:02.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-provisional-active"),
+        threadId: asThreadId("thread-1"),
+        session: {
+          threadId: asThreadId("thread-1"),
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: provisionalTurnId,
+          updatedAt: sessionAt,
+          lastError: null,
+        },
+        createdAt: sessionAt,
+      }),
+    );
+    await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "running" && entry.session.activeTurnId === provisionalTurnId,
+    );
+
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId: asThreadId("thread-1"),
+      createdAt: sessionAt,
+      updatedAt: startedAt,
+      activeTurnId: concreteTurnId,
+    });
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-concrete-provider-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      createdAt: startedAt,
+      threadId: asThreadId("thread-1"),
+      turnId: concreteTurnId,
+      payload: {},
+    });
+
+    const repaired = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "running" &&
+        entry.session.activeTurnId === concreteTurnId &&
+        entry.latestTurn?.turnId === concreteTurnId,
+    );
+
+    expect(repaired.latestTurn?.startedAt).toBe(startedAt);
+  });
+
+  it("repairs a stale projected Codex active turn from provider-owned active work", async () => {
+    const harness = await createHarness();
+    const staleTurnId = asTurnId("turn-stale-projection");
+    const concreteTurnId = asTurnId("turn-provider-work");
+    const sessionAt = "2026-01-01T00:00:01.000Z";
+    const workAt = "2026-01-01T00:00:03.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-stale-active"),
+        threadId: asThreadId("thread-1"),
+        session: {
+          threadId: asThreadId("thread-1"),
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: staleTurnId,
+          updatedAt: sessionAt,
+          lastError: null,
+        },
+        createdAt: sessionAt,
+      }),
+    );
+    await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.status === "running" && entry.session.activeTurnId === staleTurnId,
+    );
+
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId: asThreadId("thread-1"),
+      createdAt: sessionAt,
+      updatedAt: workAt,
+      activeTurnId: concreteTurnId,
+    });
+
+    harness.emit({
+      type: "item.started",
+      eventId: asEventId("evt-concrete-provider-work"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      createdAt: workAt,
+      threadId: asThreadId("thread-1"),
+      turnId: concreteTurnId,
+      payload: {
+        itemType: "command_execution",
+        status: "in_progress",
+        title: "Command run",
+        detail: "echo ok",
+      },
+    });
+
+    const repaired = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "running" &&
+        entry.session.activeTurnId === concreteTurnId &&
+        entry.latestTurn?.turnId === concreteTurnId,
+    );
+
+    expect(repaired.latestTurn?.startedAt).toBe(workAt);
+    expect(repaired.activities.some((activity) => activity.turnId === concreteTurnId)).toBe(true);
+  });
+
   it("maps session/thread lifecycle and item.started into session/activity projections", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
