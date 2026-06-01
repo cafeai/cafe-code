@@ -3,6 +3,7 @@ import { watch } from "node:fs";
 import { join } from "node:path";
 
 import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
+import { linuxSafeStorageElectronArgs } from "./linux-safe-storage.mjs";
 import { waitForResources } from "./wait-for-resources.mjs";
 
 const devServerUrl = process.env.VITE_DEV_SERVER_URL?.trim();
@@ -29,6 +30,7 @@ const forcedShutdownTimeoutMs = 1_500;
 const restartDebounceMs = 120;
 const childTreeGracePeriodMs = 1_200;
 const isolateAppProcessGroup = process.platform !== "win32";
+const electronLaunchArgs = linuxSafeStorageElectronArgs(process.env);
 
 await waitForResources({
   baseDir: desktopDir,
@@ -79,7 +81,7 @@ function startApp() {
 
   const app = spawn(
     resolveElectronPath(),
-    [`--cafecode-dev-root=${desktopDir}`, "dist-electron/main.cjs"],
+    [...electronLaunchArgs, `--cafecode-dev-root=${desktopDir}`, "dist-electron/main.cjs"],
     {
       cwd: desktopDir,
       env: childEnv,

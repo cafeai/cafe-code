@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 
 import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
+import { linuxSafeStorageElectronArgs } from "./linux-safe-storage.mjs";
 
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
@@ -9,13 +10,18 @@ delete childEnv.VITE_DEV_SERVER_URL;
 delete childEnv.CAFE_CODE_DEV_URL;
 const isolateChildProcessGroup = process.platform !== "win32";
 const forcedShutdownTimeoutMs = 5_000;
+const electronLaunchArgs = linuxSafeStorageElectronArgs(process.env);
 
-const child = spawn(resolveElectronPath(), ["dist-electron/main.cjs", ...process.argv.slice(2)], {
-  stdio: "inherit",
-  cwd: desktopDir,
-  env: childEnv,
-  detached: isolateChildProcessGroup,
-});
+const child = spawn(
+  resolveElectronPath(),
+  [...electronLaunchArgs, "dist-electron/main.cjs", ...process.argv.slice(2)],
+  {
+    stdio: "inherit",
+    cwd: desktopDir,
+    env: childEnv,
+    detached: isolateChildProcessGroup,
+  },
+);
 
 let shuttingDown = false;
 let forcedShutdownTimer = null;

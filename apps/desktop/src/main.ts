@@ -46,6 +46,20 @@ import * as DesktopSshRemoteApi from "./ssh/DesktopSshRemoteApi.ts";
 import * as DesktopState from "./app/DesktopState.ts";
 import * as DesktopUpdates from "./updates/DesktopUpdates.ts";
 import * as DesktopWindow from "./window/DesktopWindow.ts";
+import { resolveLinuxSafeStoragePasswordStore } from "./app/LinuxSafeStorageCommandLine.ts";
+
+if (process.platform === "linux") {
+  const passwordStore = resolveLinuxSafeStoragePasswordStore(process.env);
+  const hasPasswordStoreArg = process.argv.some((argument) =>
+    argument.startsWith("--password-store="),
+  );
+  if (passwordStore !== undefined && !hasPasswordStoreArg) {
+    // Direct Electron/AppImage launches can bypass the wrapper scripts that
+    // normally pass --password-store. Set the same backend at module load,
+    // before app readiness, so safeStorage can encrypt provider-daemon tokens.
+    Electron.app.commandLine.appendSwitch("password-store", passwordStore);
+  }
+}
 
 const desktopEnvironmentLayer = Layer.unwrap(
   Effect.gen(function* () {
