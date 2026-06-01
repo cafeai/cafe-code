@@ -9,7 +9,14 @@ import { render } from "vitest-browser-react";
 
 const scrollToEndSpy = vi.fn();
 const scrollToIndexSpy = vi.fn();
-const getStateSpy = vi.fn(() => ({ isAtEnd: true }));
+const getStateSpy = vi.fn<
+  () => {
+    isAtEnd: boolean;
+    contentLength?: number;
+    scroll?: number;
+    scrollLength?: number;
+  }
+>(() => ({ isAtEnd: true }));
 const legendListPropsSpy = vi.fn();
 
 vi.mock("@legendapp/list/react", async () => {
@@ -25,6 +32,7 @@ vi.mock("@legendapp/list/react", async () => {
     onTouchMove?: React.TouchEventHandler<HTMLDivElement>;
     onPointerDown?: React.PointerEventHandler<HTMLDivElement>;
     onKeyDown?: React.KeyboardEventHandler<HTMLDivElement>;
+    onScroll?: React.UIEventHandler<HTMLDivElement>;
     maintainVisibleContentPosition?: unknown;
     ref?: React.Ref<LegendListRef>;
   }) {
@@ -44,6 +52,7 @@ vi.mock("@legendapp/list/react", async () => {
         data-testid="legend-list"
         onKeyDown={props.onKeyDown}
         onPointerDown={props.onPointerDown}
+        onScroll={props.onScroll}
         onTouchMove={props.onTouchMove}
         onWheel={props.onWheel}
       >
@@ -300,6 +309,61 @@ describe("MessagesTimeline", () => {
         data: false,
         size: true,
       });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("does not report stale virtualizer scroll state away from the bottom during submit pinning", async () => {
+    const requestAnimationFrameSpy = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback: FrameRequestCallback) => {
+        callback(0);
+        return 1;
+      });
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+
+    const props = buildProps();
+    const firstEntry = buildUserTimelineEntry("existing conversation tail");
+    const screen = await render(
+      <MessagesTimeline {...props} timelineEntries={[firstEntry]} stickToEndRevision={0} />,
+    );
+
+    try {
+      const nextEntry = {
+        ...buildUserTimelineEntry("queued local prompt submitted from the bottom"),
+        id: "entry-2",
+        message: {
+          ...buildUserTimelineEntry("queued local prompt submitted from the bottom").message,
+          id: "message-2" as never,
+        },
+      };
+
+      await screen.rerender(
+        <MessagesTimeline
+          {...props}
+          timelineEntries={[firstEntry, nextEntry]}
+          stickToEndRevision={1}
+        />,
+      );
+
+      getStateSpy.mockReturnValueOnce({
+        isAtEnd: false,
+        contentLength: 10_000,
+        scroll: 0,
+        scrollLength: 400,
+      });
+      getStateSpy.mockClear();
+      const lastProps = legendListPropsSpy.mock.calls.at(-1)?.[0] as
+        | { onScroll?: React.UIEventHandler<HTMLDivElement> }
+        | undefined;
+      lastProps?.onScroll?.({} as React.UIEvent<HTMLDivElement>);
+
+      expect(props.onIsAtEndChange).toHaveBeenLastCalledWith(true);
+      expect(props.onIsAtEndChange).not.toHaveBeenCalledWith(false);
+      expect(getStateSpy).not.toHaveBeenCalled();
+      expect(requestAnimationFrameSpy).toHaveBeenCalled();
     } finally {
       await screen.unmount();
     }

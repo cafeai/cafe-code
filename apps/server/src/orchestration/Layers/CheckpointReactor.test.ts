@@ -248,6 +248,21 @@ async function waitForGitRefExists(cwd: string, ref: string, timeoutMs = 15_000)
   return poll();
 }
 
+async function waitForGitRefMissing(cwd: string, ref: string, timeoutMs = 15_000) {
+  const deadline = (await Effect.runPromise(Clock.currentTimeMillis)) + timeoutMs;
+  const poll = async (): Promise<void> => {
+    if (!gitRefExists(cwd, ref)) {
+      return;
+    }
+    if ((await Effect.runPromise(Clock.currentTimeMillis)) >= deadline) {
+      throw new Error(`Timed out waiting for git ref '${ref}' to be pruned.`);
+    }
+    await Effect.runPromise(Effect.sleep("10 millis"));
+    return poll();
+  };
+  return poll();
+}
+
 describe("CheckpointReactor", () => {
   let runtime: ManagedRuntime.ManagedRuntime<
     OrchestrationEngineService | CheckpointReactor | CheckpointStore | ProjectionSnapshotQuery,
@@ -616,6 +631,12 @@ describe("CheckpointReactor", () => {
         entry.checkpoints.some((checkpoint) => checkpoint.checkpointTurnCount === 4),
     );
     await harness.drain();
+
+    // Checkpoint ref pruning intentionally runs outside the synchronous
+    // provider-turn completion path. The turn diff is durable once drain()
+    // returns, but old hidden refs may still be deleting in the cleanup scope.
+    await waitForGitRefMissing(harness.cwd, checkpointRefForThreadTurn(threadId, 0));
+    await waitForGitRefMissing(harness.cwd, checkpointRefForThreadTurn(threadId, 1));
 
     expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 0))).toBe(false);
     expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 1))).toBe(false);

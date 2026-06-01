@@ -5072,6 +5072,7 @@ export default function ChatView(props: ChatViewProps) {
     });
     if (delivery === "queue") {
       if (!hasSendableContent) return;
+      pinTimelineToEndForLocalMessage();
       enqueueFollowUpSnapshot(snapshot);
       return;
     }
@@ -5332,6 +5333,7 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     if (delivery === "queue") {
+      pinTimelineToEndForLocalMessage();
       enqueueFollowUpSnapshot(snapshot);
       return;
     }

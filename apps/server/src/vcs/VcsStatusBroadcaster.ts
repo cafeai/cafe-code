@@ -285,14 +285,18 @@ export const layer = Layer.effect(
         Effect.gen(function* () {
           const nowMs = yield* Clock.currentTimeMillis;
           const cached = yield* getCachedStatus(cwd);
-          const lastStartedAtMs = (yield* Ref.get(lastRemoteRefreshStartedAtRef)).get(cwd) ?? 0;
+          const lastStartedAtMs = (yield* Ref.get(lastRemoteRefreshStartedAtRef)).get(cwd);
           const minIntervalMs = Duration.toMillis(VCS_REMOTE_REFRESH_MIN_INTERVAL);
 
           // Remote status refresh can involve fetch/hosting-provider lookups.
           // Trace data showed this blocking for seconds during provider work,
           // so collapse refresh storms per workspace and serve the fresh cached
           // value for a short interval. Local status still refreshes normally.
-          if (cached?.remote && nowMs - lastStartedAtMs < minIntervalMs) {
+          if (
+            cached?.remote &&
+            lastStartedAtMs !== undefined &&
+            nowMs - lastStartedAtMs < minIntervalMs
+          ) {
             return cached.remote.value;
           }
 

@@ -247,6 +247,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   }, []);
 
   const handleScroll = useCallback(() => {
+    if (Date.now() <= stickToEndDeadlineMsRef.current) {
+      onIsAtEndChange(true);
+      return;
+    }
+
     const state = listRef.current?.getState?.();
     if (state) {
       onIsAtEndChange(isTimelineScrolledToEnd(state));
