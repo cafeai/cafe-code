@@ -67,6 +67,9 @@ export interface WsRpcClient {
       readonly cwd: Parameters<LocalApi["shell"]["openInEditor"]>[0];
       readonly editor: Parameters<LocalApi["shell"]["openInEditor"]>[1];
     }) => ReturnType<LocalApi["shell"]["openInEditor"]>;
+    readonly openTerminal: (input: {
+      readonly cwd: Parameters<LocalApi["shell"]["openTerminal"]>[0];
+    }) => ReturnType<LocalApi["shell"]["openTerminal"]>;
   };
   readonly vcs: {
     readonly pull: RpcUnaryMethod<typeof WS_METHODS.vcsPull>;
@@ -168,6 +171,8 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
     shell: {
       openInEditor: (input) =>
         transport.request((client) => client[WS_METHODS.shellOpenInEditor](input)),
+      openTerminal: (input) =>
+        transport.request((client) => client[WS_METHODS.shellOpenTerminal](input)),
     },
     vcs: {
       pull: (input) => transport.request((client) => client[WS_METHODS.vcsPull](input)),

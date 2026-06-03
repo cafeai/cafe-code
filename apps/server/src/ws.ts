@@ -693,6 +693,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
           issues: keybindingsConfig.issues,
           providers,
           availableEditors: ExternalLauncher.resolveAvailableEditors(),
+          terminal: ExternalLauncher.resolveTerminalAvailability(),
           observability: {
             logsDirectoryPath: config.logsDir,
             localTracingEnabled: true,
@@ -1127,6 +1128,10 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
           ),
         [WS_METHODS.shellOpenInEditor]: (input) =>
           observeRpcEffect(WS_METHODS.shellOpenInEditor, externalLauncher.launchEditor(input), {
+            "rpc.aggregate": "workspace",
+          }),
+        [WS_METHODS.shellOpenTerminal]: (input) =>
+          observeRpcEffect(WS_METHODS.shellOpenTerminal, externalLauncher.launchTerminal(input), {
             "rpc.aggregate": "workspace",
           }),
         [WS_METHODS.filesystemBrowse]: (input) =>

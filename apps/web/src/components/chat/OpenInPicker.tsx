@@ -1,21 +1,27 @@
-import { EditorId, type ResolvedKeybindingsConfig } from "@cafecode/contracts";
+import {
+  EditorId,
+  type ResolvedKeybindingsConfig,
+  type TerminalAvailability,
+} from "@cafecode/contracts";
 import { memo, useCallback, useEffect, useMemo } from "react";
 import { isOpenFavoriteEditorShortcut, shortcutLabelForCommand } from "../../keybindings";
 import { usePreferredEditor } from "../../editorPreferences";
-import { ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon, TerminalIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import { Group, GroupSeparator } from "../ui/group";
-import { Menu, MenuItem, MenuPopup, MenuShortcut, MenuTrigger } from "../ui/menu";
+import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "../ui/menu";
 import { resolveEditorOpenOptions } from "../../editorOpenOptions";
 import { readLocalApi } from "~/localApi";
 
 export const OpenInPicker = memo(function OpenInPicker({
   keybindings,
   availableEditors,
+  terminal,
   openInCwd,
 }: {
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: ReadonlyArray<EditorId>;
+  terminal: TerminalAvailability;
   openInCwd: string | null;
 }) {
   const [preferredEditor, setPreferredEditor] = usePreferredEditor(availableEditors);
@@ -24,6 +30,7 @@ export const OpenInPicker = memo(function OpenInPicker({
     [availableEditors],
   );
   const primaryOption = options.find(({ value }) => value === preferredEditor) ?? null;
+  const terminalMenuLabel = `Open ${terminal.label} Here`;
 
   const openInEditor = useCallback(
     (editorId: EditorId | null) => {
@@ -36,6 +43,12 @@ export const OpenInPicker = memo(function OpenInPicker({
     },
     [preferredEditor, openInCwd, setPreferredEditor],
   );
+
+  const openTerminal = useCallback(() => {
+    const api = readLocalApi();
+    if (!api || !openInCwd || !terminal.available) return;
+    void api.shell.openTerminal(openInCwd);
+  }, [openInCwd, terminal.available]);
 
   const openFavoriteEditorShortcutLabel = useMemo(
     () => shortcutLabelForCommand(keybindings, "editor.openFavorite"),
@@ -85,6 +98,26 @@ export const OpenInPicker = memo(function OpenInPicker({
               )}
             </MenuItem>
           ))}
+          <MenuSeparator />
+          <MenuItem
+            disabled={!openInCwd || !terminal.available}
+            onClick={openTerminal}
+            title={
+              !openInCwd
+                ? "No workspace directory is available."
+                : !terminal.available
+                  ? terminal.unavailableReason
+                  : undefined
+            }
+          >
+            <TerminalIcon aria-hidden="true" className="text-muted-foreground" />
+            {terminalMenuLabel}
+            {!terminal.available && terminal.unavailableReason && (
+              <MenuShortcut className="normal-case tracking-normal">
+                {terminal.unavailableReason}
+              </MenuShortcut>
+            )}
+          </MenuItem>
         </MenuPopup>
       </Menu>
     </Group>

@@ -50,6 +50,18 @@ export const LaunchEditorInput = Schema.Struct({
 });
 export type LaunchEditorInput = typeof LaunchEditorInput.Type;
 
+export const LaunchTerminalInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+});
+export type LaunchTerminalInput = typeof LaunchTerminalInput.Type;
+
+export const TerminalAvailability = Schema.Struct({
+  available: Schema.Boolean,
+  label: TrimmedNonEmptyString,
+  unavailableReason: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type TerminalAvailability = typeof TerminalAvailability.Type;
+
 export class ExternalLauncherError extends Schema.TaggedErrorClass<ExternalLauncherError>()(
   "ExternalLauncherError",
   {

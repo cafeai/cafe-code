@@ -48,6 +48,7 @@ const rpcClientMock = {
   },
   shell: {
     openInEditor: vi.fn(),
+    openTerminal: vi.fn(),
   },
   vcs: {
     pull: vi.fn(),
@@ -384,6 +385,15 @@ describe("wsApi", () => {
     emitEvent(shellStreamListeners, shellEvent);
 
     expect(onShellEvent).toHaveBeenCalledWith(shellEvent);
+  });
+
+  it("forwards terminal launch requests directly to the RPC client", async () => {
+    rpcClientMock.shell.openTerminal.mockResolvedValue(undefined);
+    const { createLocalApi } = await import("./localApi");
+    const api = createLocalApi(rpcClientMock as never);
+
+    await expect(api.shell.openTerminal("/tmp/project")).resolves.toBeUndefined();
+    expect(rpcClientMock.shell.openTerminal).toHaveBeenCalledWith({ cwd: "/tmp/project" });
   });
 
   it("forwards git status stream events", async () => {

@@ -121,6 +121,7 @@ describe("DesktopShellEnvironment", () => {
         SHELL: "/bin/zsh",
         PATH: "/usr/bin",
         SSH_AUTH_SOCK: "/tmp/inherited.sock",
+        TERMINAL: "kitty",
       };
 
       yield* runShellEnvironment({
@@ -130,15 +131,17 @@ describe("DesktopShellEnvironment", () => {
           envOutput({
             PATH: "/opt/homebrew/bin:/usr/bin",
             SSH_AUTH_SOCK: "/tmp/login-shell.sock",
+            TERMINAL: "alacritty",
           }),
       });
 
       assert.equal(env.PATH, "/opt/homebrew/bin:/usr/bin");
       assert.equal(env.SSH_AUTH_SOCK, "/tmp/inherited.sock");
+      assert.equal(env.TERMINAL, "kitty");
     }),
   );
 
-  it.effect("hydrates PATH and missing SSH_AUTH_SOCK from the login shell on linux", () =>
+  it.effect("hydrates PATH and missing POSIX values from the login shell on linux", () =>
     Effect.gen(function* () {
       const env: NodeJS.ProcessEnv = {
         SHELL: "/bin/zsh",
@@ -152,11 +155,13 @@ describe("DesktopShellEnvironment", () => {
           envOutput({
             PATH: "/home/linuxbrew/.linuxbrew/bin:/usr/bin",
             SSH_AUTH_SOCK: "/tmp/secretive.sock",
+            TERMINAL: "alacritty",
           }),
       });
 
       assert.equal(env.PATH, "/home/linuxbrew/.linuxbrew/bin:/usr/bin");
       assert.equal(env.SSH_AUTH_SOCK, "/tmp/secretive.sock");
+      assert.equal(env.TERMINAL, "alacritty");
     }),
   );
 

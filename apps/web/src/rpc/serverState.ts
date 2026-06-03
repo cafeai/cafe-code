@@ -9,6 +9,7 @@ import {
   type ServerProvider,
   type ServerProviderUpdatedPayload,
   type ServerSettings,
+  type TerminalAvailability,
 } from "@cafecode/contracts";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@cafecode/shared/keybindings";
 import { Atom } from "effect/unstable/reactivity";
@@ -44,9 +45,16 @@ function toServerConfigUpdatedPayload(config: ServerConfig): ServerConfigUpdated
 
 const EMPTY_AVAILABLE_EDITORS: ReadonlyArray<EditorId> = [];
 const EMPTY_SERVER_PROVIDERS: ReadonlyArray<ServerProvider> = [];
+const UNAVAILABLE_TERMINAL: TerminalAvailability = {
+  available: false,
+  label: "Terminal",
+  unavailableReason: "$TERMINAL needs to be set.",
+};
 
 const selectAvailableEditors = (config: ServerConfig | null): ReadonlyArray<EditorId> =>
   config?.availableEditors ?? EMPTY_AVAILABLE_EDITORS;
+const selectTerminal = (config: ServerConfig | null): TerminalAvailability =>
+  config?.terminal ?? UNAVAILABLE_TERMINAL;
 const selectKeybindings = (config: ServerConfig | null) =>
   config?.keybindings ?? DEFAULT_RESOLVED_KEYBINDINGS;
 const selectKeybindingsConfigPath = (config: ServerConfig | null) =>
@@ -282,6 +290,10 @@ export function useServerKeybindings(): ServerConfig["keybindings"] {
 
 export function useServerAvailableEditors(): ReadonlyArray<EditorId> {
   return useAtomValue(serverConfigAtom, selectAvailableEditors);
+}
+
+export function useServerTerminal(): TerminalAvailability {
+  return useAtomValue(serverConfigAtom, selectTerminal);
 }
 
 export function useServerKeybindingsConfigPath(): string | null {

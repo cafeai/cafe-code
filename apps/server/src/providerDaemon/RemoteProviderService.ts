@@ -59,7 +59,6 @@ const VOID_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "respondToRequest",
   "respondToUserInput",
   "stopSession",
-  "restartProviderRuntime",
   "rollbackConversation",
 ]);
 const MUTATING_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
@@ -70,6 +69,7 @@ const MUTATING_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "respondToRequest",
   "respondToUserInput",
   "stopSession",
+  "restartProviderRuntime",
   "rollbackConversation",
 ]);
 const PROVIDER_DAEMON_REPLAY_OVERLAP_EVENTS = 1_000;
@@ -97,18 +97,30 @@ function toProviderRuntimeEndpointUnavailable(): ProviderValidationError {
   });
 }
 
+export const attachCommandIdToMutatingProviderDaemonRequest = <
+  M extends ProviderDaemonRpcRequest["method"],
+>(
+  request: Extract<ProviderDaemonRpcRequest, { readonly method: M }>,
+): Extract<ProviderDaemonRpcRequest, { readonly method: M }> => {
+  const commandId = "commandId" in request ? request.commandId : undefined;
+  return (
+    MUTATING_RPC_METHODS.has(request.method)
+      ? { ...request, commandId: commandId ?? crypto.randomUUID() }
+      : request
+  ) as Extract<ProviderDaemonRpcRequest, { readonly method: M }>;
+};
+
+export const isVoidProviderDaemonRpcMethod = (
+  method: ProviderDaemonRpcRequest["method"],
+): boolean => VOID_RPC_METHODS.has(method);
+
 const rpc = <M extends ProviderDaemonRpcRequest["method"]>(
   daemonConfig: ProviderDaemonClientConfig,
   request: Extract<ProviderDaemonRpcRequest, { readonly method: M }>,
 ) =>
   Effect.tryPromise({
     try: async () => {
-      const commandId = "commandId" in request ? request.commandId : undefined;
-      const requestWithCommandId = (
-        MUTATING_RPC_METHODS.has(request.method)
-          ? { ...request, commandId: commandId ?? crypto.randomUUID() }
-          : request
-      ) as Extract<ProviderDaemonRpcRequest, { readonly method: M }>;
+      const requestWithCommandId = attachCommandIdToMutatingProviderDaemonRequest(request);
       const response = await requestProviderDaemonJson(daemonConfig, PROVIDER_DAEMON_RPC_PATH, {
         method: "POST",
         body: encodeRpcRequestJson(requestWithCommandId),
@@ -124,7 +136,7 @@ const rpc = <M extends ProviderDaemonRpcRequest["method"]>(
             : `${envelope.error.tag}: ${envelope.error.message}; caused by ${rootCause.message}`,
         );
       }
-      if (VOID_RPC_METHODS.has(request.method)) {
+      if (isVoidProviderDaemonRpcMethod(request.method)) {
         return undefined as Schema.Schema.Type<(typeof ProviderDaemonRpcResultByMethod)[M]>;
       }
       const resultSchema = ProviderDaemonRpcResultByMethod[request.method];

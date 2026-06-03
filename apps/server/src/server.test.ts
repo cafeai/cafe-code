@@ -2717,6 +2717,59 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("routes websocket rpc shell.openTerminal", () =>
+    Effect.gen(function* () {
+      let openedInput: { cwd: string } | null = null;
+      yield* buildAppUnderTest({
+        layers: {
+          externalLauncher: {
+            launchTerminal: (input) =>
+              Effect.sync(() => {
+                openedInput = input;
+              }),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.shellOpenTerminal]({
+            cwd: "/tmp/project",
+          }),
+        ),
+      );
+
+      assert.deepEqual(openedInput, { cwd: "/tmp/project" });
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes websocket rpc shell.openTerminal errors", () =>
+    Effect.gen(function* () {
+      const externalLauncherError = new ExternalLauncherError({
+        message: "$TERMINAL needs to be set.",
+      });
+      yield* buildAppUnderTest({
+        layers: {
+          externalLauncher: {
+            launchTerminal: () => Effect.fail(externalLauncherError),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.shellOpenTerminal]({
+            cwd: "/tmp/project",
+          }),
+        ).pipe(Effect.result),
+      );
+
+      assertFailure(result, externalLauncherError);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("routes websocket rpc git methods", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest({

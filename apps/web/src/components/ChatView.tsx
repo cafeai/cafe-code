@@ -179,6 +179,7 @@ import {
   useServerAvailableEditors,
   useServerConfig,
   useServerKeybindings,
+  useServerTerminal,
 } from "~/rpc/serverState";
 import { sanitizeThreadErrorMessage } from "~/rpc/transportError";
 import { retainThreadDetailSubscription } from "../environments/runtime/service";
@@ -3290,6 +3291,7 @@ export default function ChatView(props: ChatViewProps) {
   const gitStatusQuery = useGitStatus({ environmentId, cwd: gitCwd });
   const keybindings = useServerKeybindings();
   const availableEditors = useServerAvailableEditors();
+  const terminal = useServerTerminal();
   // Prefer an instance-id match so a custom Codex instance (e.g.
   // `codex_personal`) surfaces its own status/message in the banner rather
   // than the default Codex's. Falls back to first-match-by-kind when no
@@ -6231,6 +6233,7 @@ export default function ChatView(props: ChatViewProps) {
           openInCwd={gitCwd}
           keybindings={keybindings}
           availableEditors={availableEditors}
+          terminal={terminal}
           diffToggleShortcutLabel={diffPanelShortcutLabel}
           diffOpen={diffOpen}
           onToggleDiff={onToggleDiff}

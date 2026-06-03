@@ -2,6 +2,7 @@ import {
   type EnvironmentId,
   type EditorId,
   type ResolvedKeybindingsConfig,
+  type TerminalAvailability,
 } from "@cafecode/contracts";
 import { memo } from "react";
 import { DiffIcon } from "lucide-react";
@@ -21,6 +22,7 @@ interface ChatHeaderProps {
   openInCwd: string | null;
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: ReadonlyArray<EditorId>;
+  terminal: TerminalAvailability;
   diffToggleShortcutLabel: string | null;
   diffOpen: boolean;
   onToggleDiff: () => void;
@@ -46,6 +48,7 @@ export const ChatHeader = memo(function ChatHeader({
   openInCwd,
   keybindings,
   availableEditors,
+  terminal,
   diffToggleShortcutLabel,
   diffOpen,
   onToggleDiff,
@@ -102,6 +105,7 @@ export const ChatHeader = memo(function ChatHeader({
           <OpenInPicker
             keybindings={keybindings}
             availableEditors={availableEditors}
+            terminal={terminal}
             openInCwd={openInCwd}
           />
         )}

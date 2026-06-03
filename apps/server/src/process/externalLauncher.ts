@@ -11,6 +11,8 @@ import {
   ExternalLauncherError,
   type EditorId,
   type LaunchEditorInput,
+  type LaunchTerminalInput,
+  type TerminalAvailability,
 } from "@cafecode/contracts";
 import { isCommandAvailable, type CommandAvailabilityOptions } from "@cafecode/shared/shell";
 import * as Context from "effect/Context";
@@ -31,6 +33,12 @@ export { isCommandAvailable } from "@cafecode/shared/shell";
 interface EditorLaunch {
   readonly command: string;
   readonly args: ReadonlyArray<string>;
+}
+
+interface TerminalLaunch {
+  readonly command: string;
+  readonly args: ReadonlyArray<string>;
+  readonly cwd: string;
 }
 
 interface ProcessLaunch {
@@ -143,6 +151,20 @@ function resolveWslPowerShellPath(): string {
   return "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
 }
 
+function trimNonEmpty(input: string | undefined): string | undefined {
+  const trimmed = input?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
+function splitTerminalCommand(input: string): { command: string; args: ReadonlyArray<string> } {
+  const tokens = input.trim().split(/\s+/);
+  return { command: tokens[0] ?? input, args: tokens.slice(1) };
+}
+
+function escapeAppleScriptStringLiteral(input: string): string {
+  return input.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
 function shouldUseWindowsBrowserFromWsl(
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv = process.env,
@@ -236,6 +258,36 @@ export function resolveAvailableEditors(
   return available;
 }
 
+export function resolveTerminalAvailability(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): TerminalAvailability {
+  if (platform === "linux") {
+    const terminal = trimNonEmpty(env.TERMINAL);
+    return terminal
+      ? { available: true, label: terminal }
+      : {
+          available: false,
+          label: "Terminal",
+          unavailableReason: "$TERMINAL needs to be set.",
+        };
+  }
+
+  if (platform === "win32") {
+    return { available: true, label: "PowerShell" };
+  }
+
+  if (platform === "darwin") {
+    return { available: true, label: "Terminal" };
+  }
+
+  return {
+    available: false,
+    label: "Terminal",
+    unavailableReason: "Terminal launch is unavailable on this platform.",
+  };
+}
+
 /**
  * ExternalLauncherShape - Service API for browser and editor launch actions.
  */
@@ -251,6 +303,13 @@ export interface ExternalLauncherShape {
    * Launches the editor as a detached process so server startup is not blocked.
    */
   readonly launchEditor: (input: LaunchEditorInput) => Effect.Effect<void, ExternalLauncherError>;
+
+  /**
+   * Launch a terminal in a workspace directory.
+   */
+  readonly launchTerminal: (
+    input: LaunchTerminalInput,
+  ) => Effect.Effect<void, ExternalLauncherError>;
 }
 
 /**
@@ -314,6 +373,58 @@ export function resolveEditorProcessLaunch(
   };
 }
 
+export const resolveTerminalLaunch = Effect.fn("resolveTerminalLaunch")(function* (
+  input: LaunchTerminalInput,
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): Effect.fn.Return<TerminalLaunch, ExternalLauncherError> {
+  yield* Effect.annotateCurrentSpan({
+    "externalLauncher.cwd": input.cwd,
+    "externalLauncher.platform": platform,
+  });
+
+  if (platform === "linux") {
+    const terminal = trimNonEmpty(env.TERMINAL);
+    if (!terminal) {
+      return yield* new ExternalLauncherError({ message: "$TERMINAL needs to be set." });
+    }
+    const { command, args } = splitTerminalCommand(terminal);
+    return { command, args, cwd: input.cwd };
+  }
+
+  if (platform === "win32") {
+    return { command: resolvePowerShellPath(env), args: ["-NoExit"], cwd: input.cwd };
+  }
+
+  if (platform === "darwin") {
+    const cwd = escapeAppleScriptStringLiteral(input.cwd);
+    return {
+      command: "osascript",
+      args: ["-e", `tell application "Terminal" to do script "cd \\"${cwd}\\""`],
+      cwd: input.cwd,
+    };
+  }
+
+  return yield* new ExternalLauncherError({
+    message: "Terminal launch is unavailable on this platform.",
+  });
+});
+
+export function resolveTerminalProcessLaunch(launch: TerminalLaunch): ProcessLaunch {
+  return {
+    command: launch.command,
+    args: [...launch.args],
+    options: {
+      cwd: launch.cwd,
+      detached: true,
+      shell: false,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    },
+  };
+}
+
 const launchAndUnref = Effect.fn("externalLauncher.launchAndUnref")(function* (
   launch: ProcessLaunch,
   errorMessage: string,
@@ -347,6 +458,18 @@ export const launchEditorProcess = Effect.fn("externalLauncher.launchEditorProce
   yield* launchAndUnref(resolveEditorProcessLaunch(launch), "failed to spawn detached process");
 });
 
+export const launchTerminalProcess = Effect.fn("externalLauncher.launchTerminalProcess")(function* (
+  launch: TerminalLaunch,
+): Effect.fn.Return<void, ExternalLauncherError, ChildProcessSpawner.ChildProcessSpawner> {
+  if (!isCommandAvailable(launch.command)) {
+    return yield* new ExternalLauncherError({
+      message: `Terminal command not found: ${launch.command}`,
+    });
+  }
+
+  yield* launchAndUnref(resolveTerminalProcessLaunch(launch), "failed to spawn terminal process");
+});
+
 const make = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
@@ -358,6 +481,12 @@ const make = Effect.gen(function* () {
     launchEditor: (input) =>
       Effect.flatMap(resolveEditorLaunch(input), (launch) =>
         launchEditorProcess(launch).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        ),
+      ),
+    launchTerminal: (input) =>
+      Effect.flatMap(resolveTerminalLaunch(input), (launch) =>
+        launchTerminalProcess(launch).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         ),
       ),
