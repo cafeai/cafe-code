@@ -1,7 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { ProjectId } from "@cafecode/contracts";
 
-import { resolveThreadWorkspaceDirectories } from "./Utils.ts";
+import { isGeneratedHiddenCheckpointRef, resolveThreadWorkspaceDirectories } from "./Utils.ts";
+
+describe("isGeneratedHiddenCheckpointRef", () => {
+  it("accepts only Cafe-owned hidden checkpoint refs", () => {
+    expect(isGeneratedHiddenCheckpointRef("refs/cafe/checkpoints/thread_123-abc/turn/42")).toBe(
+      true,
+    );
+    expect(isGeneratedHiddenCheckpointRef("refs/t3/checkpoints/thread_123-abc/turn/42")).toBe(true);
+    expect(isGeneratedHiddenCheckpointRef("provider-diff:evt-1")).toBe(false);
+    expect(isGeneratedHiddenCheckpointRef("refs/heads/main")).toBe(false);
+    expect(
+      isGeneratedHiddenCheckpointRef(
+        "refs/cafe/checkpoints/thread/turn/1\n delete refs/heads/main",
+      ),
+    ).toBe(false);
+  });
+});
 
 describe("resolveThreadWorkspaceDirectories", () => {
   it("keeps worktree cwd primary and excludes duplicate additional roots", () => {

@@ -37,7 +37,7 @@ import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
-import { CheckpointReactorLive } from "./CheckpointReactor.ts";
+import { CheckpointReactorLive, computeCheckpointRefPrunePlan } from "./CheckpointReactor.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
@@ -62,6 +62,41 @@ import { WorkspacePathsLive } from "../../workspace/Layers/WorkspacePaths.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
+
+describe("computeCheckpointRefPrunePlan", () => {
+  it("skips provider-diff placeholders without letting them affect retention", () => {
+    const threadId = ThreadId.make("thread-1");
+    const plan = computeCheckpointRefPrunePlan({
+      threadId,
+      currentTurnCount: 4,
+      checkpoints: [
+        {
+          checkpointTurnCount: 1,
+          checkpointRef: checkpointRefForThreadTurn(threadId, 1),
+        },
+        {
+          checkpointTurnCount: 2,
+          checkpointRef: checkpointRefForThreadTurn(threadId, 2),
+        },
+        {
+          checkpointTurnCount: 3,
+          checkpointRef: checkpointRefForThreadTurn(threadId, 3),
+        },
+        {
+          checkpointTurnCount: 99,
+          checkpointRef: CheckpointRef.make("provider-diff:evt-placeholder"),
+        },
+      ],
+    });
+
+    expect(plan.retainedTurnCounts).toEqual([4, 3, 2]);
+    expect(plan.skippedNonHiddenCheckpointRefs).toBe(1);
+    expect(plan.checkpointRefsToDelete).toEqual([
+      checkpointRefForThreadTurn(threadId, 1),
+      checkpointRefForThreadTurn(threadId, 0),
+    ]);
+  });
+});
 
 type LegacyProviderRuntimeEvent = {
   readonly type: string;

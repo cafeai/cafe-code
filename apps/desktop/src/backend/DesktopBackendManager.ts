@@ -40,9 +40,14 @@ const MAX_RESTART_DELAY = Duration.seconds(10);
 const DEFAULT_BACKEND_READINESS_TIMEOUT = Duration.minutes(1);
 const DEFAULT_BACKEND_READINESS_INTERVAL = Duration.millis(100);
 const DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT = Duration.seconds(1);
+// The post-readiness watchdog is deliberately more patient than bootstrap readiness. On large
+// long-running workspaces, legitimate SQLite/projection requests can briefly occupy the backend
+// event loop for more than one second; treating those short stalls as process death causes the
+// renderer to enter an avoidable reconnect loop and interrupts provider handoff work.
+const DEFAULT_BACKEND_HEALTH_REQUEST_TIMEOUT = Duration.seconds(5);
 const DEFAULT_BACKEND_TERMINATE_GRACE = Duration.seconds(2);
 const DEFAULT_BACKEND_HEALTH_CHECK_INTERVAL = Duration.seconds(15);
-const DEFAULT_BACKEND_HEALTH_FAILURE_THRESHOLD = 3;
+const DEFAULT_BACKEND_HEALTH_FAILURE_THRESHOLD = 6;
 const BACKEND_READINESS_PATH = CAFE_CODE_ENVIRONMENT_ENDPOINT_PATH;
 
 type BackendProcessLayerServices = ChildProcessSpawner.ChildProcessSpawner | HttpClient.HttpClient;
@@ -61,6 +66,7 @@ export interface DesktopBackendStartConfig {
   readonly captureOutput: boolean;
   readonly readinessTimeout?: Duration.Duration;
   readonly healthCheckInterval?: Duration.Duration;
+  readonly healthCheckRequestTimeout?: Duration.Duration;
   readonly healthFailureThreshold?: number;
 }
 
@@ -276,15 +282,16 @@ const readinessUrlFor = (baseUrl: URL): URL => new URL(BACKEND_READINESS_PATH, b
 
 const checkHttpReadyOnce = Effect.fn("desktop.backendManager.checkHttpReadyOnce")(function* (
   baseUrl: URL,
+  requestTimeout: Duration.Duration = DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT,
 ): Effect.fn.Return<boolean, never, HttpClient.HttpClient> {
   const readinessUrl = readinessUrlFor(baseUrl);
   const client = (yield* HttpClient.HttpClient).pipe(
     HttpClient.filterStatusOk,
-    HttpClient.transformResponse(Effect.timeout(DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT)),
+    HttpClient.transformResponse(Effect.timeout(requestTimeout)),
   );
 
   return yield* client.get(readinessUrl).pipe(
-    Effect.timeout(DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT),
+    Effect.timeout(requestTimeout),
     Effect.as(true),
     Effect.catch(() => Effect.succeed(false)),
   );
@@ -311,6 +318,7 @@ const waitForHttpReady = Effect.fn("desktop.backendManager.waitForHttpReady")(fu
 const monitorHttpHealth = Effect.fn("desktop.backendManager.monitorHttpHealth")(function* (
   baseUrl: URL,
   interval: Duration.Duration,
+  requestTimeout: Duration.Duration,
   failureThreshold: number,
   onFailure: (error: BackendHealthCheckFailedError) => Effect.Effect<void>,
 ): Effect.fn.Return<void, never, HttpClient.HttpClient> {
@@ -319,8 +327,14 @@ const monitorHttpHealth = Effect.fn("desktop.backendManager.monitorHttpHealth")(
 
   while (true) {
     yield* Effect.sleep(interval);
-    const healthy = yield* checkHttpReadyOnce(baseUrl);
+    const healthy = yield* checkHttpReadyOnce(baseUrl, requestTimeout);
     if (healthy) {
+      if (consecutiveFailures > 0) {
+        yield* Effect.logInfo("desktop.backend.health-check.recovered", {
+          url: readinessUrl.href,
+          recoveredAfterFailures: consecutiveFailures,
+        });
+      }
       consecutiveFailures = 0;
       continue;
     }
@@ -427,26 +441,33 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     Math.trunc(options.healthFailureThreshold ?? DEFAULT_BACKEND_HEALTH_FAILURE_THRESHOLD),
   );
   const healthCheckInterval = options.healthCheckInterval ?? DEFAULT_BACKEND_HEALTH_CHECK_INTERVAL;
+  const healthCheckRequestTimeout =
+    options.healthCheckRequestTimeout ?? DEFAULT_BACKEND_HEALTH_REQUEST_TIMEOUT;
   yield* waitForHttpReady(
     options.httpBaseUrl,
     options.readinessTimeout ?? DEFAULT_BACKEND_READINESS_TIMEOUT,
   ).pipe(
     Effect.tap(() => options.onReady?.() ?? Effect.void),
     Effect.tap(() =>
-      monitorHttpHealth(options.httpBaseUrl, healthCheckInterval, healthFailureThreshold, (error) =>
-        Effect.gen(function* () {
-          yield* (options.onHealthFailure?.(error) ?? Effect.void).pipe(Effect.ignore);
-          yield* handle.kill().pipe(Effect.ignore);
-          // A backend can lose its HTTP listener while process-level liveness remains true. In
-          // that split-brain state the renderer cannot reconnect, and waiting only for exitCode can
-          // wedge the desktop manager forever if the child ignores SIGTERM or has lingering fibers.
-          // Treat the health failure itself as a terminal run signal so the manager clears active
-          // state and starts a fresh backend; the next spawn reaps the stale child before binding.
-          yield* Deferred.succeed(
-            healthFailureExit,
-            describeSyntheticProcessExit(error.message),
-          ).pipe(Effect.ignore);
-        }),
+      monitorHttpHealth(
+        options.httpBaseUrl,
+        healthCheckInterval,
+        healthCheckRequestTimeout,
+        healthFailureThreshold,
+        (error) =>
+          Effect.gen(function* () {
+            yield* (options.onHealthFailure?.(error) ?? Effect.void).pipe(Effect.ignore);
+            yield* handle.kill().pipe(Effect.ignore);
+            // A backend can lose its HTTP listener while process-level liveness remains true. In
+            // that split-brain state the renderer cannot reconnect, and waiting only for exitCode can
+            // wedge the desktop manager forever if the child ignores SIGTERM or has lingering fibers.
+            // Treat the health failure itself as a terminal run signal so the manager clears active
+            // state and starts a fresh backend; the next spawn reaps the stale child before binding.
+            yield* Deferred.succeed(
+              healthFailureExit,
+              describeSyntheticProcessExit(error.message),
+            ).pipe(Effect.ignore);
+          }),
       ).pipe(Effect.forkIn(processScope)),
     ),
     Effect.catch((error) =>

@@ -970,6 +970,7 @@ describe("openCodexThread", () => {
     for (const call of calls) {
       const payload = call.payload as { readonly config?: Record<string, unknown> };
       assert.deepStrictEqual(payload.config, {
+        "features.remote_compaction_v2": false,
         model_auto_compact_token_limit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
         model_auto_compact_token_limit_scope: "total",
       });
@@ -1005,6 +1006,7 @@ describe("openCodexThread", () => {
 
     const payload = calls[0]?.payload as { readonly config?: Record<string, unknown> };
     assert.deepStrictEqual(payload.config, {
+      "features.remote_compaction_v2": false,
       model_auto_compact_token_limit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
       model_auto_compact_token_limit_scope: "total",
       sandbox_workspace_write: {

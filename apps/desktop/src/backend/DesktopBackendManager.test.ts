@@ -552,6 +552,10 @@ describe("DesktopBackendManager", () => {
         httpClientLayer: httpClientLayer((request) =>
           Effect.succeed(responseForRequest(request, healthy ? 200 : 503)),
         ),
+        config: {
+          ...baseConfig,
+          healthFailureThreshold: 3,
+        },
         desktopWindow: {
           handleBackendReady: Deferred.succeed(firstReady, void 0).pipe(Effect.asVoid),
         },
@@ -570,6 +574,67 @@ describe("DesktopBackendManager", () => {
 
         yield* TestClock.adjust(Duration.millis(500));
         assert.equal(yield* Queue.take(starts), 2);
+      }).pipe(Effect.provide(Layer.merge(TestClock.layer(), managerLayer)));
+    }),
+  );
+
+  it.effect("keeps a ready backend alive across transient health check stalls", () =>
+    Effect.gen(function* () {
+      const starts = yield* Queue.unbounded<number>();
+      const firstReady = yield* Deferred.make<void>();
+      let startCount = 0;
+      let killCount = 0;
+      let healthy = true;
+
+      const spawnerLayer = Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make(() =>
+          Effect.gen(function* () {
+            startCount += 1;
+            yield* Queue.offer(starts, startCount);
+            const killed = yield* Deferred.make<void>();
+            const kill = Effect.sync(() => {
+              killCount += 1;
+            }).pipe(Effect.andThen(Deferred.succeed(killed, void 0)), Effect.asVoid);
+            return makeProcess({
+              exitCode: Deferred.await(killed).pipe(Effect.as(ChildProcessSpawner.ExitCode(1))),
+              kill: () => kill,
+            });
+          }),
+        ),
+      );
+
+      const managerLayer = makeManagerLayer({
+        spawnerLayer,
+        httpClientLayer: httpClientLayer((request) =>
+          Effect.succeed(responseForRequest(request, healthy ? 200 : 503)),
+        ),
+        config: {
+          ...baseConfig,
+          healthCheckInterval: Duration.seconds(1),
+        },
+        desktopWindow: {
+          handleBackendReady: Deferred.succeed(firstReady, void 0).pipe(Effect.asVoid),
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        const manager = yield* DesktopBackendManager.DesktopBackendManager;
+        yield* manager.start;
+        assert.equal(yield* Queue.take(starts), 1);
+        yield* Deferred.await(firstReady);
+
+        healthy = false;
+        yield* TestClock.adjust(Duration.seconds(5));
+        yield* Effect.yieldNow;
+        assert.equal(killCount, 0);
+        assert.equal(yield* Queue.size(starts), 0);
+
+        healthy = true;
+        yield* TestClock.adjust(Duration.seconds(1));
+        yield* Effect.yieldNow;
+        assert.equal(killCount, 0);
+        assert.equal(yield* Queue.size(starts), 0);
       }).pipe(Effect.provide(Layer.merge(TestClock.layer(), managerLayer)));
     }),
   );
@@ -604,6 +669,10 @@ describe("DesktopBackendManager", () => {
         httpClientLayer: httpClientLayer((request) =>
           Effect.succeed(responseForRequest(request, healthy ? 200 : 503)),
         ),
+        config: {
+          ...baseConfig,
+          healthFailureThreshold: 3,
+        },
         desktopWindow: {
           handleBackendReady: Deferred.succeed(firstReady, void 0).pipe(Effect.asVoid),
         },

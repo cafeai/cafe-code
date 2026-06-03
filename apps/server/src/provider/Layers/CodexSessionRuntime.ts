@@ -71,6 +71,7 @@ const BENIGN_ERROR_LOG_SNIPPETS = [
   "state db record_discrepancy: find_thread_path_by_id_str_in_subdir, falling_back",
 ];
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
+const CODEX_REMOTE_COMPACTION_V2_FEATURE_CONFIG_KEY = "features.remote_compaction_v2";
 const CODEX_SNAPSHOT_BACKFILL_TURN_LIMIT = 1;
 const CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS = [
   "2 seconds",
@@ -522,6 +523,16 @@ function buildThreadStartParams(input: {
   // `~/.codex/config.toml`. The shared constant documents why Cafe currently
   // chooses 200k instead of the older 100k override.
   const threadConfig: Record<string, unknown> = {
+    // Upstream Codex rust-v0.136.0 still marks remote_compaction_v2 as an
+    // under-development feature and disables it by default. Cafe pins it off
+    // per managed thread because that v2 path uses the normal Responses tool
+    // plan; with the stable image_generation feature enabled, upstream can add
+    // a hosted image tool that currently targets gpt-image-2 and causes text
+    // compaction to fail for accounts/models that do not expose that image
+    // model. Keeping v2 off preserves the upstream default legacy
+    // /responses/compact path while still leaving the user's shared Codex
+    // config file untouched.
+    [CODEX_REMOTE_COMPACTION_V2_FEATURE_CONFIG_KEY]: false,
     model_auto_compact_token_limit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
     model_auto_compact_token_limit_scope: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT_SCOPE,
   };

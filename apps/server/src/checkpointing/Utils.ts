@@ -20,6 +20,25 @@ export function checkpointRefForThreadTurn(threadId: ThreadId, turnCount: number
   );
 }
 
+export function isGeneratedHiddenCheckpointRef(checkpointRef: string): boolean {
+  const value = String(checkpointRef);
+  if (
+    !(
+      value.startsWith(`${CHECKPOINT_REFS_PREFIX}/`) ||
+      value.startsWith(`${LEGACY_CHECKPOINT_REFS_PREFIX}/`)
+    )
+  ) {
+    return false;
+  }
+
+  // Hidden checkpoint refs are the only refs Cafe owns in git. Provider-diff
+  // placeholders and corrupted persisted values must never be sent into
+  // `git update-ref --stdin`, because that command parses stdin as a command
+  // language and the VCS layer deliberately rejects anything outside this
+  // generated grammar.
+  return /^refs\/(?:cafe|t3)\/checkpoints\/[A-Za-z0-9_-]+\/turn\/(?:0|[1-9][0-9]*)$/.test(value);
+}
+
 export function resolveThreadWorkspaceCwd(input: {
   readonly thread: {
     readonly projectId: ProjectId;

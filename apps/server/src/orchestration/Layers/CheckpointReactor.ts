@@ -22,6 +22,7 @@ import { makeDrainableWorker } from "@cafecode/shared/DrainableWorker";
 import { parseTurnDiffFilesFromUnifiedDiff } from "../../checkpointing/Diffs.ts";
 import {
   checkpointRefForThreadTurn,
+  isGeneratedHiddenCheckpointRef,
   resolveThreadWorkspaceCwd,
 } from "../../checkpointing/Utils.ts";
 import { CheckpointStore } from "../../checkpointing/Services/CheckpointStore.ts";
@@ -39,6 +40,56 @@ import { WorkspaceEntries } from "../../workspace/Services/WorkspaceEntries.ts";
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const CHECKPOINT_REFS_RETAINED_PER_THREAD = 3;
 const CHECKPOINT_REF_PRUNE_WARNING_SAMPLE_SIZE = 20;
+
+export function computeCheckpointRefPrunePlan(input: {
+  readonly threadId: ThreadId;
+  readonly currentTurnCount: number;
+  readonly checkpoints: ReadonlyArray<{
+    readonly checkpointTurnCount: number;
+    readonly checkpointRef: CheckpointRef;
+  }>;
+}): {
+  readonly retainedTurnCounts: ReadonlyArray<number>;
+  readonly checkpointRefsToDelete: ReadonlyArray<CheckpointRef>;
+  readonly skippedNonHiddenCheckpointRefs: number;
+} {
+  const skippedNonHiddenCheckpointRefs = input.checkpoints.filter(
+    (checkpoint) => !isGeneratedHiddenCheckpointRef(checkpoint.checkpointRef),
+  ).length;
+  const checkpointCandidates = [
+    ...input.checkpoints.filter((checkpoint) =>
+      isGeneratedHiddenCheckpointRef(checkpoint.checkpointRef),
+    ),
+    {
+      checkpointTurnCount: 0,
+      checkpointRef: checkpointRefForThreadTurn(input.threadId, 0),
+    },
+  ];
+  const retainedTurnCounts = [
+    ...new Set(
+      [
+        ...checkpointCandidates.map((checkpoint) => checkpoint.checkpointTurnCount),
+        input.currentTurnCount,
+      ]
+        .toSorted((left, right) => right - left)
+        .slice(0, CHECKPOINT_REFS_RETAINED_PER_THREAD),
+    ),
+  ];
+  const retainedTurnCountSet = new Set(retainedTurnCounts);
+  const checkpointRefsToDelete = [
+    ...new Set(
+      checkpointCandidates
+        .filter((checkpoint) => !retainedTurnCountSet.has(checkpoint.checkpointTurnCount))
+        .map((checkpoint) => checkpoint.checkpointRef),
+    ),
+  ];
+
+  return {
+    retainedTurnCounts,
+    checkpointRefsToDelete,
+    skippedNonHiddenCheckpointRefs,
+  };
+}
 
 type ReactorInput =
   | {
@@ -214,30 +265,18 @@ const make = Effect.gen(function* () {
         readonly checkpointRef: CheckpointRef;
       }>;
     }) {
-      const checkpointCandidates = [
-        ...input.checkpoints,
-        {
-          checkpointTurnCount: 0,
-          checkpointRef: checkpointRefForThreadTurn(input.threadId, 0),
-        },
-      ];
-      const retainedTurnCounts = new Set(
-        [
-          ...checkpointCandidates.map((checkpoint) => checkpoint.checkpointTurnCount),
-          input.currentTurnCount,
-        ]
-          .toSorted((left, right) => right - left)
-          .slice(0, CHECKPOINT_REFS_RETAINED_PER_THREAD),
-      );
-      const checkpointRefsToDelete = [
-        ...new Set(
-          checkpointCandidates
-            .filter((checkpoint) => !retainedTurnCounts.has(checkpoint.checkpointTurnCount))
-            .map((checkpoint) => checkpoint.checkpointRef),
-        ),
-      ];
+      const prunePlan = computeCheckpointRefPrunePlan(input);
+      const { checkpointRefsToDelete, retainedTurnCounts, skippedNonHiddenCheckpointRefs } =
+        prunePlan;
 
       if (checkpointRefsToDelete.length === 0) {
+        if (skippedNonHiddenCheckpointRefs > 0) {
+          yield* Effect.logDebug("skipped non-hidden checkpoint refs during prune", {
+            threadId: input.threadId,
+            cwd: input.cwd,
+            skippedNonHiddenCheckpointRefs,
+          });
+        }
         return;
       }
 
@@ -251,8 +290,9 @@ const make = Effect.gen(function* () {
             Effect.logWarning("failed to prune old checkpoint refs", {
               threadId: input.threadId,
               cwd: input.cwd,
-              retainedTurnCounts: [...retainedTurnCounts],
+              retainedTurnCounts,
               checkpointRefDeleteCount: checkpointRefsToDelete.length,
+              skippedNonHiddenCheckpointRefs,
               checkpointRefsToDeleteSample: checkpointRefsToDelete.slice(
                 0,
                 CHECKPOINT_REF_PRUNE_WARNING_SAMPLE_SIZE,
@@ -835,7 +875,8 @@ const make = Effect.gen(function* () {
 
     const staleCheckpointRefs = thread.checkpoints
       .filter((checkpoint) => checkpoint.checkpointTurnCount > event.payload.turnCount)
-      .map((checkpoint) => checkpoint.checkpointRef);
+      .map((checkpoint) => checkpoint.checkpointRef)
+      .filter((checkpointRef) => isGeneratedHiddenCheckpointRef(checkpointRef));
 
     if (staleCheckpointRefs.length > 0) {
       yield* checkpointStore.deleteCheckpointRefs({
