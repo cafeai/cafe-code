@@ -109,6 +109,10 @@ const THEME_OPTIONS = [
     label: "Dark",
   },
 ] as const;
+
+function canRestartProviderRuntime(driver: ProviderDriverKind): boolean {
+  return driver === "codex" || driver === "claudeAgent";
+}
 const DEFAULT_APP_ACCENT_PICKER_COLOR = "#2563eb";
 const DEFAULT_SIDEBAR_ACCENT_PICKER_COLOR = "#48cfff";
 
@@ -1142,6 +1146,9 @@ export function ProviderSettingsPanel() {
   const [updatingProviderDrivers, setUpdatingProviderDrivers] = useState<
     ReadonlySet<ProviderDriverKind>
   >(() => new Set());
+  const [restartingProviderRuntimeInstanceIds, setRestartingProviderRuntimeInstanceIds] = useState<
+    ReadonlySet<ProviderInstanceId>
+  >(() => new Set());
   const [openInstanceDetails, setOpenInstanceDetails] = useState<Record<string, boolean>>({});
   const refreshingRef = useRef(false);
 
@@ -1221,6 +1228,66 @@ export function ProviderSettingsPanel() {
       });
     }
   }, []);
+
+  const restartProviderRuntime = useCallback(
+    async (input: { readonly instanceId: ProviderInstanceId; readonly displayName: string }) => {
+      let started = false;
+      setRestartingProviderRuntimeInstanceIds((previous) => {
+        if (previous.has(input.instanceId)) {
+          return previous;
+        }
+        started = true;
+        const next = new Set(previous);
+        next.add(input.instanceId);
+        return next;
+      });
+      if (!started) {
+        return;
+      }
+
+      try {
+        const confirmed = await ensureLocalApi().dialogs.confirm(
+          `Restart the ${input.displayName} provider runtime?\n\nActive turns for this provider may be interrupted. Future messages will reconnect using saved session state.`,
+        );
+        if (!confirmed) {
+          return;
+        }
+
+        const result = await ensureLocalApi().server.restartProviderRuntime({
+          instanceId: input.instanceId,
+        });
+        toastManager.add({
+          type: "success",
+          title: `${input.displayName} runtime restarted`,
+          description:
+            result.stoppedSessionCount === 1
+              ? "Stopped 1 active provider session."
+              : `Stopped ${result.stoppedSessionCount} active provider sessions.`,
+        });
+      } catch (error) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: `Could not restart ${input.displayName}`,
+            description:
+              error instanceof Error
+                ? error.message
+                : "The provider runtime restart could not be started.",
+          }),
+        );
+      } finally {
+        setRestartingProviderRuntimeInstanceIds((previous) => {
+          if (!previous.has(input.instanceId)) {
+            return previous;
+          }
+          const next = new Set(previous);
+          next.delete(input.instanceId);
+          return next;
+        });
+      }
+    },
+    [],
+  );
 
   interface InstanceRow {
     readonly instanceId: ProviderInstanceId;
@@ -1466,6 +1533,8 @@ export function ProviderSettingsPanel() {
             .filter((favorite) => favorite.provider === row.instanceId)
             .map((favorite) => favorite.model);
           const resetLabel = driverOption?.label ?? String(row.driver);
+          const providerDisplayName =
+            row.instance.displayName?.trim() || driverOption?.label || String(row.driver);
           const headerAction =
             row.isDefault && row.isDirty ? (
               <SettingResetButton
@@ -1531,6 +1600,16 @@ export function ProviderSettingsPanel() {
                   : undefined
               }
               isUpdating={showInlineUpdateButton ? isDriverUpdateRunning : undefined}
+              onRestartRuntime={
+                canRestartProviderRuntime(row.driver)
+                  ? () =>
+                      void restartProviderRuntime({
+                        instanceId: row.instanceId,
+                        displayName: providerDisplayName,
+                      })
+                  : undefined
+              }
+              isRestartingRuntime={restartingProviderRuntimeInstanceIds.has(row.instanceId)}
             />
           );
         })}

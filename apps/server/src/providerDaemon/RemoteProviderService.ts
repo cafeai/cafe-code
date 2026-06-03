@@ -59,6 +59,7 @@ const VOID_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "respondToRequest",
   "respondToUserInput",
   "stopSession",
+  "restartProviderRuntime",
   "rollbackConversation",
 ]);
 const MUTATING_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
@@ -222,6 +223,8 @@ const makeRemoteProviderService = Effect.gen(function* () {
     respondToUserInput: (input) =>
       rpc(daemonConfig, { method: "respondToUserInput", payload: input }),
     stopSession: (input) => rpc(daemonConfig, { method: "stopSession", payload: input }),
+    restartProviderRuntime: (input) =>
+      rpc(daemonConfig, { method: "restartProviderRuntime", payload: input }),
     listSessions: () =>
       rpc(daemonConfig, { method: "listSessions", payload: {} }).pipe(
         Effect.catch((error) =>

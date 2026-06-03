@@ -24,6 +24,7 @@ import {
   OrchestrationReplayEventsError,
   FilesystemBrowseError,
   ThreadId,
+  ServerProviderRuntimeRestartError,
   WS_METHODS,
   WsRpcGroup,
 } from "@cafecode/contracts";
@@ -47,6 +48,7 @@ import {
   observeRpcStreamEffect,
 } from "./observability/RpcInstrumentation.ts";
 import { ProviderRegistry } from "./provider/Services/ProviderRegistry.ts";
+import { ProviderService } from "./provider/Services/ProviderService.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup.ts";
@@ -246,6 +248,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
       const vcsProvisioning = yield* VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
       const providerRegistry = yield* ProviderRegistry;
+      const providerService = yield* ProviderService;
       const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
       const config = yield* ServerConfig;
       const lifecycleEvents = yield* ServerLifecycleEvents;
@@ -969,6 +972,32 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
           observeRpcEffect(
             WS_METHODS.serverUpdateProvider,
             providerMaintenanceRunner.updateProvider(input),
+            {
+              "rpc.aggregate": "server",
+            },
+          ),
+        [WS_METHODS.serverRestartProviderRuntime]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverRestartProviderRuntime,
+            providerService.restartProviderRuntime(input).pipe(
+              Effect.flatMap((result) =>
+                providerRegistry.refreshInstance(input.instanceId).pipe(
+                  Effect.map((providers) => ({
+                    ...result,
+                    providers,
+                  })),
+                ),
+              ),
+              Effect.mapError(
+                (error) =>
+                  new ServerProviderRuntimeRestartError({
+                    instanceId: input.instanceId,
+                    reason:
+                      error instanceof Error ? error.message : "Provider runtime restart failed.",
+                    cause: error,
+                  }),
+              ),
+            ),
             {
               "rpc.aggregate": "server",
             },

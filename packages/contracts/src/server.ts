@@ -832,6 +832,32 @@ export const ServerProviderUpdateInput = Schema.Struct({
 });
 export type ServerProviderUpdateInput = typeof ServerProviderUpdateInput.Type;
 
+export const ServerProviderRuntimeRestartInput = Schema.Struct({
+  instanceId: ProviderInstanceId,
+});
+export type ServerProviderRuntimeRestartInput = typeof ServerProviderRuntimeRestartInput.Type;
+
+export const ServerProviderRuntimeRestartResult = Schema.Struct({
+  providers: ServerProviders,
+  instanceId: ProviderInstanceId,
+  provider: ProviderDriverKind,
+  stoppedSessionCount: NonNegativeInt,
+});
+export type ServerProviderRuntimeRestartResult = typeof ServerProviderRuntimeRestartResult.Type;
+
+export class ServerProviderRuntimeRestartError extends Schema.TaggedErrorClass<ServerProviderRuntimeRestartError>()(
+  "ServerProviderRuntimeRestartError",
+  {
+    instanceId: ProviderInstanceId,
+    reason: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect),
+  },
+) {
+  override get message(): string {
+    return `Provider runtime restart failed for ${this.instanceId}: ${this.reason}`;
+  }
+}
+
 export class ServerProviderUpdateError extends Schema.TaggedErrorClass<ServerProviderUpdateError>()(
   "ServerProviderUpdateError",
   {

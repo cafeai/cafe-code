@@ -372,6 +372,13 @@ export const ProviderDaemonRpcError = Schema.Struct({
 });
 export type ProviderDaemonRpcError = typeof ProviderDaemonRpcError.Type;
 
+export const ProviderDaemonRuntimeRestartResult = Schema.Struct({
+  instanceId: ProviderInstanceId,
+  provider: ProviderDriverKind,
+  stoppedSessionCount: NonNegativeInt,
+});
+export type ProviderDaemonRuntimeRestartResult = typeof ProviderDaemonRuntimeRestartResult.Type;
+
 export const ProviderDaemonRpcEnvelope = Schema.Union([
   Schema.Struct({
     ok: Schema.Literal(true),
@@ -389,6 +396,10 @@ const GetCapabilitiesPayload = Schema.Struct({
 });
 
 const GetInstanceInfoPayload = Schema.Struct({
+  instanceId: ProviderInstanceId,
+});
+
+const RestartProviderRuntimePayload = Schema.Struct({
   instanceId: ProviderInstanceId,
 });
 
@@ -434,6 +445,11 @@ export const ProviderDaemonRpcRequest = Schema.Union([
     payload: ProviderStopSessionInput,
   }),
   Schema.Struct({
+    method: Schema.Literal("restartProviderRuntime"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: RestartProviderRuntimePayload,
+  }),
+  Schema.Struct({
     method: Schema.Literal("listSessions"),
     payload: Schema.Struct({}),
   }),
@@ -461,6 +477,7 @@ export const ProviderDaemonRpcResultByMethod = {
   respondToRequest: Schema.Void,
   respondToUserInput: Schema.Void,
   stopSession: Schema.Void,
+  restartProviderRuntime: ProviderDaemonRuntimeRestartResult,
   listSessions: Schema.Array(ProviderSession),
   getCapabilities: ProviderDaemonAdapterCapabilities,
   getInstanceInfo: ProviderDaemonInstanceRoutingInfo,

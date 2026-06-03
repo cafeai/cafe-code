@@ -7,6 +7,7 @@ import {
   DownloadIcon,
   LoaderIcon,
   PlusIcon,
+  RotateCcwIcon,
   Trash2Icon,
   XIcon,
 } from "lucide-react";
@@ -422,6 +423,8 @@ interface ProviderInstanceCardProps {
   readonly onModelOrderChange: (next: ReadonlyArray<string>) => void;
   readonly onRunUpdate?: (() => void) | undefined;
   readonly isUpdating?: boolean | undefined;
+  readonly onRestartRuntime?: (() => void) | undefined;
+  readonly isRestartingRuntime?: boolean | undefined;
 }
 
 /**
@@ -466,6 +469,8 @@ export function ProviderInstanceCard({
   onModelOrderChange,
   onRunUpdate,
   isUpdating = false,
+  onRestartRuntime,
+  isRestartingRuntime = false,
 }: ProviderInstanceCardProps) {
   const enabled = instance.enabled ?? true;
   // The server-reported status wins when present; otherwise fall back to
@@ -800,6 +805,30 @@ export function ProviderInstanceCard({
             ) : null}
           </div>
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
+            {onRestartRuntime ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      type="button"
+                      size="icon-xs"
+                      variant="ghost"
+                      className="size-7 rounded-sm p-0 text-muted-foreground hover:text-foreground"
+                      disabled={isRestartingRuntime}
+                      onClick={onRestartRuntime}
+                      aria-label={`Restart ${displayName} runtime`}
+                    >
+                      {isRestartingRuntime ? (
+                        <LoaderIcon className="size-3.5 animate-spin" />
+                      ) : (
+                        <RotateCcwIcon className="size-3.5" />
+                      )}
+                    </Button>
+                  }
+                />
+                <TooltipPopup side="top">Restart provider runtime</TooltipPopup>
+              </Tooltip>
+            ) : null}
             <Button
               size="sm"
               variant="ghost"

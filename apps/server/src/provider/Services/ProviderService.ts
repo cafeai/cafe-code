@@ -20,6 +20,7 @@ import type {
   ProviderSendTurnInput,
   ProviderSession,
   ProviderSessionStartInput,
+  ServerProviderRuntimeRestartInput,
   ProviderSteerTurnInput,
   ProviderStopSessionInput,
   ThreadId,
@@ -87,6 +88,23 @@ export interface ProviderServiceShape {
   readonly stopSession: (
     input: ProviderStopSessionInput,
   ) => Effect.Effect<void, ProviderServiceError>;
+
+  /**
+   * Stop all live sessions owned by one configured provider instance.
+   *
+   * This intentionally does not start a replacement session immediately:
+   * future user intent should reopen Codex/Claude with the persisted resume
+   * cursor through the normal `startSession` path, so the renderer does not
+   * infer lifecycle truth from a raw process restart.
+   */
+  readonly restartProviderRuntime: (input: ServerProviderRuntimeRestartInput) => Effect.Effect<
+    {
+      readonly instanceId: ProviderInstanceId;
+      readonly provider: ProviderSession["provider"];
+      readonly stoppedSessionCount: number;
+    },
+    ProviderServiceError
+  >;
 
   /**
    * List active provider sessions.

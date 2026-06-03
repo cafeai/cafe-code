@@ -147,6 +147,7 @@ function createProviderServiceHarness(
     respondToRequest: () => unsupported(),
     respondToUserInput: () => unsupported(),
     stopSession: () => unsupported(),
+    restartProviderRuntime: () => unsupported(),
     listSessions,
     getCapabilities: () =>
       Effect.succeed({ sessionModelSwitch: "in-session", liveSteer: "unsupported" }),

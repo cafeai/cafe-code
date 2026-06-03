@@ -81,6 +81,7 @@ import {
   ProviderRegistry,
   type ProviderRegistryShape,
 } from "./provider/Services/ProviderRegistry.ts";
+import { ProviderService, type ProviderServiceShape } from "./provider/Services/ProviderService.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./provider/providerMaintenance.ts";
 import { ServerLifecycleEvents, type ServerLifecycleEventsShape } from "./serverLifecycleEvents.ts";
 import { ServerRuntimeStartup, type ServerRuntimeStartupShape } from "./serverRuntimeStartup.ts";
@@ -405,6 +406,7 @@ const buildAppUnderTest = (options?: {
   layers?: {
     keybindings?: Partial<KeybindingsShape>;
     providerRegistry?: Partial<ProviderRegistryShape>;
+    providerService?: Partial<ProviderServiceShape>;
     serverSettings?: Partial<ServerSettingsShape>;
     externalLauncher?: Partial<ExternalLauncher.ExternalLauncherShape>;
     vcsDriver?: Partial<VcsDriver.VcsDriverShape>;
@@ -613,6 +615,39 @@ const buildAppUnderTest = (options?: {
           setProviderMaintenanceActionState: () => Effect.succeed([]),
           streamChanges: Stream.empty,
           ...options?.layers?.providerRegistry,
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(ProviderService)({
+          startSession: () => Effect.die("unexpected startSession"),
+          sendTurn: () => Effect.die("unexpected sendTurn"),
+          steerTurn: () => Effect.die("unexpected steerTurn"),
+          interruptTurn: () => Effect.die("unexpected interruptTurn"),
+          respondToRequest: () => Effect.die("unexpected respondToRequest"),
+          respondToUserInput: () => Effect.die("unexpected respondToUserInput"),
+          stopSession: () => Effect.die("unexpected stopSession"),
+          restartProviderRuntime: (input) =>
+            Effect.succeed({
+              instanceId: input.instanceId,
+              provider: ProviderDriverKind.make(String(input.instanceId)),
+              stoppedSessionCount: 0,
+            }),
+          listSessions: () => Effect.succeed([]),
+          getCapabilities: () => Effect.die("unexpected getCapabilities"),
+          getInstanceInfo: (instanceId) =>
+            Effect.succeed({
+              instanceId,
+              driverKind: ProviderDriverKind.make(String(instanceId)),
+              displayName: undefined,
+              enabled: true,
+              continuationIdentity: {
+                driverKind: ProviderDriverKind.make(String(instanceId)),
+                continuationKey: `test:${String(instanceId)}`,
+              },
+            }),
+          rollbackConversation: () => Effect.die("unexpected rollbackConversation"),
+          streamEvents: Stream.empty,
+          ...options?.layers?.providerService,
         }),
       ),
       Layer.provide(

@@ -90,6 +90,7 @@ const mockProviderService = {
   respondToRequest: () => Effect.die("unexpected respondToRequest"),
   respondToUserInput: () => Effect.die("unexpected respondToUserInput"),
   stopSession: () => Effect.die("unexpected stopSession"),
+  restartProviderRuntime: () => Effect.die("unexpected restartProviderRuntime"),
   listSessions: () => Effect.succeed([]),
   getCapabilities: () => Effect.die("unexpected getCapabilities"),
   getInstanceInfo: () => Effect.die("unexpected getInstanceInfo"),

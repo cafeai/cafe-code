@@ -18,6 +18,7 @@ import {
   ProviderRespondToUserInputInput,
   ProviderSendTurnInput,
   ProviderSessionStartInput,
+  ServerProviderRuntimeRestartInput,
   ProviderSteerTurnInput,
   ProviderStopSessionInput,
   type TurnId,
@@ -74,6 +75,8 @@ const ProviderRollbackConversationInput = Schema.Struct({
   threadId: ThreadId,
   numTurns: NonNegativeInt,
 });
+
+const ProviderRuntimeRestartInput = ServerProviderRuntimeRestartInput;
 
 function toValidationError(
   operation: string,
@@ -1095,6 +1098,100 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const restartProviderRuntime: ProviderServiceShape["restartProviderRuntime"] = Effect.fn(
+    "restartProviderRuntime",
+  )(function* (rawInput) {
+    const input = yield* decodeInputOrValidationError({
+      operation: "ProviderService.restartProviderRuntime",
+      schema: ProviderRuntimeRestartInput,
+      payload: rawInput,
+    });
+    let metricProvider = "unknown";
+    return yield* Effect.gen(function* () {
+      const instanceInfo = yield* registry.getInstanceInfo(input.instanceId);
+      const adapter = yield* registry.getByInstance(input.instanceId);
+      metricProvider = adapter.provider;
+      const restartedAt = yield* nowIso;
+      const activeSessions = yield* adapter.listSessions();
+      const activeThreadIds = new Set(activeSessions.map((session) => session.threadId));
+
+      yield* Effect.annotateCurrentSpan({
+        "provider.operation": "restart-runtime",
+        "provider.kind": adapter.provider,
+        "provider.instance_id": input.instanceId,
+        "provider.session_count": activeSessions.length,
+      });
+
+      // Persist a stopped boundary before asking the adapter to tear down its
+      // process tree. This matches shutdown semantics: after the restart,
+      // future user input must reopen Codex/Claude through `startSession`
+      // using durable resume state, rather than steering a runtime Cafe no
+      // longer owns.
+      yield* Effect.forEach(activeSessions, (session) =>
+        directory.upsert({
+          threadId: session.threadId,
+          provider: adapter.provider,
+          providerInstanceId: input.instanceId,
+          runtimeMode: session.runtimeMode,
+          status: "stopped",
+          ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),
+          runtimePayload: {
+            cwd: session.cwd ?? null,
+            additionalDirectories: session.additionalDirectories ?? [],
+            model: session.model ?? null,
+            activeTurnId: null,
+            lastError: session.lastError ?? null,
+            lastRuntimeEvent: "provider.runtime.restart",
+            lastRuntimeEventAt: restartedAt,
+          },
+        }),
+      ).pipe(Effect.asVoid);
+
+      const bindings = yield* directory.listBindings().pipe(Effect.orElseSucceed(() => []));
+      yield* Effect.forEach(bindings, (binding) => {
+        const bindingInstanceId = dieOnMissingBindingInstanceId(
+          "ProviderService.restartProviderRuntime",
+          binding,
+        );
+        if (bindingInstanceId !== input.instanceId || activeThreadIds.has(binding.threadId)) {
+          return Effect.void;
+        }
+        return directory.upsert({
+          threadId: binding.threadId,
+          provider: binding.provider,
+          providerInstanceId: bindingInstanceId,
+          status: "stopped",
+          runtimePayload: {
+            activeTurnId: null,
+            lastRuntimeEvent: "provider.runtime.restart",
+            lastRuntimeEventAt: restartedAt,
+          },
+        });
+      }).pipe(Effect.asVoid);
+
+      yield* adapter.stopAll();
+      yield* analytics.record("provider.runtime.restarted", {
+        provider: adapter.provider,
+        sessionCount: activeSessions.length,
+      });
+      yield* analytics.flush;
+
+      return {
+        instanceId: input.instanceId,
+        provider: instanceInfo.driverKind,
+        stoppedSessionCount: activeSessions.length,
+      };
+    }).pipe(
+      withMetrics({
+        counter: providerSessionsTotal,
+        outcomeAttributes: () =>
+          providerMetricAttributes(metricProvider, {
+            operation: "restart-runtime",
+          }),
+      }),
+    );
+  });
+
   const listSessions: ProviderServiceShape["listSessions"] = Effect.fn("listSessions")(
     function* () {
       const currentAdapters = yield* getAdapterEntries;
@@ -1316,6 +1413,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     respondToRequest,
     respondToUserInput,
     stopSession,
+    restartProviderRuntime,
     listSessions,
     getCapabilities,
     getInstanceInfo,

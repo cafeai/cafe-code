@@ -58,6 +58,9 @@ import {
   ServerConfig,
   ServerProviderUpdateError,
   ServerProviderUpdateInput,
+  ServerProviderRuntimeRestartError,
+  ServerProviderRuntimeRestartInput,
+  ServerProviderRuntimeRestartResult,
   ServerLifecycleStreamEvent,
   ServerRemoveKeybindingInput,
   ServerRemoveKeybindingResult,
@@ -117,6 +120,7 @@ export const WS_METHODS = {
   serverGetConfig: "server.getConfig",
   serverRefreshProviders: "server.refreshProviders",
   serverUpdateProvider: "server.updateProvider",
+  serverRestartProviderRuntime: "server.restartProviderRuntime",
   serverUpsertKeybinding: "server.upsertKeybinding",
   serverRemoveKeybinding: "server.removeKeybinding",
   serverGetSettings: "server.getSettings",
@@ -174,6 +178,12 @@ export const WsServerUpdateProviderRpc = Rpc.make(WS_METHODS.serverUpdateProvide
   payload: ServerProviderUpdateInput,
   success: ServerProviderUpdatedPayload,
   error: ServerProviderUpdateError,
+});
+
+export const WsServerRestartProviderRuntimeRpc = Rpc.make(WS_METHODS.serverRestartProviderRuntime, {
+  payload: ServerProviderRuntimeRestartInput,
+  success: ServerProviderRuntimeRestartResult,
+  error: ServerProviderRuntimeRestartError,
 });
 
 export const WsServerGetSettingsRpc = Rpc.make(WS_METHODS.serverGetSettings, {
@@ -424,6 +434,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
+  WsServerRestartProviderRuntimeRpc,
   WsServerUpsertKeybindingRpc,
   WsServerRemoveKeybindingRpc,
   WsServerGetSettingsRpc,

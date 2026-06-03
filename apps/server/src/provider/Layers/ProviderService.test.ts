@@ -454,6 +454,64 @@ it.effect("ProviderServiceLive persists stopped runtime state before adapter sto
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+const restart = makeProviderServiceLayer();
+restart.layer("ProviderServiceLive runtime restart", (it) => {
+  it.effect("stops only the targeted provider instance", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const codexThreadId = asThreadId("thread-codex-restart");
+      const claudeThreadId = asThreadId("thread-claude-keep-running");
+
+      yield* provider.startSession(codexThreadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId: codexThreadId,
+        runtimeMode: "full-access",
+        cwd: "/repo/codex",
+      });
+      yield* provider.startSession(claudeThreadId, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId: claudeThreadId,
+        runtimeMode: "full-access",
+        cwd: "/repo/claude",
+      });
+
+      const result = yield* provider.restartProviderRuntime({
+        instanceId: codexInstanceId,
+      });
+
+      assert.equal(result.instanceId, codexInstanceId);
+      assert.equal(result.provider, CODEX_DRIVER);
+      assert.equal(result.stoppedSessionCount, 1);
+      assert.equal(restart.codex.stopAll.mock.calls.length, 1);
+      assert.equal(restart.claude.stopAll.mock.calls.length, 0);
+
+      const remainingSessions = yield* provider.listSessions();
+      assert.deepEqual(
+        remainingSessions.map((session) => session.threadId),
+        [claudeThreadId],
+      );
+
+      const codexBinding = Option.getOrThrow(yield* directory.getBinding(codexThreadId));
+      assert.equal(codexBinding.status, "stopped");
+      assert.equal(codexBinding.providerInstanceId, codexInstanceId);
+      assert.deepEqual(codexBinding.resumeCursor, {
+        opaque: `resume-${String(codexThreadId)}`,
+      });
+      assert.equal((codexBinding.runtimePayload as { activeTurnId?: unknown }).activeTurnId, null);
+      assert.equal(
+        (codexBinding.runtimePayload as { lastRuntimeEvent?: unknown }).lastRuntimeEvent,
+        "provider.runtime.restart",
+      );
+
+      const claudeBinding = Option.getOrThrow(yield* directory.getBinding(claudeThreadId));
+      assert.equal(claudeBinding.status, "running");
+    }),
+  );
+});
+
 it.effect("ProviderServiceLive rejects new sessions for disabled providers", () =>
   Effect.gen(function* () {
     const codex = makeFakeCodexAdapter();

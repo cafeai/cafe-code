@@ -718,6 +718,8 @@ const executeRpcRequest = (
       return providerService.respondToUserInput(request.payload);
     case "stopSession":
       return providerService.stopSession(request.payload);
+    case "restartProviderRuntime":
+      return providerService.restartProviderRuntime(request.payload);
     case "listSessions":
       return providerService.listSessions();
     case "getCapabilities":

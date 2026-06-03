@@ -33,6 +33,7 @@ const MUTATING_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "respondToRequest",
   "respondToUserInput",
   "stopSession",
+  "restartProviderRuntime",
   "rollbackConversation",
 ]);
 

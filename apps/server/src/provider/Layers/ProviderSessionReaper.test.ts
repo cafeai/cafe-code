@@ -165,6 +165,7 @@ describe("ProviderSessionReaper", () => {
       respondToRequest: () => unsupported(),
       respondToUserInput: () => unsupported(),
       stopSession,
+      restartProviderRuntime: () => unsupported(),
       listSessions: () => Effect.succeed([]),
       getCapabilities: () =>
         Effect.succeed({ sessionModelSwitch: "in-session", liveSteer: "unsupported" }),

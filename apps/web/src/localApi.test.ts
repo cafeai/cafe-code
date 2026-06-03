@@ -70,6 +70,7 @@ const rpcClientMock = {
     getConfig: vi.fn(),
     refreshProviders: vi.fn(),
     updateProvider: vi.fn(),
+    restartProviderRuntime: vi.fn(),
     upsertKeybinding: vi.fn(),
     getSettings: vi.fn(),
     updateSettings: vi.fn(),
@@ -525,6 +526,32 @@ describe("wsApi", () => {
     });
     expect(rpcClientMock.server.updateProvider).toHaveBeenCalledWith({
       provider: ProviderDriverKind.make("codex"),
+    });
+  });
+
+  it("forwards provider runtime restarts directly to the RPC client", async () => {
+    const nextProviders: ReadonlyArray<ServerProvider> = [
+      {
+        ...defaultProviders[0]!,
+        checkedAt: "2026-01-03T00:00:00.000Z",
+      },
+    ];
+    const restartResult = {
+      providers: nextProviders,
+      instanceId: ProviderInstanceId.make("codex"),
+      provider: ProviderDriverKind.make("codex"),
+      stoppedSessionCount: 2,
+    };
+    rpcClientMock.server.restartProviderRuntime.mockResolvedValue(restartResult);
+    const { createLocalApi } = await import("./localApi");
+
+    const api = createLocalApi(rpcClientMock as never);
+
+    await expect(
+      api.server.restartProviderRuntime({ instanceId: ProviderInstanceId.make("codex") }),
+    ).resolves.toEqual(restartResult);
+    expect(rpcClientMock.server.restartProviderRuntime).toHaveBeenCalledWith({
+      instanceId: ProviderInstanceId.make("codex"),
     });
   });
 
