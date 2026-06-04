@@ -602,29 +602,14 @@ const make = Effect.gen(function* () {
       });
     }
     const preferredProvider: ProviderDriverKind = desiredDriverKind;
-    if (
-      thread.session !== null &&
+    const requestedInstanceChange =
       requestedModelSelection !== undefined &&
-      requestedModelSelection.instanceId !== currentInstanceId
-    ) {
-      if (currentInfo.driverKind !== desiredInfo.driverKind) {
-        return yield* new ProviderAdapterRequestError({
-          provider: preferredProvider,
-          method: "thread.turn.start",
-          detail: `Thread '${threadId}' is bound to driver '${currentInfo.driverKind}' and cannot switch to '${desiredInfo.driverKind}'.`,
-        });
-      }
-      if (
+      requestedModelSelection.instanceId !== currentInstanceId;
+    const providerResumeIdentityChanged =
+      requestedInstanceChange &&
+      (currentInfo.driverKind !== desiredInfo.driverKind ||
         currentInfo.continuationIdentity.continuationKey !==
-        desiredInfo.continuationIdentity.continuationKey
-      ) {
-        return yield* new ProviderAdapterRequestError({
-          provider: preferredProvider,
-          method: "thread.turn.start",
-          detail: `Thread '${threadId}' cannot switch from instance '${currentInstanceId}' to '${desiredInstanceId}' because their provider resume state is incompatible.`,
-        });
-      }
-    }
+          desiredInfo.continuationIdentity.continuationKey);
     const project = options?.project ?? (yield* resolveProject(thread.projectId));
     const workspaceDirectories = resolveThreadWorkspaceDirectories({
       thread,
@@ -711,15 +696,21 @@ const make = Effect.gen(function* () {
         !cwdChanged &&
         !additionalDirectoriesChanged &&
         !instanceChanged &&
+        !providerResumeIdentityChanged &&
         !shouldRestartForModelChange &&
         !shouldRestartForModelSelectionChange
       ) {
         return activeSession;
       }
 
-      const resumeCursor = shouldRestartForModelChange
-        ? undefined
-        : (activeSession?.resumeCursor ?? undefined);
+      // Provider resume state is only meaningful inside the same provider
+      // continuation identity. A cross-driver switch such as Claude -> Codex,
+      // or a custom instance switch with a different continuation key, keeps
+      // Cafe's durable thread history but must start a fresh provider session.
+      const resumeCursor =
+        shouldRestartForModelChange || providerResumeIdentityChanged
+          ? undefined
+          : (activeSession?.resumeCursor ?? undefined);
       yield* Effect.logInfo("provider command reactor restarting provider session", {
         threadId,
         existingSessionThreadId,
@@ -738,6 +729,7 @@ const make = Effect.gen(function* () {
         additionalDirectoriesChanged,
         modelChanged,
         instanceChanged,
+        providerResumeIdentityChanged,
         shouldRestartForModelChange,
         shouldRestartForModelSelectionChange,
         hasResumeCursor: resumeCursor !== undefined,

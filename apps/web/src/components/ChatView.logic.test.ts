@@ -14,6 +14,7 @@ import { type Thread } from "../types";
 import {
   createLocalDispatchSnapshot,
   deriveComposerSendState,
+  deriveLockedProvider,
   hasServerAcknowledgedLocalDispatch,
   mergePendingSteerSnapshotsForInterruptedTurn,
   resolveFollowUpQueuePhase,
@@ -45,6 +46,38 @@ describe("deriveComposerSendState", () => {
 
     expect(state.trimmedPrompt).toBe("yoo  waddup");
     expect(state.hasSendableContent).toBe(true);
+  });
+});
+
+describe("deriveLockedProvider", () => {
+  it("keeps started threads unlocked so they can switch provider instances", () => {
+    const thread = makeThread({
+      latestTurn: {
+        turnId: TurnId.make("turn-1"),
+        state: "completed",
+        requestedAt: "2026-03-29T00:01:00.000Z",
+        startedAt: "2026-03-29T00:01:01.000Z",
+        completedAt: "2026-03-29T00:01:30.000Z",
+      },
+    });
+
+    expect(
+      deriveLockedProvider({
+        thread: {
+          ...thread,
+          session: {
+            status: "ready",
+            provider: ProviderDriverKind.make("claudeAgent"),
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+            createdAt: "2026-03-29T00:02:00.000Z",
+            updatedAt: "2026-03-29T00:02:00.000Z",
+            orchestrationStatus: "ready",
+          },
+        },
+        selectedProvider: "codex",
+        threadProvider: "claudeAgent",
+      }),
+    ).toBeNull();
   });
 });
 
