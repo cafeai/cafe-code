@@ -2470,7 +2470,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
               prepareWorktree: {
                 projectCwd: "/repo/project",
                 baseBranch: "main",
-                branch: expect.stringMatching(/^t3code\/[0-9a-f]{8}$/),
+                branch: expect.stringMatching(/^cafecode\/[0-9a-f]{8}$/),
               },
               runSetupScript: true,
             },
@@ -2686,7 +2686,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
               prepareWorktree: {
                 projectCwd: "/repo/project",
                 baseBranch: "main",
-                branch: expect.stringMatching(/^t3code\/[0-9a-f]{8}$/),
+                branch: expect.stringMatching(/^cafecode\/[0-9a-f]{8}$/),
               },
               runSetupScript: true,
             },
@@ -3060,6 +3060,12 @@ describe("ChatView timeline estimator parity (full app)", () => {
   });
 
   it("keeps compact mobile composer focused after a send completes", async () => {
+    let resolveDispatch!: (value: { sequence: number }) => void;
+    let dispatchResolved = false;
+    const dispatchPromise = new Promise<{ sequence: number }>((resolve) => {
+      resolveDispatch = resolve;
+    });
+
     const mounted = await mountChatView({
       viewport: COMPACT_FOOTER_VIEWPORT,
       snapshot: createSnapshotForTargetUser({
@@ -3068,9 +3074,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
       }),
       resolveRpc: (body) => {
         if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
-          return {
-            sequence: fixture.snapshot.snapshotSequence + 1,
-          };
+          return dispatchPromise;
         }
         return undefined;
       },
@@ -3101,6 +3105,42 @@ describe("ChatView timeline estimator parity (full app)", () => {
       expect(sendButton.disabled).toBe(false);
       sendButton.click();
 
+      const acknowledgedTurnId = "turn-mobile-focus-after-send" as TurnId;
+      const baseThread = fixture.snapshot.threads[0]!;
+      const baseSession = baseThread.session!;
+      const acknowledgedThread: OrchestrationReadModel["threads"][number] = {
+        ...baseThread,
+        latestTurn: {
+          turnId: acknowledgedTurnId,
+          state: "running" as const,
+          requestedAt: isoAt(1_100),
+          startedAt: isoAt(1_101),
+          completedAt: null,
+          assistantMessageId: null,
+        },
+        session: {
+          ...baseSession,
+          status: "running" as const,
+          activeTurnId: acknowledgedTurnId,
+          updatedAt: isoAt(1_101),
+        },
+        updatedAt: isoAt(1_101),
+      };
+      fixture.snapshot = {
+        ...fixture.snapshot,
+        snapshotSequence: fixture.snapshot.snapshotSequence + 1,
+        threads: [acknowledgedThread],
+      };
+      dispatchResolved = true;
+      resolveDispatch({ sequence: fixture.snapshot.snapshotSequence });
+      rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+        kind: "snapshot",
+        snapshot: {
+          snapshotSequence: fixture.snapshot.snapshotSequence,
+          thread: acknowledgedThread,
+        },
+      });
+
       await vi.waitFor(
         () => {
           expect(
@@ -3115,6 +3155,9 @@ describe("ChatView timeline estimator parity (full app)", () => {
         { timeout: 8_000, interval: 16 },
       );
     } finally {
+      if (!dispatchResolved) {
+        resolveDispatch({ sequence: fixture.snapshot.snapshotSequence + 1 });
+      }
       await mounted.cleanup();
     }
   });
@@ -3135,16 +3178,16 @@ describe("ChatView timeline estimator parity (full app)", () => {
 
       await vi.waitFor(
         () => {
-          const editor = document.querySelector<HTMLElement>('[data-testid="composer-editor"]');
-          expect(editor).toBeTruthy();
-          expect(editor?.getAttribute("contenteditable")).toBe("false");
-
           const connectingButton = document.querySelector<HTMLButtonElement>(
             'button[aria-label="Connecting"]',
           );
           expect(connectingButton).toBeTruthy();
           expect(connectingButton?.disabled).toBe(true);
           expect(connectingButton?.querySelector(".animate-spin")).toBeTruthy();
+
+          const editor = document.querySelector<HTMLElement>('[data-testid="composer-editor"]');
+          expect(editor).toBeTruthy();
+          expect(editor?.getAttribute("contenteditable")).toBe("false");
         },
         { timeout: 8_000, interval: 16 },
       );
@@ -5971,10 +6014,6 @@ describe("ChatView timeline estimator parity (full app)", () => {
                 shiftKey: true,
                 altKey: false,
                 modKey: false,
-              },
-              whenAst: {
-                type: "not",
-                node: { type: "identifier", name: "modelPickerOpen" },
               },
             },
             {
