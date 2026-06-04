@@ -42,6 +42,7 @@ const INITIAL_SOURCE_UPDATE_STATE: DesktopSourceUpdateState = {
   status: "idle",
   branch: null,
   trackedBranch: null,
+  runtimeHash: null,
   localHash: null,
   remoteHash: null,
   mergeBaseHash: null,
@@ -161,6 +162,19 @@ const isGitSuccess = Effect.fn("desktop.sourceUpdates.isGitSuccess")(function* (
   return result.exitCode === 0;
 });
 
+const readRuntimeHash = Effect.fn("desktop.sourceUpdates.readRuntimeHash")(function* (
+  spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
+  cwd: string,
+) {
+  const repoRoot = yield* runGitText(spawner, cwd, ["rev-parse", "--show-toplevel"]).pipe(
+    Effect.catch(() => Effect.succeed(null)),
+  );
+  if (!repoRoot) return null;
+  return yield* runGitText(spawner, repoRoot, ["rev-parse", "HEAD"]).pipe(
+    Effect.catch(() => Effect.succeed(null)),
+  );
+});
+
 function shortHash(hash: string | null) {
   return hash ? hash.slice(0, 12) : null;
 }
@@ -173,6 +187,7 @@ function normalizeTrackedBranch(branch: string | null): DesktopSourceUpdateTrack
 export const checkSourceUpdateForTests = Effect.fn("desktop.sourceUpdates.check")(function* (
   spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
   cwd: string,
+  runtimeHash: string | null = null,
 ) {
   const checkedAt = yield* currentIsoTimestamp;
   const repoRoot = yield* runGitText(spawner, cwd, ["rev-parse", "--show-toplevel"]).pipe(
@@ -183,6 +198,7 @@ export const checkSourceUpdateForTests = Effect.fn("desktop.sourceUpdates.check"
     return {
       ...INITIAL_SOURCE_UPDATE_STATE,
       status: "unavailable",
+      runtimeHash,
       checkedAt,
       message: "No git checkout was found for this Cafe Code install.",
     };
@@ -205,6 +221,7 @@ export const checkSourceUpdateForTests = Effect.fn("desktop.sourceUpdates.check"
       ...INITIAL_SOURCE_UPDATE_STATE,
       status: "unavailable",
       branch,
+      runtimeHash,
       localHash,
       dirty,
       checkedAt,
@@ -217,6 +234,7 @@ export const checkSourceUpdateForTests = Effect.fn("desktop.sourceUpdates.check"
       ...INITIAL_SOURCE_UPDATE_STATE,
       status: "ignored",
       branch,
+      runtimeHash,
       localHash,
       dirty,
       checkedAt,
@@ -249,6 +267,7 @@ export const checkSourceUpdateForTests = Effect.fn("desktop.sourceUpdates.check"
       status: "error",
       branch,
       trackedBranch,
+      runtimeHash,
       localHash,
       dirty,
       checkedAt,
@@ -272,6 +291,7 @@ export const checkSourceUpdateForTests = Effect.fn("desktop.sourceUpdates.check"
       status: "error",
       branch,
       trackedBranch,
+      runtimeHash,
       localHash,
       dirty,
       checkedAt,
@@ -285,6 +305,7 @@ export const checkSourceUpdateForTests = Effect.fn("desktop.sourceUpdates.check"
       status: "current",
       branch,
       trackedBranch,
+      runtimeHash,
       localHash,
       remoteHash,
       mergeBaseHash,
@@ -306,6 +327,7 @@ export const checkSourceUpdateForTests = Effect.fn("desktop.sourceUpdates.check"
       status: "behind",
       branch,
       trackedBranch,
+      runtimeHash,
       localHash,
       remoteHash,
       mergeBaseHash,
@@ -327,6 +349,7 @@ export const checkSourceUpdateForTests = Effect.fn("desktop.sourceUpdates.check"
     status: remoteIsAncestor ? "ahead" : "diverged",
     branch,
     trackedBranch,
+    runtimeHash,
     localHash,
     remoteHash,
     mergeBaseHash,
@@ -344,6 +367,7 @@ const make = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const stateRef = yield* Ref.make<DesktopSourceUpdateState>(INITIAL_SOURCE_UPDATE_STATE);
   const inFlightRef = yield* Ref.make(false);
+  const runtimeHashRef = yield* Ref.make<string | null>(null);
 
   const emitState = Ref.get(stateRef).pipe(
     Effect.flatMap((state) =>
@@ -352,6 +376,26 @@ const make = Effect.gen(function* () {
   );
   const setState = (state: DesktopSourceUpdateState): Effect.Effect<void> =>
     Ref.set(stateRef, state).pipe(Effect.andThen(emitState));
+  const getRuntimeHash = Effect.gen(function* () {
+    const captured = yield* Ref.get(runtimeHashRef);
+    if (captured !== null) return captured;
+
+    // This hash records the source revision that launched the current Electron
+    // process. Update checks compare it with the checkout's current HEAD so a
+    // user who pulls or switches between tracked branches sees a quiet
+    // "Rebuild to apply" indicator instead of another remote-update warning.
+    const runtimeHash = yield* readRuntimeHash(spawner, environment.appRoot).pipe(
+      Effect.catchCause((cause) =>
+        logWarning("runtime source hash capture failed", { cause: Cause.pretty(cause) }).pipe(
+          Effect.as(null),
+        ),
+      ),
+    );
+    if (runtimeHash !== null) {
+      yield* Ref.set(runtimeHashRef, runtimeHash);
+    }
+    return runtimeHash;
+  });
 
   const check: DesktopSourceUpdatesShape["check"] = (reason: string) =>
     Effect.gen(function* () {
@@ -363,10 +407,12 @@ const make = Effect.gen(function* () {
       yield* Ref.set(inFlightRef, true);
       const previous = yield* Ref.get(stateRef);
       yield* setState({ ...previous, status: "checking", message: "Checking branch hash." });
+      const runtimeHash = yield* getRuntimeHash;
 
       const next: DesktopSourceUpdateState = yield* checkSourceUpdateForTests(
         spawner,
         environment.appRoot,
+        runtimeHash,
       ).pipe(
         Effect.map((state): DesktopSourceUpdateState => state as DesktopSourceUpdateState),
         Effect.tap((state) =>
@@ -375,6 +421,7 @@ const make = Effect.gen(function* () {
             status: state.status,
             branch: state.branch,
             trackedBranch: state.trackedBranch,
+            runtimeHash: shortHash(state.runtimeHash),
             localHash: shortHash(state.localHash),
             remoteHash: shortHash(state.remoteHash),
             dirty: state.dirty,
@@ -400,6 +447,7 @@ const make = Effect.gen(function* () {
     }).pipe(Effect.ensuring(Ref.set(inFlightRef, false)));
 
   const configure: Effect.Effect<void, never, Scope.Scope> = Effect.gen(function* () {
+    yield* getRuntimeHash.pipe(Effect.asVoid, Effect.forkScoped);
     yield* Effect.sleep(SOURCE_UPDATE_STARTUP_DELAY).pipe(
       Effect.andThen(check("startup")),
       Effect.catchCause((cause) =>

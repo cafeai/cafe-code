@@ -211,6 +211,16 @@ function formatSourceHash(hash: string | null) {
   return hash ? hash.slice(0, 12) : "unknown";
 }
 
+function sourceUpdateRequiresRebuild(state: DesktopSourceUpdateState | null) {
+  return Boolean(
+    state?.trackedBranch &&
+    state.localHash &&
+    state.runtimeHash &&
+    state.localHash !== state.runtimeHash &&
+    state.status !== "behind",
+  );
+}
+
 function getSourceUpdateDescription(
   state: DesktopSourceUpdateState | null,
   hasDesktopBridge: boolean,
@@ -227,19 +237,21 @@ function getSourceUpdateDescription(
 
   const dirtyLabel = state.dirty === null ? "dirty state unknown" : state.dirty ? "dirty" : "clean";
   const localLine = `Current: ${formatSourceHash(state.localHash)} (${dirtyLabel})`;
+  const runtimeLine = `Running build: ${formatSourceHash(state.runtimeHash)}`;
   if (!state.trackedBranch) {
-    return `${localLine}\n${state.message ?? "Only branches main and dev are tracked."}`;
+    return `${localLine}\n${runtimeLine}\n${state.message ?? "Only branches main and dev are tracked."}`;
   }
 
   const remoteLine = `Latest origin/${state.trackedBranch}: ${formatSourceHash(state.remoteHash)}`;
-  const statusLine =
-    state.status === "behind"
+  const statusLine = sourceUpdateRequiresRebuild(state)
+    ? `Rebuild to apply (${state.trackedBranch})`
+    : state.status === "behind"
       ? `Newer ${state.trackedBranch} commit available: ${formatSourceHash(state.remoteHash)}`
       : state.status === "current"
         ? "This checkout is current with origin."
         : state.message;
 
-  return [localLine, remoteLine, statusLine].filter(Boolean).join("\n");
+  return [localLine, runtimeLine, remoteLine, statusLine].filter(Boolean).join("\n");
 }
 
 function AboutVersionTitle({ state }: { readonly state: DesktopSourceUpdateState | null }) {

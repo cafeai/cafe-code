@@ -522,6 +522,7 @@ const createDesktopBridgeStub = (overrides?: {
     status: "ignored",
     branch: "feature-test",
     trackedBranch: null,
+    runtimeHash: "abc123",
     localHash: "abc123",
     remoteHash: null,
     mergeBaseHash: null,
@@ -923,6 +924,7 @@ describe("GeneralSettingsPanel observability", () => {
       status: "behind",
       branch: "dev",
       trackedBranch: "dev",
+      runtimeHash: "1111111111111111111111111111111111111111",
       localHash: "1111111111111111111111111111111111111111",
       remoteHash: "2222222222222222222222222222222222222222",
       mergeBaseHash: "1111111111111111111111111111111111111111",
@@ -935,6 +937,7 @@ describe("GeneralSettingsPanel observability", () => {
         status: "behind",
         branch: "dev",
         trackedBranch: "dev",
+        runtimeHash: "1111111111111111111111111111111111111111",
         localHash: "1111111111111111111111111111111111111111",
         remoteHash: "2222222222222222222222222222222222222222",
         mergeBaseHash: "1111111111111111111111111111111111111111",
@@ -954,6 +957,7 @@ describe("GeneralSettingsPanel observability", () => {
 
     await expect.element(page.getByText("(dev branch)", { exact: false })).toBeInTheDocument();
     await expect.element(page.getByText("Current: 111111111111 (dirty)")).toBeInTheDocument();
+    await expect.element(page.getByText("Running build: 111111111111")).toBeInTheDocument();
     await expect.element(page.getByText("Latest origin/dev: 222222222222")).toBeInTheDocument();
     await expect
       .element(page.getByText("Newer dev commit available: 222222222222"))
@@ -963,6 +967,34 @@ describe("GeneralSettingsPanel observability", () => {
     await vi.waitFor(() => {
       expect(checkSourceUpdate).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("shows rebuild-required source status when the running build hash is stale", async () => {
+    window.desktopBridge = createDesktopBridgeStub({
+      sourceUpdateState: {
+        status: "current",
+        branch: "dev",
+        trackedBranch: "dev",
+        runtimeHash: "1111111111111111111111111111111111111111",
+        localHash: "2222222222222222222222222222222222222222",
+        remoteHash: "2222222222222222222222222222222222222222",
+        mergeBaseHash: "2222222222222222222222222222222222222222",
+        dirty: false,
+        checkedAt: "2026-01-01T00:00:00.000Z",
+        message: "This checkout is current with origin.",
+      },
+    });
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <GeneralSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByText("Current: 222222222222 (clean)")).toBeInTheDocument();
+    await expect.element(page.getByText("Running build: 111111111111")).toBeInTheDocument();
+    await expect.element(page.getByText("Rebuild to apply (dev)")).toBeInTheDocument();
   });
 
   it("persists the keep-awake preference from General settings", async () => {

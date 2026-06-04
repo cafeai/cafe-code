@@ -241,6 +241,7 @@ export interface DesktopSourceUpdateState {
   status: DesktopSourceUpdateStatus;
   branch: string | null;
   trackedBranch: DesktopSourceUpdateTrackedBranch | null;
+  runtimeHash: string | null;
   localHash: string | null;
   remoteHash: string | null;
   mergeBaseHash: string | null;
@@ -253,6 +254,7 @@ export const DesktopSourceUpdateStateSchema = Schema.Struct({
   status: DesktopSourceUpdateStatusSchema,
   branch: Schema.NullOr(Schema.String),
   trackedBranch: Schema.NullOr(DesktopSourceUpdateTrackedBranchSchema),
+  runtimeHash: Schema.NullOr(Schema.String),
   localHash: Schema.NullOr(Schema.String),
   remoteHash: Schema.NullOr(Schema.String),
   mergeBaseHash: Schema.NullOr(Schema.String),

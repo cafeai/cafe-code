@@ -73,6 +73,7 @@ describe("DesktopSourceUpdates", () => {
       assert.equal(state.status, "ignored");
       assert.equal(state.branch, "feature/window");
       assert.equal(state.trackedBranch, null);
+      assert.equal(state.runtimeHash, null);
       assert.equal(state.localHash, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
       assert.equal(state.dirty, true);
       assert.deepStrictEqual(
@@ -89,6 +90,7 @@ describe("DesktopSourceUpdates", () => {
         const commands: string[] = [];
         const localHash = "1111111111111111111111111111111111111111";
         const remoteHash = "2222222222222222222222222222222222222222";
+        const runtimeHash = "0000000000000000000000000000000000000000";
         const spawner = makeGitSpawner({
           commands,
           responses: new Map([
@@ -106,10 +108,11 @@ describe("DesktopSourceUpdates", () => {
           ]),
         });
 
-        const state = yield* checkSourceUpdateForTests(spawner, "/repo");
+        const state = yield* checkSourceUpdateForTests(spawner, "/repo", runtimeHash);
 
         assert.equal(state.status, "behind");
         assert.equal(state.trackedBranch, "dev");
+        assert.equal(state.runtimeHash, runtimeHash);
         assert.equal(state.localHash, localHash);
         assert.equal(state.remoteHash, remoteHash);
         assert.equal(state.dirty, false);

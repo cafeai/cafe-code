@@ -1,5 +1,6 @@
 import {
   type EnvironmentId,
+  type DesktopSourceUpdateState,
   type EditorId,
   type ResolvedKeybindingsConfig,
   type TerminalAvailability,
@@ -40,6 +41,16 @@ export function shouldShowOpenInPicker(input: {
   );
 }
 
+function shouldShowSourceRebuildBadge(state: DesktopSourceUpdateState | null): boolean {
+  return Boolean(
+    state?.trackedBranch &&
+    state.localHash &&
+    state.runtimeHash &&
+    state.localHash !== state.runtimeHash &&
+    state.status !== "behind",
+  );
+}
+
 export const ChatHeader = memo(function ChatHeader({
   activeThreadEnvironmentId,
   activeThreadTitle,
@@ -62,12 +73,15 @@ export const ChatHeader = memo(function ChatHeader({
   });
   const shouldShowSourceUpdateBadge =
     sourceUpdateState?.status === "behind" && sourceUpdateState.trackedBranch !== null;
+  const shouldShowSourceRebuildBadgeValue = shouldShowSourceRebuildBadge(sourceUpdateState);
   const sourceUpdateTooltip =
-    shouldShowSourceUpdateBadge && sourceUpdateState.remoteHash
-      ? `Newer origin/${sourceUpdateState.trackedBranch} commit available: ${sourceUpdateState.remoteHash.slice(0, 12)}`
-      : shouldShowSourceUpdateBadge
-        ? `Newer origin/${sourceUpdateState.trackedBranch} commit available.`
-        : null;
+    shouldShowSourceRebuildBadgeValue && sourceUpdateState?.trackedBranch
+      ? `Current checkout differs from the running Cafe Code build. Rebuild and restart to apply ${sourceUpdateState.trackedBranch}.`
+      : shouldShowSourceUpdateBadge && sourceUpdateState.remoteHash
+        ? `Newer origin/${sourceUpdateState.trackedBranch} commit available: ${sourceUpdateState.remoteHash.slice(0, 12)}`
+        : shouldShowSourceUpdateBadge
+          ? `Newer origin/${sourceUpdateState.trackedBranch} commit available.`
+          : null;
 
   return (
     <div className="@container/header-actions flex min-w-0 flex-1 items-center gap-2">
@@ -91,14 +105,16 @@ export const ChatHeader = memo(function ChatHeader({
         )}
       </div>
       <div className="flex shrink-0 items-center justify-end gap-2 @3xl/header-actions:gap-3">
-        {shouldShowSourceUpdateBadge && (
+        {(shouldShowSourceUpdateBadge || shouldShowSourceRebuildBadgeValue) && (
           <Badge
             variant="outline"
             size="sm"
             className="hidden border-muted-foreground/20 bg-muted/20 text-[10px] font-medium text-muted-foreground sm:inline-flex"
             title={sourceUpdateTooltip ?? undefined}
           >
-            Newer {sourceUpdateState.trackedBranch}
+            {shouldShowSourceRebuildBadgeValue
+              ? `Rebuild to apply (${sourceUpdateState?.trackedBranch})`
+              : `Newer ${sourceUpdateState?.trackedBranch}`}
           </Badge>
         )}
         {showOpenInPicker && (

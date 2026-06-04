@@ -1938,6 +1938,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
       status: "behind",
       branch: "dev",
       trackedBranch: "dev",
+      runtimeHash: "1111111111111111111111111111111111111111",
       localHash: "1111111111111111111111111111111111111111",
       remoteHash: "2222222222222222222222222222222222222222",
       mergeBaseHash: "1111111111111111111111111111111111111111",
@@ -1978,6 +1979,48 @@ describe("ChatView timeline estimator parity (full app)", () => {
       const relativePosition = updateBadge.compareDocumentPosition(openButton);
       expect(relativePosition & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       expect(updateBadge.getAttribute("title")).toContain("Newer origin/dev commit available");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("shows a passive rebuild badge when the checkout hash differs from the running build", async () => {
+    setDraftThreadWithoutWorktree();
+    const sourceUpdateState: DesktopSourceUpdateState = {
+      status: "current",
+      branch: "dev",
+      trackedBranch: "dev",
+      runtimeHash: "1111111111111111111111111111111111111111",
+      localHash: "2222222222222222222222222222222222222222",
+      remoteHash: "2222222222222222222222222222222222222222",
+      mergeBaseHash: "2222222222222222222222222222222222222222",
+      dirty: false,
+      checkedAt: "2026-06-02T00:00:00.000Z",
+      message: "This checkout is current with origin.",
+    };
+    window.desktopBridge = createDesktopBridgeForChatViewTests(sourceUpdateState);
+
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createDraftOnlySnapshot(),
+      configureFixture: (nextFixture) => {
+        nextFixture.serverConfig = {
+          ...nextFixture.serverConfig,
+          availableEditors: ["vscode"],
+        };
+      },
+    });
+
+    try {
+      await waitForServerConfigToApply();
+      const updateBadge = await waitForElement(
+        () =>
+          Array.from(document.querySelectorAll("[data-slot='badge']")).find(
+            (element) => element.textContent?.trim() === "Rebuild to apply (dev)",
+          ) as HTMLElement | null,
+        "Unable to find passive rebuild badge.",
+      );
+      expect(updateBadge.getAttribute("title")).toContain("Rebuild and restart to apply dev");
     } finally {
       await mounted.cleanup();
     }
