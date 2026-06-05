@@ -1,9 +1,13 @@
 import type { OrchestrationEvent, OrchestrationReadModel, ThreadId } from "@cafecode/contracts";
 import {
+  EventId,
+  MessageId,
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
+  OrchestrationProposedPlanId,
   OrchestrationSession,
   OrchestrationThread,
+  TurnId,
 } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -17,6 +21,7 @@ import {
   ThreadActivityAppendedPayload,
   ThreadArchivedPayload,
   ThreadCreatedPayload,
+  ThreadDuplicatedPayload,
   ThreadDeletedPayload,
   ThreadRestoredPayload,
   ThreadInteractionModeSetPayload,
@@ -34,6 +39,121 @@ import {
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id">>;
 const MAX_THREAD_MESSAGES = 2_000;
 const MAX_THREAD_CHECKPOINTS = 500;
+
+function copiedThreadScopedId(targetThreadId: ThreadId, id: string): string {
+  return `copy:${targetThreadId}:${id}`;
+}
+
+function copiedMessageId(targetThreadId: ThreadId, messageId: string): MessageId {
+  return MessageId.make(copiedThreadScopedId(targetThreadId, messageId));
+}
+
+function copiedTurnId(targetThreadId: ThreadId, turnId: string | null): TurnId | null {
+  return turnId === null ? null : TurnId.make(copiedThreadScopedId(targetThreadId, turnId));
+}
+
+function copiedRequiredTurnId(targetThreadId: ThreadId, turnId: string): TurnId {
+  return TurnId.make(copiedThreadScopedId(targetThreadId, turnId));
+}
+
+function copiedEventId(targetThreadId: ThreadId, eventId: string): EventId {
+  return EventId.make(copiedThreadScopedId(targetThreadId, eventId));
+}
+
+function copiedProposedPlanId(
+  targetThreadId: ThreadId,
+  planId: string,
+): OrchestrationProposedPlanId {
+  return OrchestrationProposedPlanId.make(copiedThreadScopedId(targetThreadId, planId));
+}
+
+function cloneThreadContextForDuplicate(input: {
+  readonly sourceThread: OrchestrationThread;
+  readonly targetThread: OrchestrationThread;
+  readonly duplicatedAt: string;
+}): OrchestrationThread {
+  const { sourceThread, targetThread, duplicatedAt } = input;
+  const copiedMessages = sourceThread.messages.map((message) => ({
+    ...message,
+    id: copiedMessageId(targetThread.id, message.id),
+    turnId: copiedTurnId(targetThread.id, message.turnId),
+    streaming: false,
+  }));
+  const copiedPlans = sourceThread.proposedPlans.map((plan) => ({
+    ...plan,
+    id: copiedProposedPlanId(targetThread.id, plan.id),
+    turnId: copiedTurnId(targetThread.id, plan.turnId),
+    implementationThreadId:
+      plan.implementationThreadId === sourceThread.id
+        ? targetThread.id
+        : plan.implementationThreadId,
+  }));
+  const copiedActivities = sourceThread.activities.map((activity) => ({
+    ...activity,
+    id: copiedEventId(targetThread.id, activity.id),
+    turnId: copiedTurnId(targetThread.id, activity.turnId),
+  }));
+  const latestTurn =
+    sourceThread.latestTurn === null
+      ? null
+      : {
+          ...sourceThread.latestTurn,
+          turnId: copiedRequiredTurnId(targetThread.id, sourceThread.latestTurn.turnId),
+          state:
+            sourceThread.latestTurn.state === "running"
+              ? ("interrupted" as const)
+              : sourceThread.latestTurn.state,
+          completedAt:
+            sourceThread.latestTurn.completedAt ??
+            (sourceThread.latestTurn.state === "running" ? duplicatedAt : null),
+          assistantMessageId:
+            sourceThread.latestTurn.assistantMessageId === null
+              ? null
+              : copiedMessageId(targetThread.id, sourceThread.latestTurn.assistantMessageId),
+          ...(sourceThread.latestTurn.sourceProposedPlan !== undefined
+            ? {
+                sourceProposedPlan:
+                  sourceThread.latestTurn.sourceProposedPlan.threadId === sourceThread.id
+                    ? {
+                        threadId: targetThread.id,
+                        planId: copiedProposedPlanId(
+                          targetThread.id,
+                          sourceThread.latestTurn.sourceProposedPlan.planId,
+                        ),
+                      }
+                    : sourceThread.latestTurn.sourceProposedPlan,
+              }
+            : {}),
+        };
+
+  return {
+    ...targetThread,
+    latestTurn,
+    messages: copiedMessages.slice(-MAX_THREAD_MESSAGES),
+    proposedPlans: copiedPlans,
+    activities: copiedActivities,
+    checkpoints: sourceThread.checkpoints.map(
+      (checkpoint): OrchestrationCheckpointSummary => ({
+        turnId: copiedRequiredTurnId(targetThread.id, checkpoint.turnId),
+        checkpointTurnCount: checkpoint.checkpointTurnCount,
+        checkpointRef: checkpoint.checkpointRef,
+        status: checkpoint.status,
+        files: checkpoint.files,
+        assistantMessageId:
+          checkpoint.assistantMessageId === null
+            ? null
+            : copiedMessageId(targetThread.id, checkpoint.assistantMessageId),
+        completedAt: checkpoint.completedAt,
+      }),
+    ),
+    // Provider runtime/session identity is intentionally not copied. A
+    // duplicate carries Cafe-visible conversation context only; the next user
+    // prompt must create a fresh provider boundary instead of resuming Claude
+    // or Codex state owned by the source thread.
+    session: null,
+    updatedAt: duplicatedAt,
+  };
+}
 
 function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error") {
   if (status === "error") return "error" as const;
@@ -293,6 +413,32 @@ export function projectEvent(
           threads: existing
             ? nextBase.threads.map((entry) => (entry.id === thread.id ? thread : entry))
             : [...nextBase.threads, thread],
+        };
+      });
+
+    case "thread.duplicated":
+      return Effect.gen(function* () {
+        const payload = yield* decodeForEvent(
+          ThreadDuplicatedPayload,
+          event.payload,
+          event.type,
+          "payload",
+        );
+        const sourceThread = nextBase.threads.find((entry) => entry.id === payload.sourceThreadId);
+        const targetThread = nextBase.threads.find((entry) => entry.id === payload.targetThreadId);
+        if (!sourceThread || !targetThread) {
+          return nextBase;
+        }
+        const copiedThread = cloneThreadContextForDuplicate({
+          sourceThread,
+          targetThread,
+          duplicatedAt: payload.duplicatedAt,
+        });
+        return {
+          ...nextBase,
+          threads: nextBase.threads.map((entry) =>
+            entry.id === payload.targetThreadId ? copiedThread : entry,
+          ),
         };
       });
 

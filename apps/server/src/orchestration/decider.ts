@@ -256,6 +256,64 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.duplicate": {
+      const sourceThread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.sourceThreadId,
+      });
+      if (sourceThread.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.sourceThreadId}' is in the Recycle Bin and cannot be duplicated.`,
+        });
+      }
+      yield* requireThreadAbsent({
+        readModel,
+        command,
+        threadId: command.targetThreadId,
+      });
+
+      const createdEventBase = withEventBase({
+        aggregateKind: "thread",
+        aggregateId: command.targetThreadId,
+        occurredAt: command.createdAt,
+        commandId: command.commandId,
+      });
+      return [
+        {
+          ...createdEventBase,
+          type: "thread.created" as const,
+          payload: {
+            threadId: command.targetThreadId,
+            projectId: sourceThread.projectId,
+            title: command.title,
+            modelSelection: sourceThread.modelSelection,
+            runtimeMode: sourceThread.runtimeMode,
+            interactionMode: sourceThread.interactionMode,
+            branch: sourceThread.branch,
+            worktreePath: sourceThread.worktreePath,
+            createdAt: command.createdAt,
+            updatedAt: command.createdAt,
+          },
+        },
+        {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.targetThreadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.duplicated" as const,
+          payload: {
+            sourceThreadId: command.sourceThreadId,
+            targetThreadId: command.targetThreadId,
+            duplicatedAt: command.createdAt,
+          },
+        },
+      ];
+    }
+
     case "thread.delete": {
       yield* requireThread({
         readModel,

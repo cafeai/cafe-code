@@ -502,6 +502,208 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     const path = yield* Path.Path;
     const serverConfig = yield* ServerConfig;
 
+    const copyThreadContextProjectionRows = Effect.fn(
+      "ProjectionPipeline.copyThreadContextProjectionRows",
+    )(function* (input: {
+      readonly sourceThreadId: ThreadId;
+      readonly targetThreadId: ThreadId;
+      readonly duplicatedAt: string;
+    }) {
+      const copyPrefix = `copy:${input.targetThreadId}:`;
+
+      // A duplicated thread is a Cafe read-model fork, not a provider-runtime
+      // fork. Keep historical message/turn/plan/work-log context in bulk SQL,
+      // but do not copy sessions, pending approvals, or pending user-input
+      // accounting that would make the target look like live provider work.
+      yield* sql`
+        INSERT INTO projection_thread_messages (
+          message_id,
+          thread_id,
+          turn_id,
+          role,
+          text,
+          attachments_json,
+          is_streaming,
+          created_at,
+          updated_at
+        )
+        SELECT
+          ${copyPrefix} || message_id,
+          ${input.targetThreadId},
+          CASE
+            WHEN turn_id IS NULL THEN NULL
+            ELSE ${copyPrefix} || turn_id
+          END,
+          role,
+          text,
+          attachments_json,
+          0,
+          created_at,
+          CASE
+            WHEN is_streaming = 1 AND updated_at < ${input.duplicatedAt}
+            THEN ${input.duplicatedAt}
+            ELSE updated_at
+          END
+        FROM projection_thread_messages
+        WHERE thread_id = ${input.sourceThreadId}
+        ON CONFLICT (thread_id, message_id) DO NOTHING
+      `;
+
+      yield* sql`
+        INSERT INTO projection_thread_proposed_plans (
+          plan_id,
+          thread_id,
+          turn_id,
+          plan_markdown,
+          created_at,
+          updated_at,
+          implemented_at,
+          implementation_thread_id
+        )
+        SELECT
+          ${copyPrefix} || plan_id,
+          ${input.targetThreadId},
+          CASE
+            WHEN turn_id IS NULL THEN NULL
+            ELSE ${copyPrefix} || turn_id
+          END,
+          plan_markdown,
+          created_at,
+          updated_at,
+          implemented_at,
+          CASE
+            WHEN implementation_thread_id = ${input.sourceThreadId}
+            THEN ${input.targetThreadId}
+            ELSE implementation_thread_id
+          END
+        FROM projection_thread_proposed_plans
+        WHERE thread_id = ${input.sourceThreadId}
+        ON CONFLICT (plan_id) DO NOTHING
+      `;
+
+      yield* sql`
+        INSERT INTO projection_turns (
+          thread_id,
+          turn_id,
+          pending_message_id,
+          source_proposed_plan_thread_id,
+          source_proposed_plan_id,
+          assistant_message_id,
+          state,
+          requested_at,
+          started_at,
+          completed_at,
+          checkpoint_turn_count,
+          checkpoint_ref,
+          checkpoint_status,
+          checkpoint_files_json
+        )
+        SELECT
+          ${input.targetThreadId},
+          ${copyPrefix} || turn_id,
+          CASE
+            WHEN pending_message_id IS NULL THEN NULL
+            ELSE ${copyPrefix} || pending_message_id
+          END,
+          CASE
+            WHEN source_proposed_plan_thread_id = ${input.sourceThreadId}
+            THEN ${input.targetThreadId}
+            ELSE source_proposed_plan_thread_id
+          END,
+          CASE
+            WHEN source_proposed_plan_thread_id = ${input.sourceThreadId}
+              AND source_proposed_plan_id IS NOT NULL
+            THEN ${copyPrefix} || source_proposed_plan_id
+            ELSE source_proposed_plan_id
+          END,
+          CASE
+            WHEN assistant_message_id IS NULL THEN NULL
+            ELSE ${copyPrefix} || assistant_message_id
+          END,
+          CASE
+            WHEN state IN ('pending', 'running') THEN 'interrupted'
+            ELSE state
+          END,
+          requested_at,
+          CASE
+            WHEN state IN ('pending', 'running') AND started_at IS NULL
+            THEN requested_at
+            ELSE started_at
+          END,
+          CASE
+            WHEN state IN ('pending', 'running') AND completed_at IS NULL
+            THEN ${input.duplicatedAt}
+            ELSE completed_at
+          END,
+          checkpoint_turn_count,
+          checkpoint_ref,
+          checkpoint_status,
+          checkpoint_files_json
+        FROM projection_turns
+        WHERE thread_id = ${input.sourceThreadId}
+          AND turn_id IS NOT NULL
+        ON CONFLICT (thread_id, turn_id) DO NOTHING
+      `;
+
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id,
+          thread_id,
+          turn_id,
+          tone,
+          kind,
+          summary,
+          payload_json,
+          sequence,
+          created_at
+        )
+        SELECT
+          ${copyPrefix} || activity_id,
+          ${input.targetThreadId},
+          CASE
+            WHEN turn_id IS NULL THEN NULL
+            ELSE ${copyPrefix} || turn_id
+          END,
+          tone,
+          kind,
+          summary,
+          payload_json,
+          sequence,
+          created_at
+        FROM projection_thread_activities
+        WHERE thread_id = ${input.sourceThreadId}
+          AND kind NOT IN ('user-input.requested')
+        ON CONFLICT (activity_id) DO NOTHING
+      `;
+
+      yield* sql`
+        UPDATE projection_threads
+        SET
+          latest_turn_id = (
+            SELECT CASE
+              WHEN source.latest_turn_id IS NULL THEN NULL
+              ELSE ${copyPrefix} || source.latest_turn_id
+            END
+            FROM projection_threads source
+            WHERE source.thread_id = ${input.sourceThreadId}
+          ),
+          latest_user_message_at = (
+            SELECT latest_user_message_at
+            FROM projection_threads source
+            WHERE source.thread_id = ${input.sourceThreadId}
+          ),
+          pending_approval_count = 0,
+          pending_user_input_count = 0,
+          has_actionable_proposed_plan = COALESCE((
+            SELECT has_actionable_proposed_plan
+            FROM projection_threads source
+            WHERE source.thread_id = ${input.sourceThreadId}
+          ), 0),
+          updated_at = ${input.duplicatedAt}
+        WHERE thread_id = ${input.targetThreadId}
+      `;
+    });
+
     const applyProjectsProjection: ProjectorDefinition["apply"] = Effect.fn(
       "applyProjectsProjection",
     )(function* (event, _attachmentSideEffects) {
@@ -631,6 +833,19 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             hasActionableProposedPlan: 0,
             deletedAt: null,
           });
+          return;
+
+        case "thread.duplicated":
+          yield* copyThreadContextProjectionRows({
+            sourceThreadId: event.payload.sourceThreadId,
+            targetThreadId: event.payload.targetThreadId,
+            duplicatedAt: event.payload.duplicatedAt,
+          }).pipe(
+            Effect.mapError(
+              toPersistenceSqlError("ProjectionPipeline.copyThreadContextProjectionRows:query"),
+            ),
+          );
+          yield* refreshThreadShellSummary(event.payload.targetThreadId);
           return;
 
         case "thread.archived": {

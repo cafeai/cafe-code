@@ -173,6 +173,251 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       }
     }),
   );
+
+  it.effect("duplicates thread context without copying provider session state", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const projectId = ProjectId.make("project-duplicate");
+      const sourceThreadId = ThreadId.make("thread-source");
+      const targetThreadId = ThreadId.make("thread-target");
+      const turnId = TurnId.make("turn-source");
+      const duplicateAt = "2026-06-05T00:00:05.000Z";
+
+      const append = (event: Parameters<typeof eventStore.append>[0]) => eventStore.append(event);
+
+      yield* append({
+        type: "project.created",
+        eventId: EventId.make("evt-duplicate-project"),
+        aggregateKind: "project",
+        aggregateId: projectId,
+        occurredAt: "2026-06-05T00:00:00.000Z",
+        commandId: CommandId.make("cmd-duplicate-project"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-duplicate-project"),
+        metadata: {},
+        payload: {
+          projectId,
+          title: "Duplicate Project",
+          workspaceRoot: "/tmp/duplicate-project",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: "2026-06-05T00:00:00.000Z",
+          updatedAt: "2026-06-05T00:00:00.000Z",
+        },
+      });
+      yield* append({
+        type: "thread.created",
+        eventId: EventId.make("evt-duplicate-source-created"),
+        aggregateKind: "thread",
+        aggregateId: sourceThreadId,
+        occurredAt: "2026-06-05T00:00:01.000Z",
+        commandId: CommandId.make("cmd-duplicate-source-created"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-duplicate-source-created"),
+        metadata: {},
+        payload: {
+          threadId: sourceThreadId,
+          projectId,
+          title: "Source Thread",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5.5",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: "2026-06-05T00:00:01.000Z",
+          updatedAt: "2026-06-05T00:00:01.000Z",
+        },
+      });
+      yield* append({
+        type: "thread.message-sent",
+        eventId: EventId.make("evt-duplicate-user-message"),
+        aggregateKind: "thread",
+        aggregateId: sourceThreadId,
+        occurredAt: "2026-06-05T00:00:02.000Z",
+        commandId: CommandId.make("cmd-duplicate-user-message"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-duplicate-user-message"),
+        metadata: {},
+        payload: {
+          threadId: sourceThreadId,
+          messageId: MessageId.make("message-user"),
+          role: "user",
+          text: "source prompt",
+          turnId,
+          streaming: false,
+          createdAt: "2026-06-05T00:00:02.000Z",
+          updatedAt: "2026-06-05T00:00:02.000Z",
+        },
+      });
+      yield* append({
+        type: "thread.message-sent",
+        eventId: EventId.make("evt-duplicate-assistant-message"),
+        aggregateKind: "thread",
+        aggregateId: sourceThreadId,
+        occurredAt: "2026-06-05T00:00:03.000Z",
+        commandId: CommandId.make("cmd-duplicate-assistant-message"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-duplicate-assistant-message"),
+        metadata: {},
+        payload: {
+          threadId: sourceThreadId,
+          messageId: MessageId.make("message-assistant"),
+          role: "assistant",
+          text: "partial source output",
+          turnId,
+          streaming: true,
+          createdAt: "2026-06-05T00:00:03.000Z",
+          updatedAt: "2026-06-05T00:00:03.000Z",
+        },
+      });
+      yield* append({
+        type: "thread.session-set",
+        eventId: EventId.make("evt-duplicate-source-session"),
+        aggregateKind: "thread",
+        aggregateId: sourceThreadId,
+        occurredAt: "2026-06-05T00:00:04.000Z",
+        commandId: CommandId.make("cmd-duplicate-source-session"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-duplicate-source-session"),
+        metadata: {},
+        payload: {
+          threadId: sourceThreadId,
+          session: {
+            threadId: sourceThreadId,
+            status: "running",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeMode: "full-access",
+            activeTurnId: turnId,
+            lastError: null,
+            updatedAt: "2026-06-05T00:00:04.000Z",
+          },
+        },
+      });
+      yield* append({
+        type: "thread.created",
+        eventId: EventId.make("evt-duplicate-target-created"),
+        aggregateKind: "thread",
+        aggregateId: targetThreadId,
+        occurredAt: duplicateAt,
+        commandId: CommandId.make("cmd-duplicate-target-created"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-duplicate-target-created"),
+        metadata: {},
+        payload: {
+          threadId: targetThreadId,
+          projectId,
+          title: "Source Thread (copy)",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5.5",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: duplicateAt,
+          updatedAt: duplicateAt,
+        },
+      });
+      yield* append({
+        type: "thread.duplicated",
+        eventId: EventId.make("evt-duplicate-context"),
+        aggregateKind: "thread",
+        aggregateId: targetThreadId,
+        occurredAt: duplicateAt,
+        commandId: CommandId.make("cmd-duplicate-context"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-duplicate-context"),
+        metadata: {},
+        payload: {
+          sourceThreadId,
+          targetThreadId,
+          duplicatedAt: duplicateAt,
+        },
+      });
+
+      yield* projectionPipeline.bootstrap;
+
+      const targetMessages = yield* sql<{
+        readonly messageId: string;
+        readonly turnId: string | null;
+        readonly isStreaming: number;
+      }>`
+        SELECT
+          message_id AS "messageId",
+          turn_id AS "turnId",
+          is_streaming AS "isStreaming"
+        FROM projection_thread_messages
+        WHERE thread_id = ${targetThreadId}
+        ORDER BY created_at ASC
+      `;
+      assert.deepEqual(targetMessages, [
+        {
+          messageId: "copy:thread-target:message-user",
+          turnId: "copy:thread-target:turn-source",
+          isStreaming: 0,
+        },
+        {
+          messageId: "copy:thread-target:message-assistant",
+          turnId: "copy:thread-target:turn-source",
+          isStreaming: 0,
+        },
+      ]);
+
+      const targetTurns = yield* sql<{
+        readonly turnId: string;
+        readonly state: string;
+        readonly completedAt: string | null;
+      }>`
+        SELECT
+          turn_id AS "turnId",
+          state,
+          completed_at AS "completedAt"
+        FROM projection_turns
+        WHERE thread_id = ${targetThreadId}
+      `;
+      assert.deepEqual(targetTurns, [
+        {
+          turnId: "copy:thread-target:turn-source",
+          state: "interrupted",
+          completedAt: duplicateAt,
+        },
+      ]);
+
+      const targetSessionCount = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS "count"
+        FROM projection_thread_sessions
+        WHERE thread_id = ${targetThreadId}
+      `;
+      assert.equal(targetSessionCount[0]?.count, 0);
+
+      const targetShell = yield* sql<{
+        readonly latestTurnId: string | null;
+        readonly pendingApprovalCount: number;
+        readonly pendingUserInputCount: number;
+      }>`
+        SELECT
+          latest_turn_id AS "latestTurnId",
+          pending_approval_count AS "pendingApprovalCount",
+          pending_user_input_count AS "pendingUserInputCount"
+        FROM projection_threads
+        WHERE thread_id = ${targetThreadId}
+      `;
+      assert.deepEqual(targetShell, [
+        {
+          latestTurnId: "copy:thread-target:turn-source",
+          pendingApprovalCount: 0,
+          pendingUserInputCount: 0,
+        },
+      ]);
+    }),
+  );
 });
 
 it.layer(

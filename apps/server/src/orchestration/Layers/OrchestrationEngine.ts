@@ -68,6 +68,11 @@ function commandToAggregateRef(command: OrchestrationCommand): {
         aggregateKind: "project",
         aggregateId: command.projectId,
       };
+    case "thread.duplicate":
+      return {
+        aggregateKind: "thread",
+        aggregateId: command.targetThreadId,
+      };
     default:
       return {
         aggregateKind: "thread",

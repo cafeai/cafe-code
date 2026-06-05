@@ -6,6 +6,7 @@ import type {
   OrchestrationEvent,
   OrchestrationLatestTurn,
   OrchestrationMessage,
+  OrchestrationProposedPlanId,
   OrchestrationProposedPlan,
   OrchestrationReadModel,
   OrchestrationShellSnapshot,
@@ -358,6 +359,135 @@ function toThreadTurnState(thread: Thread): ThreadTurnState {
     ...(thread.pendingSourceProposedPlan
       ? { pendingSourceProposedPlan: thread.pendingSourceProposedPlan }
       : {}),
+  };
+}
+
+function copiedThreadScopedId(targetThreadId: ThreadId, id: string): string {
+  return `copy:${targetThreadId}:${id}`;
+}
+
+function copiedTurnId(targetThreadId: ThreadId, turnId: TurnId | null | undefined): TurnId | null {
+  return turnId == null ? null : (copiedThreadScopedId(targetThreadId, turnId) as TurnId);
+}
+
+function cloneThreadContextForDuplicate(input: {
+  readonly sourceThread: Thread;
+  readonly targetThread: Thread;
+  readonly duplicatedAt: string;
+}): Thread {
+  const { sourceThread, targetThread, duplicatedAt } = input;
+  const latestTurn =
+    sourceThread.latestTurn === null
+      ? null
+      : {
+          ...sourceThread.latestTurn,
+          turnId: copiedThreadScopedId(targetThread.id, sourceThread.latestTurn.turnId) as TurnId,
+          state:
+            sourceThread.latestTurn.state === "running"
+              ? ("interrupted" as const)
+              : sourceThread.latestTurn.state,
+          completedAt:
+            sourceThread.latestTurn.completedAt ??
+            (sourceThread.latestTurn.state === "running" ? duplicatedAt : null),
+          assistantMessageId:
+            sourceThread.latestTurn.assistantMessageId === null
+              ? null
+              : (copiedThreadScopedId(
+                  targetThread.id,
+                  sourceThread.latestTurn.assistantMessageId,
+                ) as MessageId),
+          ...(sourceThread.latestTurn.sourceProposedPlan !== undefined
+            ? {
+                sourceProposedPlan:
+                  sourceThread.latestTurn.sourceProposedPlan.threadId === sourceThread.id
+                    ? {
+                        threadId: targetThread.id,
+                        planId: copiedThreadScopedId(
+                          targetThread.id,
+                          sourceThread.latestTurn.sourceProposedPlan.planId,
+                        ) as OrchestrationProposedPlanId,
+                      }
+                    : sourceThread.latestTurn.sourceProposedPlan,
+              }
+            : {}),
+        };
+
+  return {
+    ...targetThread,
+    latestTurn,
+    pendingSourceProposedPlan: latestTurn?.sourceProposedPlan,
+    session: null,
+    error: null,
+    messages: sourceThread.messages.map((message) => ({
+      ...message,
+      id: copiedThreadScopedId(targetThread.id, message.id) as MessageId,
+      turnId: copiedTurnId(targetThread.id, message.turnId),
+      streaming: false,
+    })),
+    proposedPlans: sourceThread.proposedPlans.map((plan) => ({
+      ...plan,
+      id: copiedThreadScopedId(targetThread.id, plan.id) as OrchestrationProposedPlanId,
+      turnId: copiedTurnId(targetThread.id, plan.turnId),
+      implementationThreadId:
+        plan.implementationThreadId === sourceThread.id
+          ? targetThread.id
+          : plan.implementationThreadId,
+    })),
+    activities: sourceThread.activities
+      .filter((activity) => activity.kind !== "user-input.requested")
+      .map((activity): OrchestrationThreadActivity => {
+        if (activity.sequence !== undefined) {
+          return {
+            id: copiedThreadScopedId(
+              targetThread.id,
+              activity.id,
+            ) as OrchestrationThreadActivity["id"],
+            tone: activity.tone,
+            kind: activity.kind,
+            summary: activity.summary,
+            payload: activity.payload,
+            turnId: copiedTurnId(targetThread.id, activity.turnId),
+            sequence: activity.sequence,
+            createdAt: activity.createdAt,
+          };
+        }
+        return {
+          id: copiedThreadScopedId(
+            targetThread.id,
+            activity.id,
+          ) as OrchestrationThreadActivity["id"],
+          tone: activity.tone,
+          kind: activity.kind,
+          summary: activity.summary,
+          payload: activity.payload,
+          turnId: copiedTurnId(targetThread.id, activity.turnId),
+          createdAt: activity.createdAt,
+        };
+      }),
+    turnDiffSummaries: sourceThread.turnDiffSummaries.map((summary): TurnDiffSummary => {
+      const copiedSummary: TurnDiffSummary = {
+        turnId: copiedThreadScopedId(targetThread.id, summary.turnId) as TurnId,
+        completedAt: summary.completedAt,
+        files: summary.files,
+      };
+      if (summary.status !== undefined) {
+        copiedSummary.status = summary.status;
+      }
+      if (summary.checkpointRef !== undefined) {
+        copiedSummary.checkpointRef = summary.checkpointRef;
+      }
+      if (summary.assistantMessageId !== undefined) {
+        copiedSummary.assistantMessageId = copiedThreadScopedId(
+          targetThread.id,
+          summary.assistantMessageId,
+        ) as MessageId;
+      }
+      if (summary.checkpointTurnCount !== undefined) {
+        copiedSummary.checkpointTurnCount = summary.checkpointTurnCount;
+      }
+      return copiedSummary;
+    }),
+    updatedAt: duplicatedAt,
   };
 }
 
@@ -1583,6 +1713,41 @@ function applyEnvironmentOrchestrationEvent(
         environmentId,
       );
       return writeThreadState(state, nextThread, previousThread);
+    }
+
+    case "thread.duplicated": {
+      const sourceThread = getThreadFromEnvironmentState(state, event.payload.sourceThreadId);
+      const targetThread = getThreadFromEnvironmentState(state, event.payload.targetThreadId);
+      const targetSummary = state.sidebarThreadSummaryById[event.payload.targetThreadId];
+      if (!sourceThread || !targetThread || !targetSummary) {
+        return state;
+      }
+      const nextThread = cloneThreadContextForDuplicate({
+        sourceThread,
+        targetThread,
+        duplicatedAt: event.payload.duplicatedAt,
+      });
+      const nextState = writeThreadState(state, nextThread, targetThread);
+      return {
+        ...nextState,
+        sidebarThreadSummaryById: {
+          ...nextState.sidebarThreadSummaryById,
+          [nextThread.id]: {
+            ...targetSummary,
+            session: null,
+            latestTurn: nextThread.latestTurn,
+            latestUserMessageAt:
+              sourceThread.messages.findLast((message) => message.role === "user")?.createdAt ??
+              null,
+            hasPendingApprovals: false,
+            hasPendingUserInput: false,
+            hasActionableProposedPlan: sourceThread.proposedPlans.some(
+              (plan) => plan.implementedAt === null,
+            ),
+            updatedAt: event.payload.duplicatedAt,
+          },
+        },
+      };
     }
 
     case "thread.deleted":

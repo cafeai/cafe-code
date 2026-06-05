@@ -65,7 +65,7 @@ import {
 import { usePrimaryEnvironmentId } from "../environments/primary";
 import { isElectron } from "../env";
 import { APP_STAGE_LABEL, APP_VERSION } from "../branding";
-import { cn, isMacPlatform, newCommandId } from "../lib/utils";
+import { cn, isMacPlatform, newCommandId, newThreadId } from "../lib/utils";
 import {
   selectProjectByRef,
   selectProjectsAcrossEnvironments,
@@ -2105,6 +2105,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       const clicked = await api.contextMenu.show(
         [
           { id: "rename", label: "Rename thread" },
+          { id: "duplicate", label: "Duplicate thread" },
           { id: "move", label: "Move Thread..." },
           { id: "copy-path", label: "Copy Path" },
           { id: "copy-thread-id", label: "Copy Thread ID" },
@@ -2117,6 +2118,45 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         setRenamingThreadKey(threadKey);
         setRenamingTitle(thread.title);
         renamingCommittedRef.current = false;
+        return;
+      }
+
+      if (clicked === "duplicate") {
+        const environmentApi = readEnvironmentApi(threadRef.environmentId);
+        if (!environmentApi) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Unable to duplicate thread",
+              description: "The environment for this thread is not available.",
+            }),
+          );
+          return;
+        }
+
+        const targetThreadRef = scopeThreadRef(threadRef.environmentId, newThreadId());
+        try {
+          await environmentApi.orchestration.dispatchCommand({
+            type: "thread.duplicate",
+            commandId: newCommandId(),
+            sourceThreadId: threadRef.threadId,
+            targetThreadId: targetThreadRef.threadId,
+            title: `${thread.title} (copy)`,
+            createdAt: new Date().toISOString(),
+          });
+          void router.navigate({
+            to: "/$environmentId/$threadId",
+            params: buildThreadRouteParams(targetThreadRef),
+          });
+        } catch (error) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Failed to duplicate thread",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
         return;
       }
 
@@ -2164,6 +2204,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       memberProjectByScopedKey,
       openThreadMoveDialog,
       project.cwd,
+      router,
     ],
   );
 

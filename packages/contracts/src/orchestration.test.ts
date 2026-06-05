@@ -17,6 +17,7 @@ import {
   OrchestrationSession,
   ProjectCreateCommand,
   ThreadMetaUpdatedPayload,
+  ThreadDuplicatedPayload,
   ThreadTurnStartCommand,
   ThreadCreatedPayload,
   ThreadTurnStartRequestedPayload,
@@ -42,6 +43,7 @@ function getOptionValue(
   return options?.find((option) => option.id === id)?.value;
 }
 const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPayload);
+const decodeThreadDuplicatedPayload = Schema.decodeUnknownEffect(ThreadDuplicatedPayload);
 const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationCommand);
 const decodeClientOrchestrationCommand = Schema.decodeUnknownEffect(ClientOrchestrationCommand);
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
@@ -88,6 +90,33 @@ it.effect("decodes project.create with createWorkspaceRootIfMissing enabled", ()
     });
 
     assert.strictEqual(parsed.createWorkspaceRootIfMissing, true);
+  }),
+);
+
+it.effect("decodes thread.duplicate client commands and duplicated payloads", () =>
+  Effect.gen(function* () {
+    const command = yield* decodeClientOrchestrationCommand({
+      type: "thread.duplicate",
+      commandId: "cmd-duplicate",
+      sourceThreadId: "source-thread",
+      targetThreadId: "target-thread",
+      title: "Source Thread (copy)",
+      createdAt: "2026-06-05T00:00:00.000Z",
+    });
+    assert.strictEqual(command.type, "thread.duplicate");
+    if (command.type !== "thread.duplicate") {
+      return;
+    }
+    assert.strictEqual(command.sourceThreadId, "source-thread");
+    assert.strictEqual(command.targetThreadId, "target-thread");
+
+    const payload = yield* decodeThreadDuplicatedPayload({
+      sourceThreadId: "source-thread",
+      targetThreadId: "target-thread",
+      duplicatedAt: "2026-06-05T00:00:00.000Z",
+    });
+    assert.strictEqual(payload.sourceThreadId, "source-thread");
+    assert.strictEqual(payload.targetThreadId, "target-thread");
   }),
 );
 
