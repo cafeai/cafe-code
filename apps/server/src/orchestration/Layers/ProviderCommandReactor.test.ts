@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  type ChatAttachment,
   ModelSelection,
   ProviderRuntimeEvent,
   ProviderSession,
@@ -148,7 +149,7 @@ describe("ProviderCommandReactor", () => {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir = input?.baseDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "t3code-reactor-"));
     createdBaseDirs.add(baseDir);
-    const { stateDir } = deriveServerPathsSync(baseDir, undefined);
+    const { stateDir, systemPromptPath } = deriveServerPathsSync(baseDir, undefined);
     createdStateDirs.add(stateDir);
     const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
     let nextSessionIndex = 1;
@@ -451,6 +452,7 @@ describe("ProviderCommandReactor", () => {
       generateThreadTitle,
       runtimeSessions,
       stateDir,
+      systemPromptPath,
       startReactor,
       drain,
       markThreadReady,
@@ -519,6 +521,10 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      threadId: ThreadId.make("thread-1"),
+      input: "hello reactor",
+    });
     expect(harness.startSession.mock.calls[0]?.[0]).toEqual(ThreadId.make("thread-1"));
     expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
       cwd: "/tmp/provider-project",
@@ -535,11 +541,115 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
 
+  it("prepends the configured system prompt to the first provider turn only", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const attachments = [
+      {
+        type: "image" as const,
+        id: "attachment-1",
+        name: "screenshot.png",
+        mimeType: "image/png",
+        sizeBytes: 128,
+      },
+    ] as unknown as ChatAttachment[];
+    fs.mkdirSync(path.dirname(harness.systemPromptPath), { recursive: true });
+    fs.writeFileSync(harness.systemPromptPath, "  Follow the repository rules.  \n", "utf8");
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-system-prompt"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-system-prompt"),
+          role: "user",
+          text: "implement the feature",
+          attachments,
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      threadId: ThreadId.make("thread-1"),
+      input: "System prompt:\nFollow the repository rules.\n\nUser request:\nimplement the feature",
+      attachments,
+    });
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.messages.find((message) => message.id === "user-message-system-prompt")).toEqual(
+      expect.objectContaining({
+        role: "user",
+        text: "implement the feature",
+      }),
+    );
+  });
+
+  it("does not prepend a blank system prompt or apply the prompt to later provider turns", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    fs.mkdirSync(path.dirname(harness.systemPromptPath), { recursive: true });
+    fs.writeFileSync(harness.systemPromptPath, " \n\t\n", "utf8");
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-blank-system-prompt"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-blank-system-prompt"),
+          role: "user",
+          text: "first message",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      input: "first message",
+    });
+
+    await harness.markThreadReady();
+    fs.writeFileSync(harness.systemPromptPath, "Now active", "utf8");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-system-prompt-follow-up"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-system-prompt-follow-up"),
+          role: "user",
+          text: "second message",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:01:00.000Z",
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
+      input: "second message",
+    });
+  });
+
   it("routes turn starts through live steer when the Codex runtime still owns an active turn", async () => {
     const harness = await createHarness({ liveSteer: "supported" });
     const now = "2026-01-01T00:00:00.000Z";
     const threadId = ThreadId.make("thread-1");
     const runtimeActiveTurnId = asTurnId("runtime-active-turn");
+    fs.mkdirSync(path.dirname(harness.systemPromptPath), { recursive: true });
+    fs.writeFileSync(harness.systemPromptPath, "Do not inject into steers.", "utf8");
     harness.steerTurn.mockImplementationOnce((input) =>
       Effect.succeed({
         threadId: input.threadId,

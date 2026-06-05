@@ -40,7 +40,13 @@ import { resetServerStateForTests, setServerConfigSnapshot } from "../../rpc/ser
 import { useUiStateStore } from "../../uiStateStore";
 import { ConnectionsSettings } from "./ConnectionsSettings";
 import { DiagnosticsSettingsPanel } from "./DiagnosticsSettings";
-import { GeneralSettingsPanel, ProviderSettingsPanel } from "./SettingsPanels";
+import {
+  AppearanceSettingsPanel,
+  ChatSettingsPanel,
+  FilesSettingsPanel,
+  ProviderSettingsPanel,
+  SystemSettingsPanel,
+} from "./SettingsPanels";
 import { SourceControlSettingsPanel } from "./SourceControlSettings";
 
 function renderWithTestRouter(children: ReactNode) {
@@ -231,6 +237,7 @@ function createBaseServerConfig(): ServerConfig {
     },
     cwd: "/repo/project",
     keybindingsConfigPath: "/repo/project/.t3code-keybindings.json",
+    systemPromptPath: "/repo/project/.t3code-system-prompt.md",
     keybindings: [],
     issues: [],
     providers: [],
@@ -646,7 +653,7 @@ const createDesktopBridgeStub = (overrides?: {
   };
 };
 
-describe("GeneralSettingsPanel observability", () => {
+describe("settings panels", () => {
   let mounted:
     | (Awaited<ReturnType<typeof render>> & {
         cleanup?: () => Promise<void>;
@@ -901,7 +908,7 @@ describe("GeneralSettingsPanel observability", () => {
 
     mounted = await renderWithTestRouter(
       <AppAtomRegistryProvider>
-        <GeneralSettingsPanel />
+        <SystemSettingsPanel />
       </AppAtomRegistryProvider>,
     );
 
@@ -951,7 +958,7 @@ describe("GeneralSettingsPanel observability", () => {
 
     mounted = await renderWithTestRouter(
       <AppAtomRegistryProvider>
-        <GeneralSettingsPanel />
+        <SystemSettingsPanel />
       </AppAtomRegistryProvider>,
     );
 
@@ -988,7 +995,7 @@ describe("GeneralSettingsPanel observability", () => {
 
     mounted = await renderWithTestRouter(
       <AppAtomRegistryProvider>
-        <GeneralSettingsPanel />
+        <SystemSettingsPanel />
       </AppAtomRegistryProvider>,
     );
 
@@ -997,14 +1004,14 @@ describe("GeneralSettingsPanel observability", () => {
     await expect.element(page.getByText("Rebuild to apply (dev)")).toBeInTheDocument();
   });
 
-  it("persists the keep-awake preference from General settings", async () => {
+  it("persists the keep-awake preference from System settings", async () => {
     const desktopBridge = createDesktopBridgeStub();
     window.desktopBridge = desktopBridge;
     setServerConfigSnapshot(createBaseServerConfig());
 
     mounted = await renderWithTestRouter(
       <AppAtomRegistryProvider>
-        <GeneralSettingsPanel />
+        <SystemSettingsPanel />
       </AppAtomRegistryProvider>,
     );
 
@@ -1020,14 +1027,14 @@ describe("GeneralSettingsPanel observability", () => {
     });
   });
 
-  it("persists appearance preferences from General settings", async () => {
+  it("persists appearance preferences from Appearance settings", async () => {
     const desktopBridge = createDesktopBridgeStub();
     window.desktopBridge = desktopBridge;
     setServerConfigSnapshot(createBaseServerConfig());
 
     mounted = await renderWithTestRouter(
       <AppAtomRegistryProvider>
-        <GeneralSettingsPanel />
+        <AppearanceSettingsPanel />
       </AppAtomRegistryProvider>,
     );
 
@@ -1082,7 +1089,7 @@ describe("GeneralSettingsPanel observability", () => {
     });
   });
 
-  it("shows detected editor icons in the General default editor selector", async () => {
+  it("shows detected editor icons in the Files & Diffs default editor selector", async () => {
     const platformSpy = vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
     const desktopBridge = createDesktopBridgeStub();
     window.desktopBridge = desktopBridge;
@@ -1094,7 +1101,7 @@ describe("GeneralSettingsPanel observability", () => {
     try {
       mounted = await renderWithTestRouter(
         <AppAtomRegistryProvider>
-          <GeneralSettingsPanel />
+          <FilesSettingsPanel />
         </AppAtomRegistryProvider>,
       );
 
@@ -1507,6 +1514,46 @@ describe("GeneralSettingsPanel observability", () => {
     await openLogsButton.click();
 
     expect(openInEditor).toHaveBeenCalledWith("/repo/project/.t3/logs", "cursor");
+  });
+
+  it("opens the file-backed system prompt from Chat settings", async () => {
+    const openSystemPromptFile = vi
+      .fn<LocalApi["server"]["openSystemPromptFile"]>()
+      .mockResolvedValue({
+        path: "/repo/project/.t3code-system-prompt.md",
+      });
+    const getConfig = vi.fn<LocalApi["server"]["getConfig"]>().mockResolvedValue({
+      ...createBaseServerConfig(),
+      availableEditors: ["cursor"],
+    });
+    const openInEditor = vi.fn<LocalApi["shell"]["openInEditor"]>().mockResolvedValue(undefined);
+    window.nativeApi = {
+      persistence: {
+        getClientSettings: vi.fn().mockResolvedValue(null),
+        setClientSettings: vi.fn().mockResolvedValue(undefined),
+      },
+      server: {
+        getConfig,
+        openSystemPromptFile,
+      },
+      shell: {
+        openInEditor,
+      },
+    } as unknown as LocalApi;
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <ChatSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await page.getByRole("button", { name: "Open file" }).click();
+
+    await vi.waitFor(() => {
+      expect(openSystemPromptFile).toHaveBeenCalledTimes(1);
+      expect(openInEditor).toHaveBeenCalledWith("/repo/project/.t3code-system-prompt.md", "cursor");
+    });
   });
 
   it("runs one-click provider updates from the provider card", async () => {

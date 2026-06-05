@@ -104,6 +104,9 @@ export interface WsRpcClient {
     ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.serverRefreshProviders>>;
     readonly updateProvider: RpcUnaryMethod<typeof WS_METHODS.serverUpdateProvider>;
     readonly restartProviderRuntime: RpcUnaryMethod<typeof WS_METHODS.serverRestartProviderRuntime>;
+    readonly openSystemPromptFile: RpcUnaryNoArgMethod<
+      typeof WS_METHODS.serverOpenSystemPromptFile
+    >;
     readonly upsertKeybinding: RpcUnaryMethod<typeof WS_METHODS.serverUpsertKeybinding>;
     readonly removeKeybinding: RpcUnaryMethod<typeof WS_METHODS.serverRemoveKeybinding>;
     readonly getSettings: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetSettings>;
@@ -214,6 +217,8 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         transport.request((client) => client[WS_METHODS.serverUpdateProvider](input)),
       restartProviderRuntime: (input) =>
         transport.request((client) => client[WS_METHODS.serverRestartProviderRuntime](input)),
+      openSystemPromptFile: () =>
+        transport.request((client) => client[WS_METHODS.serverOpenSystemPromptFile]({})),
       upsertKeybinding: (input) =>
         transport.request((client) => client[WS_METHODS.serverUpsertKeybinding](input)),
       removeKeybinding: (input) =>

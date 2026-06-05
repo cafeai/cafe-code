@@ -62,9 +62,11 @@ import {
   ServerProviderRuntimeRestartInput,
   ServerProviderRuntimeRestartResult,
   ServerLifecycleStreamEvent,
+  ServerOpenSystemPromptFileResult,
   ServerRemoveKeybindingInput,
   ServerRemoveKeybindingResult,
   ServerProviderUpdatedPayload,
+  ServerSystemPromptFileError,
   ServerTraceDiagnosticsResult,
   ServerProcessDiagnosticsResult,
   ServerProcessResourceHistoryInput,
@@ -122,6 +124,7 @@ export const WS_METHODS = {
   serverRefreshProviders: "server.refreshProviders",
   serverUpdateProvider: "server.updateProvider",
   serverRestartProviderRuntime: "server.restartProviderRuntime",
+  serverOpenSystemPromptFile: "server.openSystemPromptFile",
   serverUpsertKeybinding: "server.upsertKeybinding",
   serverRemoveKeybinding: "server.removeKeybinding",
   serverGetSettings: "server.getSettings",
@@ -185,6 +188,12 @@ export const WsServerRestartProviderRuntimeRpc = Rpc.make(WS_METHODS.serverResta
   payload: ServerProviderRuntimeRestartInput,
   success: ServerProviderRuntimeRestartResult,
   error: ServerProviderRuntimeRestartError,
+});
+
+export const WsServerOpenSystemPromptFileRpc = Rpc.make(WS_METHODS.serverOpenSystemPromptFile, {
+  payload: Schema.Struct({}),
+  success: ServerOpenSystemPromptFileResult,
+  error: ServerSystemPromptFileError,
 });
 
 export const WsServerGetSettingsRpc = Rpc.make(WS_METHODS.serverGetSettings, {
@@ -441,6 +450,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
   WsServerRestartProviderRuntimeRpc,
+  WsServerOpenSystemPromptFileRpc,
   WsServerUpsertKeybindingRpc,
   WsServerRemoveKeybindingRpc,
   WsServerGetSettingsRpc,

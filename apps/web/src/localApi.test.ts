@@ -72,7 +72,9 @@ const rpcClientMock = {
     refreshProviders: vi.fn(),
     updateProvider: vi.fn(),
     restartProviderRuntime: vi.fn(),
+    openSystemPromptFile: vi.fn(),
     upsertKeybinding: vi.fn(),
+    removeKeybinding: vi.fn(),
     getSettings: vi.fn(),
     updateSettings: vi.fn(),
     subscribeConfig: vi.fn(),
@@ -298,6 +300,7 @@ const baseServerConfig: ServerConfig = {
   },
   cwd: "/tmp/workspace",
   keybindingsConfigPath: "/tmp/workspace/.config/keybindings.json",
+  systemPromptPath: "/tmp/workspace/.config/system-prompt.md",
   keybindings: [],
   issues: [],
   providers: defaultProviders,
@@ -565,6 +568,17 @@ describe("wsApi", () => {
     expect(rpcClientMock.server.restartProviderRuntime).toHaveBeenCalledWith({
       instanceId: ProviderInstanceId.make("codex"),
     });
+  });
+
+  it("forwards system prompt file open requests directly to the RPC client", async () => {
+    const result = { path: "/tmp/workspace/.config/system-prompt.md" };
+    rpcClientMock.server.openSystemPromptFile.mockResolvedValue(result);
+    const { createLocalApi } = await import("./localApi");
+
+    const api = createLocalApi(rpcClientMock as never);
+
+    await expect(api.server.openSystemPromptFile()).resolves.toEqual(result);
+    expect(rpcClientMock.server.openSystemPromptFile).toHaveBeenCalledWith();
   });
 
   it("forwards server settings updates directly to the RPC client", async () => {

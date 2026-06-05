@@ -686,6 +686,7 @@ export const ServerConfig = Schema.Struct({
   auth: ServerAuthDescriptor,
   cwd: TrimmedNonEmptyString,
   keybindingsConfigPath: TrimmedNonEmptyString,
+  systemPromptPath: TrimmedNonEmptyString,
   keybindings: ResolvedKeybindingsConfig,
   issues: ServerConfigIssues,
   providers: ServerProviders,
@@ -695,6 +696,19 @@ export const ServerConfig = Schema.Struct({
   settings: ServerSettings,
 });
 export type ServerConfig = typeof ServerConfig.Type;
+
+export const ServerOpenSystemPromptFileResult = Schema.Struct({
+  path: TrimmedNonEmptyString,
+});
+export type ServerOpenSystemPromptFileResult = typeof ServerOpenSystemPromptFileResult.Type;
+
+export class ServerSystemPromptFileError extends Schema.TaggedErrorClass<ServerSystemPromptFileError>()(
+  "ServerSystemPromptFileError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect),
+  },
+) {}
 
 const ServerUpsertKeybindingReplaceTarget = Schema.Struct({
   key: KeybindingValue,

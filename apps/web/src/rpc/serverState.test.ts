@@ -81,6 +81,7 @@ const baseServerConfig: ServerConfig = {
   },
   cwd: "/tmp/workspace",
   keybindingsConfigPath: "/tmp/workspace/.config/keybindings.json",
+  systemPromptPath: "/tmp/workspace/.config/system-prompt.md",
   keybindings: [],
   issues: [],
   providers: defaultProviders,

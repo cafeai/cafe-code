@@ -1,6 +1,7 @@
 import {
   ArchiveIcon,
   ArchiveX,
+  FileTextIcon,
   LoaderIcon,
   PaletteIcon,
   PlusIcon,
@@ -93,6 +94,7 @@ import {
   useServerProviders,
 } from "../../rpc/serverState";
 import { resolveEditorOpenOptions, type EditorOpenOption } from "../../editorOpenOptions";
+import { openInPreferredEditor } from "../../editorPreferences";
 import { normalizeAccentColor } from "../../themeAccent";
 
 const THEME_OPTIONS = [
@@ -502,21 +504,10 @@ export function useSettingsRestore(onRestored?: () => void) {
   };
 }
 
-export function GeneralSettingsPanel() {
-  const { theme, setTheme } = useTheme();
+export function TextGenerationModelSettingsRow() {
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
-  const observability = useServerObservability();
   const serverProviders = useServerProviders();
-  const availableEditors = useServerAvailableEditors();
-  const diagnosticsDescription = formatDiagnosticsDescription({
-    localTracingEnabled: observability?.localTracingEnabled ?? false,
-    otlpTracesEnabled: observability?.otlpTracesEnabled ?? false,
-    otlpTracesUrl: observability?.otlpTracesUrl,
-    otlpMetricsEnabled: observability?.otlpMetricsEnabled ?? false,
-    otlpMetricsUrl: observability?.otlpMetricsUrl,
-  });
-
   const textGenerationModelSelection = resolveAppModelSelectionState(settings, serverProviders);
   const textGenInstanceId = textGenerationModelSelection.instanceId;
   const textGenModel = textGenerationModelSelection.model;
@@ -539,22 +530,93 @@ export function GeneralSettingsPanel() {
     settings.textGenerationModelSelection ?? null,
     DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection ?? null,
   );
-  const editorOptions = useMemo(
-    () => resolveEditorOpenOptions(navigator.platform, availableEditors),
-    [availableEditors],
+
+  return (
+    <SettingsRow
+      title="Text generation model"
+      description="Configure the model used for generated commit messages, PR titles, and similar Git text."
+      resetAction={
+        isGitWritingModelDirty ? (
+          <SettingResetButton
+            label="text generation model"
+            onClick={() =>
+              updateSettings({
+                textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
+              })
+            }
+          />
+        ) : null
+      }
+      control={
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
+          <ProviderModelPicker
+            activeInstanceId={textGenInstanceId}
+            model={textGenModel}
+            lockedProvider={null}
+            instanceEntries={gitModelInstanceEntries}
+            modelOptionsByInstance={gitModelOptionsByInstance}
+            triggerVariant="outline"
+            triggerClassName="min-w-0 max-w-none shrink-0 text-foreground/90 hover:text-foreground"
+            onInstanceModelChange={(instanceId, model) => {
+              updateSettings({
+                textGenerationModelSelection: resolveAppModelSelectionState(
+                  {
+                    ...settings,
+                    textGenerationModelSelection: createModelSelection(instanceId, model),
+                  },
+                  serverProviders,
+                ),
+              });
+            }}
+          />
+          <TraitsPicker
+            provider={textGenProvider}
+            models={
+              // Use the exact instance's models so custom text-generation instances
+              // keep their own model list instead of falling back to the default kind.
+              textGenInstanceEntry?.models ?? []
+            }
+            model={textGenModel}
+            prompt=""
+            onPromptChange={() => {}}
+            modelOptions={textGenModelOptions}
+            allowPromptInjectedEffort={false}
+            triggerVariant="outline"
+            triggerClassName="min-w-0 max-w-none shrink-0 text-foreground/90 hover:text-foreground"
+            onModelOptionsChange={(nextOptions) => {
+              updateSettings({
+                textGenerationModelSelection: resolveAppModelSelectionState(
+                  {
+                    ...settings,
+                    textGenerationModelSelection: createModelSelection(
+                      textGenInstanceId,
+                      textGenModel,
+                      nextOptions,
+                    ),
+                  },
+                  serverProviders,
+                ),
+              });
+            }}
+          />
+        </div>
+      }
+    />
   );
-  const defaultEditorOption =
-    settings.defaultEditor === DEFAULT_EDITOR_SYSTEM_VALUE
-      ? null
-      : (editorOptions.find((option) => option.value === settings.defaultEditor) ?? null);
-  const defaultEditorLabel =
-    settings.defaultEditor === DEFAULT_EDITOR_SYSTEM_VALUE
-      ? "System default"
-      : (defaultEditorOption?.label ?? "System default");
+}
+
+export function GeneralSettingsPanel() {
+  return <AppearanceSettingsPanel />;
+}
+
+export function AppearanceSettingsPanel() {
+  const { theme, setTheme } = useTheme();
+  const settings = useSettings();
+  const { updateSettings } = useUpdateSettings();
 
   return (
     <SettingsPageContainer>
-      <SettingsSection title="General">
+      <SettingsSection title="Appearance">
         <SettingsRow
           title="Theme"
           description="Choose how Cafe Code looks across the app."
@@ -595,11 +657,7 @@ export function GeneralSettingsPanel() {
             settings.appAccentColor !== DEFAULT_UNIFIED_SETTINGS.appAccentColor ? (
               <SettingResetButton
                 label="accent color"
-                onClick={() =>
-                  updateSettings({
-                    appAccentColor: DEFAULT_APP_ACCENT_COLOR,
-                  })
-                }
+                onClick={() => updateSettings({ appAccentColor: DEFAULT_APP_ACCENT_COLOR })}
               />
             ) : null
           }
@@ -621,11 +679,7 @@ export function GeneralSettingsPanel() {
             settings.themeAccentColor !== DEFAULT_UNIFIED_SETTINGS.themeAccentColor ? (
               <SettingResetButton
                 label="sidebar color"
-                onClick={() =>
-                  updateSettings({
-                    themeAccentColor: DEFAULT_THEME_ACCENT_COLOR,
-                  })
-                }
+                onClick={() => updateSettings({ themeAccentColor: DEFAULT_THEME_ACCENT_COLOR })}
               />
             ) : null
           }
@@ -647,11 +701,7 @@ export function GeneralSettingsPanel() {
             settings.showSidebarMascot !== DEFAULT_UNIFIED_SETTINGS.showSidebarMascot ? (
               <SettingResetButton
                 label="sidebar mascot"
-                onClick={() =>
-                  updateSettings({
-                    showSidebarMascot: DEFAULT_SHOW_SIDEBAR_MASCOT,
-                  })
-                }
+                onClick={() => updateSettings({ showSidebarMascot: DEFAULT_SHOW_SIDEBAR_MASCOT })}
               />
             ) : null
           }
@@ -699,9 +749,7 @@ export function GeneralSettingsPanel() {
               <SettingResetButton
                 label="time format"
                 onClick={() =>
-                  updateSettings({
-                    timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
-                  })
+                  updateSettings({ timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat })
                 }
               />
             ) : null
@@ -732,158 +780,41 @@ export function GeneralSettingsPanel() {
             </Select>
           }
         />
+      </SettingsSection>
+    </SettingsPageContainer>
+  );
+}
 
-        <SettingsRow
-          title="Default editor"
-          description="Choose how file links open from chats and activity."
-          resetAction={
-            settings.defaultEditor !== DEFAULT_UNIFIED_SETTINGS.defaultEditor ? (
-              <SettingResetButton
-                label="default editor"
-                onClick={() =>
-                  updateSettings({
-                    defaultEditor: DEFAULT_UNIFIED_SETTINGS.defaultEditor,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={settings.defaultEditor}
-              onValueChange={(value) => {
-                if (
-                  value === DEFAULT_EDITOR_SYSTEM_VALUE ||
-                  editorOptions.some((option) => option.value === value)
-                ) {
-                  updateSettings({ defaultEditor: value as DefaultEditorSelection });
-                }
-              }}
-            >
-              <SelectTrigger className="w-full sm:w-48" aria-label="Default editor">
-                <SelectValue>
-                  <DefaultEditorOptionLabel
-                    Icon={defaultEditorOption?.Icon}
-                    label={defaultEditorLabel}
-                    testId="default-editor-selected-option"
-                  />
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value={DEFAULT_EDITOR_SYSTEM_VALUE}>
-                  <DefaultEditorOptionLabel
-                    label="System default"
-                    testId="default-editor-option-system-default"
-                  />
-                </SelectItem>
-                {editorOptions.map((option) => (
-                  <SelectItem hideIndicator key={option.value} value={option.value}>
-                    <DefaultEditorOptionLabel
-                      Icon={option.Icon}
-                      label={option.label}
-                      testId={`default-editor-option-${option.value}`}
-                    />
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          }
-        />
+export function ChatSettingsPanel() {
+  const settings = useSettings();
+  const { updateSettings } = useUpdateSettings();
+  const [isOpeningSystemPromptFile, setIsOpeningSystemPromptFile] = useState(false);
 
-        <SettingsRow
-          title="Keep awake"
-          description="Prevent your computer and screen from sleeping while Cafe Code is working."
-          resetAction={
-            settings.powerSaveBlockerMode !== DEFAULT_UNIFIED_SETTINGS.powerSaveBlockerMode ? (
-              <SettingResetButton
-                label="keep awake"
-                onClick={() =>
-                  updateSettings({
-                    powerSaveBlockerMode: DEFAULT_UNIFIED_SETTINGS.powerSaveBlockerMode,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={settings.powerSaveBlockerMode}
-              onValueChange={(value) => {
-                if (value === "off" || value === "during-chats" || value === "always") {
-                  updateSettings({ powerSaveBlockerMode: value });
-                }
-              }}
-            >
-              <SelectTrigger className="w-full sm:w-44" aria-label="Keep awake">
-                <SelectValue>
-                  {POWER_SAVE_BLOCKER_LABELS[settings.powerSaveBlockerMode]}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value="off">
-                  {POWER_SAVE_BLOCKER_LABELS.off}
-                </SelectItem>
-                <SelectItem hideIndicator value="during-chats">
-                  {POWER_SAVE_BLOCKER_LABELS["during-chats"]}
-                </SelectItem>
-                <SelectItem hideIndicator value="always">
-                  {POWER_SAVE_BLOCKER_LABELS.always}
-                </SelectItem>
-              </SelectPopup>
-            </Select>
-          }
-        />
+  const openSystemPromptFile = useCallback(() => {
+    setIsOpeningSystemPromptFile(true);
+    void Promise.resolve()
+      .then(() => {
+        const api = ensureLocalApi();
+        return api.server
+          .openSystemPromptFile()
+          .then(({ path }) => openInPreferredEditor(api, path));
+      })
+      .catch((error: unknown) => {
+        toastManager.add({
+          title: "Unable to open system prompt file",
+          description:
+            error instanceof Error ? error.message : "The system prompt file was not opened.",
+          type: "error",
+        });
+      })
+      .finally(() => {
+        setIsOpeningSystemPromptFile(false);
+      });
+  }, []);
 
-        <SettingsRow
-          title="Diff line wrapping"
-          description="Set the default wrap state when the diff panel opens."
-          resetAction={
-            settings.diffWordWrap !== DEFAULT_UNIFIED_SETTINGS.diffWordWrap ? (
-              <SettingResetButton
-                label="diff line wrapping"
-                onClick={() =>
-                  updateSettings({
-                    diffWordWrap: DEFAULT_UNIFIED_SETTINGS.diffWordWrap,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.diffWordWrap}
-              onCheckedChange={(checked) => updateSettings({ diffWordWrap: Boolean(checked) })}
-              aria-label="Wrap diff lines by default"
-            />
-          }
-        />
-
-        <SettingsRow
-          title="Hide whitespace changes"
-          description="Set whether the diff panel ignores whitespace-only edits by default."
-          resetAction={
-            settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace ? (
-              <SettingResetButton
-                label="diff whitespace changes"
-                onClick={() =>
-                  updateSettings({
-                    diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.diffIgnoreWhitespace}
-              onCheckedChange={(checked) =>
-                updateSettings({ diffIgnoreWhitespace: Boolean(checked) })
-              }
-              aria-label="Hide whitespace changes by default"
-            />
-          }
-        />
-
+  return (
+    <SettingsPageContainer>
+      <SettingsSection title="Chat & Threads">
         <SettingsRow
           title="Assistant output"
           description="Show token-by-token output while a response is in progress."
@@ -979,30 +910,23 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
-          title="Add project starts in"
-          description='Leave empty to use "~/" when the Add Project browser opens.'
-          resetAction={
-            settings.addProjectBaseDirectory !==
-            DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory ? (
-              <SettingResetButton
-                label="add project base directory"
-                onClick={() =>
-                  updateSettings({
-                    addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
-                  })
-                }
-              />
-            ) : null
-          }
+          title="System prompt"
+          description="Edit the file prepended to the first message in each new thread."
           control={
-            <DraftInput
-              className="w-full sm:w-72"
-              value={settings.addProjectBaseDirectory}
-              onCommit={(next) => updateSettings({ addProjectBaseDirectory: next })}
-              placeholder="~/"
-              spellCheck={false}
-              aria-label="Add project base directory"
-            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={isOpeningSystemPromptFile}
+              onClick={openSystemPromptFile}
+            >
+              {isOpeningSystemPromptFile ? (
+                <LoaderIcon className="size-4 animate-spin" aria-hidden />
+              ) : (
+                <FileTextIcon className="size-4" aria-hidden />
+              )}
+              Open file
+            </Button>
           }
         />
 
@@ -1057,78 +981,222 @@ export function GeneralSettingsPanel() {
             />
           }
         />
+      </SettingsSection>
+    </SettingsPageContainer>
+  );
+}
+
+export function FilesSettingsPanel() {
+  const settings = useSettings();
+  const { updateSettings } = useUpdateSettings();
+  const availableEditors = useServerAvailableEditors();
+  const editorOptions = useMemo(
+    () => resolveEditorOpenOptions(navigator.platform, availableEditors),
+    [availableEditors],
+  );
+  const defaultEditorOption =
+    settings.defaultEditor === DEFAULT_EDITOR_SYSTEM_VALUE
+      ? null
+      : (editorOptions.find((option) => option.value === settings.defaultEditor) ?? null);
+  const defaultEditorLabel =
+    settings.defaultEditor === DEFAULT_EDITOR_SYSTEM_VALUE
+      ? "System default"
+      : (defaultEditorOption?.label ?? "System default");
+
+  return (
+    <SettingsPageContainer>
+      <SettingsSection title="Files & Diffs">
+        <SettingsRow
+          title="Default editor"
+          description="Choose how file links open from chats and activity."
+          resetAction={
+            settings.defaultEditor !== DEFAULT_UNIFIED_SETTINGS.defaultEditor ? (
+              <SettingResetButton
+                label="default editor"
+                onClick={() =>
+                  updateSettings({ defaultEditor: DEFAULT_UNIFIED_SETTINGS.defaultEditor })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={settings.defaultEditor}
+              onValueChange={(value) => {
+                if (
+                  value === DEFAULT_EDITOR_SYSTEM_VALUE ||
+                  editorOptions.some((option) => option.value === value)
+                ) {
+                  updateSettings({ defaultEditor: value as DefaultEditorSelection });
+                }
+              }}
+            >
+              <SelectTrigger className="w-full sm:w-48" aria-label="Default editor">
+                <SelectValue>
+                  <DefaultEditorOptionLabel
+                    Icon={defaultEditorOption?.Icon}
+                    label={defaultEditorLabel}
+                    testId="default-editor-selected-option"
+                  />
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value={DEFAULT_EDITOR_SYSTEM_VALUE}>
+                  <DefaultEditorOptionLabel
+                    label="System default"
+                    testId="default-editor-option-system-default"
+                  />
+                </SelectItem>
+                {editorOptions.map((option) => (
+                  <SelectItem hideIndicator key={option.value} value={option.value}>
+                    <DefaultEditorOptionLabel
+                      Icon={option.Icon}
+                      label={option.label}
+                      testId={`default-editor-option-${option.value}`}
+                    />
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          }
+        />
 
         <SettingsRow
-          title="Text generation model"
-          description="Configure the model used for generated commit messages, PR titles, and similar Git text."
+          title="Diff line wrapping"
+          description="Set the default wrap state when the diff panel opens."
           resetAction={
-            isGitWritingModelDirty ? (
+            settings.diffWordWrap !== DEFAULT_UNIFIED_SETTINGS.diffWordWrap ? (
               <SettingResetButton
-                label="text generation model"
+                label="diff line wrapping"
+                onClick={() =>
+                  updateSettings({ diffWordWrap: DEFAULT_UNIFIED_SETTINGS.diffWordWrap })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.diffWordWrap}
+              onCheckedChange={(checked) => updateSettings({ diffWordWrap: Boolean(checked) })}
+              aria-label="Wrap diff lines by default"
+            />
+          }
+        />
+
+        <SettingsRow
+          title="Hide whitespace changes"
+          description="Set whether the diff panel ignores whitespace-only edits by default."
+          resetAction={
+            settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace ? (
+              <SettingResetButton
+                label="diff whitespace changes"
                 onClick={() =>
                   updateSettings({
-                    textGenerationModelSelection:
-                      DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
+                    diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
                   })
                 }
               />
             ) : null
           }
           control={
-            <div className="flex flex-wrap items-center justify-end gap-1.5">
-              <ProviderModelPicker
-                activeInstanceId={textGenInstanceId}
-                model={textGenModel}
-                lockedProvider={null}
-                instanceEntries={gitModelInstanceEntries}
-                modelOptionsByInstance={gitModelOptionsByInstance}
-                triggerVariant="outline"
-                triggerClassName="min-w-0 max-w-none shrink-0 text-foreground/90 hover:text-foreground"
-                onInstanceModelChange={(instanceId, model) => {
+            <Switch
+              checked={settings.diffIgnoreWhitespace}
+              onCheckedChange={(checked) =>
+                updateSettings({ diffIgnoreWhitespace: Boolean(checked) })
+              }
+              aria-label="Hide whitespace changes by default"
+            />
+          }
+        />
+
+        <SettingsRow
+          title="Add project starts in"
+          description='Leave empty to use "~/" when the Add Project browser opens.'
+          resetAction={
+            settings.addProjectBaseDirectory !==
+            DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory ? (
+              <SettingResetButton
+                label="add project base directory"
+                onClick={() =>
                   updateSettings({
-                    textGenerationModelSelection: resolveAppModelSelectionState(
-                      {
-                        ...settings,
-                        textGenerationModelSelection: createModelSelection(instanceId, model),
-                      },
-                      serverProviders,
-                    ),
-                  });
-                }}
-              />
-              <TraitsPicker
-                provider={textGenProvider}
-                models={
-                  // Use the exact instance's models (rather than the
-                  // first-kind-match) so a custom text-gen instance like
-                  // `codex_personal` gets its own model list, not the
-                  // default Codex one.
-                  textGenInstanceEntry?.models ?? []
+                    addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
+                  })
                 }
-                model={textGenModel}
-                prompt=""
-                onPromptChange={() => {}}
-                modelOptions={textGenModelOptions}
-                allowPromptInjectedEffort={false}
-                triggerVariant="outline"
-                triggerClassName="min-w-0 max-w-none shrink-0 text-foreground/90 hover:text-foreground"
-                onModelOptionsChange={(nextOptions) => {
-                  updateSettings({
-                    textGenerationModelSelection: resolveAppModelSelectionState(
-                      {
-                        ...settings,
-                        textGenerationModelSelection: createModelSelection(
-                          textGenInstanceId,
-                          textGenModel,
-                          nextOptions,
-                        ),
-                      },
-                      serverProviders,
-                    ),
-                  });
-                }}
               />
-            </div>
+            ) : null
+          }
+          control={
+            <DraftInput
+              className="w-full sm:w-72"
+              value={settings.addProjectBaseDirectory}
+              onCommit={(next) => updateSettings({ addProjectBaseDirectory: next })}
+              placeholder="~/"
+              spellCheck={false}
+              aria-label="Add project base directory"
+            />
+          }
+        />
+      </SettingsSection>
+    </SettingsPageContainer>
+  );
+}
+
+export function SystemSettingsPanel() {
+  const settings = useSettings();
+  const { updateSettings } = useUpdateSettings();
+  const observability = useServerObservability();
+  const diagnosticsDescription = formatDiagnosticsDescription({
+    localTracingEnabled: observability?.localTracingEnabled ?? false,
+    otlpTracesEnabled: observability?.otlpTracesEnabled ?? false,
+    otlpTracesUrl: observability?.otlpTracesUrl,
+    otlpMetricsEnabled: observability?.otlpMetricsEnabled ?? false,
+    otlpMetricsUrl: observability?.otlpMetricsUrl,
+  });
+
+  return (
+    <SettingsPageContainer>
+      <SettingsSection title="System">
+        <SettingsRow
+          title="Keep awake"
+          description="Prevent your computer and screen from sleeping while Cafe Code is working."
+          resetAction={
+            settings.powerSaveBlockerMode !== DEFAULT_UNIFIED_SETTINGS.powerSaveBlockerMode ? (
+              <SettingResetButton
+                label="keep awake"
+                onClick={() =>
+                  updateSettings({
+                    powerSaveBlockerMode: DEFAULT_UNIFIED_SETTINGS.powerSaveBlockerMode,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={settings.powerSaveBlockerMode}
+              onValueChange={(value) => {
+                if (value === "off" || value === "during-chats" || value === "always") {
+                  updateSettings({ powerSaveBlockerMode: value });
+                }
+              }}
+            >
+              <SelectTrigger className="w-full sm:w-44" aria-label="Keep awake">
+                <SelectValue>
+                  {POWER_SAVE_BLOCKER_LABELS[settings.powerSaveBlockerMode]}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value="off">
+                  {POWER_SAVE_BLOCKER_LABELS.off}
+                </SelectItem>
+                <SelectItem hideIndicator value="during-chats">
+                  {POWER_SAVE_BLOCKER_LABELS["during-chats"]}
+                </SelectItem>
+                <SelectItem hideIndicator value="always">
+                  {POWER_SAVE_BLOCKER_LABELS.always}
+                </SelectItem>
+              </SelectPopup>
+            </Select>
           }
         />
       </SettingsSection>

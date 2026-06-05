@@ -165,6 +165,7 @@ function createBaseServerConfig(): ServerConfig {
     },
     cwd: "/repo/project",
     keybindingsConfigPath: "/repo/project/.t3code-keybindings.json",
+    systemPromptPath: "/repo/project/.t3code-system-prompt.md",
     keybindings: [],
     issues: [],
     providers: [

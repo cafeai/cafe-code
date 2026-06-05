@@ -35,7 +35,7 @@ function SettingsContentLayout() {
   const navigate = useNavigate();
   const canGoBack = useCanGoBack();
   const [restoreSignal, setRestoreSignal] = useState(0);
-  const showRestoreDefaults = location.pathname === "/settings/general";
+  const showRestoreDefaults = SETTINGS_RESTORE_DEFAULTS_PATHS.has(location.pathname);
   const handleRestored = () => setRestoreSignal((value) => value + 1);
   const navigateBackWithinApp = useCallback(() => {
     if (canGoBack) {
@@ -109,8 +109,17 @@ export const Route = createFileRoute("/settings")({
     }
 
     if (location.pathname === "/settings") {
-      throw redirect({ to: "/settings/general", replace: true });
+      throw redirect({ to: "/settings/appearance", replace: true });
     }
   },
   component: SettingsRouteLayout,
 });
+
+const SETTINGS_RESTORE_DEFAULTS_PATHS = new Set([
+  "/settings/appearance",
+  "/settings/chat-threads",
+  "/settings/files-diffs",
+  "/settings/source-control",
+  "/settings/system",
+  "/settings/general",
+]);

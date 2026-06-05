@@ -30,6 +30,7 @@ import type {
 import type { ProviderInstanceId } from "./providerInstance.ts";
 import type {
   ServerConfig,
+  ServerOpenSystemPromptFileResult,
   ServerProcessDiagnosticsResult,
   ServerProcessResourceHistoryInput,
   ServerProcessResourceHistoryResult,
@@ -511,6 +512,7 @@ export interface LocalApi {
     restartProviderRuntime: (
       input: ServerProviderRuntimeRestartInput,
     ) => Promise<ServerProviderRuntimeRestartResult>;
+    openSystemPromptFile: () => Promise<ServerOpenSystemPromptFileResult>;
     upsertKeybinding: (input: ServerUpsertKeybindingInput) => Promise<ServerUpsertKeybindingResult>;
     removeKeybinding: (input: ServerRemoveKeybindingInput) => Promise<ServerRemoveKeybindingResult>;
     getSettings: () => Promise<ServerSettings>;

@@ -48,6 +48,7 @@ import {
   type Icon,
 } from "../Icons";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
+import { TextGenerationModelSettingsRow } from "./SettingsPanels";
 import { SettingResetButton, SettingsPageContainer, SettingsSection } from "./settingsLayout";
 
 const EMPTY_DISCOVERY_RESULT: SourceControlDiscoveryResult = {
@@ -444,6 +445,10 @@ export function SourceControlSettingsPanel() {
 
   return (
     <SettingsPageContainer>
+      <SettingsSection title="Generated Text">
+        <TextGenerationModelSettingsRow />
+      </SettingsSection>
+
       {isInitialScanPending ? (
         <>
           <SourceControlSectionSkeleton title="Version Control" headerAction={scanButton} />

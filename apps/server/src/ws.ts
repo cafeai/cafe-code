@@ -88,6 +88,7 @@ import {
   type SessionCredentialChange,
 } from "./auth/Services/SessionCredentialService.ts";
 import { respondToAuthError } from "./auth/http.ts";
+import { ensureSystemPromptFile } from "./systemPromptFile.ts";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 const isWorkspacePathOutsideRootError = Schema.is(WorkspacePathOutsideRootError);
 
@@ -689,6 +690,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
           auth,
           cwd: config.cwd,
           keybindingsConfigPath: config.keybindingsConfigPath,
+          systemPromptPath: config.systemPromptPath,
           keybindings: keybindingsConfig.keybindings,
           issues: keybindingsConfig.issues,
           providers,
@@ -998,6 +1000,16 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
                     cause: error,
                   }),
               ),
+            ),
+            {
+              "rpc.aggregate": "server",
+            },
+          ),
+        [WS_METHODS.serverOpenSystemPromptFile]: (_input) =>
+          observeRpcEffect(
+            WS_METHODS.serverOpenSystemPromptFile,
+            ensureSystemPromptFile(config.systemPromptPath).pipe(
+              Effect.as({ path: config.systemPromptPath }),
             ),
             {
               "rpc.aggregate": "server",
