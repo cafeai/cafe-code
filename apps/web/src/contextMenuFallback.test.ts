@@ -150,6 +150,12 @@ function findButton(label: string): FakeElement | undefined {
     .find((button) => button.textContent.includes(label));
 }
 
+function findRootMenu(): FakeElement | undefined {
+  return (document as unknown as FakeDocument)
+    .querySelectorAll("div")
+    .find((element) => element.dataset.level === "0");
+}
+
 beforeEach(() => {
   vi.stubGlobal("document", new FakeDocument());
   vi.stubGlobal("window", {
@@ -192,6 +198,65 @@ describe("showContextMenuFallback", () => {
     const renameButton = findButton("Rename");
     expect(renameButton).toBeTruthy();
     renameButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await expect(selectionPromise).resolves.toBe("rename");
+  });
+
+  it("offsets the initial menu away from the opening pointer position", async () => {
+    const selectionPromise = showContextMenuFallback([{ id: "rename", label: "Rename" }], {
+      x: 10,
+      y: 20,
+    });
+
+    const menu = findRootMenu();
+    expect(menu?.style.left).toBe("34px");
+    expect(menu?.style.top).toBe("32px");
+
+    const renameButton = findButton("Rename");
+    renameButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await expect(selectionPromise).resolves.toBe("rename");
+  });
+
+  it("ignores the opening click until a primary mousedown occurs on a leaf item", async () => {
+    const selectionPromise = showContextMenuFallback([
+      { id: "rename", label: "Rename" },
+      { id: "delete", label: "Delete", destructive: true },
+    ]);
+
+    const renameButton = findButton("Rename");
+    expect(renameButton).toBeTruthy();
+
+    const openingSecondaryClick = new MouseEvent("click", {
+      bubbles: true,
+      button: 2,
+      detail: 1,
+    });
+    renameButton?.dispatchEvent(openingSecondaryClick);
+    expect(openingSecondaryClick.defaultPrevented).toBe(true);
+
+    const synthesizedPrimaryClick = new MouseEvent("click", {
+      bubbles: true,
+      button: 0,
+      detail: 1,
+    });
+    renameButton?.dispatchEvent(synthesizedPrimaryClick);
+    expect(synthesizedPrimaryClick.defaultPrevented).toBe(true);
+
+    renameButton?.dispatchEvent(
+      new MouseEvent("mousedown", {
+        bubbles: true,
+        button: 0,
+        detail: 1,
+      }),
+    );
+    renameButton?.dispatchEvent(
+      new MouseEvent("click", {
+        bubbles: true,
+        button: 0,
+        detail: 1,
+      }),
+    );
 
     await expect(selectionPromise).resolves.toBe("rename");
   });

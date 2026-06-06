@@ -88,6 +88,7 @@
   color-scheme: light;
   --radius: 0.625rem;
   --background: var(--color-white);
+  --cafe-sidebar-star-drift-duration: 60s;
   --app-chrome-background: var(--background);
   --foreground: var(--color-neutral-800);
   --card: var(--color-white);
@@ -279,7 +280,7 @@ body::after {
     402px 514px,
     496px 620px;
   opacity: var(--cafe-sidebar-star-opacity);
-  animation: cafe-sidebar-star-drift 60s linear infinite;
+  animation: cafe-sidebar-star-drift var(--cafe-sidebar-star-drift-duration, 60s) linear infinite;
   will-change: transform, opacity;
 }
 
@@ -452,7 +453,7 @@ body::after {
     318px 386px,
     402px 514px;
   opacity: var(--cafe-sidebar-star-opacity);
-  animation: cafe-sidebar-star-drift 60s linear infinite;
+  animation: cafe-sidebar-star-drift var(--cafe-sidebar-star-drift-duration, 60s) linear infinite;
 }
 
 .cafe-followup-queue::after {

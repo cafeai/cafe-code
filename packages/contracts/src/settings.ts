@@ -24,8 +24,25 @@ export const DEFAULT_POWER_SAVE_BLOCKER_MODE: PowerSaveBlockerMode = "off";
 
 export const DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS = false;
 export const DEFAULT_SHOW_SIDEBAR_MASCOT = true;
+export const DEFAULT_SHOW_SIDEBAR_ATTRIBUTION = true;
+export const DEFAULT_BRAND_WORDMARK_PREFIX = "Cafe";
+export const DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL = "";
 export const DEFAULT_APP_ACCENT_COLOR = "";
 export const DEFAULT_THEME_ACCENT_COLOR = "";
+export const MIN_SIDEBAR_STAR_SPEED = 0.25;
+export const MAX_SIDEBAR_STAR_SPEED = 4;
+export const DEFAULT_SIDEBAR_STAR_SPEED = 1;
+export const MAX_BRAND_WORDMARK_PREFIX_LENGTH = 64;
+export const MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES = 1_000_000;
+export const MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH =
+  Math.ceil((MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES * 4) / 3) + 128;
+export const SidebarStarSpeed = Schema.Number.check(
+  Schema.isBetween({
+    minimum: MIN_SIDEBAR_STAR_SPEED,
+    maximum: MAX_SIDEBAR_STAR_SPEED,
+  }),
+);
+export type SidebarStarSpeed = typeof SidebarStarSpeed.Type;
 
 export const SidebarProjectSortOrder = Schema.Literals(["updated_at", "created_at", "manual"]);
 export type SidebarProjectSortOrder = typeof SidebarProjectSortOrder.Type;
@@ -67,6 +84,18 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   showSidebarMascot: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SHOW_SIDEBAR_MASCOT)),
+  ),
+  showSidebarAttribution: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SHOW_SIDEBAR_ATTRIBUTION)),
+  ),
+  brandWordmarkPrefix: TrimmedString.check(
+    Schema.isMaxLength(MAX_BRAND_WORDMARK_PREFIX_LENGTH),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_BRAND_WORDMARK_PREFIX))),
+  sidebarBrandImageDataUrl: TrimmedString.check(
+    Schema.isMaxLength(MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL))),
+  sidebarStarSpeed: SidebarStarSpeed.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_STAR_SPEED)),
   ),
   themeAccentColor: TrimmedString.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_THEME_ACCENT_COLOR)),
@@ -410,6 +439,14 @@ export const ClientSettingsPatch = Schema.Struct({
   diffWordWrap: Schema.optionalKey(Schema.Boolean),
   continueBackgroundAnimations: Schema.optionalKey(Schema.Boolean),
   showSidebarMascot: Schema.optionalKey(Schema.Boolean),
+  showSidebarAttribution: Schema.optionalKey(Schema.Boolean),
+  brandWordmarkPrefix: Schema.optionalKey(
+    TrimmedString.check(Schema.isMaxLength(MAX_BRAND_WORDMARK_PREFIX_LENGTH)),
+  ),
+  sidebarBrandImageDataUrl: Schema.optionalKey(
+    TrimmedString.check(Schema.isMaxLength(MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH)),
+  ),
+  sidebarStarSpeed: Schema.optionalKey(SidebarStarSpeed),
   themeAccentColor: Schema.optionalKey(TrimmedString),
   appAccentColor: Schema.optionalKey(TrimmedString),
   defaultEditor: Schema.optionalKey(DefaultEditorSelection),

@@ -6,6 +6,11 @@ import * as Option from "effect/Option";
 
 import * as Electron from "electron";
 
+// Keep the originating pointer outside the first native menu row so the right-button release
+// that opened the menu cannot be interpreted as selecting the hovered first item.
+const CONTEXT_MENU_POINTER_CLEARANCE_X_PX = 24;
+const CONTEXT_MENU_POINTER_CLEARANCE_Y_PX = 12;
+
 export interface ElectronMenuPosition {
   readonly x: number;
   readonly y: number;
@@ -71,7 +76,12 @@ const normalizePosition = (
   Option.filter(
     position,
     ({ x, y }) => Number.isFinite(x) && Number.isFinite(y) && x >= 0 && y >= 0,
-  ).pipe(Option.map(({ x, y }) => ({ x: Math.floor(x), y: Math.floor(y) })));
+  ).pipe(
+    Option.map(({ x, y }) => ({
+      x: Math.floor(x) + CONTEXT_MENU_POINTER_CLEARANCE_X_PX,
+      y: Math.floor(y) + CONTEXT_MENU_POINTER_CLEARANCE_Y_PX,
+    })),
+  );
 
 export const layer = Layer.sync(ElectronMenu, () => {
   let destructiveMenuIconCache: Option.Option<Electron.NativeImage> | undefined;

@@ -56,6 +56,7 @@ import {
 } from "@cafecode/client-runtime";
 import { Link, useLocation, useNavigate, useParams, useRouter } from "@tanstack/react-router";
 import {
+  DEFAULT_BRAND_WORDMARK_PREFIX,
   MAX_SIDEBAR_THREAD_PREVIEW_COUNT,
   MIN_SIDEBAR_THREAD_PREVIEW_COUNT,
   type SidebarProjectSortOrder,
@@ -2670,9 +2671,13 @@ const SidebarProjectListRow = memo(function SidebarProjectListRow(props: Sidebar
 });
 
 function CafeCodeWordmark() {
+  const prefix = useSettings((s) => {
+    const raw = s.brandWordmarkPrefix?.trim();
+    return raw || DEFAULT_BRAND_WORDMARK_PREFIX;
+  });
   return (
-    <span aria-label="Cafe Code" className="shrink-0 text-sm text-foreground">
-      <span className="font-bold">Cafe</span>
+    <span aria-label={`${prefix} Code`} className="shrink-0 text-sm text-foreground">
+      <span className="font-bold">{prefix}</span>
       <span className="font-medium text-muted-foreground"> Code</span>
     </span>
   );
@@ -3028,6 +3033,8 @@ interface SidebarProjectsContentProps {
   attachProjectListAutoAnimateRef: (node: HTMLElement | null) => void;
   projectsLength: number;
   showSidebarMascot: boolean;
+  sidebarBrandImageDataUrl: string;
+  showSidebarAttribution: boolean;
 }
 
 const SidebarProjectsContent = memo(function SidebarProjectsContent(
@@ -3070,6 +3077,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     attachProjectListAutoAnimateRef,
     projectsLength,
     showSidebarMascot,
+    sidebarBrandImageDataUrl,
+    showSidebarAttribution,
   } = props;
 
   const handleProjectSortOrderChange = useCallback(
@@ -3267,17 +3276,19 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
             aria-hidden="true"
             className="h-32 w-[6.4rem] select-none rounded-[1.35rem] object-cover ring-1 ring-black/10 dark:ring-white/10"
             draggable={false}
-            src={SIDEBAR_BRAND_ICON_SRC}
+            src={sidebarBrandImageDataUrl || SIDEBAR_BRAND_ICON_SRC}
           />
-          <a
-            aria-label="Cafe Code on GitHub"
-            className="text-[10px] font-medium text-muted-foreground/35 underline-offset-2 transition-colors hover:text-muted-foreground/65 hover:underline focus-visible:rounded-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-            href="https://github.com/cafeai/cafe-code"
-            rel="noreferrer"
-            target="_blank"
-          >
-            by cafeai <span className="opacity-60">♡</span>
-          </a>
+          {showSidebarAttribution ? (
+            <a
+              aria-label="Cafe Code on GitHub"
+              className="text-[10px] font-medium text-muted-foreground/35 underline-offset-2 transition-colors hover:text-muted-foreground/65 hover:underline focus-visible:rounded-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              href="https://github.com/cafeai/cafe-code"
+              rel="noreferrer"
+              target="_blank"
+            >
+              by cafeai <span className="opacity-60">♡</span>
+            </a>
+          ) : null}
         </div>
       ) : null}
     </SidebarContent>
@@ -3299,6 +3310,8 @@ export default function Sidebar() {
   const projectGroupingSettings = useSettings(selectProjectGroupingSettings);
   const sidebarThreadPreviewCount = useSettings((s) => s.sidebarThreadPreviewCount);
   const showSidebarMascot = useSettings((s) => s.showSidebarMascot);
+  const sidebarBrandImageDataUrl = useSettings((s) => s.sidebarBrandImageDataUrl);
+  const showSidebarAttribution = useSettings((s) => s.showSidebarAttribution);
   const { updateSettings } = useUpdateSettings();
   const { handleNewThread } = useNewThreadHandler();
   const { archiveThread, deleteThread } = useThreadActions();
@@ -3947,6 +3960,8 @@ export default function Sidebar() {
               attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
               projectsLength={projects.length}
               showSidebarMascot={showSidebarMascot}
+              sidebarBrandImageDataUrl={sidebarBrandImageDataUrl}
+              showSidebarAttribution={showSidebarAttribution}
             />
 
             <SidebarSeparator />

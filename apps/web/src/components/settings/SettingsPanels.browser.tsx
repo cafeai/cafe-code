@@ -19,6 +19,7 @@ import {
   type ServerRuntimeLayerDiagnosticsResult,
   type SourceControlDiscoveryResult,
 } from "@cafecode/contracts";
+import { MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES } from "@cafecode/contracts/settings";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import { page } from "vitest/browser";
@@ -1030,6 +1031,7 @@ describe("settings panels", () => {
   it("persists appearance preferences from Appearance settings", async () => {
     const desktopBridge = createDesktopBridgeStub();
     window.desktopBridge = desktopBridge;
+    const setClientSettingsMock = vi.mocked(desktopBridge.setClientSettings);
     setServerConfigSnapshot(createBaseServerConfig());
 
     mounted = await renderWithTestRouter(
@@ -1051,6 +1053,60 @@ describe("settings panels", () => {
       input!.dispatchEvent(new Event("input", { bubbles: true }));
       input!.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
     };
+
+    await expect.element(page.getByText("Accent color")).toBeInTheDocument();
+    setColorInput("Branding prefix", "Acme");
+
+    await vi.waitFor(() => {
+      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ brandWordmarkPrefix: "Acme" }),
+      );
+    });
+
+    await expect.element(page.getByRole("heading", { name: "Sidebar image" })).toBeInTheDocument();
+    const imageInput = document.querySelector(
+      'input[aria-label="Sidebar image file"]',
+    ) as HTMLInputElement | null;
+    expect(imageInput).not.toBeNull();
+    Object.defineProperty(imageInput, "files", {
+      configurable: true,
+      value: [new File(["image"], "brand.png", { type: "image/png" })],
+    });
+    imageInput!.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await vi.waitFor(() => {
+      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sidebarBrandImageDataUrl: expect.stringContaining("data:image/png;base64,"),
+        }),
+      );
+    });
+
+    const callsBeforeUnsupportedImage = setClientSettingsMock.mock.calls.length;
+    Object.defineProperty(imageInput, "files", {
+      configurable: true,
+      value: [new File(["<svg />"], "brand.svg", { type: "image/svg+xml" })],
+    });
+    imageInput!.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await expect
+      .element(page.getByText("Choose a PNG, JPEG, GIF, or WebP image."))
+      .toBeInTheDocument();
+    expect(setClientSettingsMock).toHaveBeenCalledTimes(callsBeforeUnsupportedImage);
+
+    const callsBeforeOversizedImage = setClientSettingsMock.mock.calls.length;
+    Object.defineProperty(imageInput, "files", {
+      configurable: true,
+      value: [
+        new File([new Uint8Array(MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES + 1)], "brand.png", {
+          type: "image/png",
+        }),
+      ],
+    });
+    imageInput!.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await expect.element(page.getByText("Choose an image under 1 MB.")).toBeInTheDocument();
+    expect(setClientSettingsMock).toHaveBeenCalledTimes(callsBeforeOversizedImage);
 
     await expect.element(page.getByText("Accent color")).toBeInTheDocument();
     setColorInput("App accent color", "#dc2626");
@@ -1079,12 +1135,30 @@ describe("settings panels", () => {
       );
     });
 
+    await expect.element(page.getByText("Sidebar attribution")).toBeInTheDocument();
+    await page.getByLabelText("Show sidebar attribution").click();
+
+    await vi.waitFor(() => {
+      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ showSidebarAttribution: false }),
+      );
+    });
+
     await expect.element(page.getByText("Background animations")).toBeInTheDocument();
     await page.getByLabelText("Keep animations running in background").click();
 
     await vi.waitFor(() => {
       expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
         expect.objectContaining({ continueBackgroundAnimations: true }),
+      );
+    });
+
+    await expect.element(page.getByText("Sidebar star speed")).toBeInTheDocument();
+    await page.getByLabelText("Increase sidebar star speed").click();
+
+    await vi.waitFor(() => {
+      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ sidebarStarSpeed: 1.25 }),
       );
     });
   });

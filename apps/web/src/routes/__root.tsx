@@ -44,7 +44,11 @@ import {
 import { selectAnyThreadRunning, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { syncBrowserChromeTheme } from "../hooks/useTheme";
-import { applyAppAccentColor, applySidebarAccentColor } from "../themeAccent";
+import {
+  applyAppAccentColor,
+  applySidebarAccentColor,
+  applySidebarStarSpeed,
+} from "../themeAccent";
 import {
   ensureEnvironmentConnectionBootstrapped,
   getPrimaryEnvironmentConnection,
@@ -321,6 +325,7 @@ function AppearanceSettingsSync() {
   const continueBackgroundAnimations = useSettings(
     (settings) => settings.continueBackgroundAnimations,
   );
+  const sidebarStarSpeed = useSettings((settings) => settings.sidebarStarSpeed);
 
   useEffect(() => {
     applyAppAccentColor(appAccentColor);
@@ -342,6 +347,13 @@ function AppearanceSettingsSync() {
       clearCafeBackgroundAnimations();
     };
   }, [continueBackgroundAnimations]);
+
+  useEffect(() => {
+    applySidebarStarSpeed(sidebarStarSpeed);
+    return () => {
+      applySidebarStarSpeed(undefined);
+    };
+  }, [sidebarStarSpeed]);
 
   return null;
 }

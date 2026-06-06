@@ -1,5 +1,8 @@
 import type { ContextMenuItem } from "@cafecode/contracts";
 
+const CONTEXT_MENU_POINTER_CLEARANCE_X_PX = 24;
+const CONTEXT_MENU_POINTER_CLEARANCE_Y_PX = 12;
+
 function clampMenuPosition(menu: HTMLDivElement, preferredLeft: number, preferredTop: number) {
   const rect = menu.getBoundingClientRect();
   const left = Math.min(
@@ -112,10 +115,21 @@ export function showContextMenuFallback<T extends string>(
               event.preventDefault();
             });
           } else {
+            let sawPrimaryMouseDown = false;
+            button.addEventListener("mousedown", (event) => {
+              sawPrimaryMouseDown = event.button === 0;
+            });
             button.addEventListener("mouseenter", () => {
               closeMenusFromLevel(level + 1);
             });
-            button.addEventListener("click", () => cleanup(item.id));
+            button.addEventListener("click", (event) => {
+              if (event instanceof MouseEvent && event.detail > 0 && !sawPrimaryMouseDown) {
+                event.preventDefault();
+                return;
+              }
+
+              cleanup(item.id);
+            });
           }
         }
 
@@ -137,6 +151,11 @@ export function showContextMenuFallback<T extends string>(
     overlay.addEventListener("mousedown", () => cleanup(null));
     document.addEventListener("keydown", onKeyDown);
     document.body.appendChild(overlay);
-    openMenu(items, position?.x ?? 0, position?.y ?? 0, 0);
+    openMenu(
+      items,
+      (position?.x ?? 0) + CONTEXT_MENU_POINTER_CLEARANCE_X_PX,
+      (position?.y ?? 0) + CONTEXT_MENU_POINTER_CLEARANCE_Y_PX,
+      0,
+    );
   });
 }

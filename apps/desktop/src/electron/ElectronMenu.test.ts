@@ -74,20 +74,26 @@ describe("ElectronMenu", () => {
 
   it.effect("resolves with none when the menu closes without a click", () =>
     Effect.gen(function* () {
+      const popupMock = vi.fn((options: Electron.PopupOptions) => {
+        options.callback?.();
+      });
       buildFromTemplateMock.mockImplementation(() => ({
-        popup: (options: Electron.PopupOptions) => {
-          options.callback?.();
-        },
+        popup: popupMock,
       }));
 
+      const window = {} as Electron.BrowserWindow;
       const electronMenu = yield* ElectronMenu.ElectronMenu;
       const selectedItemId = yield* electronMenu.showContextMenu({
-        window: {} as Electron.BrowserWindow,
+        window,
         items: [{ id: "copy", label: "Copy" }],
         position: Option.some({ x: 10.8, y: 20.2 }),
       });
 
       assert.isTrue(Option.isNone(selectedItemId));
+      const popupOptions = popupMock.mock.calls[0]?.[0];
+      assert.equal(popupOptions?.window, window);
+      assert.equal(popupOptions?.x, 34);
+      assert.equal(popupOptions?.y, 32);
       assert.deepEqual(buildFromTemplateMock.mock.calls[0]?.[0][0], {
         label: "Copy",
         enabled: true,

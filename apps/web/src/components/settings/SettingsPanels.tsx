@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   defaultInstanceIdForDriver,
   type DesktopSourceUpdateState,
@@ -25,9 +25,18 @@ import { scopeThreadRef } from "@cafecode/client-runtime";
 import {
   DEFAULT_UNIFIED_SETTINGS,
   DEFAULT_APP_ACCENT_COLOR,
+  DEFAULT_BRAND_WORDMARK_PREFIX,
   DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
+  DEFAULT_SHOW_SIDEBAR_ATTRIBUTION,
+  DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL,
+  DEFAULT_SIDEBAR_STAR_SPEED,
   DEFAULT_SHOW_SIDEBAR_MASCOT,
   DEFAULT_THEME_ACCENT_COLOR,
+  MAX_BRAND_WORDMARK_PREFIX_LENGTH,
+  MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH,
+  MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
+  MAX_SIDEBAR_STAR_SPEED,
+  MIN_SIDEBAR_STAR_SPEED,
   type DefaultEditorSelection,
   type PowerSaveBlockerMode,
 } from "@cafecode/contracts/settings";
@@ -60,6 +69,13 @@ import { useDeletedThreadSnapshots } from "../../lib/deletedThreadsState";
 import { formatRelativeTime, formatRelativeTimeLabel } from "../../timestampFormat";
 import { Button } from "../ui/button";
 import { DraftInput } from "../ui/draft-input";
+import {
+  NumberField,
+  NumberFieldDecrement,
+  NumberFieldGroup,
+  NumberFieldIncrement,
+  NumberFieldInput,
+} from "../ui/number-field";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -117,6 +133,32 @@ function canRestartProviderRuntime(driver: ProviderDriverKind): boolean {
 }
 const DEFAULT_APP_ACCENT_PICKER_COLOR = "#2563eb";
 const DEFAULT_SIDEBAR_ACCENT_PICKER_COLOR = "#48cfff";
+const SIDEBAR_IMAGE_ACCEPT = "image/png,image/jpeg,image/gif,image/webp";
+const SIDEBAR_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+function clampSidebarStarSpeed(value: number | null): number {
+  if (value === null || !Number.isFinite(value)) {
+    return DEFAULT_SIDEBAR_STAR_SPEED;
+  }
+  return Math.min(MAX_SIDEBAR_STAR_SPEED, Math.max(MIN_SIDEBAR_STAR_SPEED, value));
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("error", () =>
+      reject(reader.error ?? new Error("Failed to read image file.")),
+    );
+    reader.addEventListener("load", () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error("Failed to read image file."));
+    });
+    reader.readAsDataURL(file);
+  });
+}
 
 const TIMESTAMP_FORMAT_LABELS = {
   locale: "System default",
@@ -398,6 +440,18 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.showSidebarMascot !== DEFAULT_UNIFIED_SETTINGS.showSidebarMascot
         ? ["Sidebar mascot"]
         : []),
+      ...(settings.showSidebarAttribution !== DEFAULT_UNIFIED_SETTINGS.showSidebarAttribution
+        ? ["Sidebar attribution"]
+        : []),
+      ...(settings.brandWordmarkPrefix !== DEFAULT_UNIFIED_SETTINGS.brandWordmarkPrefix
+        ? ["Branding prefix"]
+        : []),
+      ...(settings.sidebarBrandImageDataUrl !== DEFAULT_UNIFIED_SETTINGS.sidebarBrandImageDataUrl
+        ? ["Sidebar image"]
+        : []),
+      ...(settings.sidebarStarSpeed !== DEFAULT_UNIFIED_SETTINGS.sidebarStarSpeed
+        ? ["Sidebar star speed"]
+        : []),
       ...(settings.appAccentColor !== DEFAULT_UNIFIED_SETTINGS.appAccentColor
         ? ["Accent color"]
         : []),
@@ -455,7 +509,11 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.diffWordWrap,
       settings.defaultEditor,
       settings.appAccentColor,
+      settings.brandWordmarkPrefix,
       settings.showSidebarMascot,
+      settings.showSidebarAttribution,
+      settings.sidebarBrandImageDataUrl,
+      settings.sidebarStarSpeed,
       settings.themeAccentColor,
       settings.automaticGitFetchInterval,
       settings.enableAssistantStreaming,
@@ -481,6 +539,10 @@ export function useSettingsRestore(onRestored?: () => void) {
       continueBackgroundAnimations: DEFAULT_UNIFIED_SETTINGS.continueBackgroundAnimations,
       appAccentColor: DEFAULT_UNIFIED_SETTINGS.appAccentColor,
       showSidebarMascot: DEFAULT_UNIFIED_SETTINGS.showSidebarMascot,
+      showSidebarAttribution: DEFAULT_UNIFIED_SETTINGS.showSidebarAttribution,
+      brandWordmarkPrefix: DEFAULT_UNIFIED_SETTINGS.brandWordmarkPrefix,
+      sidebarBrandImageDataUrl: DEFAULT_UNIFIED_SETTINGS.sidebarBrandImageDataUrl,
+      sidebarStarSpeed: DEFAULT_UNIFIED_SETTINGS.sidebarStarSpeed,
       themeAccentColor: DEFAULT_UNIFIED_SETTINGS.themeAccentColor,
       defaultEditor: DEFAULT_UNIFIED_SETTINGS.defaultEditor,
       diffWordWrap: DEFAULT_UNIFIED_SETTINGS.diffWordWrap,
@@ -613,6 +675,43 @@ export function AppearanceSettingsPanel() {
   const { theme, setTheme } = useTheme();
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
+  const sidebarImageInputRef = useRef<HTMLInputElement | null>(null);
+  const [sidebarImageError, setSidebarImageError] = useState<string | null>(null);
+  const renderedBrandPrefix = settings.brandWordmarkPrefix.trim() || DEFAULT_BRAND_WORDMARK_PREFIX;
+  const sidebarImageSrc = settings.sidebarBrandImageDataUrl || "/cafe-code-sidebar-icon.png";
+
+  const handleSidebarImageChange = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.currentTarget.files?.[0];
+      event.currentTarget.value = "";
+      if (!file) {
+        return;
+      }
+
+      if (!SIDEBAR_IMAGE_MIME_TYPES.has(file.type)) {
+        setSidebarImageError("Choose a PNG, JPEG, GIF, or WebP image.");
+        return;
+      }
+
+      if (file.size > MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES) {
+        setSidebarImageError("Choose an image under 1 MB.");
+        return;
+      }
+
+      try {
+        const dataUrl = await readFileAsDataUrl(file);
+        if (dataUrl.length > MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH) {
+          setSidebarImageError("Choose a smaller image file.");
+          return;
+        }
+        setSidebarImageError(null);
+        updateSettings({ sidebarBrandImageDataUrl: dataUrl });
+      } catch {
+        setSidebarImageError("Could not read that image file.");
+      }
+    },
+    [updateSettings],
+  );
 
   return (
     <SettingsPageContainer>
@@ -647,6 +746,36 @@ export function AppearanceSettingsPanel() {
                 ))}
               </SelectPopup>
             </Select>
+          }
+        />
+
+        <SettingsRow
+          title="Branding prefix"
+          description="Rename the first word of the sidebar wordmark while keeping the Code suffix."
+          resetAction={
+            settings.brandWordmarkPrefix !== DEFAULT_UNIFIED_SETTINGS.brandWordmarkPrefix ? (
+              <SettingResetButton
+                label="branding prefix"
+                onClick={() =>
+                  updateSettings({ brandWordmarkPrefix: DEFAULT_BRAND_WORDMARK_PREFIX })
+                }
+              />
+            ) : null
+          }
+          status={`Preview: ${renderedBrandPrefix} Code`}
+          control={
+            <DraftInput
+              aria-label="Branding prefix"
+              className="w-full sm:w-48"
+              maxLength={MAX_BRAND_WORDMARK_PREFIX_LENGTH}
+              placeholder={DEFAULT_BRAND_WORDMARK_PREFIX}
+              value={settings.brandWordmarkPrefix}
+              onCommit={(value) =>
+                updateSettings({
+                  brandWordmarkPrefix: value.trim().slice(0, MAX_BRAND_WORDMARK_PREFIX_LENGTH),
+                })
+              }
+            />
           }
         />
 
@@ -695,8 +824,75 @@ export function AppearanceSettingsPanel() {
         />
 
         <SettingsRow
+          title="Sidebar image"
+          description="Use a local PNG, JPEG, GIF, or WebP image at the bottom of the sidebar."
+          resetAction={
+            settings.sidebarBrandImageDataUrl !==
+            DEFAULT_UNIFIED_SETTINGS.sidebarBrandImageDataUrl ? (
+              <SettingResetButton
+                label="sidebar image"
+                onClick={() => {
+                  setSidebarImageError(null);
+                  updateSettings({
+                    sidebarBrandImageDataUrl: DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL,
+                  });
+                }}
+              />
+            ) : null
+          }
+          status={
+            sidebarImageError ? <span className="text-destructive">{sidebarImageError}</span> : null
+          }
+          control={
+            <div className="flex w-full flex-col items-start gap-2 sm:w-72">
+              <div className="flex w-full items-center gap-3">
+                <img
+                  alt=""
+                  aria-hidden="true"
+                  className="h-14 w-11 shrink-0 rounded-lg object-cover ring-1 ring-border"
+                  draggable={false}
+                  src={sidebarImageSrc}
+                />
+                <div className="flex min-w-0 flex-1 items-center gap-2">
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={() => sidebarImageInputRef.current?.click()}
+                  >
+                    Choose image
+                  </Button>
+                  {settings.sidebarBrandImageDataUrl ? (
+                    <Button
+                      size="xs"
+                      variant="ghost"
+                      onClick={() => {
+                        setSidebarImageError(null);
+                        updateSettings({
+                          sidebarBrandImageDataUrl: DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL,
+                        });
+                      }}
+                    >
+                      Use default
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+              <input
+                ref={sidebarImageInputRef}
+                type="file"
+                accept={SIDEBAR_IMAGE_ACCEPT}
+                aria-label="Sidebar image file"
+                className="sr-only"
+                tabIndex={-1}
+                onChange={(event) => void handleSidebarImageChange(event)}
+              />
+            </div>
+          }
+        />
+
+        <SettingsRow
           title="Sidebar mascot"
-          description="Show the Cafe Code mascot and attribution link at the bottom of the sidebar."
+          description="Show the sidebar image at the bottom of the sidebar."
           resetAction={
             settings.showSidebarMascot !== DEFAULT_UNIFIED_SETTINGS.showSidebarMascot ? (
               <SettingResetButton
@@ -710,6 +906,30 @@ export function AppearanceSettingsPanel() {
               checked={settings.showSidebarMascot}
               onCheckedChange={(checked) => updateSettings({ showSidebarMascot: Boolean(checked) })}
               aria-label="Show sidebar mascot"
+            />
+          }
+        />
+
+        <SettingsRow
+          title="Sidebar attribution"
+          description="Show the attribution message below the sidebar image."
+          resetAction={
+            settings.showSidebarAttribution !== DEFAULT_UNIFIED_SETTINGS.showSidebarAttribution ? (
+              <SettingResetButton
+                label="sidebar attribution"
+                onClick={() =>
+                  updateSettings({ showSidebarAttribution: DEFAULT_SHOW_SIDEBAR_ATTRIBUTION })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.showSidebarAttribution}
+              onCheckedChange={(checked) =>
+                updateSettings({ showSidebarAttribution: Boolean(checked) })
+              }
+              aria-label="Show sidebar attribution"
             />
           }
         />
@@ -738,6 +958,41 @@ export function AppearanceSettingsPanel() {
               }
               aria-label="Keep animations running in background"
             />
+          }
+        />
+
+        <SettingsRow
+          title="Sidebar star speed"
+          description="Adjust how quickly the decorative sidebar stars drift."
+          resetAction={
+            settings.sidebarStarSpeed !== DEFAULT_UNIFIED_SETTINGS.sidebarStarSpeed ? (
+              <SettingResetButton
+                label="sidebar star speed"
+                onClick={() => updateSettings({ sidebarStarSpeed: DEFAULT_SIDEBAR_STAR_SPEED })}
+              />
+            ) : null
+          }
+          control={
+            <div className="flex items-center gap-2">
+              <NumberField
+                value={settings.sidebarStarSpeed}
+                min={MIN_SIDEBAR_STAR_SPEED}
+                max={MAX_SIDEBAR_STAR_SPEED}
+                step={0.25}
+                size="sm"
+                className="w-28"
+                onValueChange={(value) =>
+                  updateSettings({ sidebarStarSpeed: clampSidebarStarSpeed(value) })
+                }
+              >
+                <NumberFieldGroup>
+                  <NumberFieldDecrement aria-label="Decrease sidebar star speed" />
+                  <NumberFieldInput aria-label="Sidebar star speed multiplier" />
+                  <NumberFieldIncrement aria-label="Increase sidebar star speed" />
+                </NumberFieldGroup>
+              </NumberField>
+              <span className="text-xs text-muted-foreground">x</span>
+            </div>
           }
         />
 
