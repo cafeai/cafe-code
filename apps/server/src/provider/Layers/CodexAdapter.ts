@@ -72,6 +72,7 @@ import {
   type CodexTransportPolicy,
 } from "./CodexSessionRuntime.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import type { CodexShadowHomeError } from "../Drivers/CodexHomeLayout.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
 const isCodexAppServerTransportError = Schema.is(CodexErrors.CodexAppServerTransportError);
 const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
@@ -95,6 +96,7 @@ class CodexTransportPolicyFileError extends Data.TaggedError("CodexTransportPoli
 export interface CodexAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly prepareRuntimeHome?: Effect.Effect<void, CodexShadowHomeError>;
   readonly makeRuntime?: (
     options: CodexSessionRuntimeOptions,
   ) => Effect.Effect<
@@ -237,6 +239,16 @@ function isCodexResponsesWebsocketFallbackEvent(event: ProviderEvent): boolean {
   return (
     containsNormalized(combined, "falling back from websockets to https transport") ||
     containsNormalized(combined, "falling back to http")
+  );
+}
+
+function isCodexAuthInvalidatedEvent(event: ProviderEvent): boolean {
+  const message = readPayloadMessage(event);
+  const additionalDetails = readPayloadAdditionalDetails(event);
+  const combined = [message, additionalDetails].filter(Boolean).join("\n");
+  return (
+    containsNormalized(combined, "token_revoked") ||
+    containsNormalized(combined, "invalidated oauth token")
   );
 }
 
@@ -1726,6 +1738,43 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
   const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
+  const prepareRuntimeHome = options?.prepareRuntimeHome ?? Effect.void;
+
+  const prepareRuntimeHomeForSession = Effect.fn("CodexAdapter.prepareRuntimeHomeForSession")(
+    function* (threadId: ThreadId, operation: string) {
+      yield* prepareRuntimeHome.pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapterProcessError({
+              provider: PROVIDER,
+              threadId,
+              detail: `Failed to refresh Codex home before ${operation}: ${
+                cause instanceof Error ? cause.message : String(cause)
+              }`,
+              cause,
+            }),
+        ),
+      );
+    },
+  );
+
+  const prepareRuntimeHomeForRequest = Effect.fn("CodexAdapter.prepareRuntimeHomeForRequest")(
+    function* (threadId: ThreadId, method: string) {
+      yield* prepareRuntimeHome.pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method,
+              detail: `Failed to refresh Codex home before ${method}: ${
+                cause instanceof Error ? cause.message : String(cause)
+              }`,
+              cause,
+            }),
+        ),
+      );
+    },
+  );
 
   const disableResponsesWebsocketsFromEvent = (event: ProviderEvent): Effect.Effect<void> =>
     Effect.gen(function* () {
@@ -1861,6 +1910,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           yield* Effect.suspend(() => stopSessionInternal(existing));
         }
 
+        yield* prepareRuntimeHomeForSession(input.threadId, "startSession");
+
         const currentTransportPolicy = toRuntimeTransportPolicy(yield* Ref.get(transportPolicyRef));
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
@@ -1924,6 +1975,25 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               yield* disableResponsesWebsocketsFromEvent(event);
             }
             yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
+            if (isCodexAuthInvalidatedEvent(event)) {
+              yield* prepareRuntimeHome.pipe(
+                Effect.tapError((cause) =>
+                  Effect.logWarning("codex.home.authRefreshAfterInvalidationFailed", {
+                    instanceId: boundInstanceId,
+                    threadId: event.threadId,
+                    turnId: event.turnId,
+                    detail: cause instanceof Error ? cause.message : String(cause),
+                  }),
+                ),
+                Effect.ignore,
+              );
+              yield* retireSession(
+                event.threadId,
+                "Codex reported an invalidated OAuth token; refreshed the shadow auth copy and retired the app-server so the next turn starts with current login material.",
+                "codex.session.retired-after-auth-invalidation",
+              );
+              return;
+            }
             if (isCodexTurnTerminalEvent(event)) {
               const session = sessions.get(event.threadId);
               const pendingRetirement = session?.pendingTransportPolicyRetirement;
@@ -2018,6 +2088,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   });
 
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
+    yield* prepareRuntimeHomeForRequest(input.threadId, "turn/start");
+
     const codexAttachments = yield* Effect.forEach(
       input.attachments ?? [],
       (attachment) => resolveAttachment("turn/start", attachment),
@@ -2052,6 +2124,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   });
 
   const steerTurn: CodexAdapterShape["steerTurn"] = Effect.fn("steerTurn")(function* (input) {
+    yield* prepareRuntimeHomeForRequest(input.threadId, "turn/steer");
+
     const codexAttachments = yield* Effect.forEach(
       input.attachments ?? [],
       (attachment) => resolveAttachment("turn/steer", attachment),

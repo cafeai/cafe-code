@@ -140,6 +140,14 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const layoutConfig = withDefaultCodexShadowHome({ instanceId, config });
       const homeLayout = yield* resolveCodexHomeLayout(layoutConfig);
+      // A default Cafe-created shadow overlays the user's normal ~/.codex auth
+      // so CLI re-login repairs Cafe automatically. An explicit shadow-only
+      // instance is different: users configure those paths to hold separate
+      // Codex accounts, so its own auth.json is the source of truth.
+      const authSource =
+        config.homePath.trim().length === 0 && config.shadowHomePath.trim().length > 0
+          ? "shadow"
+          : "shared";
       const continuationIdentity = codexContinuationIdentity(homeLayout);
       const stampIdentity = withInstanceIdentity({
         instanceId,
@@ -148,7 +156,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         continuationGroupKey: continuationIdentity.continuationKey,
       });
       if (enabled) {
-        yield* materializeCodexShadowHome(homeLayout).pipe(
+        yield* materializeCodexShadowHome(homeLayout, { authSource }).pipe(
           Effect.mapError(
             (cause) =>
               new ProviderDriverError({
@@ -166,6 +174,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         sharedHomePath: homeLayout.sharedHomePath,
         effectiveHomePath: homeLayout.effectiveHomePath ?? null,
         defaultShadowHomeApplied: layoutConfig !== config,
+        authSource,
         sqliteState: homeLayout.mode === "authOverlay" ? "shadow-local" : "direct",
       });
       const effectiveConfig = {
@@ -177,6 +186,10 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         binaryPath: effectiveConfig.binaryPath,
         env: processEnv,
       });
+      const refreshCodexShadowHome = materializeCodexShadowHome(homeLayout, { authSource }).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+      );
 
       // `makeCodexAdapter` and `makeCodexTextGeneration` have `never` error
       // channels at construction time — their failure modes are all on the
@@ -186,6 +199,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const adapter = yield* makeCodexAdapter(effectiveConfig, {
         instanceId,
         environment: processEnv,
+        prepareRuntimeHome: refreshCodexShadowHome,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });
       const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, processEnv);
@@ -198,7 +212,14 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // model/skill metadata requests and block for long enough to show a
       // false "provider unavailable" warning before the user has sent a
       // message. Real sessions still use the app-server lifecycle below.
-      const checkProvider = checkCodexCliProviderStatus(effectiveConfig, processEnv).pipe(
+      const checkProvider = refreshCodexShadowHome.pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("codex.home.authRefreshBeforeStatusFailed", {
+            instanceId,
+            detail: cause.message,
+          }),
+        ),
+        Effect.andThen(checkCodexCliProviderStatus(effectiveConfig, processEnv)),
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.provideService(FileSystem.FileSystem, fileSystem),

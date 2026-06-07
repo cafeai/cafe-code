@@ -1,13 +1,17 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeOS from "node:os";
 import {
+  chmod as chmodFile,
   copyFile,
   link as createHardLink,
   lstat,
+  rename,
   rm,
   stat as statFile,
   symlink as createNodeSymlink,
+  writeFile,
 } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 
 import { ProviderDriverKind, type CodexSettings } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
@@ -24,6 +28,8 @@ export interface CodexHomeLayout {
   readonly effectiveHomePath: string | undefined;
   readonly continuationKey: string;
 }
+
+export type CodexShadowHomeAuthSource = "shared" | "shadow";
 
 const KNOWN_SHARED_DIRECTORIES = [
   "sessions",
@@ -335,7 +341,7 @@ const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (inpu
 
 const ensureShadowAuthIsPrivate = Effect.fn("CodexHomeLayout.ensureShadowAuthIsPrivate")(function* (
   fileSystem: FileSystem.FileSystem,
-  sharedPath: string,
+  authSourcePath: string,
   shadowPath: string,
 ): Effect.fn.Return<void, CodexShadowHomeError, Path.Path> {
   const path = yield* Path.Path;
@@ -346,24 +352,65 @@ const ensureShadowAuthIsPrivate = Effect.fn("CodexHomeLayout.ensureShadowAuthIsP
       detail: `Codex shadow auth file '${authPath}' must be a real file, not a symlink.`,
     });
   }
-  if (state._tag === "NotSymlink") {
-    yield* normalizeShadowHomeError(fileSystem.chmod(authPath, 0o600));
+
+  if (areSameResolvedPath(path, authSourcePath, shadowPath)) {
+    if (state._tag === "NotSymlink") {
+      yield* normalizeShadowHomeError(fileSystem.chmod(authPath, 0o600));
+    }
     return;
   }
 
-  const sharedAuthPath = path.join(sharedPath, "auth.json");
-  const sharedAuthExists = yield* normalizeShadowHomeError(fileSystem.exists(sharedAuthPath));
-  if (!sharedAuthExists) {
+  const sharedAuthPath = path.join(authSourcePath, "auth.json");
+  const sharedAuthState = yield* readLinkState(fileSystem, sharedAuthPath);
+  if (sharedAuthState._tag === "Symlink") {
+    return yield* new CodexShadowHomeError({
+      detail: `Codex shared auth file '${sharedAuthPath}' must be a real file, not a symlink.`,
+    });
+  }
+
+  if (sharedAuthState._tag === "Missing") {
+    if (state._tag === "NotSymlink") {
+      yield* runNodeFs(() => rm(authPath, { force: true }));
+    }
     return;
   }
 
   const authContents = yield* normalizeShadowHomeError(fileSystem.readFileString(sharedAuthPath));
-  yield* normalizeShadowHomeError(fileSystem.writeFileString(authPath, authContents));
-  yield* normalizeShadowHomeError(fileSystem.chmod(authPath, 0o600));
+  if (state._tag === "NotSymlink") {
+    const existingContents = yield* fileSystem
+      .readFileString(authPath)
+      .pipe(Effect.catch(() => Effect.sync((): string | undefined => undefined)));
+    if (existingContents === authContents) {
+      yield* normalizeShadowHomeError(fileSystem.chmod(authPath, 0o600));
+      return;
+    }
+  }
+
+  const tempPath = path.join(
+    path.dirname(authPath),
+    `.auth.json.${process.pid}.${randomUUID()}.tmp`,
+  );
+  yield* runNodeFs(async () => {
+    try {
+      // Auth is private material. Write a 0600 temp file first, then atomically
+      // replace the shadow auth so app-server never observes a partially
+      // written token after the user logs in again through the upstream CLI.
+      await writeFile(tempPath, authContents, { mode: 0o600, flag: "wx" });
+      await chmodFile(tempPath, 0o600);
+      await rename(tempPath, authPath);
+      await chmodFile(authPath, 0o600);
+    } catch (error) {
+      await rm(tempPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
+  });
 });
 
 export const materializeCodexShadowHome = Effect.fn("materializeCodexShadowHome")(function* (
   layout: CodexHomeLayout,
+  options?: {
+    readonly authSource?: CodexShadowHomeAuthSource;
+  },
 ) {
   if (layout.mode !== "authOverlay") return;
   const effectiveHomePath = layout.effectiveHomePath;
@@ -434,7 +481,9 @@ export const materializeCodexShadowHome = Effect.fn("materializeCodexShadowHome"
     { discard: true },
   );
 
-  yield* ensureShadowAuthIsPrivate(fileSystem, layout.sharedHomePath, effectiveHomePath);
+  const authSourcePath =
+    options?.authSource === "shadow" ? effectiveHomePath : layout.sharedHomePath;
+  yield* ensureShadowAuthIsPrivate(fileSystem, authSourcePath, effectiveHomePath);
 });
 
 export function codexContinuationIdentity(layout: CodexHomeLayout) {

@@ -84,85 +84,90 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
   });
 
   describe("materializeCodexShadowHome", () => {
-    it.effect("materializes a shadow home with shared config/session links and private auth", () =>
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const sharedHome = yield* makeTempDir("t3code-codex-shared-");
-        const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
-        const shadowHome = path.join(shadowRoot, "shadow");
+    it.effect(
+      "materializes a shadow home with shared config/session links and refreshed private auth",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const sharedHome = yield* makeTempDir("t3code-codex-shared-");
+          const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+          const shadowHome = path.join(shadowRoot, "shadow");
 
-        yield* fileSystem.makeDirectory(path.join(sharedHome, "sessions"));
-        yield* writeTextFile(path.join(sharedHome, "config.toml"), 'model = "gpt-5-codex"\n');
-        yield* writeTextFile(path.join(sharedHome, "state_5.sqlite"), "shared-state-db");
-        yield* writeTextFile(path.join(sharedHome, "state_5.sqlite-wal"), "shared-state-wal");
-        yield* writeTextFile(path.join(sharedHome, "logs_2.sqlite"), "shared-logs-db");
-        yield* writeTextFile(path.join(sharedHome, "goals_1.sqlite"), "shared-goals-db");
-        yield* writeTextFile(path.join(sharedHome, "models_cache.json"), '{"models":["shared"]}\n');
-        yield* writeTextFile(path.join(sharedHome, "auth.json"), '{"shared":true}\n');
-        yield* fileSystem.makeDirectory(shadowHome, { recursive: true });
-        yield* writeTextFile(path.join(shadowHome, "auth.json"), '{"shadow":true}\n');
-        yield* writeTextFile(path.join(shadowHome, "state_5.sqlite"), "shadow-state-db");
-        if (process.platform !== "win32") {
-          yield* fileSystem.symlink(
-            path.join(sharedHome, "goals_1.sqlite"),
-            path.join(shadowHome, "goals_1.sqlite"),
-          );
-          yield* fileSystem.symlink(
+          yield* fileSystem.makeDirectory(path.join(sharedHome, "sessions"));
+          yield* writeTextFile(path.join(sharedHome, "config.toml"), 'model = "gpt-5-codex"\n');
+          yield* writeTextFile(path.join(sharedHome, "state_5.sqlite"), "shared-state-db");
+          yield* writeTextFile(path.join(sharedHome, "state_5.sqlite-wal"), "shared-state-wal");
+          yield* writeTextFile(path.join(sharedHome, "logs_2.sqlite"), "shared-logs-db");
+          yield* writeTextFile(path.join(sharedHome, "goals_1.sqlite"), "shared-goals-db");
+          yield* writeTextFile(
             path.join(sharedHome, "models_cache.json"),
+            '{"models":["shared"]}\n',
+          );
+          yield* writeTextFile(path.join(sharedHome, "auth.json"), '{"shared":true}\n');
+          yield* fileSystem.makeDirectory(shadowHome, { recursive: true });
+          yield* writeTextFile(path.join(shadowHome, "auth.json"), '{"shadow":true}\n');
+          yield* writeTextFile(path.join(shadowHome, "state_5.sqlite"), "shadow-state-db");
+          if (process.platform !== "win32") {
+            yield* fileSystem.symlink(
+              path.join(sharedHome, "goals_1.sqlite"),
+              path.join(shadowHome, "goals_1.sqlite"),
+            );
+            yield* fileSystem.symlink(
+              path.join(sharedHome, "models_cache.json"),
+              path.join(shadowHome, "models_cache.json"),
+            );
+          }
+
+          const layout = yield* resolveCodexHomeLayout(
+            decodeCodexSettings({
+              homePath: sharedHome,
+              shadowHomePath: shadowHome,
+            }),
+          );
+
+          yield* materializeCodexShadowHome(layout);
+
+          const sessionsExists = yield* fileSystem.exists(path.join(shadowHome, "sessions"));
+          const configContents = yield* fileSystem.readFileString(
+            path.join(shadowHome, "config.toml"),
+          );
+          const modelsCacheExists = yield* fileSystem.exists(
             path.join(shadowHome, "models_cache.json"),
           );
-        }
+          const stateLinkResult = yield* fileSystem
+            .readLink(path.join(shadowHome, "state_5.sqlite"))
+            .pipe(Effect.result);
+          const stateContents = yield* fileSystem.readFileString(
+            path.join(shadowHome, "state_5.sqlite"),
+          );
+          const stateWalExists = yield* fileSystem.exists(
+            path.join(shadowHome, "state_5.sqlite-wal"),
+          );
+          const logsDbExists = yield* fileSystem.exists(path.join(shadowHome, "logs_2.sqlite"));
+          const goalsDbExists = yield* fileSystem.exists(path.join(shadowHome, "goals_1.sqlite"));
+          const authLinkResult = yield* fileSystem
+            .readLink(path.join(shadowHome, "auth.json"))
+            .pipe(Effect.result);
+          const authContents = yield* fileSystem.readFileString(path.join(shadowHome, "auth.json"));
 
-        const layout = yield* resolveCodexHomeLayout(
-          decodeCodexSettings({
-            homePath: sharedHome,
-            shadowHomePath: shadowHome,
-          }),
-        );
-
-        yield* materializeCodexShadowHome(layout);
-
-        const sessionsExists = yield* fileSystem.exists(path.join(shadowHome, "sessions"));
-        const configContents = yield* fileSystem.readFileString(
-          path.join(shadowHome, "config.toml"),
-        );
-        const modelsCacheExists = yield* fileSystem.exists(
-          path.join(shadowHome, "models_cache.json"),
-        );
-        const stateLinkResult = yield* fileSystem
-          .readLink(path.join(shadowHome, "state_5.sqlite"))
-          .pipe(Effect.result);
-        const stateContents = yield* fileSystem.readFileString(
-          path.join(shadowHome, "state_5.sqlite"),
-        );
-        const stateWalExists = yield* fileSystem.exists(
-          path.join(shadowHome, "state_5.sqlite-wal"),
-        );
-        const logsDbExists = yield* fileSystem.exists(path.join(shadowHome, "logs_2.sqlite"));
-        const goalsDbExists = yield* fileSystem.exists(path.join(shadowHome, "goals_1.sqlite"));
-        const authLinkResult = yield* fileSystem
-          .readLink(path.join(shadowHome, "auth.json"))
-          .pipe(Effect.result);
-        const authContents = yield* fileSystem.readFileString(path.join(shadowHome, "auth.json"));
-
-        expect(sessionsExists).toBe(true);
-        expect(configContents).toBe('model = "gpt-5-codex"\n');
-        if (process.platform !== "win32") {
-          const sessionsTarget = yield* fileSystem.readLink(path.join(shadowHome, "sessions"));
-          const configTarget = yield* fileSystem.readLink(path.join(shadowHome, "config.toml"));
-          expect(sessionsTarget).toBe(path.join(sharedHome, "sessions"));
-          expect(configTarget).toBe(path.join(sharedHome, "config.toml"));
-        }
-        expect(modelsCacheExists).toBe(false);
-        expect(stateLinkResult._tag).toBe("Failure");
-        expect(stateContents).toBe("shadow-state-db");
-        expect(stateWalExists).toBe(false);
-        expect(logsDbExists).toBe(false);
-        expect(goalsDbExists).toBe(false);
-        expect(authLinkResult._tag).toBe("Failure");
-        expect(authContents).toContain("shadow");
-      }),
+          expect(sessionsExists).toBe(true);
+          expect(configContents).toBe('model = "gpt-5-codex"\n');
+          if (process.platform !== "win32") {
+            const sessionsTarget = yield* fileSystem.readLink(path.join(shadowHome, "sessions"));
+            const configTarget = yield* fileSystem.readLink(path.join(shadowHome, "config.toml"));
+            expect(sessionsTarget).toBe(path.join(sharedHome, "sessions"));
+            expect(configTarget).toBe(path.join(sharedHome, "config.toml"));
+          }
+          expect(modelsCacheExists).toBe(false);
+          expect(stateLinkResult._tag).toBe("Failure");
+          expect(stateContents).toBe("shadow-state-db");
+          expect(stateWalExists).toBe(false);
+          expect(logsDbExists).toBe(false);
+          expect(goalsDbExists).toBe(false);
+          expect(authLinkResult._tag).toBe("Failure");
+          expect(authContents).toContain("shared");
+        }),
     );
 
     it.effect("copies shared auth into a new shadow home without symlinking it", () =>
@@ -191,6 +196,112 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
 
         expect(authLinkResult._tag).toBe("Failure");
         expect(authContents).toContain("shared");
+      }),
+    );
+
+    it.effect("refreshes an existing private shadow auth copy from the shared auth", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const sharedHome = yield* makeTempDir("t3code-codex-shared-");
+        const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+        const shadowHome = path.join(shadowRoot, "shadow");
+
+        yield* writeTextFile(path.join(sharedHome, "auth.json"), '{"token":"fresh"}\n');
+        yield* writeTextFile(path.join(shadowHome, "auth.json"), '{"token":"revoked"}\n');
+
+        const layout = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({
+            homePath: sharedHome,
+            shadowHomePath: shadowHome,
+          }),
+        );
+
+        yield* materializeCodexShadowHome(layout);
+
+        const authLinkResult = yield* fileSystem
+          .readLink(path.join(shadowHome, "auth.json"))
+          .pipe(Effect.result);
+        const authContents = yield* fileSystem.readFileString(path.join(shadowHome, "auth.json"));
+
+        expect(authLinkResult._tag).toBe("Failure");
+        expect(authContents).toBe('{"token":"fresh"}\n');
+      }),
+    );
+
+    it.effect("keeps an explicit shadow auth copy when the shadow is the auth source", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const sharedHome = yield* makeTempDir("t3code-codex-shared-");
+        const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+        const shadowHome = path.join(shadowRoot, "shadow");
+
+        yield* writeTextFile(path.join(sharedHome, "auth.json"), '{"token":"default"}\n');
+        yield* writeTextFile(path.join(shadowHome, "auth.json"), '{"token":"shadow"}\n');
+
+        const layout = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({
+            homePath: sharedHome,
+            shadowHomePath: shadowHome,
+          }),
+        );
+
+        yield* materializeCodexShadowHome(layout, { authSource: "shadow" });
+
+        const authContents = yield* fileSystem.readFileString(path.join(shadowHome, "auth.json"));
+        expect(authContents).toBe('{"token":"shadow"}\n');
+      }),
+    );
+
+    it.effect(
+      "does not create shadow auth from shared auth when the shadow is the auth source",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const sharedHome = yield* makeTempDir("t3code-codex-shared-");
+          const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+          const shadowHome = path.join(shadowRoot, "shadow");
+
+          yield* writeTextFile(path.join(sharedHome, "auth.json"), '{"token":"default"}\n');
+
+          const layout = yield* resolveCodexHomeLayout(
+            decodeCodexSettings({
+              homePath: sharedHome,
+              shadowHomePath: shadowHome,
+            }),
+          );
+
+          yield* materializeCodexShadowHome(layout, { authSource: "shadow" });
+
+          const authExists = yield* fileSystem.exists(path.join(shadowHome, "auth.json"));
+          expect(authExists).toBe(false);
+        }),
+    );
+
+    it.effect("removes a stale shadow auth copy when the shared auth is gone", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const sharedHome = yield* makeTempDir("t3code-codex-shared-");
+        const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+        const shadowHome = path.join(shadowRoot, "shadow");
+
+        yield* fileSystem.makeDirectory(sharedHome, { recursive: true });
+        yield* writeTextFile(path.join(shadowHome, "auth.json"), '{"token":"revoked"}\n');
+
+        const layout = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({
+            homePath: sharedHome,
+            shadowHomePath: shadowHome,
+          }),
+        );
+
+        yield* materializeCodexShadowHome(layout);
+
+        const authExists = yield* fileSystem.exists(path.join(shadowHome, "auth.json"));
+        expect(authExists).toBe(false);
       }),
     );
 
