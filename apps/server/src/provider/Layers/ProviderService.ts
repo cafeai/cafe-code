@@ -49,7 +49,11 @@ import {
   providerTurnMetricAttributes,
   withMetrics,
 } from "../../observability/Metrics.ts";
-import { type ProviderAdapterError, ProviderValidationError } from "../Errors.ts";
+import {
+  ProviderAdapterProcessError,
+  type ProviderAdapterError,
+  ProviderValidationError,
+} from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import { ProviderAdapterRegistry } from "../Services/ProviderAdapterRegistry.ts";
 import { ProviderService, type ProviderServiceShape } from "../Services/ProviderService.ts";
@@ -61,6 +65,8 @@ import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { AnalyticsService } from "../../telemetry/Services/AnalyticsService.ts";
 const isModelSelection = Schema.is(ModelSelection);
+const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
+const CODEX_NO_ROLLOUT_FOUND_PATTERN = /\bno rollout found for thread id\b/i;
 
 /**
  * Hook for tests that want to override the canonical event logger pulled
@@ -121,6 +127,30 @@ function toRuntimeStatus(session: ProviderSession): "starting" | "running" | "st
     default:
       return "running";
   }
+}
+
+function errorMessageChain(error: unknown): string {
+  if (error instanceof Error) {
+    const cause = "cause" in error ? (error as { readonly cause?: unknown }).cause : undefined;
+    return cause === undefined ? error.message : `${error.message}\n${errorMessageChain(cause)}`;
+  }
+  if (typeof error === "object" && error !== null) {
+    const record = error as Record<string, unknown>;
+    const message = typeof record.message === "string" ? record.message : String(error);
+    return record.cause === undefined ? message : `${message}\n${errorMessageChain(record.cause)}`;
+  }
+  return String(error);
+}
+
+function isCodexMissingRolloutResumeError(input: {
+  readonly provider: ProviderDriverKind;
+  readonly error: unknown;
+}): boolean {
+  return (
+    input.provider === ProviderDriverKind.make("codex") &&
+    isProviderAdapterProcessError(input.error) &&
+    CODEX_NO_ROLLOUT_FOUND_PATTERN.test(errorMessageChain(input.error))
+  );
 }
 
 function toRuntimePayloadFromSession(
@@ -348,6 +378,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       readonly modelSelection?: unknown;
       readonly lastRuntimeEvent?: string;
       readonly lastRuntimeEventAt?: string;
+      readonly resumeCursor?: unknown | null;
     },
   ) =>
     Effect.gen(function* () {
@@ -361,7 +392,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         providerInstanceId,
         runtimeMode: session.runtimeMode,
         status: toRuntimeStatus(session),
-        ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),
+        ...(extra && "resumeCursor" in extra
+          ? { resumeCursor: extra.resumeCursor }
+          : session.resumeCursor !== undefined
+            ? { resumeCursor: session.resumeCursor }
+            : {}),
         runtimePayload: toRuntimePayloadFromSession(session, extra),
       });
     });
@@ -727,7 +762,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.additional_directories.count": effectiveAdditionalDirectories?.length ?? 0,
         });
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
-        const session = yield* adapter.startSession({
+        const startInput = {
           ...input,
           providerInstanceId: resolvedInstanceId,
           ...(effectiveCwd !== undefined ? { cwd: effectiveCwd } : {}),
@@ -735,7 +770,31 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             ? { additionalDirectories: effectiveAdditionalDirectories }
             : {}),
           ...(effectiveResumeCursor !== undefined ? { resumeCursor: effectiveResumeCursor } : {}),
-        });
+        } satisfies ProviderSessionStartInput;
+        const recoveredFromRejectedResumeCursor = yield* Ref.make(false);
+        const session = yield* adapter.startSession(startInput).pipe(
+          Effect.catch((error) => {
+            if (
+              effectiveResumeCursor === undefined ||
+              !isCodexMissingRolloutResumeError({ provider: resolvedProvider, error })
+            ) {
+              return Effect.fail(error);
+            }
+
+            const { resumeCursor: _staleResumeCursor, ...freshStartInput } = startInput;
+            return Ref.set(recoveredFromRejectedResumeCursor, true).pipe(
+              Effect.andThen(
+                Effect.logWarning("provider.session.resume-cursor-rejected", {
+                  threadId,
+                  provider: resolvedProvider,
+                  providerInstanceId: resolvedInstanceId,
+                  reason: "Codex reported no rollout for the persisted thread id; starting fresh.",
+                }),
+              ),
+              Effect.andThen(adapter.startSession(freshStartInput)),
+            );
+          }),
+        );
 
         if (session.provider !== adapter.provider) {
           return yield* toValidationError(
@@ -755,8 +814,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           threadId,
           currentInstanceId: resolvedInstanceId,
         });
+        const usedMissingRolloutRecovery = yield* Ref.get(recoveredFromRejectedResumeCursor);
         yield* upsertSessionBinding(sessionWithInstance, threadId, {
           modelSelection: input.modelSelection,
+          ...(usedMissingRolloutRecovery && sessionWithInstance.resumeCursor === undefined
+            ? { resumeCursor: null }
+            : {}),
         });
         yield* analytics.record("provider.session.started", {
           provider: sessionWithInstance.provider,
