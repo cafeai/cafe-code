@@ -18,9 +18,11 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const resolved = path.resolve(NodeOS.homedir());
+        const env = yield* makeClaudeEnvironment({ homePath: "" });
 
         expect(yield* resolveClaudeHomePath({ homePath: "" })).toBe(resolved);
-        expect(yield* makeClaudeEnvironment({ homePath: "" })).toBe(process.env);
+        expect(env.HOME).toBe(resolved);
+        expect(env.CLAUDE_CONFIG_DIR).toBe(path.join(resolved, ".claude"));
       }),
     );
 
@@ -29,13 +31,32 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
         const path = yield* Path.Path;
         const homePath = "~/.claude-work";
         const resolved = path.resolve(NodeOS.homedir(), ".claude-work");
+        const env = yield* makeClaudeEnvironment({ homePath });
 
         expect(yield* resolveClaudeHomePath({ homePath })).toBe(resolved);
-        expect((yield* makeClaudeEnvironment({ homePath })).HOME).toBe(resolved);
+        expect(env.HOME).toBe(resolved);
+        expect(env.CLAUDE_CONFIG_DIR).toBe(path.join(resolved, ".claude"));
         expect(yield* makeClaudeContinuationGroupKey({ homePath })).toBe(`claude:home:${resolved}`);
         expect(yield* makeClaudeCapabilitiesCacheKey({ binaryPath: "claude", homePath })).toBe(
           `claude\0${resolved}`,
         );
+      }),
+    );
+
+    it.effect("preserves an explicit Claude config directory from the provider environment", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const explicitConfigDir = path.resolve(NodeOS.homedir(), ".claude-zkpixels");
+        const env = yield* makeClaudeEnvironment(
+          { homePath: "" },
+          {
+            ...process.env,
+            CLAUDE_CONFIG_DIR: explicitConfigDir,
+          },
+        );
+
+        expect(env.HOME).toBe(path.resolve(NodeOS.homedir()));
+        expect(env.CLAUDE_CONFIG_DIR).toBe(explicitConfigDir);
       }),
     );
 

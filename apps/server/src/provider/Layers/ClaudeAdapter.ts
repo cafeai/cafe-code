@@ -203,6 +203,7 @@ interface ClaudeSessionContext {
   lastAssistantUuid: string | undefined;
   lastThreadStartedId: string | undefined;
   hasSubmittedUserPrompt: boolean;
+  authFailureSeen: boolean;
   stopped: boolean;
 }
 
@@ -242,8 +243,70 @@ function isZeroTurnClaudeExecutionFailure(message: SDKMessage): boolean {
   );
 }
 
+function isClaudeAuthFailureSystemMessage(message: SDKMessage): boolean {
+  if (message.type !== "system") {
+    return false;
+  }
+  const record = message as Record<string, unknown>;
+  return (
+    record.subtype === "api_retry" &&
+    record.error_status === 401 &&
+    record.error === "authentication_failed"
+  );
+}
+
+function resultPrimaryError(result: SDKResultMessage): string | undefined {
+  if ("errors" in result && Array.isArray(result.errors)) {
+    const first = result.errors.find((entry): entry is string => typeof entry === "string");
+    if (first && first.trim().length > 0) {
+      return first;
+    }
+  }
+
+  const resultText = (result as { readonly result?: unknown }).result;
+  return typeof resultText === "string" && resultText.trim().length > 0 ? resultText : undefined;
+}
+
+function isClaudeAuthFailureResult(message: SDKMessage): message is SDKResultMessage {
+  if (message.type !== "result") {
+    return false;
+  }
+  const record = message as Record<string, unknown>;
+  return (
+    message.is_error === true &&
+    (record.api_error_status === 401 ||
+      resultPrimaryError(message)?.toLowerCase().includes("invalid authentication credentials") ===
+        true)
+  );
+}
+
+function isClaudeAuthFailureAssistantMessage(message: SDKMessage): boolean {
+  if (message.type !== "assistant") {
+    return false;
+  }
+  const record = message as Record<string, unknown>;
+  if (record.error === "authentication_failed") {
+    return true;
+  }
+
+  const content = message.message?.content;
+  return (
+    Array.isArray(content) &&
+    content.some((block) => {
+      if (!block || typeof block !== "object") {
+        return false;
+      }
+      const text = (block as { readonly text?: unknown }).text;
+      return (
+        typeof text === "string" &&
+        text.toLowerCase().includes("invalid authentication credentials")
+      );
+    })
+  );
+}
+
 function hasDurableClaudeSessionId(message: SDKMessage): boolean {
-  if (isZeroTurnClaudeExecutionFailure(message)) {
+  if (isZeroTurnClaudeExecutionFailure(message) || isClaudeAuthFailureResult(message)) {
     // Claude Code may allocate a brand-new session id for pre-turn failures
     // such as an invalid resume cursor, then report `error_during_execution`
     // with `num_turns: 0`. That id does not represent the user's durable
@@ -363,9 +426,9 @@ function interruptionMessageFromClaudeCause(
 }
 
 function resultErrorsText(result: SDKResultMessage): string {
-  return "errors" in result && Array.isArray(result.errors)
-    ? result.errors.join(" ").toLowerCase()
-    : "";
+  const errors = "errors" in result && Array.isArray(result.errors) ? result.errors.join(" ") : "";
+  const resultText = resultPrimaryError(result) ?? "";
+  return `${errors} ${resultText}`.toLowerCase();
 }
 
 function isInterruptedResult(result: SDKResultMessage): boolean {
@@ -1138,13 +1201,15 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
 });
 
 function turnStatusFromResult(result: SDKResultMessage): ProviderRuntimeTurnStatus {
-  if (result.subtype === "success") {
-    return "completed";
-  }
-
   const errors = resultErrorsText(result);
   if (isInterruptedResult(result)) {
     return "interrupted";
+  }
+  if (result.is_error === true) {
+    return "failed";
+  }
+  if (result.subtype === "success") {
+    return "completed";
   }
   if (errors.includes("cancel")) {
     return "cancelled";
@@ -2543,6 +2608,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (message.type !== "assistant") {
       return;
     }
+    if (isClaudeAuthFailureAssistantMessage(message)) {
+      context.authFailureSeen = true;
+      yield* emitRuntimeWarning(
+        context,
+        "Claude authentication failed; suppressing Claude Code's synthetic assistant error and retiring this stale session.",
+        {
+          apiErrorStatus: 401,
+          error: "authentication_failed",
+          sessionId: typeof message.session_id === "string" ? message.session_id : undefined,
+        },
+        {
+          source: "claude.sdk.message",
+          method: "claude/assistant/authentication_failed",
+          payload: message,
+        },
+      );
+      return;
+    }
 
     // Auto-start a synthetic turn for assistant messages that arrive without
     // an active turn (e.g., background agent/subagent responses between user prompts).
@@ -2628,7 +2711,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     const status = turnStatusFromResult(message);
     const resultErrors = "errors" in message && Array.isArray(message.errors) ? message.errors : [];
-    const errorMessage = message.subtype === "success" ? undefined : resultErrors[0];
+    const authFailure = isClaudeAuthFailureResult(message);
+    const errorMessage =
+      status !== "completed"
+        ? (resultPrimaryError(message) ?? resultErrors[0] ?? "Claude turn failed.")
+        : undefined;
 
     if (status === "failed") {
       if (isZeroTurnClaudeExecutionFailure(message)) {
@@ -2647,12 +2734,34 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             payload: message,
           },
         );
+      } else if (authFailure) {
+        context.authFailureSeen = true;
+        yield* emitRuntimeWarning(
+          context,
+          "Claude authentication failed; retiring this stale Claude session so the next turn starts with current login material.",
+          {
+            apiErrorStatus: 401,
+            error: "authentication_failed",
+            sessionId: typeof message.session_id === "string" ? message.session_id : undefined,
+          },
+          {
+            source: "claude.sdk.message",
+            method: "claude/result/authentication_failed",
+            payload: message,
+          },
+        );
       } else {
         yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
       }
     }
 
     yield* completeTurn(context, status, errorMessage, message);
+    if (authFailure) {
+      yield* stopSessionInternal(context, {
+        emitExitEvent: true,
+        interruptStreamFiber: false,
+      });
+    }
   });
 
   const handleSystemMessage = Effect.fn("handleSystemMessage")(function* (
@@ -2680,6 +2789,32 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     };
 
     switch (message.subtype) {
+      case "api_retry":
+        if (isClaudeAuthFailureSystemMessage(message)) {
+          context.authFailureSeen = true;
+          yield* offerRuntimeEvent({
+            ...base,
+            type: "runtime.warning",
+            payload: {
+              message:
+                "Claude authentication retry failed with 401; Cafe will retire this session if Claude reports the turn as failed.",
+              detail: {
+                apiErrorStatus: 401,
+                error: "authentication_failed",
+                attempt: (message as Record<string, unknown>).attempt,
+                maxRetries: (message as Record<string, unknown>).max_retries,
+                retryDelayMs: (message as Record<string, unknown>).retry_delay_ms,
+              },
+            },
+          });
+          return;
+        }
+        yield* emitRuntimeWarning(context, "Claude reported an API retry.", message, {
+          source: "claude.sdk.message",
+          method: "claude/system/api_retry",
+          payload: message,
+        });
+        return;
       case "init":
         yield* offerRuntimeEvent({
           ...base,
@@ -3018,7 +3153,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const stopSessionInternal = Effect.fn("stopSessionInternal")(function* (
     context: ClaudeSessionContext,
-    options?: { readonly emitExitEvent?: boolean },
+    options?: { readonly emitExitEvent?: boolean; readonly interruptStreamFiber?: boolean },
   ) {
     if (context.stopped) return;
 
@@ -3052,7 +3187,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     const streamFiber = context.streamFiber;
     context.streamFiber = undefined;
-    if (streamFiber && streamFiber.pollUnsafe() === undefined) {
+    if (
+      options?.interruptStreamFiber !== false &&
+      streamFiber &&
+      streamFiber.pollUnsafe() === undefined
+    ) {
       yield* Fiber.interrupt(streamFiber);
     }
 
@@ -3738,6 +3877,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastAssistantUuid: undefined,
         lastThreadStartedId: undefined,
         hasSubmittedUserPrompt: false,
+        authFailureSeen: false,
         stopped: false,
       };
       yield* Ref.set(contextRef, context);

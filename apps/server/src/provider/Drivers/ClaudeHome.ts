@@ -18,12 +18,21 @@ export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function
   config: Pick<ClaudeSettings, "homePath">,
   baseEnv: NodeJS.ProcessEnv = process.env,
 ): Effect.fn.Return<NodeJS.ProcessEnv, never, Path.Path> {
-  const homePath = config.homePath.trim();
-  if (homePath.length === 0) return baseEnv;
+  const path = yield* Path.Path;
   const resolvedHomePath = yield* resolveClaudeHomePath(config);
+  const configuredConfigDir = baseEnv.CLAUDE_CONFIG_DIR?.trim();
+
+  // Claude Code currently supports both HOME-derived config discovery and
+  // CLAUDE_CONFIG_DIR. Cafe sets the latter explicitly so SDK launches match a
+  // verified CLI command such as `CLAUDE_CONFIG_DIR=/Users/me/.claude claude`
+  // instead of depending on subtle process-launch HOME behavior.
   return {
     ...baseEnv,
     HOME: resolvedHomePath,
+    CLAUDE_CONFIG_DIR:
+      configuredConfigDir && configuredConfigDir.length > 0
+        ? path.resolve(configuredConfigDir)
+        : path.join(resolvedHomePath, ".claude"),
   };
 });
 

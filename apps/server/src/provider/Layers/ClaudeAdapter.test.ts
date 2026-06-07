@@ -1003,6 +1003,100 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect(
+    "retires stale Claude sessions and suppresses synthetic assistant text on 401 auth failures",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+
+        const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 10).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+
+        const turn = yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "hello",
+          attachments: [],
+        });
+
+        harness.query.emit({
+          type: "system",
+          subtype: "api_retry",
+          attempt: 1,
+          max_retries: 10,
+          retry_delay_ms: 510,
+          error_status: 401,
+          error: "authentication_failed",
+          session_id: "stale-claude-session",
+          uuid: "api-retry-auth-failure",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "assistant",
+          session_id: "stale-claude-session",
+          uuid: "assistant-auth-failure",
+          parent_tool_use_id: null,
+          error: "authentication_failed",
+          message: {
+            id: "synthetic-auth-failure",
+            model: "<synthetic>",
+            role: "assistant",
+            content: [
+              {
+                type: "text",
+                text: "Failed to authenticate. API Error: 401 Invalid authentication credentials",
+              },
+            ],
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: true,
+          api_error_status: 401,
+          result: "Failed to authenticate. API Error: 401 Invalid authentication credentials",
+          errors: [],
+          session_id: "stale-claude-session",
+          uuid: "result-auth-failure",
+        } as unknown as SDKMessage);
+
+        const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+        assert.equal(
+          runtimeEvents.some((event) => event.type === "content.delta"),
+          false,
+        );
+
+        const completed = runtimeEvents.find((event) => event.type === "turn.completed");
+        assert.equal(completed?.type, "turn.completed");
+        if (completed?.type === "turn.completed") {
+          assert.equal(String(completed.turnId), String(turn.turnId));
+          assert.equal(completed.payload.state, "failed");
+          assert.include(
+            String(completed.payload.errorMessage),
+            "Invalid authentication credentials",
+          );
+        }
+
+        assert.equal(
+          runtimeEvents.some((event) => event.type === "session.exited"),
+          true,
+        );
+        assert.equal(harness.query.closeCalls, 1);
+        assert.deepEqual(yield* adapter.listSessions(), []);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("maps Claude reasoning deltas, streamed tool inputs, and tool results", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
