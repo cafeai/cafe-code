@@ -610,4 +610,74 @@ describe("ProviderDaemonServer", () => {
       }).pipe(Effect.scoped, Effect.provide(layer));
     }),
   );
+
+  it.effect("keeps journaling runtime events after one malformed event", () =>
+    Effect.gen(function* () {
+      const events = yield* PubSub.unbounded<ProviderRuntimeEvent>();
+      const streamingProviderServiceLayer = Layer.succeed(ProviderService, {
+        ...mockProviderService,
+        streamEvents: Stream.fromPubSub(events),
+      } satisfies ProviderServiceShape);
+      const layer = Layer.mergeAll(
+        streamingProviderServiceLayer,
+        ProviderRuntimeInventoryLocalLive.pipe(Layer.provide(mockProviderAdapterRegistryLayer)),
+        mockServerSettingsLayer,
+        ProviderSupervisorRegistryLive,
+      ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+
+      yield* Effect.gen(function* () {
+        const port = yield* getAvailablePort;
+        yield* runProviderDaemonServer({
+          host: "127.0.0.1",
+          port,
+          token: TEST_TOKEN,
+          version: "0.0.0-test",
+        });
+        yield* Effect.yieldNow;
+
+        // This intentionally invalid object models a provider protocol or
+        // serialization edge case at the journal boundary. The daemon must log
+        // and discard it without killing the long-lived event bridge; otherwise
+        // later valid provider output never reaches the backend/UI projections.
+        yield* PubSub.publish(events, {
+          type: "turn.completed",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: ThreadId.make("thread-journal-resilience"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+        } as unknown as ProviderRuntimeEvent);
+
+        const validEvent: ProviderRuntimeEvent = {
+          type: "turn.completed",
+          eventId: asEventId("evt-journal-after-malformed"),
+          provider: ProviderDriverKind.make("codex"),
+          threadId: ThreadId.make("thread-journal-resilience"),
+          turnId: TurnId.make("turn-journal-resilience"),
+          createdAt: "2026-01-01T00:00:01.000Z",
+          payload: {
+            state: "completed",
+          },
+        };
+        yield* PubSub.publish(events, validEvent);
+        yield* Effect.yieldNow;
+
+        const healthResponse = yield* Effect.promise(() =>
+          fetch(`http://127.0.0.1:${port}/api/provider-daemon/health`, {
+            headers: {
+              authorization: `Bearer ${TEST_TOKEN}`,
+            },
+          }),
+        );
+        const health = decodeProviderDaemonHealth(
+          yield* Effect.promise(() => healthResponse.json()),
+        );
+
+        assert.isAtLeast(health.eventCursor, 1);
+        assert.equal(
+          health.runtimeEvents?.recentTurnTimings[0]?.threadId,
+          "thread-journal-resilience",
+        );
+        assert.equal(health.runtimeEvents?.recentTurnTimings[0]?.turnId, "turn-journal-resilience");
+      }).pipe(Effect.scoped, Effect.provide(layer));
+    }),
+  );
 });

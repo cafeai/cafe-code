@@ -1027,35 +1027,60 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
-  it.effect("rejects direct Codex sendTurn while the adapter still owns an active turn", () =>
-    Effect.gen(function* () {
-      const provider = yield* ProviderService;
+  it.effect(
+    "routes direct Codex sendTurn through steer while the adapter owns an active turn",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const runtimeRepository = yield* ProviderSessionRuntimeRepository;
 
-      const session = yield* provider.startSession(asThreadId("thread-active"), {
-        provider: ProviderDriverKind.make("codex"),
-        providerInstanceId: codexInstanceId,
-        threadId: asThreadId("thread-active"),
-        cwd: "/tmp/project",
-        runtimeMode: "full-access",
-      });
-      routing.codex.updateSession(session.threadId, (current) => ({
-        ...current,
-        status: "running",
-        activeTurnId: asTurnId("turn-active"),
-      }));
-      routing.codex.sendTurn.mockClear();
+        const session = yield* provider.startSession(asThreadId("thread-active"), {
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: codexInstanceId,
+          threadId: asThreadId("thread-active"),
+          cwd: "/tmp/project",
+          runtimeMode: "full-access",
+        });
+        routing.codex.updateSession(session.threadId, (current) => ({
+          ...current,
+          status: "running",
+          activeTurnId: asTurnId("turn-active"),
+        }));
+        routing.codex.sendTurn.mockClear();
+        routing.codex.steerTurn.mockClear();
 
-      const exit = yield* Effect.exit(
-        provider.sendTurn({
+        const turn = yield* provider.sendTurn({
           threadId: session.threadId,
           input: "this must be steered or queued",
           attachments: [],
-        }),
-      );
+        });
 
-      assert.equal(Exit.isFailure(exit), true);
-      assert.equal(routing.codex.sendTurn.mock.calls.length, 0);
-    }),
+        assert.equal(turn.turnId, asTurnId("turn-active"));
+        assert.equal(routing.codex.sendTurn.mock.calls.length, 0);
+        assert.equal(routing.codex.steerTurn.mock.calls.length, 1);
+        assert.deepEqual(routing.codex.steerTurn.mock.calls[0]?.[0], {
+          threadId: session.threadId,
+          expectedTurnId: asTurnId("turn-active"),
+          input: "this must be steered or queued",
+        });
+
+        const runningRuntime = yield* runtimeRepository.getByThreadId({
+          threadId: session.threadId,
+        });
+        assert.equal(Option.isSome(runningRuntime), true);
+        if (Option.isSome(runningRuntime)) {
+          const payload = runningRuntime.value.runtimePayload;
+          assert.equal(payload !== null && typeof payload === "object", true);
+          if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+            const runtimePayload = payload as {
+              activeTurnId: string | null;
+              lastRuntimeEvent: string | null;
+            };
+            assert.equal(runtimePayload.activeTurnId, "turn-active");
+            assert.equal(runtimePayload.lastRuntimeEvent, "provider.steerTurn");
+          }
+        }
+      }),
   );
 
   it.effect("recovers stale persisted sessions for rollback by resuming thread identity", () =>
@@ -1426,6 +1451,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         threadId,
         runtimeMode: "full-access",
       });
+      routing.codex.steerTurn.mockClear();
       const result = yield* provider.steerTurn({
         threadId: session.threadId,
         expectedTurnId: asTurnId("turn-active"),
@@ -1972,6 +1998,57 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
       assert.deepEqual(
         receivedByHealthy.filter((eventId) => expectedEventIds.has(eventId)).slice(0, 3),
         ["evt-ordered-1", "evt-ordered-2", "evt-ordered-3"],
+      );
+    }),
+  );
+
+  it.effect("continues adapter event fanout after one malformed source event", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const session = yield* provider.startSession(asThreadId("thread-fanout-resilience"), {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId: asThreadId("thread-fanout-resilience"),
+        runtimeMode: "full-access",
+      });
+
+      const receivedRef = yield* Ref.make<Array<ProviderRuntimeEvent>>([]);
+      const consumer = yield* Stream.runForEach(provider.streamEvents, (event) =>
+        Ref.update(receivedRef, (current) => [...current, event]),
+      ).pipe(Effect.forkChild);
+      yield* advanceTestClock(50);
+
+      // This event carries a conflicting providerInstanceId for the adapter
+      // that emitted it. It must be logged and discarded, not allowed to kill
+      // the adapter subscription for future valid events from the same session.
+      fanout.codex.emit({
+        type: "turn.completed",
+        eventId: asEventId("evt-fanout-malformed"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex-other"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId: session.threadId,
+        turnId: asTurnId("turn-1"),
+        status: "completed",
+      } as unknown as LegacyProviderRuntimeEvent);
+
+      fanout.codex.emit({
+        type: "turn.completed",
+        eventId: asEventId("evt-fanout-valid-after-malformed"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        threadId: session.threadId,
+        turnId: asTurnId("turn-1"),
+        status: "completed",
+      });
+      yield* advanceTestClock(50);
+
+      const received = yield* Ref.get(receivedRef);
+      yield* Fiber.interrupt(consumer);
+
+      assert.deepEqual(
+        received.map((event) => event.eventId),
+        [asEventId("evt-fanout-valid-after-malformed")],
       );
     }),
   );

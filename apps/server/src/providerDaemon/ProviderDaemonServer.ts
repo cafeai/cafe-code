@@ -24,6 +24,8 @@ import {
 } from "@cafecode/contracts";
 import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
+import * as Cause from "effect/Cause";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
@@ -845,9 +847,47 @@ export const runProviderDaemonServer = (
       Effect.forkScoped,
     );
 
-    yield* Stream.runForEach(providerService.streamEvents, (event) => journal.publish(event)).pipe(
-      Effect.forkScoped,
-    );
+    const publishRuntimeEventsToJournal = Effect.gen(function* () {
+      // The provider daemon journal is the durable handoff between long-lived
+      // provider runtime processes and the backend/UI projections. A single bad
+      // event, transient SQLite failure, or broken client listener must not kill
+      // this bridge: provider adapters can continue producing events for hours,
+      // and losing the journal consumer makes turns appear stuck even though the
+      // provider completed. Keep per-event failures local, and restart the
+      // subscription if the stream itself terminates unexpectedly.
+      while (true) {
+        yield* Stream.runForEach(providerService.streamEvents, (event) =>
+          journal.publish(event).pipe(
+            Effect.catchCause((cause) => {
+              if (Cause.hasInterruptsOnly(cause)) {
+                return Effect.failCause(cause);
+              }
+              return Effect.logWarning("provider daemon runtime event journal publish failed", {
+                provider: event.provider,
+                providerInstanceId: event.providerInstanceId,
+                threadId: event.threadId,
+                turnId: event.turnId,
+                eventId: event.eventId,
+                eventType: event.type,
+                cause: Cause.pretty(cause),
+              });
+            }),
+            Effect.asVoid,
+          ),
+        ).pipe(
+          Effect.catchCause((cause) => {
+            if (Cause.hasInterruptsOnly(cause)) {
+              return Effect.failCause(cause);
+            }
+            return Effect.logWarning("provider daemon runtime event stream stopped", {
+              cause: Cause.pretty(cause),
+            });
+          }),
+        );
+        yield* Effect.sleep(Duration.millis(500));
+      }
+    });
+    yield* publishRuntimeEventsToJournal.pipe(Effect.forkScoped);
 
     const providerRuntimeContext = yield* Effect.context<
       | ProviderService

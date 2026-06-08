@@ -346,7 +346,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     Effect.succeed(event).pipe(
       Effect.tap((canonicalEvent) =>
         canonicalEventLogger
-          ? canonicalEventLogger.write(canonicalEvent, canonicalEvent.threadId)
+          ? canonicalEventLogger.write(canonicalEvent, canonicalEvent.threadId).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("provider.runtime.canonical-log-write-failed", {
+                  provider: canonicalEvent.provider,
+                  providerInstanceId: canonicalEvent.providerInstanceId,
+                  threadId: canonicalEvent.threadId,
+                  turnId: canonicalEvent.turnId,
+                  eventId: canonicalEvent.eventId,
+                  eventType: canonicalEvent.type,
+                  cause: Cause.pretty(cause),
+                }),
+              ),
+            )
           : Effect.void,
       ),
       Effect.flatMap((canonicalEvent) => PubSub.publish(runtimeEventPubSub, canonicalEvent)),
@@ -420,6 +432,32 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           Effect.andThen(publishRuntimeEvent(canonicalEvent)),
         ),
       ),
+    );
+
+  const processRuntimeEventSafely = (
+    source: {
+      readonly instanceId: ProviderInstanceId;
+      readonly provider: ProviderDriverKind;
+    },
+    event: ProviderRuntimeEvent,
+  ): Effect.Effect<void> =>
+    processRuntimeEvent(source, event).pipe(
+      Effect.catchCause((cause) => {
+        if (Cause.hasInterruptsOnly(cause)) {
+          return Effect.failCause(cause);
+        }
+        return Effect.logWarning("provider.runtime.event-fanout-failed", {
+          sourceInstanceId: source.instanceId,
+          sourceProvider: source.provider,
+          provider: event.provider,
+          providerInstanceId: event.providerInstanceId,
+          threadId: event.threadId,
+          turnId: event.turnId,
+          eventId: event.eventId,
+          eventType: event.type,
+          cause: Cause.pretty(cause),
+        });
+      }),
     );
 
   const persistRuntimeLifecycleEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> => {
@@ -496,7 +534,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       next.set(id, adapter);
       if (previous.get(id) !== adapter) {
         yield* Stream.runForEach(adapter.streamEvents, (event) =>
-          processRuntimeEvent(
+          processRuntimeEventSafely(
             {
               instanceId: id,
               provider: adapter.provider,
@@ -885,10 +923,30 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         const activeSessions = yield* routed.adapter.listSessions();
         const activeSession = activeSessions.find((session) => session.threadId === input.threadId);
         if (activeSession?.status === "running" && activeSession.activeTurnId !== undefined) {
-          return yield* toValidationError(
-            "ProviderService.sendTurn",
-            `Cannot start a new Codex turn while active turn '${activeSession.activeTurnId}' is running; route the input through steerTurn or queue it until the active turn completes.`,
-          );
+          const turn = yield* routed.adapter.steerTurn({
+            threadId: input.threadId,
+            expectedTurnId: activeSession.activeTurnId,
+            ...(input.input !== undefined ? { input: input.input } : {}),
+            ...(input.attachments.length > 0 ? { attachments: input.attachments } : {}),
+          });
+          yield* directory.upsert({
+            threadId: input.threadId,
+            provider: routed.adapter.provider,
+            providerInstanceId: routed.instanceId,
+            status: "running",
+            ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
+            runtimePayload: {
+              activeTurnId: turn.turnId,
+              lastRuntimeEvent: "provider.steerTurn",
+              lastRuntimeEventAt: yield* nowIso,
+            },
+          });
+          yield* analytics.record("provider.turn.steered", {
+            provider: routed.adapter.provider,
+            attachmentCount: input.attachments.length,
+            hasInput: typeof input.input === "string" && input.input.trim().length > 0,
+          });
+          return turn;
         }
       }
       const turn = yield* routed.adapter.sendTurn(input);
