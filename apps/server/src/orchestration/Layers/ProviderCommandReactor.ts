@@ -316,11 +316,23 @@ const make = Effect.gen(function* () {
     timeToLive: HANDLED_TURN_START_KEY_TTL,
     lookup: () => Effect.succeed(true),
   });
+  const handledStaleSteerRecoveryKeys = yield* Cache.make<string, true>({
+    capacity: HANDLED_TURN_START_KEY_MAX,
+    timeToLive: HANDLED_TURN_START_KEY_TTL,
+    lookup: () => Effect.succeed(true),
+  });
 
   const hasHandledTurnStartRecently = (key: string) =>
     Cache.getOption(handledTurnStartKeys, key).pipe(
       Effect.flatMap((cached) =>
         Cache.set(handledTurnStartKeys, key, true).pipe(Effect.as(Option.isSome(cached))),
+      ),
+    );
+
+  const hasHandledStaleSteerRecoveryRecently = (key: string) =>
+    Cache.getOption(handledStaleSteerRecoveryKeys, key).pipe(
+      Effect.flatMap((cached) =>
+        Cache.set(handledStaleSteerRecoveryKeys, key, true).pipe(Effect.as(Option.isSome(cached))),
       ),
     );
 
@@ -848,7 +860,11 @@ const make = Effect.gen(function* () {
   });
 
   const markThreadRunningFromSendTurnResult = Effect.fn("markThreadRunningFromSendTurnResult")(
-    function* (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) {
+    function* (input: {
+      readonly threadId: ThreadId;
+      readonly turnId: TurnId;
+      readonly createdAt?: string;
+    }) {
       const thread = yield* resolveThread(input.threadId);
       const providerSessions = yield* providerService
         .listSessions()
@@ -891,7 +907,12 @@ const make = Effect.gen(function* () {
         currentSession?.runtimeMode ??
         thread?.runtimeMode ??
         DEFAULT_RUNTIME_MODE;
-      const updatedAt = DateTime.formatIso(yield* DateTime.now);
+      // `sendTurn` returns an ACK from the provider boundary. For Codex this
+      // can be a provisional turn id, while the later runtime notification is
+      // the authoritative provider-owned turn. Stamp this local marker at the
+      // original request/recovery time so projection monotonicity prefers the
+      // concrete runtime event when it arrives with its provider timestamp.
+      const updatedAt = input.createdAt ?? DateTime.formatIso(yield* DateTime.now);
 
       yield* setThreadSession({
         threadId: input.threadId,
@@ -909,6 +930,147 @@ const make = Effect.gen(function* () {
       });
     },
   );
+
+  const recoverPostTerminalStaleSteerMessagesOnStartup = Effect.fn(
+    "recoverPostTerminalStaleSteerMessagesOnStartup",
+  )(function* () {
+    const snapshot = yield* projectionSnapshotQuery.getSnapshot();
+    const activeProviderSessions = yield* providerService.listSessions();
+    const runningProviderThreadIds = new Set(
+      activeProviderSessions
+        .filter((session) => session.status === "running")
+        .map((session) => String(session.threadId)),
+    );
+    const terminalStates = new Set(["completed", "error", "interrupted"]);
+    const recoveredAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
+    let recoveredCount = 0;
+
+    yield* Effect.forEach(
+      snapshot.threads,
+      (thread) =>
+        Effect.gen(function* () {
+          const latestTurn = thread.latestTurn;
+          if (
+            latestTurn === null ||
+            latestTurn.completedAt === null ||
+            !terminalStates.has(latestTurn.state) ||
+            thread.session?.providerName !== "codex" ||
+            runningProviderThreadIds.has(thread.id)
+          ) {
+            return;
+          }
+
+          const staleSteerMessage = thread.messages
+            .filter(
+              (message) =>
+                message.role === "user" &&
+                message.turnId === latestTurn.turnId &&
+                message.createdAt > latestTurn.completedAt!,
+            )
+            .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
+          if (staleSteerMessage === undefined) {
+            return;
+          }
+
+          const hasStaleSteerRecoveryDiagnostic = thread.activities.some(
+            (activity) =>
+              activity.kind === "runtime.warning" &&
+              activity.summary === "Steer submitted as next turn" &&
+              readRecord(activity.payload)?.messageId === staleSteerMessage.id,
+          );
+          if (!hasStaleSteerRecoveryDiagnostic) {
+            return;
+          }
+
+          const recoveryKey = [
+            "startup-post-terminal-stale-steer",
+            thread.id,
+            staleSteerMessage.id,
+            latestTurn.turnId,
+          ].join(":");
+          if (yield* hasHandledStaleSteerRecoveryRecently(recoveryKey)) {
+            return;
+          }
+
+          yield* appendProviderDiagnosticActivity({
+            threadId: thread.id,
+            kind: "runtime.warning",
+            summary: "Stranded steer recovered as next turn",
+            detail:
+              "Cafe Code found a user steer that was recorded after the previous provider turn had already become terminal. It is submitting that message as the next turn on startup, matching upstream Codex CLI/TUI stale-active-turn recovery.",
+            turnId: latestTurn.turnId,
+            createdAt: recoveredAt,
+            payload: {
+              method: "startup/reconcile-stale-steer",
+              recovery: "turn-start-after-post-terminal-steer",
+              messageId: staleSteerMessage.id,
+              staleTurnId: latestTurn.turnId,
+              previousTurnState: latestTurn.state,
+              previousTurnCompletedAt: latestTurn.completedAt,
+            },
+          });
+
+          yield* setThreadSession({
+            threadId: thread.id,
+            session: {
+              threadId: thread.id,
+              status: "ready",
+              providerName: thread.session?.providerName ?? null,
+              ...(thread.session?.providerInstanceId !== undefined
+                ? { providerInstanceId: thread.session.providerInstanceId }
+                : {}),
+              runtimeMode: thread.session?.runtimeMode ?? thread.runtimeMode,
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: recoveredAt,
+            },
+            createdAt: recoveredAt,
+          });
+
+          yield* orchestrationEngine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make(
+              [
+                "server:startup-post-terminal-stale-steer",
+                thread.id,
+                staleSteerMessage.id,
+                latestTurn.turnId,
+              ].join(":"),
+            ),
+            threadId: thread.id,
+            message: {
+              messageId: staleSteerMessage.id,
+              role: "user",
+              text: staleSteerMessage.text,
+              attachments: staleSteerMessage.attachments ?? [],
+            },
+            modelSelection: thread.modelSelection,
+            runtimeMode: thread.runtimeMode,
+            interactionMode: thread.interactionMode,
+            createdAt: recoveredAt,
+          });
+          recoveredCount += 1;
+        }).pipe(
+          Effect.catchCause((cause) =>
+            appendProviderFailureActivity({
+              threadId: thread.id,
+              kind: "provider.turn.start.failed",
+              summary: "Provider turn start failed",
+              detail: `Automatic post-terminal steer recovery failed: ${Cause.pretty(cause)}`,
+              turnId: thread.latestTurn?.turnId ?? null,
+              createdAt: recoveredAt,
+            }),
+          ),
+        ),
+      { concurrency: 1 },
+    );
+
+    if (recoveredCount > 0) {
+      yield* Effect.logWarning("provider command reactor recovered post-terminal stale steers", {
+        threadCount: recoveredCount,
+      });
+    }
+  });
 
   const maybeGenerateAndRenameWorktreeBranchForFirstTurn = Effect.fn(
     "maybeGenerateAndRenameWorktreeBranchForFirstTurn",
@@ -1217,6 +1379,7 @@ const make = Effect.gen(function* () {
               markThreadRunningFromSendTurnResult({
                 threadId: event.payload.threadId,
                 turnId: turn.turnId,
+                createdAt: observedAt,
               }),
             ),
           );
@@ -1348,6 +1511,7 @@ const make = Effect.gen(function* () {
               markThreadRunningFromSendTurnResult({
                 threadId: event.payload.threadId,
                 turnId: turn.turnId,
+                createdAt: observedAt,
               }),
             ),
           );
@@ -1411,6 +1575,7 @@ const make = Effect.gen(function* () {
         markThreadRunningFromSendTurnResult({
           threadId: event.payload.threadId,
           turnId: turn.turnId,
+          createdAt: event.payload.createdAt,
         }),
       ),
       Effect.catchCause((cause) => {
@@ -1521,6 +1686,7 @@ const make = Effect.gen(function* () {
     if (!thread) {
       return;
     }
+    const project = yield* resolveProject(thread.projectId);
     const message = thread.messages.find((entry) => entry.id === event.payload.messageId);
     if (!message || message.role !== "user") {
       return yield* appendProviderFailureActivity({
@@ -1551,10 +1717,22 @@ const make = Effect.gen(function* () {
       readonly staleTurnId: TurnId | null;
       readonly recovery: string;
       readonly provider?: string | undefined;
-      readonly providerInstanceId?: string | undefined;
+      readonly providerInstanceId?: OrchestrationSession["providerInstanceId"] | undefined;
+      readonly runtimeMode?: RuntimeMode | undefined;
     }) =>
       Effect.gen(function* () {
         const observedAt = DateTime.formatIso(yield* DateTime.now);
+        const recoveryKey = [
+          "stale-steer",
+          event.payload.threadId,
+          event.payload.messageId,
+          input.recovery,
+        ].join(":");
+        if (yield* hasHandledStaleSteerRecoveryRecently(recoveryKey)) {
+          return;
+        }
+        const recoveredProviderInstanceId =
+          input.providerInstanceId ?? thread.session?.providerInstanceId;
 
         // `thread.turn-steer-requested` can be emitted while the projection
         // still believes a Codex turn is running, then restart/reconciliation
@@ -1582,21 +1760,44 @@ const make = Effect.gen(function* () {
           },
         });
 
-        yield* orchestrationEngine.dispatch({
-          type: "thread.turn.start",
-          commandId: serverCommandId("stale-steer-retry-turn-start"),
+        yield* setThreadSession({
           threadId: event.payload.threadId,
-          message: {
-            messageId: event.payload.messageId,
-            role: "user",
-            text: message.text,
-            attachments: normalizedAttachments,
+          session: {
+            threadId: event.payload.threadId,
+            status: "ready",
+            providerName: input.provider ?? thread.session?.providerName ?? null,
+            ...(recoveredProviderInstanceId !== undefined
+              ? { providerInstanceId: recoveredProviderInstanceId }
+              : {}),
+            runtimeMode: input.runtimeMode ?? thread.session?.runtimeMode ?? thread.runtimeMode,
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: observedAt,
           },
-          ...(thread.modelSelection !== undefined ? { modelSelection: thread.modelSelection } : {}),
-          runtimeMode: thread.runtimeMode,
-          interactionMode: thread.interactionMode,
           createdAt: observedAt,
         });
+
+        const sendTurnRequest = yield* buildSendTurnRequestForThread({
+          threadId: event.payload.threadId,
+          messageId: event.payload.messageId,
+          messageText: message.text,
+          attachments: normalizedAttachments,
+          ...(thread.modelSelection !== undefined ? { modelSelection: thread.modelSelection } : {}),
+          interactionMode: thread.interactionMode,
+          createdAt: observedAt,
+          thread,
+          ...(project !== undefined ? { project } : {}),
+        });
+
+        yield* providerService.sendTurn(sendTurnRequest).pipe(
+          Effect.tap((turn) =>
+            markThreadRunningFromSendTurnResult({
+              threadId: event.payload.threadId,
+              turnId: turn.turnId,
+              createdAt: observedAt,
+            }),
+          ),
+        );
       }).pipe(
         Effect.catchCause((recoveryCause) =>
           appendProviderFailureActivity({
@@ -1638,6 +1839,7 @@ const make = Effect.gen(function* () {
         recovery: "turn-start-after-no-local-active-turn",
         provider: projectedSession?.providerName ?? undefined,
         providerInstanceId: projectedSession?.providerInstanceId ?? undefined,
+        runtimeMode: projectedSession?.runtimeMode ?? undefined,
       });
     }
 
@@ -1650,6 +1852,7 @@ const make = Effect.gen(function* () {
         recovery: "turn-start-after-missing-active-turn-id",
         provider: activeSession.providerName ?? undefined,
         providerInstanceId: activeSession.providerInstanceId ?? undefined,
+        runtimeMode: activeSession.runtimeMode,
       });
     }
     const providerInstanceId = activeSession.providerInstanceId;
@@ -1682,6 +1885,15 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const observedAt = DateTime.formatIso(yield* DateTime.now);
         const staleTurnId = activeSession.activeTurnId;
+        const recoveryKey = [
+          "codex-no-active-turn",
+          event.payload.threadId,
+          event.payload.messageId,
+          staleTurnId,
+        ].join(":");
+        if (yield* hasHandledStaleSteerRecoveryRecently(recoveryKey)) {
+          return;
+        }
 
         // Upstream Codex TUI handles this exact app-server race in
         // `active_turn_steer_race`: if `turn/steer` says there is no active
@@ -1718,21 +1930,27 @@ const make = Effect.gen(function* () {
           createdAt: observedAt,
         });
 
-        yield* orchestrationEngine.dispatch({
-          type: "thread.turn.start",
-          commandId: serverCommandId("codex-stale-steer-retry-turn-start"),
+        const sendTurnRequest = yield* buildSendTurnRequestForThread({
           threadId: event.payload.threadId,
-          message: {
-            messageId: event.payload.messageId,
-            role: "user",
-            text: message.text,
-            attachments: normalizedAttachments,
-          },
+          messageId: event.payload.messageId,
+          messageText: message.text,
+          attachments: normalizedAttachments,
           ...(thread.modelSelection !== undefined ? { modelSelection: thread.modelSelection } : {}),
-          runtimeMode: thread.runtimeMode,
           interactionMode: thread.interactionMode,
           createdAt: observedAt,
+          thread,
+          ...(project !== undefined ? { project } : {}),
         });
+
+        yield* providerService.sendTurn(sendTurnRequest).pipe(
+          Effect.tap((turn) =>
+            markThreadRunningFromSendTurnResult({
+              threadId: event.payload.threadId,
+              turnId: turn.turnId,
+              createdAt: observedAt,
+            }),
+          ),
+        );
       }).pipe(
         Effect.catchCause((recoveryCause) =>
           appendProviderFailureActivity({
@@ -1980,6 +2198,14 @@ const make = Effect.gen(function* () {
       Effect.catchCause((cause) =>
         Effect.logWarning(
           "provider command reactor failed to clear interrupted turn starts after restart",
+          { cause: Cause.pretty(cause) },
+        ),
+      ),
+    );
+    yield* recoverPostTerminalStaleSteerMessagesOnStartup().pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning(
+          "provider command reactor failed to recover post-terminal stale steers after restart",
           { cause: Cause.pretty(cause) },
         ),
       ),
