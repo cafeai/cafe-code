@@ -215,6 +215,33 @@ function hasRenderableAssistantText(text: string | undefined): boolean {
   return (text?.trim().length ?? 0) > 0;
 }
 
+function completedAssistantTextDelta(input: {
+  readonly projectedText: string | undefined;
+  readonly bufferedText: string;
+  readonly fallbackText: string | undefined;
+}): string {
+  if (input.bufferedText.length > 0) {
+    return input.bufferedText;
+  }
+
+  const fallbackText = input.fallbackText;
+  if (!hasRenderableAssistantText(fallbackText)) {
+    return "";
+  }
+
+  const projectedText = input.projectedText ?? "";
+  if (projectedText.length === 0) {
+    return fallbackText!;
+  }
+
+  // Codex item/completed carries the authoritative final assistant item text.
+  // When Cafe has only projected a streamed prefix, append exactly the missing
+  // suffix before the terminal marker. Do not append divergent completion text:
+  // that would duplicate visible content and corrupt the append-only message
+  // event stream. Divergence remains visible through provider/runtime logs.
+  return fallbackText!.startsWith(projectedText) ? fallbackText!.slice(projectedText.length) : "";
+}
+
 function normalizedAssistantDedupText(text: string | undefined): string | undefined {
   const trimmed = text?.trim();
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
@@ -1187,16 +1214,16 @@ const make = Effect.gen(function* () {
     commandTag: string;
     finalDeltaCommandTag: string;
     fallbackText?: string;
+    projectedText?: string;
     hasProjectedMessage?: boolean;
   }) =>
     Effect.gen(function* () {
       const bufferedText = yield* takeBufferedAssistantText(input.messageId);
-      const text =
-        bufferedText.length > 0
-          ? bufferedText
-          : (input.fallbackText?.trim().length ?? 0) > 0
-            ? input.fallbackText!
-            : "";
+      const text = completedAssistantTextDelta({
+        bufferedText,
+        fallbackText: input.fallbackText,
+        projectedText: input.projectedText,
+      });
       const hasRenderableText = hasRenderableAssistantText(text);
 
       if (hasRenderableText) {
@@ -1921,9 +1948,6 @@ const make = Effect.gen(function* () {
             text: assistantCompletion.fallbackText,
             excludeMessageId: assistantMessageId,
           });
-        const shouldApplyFallbackCompletionText =
-          !existingAssistantMessage || existingAssistantMessage.text.length === 0;
-
         const shouldSkipRedundantCompletion =
           Option.isNone(activeAssistantMessageId) &&
           turnId !== undefined &&
@@ -1944,7 +1968,10 @@ const make = Effect.gen(function* () {
             commandTag: "assistant-complete",
             finalDeltaCommandTag: "assistant-delta-finalize",
             hasProjectedMessage: existingAssistantMessage !== undefined,
-            ...(assistantCompletion.fallbackText !== undefined && shouldApplyFallbackCompletionText
+            ...(existingAssistantMessage !== undefined
+              ? { projectedText: existingAssistantMessage.text }
+              : {}),
+            ...(assistantCompletion.fallbackText !== undefined
               ? { fallbackText: assistantCompletion.fallbackText }
               : {}),
           });

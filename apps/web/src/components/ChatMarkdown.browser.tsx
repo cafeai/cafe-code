@@ -210,6 +210,7 @@ describe("ChatMarkdown", () => {
           "| --- | --- | --- |",
           "| Long inline math | $f(x)=\\sum_{i=1}^{999999999999999999999999999999999999999999999999} \\frac{x_i}{1+x_i}$ | Should not widen the message column |",
           "| Long code token | `const_veryVeryVeryVeryVeryVeryVeryLongIdentifierNameWithoutBreaksOrSpacesEqualsAnotherVeryVeryVeryVeryLongIdentifierName` | Scroll instead of crushing columns |",
+          "| Display math | $$\\prod_{j=1}^{123456789012345678901234567890}\\left(\\frac{a_j+b_j+c_j+d_j+e_j+f_j+g_j+h_j+i_j}{\\omega_j^{98765432109876543210}+\\theta_j^{12345678901234567890}}\\right)$$ | Stays in the table after reload |",
         ].join("\n")}
         cwd="/repo/project"
       />,
@@ -222,7 +223,24 @@ describe("ChatMarkdown", () => {
       expect(tableScroll).not.toBeNull();
       expect(table).not.toBeNull();
       expect(window.getComputedStyle(tableScroll!).overflowX).toBe("auto");
-      expect(window.getComputedStyle(table!).minWidth).toBe("max-content");
+      expect(window.getComputedStyle(table!).minWidth).toBe("100%");
+      expect(tableScroll!.scrollWidth).toBeGreaterThan(tableScroll!.clientWidth);
+      expect(table!.getBoundingClientRect().width).toBeGreaterThan(
+        tableScroll!.getBoundingClientRect().width,
+      );
+
+      const longCode = Array.from(tableScroll!.querySelectorAll("code")).find((node) =>
+        node.textContent?.includes("const_veryVeryVeryVeryVeryVeryVeryLongIdentifierName"),
+      );
+      const longCodeCell = longCode?.closest("td");
+      expect(longCode).toBeDefined();
+      expect(longCodeCell).not.toBeNull();
+      expect(longCode!.getBoundingClientRect().right).toBeLessThanOrEqual(
+        longCodeCell!.getBoundingClientRect().right + 1,
+      );
+
+      await expect.element(page.getByText("Display math")).toBeInTheDocument();
+      await expect.element(page.getByText("Stays in the table after reload")).toBeInTheDocument();
       expect(document.querySelector(".katex")).not.toBeNull();
     } finally {
       await screen.unmount();

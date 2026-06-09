@@ -76,6 +76,48 @@ function normalizeLatexDelimiters(text: string): string {
     .replace(/\\\((.*?)\\\)/g, (_match, math: string) => `$${math.trim()}$`);
 }
 
+function normalizeTableRowMathDelimiters(text: string): string {
+  const lines = text.split("\n");
+  const output: string[] = [];
+  let activeFence: { indent: string; marker: string } | null = null;
+
+  for (const line of lines) {
+    if (activeFence) {
+      output.push(line);
+      if (isFenceClose(line, activeFence.indent, activeFence.marker)) {
+        activeFence = null;
+      }
+      continue;
+    }
+
+    const fenceStartMatch = line.match(FENCE_START_PATTERN);
+    if (fenceStartMatch) {
+      const [, fenceIndent = "", fenceMarker = ""] = fenceStartMatch;
+      activeFence = { indent: fenceIndent, marker: fenceMarker };
+      output.push(line);
+      continue;
+    }
+
+    if (!line.includes("|")) {
+      output.push(line);
+      continue;
+    }
+
+    // GFM table cells cannot contain real block math. Providers sometimes put
+    // same-line display delimiters inside a table cell to mean "large formula";
+    // keeping `$$...$$` or `\[...\]` there can break table parsing after a
+    // reload. Render it as inline math so the table remains structurally valid
+    // and the formula can scroll with the table.
+    output.push(
+      line
+        .replace(/\$\$([^\n]*?)\$\$/g, (_match, math: string) => `$${math.trim()}$`)
+        .replace(/\\\[([^\n]*?)\\\]/g, (_match, math: string) => `$${math.trim()}$`),
+    );
+  }
+
+  return output.join("\n");
+}
+
 function removeTexSyntaxForProseCheck(line: string): string {
   return line
     .replace(/\\[A-Za-z]+[*]?/g, " ")
@@ -117,5 +159,7 @@ function normalizeStandaloneMathParagraphs(text: string): string {
  * leaving ordinary non-math code fences untouched.
  */
 export function normalizeChatMarkdownMath(text: string): string {
-  return normalizeStandaloneMathParagraphs(normalizeLatexDelimiters(normalizeMathFences(text)));
+  return normalizeStandaloneMathParagraphs(
+    normalizeLatexDelimiters(normalizeTableRowMathDelimiters(normalizeMathFences(text))),
+  );
 }

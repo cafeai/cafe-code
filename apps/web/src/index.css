@@ -1078,8 +1078,8 @@ label:has(> select#reasoning-effort) select {
 }
 
 .chat-markdown table {
-  width: 100%;
-  min-width: max-content;
+  width: max-content;
+  min-width: 100%;
   max-width: none;
   border-collapse: collapse;
   margin: 0;
@@ -1103,10 +1103,19 @@ label:has(> select#reasoning-effort) select {
   font-weight: 600;
 }
 
+.chat-markdown td:has(code),
+.chat-markdown th:has(code),
+.chat-markdown td:has(.katex),
+.chat-markdown th:has(.katex) {
+  max-width: none;
+}
+
 .chat-markdown td :not(pre) > code,
 .chat-markdown th :not(pre) > code,
 .chat-markdown td > code,
 .chat-markdown th > code {
+  display: inline-block;
+  max-width: none;
   white-space: nowrap;
 }
 
