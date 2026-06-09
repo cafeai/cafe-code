@@ -242,6 +242,27 @@ function isCodexResponsesWebsocketFallbackEvent(event: ProviderEvent): boolean {
   );
 }
 
+function isCodexResponsesWebsocketStderrDiagnostic(event: ProviderEvent): boolean {
+  if (event.method !== "process/stderr") {
+    return false;
+  }
+  const message = event.message ?? readPayloadMessage(event);
+  if (!message) {
+    return false;
+  }
+
+  // Upstream Codex rust-v0.138.0 reports retry/fallback state through structured
+  // StreamError and Warning events. The Responses WebSocket tracing line on
+  // stderr is duplicate transport noise, especially after machine sleep/wake
+  // DNS loss, so Cafe keeps the structured work-log facts and drops only this
+  // raw diagnostic line.
+  return (
+    containsNormalized(message, "codex_api::endpoint::responses_websocket") &&
+    containsNormalized(message, "failed to connect to websocket") &&
+    containsNormalized(message, "/backend-api/codex/responses")
+  );
+}
+
 function isCodexAuthInvalidatedEvent(event: ProviderEvent): boolean {
   const message = readPayloadMessage(event);
   const additionalDetails = readPayloadAdditionalDetails(event);
@@ -1316,6 +1337,14 @@ function mapToRuntimeEvents(
     ];
   }
 
+  if (event.method === "turn/moderationMetadata") {
+    // Upstream Codex rust-v0.138.0 marks this notification experimental and the
+    // TUI routes it to the thread but does not render it in chat. Do the same
+    // and avoid persisting arbitrary moderation metadata into work-log/debug
+    // activity payloads.
+    return [];
+  }
+
   if (event.method === "deprecationNotice") {
     const payload = readPayload(EffectCodexSchema.V2DeprecationNoticeNotification, event.payload);
     if (!payload) {
@@ -1621,12 +1650,13 @@ function mapToRuntimeEvents(
   }
 
   if (event.method === "process/stderr") {
+    if (isCodexResponsesWebsocketStderrDiagnostic(event)) {
+      return [];
+    }
     const message = event.message ?? "Codex process stderr";
-    // Upstream Codex logs some retryable Responses WebSocket failures on stderr while the
-    // normal stream retry loop is still alive. Treat stderr as diagnostic output and rely on
-    // Codex's structured `error` notification with `willRetry: false`, process exit, or terminal
-    // turn events to mark actual failure. This keeps transient reconnect noise in the work log
-    // instead of surfacing it as a user-visible fatal provider error.
+    // Keep generic stderr diagnostic output as a non-fatal warning. Actual provider failure
+    // still comes from Codex's structured `error` notification with `willRetry: false`,
+    // process exit, or terminal turn events.
     return [
       {
         type: "runtime.warning",
@@ -1780,7 +1810,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     Effect.gen(function* () {
       const observedAt = DateTime.formatIso(yield* DateTime.now);
       if (!transportPolicyPersistenceEnabled) {
-        // Upstream Codex 0.134.0 keeps Responses WebSocket fallback as
+        // Upstream Codex 0.138.0 keeps Responses WebSocket fallback as
         // session-scoped runtime state: the built-in OpenAI provider still has
         // `supports_websockets = true`, and the fallback flag sticks inside the
         // live session after the official warning. Cafe used to persist this

@@ -1,5 +1,6 @@
 let nextServerRequestId = 10_000;
 let pendingSkillsListRequestId: number | string | null = null;
+let pendingSkillsListCwd: string | null = null;
 let pendingUserInputRequestId: number | null = null;
 
 const writeMessage = (message: unknown) => {
@@ -67,6 +68,9 @@ const handleMethod = (message: Record<string, unknown>) => {
     }
     case "skills/list": {
       pendingSkillsListRequestId = message.id as number | string;
+      const params = message.params as { readonly cwds?: ReadonlyArray<unknown> } | undefined;
+      const firstCwd = params?.cwds?.[0];
+      pendingSkillsListCwd = typeof firstCwd === "string" ? firstCwd : process.cwd();
       pendingUserInputRequestId = sendRequest("item/tool/requestUserInput", {
         itemId: "item-approval-1",
         threadId: "thread-1",
@@ -105,13 +109,14 @@ const handleResponse = (message: Record<string, unknown>) => {
   respond(pendingSkillsListRequestId!, {
     data: [
       {
-        cwd: process.cwd(),
+        cwd: pendingSkillsListCwd ?? process.cwd(),
         errors: [],
         skills: [],
       },
     ],
   });
   pendingSkillsListRequestId = null;
+  pendingSkillsListCwd = null;
 };
 
 let remainder = "";

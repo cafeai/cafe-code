@@ -60,7 +60,7 @@ export interface CodexAppServerProviderSnapshot {
   readonly skills: ReadonlyArray<ServerProviderSkill>;
 }
 
-const REASONING_EFFORT_LABELS: Record<CodexSchema.V2ModelListResponse__ReasoningEffort, string> = {
+const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
   none: "None",
   minimal: "Minimal",
   low: "Low",
@@ -68,6 +68,13 @@ const REASONING_EFFORT_LABELS: Record<CodexSchema.V2ModelListResponse__Reasoning
   high: "High",
   xhigh: "Extra High",
 };
+
+function reasoningEffortLabel(reasoningEffort: string): string {
+  // Codex rust-v0.138.0 intentionally changed reasoning effort to a non-empty
+  // open string advertised by the model. Keep known friendly labels, but never
+  // reject or render an undefined label for a newly introduced upstream effort.
+  return REASONING_EFFORT_LABELS[reasoningEffort] ?? reasoningEffort;
+}
 
 function codexAccountAuthLabel(account: CodexSchema.V2GetAccountResponse["account"]) {
   if (!account) return undefined;
@@ -508,7 +515,7 @@ async function fetchCodexAccountRateLimits(input: {
   readonly checkedAt: string;
 }): Promise<ServerProviderAccountRateLimits | undefined> {
   try {
-    // Upstream Codex 0.134.0 fetches ChatGPT-backed account usage from
+    // Upstream Codex 0.138.0 fetches ChatGPT-backed account usage from
     // `{chatgpt_base_url}/wham/usage` via BackendClient::get_rate_limits_many
     // and sends Authorization plus ChatGPT-Account-ID when available. Cafe's
     // provider badge path intentionally avoids spawning a hidden app-server, so
@@ -563,12 +570,12 @@ function mapCodexModelCapabilities(
     reasoningEffort === model.defaultReasoningEffort
       ? {
           id: reasoningEffort,
-          label: REASONING_EFFORT_LABELS[reasoningEffort],
+          label: reasoningEffortLabel(reasoningEffort),
           isDefault: true,
         }
       : {
           id: reasoningEffort,
-          label: REASONING_EFFORT_LABELS[reasoningEffort],
+          label: reasoningEffortLabel(reasoningEffort),
         },
   );
   const defaultReasoning = reasoningOptions.find((option) => option.isDefault)?.id;
@@ -622,12 +629,12 @@ function makeStaticCodexReasoningCapabilities(input: {
           reasoningEffort === input.defaultEffort
             ? {
                 id: reasoningEffort,
-                label: REASONING_EFFORT_LABELS[reasoningEffort],
+                label: reasoningEffortLabel(reasoningEffort),
                 isDefault: true,
               }
             : {
                 id: reasoningEffort,
-                label: REASONING_EFFORT_LABELS[reasoningEffort],
+                label: reasoningEffortLabel(reasoningEffort),
               },
         ),
         currentValue: input.defaultEffort,

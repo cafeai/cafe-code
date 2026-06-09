@@ -93,16 +93,22 @@ function makeThreadOpenResponse(
     modelProvider: "openai",
     approvalPolicy: "never",
     approvalsReviewer: "user",
-    sandbox: { type: "danger-full-access" },
+    sandbox: { type: "dangerFullAccess" },
     thread: {
+      cliVersion: "0.138.0",
+      createdAt: 1_713_403_200,
+      cwd: "/tmp/project",
+      ephemeral: false,
       id: threadId,
-      createdAt: "2026-04-18T00:00:00.000Z",
-      source: { session: "cli" },
+      modelProvider: "openai",
+      preview: "",
+      sessionId: "session-1",
+      source: "cli",
       turns: [],
       status: {
-        state: "idle",
-        activeFlags: [],
+        type: "idle",
       },
+      updatedAt: 1_713_403_200,
     },
   } as unknown as CodexRpc.ClientRequestResponsesByMethod["thread/start"];
 }
@@ -218,12 +224,19 @@ describe("buildTurnStartParams", () => {
     const params = Effect.runSync(
       buildTurnStartParams({
         threadId: "provider-thread-1",
+        cwd: "/tmp/project",
         runtimeMode: "auto-accept-edits",
         prompt: "Implement it",
         additionalDirectories: ["/tmp/docs", "/tmp/tools"],
       }),
     );
 
+    assert.equal(params.cwd, "/tmp/project");
+    assert.deepStrictEqual(params.runtimeWorkspaceRoots, [
+      "/tmp/project",
+      "/tmp/docs",
+      "/tmp/tools",
+    ]);
     assert.deepStrictEqual(params.sandboxPolicy, {
       type: "workspaceWrite",
       writableRoots: ["/tmp/docs", "/tmp/tools"],
@@ -933,20 +946,19 @@ describe("openCodexThread", () => {
     const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
     const started = makeThreadOpenResponse("fresh-thread");
     const client = {
-      request: <M extends "thread/start" | "thread/resume">(
-        method: M,
-        payload: CodexRpc.ClientRequestParamsByMethod[M],
-      ) => {
-        calls.push({ method, payload });
-        if (method === "thread/resume") {
-          return Effect.fail(
-            new CodexErrors.CodexAppServerRequestError({
-              code: -32603,
-              errorMessage: "thread not found",
-            }),
-          );
-        }
-        return Effect.succeed(started as CodexRpc.ClientRequestResponsesByMethod[M]);
+      raw: {
+        request: (method: "thread/start" | "thread/resume", payload: unknown) => {
+          calls.push({ method, payload });
+          if (method === "thread/resume") {
+            return Effect.fail(
+              new CodexErrors.CodexAppServerRequestError({
+                code: -32603,
+                errorMessage: "thread not found",
+              }),
+            );
+          }
+          return Effect.succeed(started);
+        },
       },
     };
 
@@ -968,26 +980,27 @@ describe("openCodexThread", () => {
       ["thread/resume", "thread/start"],
     );
     for (const call of calls) {
-      const payload = call.payload as { readonly config?: Record<string, unknown> };
+      const payload = call.payload as {
+        readonly config?: Record<string, unknown>;
+        readonly runtimeWorkspaceRoots?: ReadonlyArray<string>;
+      };
       assert.deepStrictEqual(payload.config, {
         "features.remote_compaction_v2": false,
         model_auto_compact_token_limit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
         model_auto_compact_token_limit_scope: "total",
       });
+      assert.deepStrictEqual(payload.runtimeWorkspaceRoots, ["/tmp/project"]);
     }
   });
 
   it("preserves workspace-write roots alongside Codex auto-compaction overrides", async () => {
     const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
     const client = {
-      request: <M extends "thread/start" | "thread/resume">(
-        method: M,
-        payload: CodexRpc.ClientRequestParamsByMethod[M],
-      ) => {
-        calls.push({ method, payload });
-        return Effect.succeed(
-          makeThreadOpenResponse("fresh-thread") as CodexRpc.ClientRequestResponsesByMethod[M],
-        );
+      raw: {
+        request: (method: "thread/start" | "thread/resume", payload: unknown) => {
+          calls.push({ method, payload });
+          return Effect.succeed(makeThreadOpenResponse("fresh-thread"));
+        },
       },
     };
 
@@ -1004,7 +1017,10 @@ describe("openCodexThread", () => {
       }),
     );
 
-    const payload = calls[0]?.payload as { readonly config?: Record<string, unknown> };
+    const payload = calls[0]?.payload as {
+      readonly config?: Record<string, unknown>;
+      readonly runtimeWorkspaceRoots?: ReadonlyArray<string>;
+    };
     assert.deepStrictEqual(payload.config, {
       "features.remote_compaction_v2": false,
       model_auto_compact_token_limit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
@@ -1013,25 +1029,23 @@ describe("openCodexThread", () => {
         writable_roots: ["/tmp/extra"],
       },
     });
+    assert.deepStrictEqual(payload.runtimeWorkspaceRoots, ["/tmp/project", "/tmp/extra"]);
   });
 
   it("propagates non-recoverable resume failures", async () => {
     const client = {
-      request: <M extends "thread/start" | "thread/resume">(
-        method: M,
-        _payload: CodexRpc.ClientRequestParamsByMethod[M],
-      ) => {
-        if (method === "thread/resume") {
-          return Effect.fail(
-            new CodexErrors.CodexAppServerRequestError({
-              code: -32603,
-              errorMessage: "timed out waiting for server",
-            }),
-          );
-        }
-        return Effect.succeed(
-          makeThreadOpenResponse("fresh-thread") as CodexRpc.ClientRequestResponsesByMethod[M],
-        );
+      raw: {
+        request: (method: "thread/start" | "thread/resume", _payload: unknown) => {
+          if (method === "thread/resume") {
+            return Effect.fail(
+              new CodexErrors.CodexAppServerRequestError({
+                code: -32603,
+                errorMessage: "timed out waiting for server",
+              }),
+            );
+          }
+          return Effect.succeed(makeThreadOpenResponse("fresh-thread"));
+        },
       },
     };
 

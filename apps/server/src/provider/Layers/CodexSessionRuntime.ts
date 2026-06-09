@@ -123,19 +123,41 @@ const CodexUserInputAnswerObject = Schema.Struct({
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 const isCodexUserInputAnswerObject = Schema.is(CodexUserInputAnswerObject);
 
-// TODO: Verify `packages/effect-codex-app-server/scripts/generate.ts` so the generated
-// `V2TurnStartParams` schema includes `collaborationMode` directly.
-const CodexTurnStartParamsWithCollaborationMode = EffectCodexSchema.V2TurnStartParams.pipe(
+const CodexRuntimeWorkspaceRoots = Schema.Array(Schema.String);
+const CodexThreadStartParamsWithRuntimeWorkspaceRoots = EffectCodexSchema.V2ThreadStartParams.pipe(
   Schema.fieldsAssign({
-    collaborationMode: Schema.optionalKey(EffectCodexSchema.V2TurnStartParams__CollaborationMode),
+    runtimeWorkspaceRoots: Schema.optionalKey(CodexRuntimeWorkspaceRoots),
   }),
 );
-const decodeCodexTurnStartParamsWithCollaborationMode = Schema.decodeUnknownEffect(
-  CodexTurnStartParamsWithCollaborationMode,
+
+// Upstream marks `runtimeWorkspaceRoots` and `collaborationMode` as
+// experimental, so the public generated TypeScript schema omits them even
+// though the TUI sends them after initializing with `experimentalApi: true`.
+// Cafe opts into the same capability and layers those fields onto the local
+// request schema so request construction is still explicit and testable.
+const CodexTurnStartParamsWithExperimentalFields = EffectCodexSchema.V2TurnStartParams.pipe(
+  Schema.fieldsAssign({
+    collaborationMode: Schema.optionalKey(EffectCodexSchema.V2TurnStartParams__CollaborationMode),
+    runtimeWorkspaceRoots: Schema.optionalKey(CodexRuntimeWorkspaceRoots),
+  }),
+);
+const decodeCodexTurnStartParamsWithExperimentalFields = Schema.decodeUnknownEffect(
+  CodexTurnStartParamsWithExperimentalFields,
+);
+const decodeV2ThreadStartResponse = Schema.decodeUnknownEffect(
+  EffectCodexSchema.V2ThreadStartResponse,
+);
+const decodeV2ThreadResumeResponse = Schema.decodeUnknownEffect(
+  EffectCodexSchema.V2ThreadResumeResponse,
 );
 
-export type CodexTurnStartParamsWithCollaborationMode =
-  typeof CodexTurnStartParamsWithCollaborationMode.Type;
+type CodexThreadStartParamsWithRuntimeWorkspaceRoots =
+  typeof CodexThreadStartParamsWithRuntimeWorkspaceRoots.Type;
+type CodexThreadResumeParamsWithRuntimeWorkspaceRoots = EffectCodexSchema.V2ThreadResumeParams & {
+  readonly runtimeWorkspaceRoots?: ReadonlyArray<string>;
+};
+export type CodexTurnStartParamsWithExperimentalFields =
+  typeof CodexTurnStartParamsWithExperimentalFields.Type;
 const formatSchemaIssue = SchemaIssue.makeFormatterDefault();
 const CODEX_HTTP_FALLBACK_PROVIDER_ID = "cafecode-openai-http";
 
@@ -507,13 +529,38 @@ function runtimeModeToThreadConfig(input: RuntimeMode): {
   }
 }
 
+function normalizeComparableWorkspaceRoot(value: string): string {
+  return value.trim().replaceAll("\\", "/").replace(/\/+$/, "");
+}
+
+function buildRuntimeWorkspaceRoots(input: {
+  readonly cwd: string;
+  readonly additionalDirectories?: ReadonlyArray<string> | undefined;
+}): ReadonlyArray<string> {
+  const roots: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of [input.cwd, ...(input.additionalDirectories ?? [])]) {
+    const root = candidate.trim();
+    if (root.length === 0) {
+      continue;
+    }
+    const comparable = normalizeComparableWorkspaceRoot(root);
+    if (seen.has(comparable)) {
+      continue;
+    }
+    seen.add(comparable);
+    roots.push(root);
+  }
+  return roots;
+}
+
 function buildThreadStartParams(input: {
   readonly cwd: string;
   readonly runtimeMode: RuntimeMode;
   readonly model: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
-}): EffectCodexSchema.V2ThreadStartParams {
+}): CodexThreadStartParamsWithRuntimeWorkspaceRoots {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
   // Upstream Codex 0.133.0 only auto-compacts when the resolved model info or
   // request config supplies `model_auto_compact_token_limit`. Current Codex
@@ -543,6 +590,10 @@ function buildThreadStartParams(input: {
   }
   return {
     cwd: input.cwd,
+    runtimeWorkspaceRoots: buildRuntimeWorkspaceRoots({
+      cwd: input.cwd,
+      additionalDirectories: input.additionalDirectories,
+    }),
     approvalPolicy: config.approvalPolicy,
     sandbox: config.sandbox,
     config: threadConfig,
@@ -597,6 +648,7 @@ function buildCodexCollaborationMode(input: {
 
 export function buildTurnStartParams(input: {
   readonly threadId: string;
+  readonly cwd?: string;
   readonly runtimeMode: RuntimeMode;
   readonly prompt?: string;
   readonly attachments?: ReadonlyArray<{
@@ -609,7 +661,7 @@ export function buildTurnStartParams(input: {
   readonly interactionMode?: ProviderInteractionMode;
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
 }): Effect.Effect<
-  CodexTurnStartParamsWithCollaborationMode,
+  CodexTurnStartParamsWithExperimentalFields,
   CodexErrors.CodexAppServerProtocolParseError
 > {
   const turnInput: Array<EffectCodexSchema.V2TurnStartParams__UserInput> = [];
@@ -630,8 +682,17 @@ export function buildTurnStartParams(input: {
     ...(input.effort ? { effort: input.effort } : {}),
   });
 
-  return decodeCodexTurnStartParamsWithCollaborationMode({
+  return decodeCodexTurnStartParamsWithExperimentalFields({
     threadId: input.threadId,
+    ...(input.cwd ? { cwd: input.cwd } : {}),
+    ...(input.cwd
+      ? {
+          runtimeWorkspaceRoots: buildRuntimeWorkspaceRoots({
+            cwd: input.cwd,
+            additionalDirectories: input.additionalDirectories,
+          }),
+        }
+      : {}),
     input: turnInput,
     approvalPolicy: config.approvalPolicy,
     sandboxPolicy: runtimeModeToTurnSandboxPolicy(
@@ -1152,13 +1213,47 @@ type CodexThreadOpenResponse =
   | CodexRpc.ClientRequestResponsesByMethod["thread/resume"];
 
 type CodexThreadOpenMethod = "thread/start" | "thread/resume";
+type CodexThreadOpenPayloadByMethod = {
+  readonly "thread/start": CodexThreadStartParamsWithRuntimeWorkspaceRoots;
+  readonly "thread/resume": CodexThreadResumeParamsWithRuntimeWorkspaceRoots;
+};
 
 interface CodexThreadOpenClient {
-  readonly request: <M extends CodexThreadOpenMethod>(
-    method: M,
-    payload: CodexRpc.ClientRequestParamsByMethod[M],
-  ) => Effect.Effect<CodexRpc.ClientRequestResponsesByMethod[M], CodexErrors.CodexAppServerError>;
+  readonly raw: {
+    readonly request: (
+      method: CodexThreadOpenMethod,
+      payload: CodexThreadOpenPayloadByMethod[CodexThreadOpenMethod],
+    ) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
+  };
 }
+
+const requestCodexThreadOpen = <M extends CodexThreadOpenMethod>(
+  client: CodexThreadOpenClient,
+  method: M,
+  payload: CodexThreadOpenPayloadByMethod[M],
+): Effect.Effect<CodexRpc.ClientRequestResponsesByMethod[M], CodexErrors.CodexAppServerError> =>
+  client.raw.request(method, payload).pipe(
+    Effect.flatMap((rawResponse) => {
+      if (method === "thread/start") {
+        return decodeV2ThreadStartResponse(rawResponse).pipe(
+          Effect.mapError((error) =>
+            toProtocolParseError("Invalid thread/start response payload", error),
+          ),
+        ) as Effect.Effect<
+          CodexRpc.ClientRequestResponsesByMethod[M],
+          CodexErrors.CodexAppServerError
+        >;
+      }
+      return decodeV2ThreadResumeResponse(rawResponse).pipe(
+        Effect.mapError((error) =>
+          toProtocolParseError("Invalid thread/resume response payload", error),
+        ),
+      ) as Effect.Effect<
+        CodexRpc.ClientRequestResponsesByMethod[M],
+        CodexErrors.CodexAppServerError
+      >;
+    }),
+  );
 
 export const openCodexThread = (input: {
   readonly client: CodexThreadOpenClient;
@@ -1180,25 +1275,23 @@ export const openCodexThread = (input: {
   });
 
   if (resumeThreadId === undefined) {
-    return input.client.request("thread/start", startParams);
+    return requestCodexThreadOpen(input.client, "thread/start", startParams);
   }
 
-  return input.client
-    .request("thread/resume", {
-      threadId: resumeThreadId,
-      ...startParams,
-    })
-    .pipe(
-      Effect.catchIf(isRecoverableThreadResumeError, (error) =>
-        Effect.logWarning("codex app-server thread resume fell back to fresh start", {
-          threadId: input.threadId,
-          requestedRuntimeMode: input.runtimeMode,
-          resumeThreadId,
-          recoverable: true,
-          cause: error.message,
-        }).pipe(Effect.andThen(input.client.request("thread/start", startParams))),
-      ),
-    );
+  return requestCodexThreadOpen(input.client, "thread/resume", {
+    threadId: resumeThreadId,
+    ...startParams,
+  }).pipe(
+    Effect.catchIf(isRecoverableThreadResumeError, (error) =>
+      Effect.logWarning("codex app-server thread resume fell back to fresh start", {
+        threadId: input.threadId,
+        requestedRuntimeMode: input.runtimeMode,
+        resumeThreadId,
+        recoverable: true,
+        cause: error.message,
+      }).pipe(Effect.andThen(requestCodexThreadOpen(input.client, "thread/start", startParams))),
+    ),
+  );
 };
 
 function readNotificationThreadId(notification: CodexServerNotification): string | undefined {
@@ -2249,7 +2342,7 @@ export const makeCodexSessionRuntime = (
             warningCount: input.pending.warningCount,
             appServerChildProcesses: childProcesses,
             semantics:
-              "Upstream Codex 0.134.0 stores turn/steer input in the active turn queue and emits the injected userMessage only when the turn loop drains pending input. Cafe has delivered the steer; only child processes classified as active count as turn work. Persistent Codex helper/MCP processes are reported as support processes and do not explain a delayed steer.",
+              "Upstream Codex 0.138.0 stores turn/steer input in the active turn queue and emits the injected userMessage only when the turn loop drains pending input. Cafe has delivered the steer; only child processes classified as active count as turn work. Persistent Codex helper/MCP processes are reported as support processes and do not explain a delayed steer.",
           },
         });
       });
@@ -3456,6 +3549,7 @@ export const makeCodexSessionRuntime = (
             input.additionalDirectories ?? options.additionalDirectories ?? [];
           const params = yield* buildTurnStartParams({
             threadId: providerThreadId,
+            cwd: options.cwd,
             runtimeMode: options.runtimeMode,
             ...(input.input ? { prompt: input.input } : {}),
             ...(input.attachments ? { attachments: input.attachments } : {}),

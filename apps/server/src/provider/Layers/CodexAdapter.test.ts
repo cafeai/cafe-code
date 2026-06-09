@@ -1157,7 +1157,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
-  it.effect("maps websocket stderr notifications to runtime.warning", () =>
+  it.effect("drops duplicate websocket stderr diagnostics but keeps generic stderr warnings", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
       const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
@@ -1173,6 +1173,16 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         message:
           "2026-03-31T18:14:06.833399Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: HTTP error: 503 Service Unavailable, url: wss://chatgpt.com/backend-api/codex/responses",
       } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-process-stderr-generic"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.001Z",
+        method: "process/stderr",
+        turnId: asTurnId("turn-1"),
+        message: "warning: normal stderr diagnostic",
+      } satisfies ProviderEvent);
 
       const firstEvent = yield* Fiber.join(firstEventFiber);
 
@@ -1185,10 +1195,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         return;
       }
       assert.equal(firstEvent.value.turnId, "turn-1");
-      assert.equal(
-        firstEvent.value.payload.message,
-        "2026-03-31T18:14:06.833399Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: HTTP error: 503 Service Unavailable, url: wss://chatgpt.com/backend-api/codex/responses",
-      );
+      assert.equal(firstEvent.value.payload.message, "warning: normal stderr diagnostic");
     }),
   );
 
@@ -1476,6 +1483,51 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         compactsAutomatically: true,
         autoCompactTokenLimit: 200_000,
       });
+    }),
+  );
+
+  it.effect("drops experimental Codex moderation metadata notifications", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-codex-turn-moderation-metadata"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/moderationMetadata",
+        payload: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          metadata: { moderation: "provider-private" },
+        },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-warning-after-moderation-metadata"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        createdAt: "2026-01-01T00:00:00.001Z",
+        method: "warning",
+        payload: {
+          message: "visible warning",
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      assert.equal(firstEvent.value.type, "runtime.warning");
+      if (firstEvent.value.type !== "runtime.warning") {
+        return;
+      }
+      assert.equal(firstEvent.value.payload.message, "visible warning");
     }),
   );
 });
