@@ -1,6 +1,8 @@
 import {
+  type AuthBootstrapResult,
   type AuthBearerBootstrapResult,
   AuthBootstrapInput,
+  AuthPasswordBootstrapInput,
   AuthCreatePairingCredentialInput,
   AuthRevokeClientSessionInput,
   AuthRevokePairingLinkInput,
@@ -117,6 +119,78 @@ export const authBearerBootstrapRouteLayer = HttpRouter.add(
     );
     const result = yield* serverAuth.exchangeBootstrapCredentialForBearerSession(
       payload.credential,
+      deriveAuthClientMetadata({ request }),
+    );
+    return HttpServerResponse.jsonUnsafe(result satisfies AuthBearerBootstrapResult, {
+      status: 200,
+      headers: browserApiCorsHeaders,
+    });
+  }).pipe(Effect.catchTag("AuthError", (error) => respondToAuthError(error))),
+);
+
+const setBrowserSessionCookie = (
+  result: {
+    readonly response: AuthBootstrapResult;
+    readonly sessionToken: string;
+  },
+  cookieName: string,
+) =>
+  HttpServerResponse.jsonUnsafe(result.response, {
+    status: 200,
+    headers: browserApiCorsHeaders,
+  }).pipe(
+    HttpServerResponse.setCookie(cookieName, result.sessionToken, {
+      expires: DateTime.toDate(result.response.expiresAt),
+      httpOnly: true,
+      path: "/",
+      sameSite: "lax",
+    }),
+  );
+
+export const authPasswordBootstrapRouteLayer = HttpRouter.add(
+  "POST",
+  "/api/auth/bootstrap/password",
+  Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const serverAuth = yield* ServerAuth;
+    const sessions = yield* SessionCredentialService;
+    const payload = yield* HttpServerRequest.schemaBodyJson(AuthPasswordBootstrapInput).pipe(
+      Effect.mapError(
+        (cause) =>
+          new AuthError({
+            message: "Invalid password bootstrap payload.",
+            status: 400,
+            cause,
+          }),
+      ),
+    );
+    const result = yield* serverAuth.exchangePasswordCredential(
+      payload,
+      deriveAuthClientMetadata({ request }),
+    );
+
+    return yield* setBrowserSessionCookie(result, sessions.cookieName);
+  }).pipe(Effect.catchTag("AuthError", (error) => respondToAuthError(error))),
+);
+
+export const authPasswordBearerBootstrapRouteLayer = HttpRouter.add(
+  "POST",
+  "/api/auth/bootstrap/password/bearer",
+  Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const serverAuth = yield* ServerAuth;
+    const payload = yield* HttpServerRequest.schemaBodyJson(AuthPasswordBootstrapInput).pipe(
+      Effect.mapError(
+        (cause) =>
+          new AuthError({
+            message: "Invalid password bootstrap payload.",
+            status: 400,
+            cause,
+          }),
+      ),
+    );
+    const result = yield* serverAuth.exchangePasswordCredentialForBearerSession(
+      payload,
       deriveAuthClientMetadata({ request }),
     );
     return HttpServerResponse.jsonUnsafe(result satisfies AuthBearerBootstrapResult, {

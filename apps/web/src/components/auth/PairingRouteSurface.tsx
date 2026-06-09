@@ -6,6 +6,7 @@ import {
   peekPairingTokenFromUrl,
   stripPairingTokenFromUrl,
   submitServerAuthCredential,
+  submitServerPasswordCredential,
 } from "../../environments/primary";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -44,7 +45,13 @@ export function PairingRouteSurface({
   onAuthenticated: () => void;
 }) {
   const autoPairTokenRef = useRef<string | null>(peekPairingTokenFromUrl());
+  const supportsPassword = auth.bootstrapMethods.includes("password");
+  const supportsPairingToken = auth.bootstrapMethods.includes("one-time-token");
   const [credential, setCredential] = useState(() => autoPairTokenRef.current ?? "");
+  const [password, setPassword] = useState("");
+  const [authMode, setAuthMode] = useState<"password" | "pairing-token">(() =>
+    supportsPassword && !autoPairTokenRef.current ? "password" : "pairing-token",
+  );
   const [errorMessage, setErrorMessage] = useState(initialErrorMessage ?? "");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const autoSubmitAttemptedRef = useRef(false);
@@ -73,12 +80,40 @@ export function PairingRouteSurface({
     [onAuthenticated],
   );
 
+  const submitPassword = useCallback(
+    async (nextPassword: string) => {
+      setIsSubmitting(true);
+      setErrorMessage("");
+
+      const submitError = await submitServerPasswordCredential({ password: nextPassword }).then(
+        () => null,
+        (error) => errorMessageFromUnknown(error),
+      );
+
+      setIsSubmitting(false);
+
+      if (submitError) {
+        setErrorMessage(submitError);
+        return;
+      }
+
+      startTransition(() => {
+        onAuthenticated();
+      });
+    },
+    [onAuthenticated],
+  );
+
   const handleSubmit = useCallback(
     async (event?: React.SubmitEvent<HTMLFormElement>) => {
       event?.preventDefault();
+      if (authMode === "password") {
+        await submitPassword(password);
+        return;
+      }
       await submitCredential(credential);
     },
-    [submitCredential, credential],
+    [authMode, submitCredential, credential, submitPassword, password],
   );
 
   useEffect(() => {
@@ -112,23 +147,66 @@ export function PairingRouteSurface({
         </p>
 
         <form className="mt-6 space-y-4" onSubmit={(event) => void handleSubmit(event)}>
-          <div className="space-y-2">
-            <label className="text-sm font-medium" htmlFor="pairing-token">
-              Pairing token
-            </label>
-            <Input
-              id="pairing-token"
-              autoCapitalize="none"
-              autoComplete="off"
-              autoCorrect="off"
-              disabled={isSubmitting}
-              nativeInput
-              onChange={(event) => setCredential(event.currentTarget.value)}
-              placeholder="Paste a one-time token or pairing secret"
-              spellCheck={false}
-              value={credential}
-            />
-          </div>
+          {supportsPassword && supportsPairingToken ? (
+            <div className="inline-flex rounded-md border border-border bg-background p-0.5">
+              <Button
+                aria-pressed={authMode === "password"}
+                disabled={isSubmitting}
+                onClick={() => setAuthMode("password")}
+                size="sm"
+                type="button"
+                variant={authMode === "password" ? "secondary" : "ghost"}
+              >
+                Password
+              </Button>
+              <Button
+                aria-pressed={authMode === "pairing-token"}
+                disabled={isSubmitting}
+                onClick={() => setAuthMode("pairing-token")}
+                size="sm"
+                type="button"
+                variant={authMode === "pairing-token" ? "secondary" : "ghost"}
+              >
+                Pairing token
+              </Button>
+            </div>
+          ) : null}
+
+          {authMode === "password" && supportsPassword ? (
+            <div className="space-y-2">
+              <label className="text-sm font-medium" htmlFor="admin-password">
+                Admin password
+              </label>
+              <Input
+                id="admin-password"
+                autoComplete="current-password"
+                disabled={isSubmitting}
+                nativeInput
+                onChange={(event) => setPassword(event.currentTarget.value)}
+                placeholder="Enter the admin password"
+                type="password"
+                value={password}
+              />
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <label className="text-sm font-medium" htmlFor="pairing-token">
+                Pairing token
+              </label>
+              <Input
+                id="pairing-token"
+                autoCapitalize="none"
+                autoComplete="off"
+                autoCorrect="off"
+                disabled={isSubmitting}
+                nativeInput
+                onChange={(event) => setCredential(event.currentTarget.value)}
+                placeholder="Paste a one-time token or pairing secret"
+                spellCheck={false}
+                value={credential}
+              />
+            </div>
+          )}
 
           {errorMessage ? (
             <div className="rounded-lg border border-destructive/30 bg-destructive/6 px-3 py-2 text-sm text-destructive">
@@ -138,7 +216,11 @@ export function PairingRouteSurface({
 
           <div className="flex flex-wrap gap-2">
             <Button disabled={isSubmitting} size="sm" type="submit">
-              {isSubmitting ? "Pairing..." : "Continue"}
+              {isSubmitting
+                ? authMode === "password"
+                  ? "Signing in..."
+                  : "Pairing..."
+                : "Continue"}
             </Button>
             <Button
               disabled={isSubmitting}
@@ -172,6 +254,10 @@ function errorMessageFromUnknown(error: unknown): string {
 }
 
 function describeAuthGate(bootstrapMethods: ReadonlyArray<string>): string {
+  if (bootstrapMethods.includes("password")) {
+    return "Sign in with the admin password or pair this browser with a one-time token.";
+  }
+
   if (bootstrapMethods.includes("desktop-bootstrap")) {
     return "This environment expects a trusted pairing credential before the app can connect.";
   }
@@ -180,6 +266,14 @@ function describeAuthGate(bootstrapMethods: ReadonlyArray<string>): string {
 }
 
 function describeSupportedMethods(bootstrapMethods: ReadonlyArray<string>): string {
+  if (bootstrapMethods.includes("password") && bootstrapMethods.includes("one-time-token")) {
+    return "This environment accepts admin password sign-in and one-time pairing tokens.";
+  }
+
+  if (bootstrapMethods.includes("password")) {
+    return "This environment accepts admin password sign-in.";
+  }
+
   if (
     bootstrapMethods.includes("desktop-bootstrap") &&
     bootstrapMethods.includes("one-time-token")

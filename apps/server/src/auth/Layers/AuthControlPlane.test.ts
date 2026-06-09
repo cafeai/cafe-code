@@ -6,6 +6,7 @@ import * as Layer from "effect/Layer";
 import type { ServerConfigShape } from "../../config.ts";
 import { ServerConfig } from "../../config.ts";
 import { BootstrapCredentialServiceLive } from "./BootstrapCredentialService.ts";
+import { AdminPasswordServiceLive } from "./AdminPasswordService.ts";
 import { ServerSecretStoreLive } from "./ServerSecretStore.ts";
 import { SessionCredentialServiceLive } from "./SessionCredentialService.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -35,6 +36,7 @@ const makeAuthControlPlaneLayer = (
   Layer.effect(AuthControlPlane, makeAuthControlPlane).pipe(
     Layer.provideMerge(BootstrapCredentialServiceLive),
     Layer.provideMerge(SessionCredentialServiceLive),
+    Layer.provideMerge(AdminPasswordServiceLive),
     Layer.provideMerge(ServerSecretStoreLive),
     Layer.provideMerge(SqlitePersistenceMemory),
     Layer.provide(makeServerConfigLayer(overrides)),
@@ -107,6 +109,18 @@ it.layer(NodeServices.layer)("AuthControlPlane", (it) => {
 
       expect(beforeConnect[0]?.lastConnectedAt).toBeNull();
       expect(afterConnect[0]?.lastConnectedAt).not.toBeNull();
+    }).pipe(Effect.provide(makeAuthControlPlaneLayer())),
+  );
+
+  it.effect("sets and clears the admin password through the control plane", () =>
+    Effect.gen(function* () {
+      const authControlPlane = yield* AuthControlPlane;
+
+      expect(yield* authControlPlane.isAdminPasswordConfigured).toBe(false);
+      yield* authControlPlane.setAdminPassword("correct horse battery staple");
+      expect(yield* authControlPlane.isAdminPasswordConfigured).toBe(true);
+      yield* authControlPlane.clearAdminPassword;
+      expect(yield* authControlPlane.isAdminPasswordConfigured).toBe(false);
     }).pipe(Effect.provide(makeAuthControlPlaneLayer())),
   );
 });

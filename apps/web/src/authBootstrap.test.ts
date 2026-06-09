@@ -381,6 +381,74 @@ describe("resolveInitialServerAuthGateState", () => {
     });
   });
 
+  it("submits admin password credentials to the password bootstrap endpoint", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          authenticated: true,
+          sessionMethod: "browser-session-cookie",
+          expiresAt: "2026-04-05T00:00:00.000Z",
+        }),
+      )
+      .mockResolvedValueOnce(
+        sessionResponse({
+          authenticated: true,
+          auth: {
+            policy: "remote-reachable",
+            bootstrapMethods: ["one-time-token", "password"],
+            sessionMethods: ["browser-session-cookie"],
+            sessionCookieName: "t3_session",
+          },
+          sessionMethod: "browser-session-cookie",
+          expiresAt: "2026-04-05T00:00:00.000Z",
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { submitServerPasswordCredential } = await import("./environments/primary");
+
+    await expect(
+      submitServerPasswordCredential({
+        username: "admin",
+        password: "correct horse battery staple",
+      }),
+    ).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost/api/auth/bootstrap/password", {
+      body: JSON.stringify({
+        username: "admin",
+        password: "correct horse battery staple",
+      }),
+      credentials: "include",
+      headers: {
+        "content-type": "application/json",
+      },
+      method: "POST",
+    });
+  });
+
+  it("surfaces a friendly error message when an invalid admin password is submitted", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse(
+        {
+          error: "Invalid password credential.",
+        },
+        {
+          status: 401,
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { submitServerPasswordCredential } = await import("./environments/primary");
+
+    await expect(
+      submitServerPasswordCredential({
+        password: "bad password",
+      }),
+    ).rejects.toThrow("Invalid password. Check the password and try again.");
+  });
+
   it("waits for the authenticated session to become observable after silent desktop bootstrap", async () => {
     vi.useFakeTimers();
     const fetchMock = vi

@@ -116,6 +116,8 @@ import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
 import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore.ts";
 import { ServerAuthLive } from "./auth/Layers/ServerAuth.ts";
+import { AdminPasswordServiceLive } from "./auth/Layers/AdminPasswordService.ts";
+import { AdminPasswordService } from "./auth/Services/AdminPasswordService.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as RuntimeLayerDiagnostics from "./diagnostics/RuntimeLayerDiagnostics.ts";
@@ -967,6 +969,81 @@ const bootstrapBearerSession = (
     };
   });
 
+const configureAdminPassword = (baseDir: string, password: string) =>
+  Effect.gen(function* () {
+    const adminPassword = yield* AdminPasswordService;
+    yield* adminPassword.setPassword(password);
+  }).pipe(
+    Effect.provide(
+      AdminPasswordServiceLive.pipe(
+        Layer.provide(ServerSecretStoreLive),
+        Layer.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
+      ),
+    ),
+  );
+
+const bootstrapPasswordSession = (
+  password: string,
+  options?: {
+    readonly username?: string;
+    readonly headers?: Record<string, string>;
+  },
+) =>
+  Effect.gen(function* () {
+    const response = yield* HttpClient.post("/api/auth/bootstrap/password", {
+      headers: {
+        "content-type": "application/json",
+        ...options?.headers,
+      },
+      body: HttpBody.jsonUnsafe({
+        ...(options?.username ? { username: options.username } : {}),
+        password,
+      }),
+    });
+    const body = (yield* response.json) as {
+      readonly authenticated?: boolean;
+      readonly sessionMethod?: string;
+      readonly expiresAt?: string;
+      readonly error?: string;
+    };
+    return {
+      response,
+      body,
+      cookie: getHeader(response.headers, "set-cookie"),
+    };
+  });
+
+const bootstrapPasswordBearerSession = (
+  password: string,
+  options?: {
+    readonly username?: string;
+    readonly headers?: Record<string, string>;
+  },
+) =>
+  Effect.gen(function* () {
+    const response = yield* HttpClient.post("/api/auth/bootstrap/password/bearer", {
+      headers: {
+        "content-type": "application/json",
+        ...options?.headers,
+      },
+      body: HttpBody.jsonUnsafe({
+        ...(options?.username ? { username: options.username } : {}),
+        password,
+      }),
+    });
+    const body = (yield* response.json) as {
+      readonly authenticated?: boolean;
+      readonly sessionMethod?: string;
+      readonly expiresAt?: string;
+      readonly sessionToken?: string;
+      readonly error?: string;
+    };
+    return {
+      response,
+      body,
+    };
+  });
+
 class AuthenticationGetterError extends Data.TaggedError("AuthenticationGetterError")<{
   readonly message: string;
 }> {}
@@ -1228,6 +1305,32 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("advertises password bootstrap when an admin password is configured", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-router-password-descriptor-test-",
+      });
+      yield* configureAdminPassword(baseDir, "correct horse battery staple");
+      yield* buildAppUnderTest({ config: { baseDir } });
+
+      const url = yield* getHttpServerUrl("/api/auth/session");
+      const response = yield* Effect.promise(() => fetch(url));
+      const body = (yield* Effect.promise(() => response.json())) as {
+        readonly authenticated: boolean;
+        readonly auth: {
+          readonly bootstrapMethods: ReadonlyArray<string>;
+        };
+      };
+
+      assert.equal(response.status, 200);
+      assert.equal(body.authenticated, false);
+      assert.deepEqual(body.auth.bootstrapMethods, ["desktop-bootstrap", "password"]);
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      assert.equal(JSON.stringify(body.auth).includes("correct horse battery staple"), false);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("bootstraps a browser session and authenticates the session endpoint via cookie", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest();
@@ -1263,6 +1366,70 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("bootstraps a browser session with the admin password", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-router-password-bootstrap-test-",
+      });
+      yield* configureAdminPassword(baseDir, "correct horse battery staple");
+      yield* buildAppUnderTest({ config: { baseDir } });
+
+      const {
+        response: bootstrapResponse,
+        body: bootstrapBody,
+        cookie: setCookie,
+      } = yield* bootstrapPasswordSession("correct horse battery staple", {
+        username: "admin",
+      });
+
+      assert.equal(bootstrapResponse.status, 200);
+      assert.equal(bootstrapBody.authenticated, true);
+      assert.equal(bootstrapBody.sessionMethod, "browser-session-cookie");
+      assert.isDefined(setCookie);
+
+      const sessionUrl = yield* getHttpServerUrl("/api/auth/session");
+      const sessionResponse = yield* Effect.promise(() =>
+        fetch(sessionUrl, {
+          headers: {
+            cookie: setCookie?.split(";")[0] ?? "",
+          },
+        }),
+      );
+      const sessionBody = (yield* Effect.promise(() => sessionResponse.json())) as {
+        readonly authenticated: boolean;
+        readonly role?: string;
+        readonly sessionMethod?: string;
+      };
+
+      assert.equal(sessionResponse.status, 200);
+      assert.equal(sessionBody.authenticated, true);
+      assert.equal(sessionBody.role, "owner");
+      assert.equal(sessionBody.sessionMethod, "browser-session-cookie");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rejects wrong admin passwords and throttles repeated failures", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-router-password-reject-test-",
+      });
+      yield* configureAdminPassword(baseDir, "correct horse battery staple");
+      yield* buildAppUnderTest({ config: { baseDir } });
+
+      for (let index = 0; index < 5; index += 1) {
+        const { response, body } = yield* bootstrapPasswordSession("wrong password");
+        assert.equal(response.status, 401);
+        assert.equal(body.error, "Invalid password credential.");
+      }
+
+      const throttled = yield* bootstrapPasswordSession("wrong password");
+      assert.equal(throttled.response.status, 401);
+      assert.equal(throttled.body.error, "Too many password attempts. Try again later.");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect(
     "bootstraps a bearer session and authenticates the session endpoint via authorization header",
     () =>
@@ -1295,6 +1462,26 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.equal(sessionBody.authenticated, true);
         assert.equal(sessionBody.sessionMethod, "bearer-session-token");
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("bootstraps a bearer session with the admin password", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-router-password-bearer-test-",
+      });
+      yield* configureAdminPassword(baseDir, "correct horse battery staple");
+      yield* buildAppUnderTest({ config: { baseDir } });
+
+      const { response: bootstrapResponse, body: bootstrapBody } =
+        yield* bootstrapPasswordBearerSession("correct horse battery staple");
+
+      assert.equal(bootstrapResponse.status, 200);
+      assert.equal(bootstrapBody.authenticated, true);
+      assert.equal(bootstrapBody.sessionMethod, "bearer-session-token");
+      assert.equal(typeof bootstrapBody.sessionToken, "string");
+      assert.isTrue((bootstrapBody.sessionToken?.length ?? 0) > 0);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("issues short-lived websocket tokens for authenticated bearer sessions", () =>

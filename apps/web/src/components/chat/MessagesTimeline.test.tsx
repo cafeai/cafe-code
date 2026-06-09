@@ -35,7 +35,16 @@ function matchMedia() {
   };
 }
 
-beforeAll(() => {
+let messagesTimelineModule: typeof import("./MessagesTimeline") | null = null;
+
+function readMessagesTimelineModule(): typeof import("./MessagesTimeline") {
+  if (!messagesTimelineModule) {
+    throw new Error("MessagesTimeline test module was not loaded.");
+  }
+  return messagesTimelineModule;
+}
+
+beforeAll(async () => {
   const classList = {
     add: () => {},
     remove: () => {},
@@ -66,7 +75,9 @@ beforeAll(() => {
       offsetHeight: 0,
     },
   });
-});
+
+  messagesTimelineModule = await import("./MessagesTimeline");
+}, 30_000);
 
 const ACTIVE_THREAD_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const MESSAGE_CREATED_AT = "2026-03-17T19:12:28.000Z";
@@ -137,7 +148,7 @@ describe("MessagesTimeline file open helpers", () => {
   it(
     "treats near-bottom scroll positions as already at the end",
     async () => {
-      const { isTimelineScrolledToEnd } = await import("./MessagesTimeline");
+      const { isTimelineScrolledToEnd } = await import("./MessagesTimeline.helpers");
 
       expect(isTimelineScrolledToEnd({ isAtEnd: true })).toBe(true);
       expect(
@@ -162,7 +173,7 @@ describe("MessagesTimeline file open helpers", () => {
   );
 
   it("uses the configured editor only when that editor is available", async () => {
-    const { resolveFileOpenEditor } = await import("./MessagesTimeline");
+    const { resolveFileOpenEditor } = await import("./MessagesTimeline.helpers");
 
     expect(resolveFileOpenEditor("system-default", ["vscode"])).toBeNull();
     expect(resolveFileOpenEditor("vscode", ["vscode", "antigravity"])).toBe("vscode");
@@ -170,7 +181,7 @@ describe("MessagesTimeline file open helpers", () => {
   });
 
   it("extracts openable command path tokens inside the workspace", async () => {
-    const { extractOpenablePathTokens } = await import("./MessagesTimeline");
+    const { extractOpenablePathTokens } = await import("./MessagesTimeline.helpers");
 
     expect(
       extractOpenablePathTokens(
@@ -183,7 +194,7 @@ describe("MessagesTimeline file open helpers", () => {
 
 describe("MessagesTimeline", () => {
   it("renders collapse controls for long user messages", async () => {
-    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const { MessagesTimeline } = readMessagesTimelineModule();
     const markup = renderToStaticMarkup(
       <MessagesTimeline
         {...buildProps()}
@@ -198,7 +209,7 @@ describe("MessagesTimeline", () => {
   });
 
   it("does not render collapse controls for short user messages", async () => {
-    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const { MessagesTimeline } = readMessagesTimelineModule();
     const markup = renderToStaticMarkup(
       <MessagesTimeline
         {...buildProps()}
@@ -211,7 +222,7 @@ describe("MessagesTimeline", () => {
   });
 
   it("keeps the copy button for collapsed long user messages", async () => {
-    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const { MessagesTimeline } = readMessagesTimelineModule();
     const markup = renderToStaticMarkup(
       <MessagesTimeline
         {...buildProps()}
@@ -225,7 +236,7 @@ describe("MessagesTimeline", () => {
   });
 
   it("renders the copy button for completed assistant output", async () => {
-    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const { MessagesTimeline } = readMessagesTimelineModule();
     const markup = renderToStaticMarkup(
       <MessagesTimeline
         {...buildProps()}
@@ -238,7 +249,7 @@ describe("MessagesTimeline", () => {
   });
 
   it("keeps the assistant copy button while output is still streaming", async () => {
-    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const { MessagesTimeline } = readMessagesTimelineModule();
     const markup = renderToStaticMarkup(
       <MessagesTimeline
         {...buildProps()}
@@ -255,7 +266,7 @@ describe("MessagesTimeline", () => {
   });
 
   it("renders context compaction entries in the normal work log", async () => {
-    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const { MessagesTimeline } = readMessagesTimelineModule();
     const markup = renderToStaticMarkup(
       <MessagesTimeline
         {...buildProps()}
@@ -280,7 +291,7 @@ describe("MessagesTimeline", () => {
   });
 
   it("formats changed file paths from the workspace root", async () => {
-    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const { MessagesTimeline } = readMessagesTimelineModule();
     const markup = renderToStaticMarkup(
       <MessagesTimeline
         {...buildProps()}
@@ -310,7 +321,7 @@ describe("MessagesTimeline", () => {
   });
 
   it("left-aligns openable path pills from runtime warning details", async () => {
-    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const { MessagesTimeline } = readMessagesTimelineModule();
     const markup = renderToStaticMarkup(
       <MessagesTimeline
         {...buildProps()}
@@ -338,7 +349,7 @@ describe("MessagesTimeline", () => {
   });
 
   it("does not expose truncated JSON fragments as openable path tokens", async () => {
-    const { extractOpenablePathTokens } = await import("./MessagesTimeline");
+    const { extractOpenablePathTokens } = await import("./MessagesTimeline.helpers");
 
     expect(
       extractOpenablePathTokens(

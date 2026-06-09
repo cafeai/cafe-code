@@ -47,7 +47,11 @@ export type ServerAuthPolicy = typeof ServerAuthPolicy.Type;
  * - `one-time-token`: a short-lived pairing token, suitable for manual pairing
  *   flows such as `/pair?token=...`
  */
-export const ServerAuthBootstrapMethod = Schema.Literals(["desktop-bootstrap", "one-time-token"]);
+export const ServerAuthBootstrapMethod = Schema.Literals([
+  "desktop-bootstrap",
+  "one-time-token",
+  "password",
+]);
 export type ServerAuthBootstrapMethod = typeof ServerAuthBootstrapMethod.Type;
 
 /**
@@ -105,6 +109,12 @@ export const AuthBootstrapInput = Schema.Struct({
   credential: TrimmedNonEmptyString,
 });
 export type AuthBootstrapInput = typeof AuthBootstrapInput.Type;
+
+export const AuthPasswordBootstrapInput = Schema.Struct({
+  username: Schema.optionalKey(TrimmedNonEmptyString),
+  password: TrimmedNonEmptyString,
+});
+export type AuthPasswordBootstrapInput = typeof AuthPasswordBootstrapInput.Type;
 
 export const AuthBootstrapResult = Schema.Struct({
   authenticated: Schema.Literal(true),

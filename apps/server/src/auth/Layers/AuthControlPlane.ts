@@ -4,8 +4,10 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import { BootstrapCredentialServiceLive } from "./BootstrapCredentialService.ts";
+import { AdminPasswordServiceLive } from "./AdminPasswordService.ts";
 import { ServerSecretStoreLive } from "./ServerSecretStore.ts";
 import { SessionCredentialServiceLive } from "./SessionCredentialService.ts";
+import { AdminPasswordService } from "../Services/AdminPasswordService.ts";
 import { BootstrapCredentialService } from "../Services/BootstrapCredentialService.ts";
 import { SessionCredentialService } from "../Services/SessionCredentialService.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "../../persistence/Layers/Sqlite.ts";
@@ -41,6 +43,7 @@ const toAuthControlPlaneError =
 export const makeAuthControlPlane = Effect.gen(function* () {
   const bootstrapCredentials = yield* BootstrapCredentialService;
   const sessions = yield* SessionCredentialService;
+  const adminPassword = yield* AdminPasswordService;
 
   const createPairingLink: AuthControlPlaneShape["createPairingLink"] = (input) =>
     Effect.gen(function* () {
@@ -153,6 +156,19 @@ export const makeAuthControlPlane = Effect.gen(function* () {
       .revokeAllExcept(sessionId)
       .pipe(Effect.mapError(toAuthControlPlaneError("Failed to revoke other sessions.")));
 
+  const isAdminPasswordConfigured = adminPassword.isConfigured.pipe(
+    Effect.mapError(toAuthControlPlaneError("Failed to inspect admin password configuration.")),
+  );
+
+  const setAdminPassword: AuthControlPlaneShape["setAdminPassword"] = (password) =>
+    adminPassword
+      .setPassword(password)
+      .pipe(Effect.mapError(toAuthControlPlaneError("Failed to set admin password.")));
+
+  const clearAdminPassword = adminPassword.clearPassword.pipe(
+    Effect.mapError(toAuthControlPlaneError("Failed to clear admin password.")),
+  );
+
   return {
     createPairingLink,
     listPairingLinks,
@@ -161,12 +177,16 @@ export const makeAuthControlPlane = Effect.gen(function* () {
     listSessions,
     revokeSession,
     revokeOtherSessionsExcept,
+    isAdminPasswordConfigured,
+    setAdminPassword,
+    clearAdminPassword,
   } satisfies AuthControlPlaneShape;
 });
 
 export const AuthCoreLive = Layer.mergeAll(
   BootstrapCredentialServiceLive,
   SessionCredentialServiceLive,
+  AdminPasswordServiceLive,
 );
 
 export const AuthStorageLive = Layer.mergeAll(ServerSecretStoreLive, SqlitePersistenceLayerLive);

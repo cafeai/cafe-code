@@ -3,6 +3,7 @@ import type {
   AuthBootstrapResult,
   AuthClientMetadata,
   AuthCreatePairingCredentialInput,
+  AuthPasswordBootstrapInput,
   AuthPairingCredentialResult,
   AuthRevokeClientSessionInput,
   AuthRevokePairingLinkInput,
@@ -169,6 +170,43 @@ async function exchangeBootstrapCredential(credential: string): Promise<AuthBoot
   });
 }
 
+function toFriendlyPasswordBootstrapErrorMessage(status: number, message: string): string {
+  const parsedMessage = parseBootstrapErrorMessage(message);
+  if (status === 401) {
+    return "Invalid password. Check the password and try again.";
+  }
+
+  return parsedMessage;
+}
+
+async function exchangePasswordCredential(
+  input: AuthPasswordBootstrapInput,
+): Promise<AuthBootstrapResult> {
+  return retryTransientBootstrap(async () => {
+    const response = await fetch(resolvePrimaryEnvironmentHttpUrl("/api/auth/bootstrap/password"), {
+      body: JSON.stringify(input),
+      credentials: "include",
+      headers: {
+        "content-type": "application/json",
+      },
+      method: "POST",
+    });
+
+    if (!response.ok) {
+      const message = toFriendlyPasswordBootstrapErrorMessage(
+        response.status,
+        await response.text(),
+      );
+      throw new BootstrapHttpError({
+        message: message || `Failed to bootstrap password auth session (${response.status}).`,
+        status: response.status,
+      });
+    }
+
+    return (await response.json()) as AuthBootstrapResult;
+  });
+}
+
 async function waitForAuthenticatedSessionAfterBootstrap(): Promise<AuthSessionState> {
   const startedAt = Date.now();
 
@@ -264,6 +302,24 @@ export async function submitServerAuthCredential(credential: string): Promise<vo
   await exchangeBootstrapCredential(trimmedCredential);
   bootstrapPromise = null;
   stripPairingTokenFromUrl();
+}
+
+export async function submitServerPasswordCredential(input: {
+  readonly username?: string;
+  readonly password: string;
+}): Promise<void> {
+  const password = input.password.trim();
+  const username = input.username?.trim();
+  if (!password) {
+    throw new Error("Enter the admin password to continue.");
+  }
+
+  await exchangePasswordCredential({
+    ...(username ? { username } : {}),
+    password,
+  });
+  await waitForAuthenticatedSessionAfterBootstrap();
+  resolvedAuthenticatedGateState = { status: "authenticated" };
 }
 
 export async function createServerPairingCredential(

@@ -26,6 +26,7 @@ export {
   revokeServerPairingLink,
   stripPairingTokenFromUrl,
   submitServerAuthCredential,
+  submitServerPasswordCredential,
   takePairingTokenFromUrl,
   type ServerClientSessionRecord,
   type ServerPairingLinkRecord,

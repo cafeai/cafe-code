@@ -1,5 +1,5 @@
 import { EnvironmentId } from "@cafecode/contracts";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 let mockSavedRecords: Array<Record<string, unknown>> = [];
 
@@ -125,12 +125,17 @@ vi.mock("../../rpc/wsTransport", () => ({
 }));
 
 describe("addSavedEnvironment", () => {
-  afterEach(() => {
+  beforeAll(async () => {
+    await import("./service");
+  });
+
+  afterEach(async () => {
+    const { resetEnvironmentServiceForTests } = await import("./service");
+    await resetEnvironmentServiceForTests();
     vi.useRealTimers();
   });
 
   beforeEach(() => {
-    vi.resetModules();
     vi.clearAllMocks();
     mockSavedRecords = [];
     vi.stubGlobal("window", {

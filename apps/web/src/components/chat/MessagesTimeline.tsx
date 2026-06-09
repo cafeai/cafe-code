@@ -64,6 +64,19 @@ import { readLocalApi } from "../../localApi";
 import { readEnvironmentApi } from "../../environmentApi";
 import { useSettings } from "../../hooks/useSettings";
 import { useServerAvailableEditors } from "../../rpc/serverState";
+import {
+  extractOpenablePathTokens,
+  isTimelineScrolledToEnd,
+  resolveFileOpenEditor,
+  resolveWorkspaceFilePath,
+} from "./MessagesTimeline.helpers";
+
+export {
+  extractOpenablePathTokens,
+  isTimelineScrolledToEnd,
+  resolveFileOpenEditor,
+  resolveWorkspaceFilePath,
+} from "./MessagesTimeline.helpers";
 
 // ---------------------------------------------------------------------------
 // Context — shared state consumed by every row component via Context.
@@ -94,7 +107,6 @@ const TimelineRowActivityCtx = createContext<TimelineRowActivityState>(null!);
 const TIMELINE_LIST_HEADER = <div className="h-3 sm:h-4" />;
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
-const TIMELINE_AT_END_TOLERANCE_PX = 720;
 const TIMELINE_MAINTAIN_SCROLL_AT_END_THRESHOLD = 0.9;
 const TIMELINE_SUBMIT_STICK_TO_END_WINDOW_MS = 1_500;
 const TIMELINE_SUBMIT_STICK_TO_END_FRAME_ATTEMPTS = 8;
@@ -106,32 +118,6 @@ const TIMELINE_MAINTAIN_VISIBLE_CONTENT_POSITION = {
   data: false,
   size: true,
 } as const;
-
-export function isTimelineScrolledToEnd(state: {
-  readonly isAtEnd: boolean;
-  readonly contentLength?: number;
-  readonly scroll?: number;
-  readonly scrollLength?: number;
-}): boolean {
-  if (state.isAtEnd) {
-    return true;
-  }
-
-  const { contentLength, scroll, scrollLength } = state;
-  if (
-    typeof contentLength !== "number" ||
-    typeof scroll !== "number" ||
-    typeof scrollLength !== "number" ||
-    !Number.isFinite(contentLength) ||
-    !Number.isFinite(scroll) ||
-    !Number.isFinite(scrollLength)
-  ) {
-    return false;
-  }
-
-  const remainingScrollDistance = Math.max(0, contentLength - scroll - scrollLength);
-  return remainingScrollDistance <= TIMELINE_AT_END_TOLERANCE_PX;
-}
 
 // ---------------------------------------------------------------------------
 // Props (public API)
@@ -1459,72 +1445,6 @@ function capitalizePhrase(value: string): string {
   return `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}`;
 }
 
-function normalizePathForOpen(path: string): string | null {
-  if (path.includes("\0") || isTruncatedOpenPath(path) || /^[a-z][a-z0-9+.-]*:/iu.test(path)) {
-    return null;
-  }
-  const normalized = path.replaceAll("\\", "/");
-  const absolute = normalized.startsWith("/");
-  const output: string[] = [];
-  for (const part of normalized.split("/")) {
-    if (part.length === 0 || part === ".") {
-      continue;
-    }
-    if (part === "..") {
-      if (output.length === 0) {
-        return null;
-      }
-      output.pop();
-      continue;
-    }
-    output.push(part);
-  }
-  return `${absolute ? "/" : ""}${output.join("/")}`;
-}
-
-function isTruncatedOpenPath(path: string): boolean {
-  const trimmed = path.trim();
-  return trimmed.includes("…") || trimmed.includes("[truncated]") || trimmed.includes("...");
-}
-
-export function resolveWorkspaceFilePath(
-  filePath: string,
-  workspaceRoot: string | undefined,
-): string | null {
-  const normalizedFilePath = normalizePathForOpen(filePath);
-  if (!normalizedFilePath) {
-    return null;
-  }
-  const normalizedWorkspaceRoot = workspaceRoot ? normalizePathForOpen(workspaceRoot) : null;
-  if (!normalizedWorkspaceRoot) {
-    return normalizedFilePath.startsWith("/") ? normalizedFilePath : null;
-  }
-
-  const absolutePath = normalizedFilePath.startsWith("/")
-    ? normalizedFilePath
-    : normalizePathForOpen(`${normalizedWorkspaceRoot}/${normalizedFilePath}`);
-  if (!absolutePath) {
-    return null;
-  }
-  if (
-    absolutePath !== normalizedWorkspaceRoot &&
-    !absolutePath.startsWith(`${normalizedWorkspaceRoot}/`)
-  ) {
-    return null;
-  }
-  return absolutePath;
-}
-
-export function resolveFileOpenEditor(
-  defaultEditor: DefaultEditorSelection,
-  availableEditors: ReadonlyArray<EditorId>,
-): EditorId | null {
-  if (defaultEditor === "system-default") {
-    return null;
-  }
-  return availableEditors.includes(defaultEditor) ? defaultEditor : null;
-}
-
 function openFileWithPreferredEditor(input: {
   readonly filePath: string;
   readonly workspaceRoot: string | undefined;
@@ -1546,46 +1466,6 @@ function openFileWithPreferredEditor(input: {
   void opened.catch((error: unknown) => {
     console.warn("Failed to open file", error);
   });
-}
-
-const COMMAND_PATH_STRIP_PATTERN = /^[`'"[(<]+|[`'"\])>,;]+$/g;
-const COMMAND_PATH_TOKEN_REJECT_PATTERN = /[{}"]/u;
-
-function isOpenableCommandPathToken(token: string): boolean {
-  if (COMMAND_PATH_TOKEN_REJECT_PATTERN.test(token) || isTruncatedOpenPath(token)) {
-    return false;
-  }
-  const colonIndex = token.indexOf(":");
-  if (colonIndex >= 0 && !/^[a-zA-Z]:[\\/]/u.test(token)) {
-    return false;
-  }
-  return true;
-}
-
-export function extractOpenablePathTokens(
-  text: string,
-  workspaceRoot: string | undefined,
-): ReadonlyArray<string> {
-  const seen = new Set<string>();
-  const paths: string[] = [];
-  for (const rawToken of text.split(/\s+/u)) {
-    const token = rawToken.trim().replace(COMMAND_PATH_STRIP_PATTERN, "");
-    if (!token || token.startsWith("-") || !isOpenableCommandPathToken(token)) {
-      continue;
-    }
-    if (!token.includes("/") && !token.startsWith(".")) {
-      continue;
-    }
-    if (resolveWorkspaceFilePath(token, workspaceRoot) === null) {
-      continue;
-    }
-    if (seen.has(token)) {
-      continue;
-    }
-    seen.add(token);
-    paths.push(token);
-  }
-  return paths.slice(0, 4);
 }
 
 function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {

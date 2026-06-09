@@ -11,7 +11,7 @@ import {
   type OrchestrationThread,
   type OrchestrationThreadStreamItem,
 } from "@cafecode/contracts";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockSubscribeThread = vi.fn();
 const mockThreadUnsubscribe = vi.fn();
@@ -244,9 +244,12 @@ function makeThreadSessionSetEvent(params: {
 }
 
 describe("retainThreadDetailSubscription", () => {
+  beforeAll(async () => {
+    await import("./service");
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
-    vi.resetModules();
     vi.clearAllMocks();
     mockGetPrimaryKnownEnvironment.mockReturnValue({
       id: "env-1",

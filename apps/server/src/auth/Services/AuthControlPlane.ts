@@ -61,6 +61,9 @@ export interface AuthControlPlaneShape {
   readonly revokeOtherSessionsExcept: (
     sessionId: AuthContracts.AuthSessionId,
   ) => Effect.Effect<number, AuthControlPlaneError>;
+  readonly isAdminPasswordConfigured: Effect.Effect<boolean, AuthControlPlaneError>;
+  readonly setAdminPassword: (password: string) => Effect.Effect<void, AuthControlPlaneError>;
+  readonly clearAdminPassword: Effect.Effect<void, AuthControlPlaneError>;
 }
 
 export class AuthControlPlane extends Context.Service<AuthControlPlane, AuthControlPlaneShape>()(

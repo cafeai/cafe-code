@@ -1,5 +1,6 @@
 import { AuthSessionId } from "@cafecode/contracts/auth";
 import * as Console from "effect/Console";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -82,6 +83,25 @@ const tokenOnlyFlag = Flag.boolean("token-only").pipe(
   Flag.withDescription("Print only the issued bearer token."),
   Flag.withDefault(false),
 );
+
+const passwordStdinFlag = Flag.boolean("password-stdin").pipe(
+  Flag.withDescription("Read the new admin password from stdin."),
+  Flag.withDefault(false),
+);
+
+const readPasswordFromStdin = Effect.promise(async () => {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks)
+    .toString("utf8")
+    .replace(/\r?\n$/u, "");
+});
+
+class PasswordStdinRequiredError extends Data.TaggedError("PasswordStdinRequiredError")<{
+  readonly message: string;
+}> {}
 
 const pairingCreateCommand = Command.make("create", {
   ...authLocationFlags,
@@ -241,7 +261,73 @@ const sessionCommand = Command.make("session").pipe(
   Command.withSubcommands([sessionIssueCommand, sessionListCommand, sessionRevokeCommand]),
 );
 
+const passwordStatusCommand = Command.make("status", {
+  ...authLocationFlags,
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription("Show whether an admin password is configured."),
+  Command.withHandler((flags) =>
+    runWithAuthControlPlane(
+      flags,
+      (authControlPlane) =>
+        Effect.gen(function* () {
+          const configured = yield* authControlPlane.isAdminPasswordConfigured;
+          yield* Console.log(
+            flags.json
+              ? `{\n  "configured": ${configured ? "true" : "false"}\n}\n`
+              : configured
+                ? "Admin password is configured.\n"
+                : "Admin password is not configured.\n",
+          );
+        }),
+      {
+        quietLogs: flags.json,
+      },
+    ),
+  ),
+);
+
+const passwordSetCommand = Command.make("set", {
+  ...authLocationFlags,
+  passwordStdin: passwordStdinFlag,
+}).pipe(
+  Command.withDescription("Set or replace the admin password from stdin."),
+  Command.withHandler((flags) =>
+    runWithAuthControlPlane(flags, (authControlPlane) =>
+      Effect.gen(function* () {
+        if (!flags.passwordStdin) {
+          return yield* new PasswordStdinRequiredError({
+            message: "Use --password-stdin so the admin password is not exposed in argv.",
+          });
+        }
+        const password = yield* readPasswordFromStdin;
+        yield* authControlPlane.setAdminPassword(password);
+        yield* Console.log("Admin password updated.\n");
+      }),
+    ),
+  ),
+);
+
+const passwordClearCommand = Command.make("clear", {
+  ...authLocationFlags,
+}).pipe(
+  Command.withDescription("Remove the configured admin password."),
+  Command.withHandler((flags) =>
+    runWithAuthControlPlane(flags, (authControlPlane) =>
+      Effect.gen(function* () {
+        yield* authControlPlane.clearAdminPassword;
+        yield* Console.log("Admin password cleared.\n");
+      }),
+    ),
+  ),
+);
+
+const passwordCommand = Command.make("password").pipe(
+  Command.withDescription("Manage Web UI admin password authentication."),
+  Command.withSubcommands([passwordStatusCommand, passwordSetCommand, passwordClearCommand]),
+);
+
 export const authCommand = Command.make("auth").pipe(
   Command.withDescription("Manage the local auth control plane for headless deployments."),
-  Command.withSubcommands([pairingCommand, sessionCommand]),
+  Command.withSubcommands([pairingCommand, sessionCommand, passwordCommand]),
 );

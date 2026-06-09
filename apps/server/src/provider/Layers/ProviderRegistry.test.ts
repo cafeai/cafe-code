@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, it, assert } from "@effect/vitest";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -39,7 +40,10 @@ import {
 } from "./CodexProvider.ts";
 import { checkClaudeProviderStatus } from "./ClaudeProvider.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
-import { ProviderInstanceRegistryHydrationLive } from "./ProviderInstanceRegistryHydration.ts";
+import {
+  deriveProviderInstanceConfigMap,
+  ProviderInstanceRegistryHydrationLive,
+} from "./ProviderInstanceRegistryHydration.ts";
 import {
   haveProvidersChanged,
   mergeProviderSnapshot,
@@ -52,6 +56,7 @@ import { ServerSettingsService, type ServerSettingsShape } from "../../serverSet
 import { readProviderStatusCache, resolveProviderStatusCachePath } from "../providerStatusCache.ts";
 import type { ProviderInstance } from "../ProviderDriver.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
+import { ProviderInstanceRegistryMutator } from "../Services/ProviderInstanceRegistryMutator.ts";
 import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 const decodeServerSettings = Schema.decodeSync(ServerSettings);
@@ -287,7 +292,7 @@ function makeMutableServerSettingsService(
           return next;
         }),
       get streamChanges() {
-        return Stream.fromPubSub(changes);
+        return Stream.concat(Stream.fromEffect(Ref.get(settingsRef)), Stream.fromPubSub(changes));
       },
     } satisfies ServerSettingsShape;
   });
@@ -1069,6 +1074,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         Effect.gen(function* () {
           const firstMissing = `t3code_codex_first_`;
           const secondMissing = `t3code_codex_second_`;
+          const reprobeModel = "settings-reprobe-marker";
           const serverSettings = yield* makeMutableServerSettingsService(
             decodeServerSettings(
               deepMerge(encodedDefaultServerSettings, {
@@ -1100,23 +1106,28 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           const runtimeServices = yield* Layer.build(providerRegistryLayer).pipe(
             Scope.provide(scope),
           );
+          const runtimeServicesWithMutator = runtimeServices as unknown as Context.Context<
+            ProviderRegistry | ProviderInstanceRegistryMutator
+          >;
 
           yield* Effect.gen(function* () {
             const registry = yield* ProviderRegistry;
             // Boot-time probe: the default codex instance is enabled with
             // `firstMissing`, so the real spawner yields ENOENT and the
-            // snapshot should be `status: "error"`. What *distinguishes*
-            // the two probe runs is `checkedAt` — each probe stamps a
-            // fresh DateTime, so we capture it and assert it advances
-            // after the settings mutation.
+            // snapshot should be `status: "error"` / `installed: false`.
             const initialProviders = yield* registry.getProviders;
             const initialCodex = initialProviders.find(
               (provider) => provider.instanceId === "codex",
             );
             assert.strictEqual(initialCodex?.status, "error");
             assert.strictEqual(initialCodex?.installed, false);
-            const initialCheckedAt = initialCodex?.checkedAt;
-            assert.notStrictEqual(initialCheckedAt, undefined);
+            assert.strictEqual(
+              initialCodex?.models.some((model) => model.slug === reprobeModel),
+              false,
+            );
+            yield* Effect.yieldNow;
+            yield* TestClock.adjust("1 millis");
+            yield* Effect.yieldNow;
 
             // Drive a settings change. The Hydration layer's
             // `SettingsWatcherLive` consumes this via `streamChanges`,
@@ -1126,19 +1137,30 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             // instanceRegistry.streamChanges, () => syncLiveSources)`
             // fires `syncLiveSources`, which subscribes + awaits a fresh
             // refresh on the rebuilt instance.
-            yield* serverSettings.updateSettings({
+            const nextSettings = yield* serverSettings.updateSettings({
               providers: {
-                codex: { enabled: true, binaryPath: secondMissing },
+                codex: {
+                  enabled: true,
+                  binaryPath: secondMissing,
+                  customModels: [reprobeModel],
+                },
               },
             });
+            const mutator = yield* ProviderInstanceRegistryMutator;
+            yield* mutator.reconcile(deriveProviderInstanceConfigMap(nextSettings));
 
-            // Poll with TestClock until `checkedAt` advances or we hit a
-            // generous virtual 3-second ceiling.
+            // Poll with TestClock until the rebuilt probe reflects settings
+            // from the new instance. The replacement binary is still missing,
+            // but custom models are projected into error snapshots, so this
+            // proves the aggregator no longer holds the initial snapshot.
             const refreshed = yield* Effect.gen(function* () {
               for (let attempts = 0; attempts < 60; attempts += 1) {
                 const providers = yield* registry.getProviders;
                 const codex = providers.find((provider) => provider.instanceId === "codex");
-                if (codex !== undefined && codex.checkedAt !== initialCheckedAt) {
+                if (
+                  codex?.models.some((model) => model.slug === reprobeModel && model.isCustom) ===
+                  true
+                ) {
                   return providers;
                 }
                 yield* TestClock.adjust("50 millis");
@@ -1148,14 +1170,14 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             });
 
             const reprobedCodex = refreshed.find((provider) => provider.instanceId === "codex");
-            assert.notStrictEqual(
-              reprobedCodex?.checkedAt,
-              initialCheckedAt,
-              "Expected a fresh probe after settings change, got the stale snapshot",
-            );
             assert.strictEqual(reprobedCodex?.status, "error");
             assert.strictEqual(reprobedCodex?.installed, false);
-          }).pipe(Effect.provide(runtimeServices));
+            assert.strictEqual(
+              reprobedCodex?.models.some((model) => model.slug === reprobeModel && model.isCustom),
+              true,
+              "Expected a fresh probe after settings change, got the stale snapshot",
+            );
+          }).pipe(Effect.provide(runtimeServicesWithMutator));
         }),
       );
 

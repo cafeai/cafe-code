@@ -3511,7 +3511,8 @@ describe("ProviderRuntimeIngestion", () => {
       (entry) =>
         entry.session?.status === "running" &&
         entry.session.activeTurnId === concreteTurnId &&
-        entry.latestTurn?.turnId === concreteTurnId,
+        entry.latestTurn?.turnId === concreteTurnId &&
+        entry.activities.some((activity) => activity.turnId === concreteTurnId),
     );
 
     expect(repaired.latestTurn?.startedAt).toBe(workAt);
