@@ -77,6 +77,7 @@ If a tradeoff is required, choose correctness, durability, and debuggability ove
 
 - Chat messages render Markdown through `apps/web/src/components/ChatMarkdown.tsx`. Provider math output is intentionally normalized before Markdown parsing by `apps/web/src/lib/chatMarkdownMath.ts`: Codex commonly emits fenced `math`/`tex`/`latex` blocks, while Claude commonly emits `$...$`, `$$...$$`, `\(...\)`, `\[...\]`, and TeX macros in prose. Preserve all of those shapes when changing message rendering.
 - Math rendering uses `remark-math` plus KaTeX through `rehype-katex`; keep KaTeX configured with `trust: false` and non-throwing error handling so malformed or hostile math cannot crash chat rendering or enable trusted HTML-style extensions. Real code fences must remain code fences and must not be reinterpreted as math.
+- Codex ChatGPT search output can include private-use citation delimiters such as `U+E200 cite U+E202 <handle> U+E201` around opaque handles like `turn4search3`. These are valid UTF-8 provider markup, not mojibake or a local decoder failure. Cafe must keep raw provider text persisted for diagnostics, but Codex chat display and assistant-copy text should normalize those markers through `apps/web/src/lib/codexCitations.ts` so private-use glyphs do not appear in the UI. Do not fabricate external links unless app-server supplies trusted URL metadata for the handle.
 
 ## Current Runtime Architecture
 

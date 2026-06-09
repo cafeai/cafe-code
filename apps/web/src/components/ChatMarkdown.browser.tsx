@@ -151,6 +151,24 @@ describe("ChatMarkdown", () => {
     }
   });
 
+  it("normalizes Codex private-use citation markers for display", async () => {
+    const screen = await render(
+      <ChatMarkdown
+        text={"Reference \uE200cite\uE202turn4search3\uE201 stays readable."}
+        cwd="/repo/project"
+        normalizeCodexCitations
+      />,
+    );
+
+    try {
+      await expect.element(page.getByText("Reference [1] stays readable.")).toBeInTheDocument();
+      await expect.element(page.getByText("\uE200")).not.toBeInTheDocument();
+      await expect.element(page.getByText("turn4search3")).not.toBeInTheDocument();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("renders Codex math fences with KaTeX instead of code highlighting", async () => {
     const screen = await render(
       <ChatMarkdown text={["```math", "E = mc^2", "```"].join("\n")} cwd="/repo/project" />,

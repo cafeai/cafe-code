@@ -6270,6 +6270,7 @@ export default function ChatView(props: ChatViewProps) {
               onRevertUserMessage={onRevertUserMessage}
               isRevertingCheckpoint={isRevertingCheckpoint}
               onImageExpand={onExpandTimelineImage}
+              activeProvider={activeThread.session?.provider ?? null}
               markdownCwd={gitCwd ?? undefined}
               additionalWorkspaceRoots={activeProject?.additionalWorkspaceRoots ?? []}
               timestampFormat={timestampFormat}

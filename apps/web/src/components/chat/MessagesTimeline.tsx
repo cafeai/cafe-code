@@ -3,6 +3,7 @@ import {
   type EditorId,
   type MessageId,
   type OrchestrationThreadActivity,
+  type ProviderDriverKind,
   type ServerProviderSkill,
   type ThreadId,
   type TurnId,
@@ -57,6 +58,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
 import { type DefaultEditorSelection, type TimestampFormat } from "@cafecode/contracts/settings";
 import { formatTimestamp } from "../../timestampFormat";
+import { normalizeCodexCitationMarkers } from "../../lib/codexCitations";
 
 import { SkillInlineText } from "./SkillInlineText";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
@@ -74,6 +76,7 @@ import { useServerAvailableEditors } from "../../rpc/serverState";
 
 interface TimelineRowSharedState {
   timestampFormat: TimestampFormat;
+  activeProvider: ProviderDriverKind | null;
   markdownCwd: string | undefined;
   additionalWorkspaceRoots: ReadonlyArray<string>;
   workspaceRoot: string | undefined;
@@ -154,6 +157,7 @@ interface MessagesTimelineProps {
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   activeThreadEnvironmentId: EnvironmentId;
+  activeProvider: ProviderDriverKind | null;
   markdownCwd: string | undefined;
   additionalWorkspaceRoots?: ReadonlyArray<string>;
   timestampFormat: TimestampFormat;
@@ -184,6 +188,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   isRevertingCheckpoint,
   onImageExpand,
   activeThreadEnvironmentId,
+  activeProvider,
   markdownCwd,
   additionalWorkspaceRoots = [],
   timestampFormat,
@@ -422,6 +427,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       skills,
       activeThreadId,
       activeThreadEnvironmentId,
+      activeProvider,
       onRevertUserMessage,
       onImageExpand,
     }),
@@ -433,6 +439,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       skills,
       activeThreadId,
       activeThreadEnvironmentId,
+      activeProvider,
       onRevertUserMessage,
       onImageExpand,
     ],
@@ -703,6 +710,7 @@ function useSmoothedAssistantText(messageId: MessageId, sourceText: string) {
 function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
   const sourceMessageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+  const normalizeCodexCitations = ctx.activeProvider === "codex";
   const { displayedText: messageText, isAnimating } = useSmoothedAssistantText(
     row.message.id,
     sourceMessageText,
@@ -715,6 +723,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
         cwd={ctx.markdownCwd}
         additionalWorkspaceRoots={ctx.additionalWorkspaceRoots}
         isStreaming={Boolean(row.message.streaming || isAnimating)}
+        normalizeCodexCitations={normalizeCodexCitations}
         skills={ctx.skills}
       />
       <div className="mt-1.5 flex items-center gap-2">
@@ -752,6 +761,7 @@ function AssistantCompletionDivider({ completionSummary }: { completionSummary: 
 }
 
 function AssistantCopyButton({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
+  const ctx = use(TimelineRowCtx);
   const assistantCopyState = resolveAssistantMessageCopyState({
     text: row.message.text ?? null,
     showCopyButton: row.showAssistantCopyButton,
@@ -765,7 +775,11 @@ function AssistantCopyButton({ row }: { row: Extract<TimelineRow, { kind: "messa
   return (
     <div className="flex items-center opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/assistant:opacity-100">
       <MessageCopyButton
-        text={assistantCopyState.text ?? ""}
+        text={
+          ctx.activeProvider === "codex"
+            ? normalizeCodexCitationMarkers(assistantCopyState.text ?? "", { mode: "strip" })
+            : (assistantCopyState.text ?? "")
+        }
         size="icon-xs"
         variant="outline"
         className="border-border/50 bg-background/35 text-muted-foreground/45 shadow-none hover:border-border/70 hover:bg-background/55 hover:text-muted-foreground/70"
