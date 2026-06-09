@@ -202,6 +202,33 @@ describe("ChatMarkdown", () => {
     }
   });
 
+  it("keeps wide Markdown tables inside a horizontal scroll container", async () => {
+    const screen = await render(
+      <ChatMarkdown
+        text={[
+          "| Case | Expression | Notes |",
+          "| --- | --- | --- |",
+          "| Long inline math | $f(x)=\\sum_{i=1}^{999999999999999999999999999999999999999999999999} \\frac{x_i}{1+x_i}$ | Should not widen the message column |",
+          "| Long code token | `const_veryVeryVeryVeryVeryVeryVeryLongIdentifierNameWithoutBreaksOrSpacesEqualsAnotherVeryVeryVeryVeryLongIdentifierName` | Scroll instead of crushing columns |",
+        ].join("\n")}
+        cwd="/repo/project"
+      />,
+    );
+
+    try {
+      const tableScroll = document.querySelector<HTMLElement>(".chat-markdown-table-scroll");
+      const table = tableScroll?.querySelector("table");
+
+      expect(tableScroll).not.toBeNull();
+      expect(table).not.toBeNull();
+      expect(window.getComputedStyle(tableScroll!).overflowX).toBe("auto");
+      expect(window.getComputedStyle(table!).minWidth).toBe("max-content");
+      expect(document.querySelector(".katex")).not.toBeNull();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("asks before opening markdown file links outside the workspace", async () => {
     confirmMock.mockResolvedValueOnce(false);
     const screen = await render(
