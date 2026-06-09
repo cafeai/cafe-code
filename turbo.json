@@ -11,6 +11,7 @@
     "CAFE_CODE_NO_BROWSER",
     "CAFE_CODE_HOME",
     "CAFE_CODE_AUTH_TOKEN",
+    "CAFE_CODE_DESKTOP_DEV",
     "CAFE_CODE_DESKTOP_WS_URL",
     "CAFE_CODE_TRACE_MIN_LEVEL",
     "CAFE_CODE_TRACE_TIMING_ENABLED",
@@ -24,7 +25,20 @@
     "CAFE_CODE_OTLP_SERVICE_NAME",
     "APP_VERSION"
   ],
-  "globalPassThroughEnv": ["PATHEXT"],
+  "globalPassThroughEnv": [
+    "CAFE_CODE_LINUX_PASSWORD_STORE",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DESKTOP_SESSION",
+    "DISPLAY",
+    "KDE_FULL_SESSION",
+    "KDE_SESSION_VERSION",
+    "PATHEXT",
+    "WAYLAND_DISPLAY",
+    "XDG_CURRENT_DESKTOP",
+    "XDG_RUNTIME_DIR",
+    "XDG_SESSION_DESKTOP",
+    "XDG_SESSION_TYPE"
+  ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
