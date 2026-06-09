@@ -1028,6 +1028,29 @@ describe("settings panels", () => {
     });
   });
 
+  it("persists the chat selection copy preference from Chat settings", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <ChatSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByText("Chat selection copy")).toBeInTheDocument();
+    await expect.element(page.getByText("Markdown", { exact: true })).toBeInTheDocument();
+    await page.getByLabelText("Chat selection copy format").click();
+    await page.getByText("Plain text", { exact: true }).click();
+
+    await vi.waitFor(() => {
+      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ chatCopyFormat: "plainText" }),
+      );
+    });
+  });
+
   it("persists appearance preferences from Appearance settings", async () => {
     const desktopBridge = createDesktopBridgeStub();
     window.desktopBridge = desktopBridge;

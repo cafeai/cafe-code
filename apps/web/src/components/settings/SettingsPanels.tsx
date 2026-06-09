@@ -37,6 +37,7 @@ import {
   MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
   MAX_SIDEBAR_STAR_SPEED,
   MIN_SIDEBAR_STAR_SPEED,
+  type ChatCopyFormat,
   type DefaultEditorSelection,
   type PowerSaveBlockerMode,
 } from "@cafecode/contracts/settings";
@@ -165,6 +166,11 @@ const TIMESTAMP_FORMAT_LABELS = {
   "12-hour": "12-hour",
   "24-hour": "24-hour",
 } as const;
+
+const CHAT_COPY_FORMAT_LABELS = {
+  markdown: "Markdown",
+  plainText: "Plain text",
+} as const satisfies Record<ChatCopyFormat, string>;
 
 const DEFAULT_EDITOR_SYSTEM_VALUE = "system-default" satisfies DefaultEditorSelection;
 
@@ -1120,6 +1126,45 @@ export function ChatSettingsPanel() {
               }
               aria-label="Open the task panel automatically"
             />
+          }
+        />
+
+        <SettingsRow
+          title="Chat selection copy"
+          description="Choose what Ctrl-C and right-click Copy put on the clipboard for selected chat message text."
+          resetAction={
+            settings.chatCopyFormat !== DEFAULT_UNIFIED_SETTINGS.chatCopyFormat ? (
+              <SettingResetButton
+                label="chat selection copy"
+                onClick={() =>
+                  updateSettings({
+                    chatCopyFormat: DEFAULT_UNIFIED_SETTINGS.chatCopyFormat,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={settings.chatCopyFormat}
+              onValueChange={(value) => {
+                if (value === "markdown" || value === "plainText") {
+                  updateSettings({ chatCopyFormat: value });
+                }
+              }}
+            >
+              <SelectTrigger className="w-full sm:w-44" aria-label="Chat selection copy format">
+                <SelectValue>{CHAT_COPY_FORMAT_LABELS[settings.chatCopyFormat]}</SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value="markdown">
+                  Markdown
+                </SelectItem>
+                <SelectItem hideIndicator value="plainText">
+                  Plain text
+                </SelectItem>
+              </SelectPopup>
+            </Select>
           }
         />
 
