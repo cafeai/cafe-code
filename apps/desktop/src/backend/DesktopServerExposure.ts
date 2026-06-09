@@ -16,12 +16,9 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
-import { HttpClient } from "effect/unstable/http";
-import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { DEFAULT_DESKTOP_SETTINGS, type DesktopSettings } from "../settings/DesktopAppSettings.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
-import { resolveTailscaleAdvertisedEndpoints } from "./tailscaleEndpointProvider.ts";
 import * as DesktopAppSettingsService from "../settings/DesktopAppSettings.ts";
 
 export const DESKTOP_LOOPBACK_HOST = "127.0.0.1";
@@ -212,7 +209,7 @@ const resolveDesktopCoreAdvertisedEndpoints = (
   return endpoints;
 };
 
-type DesktopServerExposurePersistenceOperation = "server-exposure-mode" | "tailscale-serve";
+type DesktopServerExposurePersistenceOperation = "server-exposure-mode";
 
 export class DesktopServerExposureNoNetworkAddressError extends Data.TaggedError(
   "DesktopServerExposureNoNetworkAddressError",
@@ -245,8 +242,6 @@ export interface DesktopServerExposureBackendConfig {
   readonly port: number;
   readonly bindHost: string;
   readonly httpBaseUrl: URL;
-  readonly tailscaleServeEnabled: boolean;
-  readonly tailscaleServePort: number;
 }
 
 export interface DesktopServerExposureChange {
@@ -263,10 +258,6 @@ export interface DesktopServerExposureShape {
   readonly setMode: (
     mode: DesktopServerExposureMode,
   ) => Effect.Effect<DesktopServerExposureChange, DesktopServerExposureSetModeError>;
-  readonly setTailscaleServeEnabled: (input: {
-    readonly enabled: boolean;
-    readonly port?: number;
-  }) => Effect.Effect<DesktopServerExposureChange, DesktopServerExposurePersistenceError>;
   readonly getAdvertisedEndpoints: Effect.Effect<readonly AdvertisedEndpoint[]>;
 }
 
@@ -294,8 +285,6 @@ interface RuntimeState {
   readonly httpBaseUrl: URL;
   readonly endpointUrl: Option.Option<string>;
   readonly advertisedHost: Option.Option<string>;
-  readonly tailscaleServeEnabled: boolean;
-  readonly tailscaleServePort: number;
 }
 
 interface ResolvedRuntimeState {
@@ -319,16 +308,12 @@ const toContractState = (state: RuntimeState): DesktopServerExposureState => ({
   mode: state.mode,
   endpointUrl: Option.getOrNull(state.endpointUrl),
   advertisedHost: Option.getOrNull(state.advertisedHost),
-  tailscaleServeEnabled: state.tailscaleServeEnabled,
-  tailscaleServePort: state.tailscaleServePort,
 });
 
 const toBackendConfig = (state: RuntimeState): DesktopServerExposureBackendConfig => ({
   port: state.port,
   bindHost: state.bindHost,
   httpBaseUrl: state.httpBaseUrl,
-  tailscaleServeEnabled: state.tailscaleServeEnabled,
-  tailscaleServePort: state.tailscaleServePort,
 });
 
 const toResolvedExposure = (state: RuntimeState): ResolvedDesktopServerExposure => ({
@@ -356,8 +341,6 @@ function runtimeStateFromResolvedExposure(input: {
     httpBaseUrl: new URL(input.exposure.localHttpUrl),
     endpointUrl: Option.fromNullishOr(input.exposure.endpointUrl),
     advertisedHost: Option.fromNullishOr(input.exposure.advertisedHost),
-    tailscaleServeEnabled: input.settings.tailscaleServeEnabled,
-    tailscaleServePort: input.settings.tailscaleServePort,
   };
 }
 
@@ -405,8 +388,6 @@ const requiresBackendRelaunch = (previous: RuntimeState, next: RuntimeState): bo
 const make = Effect.gen(function* () {
   const config = yield* DesktopConfig.DesktopConfig;
   const networkInterfaces = yield* DesktopNetworkInterfacesService;
-  const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const httpClient = yield* HttpClient.HttpClient;
   const desktopSettings = yield* DesktopAppSettingsService.DesktopAppSettings;
   const stateRef = yield* Ref.make(initialRuntimeState());
 
@@ -472,58 +453,13 @@ const make = Effect.gen(function* () {
     };
   });
 
-  const setTailscaleServeEnabled = Effect.fn("desktop.serverExposure.setTailscaleServeEnabled")(
-    function* (input: { readonly enabled: boolean; readonly port?: number }) {
-      yield* Effect.annotateCurrentSpan({
-        enabled: input.enabled,
-        ...(input.port === undefined ? {} : { port: input.port }),
-      });
-      const result = yield* desktopSettings
-        .setTailscaleServe({
-          enabled: input.enabled,
-          port: Option.fromNullishOr(input.port),
-        })
-        .pipe(
-          Effect.mapError(
-            (cause) =>
-              new DesktopServerExposurePersistenceError({
-                operation: "tailscale-serve",
-                cause,
-              }),
-          ),
-        );
-
-      const nextState = yield* Ref.updateAndGet(stateRef, (current) => ({
-        ...current,
-        tailscaleServeEnabled: result.settings.tailscaleServeEnabled,
-        tailscaleServePort: result.settings.tailscaleServePort,
-      }));
-
-      return {
-        state: toContractState(nextState),
-        requiresRelaunch: result.changed,
-      };
-    },
-  );
-
   const getAdvertisedEndpoints = Effect.gen(function* () {
     const state = yield* Ref.get(stateRef);
-    const currentNetworkInterfaces = yield* readNetworkInterfaces;
-    const coreEndpoints = resolveDesktopCoreAdvertisedEndpoints({
+    return resolveDesktopCoreAdvertisedEndpoints({
       port: state.port,
       exposure: toResolvedExposure(state),
       customHttpsEndpointUrls: config.desktopHttpsEndpointUrls,
     });
-    const tailscaleEndpoints = yield* resolveTailscaleAdvertisedEndpoints({
-      port: state.port,
-      serveEnabled: state.tailscaleServeEnabled,
-      servePort: state.tailscaleServePort,
-      networkInterfaces: currentNetworkInterfaces,
-    }).pipe(
-      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
-      Effect.provideService(HttpClient.HttpClient, httpClient),
-    );
-    return [...coreEndpoints, ...tailscaleEndpoints];
   }).pipe(Effect.withSpan("desktop.serverExposure.getAdvertisedEndpoints"));
 
   return DesktopServerExposure.of({
@@ -531,7 +467,6 @@ const make = Effect.gen(function* () {
     backendConfig,
     configureFromSettings,
     setMode,
-    setTailscaleServeEnabled,
     getAdvertisedEndpoints,
   });
 });

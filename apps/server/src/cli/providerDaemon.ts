@@ -87,8 +87,6 @@ const resolveProviderDaemonServerConfig = (input: {
       desktopBootstrapToken: undefined,
       autoBootstrapProjectFromCwd: false,
       logWebSocketEvents: false,
-      tailscaleServeEnabled: false,
-      tailscaleServePort: 443,
       providerDaemon: undefined,
       providerSupervisor: input.providerSupervisor,
     } satisfies ServerConfigShape;

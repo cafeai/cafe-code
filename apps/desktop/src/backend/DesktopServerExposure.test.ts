@@ -1,13 +1,9 @@
 import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
-import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import * as Sink from "effect/Sink";
-import * as Stream from "effect/Stream";
-import { ChildProcessSpawner } from "effect/unstable/process";
 
 import {
   DesktopEnvironment,
@@ -17,8 +13,6 @@ import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopServerExposure from "./DesktopServerExposure.ts";
 import type { DesktopNetworkInterfaces } from "./DesktopServerExposure.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
-
-const encoder = new TextEncoder();
 
 const emptyNetworkInterfaces: DesktopNetworkInterfaces = {};
 const lanNetworkInterfaces: DesktopNetworkInterfaces = {
@@ -30,39 +24,6 @@ const lanNetworkInterfaces: DesktopNetworkInterfaces = {
     },
   ],
 };
-
-const tailnetNetworkInterfaces: DesktopNetworkInterfaces = {
-  tailscale0: [
-    {
-      address: "100.90.1.2",
-      family: "IPv4",
-      internal: false,
-    },
-  ],
-};
-
-function mockSpawnerLayer(statusJson = "{}") {
-  return Layer.succeed(
-    ChildProcessSpawner.ChildProcessSpawner,
-    ChildProcessSpawner.make(() =>
-      Effect.succeed(
-        ChildProcessSpawner.makeHandle({
-          pid: ChildProcessSpawner.ProcessId(1),
-          exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
-          isRunning: Effect.succeed(false),
-          kill: () => Effect.void,
-          unref: Effect.succeed(Effect.void),
-          stdin: Sink.drain,
-          stdout: Stream.make(encoder.encode(statusJson)),
-          stderr: Stream.empty,
-          all: Stream.empty,
-          getInputFd: () => Sink.drain,
-          getOutputFd: () => Stream.empty,
-        }),
-      ),
-    ),
-  );
-}
 
 function makeEnvironmentLayer(baseDir: string, env: Record<string, string | undefined> = {}) {
   return makeDesktopEnvironmentLayer({
@@ -99,8 +60,6 @@ function makeLayer(input: {
   return DesktopServerExposure.layer.pipe(
     Layer.provideMerge(DesktopAppSettings.layer),
     Layer.provideMerge(NodeFileSystem.layer),
-    Layer.provideMerge(NodeHttpClient.layerUndici),
-    Layer.provideMerge(mockSpawnerLayer()),
     Layer.provideMerge(networkLayer),
     Layer.provideMerge(DesktopConfig.layerTest(env)),
     Layer.provideMerge(environmentLayer),
@@ -180,8 +139,6 @@ describe("DesktopServerExposure", () => {
           mode: "network-accessible",
           endpointUrl: "http://192.168.1.20:4173",
           advertisedHost: "192.168.1.20",
-          tailscaleServeEnabled: false,
-          tailscaleServePort: 443,
         });
 
         const backendConfig = yield* serverExposure.backendConfig;
@@ -194,40 +151,9 @@ describe("DesktopServerExposure", () => {
     ),
   );
 
-  it.effect("persists tailscale serve preferences atomically and reports no-op updates", () =>
-    withHarness(
-      emptyNetworkInterfaces,
-      Effect.gen(function* () {
-        const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
-        const settings = yield* DesktopAppSettings.DesktopAppSettings;
-
-        yield* settings.load;
-        yield* serverExposure.configureFromSettings({ port: 4173 });
-
-        const changed = yield* serverExposure.setTailscaleServeEnabled({
-          enabled: true,
-          port: 8443,
-        });
-        assert.equal(changed.requiresRelaunch, true);
-        assert.equal(changed.state.tailscaleServeEnabled, true);
-        assert.equal(changed.state.tailscaleServePort, 8443);
-
-        const unchanged = yield* serverExposure.setTailscaleServeEnabled({
-          enabled: true,
-          port: 8443,
-        });
-        assert.equal(unchanged.requiresRelaunch, false);
-
-        const persisted = yield* settings.get;
-        assert.equal(persisted.tailscaleServeEnabled, true);
-        assert.equal(persisted.tailscaleServePort, 8443);
-      }),
-    ),
-  );
-
   it.effect("resolves advertised endpoints from the scoped runtime state", () =>
     withHarness(
-      { ...lanNetworkInterfaces, ...tailnetNetworkInterfaces },
+      lanNetworkInterfaces,
       Effect.gen(function* () {
         const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
         yield* serverExposure.configureFromSettings({ port: 4173 });
@@ -236,7 +162,7 @@ describe("DesktopServerExposure", () => {
         const endpoints = yield* serverExposure.getAdvertisedEndpoints;
         assert.deepEqual(
           endpoints.map((endpoint) => endpoint.httpBaseUrl),
-          ["http://127.0.0.1:4173/", "http://192.168.1.20:4173/", "http://100.90.1.2:4173/"],
+          ["http://127.0.0.1:4173/", "http://192.168.1.20:4173/"],
         );
       }),
     ),

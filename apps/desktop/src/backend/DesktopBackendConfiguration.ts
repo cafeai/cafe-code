@@ -44,8 +44,6 @@ const DESKTOP_BACKEND_ENV_NAMES = [
   "CAFE_CODE_DESKTOP_LAN_ACCESS",
   "CAFE_CODE_DESKTOP_LAN_HOST",
   "CAFE_CODE_DESKTOP_HTTPS_ENDPOINTS",
-  "CAFE_CODE_TAILSCALE_SERVE",
-  "CAFE_CODE_TAILSCALE_SERVE_PORT",
   "VITE_DEV_SERVER_URL",
 ] as const;
 
@@ -135,8 +133,6 @@ const resolveBackendStartConfig = Effect.fn("desktop.backendConfiguration.resolv
         cafeCodeHome: environment.baseDir,
         host: backendExposure.bindHost,
         desktopBootstrapToken: input.bootstrapToken,
-        tailscaleServeEnabled: backendExposure.tailscaleServeEnabled,
-        tailscaleServePort: backendExposure.tailscaleServePort,
         ...Option.match(input.observabilitySettings.otlpTracesUrl, {
           onNone: () => ({}),
           onSome: (otlpTracesUrl) => ({ otlpTracesUrl }),

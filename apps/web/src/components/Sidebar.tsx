@@ -68,6 +68,7 @@ import { isElectron } from "../env";
 import { APP_STAGE_LABEL, APP_VERSION } from "../branding";
 import { cn, isMacPlatform, newCommandId, newThreadId } from "../lib/utils";
 import {
+  selectBootstrapCompleteForEnvironment,
   selectProjectByRef,
   selectProjectsAcrossEnvironments,
   selectSidebarThreadsForProjectRefs,
@@ -896,6 +897,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
 
 interface SidebarProjectItemProps {
   project: SidebarProjectSnapshot;
+  bootstrappedEnvironmentIds: ReadonlySet<string>;
   isThreadListExpanded: boolean;
   activeRouteThreadKey: string | null;
   newThreadShortcutLabel: string | null;
@@ -916,6 +918,7 @@ interface SidebarProjectItemProps {
 const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjectItemProps) {
   const {
     project,
+    bootstrappedEnvironmentIds,
     isThreadListExpanded,
     activeRouteThreadKey,
     newThreadShortcutLabel,
@@ -1108,6 +1111,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     }
     return counts;
   }, [memberProjectByScopedKey, project.memberProjects, projectThreads]);
+  const projectBootstrapComplete = useMemo(
+    () =>
+      project.memberProjects.every((member) =>
+        bootstrappedEnvironmentIds.has(member.environmentId),
+      ),
+    [bootstrappedEnvironmentIds, project.memberProjects],
+  );
 
   const { projectStatus, visibleProjectThreads, orderedProjectThreadKeys } = useMemo(() => {
     const lastVisitedAtByThreadKey = new Map(
@@ -1205,12 +1215,14 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         hiddenThreads.map((thread) => resolveProjectThreadStatus(thread)),
       ),
       renderedThreads,
-      showEmptyThreadState: projectExpanded && visibleProjectThreads.length === 0,
+      showEmptyThreadState:
+        projectBootstrapComplete && projectExpanded && visibleProjectThreads.length === 0,
       shouldShowThreadPanel: projectExpanded || pinnedCollapsedThread !== null,
     };
   }, [
     isThreadListExpanded,
     pinnedCollapsedThread,
+    projectBootstrapComplete,
     projectExpanded,
     projectThreads,
     sidebarThreadPreviewCount,
@@ -2997,6 +3009,8 @@ const SidebarChromeFooter = memo(function SidebarChromeFooter() {
 });
 
 interface SidebarProjectsContentProps {
+  primaryEnvironmentBootstrapped: boolean;
+  bootstrappedEnvironmentIds: ReadonlySet<string>;
   showArm64IntelBuildWarning: boolean;
   arm64IntelBuildWarningDescription: string | null;
   desktopUpdateButtonAction: "download" | "install" | "none";
@@ -3041,6 +3055,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
   props: SidebarProjectsContentProps,
 ) {
   const {
+    primaryEnvironmentBootstrapped,
+    bootstrappedEnvironmentIds,
     showArm64IntelBuildWarning,
     arm64IntelBuildWarningDescription,
     desktopUpdateButtonAction,
@@ -3208,6 +3224,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                     {(dragHandleProps) => (
                       <SidebarProjectItem
                         project={project}
+                        bootstrappedEnvironmentIds={bootstrappedEnvironmentIds}
                         isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                         activeRouteThreadKey={
                           activeRouteProjectKey === project.projectKey ? routeThreadKey : null
@@ -3240,6 +3257,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
               <SidebarProjectListRow
                 key={project.projectKey}
                 project={project}
+                bootstrappedEnvironmentIds={bootstrappedEnvironmentIds}
                 isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                 activeRouteThreadKey={
                   activeRouteProjectKey === project.projectKey ? routeThreadKey : null
@@ -3262,7 +3280,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
           </SidebarMenu>
         )}
 
-        {projectsLength === 0 && (
+        {primaryEnvironmentBootstrapped && projectsLength === 0 && (
           <div className="px-2 pt-4 text-center text-xs text-muted-foreground/60">
             No projects yet
           </div>
@@ -3296,6 +3314,21 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
 });
 
 export default function Sidebar() {
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const primaryEnvironmentBootstrapped = useStore((state) =>
+    selectBootstrapCompleteForEnvironment(state, primaryEnvironmentId),
+  );
+  const bootstrappedEnvironmentIds = useStore(
+    useShallow((state) =>
+      Object.entries(state.environmentStateById)
+        .filter(([, environmentState]) => environmentState.bootstrapComplete)
+        .map(([environmentId]) => environmentId),
+    ),
+  );
+  const bootstrappedEnvironmentIdSet = useMemo(
+    () => new Set(bootstrappedEnvironmentIds),
+    [bootstrappedEnvironmentIds],
+  );
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const sidebarThreads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
   const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
@@ -3336,7 +3369,6 @@ export default function Sidebar() {
   const platform = navigator.platform;
   const shortcutModifiers = useShortcutModifierState();
   const modelPickerOpen = useModelPickerOpen();
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
   const savedEnvironmentRegistry = useSavedEnvironmentRegistryStore((s) => s.byId);
   const savedEnvironmentRuntimeById = useSavedEnvironmentRuntimeStore((s) => s.byId);
   const orderedProjects = useMemo(() => {
@@ -3924,6 +3956,8 @@ export default function Sidebar() {
         <>
           <div className="flex min-h-0 flex-1 flex-col group-data-[collapsible=icon]:hidden">
             <SidebarProjectsContent
+              primaryEnvironmentBootstrapped={primaryEnvironmentBootstrapped}
+              bootstrappedEnvironmentIds={bootstrappedEnvironmentIdSet}
               showArm64IntelBuildWarning={showArm64IntelBuildWarning}
               arm64IntelBuildWarningDescription={arm64IntelBuildWarningDescription}
               desktopUpdateButtonAction={desktopUpdateButtonAction}

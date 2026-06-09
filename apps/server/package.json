@@ -59,7 +59,6 @@
   "devDependencies": {
     "@cafecode/contracts": "workspace:*",
     "@cafecode/shared": "workspace:*",
-    "@cafecode/tailscale": "workspace:*",
     "@cafecode/web": "workspace:*",
     "@effect/language-service": "catalog:",
     "@effect/vitest": "catalog:",

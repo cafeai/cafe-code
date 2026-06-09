@@ -2322,6 +2322,13 @@ export function selectBootstrapCompleteForActiveEnvironment(state: AppState): bo
   return selectEnvironmentState(state, state.activeEnvironmentId).bootstrapComplete;
 }
 
+export function selectBootstrapCompleteForEnvironment(
+  state: AppState,
+  environmentId: EnvironmentId | null | undefined,
+): boolean {
+  return selectEnvironmentState(state, environmentId).bootstrapComplete;
+}
+
 export function selectProjectByRef(
   state: AppState,
   ref: ScopedProjectRef | null | undefined,

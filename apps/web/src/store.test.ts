@@ -19,6 +19,7 @@ import {
   applyOrchestrationEvent,
   applyOrchestrationEvents,
   removeEnvironmentState,
+  selectBootstrapCompleteForEnvironment,
   selectEnvironmentState,
   selectProjectsAcrossEnvironments,
   selectThreadByRef,
@@ -221,6 +222,31 @@ function projectsOf(state: AppState) {
 function threadsOf(state: AppState) {
   return selectThreadsAcrossEnvironments(state);
 }
+
+describe("bootstrap selectors", () => {
+  it("reads bootstrap completion for an explicit environment", () => {
+    const bootstrappedEnvironment = selectEnvironmentState(
+      makeEmptyState({ bootstrapComplete: true }),
+      localEnvironmentId,
+    );
+    const pendingEnvironment = selectEnvironmentState(
+      makeEmptyState({ bootstrapComplete: false }),
+      localEnvironmentId,
+    );
+    const state: AppState = {
+      activeEnvironmentId: localEnvironmentId,
+      environmentStateById: {
+        [localEnvironmentId]: bootstrappedEnvironment,
+        [remoteEnvironmentId]: pendingEnvironment,
+      },
+    };
+
+    expect(selectBootstrapCompleteForEnvironment(state, localEnvironmentId)).toBe(true);
+    expect(selectBootstrapCompleteForEnvironment(state, remoteEnvironmentId)).toBe(false);
+    expect(selectBootstrapCompleteForEnvironment(state, null)).toBe(false);
+    expect(selectBootstrapCompleteForEnvironment(state, EnvironmentId.make("missing"))).toBe(false);
+  });
+});
 
 function makeEvent<T extends OrchestrationEvent["type"]>(
   type: T,

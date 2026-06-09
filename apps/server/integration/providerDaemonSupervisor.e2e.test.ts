@@ -76,8 +76,6 @@ function providerRuntimeChildEnv(): NodeJS.ProcessEnv {
     "CAFE_CODE_DESKTOP_LAN_ACCESS",
     "CAFE_CODE_DESKTOP_LAN_HOST",
     "CAFE_CODE_DESKTOP_HTTPS_ENDPOINTS",
-    "CAFE_CODE_TAILSCALE_SERVE",
-    "CAFE_CODE_TAILSCALE_SERVE_PORT",
     "VITE_DEV_SERVER_URL",
   ]) {
     delete env[name];

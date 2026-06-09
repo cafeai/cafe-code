@@ -2858,7 +2858,7 @@ export default function ChatView(props: ChatViewProps) {
               variant="outline"
               onClick={() => void navigate({ to: "/settings/connections" })}
             >
-              Connections
+              WebUI
             </Button>
           </>
         ),

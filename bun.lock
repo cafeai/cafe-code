@@ -17,12 +17,11 @@
     },
     "apps/desktop": {
       "name": "@cafecode/desktop",
-      "version": "0.0.48",
+      "version": "0.0.49",
       "dependencies": {
         "@cafecode/contracts": "workspace:*",
         "@cafecode/shared": "workspace:*",
         "@cafecode/ssh": "workspace:*",
-        "@cafecode/tailscale": "workspace:*",
         "@effect/platform-node": "catalog:",
         "effect": "catalog:",
         "electron": "42.2.0",
@@ -39,7 +38,7 @@
     },
     "apps/server": {
       "name": "@cafeai/cafe-code",
-      "version": "0.0.48",
+      "version": "0.0.49",
       "bin": {
         "cafe-code": "dist/launcher.mjs",
         "cafe-code-server": "dist/bin.mjs",
@@ -60,7 +59,6 @@
       "devDependencies": {
         "@cafecode/contracts": "workspace:*",
         "@cafecode/shared": "workspace:*",
-        "@cafecode/tailscale": "workspace:*",
         "@cafecode/web": "workspace:*",
         "@effect/language-service": "catalog:",
         "@effect/vitest": "catalog:",
@@ -75,7 +73,7 @@
     },
     "apps/web": {
       "name": "@cafecode/web",
-      "version": "0.0.48",
+      "version": "0.0.49",
       "dependencies": {
         "@base-ui/react": "^1.4.1",
         "@cafecode/client-runtime": "workspace:*",
@@ -159,7 +157,7 @@
     },
     "packages/contracts": {
       "name": "@cafecode/contracts",
-      "version": "0.0.48",
+      "version": "0.0.49",
       "dependencies": {
         "effect": "catalog:",
       },
@@ -223,21 +221,6 @@
       "devDependencies": {
         "@effect/language-service": "catalog:",
         "@effect/platform-node": "catalog:",
-        "@effect/vitest": "catalog:",
-        "@types/node": "catalog:",
-        "typescript": "catalog:",
-        "vitest": "catalog:",
-      },
-    },
-    "packages/tailscale": {
-      "name": "@cafecode/tailscale",
-      "dependencies": {
-        "@cafecode/shared": "workspace:*",
-        "@effect/platform-node": "catalog:",
-        "effect": "catalog:",
-      },
-      "devDependencies": {
-        "@effect/language-service": "catalog:",
         "@effect/vitest": "catalog:",
         "@types/node": "catalog:",
         "typescript": "catalog:",
@@ -389,8 +372,6 @@
     "@cafecode/shared": ["@cafecode/shared@workspace:packages/shared"],
 
     "@cafecode/ssh": ["@cafecode/ssh@workspace:packages/ssh"],
-
-    "@cafecode/tailscale": ["@cafecode/tailscale@workspace:packages/tailscale"],
 
     "@cafecode/web": ["@cafecode/web@workspace:apps/web"],
 

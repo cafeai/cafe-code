@@ -144,8 +144,6 @@ const makeServerConfig = (baseDir: string) =>
       desktopBootstrapToken: undefined,
       autoBootstrapProjectFromCwd: false,
       logWebSocketEvents: false,
-      tailscaleServeEnabled: false,
-      tailscaleServePort: 443,
       providerDaemon: undefined,
       providerSupervisor: undefined,
     } satisfies ServerConfigShape;

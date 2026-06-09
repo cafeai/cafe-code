@@ -73,7 +73,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
     items: [
       { label: "Providers", to: "/settings/providers", icon: BotIcon },
       { label: "Source Control", to: "/settings/source-control", icon: GitBranchIcon },
-      { label: "Connections", to: "/settings/connections", icon: Link2Icon },
+      { label: "WebUI", to: "/settings/connections", icon: Link2Icon },
     ],
   },
   {

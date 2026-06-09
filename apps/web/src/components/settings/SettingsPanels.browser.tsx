@@ -605,8 +605,6 @@ const createDesktopBridgeStub = (overrides?: {
         mode: "local-only",
         endpointUrl: null,
         advertisedHost: null,
-        tailscaleServeEnabled: false,
-        tailscaleServePort: 443,
       },
     ),
     setServerExposureMode:
@@ -615,16 +613,7 @@ const createDesktopBridgeStub = (overrides?: {
         mode,
         endpointUrl: mode === "network-accessible" ? "http://192.168.1.44:3773" : null,
         advertisedHost: mode === "network-accessible" ? "192.168.1.44" : null,
-        tailscaleServeEnabled: false,
-        tailscaleServePort: 443,
       })),
-    setTailscaleServeEnabled: vi.fn().mockImplementation(async (input) => ({
-      mode: overrides?.serverExposureState?.mode ?? "network-accessible",
-      endpointUrl: overrides?.serverExposureState?.endpointUrl ?? "http://192.168.1.44:3773",
-      advertisedHost: overrides?.serverExposureState?.advertisedHost ?? "192.168.1.44",
-      tailscaleServeEnabled: input.enabled,
-      tailscaleServePort: input.port ?? 443,
-    })),
     getAdvertisedEndpoints: vi.fn().mockResolvedValue(overrides?.advertisedEndpoints ?? []),
     pickFolder: vi.fn().mockResolvedValue(null),
     confirm: vi.fn().mockResolvedValue(false),
@@ -760,8 +749,6 @@ describe("settings panels", () => {
         mode: "local-only",
         endpointUrl: null,
         advertisedHost: null,
-        tailscaleServeEnabled: false,
-        tailscaleServePort: 443,
       },
       advertisedEndpoints: [
         {
@@ -779,21 +766,6 @@ describe("settings panels", () => {
           source: "desktop-core",
           status: "available",
           isDefault: true,
-        },
-        {
-          id: "tailscale-ip",
-          label: "Tailscale IP",
-          provider: {
-            id: "tailscale",
-            label: "Tailscale",
-            kind: "private-network",
-            isAddon: true,
-          },
-          httpBaseUrl: "http://100.105.39.17:3773/",
-          wsBaseUrl: "ws://100.105.39.17:3773/",
-          reachability: "private-network",
-          source: "desktop-addon",
-          status: "available",
         },
       ],
     });
@@ -813,19 +785,14 @@ describe("settings panels", () => {
     await expect
       .element(page.getByRole("heading", { name: "This machine", exact: true }))
       .not.toBeInTheDocument();
-    await expect
-      .element(page.getByRole("heading", { name: "Tailscale IP", exact: true }))
-      .not.toBeInTheDocument();
   });
 
-  it("collapses advertised endpoints behind the network access summary", async () => {
+  it("shows advertised endpoints by default and lets users hide them", async () => {
     window.desktopBridge = createDesktopBridgeStub({
       serverExposureState: {
         mode: "network-accessible",
         endpointUrl: "http://192.168.86.39:3773",
         advertisedHost: "192.168.86.39",
-        tailscaleServeEnabled: false,
-        tailscaleServePort: 443,
       },
       advertisedEndpoints: [
         {
@@ -859,21 +826,6 @@ describe("settings panels", () => {
           status: "available",
           isDefault: true,
         },
-        {
-          id: "tailscale-ip:http://100.105.39.17:3773",
-          label: "Tailscale IP",
-          provider: {
-            id: "tailscale",
-            label: "Tailscale",
-            kind: "private-network",
-            isAddon: true,
-          },
-          httpBaseUrl: "http://100.105.39.17:3773/",
-          wsBaseUrl: "ws://100.105.39.17:3773/",
-          reachability: "private-network",
-          source: "desktop-addon",
-          status: "available",
-        },
       ],
     });
     authAccessHarness.setSnapshot({
@@ -889,17 +841,19 @@ describe("settings panels", () => {
     );
 
     await expect.element(page.getByText("http://192.168.86.39:3773/")).toBeInTheDocument();
-    await expect.element(page.getByRole("button", { name: "+2" })).toBeInTheDocument();
-    await expect
-      .element(page.getByRole("heading", { name: "Local network", exact: true }))
-      .not.toBeInTheDocument();
-
-    await page.getByRole("button", { name: "+2" }).click();
-
     await expect
       .element(page.getByRole("heading", { name: "Local network", exact: true }))
       .toBeInTheDocument();
-    await expect.element(page.getByText("Default", { exact: true })).toBeInTheDocument();
+
+    await page.getByRole("button", { name: "Hide" }).click();
+
+    await expect
+      .element(page.getByRole("heading", { name: "Local network", exact: true }))
+      .not.toBeInTheDocument();
+    await page.getByRole("button", { name: "+1" }).click();
+    await expect
+      .element(page.getByRole("heading", { name: "Local network", exact: true }))
+      .toBeInTheDocument();
     await page.getByRole("button", { name: "Set as default" }).first().click();
     await expect.element(page.getByText("http://127.0.0.1:3773/").first()).toBeInTheDocument();
   });
@@ -1219,8 +1173,6 @@ describe("settings panels", () => {
         mode: "network-accessible",
         endpointUrl: "http://192.168.1.44:3773",
         advertisedHost: "192.168.1.44",
-        tailscaleServeEnabled: false,
-        tailscaleServePort: 443,
       },
     });
     let pairingLinks: Array<AuthAccessSnapshot["pairingLinks"][number]> = [];
@@ -1337,8 +1289,6 @@ describe("settings panels", () => {
         mode: "network-accessible",
         endpointUrl: "http://192.168.1.44:3773",
         advertisedHost: "192.168.1.44",
-        tailscaleServeEnabled: false,
-        tailscaleServePort: 443,
       },
     });
     let clientSessions: Array<AuthAccessSnapshot["clientSessions"][number]> = [

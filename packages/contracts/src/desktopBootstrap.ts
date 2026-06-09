@@ -10,8 +10,6 @@ export const DesktopBackendBootstrap = Schema.Struct({
   cafeCodeHome: Schema.String,
   host: Schema.String,
   desktopBootstrapToken: Schema.String,
-  tailscaleServeEnabled: Schema.Boolean,
-  tailscaleServePort: PortSchema,
   otlpTracesUrl: Schema.optional(Schema.String),
   otlpMetricsUrl: Schema.optional(Schema.String),
   providerDaemon: Schema.optional(ProviderDaemonClientConfig),

@@ -13,6 +13,7 @@ import { QueryClient, useQueryClient } from "@tanstack/react-query";
 import { APP_DISPLAY_NAME } from "../branding";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
 import { CommandPalette } from "../components/CommandPalette";
+import { InitialBackendBootstrapSurface } from "../components/InitialBackendBootstrapSurface";
 import { ProviderUpdateLaunchNotification } from "../components/ProviderUpdateLaunchNotification";
 import {
   WebSocketConnectionCoordinator,
@@ -160,7 +161,9 @@ function RootRouteView() {
         {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
         {primaryEnvironmentAuthenticated ? <WebSocketConnectionCoordinator /> : null}
         {primaryEnvironmentAuthenticated ? (
-          <WebSocketConnectionSurface>{appShell}</WebSocketConnectionSurface>
+          <WebSocketConnectionSurface>
+            <InitialBackendBootstrapSurface>{appShell}</InitialBackendBootstrapSurface>
+          </WebSocketConnectionSurface>
         ) : (
           appShell
         )}
