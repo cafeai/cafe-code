@@ -1,4 +1,5 @@
 import {
+  type AuthAdminPasswordStatus,
   type AuthBootstrapResult,
   type AuthBearerBootstrapResult,
   AuthBootstrapInput,
@@ -6,6 +7,7 @@ import {
   AuthCreatePairingCredentialInput,
   AuthRevokeClientSessionInput,
   AuthRevokePairingLinkInput,
+  AuthSetAdminPasswordInput,
   type AuthWebSocketTokenResult,
 } from "@cafecode/contracts/auth";
 import * as DateTime from "effect/DateTime";
@@ -261,12 +263,61 @@ const authenticateOwnerSession = Effect.gen(function* () {
   const session = yield* serverAuth.authenticateHttpRequest(request);
   if (session.role !== "owner") {
     return yield* new AuthError({
-      message: "Only owner sessions can manage network access.",
+      message: "Only owner sessions can manage local backend access.",
       status: 403,
     });
   }
   return { serverAuth, session } as const;
 });
+
+export const authAdminPasswordStatusRouteLayer = HttpRouter.add(
+  "GET",
+  "/api/auth/admin-password",
+  Effect.gen(function* () {
+    const { serverAuth } = yield* authenticateOwnerSession;
+    const result = yield* serverAuth.getAdminPasswordStatus();
+    return HttpServerResponse.jsonUnsafe(result satisfies AuthAdminPasswordStatus, {
+      status: 200,
+      headers: browserApiCorsHeaders,
+    });
+  }).pipe(Effect.catchTag("AuthError", (error) => respondToAuthError(error))),
+);
+
+export const authAdminPasswordSetRouteLayer = HttpRouter.add(
+  "POST",
+  "/api/auth/admin-password",
+  Effect.gen(function* () {
+    const { serverAuth } = yield* authenticateOwnerSession;
+    const payload = yield* HttpServerRequest.schemaBodyJson(AuthSetAdminPasswordInput).pipe(
+      Effect.mapError(
+        (cause) =>
+          new AuthError({
+            message: "Invalid admin password payload.",
+            status: 400,
+            cause,
+          }),
+      ),
+    );
+    const result = yield* serverAuth.setAdminPassword(payload);
+    return HttpServerResponse.jsonUnsafe(result satisfies AuthAdminPasswordStatus, {
+      status: 200,
+      headers: browserApiCorsHeaders,
+    });
+  }).pipe(Effect.catchTag("AuthError", (error) => respondToAuthError(error))),
+);
+
+export const authAdminPasswordClearRouteLayer = HttpRouter.add(
+  "POST",
+  "/api/auth/admin-password/clear",
+  Effect.gen(function* () {
+    const { serverAuth } = yield* authenticateOwnerSession;
+    const result = yield* serverAuth.clearAdminPassword();
+    return HttpServerResponse.jsonUnsafe(result satisfies AuthAdminPasswordStatus, {
+      status: 200,
+      headers: browserApiCorsHeaders,
+    });
+  }).pipe(Effect.catchTag("AuthError", (error) => respondToAuthError(error))),
+);
 
 export const authPairingLinksRouteLayer = HttpRouter.add(
   "GET",

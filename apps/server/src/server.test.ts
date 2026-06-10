@@ -1482,6 +1482,124 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("lets owner sessions inspect, set, and clear admin password auth", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+      const statusBeforeResponse = yield* HttpClient.get("/api/auth/admin-password", {
+        headers: {
+          cookie: ownerCookie,
+        },
+      });
+      const statusBefore = (yield* statusBeforeResponse.json) as {
+        readonly configured: boolean;
+      };
+
+      const shortPasswordResponse = yield* HttpClient.post("/api/auth/admin-password", {
+        headers: {
+          cookie: ownerCookie,
+          "content-type": "application/json",
+        },
+        body: HttpBody.jsonUnsafe({
+          password: "short",
+        }),
+      });
+      const shortPasswordBody = (yield* shortPasswordResponse.json) as {
+        readonly error: string;
+      };
+
+      const setResponse = yield* HttpClient.post("/api/auth/admin-password", {
+        headers: {
+          cookie: ownerCookie,
+          "content-type": "application/json",
+        },
+        body: HttpBody.jsonUnsafe({
+          password: "correct horse battery staple",
+        }),
+      });
+      const setBody = (yield* setResponse.json) as {
+        readonly configured: boolean;
+      };
+
+      const statusAfterSetResponse = yield* HttpClient.get("/api/auth/admin-password", {
+        headers: {
+          cookie: ownerCookie,
+        },
+      });
+      const statusAfterSet = (yield* statusAfterSetResponse.json) as {
+        readonly configured: boolean;
+      };
+
+      const clearResponse = yield* HttpClient.post("/api/auth/admin-password/clear", {
+        headers: {
+          cookie: ownerCookie,
+        },
+      });
+      const clearBody = (yield* clearResponse.json) as {
+        readonly configured: boolean;
+      };
+
+      const statusAfterClearResponse = yield* HttpClient.get("/api/auth/admin-password", {
+        headers: {
+          cookie: ownerCookie,
+        },
+      });
+      const statusAfterClear = (yield* statusAfterClearResponse.json) as {
+        readonly configured: boolean;
+      };
+
+      assert.equal(statusBeforeResponse.status, 200);
+      assert.equal(statusBefore.configured, false);
+      assert.equal(shortPasswordResponse.status, 400);
+      assert.equal(shortPasswordBody.error, "Admin password must be at least 8 characters.");
+      assert.equal(setResponse.status, 200);
+      assert.equal(setBody.configured, true);
+      assert.equal(statusAfterSet.configured, true);
+      assert.equal(clearResponse.status, 200);
+      assert.equal(clearBody.configured, false);
+      assert.equal(statusAfterClear.configured, false);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rejects admin password management from non-owner paired sessions", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const ownerResponse = yield* HttpClient.post("/api/auth/pairing-token", {
+        headers: {
+          cookie: yield* getAuthenticatedSessionCookieHeader(),
+        },
+      });
+      const ownerBody = (yield* ownerResponse.json) as {
+        readonly credential: string;
+      };
+      const pairedSessionCookie = yield* getAuthenticatedSessionCookieHeader(ownerBody.credential);
+
+      const statusResponse = yield* HttpClient.get("/api/auth/admin-password", {
+        headers: {
+          cookie: pairedSessionCookie,
+        },
+      });
+      const statusBody = (yield* statusResponse.json) as {
+        readonly error: string;
+      };
+      const setResponse = yield* HttpClient.post("/api/auth/admin-password", {
+        headers: {
+          cookie: pairedSessionCookie,
+          "content-type": "application/json",
+        },
+        body: HttpBody.jsonUnsafe({
+          password: "correct horse battery staple",
+        }),
+      });
+
+      assert.equal(statusResponse.status, 403);
+      assert.equal(statusBody.error, "Only owner sessions can manage local backend access.");
+      assert.equal(setResponse.status, 403);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("issues short-lived websocket tokens for authenticated bearer sessions", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest();

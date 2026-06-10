@@ -1,6 +1,7 @@
 import {
   ChevronDownIcon,
   ChevronsLeftRightEllipsisIcon,
+  KeyRoundIcon,
   PlusIcon,
   QrCodeIcon,
   RefreshCwIcon,
@@ -71,11 +72,14 @@ import {
 import { Textarea } from "../ui/textarea";
 import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "../../pairingUrl";
 import {
+  clearServerAdminPassword,
   createServerPairingCredential,
+  fetchServerAdminPasswordStatus,
   fetchSessionState,
   revokeOtherServerClientSessions,
   revokeServerClientSession,
   revokeServerPairingLink,
+  setServerAdminPassword,
   isLoopbackHostname,
   type ServerClientSessionRecord,
   type ServerPairingLinkRecord,
@@ -972,6 +976,244 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
   );
 });
 
+type AdminPasswordManagementRowProps = {
+  configured: boolean | null;
+  isLoading: boolean;
+  isSaving: boolean;
+  error: string | null;
+  onSetPassword: (password: string) => Promise<void>;
+  onClearPassword: () => Promise<void>;
+};
+
+const AdminPasswordManagementRow = memo(function AdminPasswordManagementRow({
+  configured,
+  isLoading,
+  isSaving,
+  error,
+  onSetPassword,
+  onClearPassword,
+}: AdminPasswordManagementRowProps) {
+  const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
+  const [passwordDialogMode, setPasswordDialogMode] = useState<"enable" | "change">("enable");
+  const [disableDialogOpen, setDisableDialogOpen] = useState(false);
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [dialogError, setDialogError] = useState<string | null>(null);
+  const resetPasswordDialog = useCallback(() => {
+    setPassword("");
+    setConfirmPassword("");
+    setDialogError(null);
+  }, []);
+  const openPasswordDialog = useCallback((mode: "enable" | "change") => {
+    setPasswordDialogMode(mode);
+    setPasswordDialogOpen(true);
+    setDialogError(null);
+  }, []);
+  const handleSavePassword = useCallback(async () => {
+    const nextPassword = password.trim();
+    if (!nextPassword) {
+      setDialogError("Enter an admin password.");
+      return;
+    }
+    if (nextPassword.length < 8) {
+      setDialogError("Admin password must be at least 8 characters.");
+      return;
+    }
+    if (nextPassword !== confirmPassword.trim()) {
+      setDialogError("Passwords do not match.");
+      return;
+    }
+
+    setDialogError(null);
+    try {
+      await onSetPassword(nextPassword);
+      setPasswordDialogOpen(false);
+      resetPasswordDialog();
+    } catch (caughtError) {
+      setDialogError(
+        caughtError instanceof Error ? caughtError.message : "Failed to update admin password.",
+      );
+    }
+  }, [confirmPassword, onSetPassword, password, resetPasswordDialog]);
+  const handleClearPassword = useCallback(async () => {
+    try {
+      await onClearPassword();
+      setDisableDialogOpen(false);
+    } catch (caughtError) {
+      setDialogError(
+        caughtError instanceof Error ? caughtError.message : "Failed to disable admin password.",
+      );
+    }
+  }, [onClearPassword]);
+
+  const isConfigured = configured === true;
+  const controlsDisabled = isLoading || isSaving || configured === null;
+
+  return (
+    <>
+      <SettingsRow
+        title="Admin password"
+        description={isConfigured ? "Password sign-in is on." : "Password sign-in is off."}
+        status={
+          error ? (
+            <span className="block text-destructive">{error}</span>
+          ) : isLoading ? (
+            "Loading…"
+          ) : isConfigured ? (
+            "Available on the pairing screen."
+          ) : null
+        }
+        control={
+          <>
+            {isConfigured ? (
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={controlsDisabled}
+                onClick={() => openPasswordDialog("change")}
+              >
+                <KeyRoundIcon className="size-3" />
+                Change
+              </Button>
+            ) : null}
+            <Switch
+              checked={isConfigured}
+              disabled={controlsDisabled}
+              onCheckedChange={(checked) => {
+                if (checked) {
+                  openPasswordDialog("enable");
+                } else {
+                  setDisableDialogOpen(true);
+                  setDialogError(null);
+                }
+              }}
+              aria-label="Enable password authentication"
+            />
+          </>
+        }
+      />
+      <Dialog
+        open={passwordDialogOpen}
+        onOpenChange={(open) => {
+          if (isSaving) return;
+          setPasswordDialogOpen(open);
+          if (!open) {
+            resetPasswordDialog();
+          }
+        }}
+      >
+        <DialogPopup className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>
+              {passwordDialogMode === "enable" ? "Enable admin password" : "Change admin password"}
+            </DialogTitle>
+            <DialogDescription>
+              Set the password used for owner login from the pairing screen.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogPanel className="space-y-3">
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-medium text-foreground">
+                Admin password
+              </span>
+              <Input
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                type="password"
+                autoComplete="new-password"
+                disabled={isSaving}
+                autoFocus
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-medium text-foreground">
+                Confirm password
+              </span>
+              <Input
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+                type="password"
+                autoComplete="new-password"
+                disabled={isSaving}
+              />
+            </label>
+            {dialogError ? <p className="text-xs text-destructive">{dialogError}</p> : null}
+          </DialogPanel>
+          <DialogFooter variant="bare">
+            <Button
+              variant="outline"
+              disabled={isSaving}
+              onClick={() => {
+                setPasswordDialogOpen(false);
+                resetPasswordDialog();
+              }}
+            >
+              Cancel
+            </Button>
+            <Button disabled={isSaving} onClick={() => void handleSavePassword()}>
+              {isSaving ? (
+                <>
+                  <Spinner className="size-3.5" />
+                  Saving…
+                </>
+              ) : passwordDialogMode === "enable" ? (
+                "Enable"
+              ) : (
+                "Save"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogPopup>
+      </Dialog>
+      <AlertDialog
+        open={disableDialogOpen}
+        onOpenChange={(open) => {
+          if (isSaving) return;
+          setDisableDialogOpen(open);
+          if (!open) {
+            setDialogError(null);
+          }
+        }}
+      >
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Disable password authentication?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This clears the saved admin password. Existing sessions stay active until revoked or
+              expired.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {dialogError ? (
+            <div className="px-6 pb-2 text-xs text-destructive">{dialogError}</div>
+          ) : null}
+          <AlertDialogFooter>
+            <AlertDialogClose
+              disabled={isSaving}
+              render={<Button variant="outline" disabled={isSaving} />}
+            >
+              Cancel
+            </AlertDialogClose>
+            <Button
+              variant="destructive"
+              disabled={isSaving}
+              onClick={() => void handleClearPassword()}
+            >
+              {isSaving ? (
+                <>
+                  <Spinner className="size-3.5" />
+                  Disabling…
+                </>
+              ) : (
+                "Disable"
+              )}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
+    </>
+  );
+});
+
 type PairingClientsListProps = {
   endpointUrl: string | null | undefined;
   endpoints: ReadonlyArray<AdvertisedEndpoint>;
@@ -1346,6 +1588,10 @@ export function ConnectionsSettings() {
     null,
   );
   const [isLoadingDesktopAccessManagement, setIsLoadingDesktopAccessManagement] = useState(false);
+  const [adminPasswordConfigured, setAdminPasswordConfigured] = useState<boolean | null>(null);
+  const [adminPasswordError, setAdminPasswordError] = useState<string | null>(null);
+  const [isLoadingAdminPassword, setIsLoadingAdminPassword] = useState(false);
+  const [isSavingAdminPassword, setIsSavingAdminPassword] = useState(false);
   const [revokingDesktopPairingLinkId, setRevokingDesktopPairingLinkId] = useState<string | null>(
     null,
   );
@@ -1499,6 +1745,60 @@ export function ConnectionsSettings() {
       );
     } finally {
       setIsRevokingOtherDesktopClients(false);
+    }
+  }, []);
+
+  const handleSetAdminPassword = useCallback(async (password: string) => {
+    setIsSavingAdminPassword(true);
+    setAdminPasswordError(null);
+    try {
+      const result = await setServerAdminPassword(password);
+      setAdminPasswordConfigured(result.configured);
+      toastManager.add({
+        type: "success",
+        title: "Admin password updated",
+        description: "Password login is available from the pairing screen.",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to update admin password.";
+      setAdminPasswordError(message);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not update admin password",
+          description: message,
+        }),
+      );
+      throw error;
+    } finally {
+      setIsSavingAdminPassword(false);
+    }
+  }, []);
+
+  const handleClearAdminPassword = useCallback(async () => {
+    setIsSavingAdminPassword(true);
+    setAdminPasswordError(null);
+    try {
+      const result = await clearServerAdminPassword();
+      setAdminPasswordConfigured(result.configured);
+      toastManager.add({
+        type: "success",
+        title: "Password authentication disabled",
+        description: "New browser logins will need a pairing link.",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to disable admin password.";
+      setAdminPasswordError(message);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not disable password authentication",
+          description: message,
+        }),
+      );
+      throw error;
+    } finally {
+      setIsSavingAdminPassword(false);
     }
   }, []);
 
@@ -1739,6 +2039,39 @@ export function ConnectionsSettings() {
       cancelled = true;
     };
   }, [desktopBridge]);
+
+  useEffect(() => {
+    if (!canManageLocalBackend) {
+      setAdminPasswordConfigured(null);
+      setAdminPasswordError(null);
+      setIsLoadingAdminPassword(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoadingAdminPassword(true);
+    setAdminPasswordError(null);
+    void fetchServerAdminPasswordStatus()
+      .then((status) => {
+        if (cancelled) return;
+        setAdminPasswordConfigured(status.configured);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setAdminPasswordConfigured(null);
+        setAdminPasswordError(
+          error instanceof Error ? error.message : "Failed to load admin password status.",
+        );
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setIsLoadingAdminPassword(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [canManageLocalBackend]);
 
   useEffect(() => {
     if (!canManageLocalBackend) return;
@@ -2211,6 +2544,14 @@ export function ConnectionsSettings() {
             ) : (
               renderDisabledNetworkAccessRow()
             )}
+            <AdminPasswordManagementRow
+              configured={adminPasswordConfigured}
+              isLoading={isLoadingAdminPassword}
+              isSaving={isSavingAdminPassword}
+              error={adminPasswordError}
+              onSetPassword={handleSetAdminPassword}
+              onClearPassword={handleClearAdminPassword}
+            />
           </SettingsSection>
 
           {isLocalBackendRemotelyReachable ? (

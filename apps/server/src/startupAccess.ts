@@ -6,6 +6,7 @@ import { HttpServer } from "effect/unstable/http";
 
 import { ServerConfig } from "./config.ts";
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
+import { buildServerPairingUrl } from "./authPairingUrl.ts";
 
 export interface HeadlessServeAccessInfo {
   readonly connectionString: string;
@@ -90,11 +91,7 @@ export const resolveListeningPort = (address: unknown, fallbackPort: number): nu
 };
 
 export const buildPairingUrl = (connectionString: string, token: string): string => {
-  const url = new URL(connectionString);
-  url.pathname = "/pair";
-  url.searchParams.delete("token");
-  url.hash = new URLSearchParams([["token", token]]).toString();
-  return url.toString();
+  return buildServerPairingUrl(connectionString, token);
 };
 
 export const renderTerminalQrCode = (value: string, margin = 2): string => {

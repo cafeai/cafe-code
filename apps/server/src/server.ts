@@ -68,6 +68,9 @@ import { ProjectSetupScriptRunnerLive } from "./project/Layers/ProjectSetupScrip
 import { ObservabilityLive } from "./observability/Layers/Observability.ts";
 import { ServerEnvironmentLive } from "./environment/Layers/ServerEnvironment.ts";
 import {
+  authAdminPasswordClearRouteLayer,
+  authAdminPasswordSetRouteLayer,
+  authAdminPasswordStatusRouteLayer,
   authBearerBootstrapRouteLayer,
   authBootstrapRouteLayer,
   authPasswordBearerBootstrapRouteLayer,
@@ -309,6 +312,9 @@ const RuntimeServicesLive = ServerRuntimeStartupLive.pipe(
 );
 
 export const makeRoutesLayer = Layer.mergeAll(
+  authAdminPasswordClearRouteLayer,
+  authAdminPasswordSetRouteLayer,
+  authAdminPasswordStatusRouteLayer,
   authBearerBootstrapRouteLayer,
   authBootstrapRouteLayer,
   authPasswordBearerBootstrapRouteLayer,

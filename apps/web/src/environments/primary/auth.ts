@@ -1,4 +1,5 @@
 import type {
+  AuthAdminPasswordStatus,
   AuthBootstrapInput,
   AuthBootstrapResult,
   AuthClientMetadata,
@@ -7,6 +8,7 @@ import type {
   AuthPairingCredentialResult,
   AuthRevokeClientSessionInput,
   AuthRevokePairingLinkInput,
+  AuthSetAdminPasswordInput,
   AuthSessionId,
   AuthSessionState,
 } from "@cafecode/contracts";
@@ -110,6 +112,11 @@ export async function fetchSessionState(): Promise<AuthSessionState> {
 async function readErrorMessage(response: Response, fallbackMessage: string): Promise<string> {
   const text = await response.text();
   return text || fallbackMessage;
+}
+
+async function readJsonErrorMessage(response: Response, fallbackMessage: string): Promise<string> {
+  const parsedMessage = parseBootstrapErrorMessage(await response.text());
+  return parsedMessage || fallbackMessage;
 }
 
 const INVALID_BOOTSTRAP_CREDENTIAL_MESSAGES = new Set([
@@ -343,6 +350,66 @@ export async function createServerPairingCredential(
   }
 
   return (await response.json()) as AuthPairingCredentialResult;
+}
+
+export async function fetchServerAdminPasswordStatus(): Promise<AuthAdminPasswordStatus> {
+  const response = await fetch(resolvePrimaryEnvironmentHttpUrl("/api/auth/admin-password"), {
+    credentials: "include",
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      await readJsonErrorMessage(
+        response,
+        `Failed to load admin password status (${response.status}).`,
+      ),
+    );
+  }
+
+  return (await response.json()) as AuthAdminPasswordStatus;
+}
+
+export async function setServerAdminPassword(password: string): Promise<AuthAdminPasswordStatus> {
+  const trimmedPassword = password.trim();
+  if (!trimmedPassword) {
+    throw new Error("Enter an admin password.");
+  }
+
+  const payload: AuthSetAdminPasswordInput = { password: trimmedPassword };
+  const response = await fetch(resolvePrimaryEnvironmentHttpUrl("/api/auth/admin-password"), {
+    body: JSON.stringify(payload),
+    credentials: "include",
+    headers: {
+      "content-type": "application/json",
+    },
+    method: "POST",
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      await readJsonErrorMessage(response, `Failed to update admin password (${response.status}).`),
+    );
+  }
+
+  return (await response.json()) as AuthAdminPasswordStatus;
+}
+
+export async function clearServerAdminPassword(): Promise<AuthAdminPasswordStatus> {
+  const response = await fetch(resolvePrimaryEnvironmentHttpUrl("/api/auth/admin-password/clear"), {
+    credentials: "include",
+    method: "POST",
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      await readJsonErrorMessage(
+        response,
+        `Failed to disable admin password (${response.status}).`,
+      ),
+    );
+  }
+
+  return (await response.json()) as AuthAdminPasswordStatus;
 }
 
 export async function listServerPairingLinks(): Promise<ReadonlyArray<ServerPairingLinkRecord>> {

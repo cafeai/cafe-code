@@ -840,7 +840,7 @@ describe("settings panels", () => {
       </AppAtomRegistryProvider>,
     );
 
-    await expect.element(page.getByText("http://192.168.86.39:3773/")).toBeInTheDocument();
+    await expect.element(page.getByText("http://192.168.86.39:3773/").first()).toBeInTheDocument();
     await expect
       .element(page.getByRole("heading", { name: "Local network", exact: true }))
       .toBeInTheDocument();
@@ -1281,6 +1281,93 @@ describe("settings panels", () => {
       .element(page.getByRole("button", { name: /^Copy pairing URL for:/ }))
       .toBeInTheDocument();
     await expect.element(page.getByText("Revoke others")).toBeInTheDocument();
+  });
+
+  it("enables, changes, and disables admin password auth from settings", async () => {
+    window.desktopBridge = createDesktopBridgeStub({
+      serverExposureState: {
+        mode: "network-accessible",
+        endpointUrl: "http://192.168.1.44:3773",
+        advertisedHost: "192.168.1.44",
+      },
+    });
+    authAccessHarness.setSnapshot({
+      pairingLinks: [],
+      clientSessions: [],
+    });
+    let configured = false;
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/api/auth/admin-password") && method === "GET") {
+        return new Response(JSON.stringify({ configured }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.endsWith("/api/auth/admin-password") && method === "POST") {
+        configured = true;
+        return new Response(JSON.stringify({ configured }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.endsWith("/api/auth/admin-password/clear") && method === "POST") {
+        configured = false;
+        return new Response(JSON.stringify({ configured }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
+      throw new Error(`Unhandled fetch ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ConnectionsSettings />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByText("Admin password")).toBeInTheDocument();
+    await expect
+      .element(page.getByText("Password login is disabled for this backend."))
+      .toBeInTheDocument();
+    await page.getByLabelText("Enable password authentication").click();
+    await expect.element(page.getByText("Enable admin password")).toBeInTheDocument();
+    await page
+      .getByRole("textbox", { name: "Admin password", exact: true })
+      .fill("correct horse battery staple");
+    await page
+      .getByRole("textbox", { name: "Confirm password", exact: true })
+      .fill("correct horse battery staple");
+    await page.getByRole("button", { name: "Enable", exact: true }).click();
+
+    await expect
+      .element(page.getByText("Password login is enabled for this backend."))
+      .toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Change", exact: true }))
+      .toBeInTheDocument();
+
+    await page.getByLabelText("Enable password authentication").click();
+    await expect.element(page.getByText("Disable password authentication?")).toBeInTheDocument();
+    await page.getByRole("button", { name: "Disable", exact: true }).click();
+
+    await expect
+      .element(page.getByText("Password login is disabled for this backend."))
+      .toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:3773/api/auth/admin-password", {
+      body: JSON.stringify({ password: "correct horse battery staple" }),
+      credentials: "include",
+      headers: {
+        "content-type": "application/json",
+      },
+      method: "POST",
+    });
   });
 
   it("revokes all other paired clients from settings", async () => {

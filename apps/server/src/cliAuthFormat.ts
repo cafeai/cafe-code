@@ -5,6 +5,7 @@ import type {
 } from "@cafecode/contracts/auth";
 import * as DateTime from "effect/DateTime";
 
+import { buildServerPairingUrl } from "./authPairingUrl.ts";
 import type { IssuedBearerSession, IssuedPairingLink } from "./auth/Services/AuthControlPlane.ts";
 
 const newline = "\n";
@@ -37,12 +38,7 @@ export function formatIssuedPairingCredential(
 ): string {
   const pairUrl =
     options?.baseUrl != null && options.baseUrl.length > 0
-      ? (() => {
-          const url = new URL("/pair", options.baseUrl);
-          url.searchParams.delete("token");
-          url.hash = new URLSearchParams([["token", credential.credential]]).toString();
-          return url.toString();
-        })()
+      ? buildServerPairingUrl(options.baseUrl, credential.credential)
       : undefined;
 
   if (options?.json) {

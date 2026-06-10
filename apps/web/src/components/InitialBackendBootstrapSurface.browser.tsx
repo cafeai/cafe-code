@@ -127,7 +127,7 @@ describe("InitialBackendBootstrapSurface", () => {
       expect(document.querySelector('[data-testid="initial-backend-bootstrap-loading"]')).not.toBe(
         null,
       );
-      expect(document.body.textContent).toContain("Loading workspace");
+      expect(document.body.textContent).toContain("Connecting to workspace");
       expect(document.querySelector('[data-testid="bootstrapped-workspace"]')).toBe(null);
 
       useStore.getState().syncServerShellSnapshot(createShellSnapshot(), TEST_ENVIRONMENT_ID);

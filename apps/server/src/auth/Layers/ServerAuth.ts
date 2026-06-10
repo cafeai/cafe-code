@@ -17,6 +17,7 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 
+import { buildServerPairingUrl } from "../../authPairingUrl.ts";
 import { AuthControlPlane } from "../Services/AuthControlPlane.ts";
 import { AdminPasswordService } from "../Services/AdminPasswordService.ts";
 import { ServerAuthPolicyLive } from "./ServerAuthPolicy.ts";
@@ -515,15 +516,48 @@ export const makeServerAuth = Effect.gen(function* () {
       ),
     );
 
+  const getAdminPasswordStatus: ServerAuthShape["getAdminPasswordStatus"] = () =>
+    adminPassword.isConfigured.pipe(
+      Effect.map((configured) => ({ configured })),
+      Effect.mapError(
+        (cause) =>
+          new AuthError({
+            message: "Failed to inspect admin password configuration.",
+            status: cause.status ?? 500,
+            cause,
+          }),
+      ),
+    );
+
+  const setAdminPassword: ServerAuthShape["setAdminPassword"] = (input) =>
+    adminPassword.setPassword(input.password).pipe(
+      Effect.as({ configured: true }),
+      Effect.mapError(
+        (cause) =>
+          new AuthError({
+            message: cause.message,
+            status: cause.status ?? 500,
+            cause,
+          }),
+      ),
+    );
+
+  const clearAdminPassword: ServerAuthShape["clearAdminPassword"] = () =>
+    adminPassword.clearPassword.pipe(
+      Effect.as({ configured: false }),
+      Effect.mapError(
+        (cause) =>
+          new AuthError({
+            message: "Failed to clear admin password.",
+            status: cause.status ?? 500,
+            cause,
+          }),
+      ),
+    );
+
   const issueStartupPairingUrl: ServerAuthShape["issueStartupPairingUrl"] = (baseUrl) =>
     issuePairingCredential({ role: "owner" }).pipe(
-      Effect.map((issued) => {
-        const url = new URL(baseUrl);
-        url.pathname = "/pair";
-        url.searchParams.delete("token");
-        url.hash = new URLSearchParams([["token", issued.credential]]).toString();
-        return url.toString();
-      }),
+      Effect.map((issued) => buildServerPairingUrl(baseUrl, issued.credential)),
     );
 
   const issueWebSocketToken: ServerAuthShape["issueWebSocketToken"] = (session) =>
@@ -586,6 +620,9 @@ export const makeServerAuth = Effect.gen(function* () {
     listClientSessions,
     revokeClientSession,
     revokeOtherClientSessions,
+    getAdminPasswordStatus,
+    setAdminPassword,
+    clearAdminPassword,
     authenticateHttpRequest: authenticateRequest,
     authenticateWebSocketUpgrade,
     issueWebSocketToken,

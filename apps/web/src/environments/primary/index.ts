@@ -15,7 +15,9 @@ export {
 } from "./context";
 
 export {
+  clearServerAdminPassword,
   createServerPairingCredential,
+  fetchServerAdminPasswordStatus,
   fetchSessionState,
   listServerClientSessions,
   listServerPairingLinks,
@@ -24,6 +26,7 @@ export {
   revokeOtherServerClientSessions,
   revokeServerClientSession,
   revokeServerPairingLink,
+  setServerAdminPassword,
   stripPairingTokenFromUrl,
   submitServerAuthCredential,
   submitServerPasswordCredential,

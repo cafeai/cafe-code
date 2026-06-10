@@ -1,6 +1,5 @@
 import { type ReactNode } from "react";
 
-import { APP_DISPLAY_NAME } from "../branding";
 import { usePrimaryEnvironmentId } from "../environments/primary";
 import { getWsConnectionUiState, useWsConnectionStatus } from "../rpc/wsConnectionState";
 import { selectBootstrapCompleteForEnvironment, useStore } from "../store";
@@ -9,29 +8,25 @@ import { Skeleton } from "./ui/skeleton";
 import { SidebarMenuSkeleton } from "./ui/sidebar";
 
 function describeBootstrapStatus(input: {
-  readonly connectionLabel: string | null;
-  readonly lastError: string | null;
   readonly uiState: ReturnType<typeof getWsConnectionUiState>;
 }): { readonly detail: string; readonly title: string } {
-  const connectionName = input.connectionLabel?.trim() || `${APP_DISPLAY_NAME} Server`;
-
   if (input.uiState === "offline") {
     return {
-      detail: "Waiting for the network before loading projects and threads.",
-      title: "Waiting for network",
+      detail: "Waiting for a network connection.",
+      title: "Connecting to workspace",
     };
   }
 
   if (input.uiState === "error") {
     return {
-      detail: input.lastError?.trim() || `Waiting for ${connectionName} to respond.`,
-      title: "Waiting for backend",
+      detail: "Waiting for the workspace to respond.",
+      title: "Connecting to workspace",
     };
   }
 
   return {
-    detail: `Connecting to ${connectionName} and loading projects and threads.`,
-    title: "Loading workspace",
+    detail: "Loading projects and chats.",
+    title: "Connecting to workspace",
   };
 }
 
@@ -96,8 +91,6 @@ export function InitialBackendBootstrapSurface({ children }: { readonly children
   }
 
   const copy = describeBootstrapStatus({
-    connectionLabel: status.connectionLabel,
-    lastError: status.lastError,
     uiState: uiState === "connected" ? "connecting" : uiState,
   });
 

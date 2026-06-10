@@ -588,4 +588,38 @@ describe("resolveInitialServerAuthGateState", () => {
       method: "POST",
     });
   });
+
+  it("manages admin password status through authenticated auth endpoints", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ configured: false }))
+      .mockResolvedValueOnce(jsonResponse({ configured: true }))
+      .mockResolvedValueOnce(jsonResponse({ configured: false }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { clearServerAdminPassword, fetchServerAdminPasswordStatus, setServerAdminPassword } =
+      await import("./environments/primary");
+
+    await expect(fetchServerAdminPasswordStatus()).resolves.toEqual({ configured: false });
+    await expect(setServerAdminPassword(" correct horse battery staple ")).resolves.toEqual({
+      configured: true,
+    });
+    await expect(clearServerAdminPassword()).resolves.toEqual({ configured: false });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "http://localhost/api/auth/admin-password", {
+      credentials: "include",
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "http://localhost/api/auth/admin-password", {
+      body: JSON.stringify({ password: "correct horse battery staple" }),
+      credentials: "include",
+      headers: {
+        "content-type": "application/json",
+      },
+      method: "POST",
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(3, "http://localhost/api/auth/admin-password/clear", {
+      credentials: "include",
+      method: "POST",
+    });
+  });
 });

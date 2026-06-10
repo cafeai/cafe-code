@@ -116,6 +116,16 @@ export const AuthPasswordBootstrapInput = Schema.Struct({
 });
 export type AuthPasswordBootstrapInput = typeof AuthPasswordBootstrapInput.Type;
 
+export const AuthAdminPasswordStatus = Schema.Struct({
+  configured: Schema.Boolean,
+});
+export type AuthAdminPasswordStatus = typeof AuthAdminPasswordStatus.Type;
+
+export const AuthSetAdminPasswordInput = Schema.Struct({
+  password: TrimmedNonEmptyString,
+});
+export type AuthSetAdminPasswordInput = typeof AuthSetAdminPasswordInput.Type;
+
 export const AuthBootstrapResult = Schema.Struct({
   authenticated: Schema.Literal(true),
   role: AuthSessionRole,

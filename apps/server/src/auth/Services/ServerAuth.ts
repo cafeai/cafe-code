@@ -1,4 +1,5 @@
 import type {
+  AuthAdminPasswordStatus,
   AuthBearerBootstrapResult,
   AuthBootstrapResult,
   AuthClientMetadata,
@@ -7,6 +8,7 @@ import type {
   AuthPasswordBootstrapInput,
   AuthPairingLink,
   AuthPairingCredentialResult,
+  AuthSetAdminPasswordInput,
   AuthSessionId,
   AuthSessionState,
   ServerAuthDescriptor,
@@ -84,6 +86,11 @@ export interface ServerAuthShape {
   readonly revokeOtherClientSessions: (
     currentSessionId: AuthSessionId,
   ) => Effect.Effect<number, AuthError>;
+  readonly getAdminPasswordStatus: () => Effect.Effect<AuthAdminPasswordStatus, AuthError>;
+  readonly setAdminPassword: (
+    input: AuthSetAdminPasswordInput,
+  ) => Effect.Effect<AuthAdminPasswordStatus, AuthError>;
+  readonly clearAdminPassword: () => Effect.Effect<AuthAdminPasswordStatus, AuthError>;
   readonly authenticateHttpRequest: (
     request: HttpServerRequest.HttpServerRequest,
   ) => Effect.Effect<AuthenticatedSession, AuthError>;

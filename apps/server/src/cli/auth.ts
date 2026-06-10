@@ -75,7 +75,7 @@ const subjectFlag = Flag.string("subject").pipe(
 );
 
 const baseUrlFlag = Flag.string("base-url").pipe(
-  Flag.withDescription("Optional public base URL used to print a ready `/pair#token=...` link."),
+  Flag.withDescription("Optional public base URL used to print a ready `/pair?token=...` link."),
   Flag.optional,
 );
 
