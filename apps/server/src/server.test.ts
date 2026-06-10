@@ -2327,12 +2327,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  if (process.versions.bun !== undefined) {
-    // Bun's bare `ws` compatibility server accepts upgrades but does not
-    // negotiate permessage-deflate. The production compression layer is for
-    // the Node/Electron backend path, so keep this assertion on that runtime.
-    it.skip("negotiates websocket compression when a client offers permessage-deflate", () => {});
-  } else {
+  // Bun's bare `ws` compatibility server accepts upgrades but does not
+  // negotiate permessage-deflate. The production compression layer is for
+  // the Node/Electron backend path, so register this assertion only there.
+  if (process.versions.bun === undefined) {
     it.effect("negotiates websocket compression when a client offers permessage-deflate", () =>
       Effect.gen(function* () {
         yield* buildAppUnderTest();
