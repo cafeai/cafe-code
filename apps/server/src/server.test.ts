@@ -1293,6 +1293,42 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect(
+    "keeps client debug log ingestion disabled unless server debug logging is enabled",
+    () =>
+      Effect.gen(function* () {
+        yield* buildAppUnderTest();
+
+        const url = yield* getHttpServerUrl("/api/client-debug-log");
+        const response = yield* Effect.promise(() =>
+          fetch(url, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ event: "test" }),
+          }),
+        );
+
+        assert.equal(response.status, 404);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("accepts client debug log ingestion when server debug logging is enabled", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({ config: { logLevel: "Debug" } });
+
+      const url = yield* getHttpServerUrl("/api/client-debug-log");
+      const response = yield* Effect.promise(() =>
+        fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ event: "test" }),
+        }),
+      );
+
+      assert.equal(response.status, 204);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("reports unauthenticated session state without requiring auth", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest();

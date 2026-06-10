@@ -209,11 +209,17 @@ export const serverEnvironmentRouteLayer = HttpRouter.add(
 // Receives DOM/state debug events from the web UI (see
 // apps/web/src/lib/mobileDebugLog.ts) and echoes them to the server log so
 // mobile composer behavior can be diagnosed without devtools on the device.
-// The client only posts here when its debug flag is enabled (off by default).
+// The browser debug flag is not authoritative: the server only accepts these
+// diagnostics when it was explicitly started with debug logging enabled.
 export const clientDebugLogRouteLayer = HttpRouter.add(
   "POST",
   "/api/client-debug-log",
   Effect.gen(function* () {
+    const config = yield* ServerConfig;
+    if (config.logLevel !== "Debug") {
+      return HttpServerResponse.empty({ status: 404, headers: browserApiCorsHeaders });
+    }
+
     const request = yield* HttpServerRequest.HttpServerRequest;
     const body = yield* request.json.pipe(Effect.catch(() => Effect.succeed("<unparseable body>")));
     yield* Effect.logInfo("[client-debug]", body);

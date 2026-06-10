@@ -2,9 +2,9 @@
  * Mobile debugging instrumentation (disabled by default).
  *
  * When enabled, sends DOM/state snapshots to the server
- * (`POST /api/client-debug-log`), which echoes them to the server log, so
- * mobile composer behavior can be diagnosed without attaching devtools to the
- * device.
+ * (`POST /api/client-debug-log`), which echoes them to the server log only
+ * when the backend was started with debug logging. This lets mobile composer
+ * behavior be diagnosed without attaching devtools to the device.
  *
  * To enable on a device without rebuilding, run this in its console (or via a
  * bookmarklet) and reload:
