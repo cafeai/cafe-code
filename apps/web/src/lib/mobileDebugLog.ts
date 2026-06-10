@@ -25,8 +25,7 @@ function isDebugLoggingEnabled(): boolean {
   }
   try {
     enabledCache =
-      typeof window !== "undefined" &&
-      window.localStorage.getItem("cafecode:mobile-debug") === "1";
+      typeof window !== "undefined" && window.localStorage.getItem("cafecode:mobile-debug") === "1";
   } catch {
     enabledCache = false;
   }
@@ -69,7 +68,8 @@ export function domSnapshot(): Record<string, unknown> {
     activeElement: describeElement(document.activeElement),
     headerDisplay: computedDisplay("[data-chat-view-header]"),
     footerDisplay: computedDisplay("[data-chat-composer-footer]"),
-    collapsedAttr: composerSurface?.getAttribute("data-chat-composer-mobile-collapsed") ?? "<absent>",
+    collapsedAttr:
+      composerSurface?.getAttribute("data-chat-composer-mobile-collapsed") ?? "<absent>",
     keyboardOpenAttr:
       composerSurface?.getAttribute("data-chat-composer-keyboard-open") ?? "<absent>",
   };
@@ -78,7 +78,6 @@ export function domSnapshot(): Record<string, unknown> {
 export function mobileDebugLog(event: string, data: Record<string, unknown> = {}): void {
   if (!isDebugLoggingEnabled()) return;
   const payload = { seq: ++sequence, event, ...data };
-  // eslint-disable-next-line no-console
   console.info("[mobile-debug]", payload);
   try {
     void fetch("/api/client-debug-log", {

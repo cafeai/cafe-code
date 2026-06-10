@@ -1944,7 +1944,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       return;
     }
     requestComposerEditorFocus();
-  }, [activeThreadId, composerEditorDisabled, isOnScreenKeyboardDevice, requestComposerEditorFocus]);
+  }, [
+    activeThreadId,
+    composerEditorDisabled,
+    isOnScreenKeyboardDevice,
+    requestComposerEditorFocus,
+  ]);
   const expandMobileComposer = useCallback(() => {
     if (composerBlurFrameRef.current !== null) {
       window.cancelAnimationFrame(composerBlurFrameRef.current);
@@ -2158,15 +2163,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   }, [isOnScreenKeyboardDevice]);
 
   useEffect(() => {
+    const composerBlurFrameRefForCleanup = composerBlurFrameRef;
+    const mobileComposerExpandFrameRefForCleanup = mobileComposerExpandFrameRef;
+    const mobileComposerExpandReleaseFrameRefForCleanup = mobileComposerExpandReleaseFrameRef;
     return () => {
-      if (composerBlurFrameRef.current !== null) {
-        window.cancelAnimationFrame(composerBlurFrameRef.current);
+      if (composerBlurFrameRefForCleanup.current !== null) {
+        window.cancelAnimationFrame(composerBlurFrameRefForCleanup.current);
       }
-      if (mobileComposerExpandFrameRef.current !== null) {
-        window.cancelAnimationFrame(mobileComposerExpandFrameRef.current);
+      if (mobileComposerExpandFrameRefForCleanup.current !== null) {
+        window.cancelAnimationFrame(mobileComposerExpandFrameRefForCleanup.current);
       }
-      if (mobileComposerExpandReleaseFrameRef.current !== null) {
-        window.cancelAnimationFrame(mobileComposerExpandReleaseFrameRef.current);
+      if (mobileComposerExpandReleaseFrameRefForCleanup.current !== null) {
+        window.cancelAnimationFrame(mobileComposerExpandReleaseFrameRefForCleanup.current);
       }
     };
   }, []);
@@ -2588,9 +2596,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 cursor={composerCursor}
                 skills={selectedProviderStatus?.skills ?? []}
                 focusRequestRevision={composerFocusRequestRevision}
-                {...(showMobileComposerActionsOverlay
-                  ? { className: "max-h-40 pb-11" }
-                  : {})}
+                {...(showMobileComposerActionsOverlay ? { className: "max-h-40 pb-11" } : {})}
                 onChange={onPromptChange}
                 onCommandKeyDown={onComposerCommandKey}
                 onPaste={onComposerPaste}
@@ -2646,7 +2652,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               desktop; it is hidden only while the on-screen keyboard is open
               (the editor overlay provides the primary action then). */}
           {showMobileComposerActionsOverlay ||
-          (isComposerCollapsedMobile && !showCollapsedMobilePromptRow) ? null : activePendingApproval ? (
+          (isComposerCollapsedMobile &&
+            !showCollapsedMobilePromptRow) ? null : activePendingApproval ? (
             <div className="flex items-center justify-end gap-2 px-2.5 pb-2.5 sm:px-3 sm:pb-3">
               <ComposerPendingApprovalActions
                 requestId={activePendingApproval.requestId}

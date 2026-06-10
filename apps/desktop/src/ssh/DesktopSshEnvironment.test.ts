@@ -1,4 +1,3 @@
-import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as NetService from "@cafecode/shared/Net";
@@ -6,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import { FetchHttpClient } from "effect/unstable/http";
 
 import * as DesktopSshEnvironment from "./DesktopSshEnvironment.ts";
 
@@ -84,7 +84,7 @@ describe("sshEnvironment", () => {
       Effect.provide(
         DesktopSshEnvironment.layer().pipe(
           Layer.provideMerge(NodeServices.layer),
-          Layer.provideMerge(NodeHttpClient.layerUndici),
+          Layer.provideMerge(FetchHttpClient.layer),
           Layer.provideMerge(NetService.layer),
         ),
       ),

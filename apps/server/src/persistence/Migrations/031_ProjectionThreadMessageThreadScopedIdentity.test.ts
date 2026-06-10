@@ -4,9 +4,9 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
-import * as NodeSqliteClient from "../NodeSqliteClient.ts";
+import * as TestSqliteClient from "../TestSqliteClient.ts";
 
-const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
+const layer = it.layer(Layer.mergeAll(TestSqliteClient.layerMemory()));
 
 layer("031_ProjectionThreadMessageThreadScopedIdentity", (it) => {
   it.effect("rebuilds projection messages with a thread-scoped primary key", () =>

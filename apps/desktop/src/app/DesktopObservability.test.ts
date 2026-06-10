@@ -1,10 +1,10 @@
-import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import { FetchHttpClient } from "effect/unstable/http";
 
 import * as DesktopConfig from "./DesktopConfig.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
@@ -109,7 +109,7 @@ describe("DesktopObservability", () => {
       assert.isFalse(yield* fileSystem.exists(logPath));
     }).pipe(
       Effect.scoped,
-      Effect.provide(Layer.mergeAll(NodeServices.layer, NodeHttpClient.layerUndici)),
+      Effect.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer)),
     ),
   );
 
@@ -157,7 +157,7 @@ describe("DesktopObservability", () => {
       assert.equal(output.annotations.text, "hello server\n");
     }).pipe(
       Effect.scoped,
-      Effect.provide(Layer.mergeAll(NodeServices.layer, NodeHttpClient.layerUndici)),
+      Effect.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer)),
     ),
   );
 });
