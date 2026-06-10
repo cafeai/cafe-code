@@ -95,6 +95,34 @@ Debug mode:
 bun run --cwd apps/desktop start -- --cafe-debug
 ```
 
+### Browser Web UI Firewall Ports
+
+If you want to open the Cafe Code Web UI from another device on your LAN, first
+enable network/LAN access in Cafe Code, then allow the desktop backend ports
+through your firewall. The default desktop ports are:
+
+- HTTPS/WSS Web UI: `3775/tcp`
+- HTTP/WS fallback and certificate bootstrap page: `3773/tcp`
+
+For `ufw`:
+
+```bash
+sudo ufw allow 3775/tcp comment 'Cafe Code HTTPS'
+sudo ufw allow 3773/tcp comment 'Cafe Code HTTP'
+```
+
+For local development with `bun run dev:desktop`, the default ports are:
+
+```bash
+sudo ufw allow 13775/tcp comment 'Cafe Code dev HTTPS'
+sudo ufw allow 13773/tcp comment 'Cafe Code dev backend'
+sudo ufw allow 5733/tcp comment 'Cafe Code dev Vite'
+```
+
+If Cafe Code prints a different port, or you run with `CAFE_CODE_PORT`,
+`CAFE_CODE_HTTPS_PORT`, `CAFE_CODE_DEV_INSTANCE`, or
+`CAFE_CODE_PORT_OFFSET`, allow the printed port instead.
+
 If you want Codex or Claude to do it for you, paste this into the CLI:
 
 ```text
@@ -213,6 +241,31 @@ bun run --cwd apps/desktop start
 ```bash
 bun run --cwd apps/desktop start -- --cafe-debug
 ```
+
+LAN の別デバイスから Cafe Code の Web UI を開きたいなら、先に Cafe Code
+側でネットワーク/LAN アクセスを有効にして、ファイアウォールでこのポートを開ける。
+
+- HTTPS/WSS Web UI: `3775/tcp`
+- HTTP/WS のフォールバックと証明書案内ページ: `3773/tcp`
+
+`ufw` ならこれ。
+
+```bash
+sudo ufw allow 3775/tcp comment 'Cafe Code HTTPS'
+sudo ufw allow 3773/tcp comment 'Cafe Code HTTP'
+```
+
+`bun run dev:desktop` の開発中は、デフォルトではこっち。
+
+```bash
+sudo ufw allow 13775/tcp comment 'Cafe Code dev HTTPS'
+sudo ufw allow 13773/tcp comment 'Cafe Code dev backend'
+sudo ufw allow 5733/tcp comment 'Cafe Code dev Vite'
+```
+
+Cafe Code が別のポートを表示しているときや、`CAFE_CODE_PORT`、
+`CAFE_CODE_HTTPS_PORT`、`CAFE_CODE_DEV_INSTANCE`、`CAFE_CODE_PORT_OFFSET`
+を使っているときは、その表示されたポートを開けてね。
 
 だいたい macOS で見てる。Windows も動いてそう。
 Linux はまだあまり見れてないから、ちょっと調整がいるかも。

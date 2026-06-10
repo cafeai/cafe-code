@@ -151,7 +151,7 @@ function SidebarProvider({
     <SidebarContext value={contextValue}>
       <div
         className={cn(
-          "group/sidebar-wrapper flex min-h-svh w-full has-data-[variant=inset]:bg-sidebar",
+          "group/sidebar-wrapper flex min-h-dvh w-full has-data-[variant=inset]:bg-sidebar",
           className,
         )}
         data-slot="sidebar-wrapper"
@@ -253,7 +253,12 @@ function Sidebar({
             </SheetHeader>
             <div
               className={cn(
-                "flex h-full w-full flex-col pb-safe pt-safe",
+                // No pb-safe: mobile browsers (e.g. Firefox Android) exclude the
+                // system nav bar from the viewport yet still report a non-zero
+                // safe-area-inset-bottom, so pb-safe would add ~48px of phantom
+                // empty space below the sidebar footer (Settings). pt-safe is kept
+                // for top-notch devices and is 0 elsewhere.
+                "flex h-full w-full flex-col pt-safe",
                 side === "left" ? "pl-safe" : "pr-safe",
               )}
             >

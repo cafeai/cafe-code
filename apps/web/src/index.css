@@ -162,12 +162,19 @@ body {
 
 html,
 body {
-  min-height: calc(100svh + env(safe-area-inset-top));
+  /*
+   * Use the dynamic viewport height so the page fills the *current* visible
+   * viewport on mobile (where the browser toolbar shows/hides). Previously this
+   * was locked to 100svh (the smallest viewport), which left a gap at the bottom
+   * on mobile when the toolbar was retracted. On desktop dvh == svh == 100vh, so
+   * this is unchanged there.
+   */
+  min-height: 100dvh;
   overscroll-behavior: none;
 }
 
 body {
-  height: 100%;
+  height: 100dvh;
   overflow: hidden;
 }
 

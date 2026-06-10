@@ -6306,9 +6306,13 @@ export default function ChatView(props: ChatViewProps) {
           <div
             className={cn(
               "pl-[calc(env(safe-area-inset-left)+0.75rem)] pr-[calc(env(safe-area-inset-right)+0.75rem)] pt-1.5 sm:pl-[calc(env(safe-area-inset-left)+1.25rem)] sm:pr-[calc(env(safe-area-inset-right)+1.25rem)] sm:pt-2",
-              isGitRepo
-                ? "pb-[calc(env(safe-area-inset-bottom)+0.25rem)]"
-                : "pb-[calc(env(safe-area-inset-bottom)+0.75rem)] sm:pb-[calc(env(safe-area-inset-bottom)+1rem)]",
+              // NOTE: intentionally NOT adding env(safe-area-inset-bottom) here.
+              // Mobile browsers (e.g. Firefox Android) already exclude the system
+              // nav bar from the viewport yet still report a non-zero
+              // safe-area-inset-bottom, so adding it inserts ~48px of phantom empty
+              // space below the composer. On desktop the inset is 0, so this is
+              // identical to the previous behavior there.
+              isGitRepo ? "pb-1" : "pb-3 sm:pb-4",
             )}
           >
             <div className="relative isolate">

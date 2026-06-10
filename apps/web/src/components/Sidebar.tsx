@@ -3294,15 +3294,10 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
           </div>
         )}
       </SidebarGroup>
-      {/*
-       * Desktop: the grow spacer pushes the mascot to the bottom of the sidebar.
-       * Mobile (max-md): drop the spacer so the mascot tucks directly under the
-       * project list instead of floating in the middle of an empty Sheet, and
-       * trim its footprint a little.
-       */}
-      <div aria-hidden="true" className="min-h-6 flex-1 max-md:hidden" />
+      {/* Grow spacer pushes the mascot to the bottom of the sidebar on all sizes. */}
+      <div aria-hidden="true" className="min-h-6 flex-1" />
       {showSidebarMascot ? (
-        <div className="flex shrink-0 flex-col items-center justify-center gap-2 px-4 pt-3 pb-4 max-md:pt-2 max-md:pb-3">
+        <div className="flex shrink-0 flex-col items-center justify-center gap-2 px-4 pt-3 pb-4">
           <img
             alt=""
             aria-hidden="true"
