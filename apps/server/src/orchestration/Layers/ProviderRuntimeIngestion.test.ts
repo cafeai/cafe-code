@@ -1012,6 +1012,65 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  it("appends missing suffix from assistant item completion detail after a streamed prefix", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
+    const now = "2026-01-01T00:00:00.000Z";
+    const turnId = asTurnId("turn-completion-prefix-repair");
+    const itemId = asItemId("item-completion-prefix-repair");
+    const finalText = "Here’s a table:\n\n| A | B |\n|---|---|\n";
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-completion-prefix-repair-delta"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId,
+      payload: {
+        streamKind: "assistant_text",
+        delta: "Here",
+      },
+    });
+
+    await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-completion-prefix-repair" &&
+          message.streaming &&
+          message.text === "Here",
+      ),
+    );
+
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-completion-prefix-repair-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId,
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+        detail: finalText,
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-completion-prefix-repair" && !message.streaming,
+      ),
+    );
+    const message = thread.messages.find(
+      (entry: ProviderRuntimeTestMessage) => entry.id === "assistant:item-completion-prefix-repair",
+    );
+
+    expect(message?.text).toBe(finalText);
+    expect(message?.streaming).toBe(false);
+  });
+
   it("ignores Codex snapshot backfill assistant completions that duplicate live assistant output", async () => {
     const harness = await createHarness({ serverSettings: { enableAssistantStreaming: false } });
     const now = "2026-01-01T00:00:00.000Z";

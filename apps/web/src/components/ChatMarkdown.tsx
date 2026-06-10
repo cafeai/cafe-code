@@ -38,6 +38,7 @@ import {
 import { readLocalApi } from "../localApi";
 import { cn } from "../lib/utils";
 import { normalizeChatMarkdownMath } from "../lib/chatMarkdownMath";
+import { normalizeCodexCitationMarkers } from "../lib/codexCitations";
 
 class CodeHighlightErrorBoundary extends React.Component<
   { fallback: ReactNode; children: ReactNode },
@@ -65,6 +66,7 @@ interface ChatMarkdownProps {
   cwd: string | undefined;
   additionalWorkspaceRoots?: ReadonlyArray<string>;
   isStreaming?: boolean;
+  normalizeCodexCitations?: boolean;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
 }
 
@@ -600,11 +602,17 @@ function ChatMarkdown({
   cwd,
   additionalWorkspaceRoots = [],
   isStreaming = false,
+  normalizeCodexCitations = false,
   skills = EMPTY_MARKDOWN_SKILLS,
 }: ChatMarkdownProps) {
   const { resolvedTheme } = useTheme();
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
-  const normalizedText = useMemo(() => normalizeChatMarkdownMath(text), [text]);
+  const normalizedText = useMemo(() => {
+    const citationNormalizedText = normalizeCodexCitations
+      ? normalizeCodexCitationMarkers(text, { mode: "display" })
+      : text;
+    return normalizeChatMarkdownMath(citationNormalizedText);
+  }, [normalizeCodexCitations, text]);
   const markdownFileLinkMetaByHref = useMemo(() => {
     const metaByHref = new Map<
       string,
@@ -685,6 +693,13 @@ function ChatMarkdown({
               </Suspense>
             </CodeHighlightErrorBoundary>
           </MarkdownCodeBlock>
+        );
+      },
+      table({ node: _node, children, ...props }) {
+        return (
+          <div className="chat-markdown-table-scroll">
+            <table {...props}>{children}</table>
+          </div>
         );
       },
     }),

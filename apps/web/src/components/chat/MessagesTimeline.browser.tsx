@@ -1,6 +1,6 @@
 import "../../index.css";
 
-import { EnvironmentId } from "@cafecode/contracts";
+import { EnvironmentId, ProviderDriverKind } from "@cafecode/contracts";
 import { createRef } from "react";
 import type { LegendListRef } from "@legendapp/list/react";
 import { page } from "vitest/browser";
@@ -86,6 +86,7 @@ function buildProps() {
     isRevertingCheckpoint: false,
     onImageExpand: vi.fn(),
     activeThreadEnvironmentId: EnvironmentId.make("environment-local"),
+    activeProvider: ProviderDriverKind.make("codex"),
     markdownCwd: undefined,
     timestampFormat: "24-hour" as const,
     workspaceRoot: undefined,

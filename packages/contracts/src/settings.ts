@@ -14,6 +14,10 @@ export const TimestampFormat = Schema.Literals(["locale", "12-hour", "24-hour"])
 export type TimestampFormat = typeof TimestampFormat.Type;
 export const DEFAULT_TIMESTAMP_FORMAT: TimestampFormat = "locale";
 
+export const ChatCopyFormat = Schema.Literals(["markdown", "plainText"]);
+export type ChatCopyFormat = typeof ChatCopyFormat.Type;
+export const DEFAULT_CHAT_COPY_FORMAT: ChatCopyFormat = "markdown";
+
 export const DefaultEditorSelection = Schema.Union([Schema.Literal("system-default"), EditorId]);
 export type DefaultEditorSelection = typeof DefaultEditorSelection.Type;
 export const DEFAULT_DEFAULT_EDITOR: DefaultEditorSelection = "system-default";
@@ -152,6 +156,9 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   timestampFormat: TimestampFormat.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_TIMESTAMP_FORMAT)),
+  ),
+  chatCopyFormat: ChatCopyFormat.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHAT_COPY_FORMAT)),
   ),
 });
 export type ClientSettings = typeof ClientSettingsSchema.Type;
@@ -480,5 +487,6 @@ export const ClientSettingsPatch = Schema.Struct({
   sidebarThreadSortOrder: Schema.optionalKey(SidebarThreadSortOrder),
   sidebarThreadPreviewCount: Schema.optionalKey(SidebarThreadPreviewCount),
   timestampFormat: Schema.optionalKey(TimestampFormat),
+  chatCopyFormat: Schema.optionalKey(ChatCopyFormat),
 });
 export type ClientSettingsPatch = typeof ClientSettingsPatch.Type;

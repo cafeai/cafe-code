@@ -151,6 +151,24 @@ describe("ChatMarkdown", () => {
     }
   });
 
+  it("normalizes Codex private-use citation markers for display", async () => {
+    const screen = await render(
+      <ChatMarkdown
+        text={"Reference \uE200cite\uE202turn4search3\uE201 stays readable."}
+        cwd="/repo/project"
+        normalizeCodexCitations
+      />,
+    );
+
+    try {
+      await expect.element(page.getByText("Reference [1] stays readable.")).toBeInTheDocument();
+      await expect.element(page.getByText("\uE200")).not.toBeInTheDocument();
+      await expect.element(page.getByText("turn4search3")).not.toBeInTheDocument();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("renders Codex math fences with KaTeX instead of code highlighting", async () => {
     const screen = await render(
       <ChatMarkdown text={["```math", "E = mc^2", "```"].join("\n")} cwd="/repo/project" />,
@@ -179,6 +197,51 @@ describe("ChatMarkdown", () => {
         expect(document.querySelector(".katex")).not.toBeNull();
       });
       expect(document.querySelector(".katex-display")).not.toBeNull();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps wide Markdown tables inside a horizontal scroll container", async () => {
+    const screen = await render(
+      <ChatMarkdown
+        text={[
+          "| Case | Expression | Notes |",
+          "| --- | --- | --- |",
+          "| Long inline math | $f(x)=\\sum_{i=1}^{999999999999999999999999999999999999999999999999} \\frac{x_i}{1+x_i}$ | Should not widen the message column |",
+          "| Long code token | `const_veryVeryVeryVeryVeryVeryVeryLongIdentifierNameWithoutBreaksOrSpacesEqualsAnotherVeryVeryVeryVeryLongIdentifierName` | Scroll instead of crushing columns |",
+          "| Display math | $$\\prod_{j=1}^{123456789012345678901234567890}\\left(\\frac{a_j+b_j+c_j+d_j+e_j+f_j+g_j+h_j+i_j}{\\omega_j^{98765432109876543210}+\\theta_j^{12345678901234567890}}\\right)$$ | Stays in the table after reload |",
+        ].join("\n")}
+        cwd="/repo/project"
+      />,
+    );
+
+    try {
+      const tableScroll = document.querySelector<HTMLElement>(".chat-markdown-table-scroll");
+      const table = tableScroll?.querySelector("table");
+
+      expect(tableScroll).not.toBeNull();
+      expect(table).not.toBeNull();
+      expect(window.getComputedStyle(tableScroll!).overflowX).toBe("auto");
+      expect(window.getComputedStyle(table!).minWidth).toBe("100%");
+      expect(tableScroll!.scrollWidth).toBeGreaterThan(tableScroll!.clientWidth);
+      expect(table!.getBoundingClientRect().width).toBeGreaterThan(
+        tableScroll!.getBoundingClientRect().width,
+      );
+
+      const longCode = Array.from(tableScroll!.querySelectorAll("code")).find((node) =>
+        node.textContent?.includes("const_veryVeryVeryVeryVeryVeryVeryLongIdentifierName"),
+      );
+      const longCodeCell = longCode?.closest("td");
+      expect(longCode).toBeDefined();
+      expect(longCodeCell).not.toBeNull();
+      expect(longCode!.getBoundingClientRect().right).toBeLessThanOrEqual(
+        longCodeCell!.getBoundingClientRect().right + 1,
+      );
+
+      await expect.element(page.getByText("Display math")).toBeInTheDocument();
+      await expect.element(page.getByText("Stays in the table after reload")).toBeInTheDocument();
+      expect(document.querySelector(".katex")).not.toBeNull();
     } finally {
       await screen.unmount();
     }

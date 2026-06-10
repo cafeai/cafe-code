@@ -6,6 +6,7 @@ import {
   ClientSettingsSchema,
   DEFAULT_APP_ACCENT_COLOR,
   DEFAULT_BRAND_WORDMARK_PREFIX,
+  DEFAULT_CHAT_COPY_FORMAT,
   DEFAULT_CLIENT_SETTINGS,
   DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
   DEFAULT_POWER_SAVE_BLOCKER_MODE,
@@ -28,6 +29,18 @@ describe("client settings", () => {
   it("defaults power-save blocking to off", () => {
     expect(DEFAULT_CLIENT_SETTINGS.powerSaveBlockerMode).toBe(DEFAULT_POWER_SAVE_BLOCKER_MODE);
     expect(decodeClientSettings({}).powerSaveBlockerMode).toBe("off");
+  });
+
+  it("defaults chat selection copy to Markdown", () => {
+    expect(DEFAULT_CLIENT_SETTINGS.chatCopyFormat).toBe(DEFAULT_CHAT_COPY_FORMAT);
+    expect(decodeClientSettings({}).chatCopyFormat).toBe("markdown");
+  });
+
+  it("accepts only supported chat copy formats in patches", () => {
+    expect(decodeClientSettingsPatch({ chatCopyFormat: "plainText" })).toEqual({
+      chatCopyFormat: "plainText",
+    });
+    expect(() => decodeClientSettingsPatch({ chatCopyFormat: "html" })).toThrow();
   });
 
   it("defaults appearance preferences", () => {

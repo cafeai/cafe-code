@@ -72,4 +72,29 @@ describe("normalizeChatMarkdownMath", () => {
       "A short inline expression $x+1$ should not turn the paragraph into a block.",
     );
   });
+
+  it("keeps display-style math inside GFM table rows inline", () => {
+    expect(
+      normalizeChatMarkdownMath(
+        [
+          "| Case | Expression |",
+          "|---|---|",
+          "| Display dollars | $$\\prod_{j=1}^{1234567890}\\frac{a_j}{b_j}$$ |",
+          "| Slash display | \\[x=\\frac{-b\\pm\\sqrt{b^2-4ac}}{2a}\\] |",
+        ].join("\n"),
+      ),
+    ).toBe(
+      [
+        "| Case | Expression |",
+        "|---|---|",
+        "| Display dollars | $\\prod_{j=1}^{1234567890}\\frac{a_j}{b_j}$ |",
+        "| Slash display | $x=\\frac{-b\\pm\\sqrt{b^2-4ac}}{2a}$ |",
+      ].join("\n"),
+    );
+  });
+
+  it("does not rewrite display math delimiters inside non-math code fences", () => {
+    const markdown = ["```text", "| Literal | $$x=1$$ |", "```"].join("\n");
+    expect(normalizeChatMarkdownMath(markdown)).toBe(markdown);
+  });
 });

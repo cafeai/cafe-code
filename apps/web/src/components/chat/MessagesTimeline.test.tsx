@@ -1,4 +1,4 @@
-import { EnvironmentId, MessageId } from "@cafecode/contracts";
+import { EnvironmentId, MessageId, ProviderDriverKind } from "@cafecode/contracts";
 import { createRef, type ReactNode, type Ref } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeAll, describe, expect, it, vi } from "vitest";
@@ -97,6 +97,7 @@ function buildProps() {
     isRevertingCheckpoint: false,
     onImageExpand: () => {},
     activeThreadEnvironmentId: ACTIVE_THREAD_ENVIRONMENT_ID,
+    activeProvider: ProviderDriverKind.make("codex"),
     markdownCwd: undefined,
     timestampFormat: "locale" as const,
     workspaceRoot: undefined,

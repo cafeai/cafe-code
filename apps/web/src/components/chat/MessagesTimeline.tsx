@@ -3,6 +3,7 @@ import {
   type EditorId,
   type MessageId,
   type OrchestrationThreadActivity,
+  type ProviderDriverKind,
   type ServerProviderSkill,
   type ThreadId,
   type TurnId,
@@ -55,8 +56,17 @@ import {
 } from "./MessagesTimeline.logic";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
-import { type DefaultEditorSelection, type TimestampFormat } from "@cafecode/contracts/settings";
+import {
+  type ChatCopyFormat,
+  type DefaultEditorSelection,
+  type TimestampFormat,
+} from "@cafecode/contracts/settings";
 import { formatTimestamp } from "../../timestampFormat";
+import {
+  isWholeMessageSelection,
+  prepareChatMessageMarkdownCopyText,
+  shouldUseMarkdownSelectionCopy,
+} from "../../lib/chatClipboard";
 
 import { SkillInlineText } from "./SkillInlineText";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
@@ -87,6 +97,7 @@ export {
 
 interface TimelineRowSharedState {
   timestampFormat: TimestampFormat;
+  activeProvider: ProviderDriverKind | null;
   markdownCwd: string | undefined;
   additionalWorkspaceRoots: ReadonlyArray<string>;
   workspaceRoot: string | undefined;
@@ -140,6 +151,7 @@ interface MessagesTimelineProps {
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   activeThreadEnvironmentId: EnvironmentId;
+  activeProvider: ProviderDriverKind | null;
   markdownCwd: string | undefined;
   additionalWorkspaceRoots?: ReadonlyArray<string>;
   timestampFormat: TimestampFormat;
@@ -170,6 +182,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   isRevertingCheckpoint,
   onImageExpand,
   activeThreadEnvironmentId,
+  activeProvider,
   markdownCwd,
   additionalWorkspaceRoots = [],
   timestampFormat,
@@ -181,6 +194,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onUserScrollIntent,
 }: MessagesTimelineProps) {
   const activeThreadId = activeThreadIdProp ?? null;
+  const chatCopyFormat = useSettings((settings) => settings.chatCopyFormat);
   const rawRows = useMemo(
     () =>
       deriveMessagesTimelineRows({
@@ -210,6 +224,74 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   );
   const rows = useStableRows(rawRows);
   const stickToEndDeadlineMsRef = useRef(0);
+  const assistantMarkdownCopyTextByMessageId = useMemo(() => {
+    const values = new Map<string, string>();
+    for (const row of rows) {
+      if (row.kind !== "message" || row.message.role !== "assistant") {
+        continue;
+      }
+      values.set(
+        row.message.id,
+        prepareChatMessageMarkdownCopyText(row.message.text ?? "", {
+          provider: activeProvider,
+        }),
+      );
+    }
+    return values;
+  }, [activeProvider, rows]);
+  const markdownSelectionCopyStateRef = useRef<{
+    format: ChatCopyFormat;
+    assistantMarkdownCopyTextByMessageId: Map<string, string>;
+  }>({
+    format: chatCopyFormat,
+    assistantMarkdownCopyTextByMessageId,
+  });
+  useEffect(() => {
+    markdownSelectionCopyStateRef.current = {
+      format: chatCopyFormat,
+      assistantMarkdownCopyTextByMessageId,
+    };
+  }, [assistantMarkdownCopyTextByMessageId, chatCopyFormat]);
+  useEffect(() => {
+    const handleDocumentCopy = (event: ClipboardEvent) => {
+      const { format, assistantMarkdownCopyTextByMessageId: copyTextByMessageId } =
+        markdownSelectionCopyStateRef.current;
+      if (!shouldUseMarkdownSelectionCopy(format) || event.defaultPrevented) {
+        return;
+      }
+
+      const selection = window.getSelection();
+      if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) {
+        return;
+      }
+
+      const range = selection.getRangeAt(0);
+      const copyRegion = findAssistantMarkdownCopyRegion(range);
+      if (!copyRegion) {
+        return;
+      }
+
+      const visibleText = copyRegion.innerText || copyRegion.textContent || "";
+      if (!isWholeMessageSelection({ selectedText: selection.toString(), visibleText })) {
+        return;
+      }
+
+      const messageId = copyRegion.dataset.chatCopyMessageId;
+      const markdownText = messageId ? copyTextByMessageId.get(messageId) : null;
+      if (!markdownText) {
+        return;
+      }
+
+      event.preventDefault();
+      event.clipboardData?.setData("text/plain", markdownText);
+      event.clipboardData?.setData("text/markdown", markdownText);
+    };
+
+    document.addEventListener("copy", handleDocumentCopy);
+    return () => {
+      document.removeEventListener("copy", handleDocumentCopy);
+    };
+  }, []);
   const forceScrollToEnd = useCallback(
     (rowCount = rows.length) => {
       if (rowCount <= 0) {
@@ -408,6 +490,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       skills,
       activeThreadId,
       activeThreadEnvironmentId,
+      activeProvider,
       onRevertUserMessage,
       onImageExpand,
     }),
@@ -419,6 +502,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       skills,
       activeThreadId,
       activeThreadEnvironmentId,
+      activeProvider,
       onRevertUserMessage,
       onImageExpand,
     ],
@@ -481,6 +565,45 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
 function keyExtractor(item: MessagesTimelineRow) {
   return item.id;
+}
+
+function isNodeInsideElement(node: Node, element: HTMLElement): boolean {
+  if (node === element) {
+    return true;
+  }
+  if (node.nodeType === Node.ELEMENT_NODE) {
+    return element.contains(node);
+  }
+  return node.parentElement != null && element.contains(node.parentElement);
+}
+
+function closestElementFromNode(node: Node): Element | null {
+  if (node.nodeType === Node.ELEMENT_NODE) {
+    return node as Element;
+  }
+  return node.parentElement;
+}
+
+function findAssistantMarkdownCopyRegion(range: Range): HTMLElement | null {
+  const startRegion = closestElementFromNode(range.startContainer)?.closest<HTMLElement>(
+    '[data-chat-copy-region="assistant"]',
+  );
+  const endRegion = closestElementFromNode(range.endContainer)?.closest<HTMLElement>(
+    '[data-chat-copy-region="assistant"]',
+  );
+
+  if (!startRegion || startRegion !== endRegion) {
+    return null;
+  }
+
+  if (
+    !isNodeInsideElement(range.startContainer, startRegion) ||
+    !isNodeInsideElement(range.endContainer, startRegion)
+  ) {
+    return null;
+  }
+
+  return startRegion;
 }
 
 // ---------------------------------------------------------------------------
@@ -689,6 +812,7 @@ function useSmoothedAssistantText(messageId: MessageId, sourceText: string) {
 function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
   const sourceMessageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+  const normalizeCodexCitations = ctx.activeProvider === "codex";
   const { displayedText: messageText, isAnimating } = useSmoothedAssistantText(
     row.message.id,
     sourceMessageText,
@@ -696,13 +820,16 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
 
   return (
     <div className="min-w-0 px-1 py-0.5">
-      <ChatMarkdown
-        text={messageText}
-        cwd={ctx.markdownCwd}
-        additionalWorkspaceRoots={ctx.additionalWorkspaceRoots}
-        isStreaming={Boolean(row.message.streaming || isAnimating)}
-        skills={ctx.skills}
-      />
+      <div data-chat-copy-region="assistant" data-chat-copy-message-id={row.message.id}>
+        <ChatMarkdown
+          text={messageText}
+          cwd={ctx.markdownCwd}
+          additionalWorkspaceRoots={ctx.additionalWorkspaceRoots}
+          isStreaming={Boolean(row.message.streaming || isAnimating)}
+          normalizeCodexCitations={normalizeCodexCitations}
+          skills={ctx.skills}
+        />
+      </div>
       <div className="mt-1.5 flex items-center gap-2">
         <p className="text-[10px] text-muted-foreground/30">
           {row.message.streaming ? (
@@ -738,6 +865,7 @@ function AssistantCompletionDivider({ completionSummary }: { completionSummary: 
 }
 
 function AssistantCopyButton({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
+  const ctx = use(TimelineRowCtx);
   const assistantCopyState = resolveAssistantMessageCopyState({
     text: row.message.text ?? null,
     showCopyButton: row.showAssistantCopyButton,
@@ -751,7 +879,9 @@ function AssistantCopyButton({ row }: { row: Extract<TimelineRow, { kind: "messa
   return (
     <div className="flex items-center opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/assistant:opacity-100">
       <MessageCopyButton
-        text={assistantCopyState.text ?? ""}
+        text={prepareChatMessageMarkdownCopyText(assistantCopyState.text ?? "", {
+          provider: ctx.activeProvider,
+        })}
         size="icon-xs"
         variant="outline"
         className="border-border/50 bg-background/35 text-muted-foreground/45 shadow-none hover:border-border/70 hover:bg-background/55 hover:text-muted-foreground/70"
