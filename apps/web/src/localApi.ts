@@ -17,6 +17,7 @@ import {
 import { getPrimaryKnownEnvironment } from "./environments/primary";
 import { type WsRpcClient } from "./rpc/wsRpcClient";
 import { showContextMenuFallback } from "./contextMenuFallback";
+import { getLocalShellCapabilities } from "./localCapabilities";
 import {
   readBrowserClientSettings,
   readBrowserSavedEnvironmentRegistry,
@@ -31,6 +32,10 @@ let cachedApi: LocalApi | undefined;
 
 function unavailableLocalBackendError(): Error {
   return new Error("Local backend API is unavailable before a backend is paired.");
+}
+
+function unavailableLocalShellCapabilityError(action: string): Error {
+  return new Error(`${action} is only available in the desktop app.`);
 }
 
 function createBrowserLocalApi(rpcClient?: WsRpcClient): LocalApi {
@@ -48,14 +53,22 @@ function createBrowserLocalApi(rpcClient?: WsRpcClient): LocalApi {
       },
     },
     shell: {
-      openInEditor: (cwd, editor) =>
-        rpcClient
+      openInEditor: (cwd, editor) => {
+        if (!getLocalShellCapabilities().canOpenLocalEditor) {
+          return Promise.reject(unavailableLocalShellCapabilityError("Opening local editors"));
+        }
+        return rpcClient
           ? rpcClient.shell.openInEditor({ cwd, editor })
-          : Promise.reject(unavailableLocalBackendError()),
-      openTerminal: (cwd) =>
-        rpcClient
+          : Promise.reject(unavailableLocalBackendError());
+      },
+      openTerminal: (cwd) => {
+        if (!getLocalShellCapabilities().canOpenLocalTerminal) {
+          return Promise.reject(unavailableLocalShellCapabilityError("Opening local terminals"));
+        }
+        return rpcClient
           ? rpcClient.shell.openTerminal({ cwd })
-          : Promise.reject(unavailableLocalBackendError()),
+          : Promise.reject(unavailableLocalBackendError());
+      },
       openExternal: async (url) => {
         if (window.desktopBridge) {
           const opened = await window.desktopBridge.openExternal(url);
@@ -164,6 +177,14 @@ function createBrowserLocalApi(rpcClient?: WsRpcClient): LocalApi {
       updateSettings: (patch) =>
         rpcClient
           ? rpcClient.server.updateSettings(patch)
+          : Promise.reject(unavailableLocalBackendError()),
+      getClientSettings: () =>
+        rpcClient
+          ? rpcClient.server.getClientSettings()
+          : Promise.reject(unavailableLocalBackendError()),
+      updateClientSettings: (patch) =>
+        rpcClient
+          ? rpcClient.server.updateClientSettings(patch)
           : Promise.reject(unavailableLocalBackendError()),
       discoverSourceControl: () =>
         rpcClient

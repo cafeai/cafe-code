@@ -40,15 +40,17 @@ export type DesktopNetworkInterfaces = Readonly<
 
 interface ResolvedDesktopServerExposure {
   readonly mode: DesktopServerExposureMode;
+  readonly httpsEnabled: boolean;
   readonly bindHost: string;
   readonly localHttpUrl: string;
   readonly localWsUrl: string;
+  readonly localHttpsUrl: string | null;
   readonly endpointUrl: string | null;
+  readonly httpsEndpointUrl: string | null;
   readonly advertisedHost: string | null;
 }
 
 interface DesktopAdvertisedEndpointInput {
-  readonly port: number;
   readonly exposure: ResolvedDesktopServerExposure;
   readonly customHttpsEndpointUrls?: readonly string[];
 }
@@ -108,20 +110,29 @@ const resolveLanAdvertisedHost = (
 
 const resolveDesktopServerExposure = (input: {
   readonly mode: DesktopServerExposureMode;
+  readonly httpsEnabled: boolean;
   readonly port: number;
+  readonly httpsPort?: number;
   readonly networkInterfaces: DesktopNetworkInterfaces;
   readonly advertisedHostOverride?: string;
 }): ResolvedDesktopServerExposure => {
   const localHttpUrl = `http://${DESKTOP_LOOPBACK_HOST}:${input.port}`;
   const localWsUrl = `ws://${DESKTOP_LOOPBACK_HOST}:${input.port}`;
+  const localHttpsUrl =
+    !input.httpsEnabled || input.httpsPort === undefined
+      ? null
+      : `https://${DESKTOP_LOOPBACK_HOST}:${input.httpsPort}`;
 
   if (input.mode === "local-only") {
     return {
       mode: input.mode,
+      httpsEnabled: input.httpsEnabled,
       bindHost: DESKTOP_LOOPBACK_HOST,
       localHttpUrl,
       localWsUrl,
+      localHttpsUrl,
       endpointUrl: null,
+      httpsEndpointUrl: null,
       advertisedHost: null,
     };
   }
@@ -133,10 +144,16 @@ const resolveDesktopServerExposure = (input: {
 
   return {
     mode: input.mode,
+    httpsEnabled: input.httpsEnabled,
     bindHost: DESKTOP_LAN_BIND_HOST,
     localHttpUrl,
     localWsUrl,
+    localHttpsUrl,
     endpointUrl: advertisedHost ? `http://${advertisedHost}:${input.port}` : null,
+    httpsEndpointUrl:
+      input.httpsEnabled && advertisedHost && input.httpsPort !== undefined
+        ? `https://${advertisedHost}:${input.httpsPort}`
+        : null,
     advertisedHost,
   };
 };
@@ -162,23 +179,26 @@ const createManualEndpoint = (
 const resolveDesktopCoreAdvertisedEndpoints = (
   input: DesktopAdvertisedEndpointInput,
 ): readonly AdvertisedEndpoint[] => {
+  const localBaseUrl = input.exposure.localHttpsUrl ?? input.exposure.localHttpUrl;
+  const lanBaseUrl = input.exposure.httpsEndpointUrl ?? input.exposure.endpointUrl;
   const endpoints: AdvertisedEndpoint[] = [
     createDesktopEndpoint({
-      id: `desktop-loopback:${input.port}`,
+      id: `desktop-loopback:${localBaseUrl}`,
       label: "This machine",
-      httpBaseUrl: input.exposure.localHttpUrl,
+      httpBaseUrl: localBaseUrl,
       reachability: "loopback",
       status: "available",
+      isDefault: lanBaseUrl === null,
       description: "Loopback endpoint for this desktop app.",
     }),
   ];
 
-  if (input.exposure.endpointUrl) {
+  if (lanBaseUrl) {
     endpoints.push(
       createDesktopEndpoint({
-        id: `desktop-lan:${input.exposure.endpointUrl}`,
+        id: `desktop-lan:${lanBaseUrl}`,
         label: "Local network",
-        httpBaseUrl: input.exposure.endpointUrl,
+        httpBaseUrl: lanBaseUrl,
         reachability: "lan",
         status: "available",
         isDefault: true,
@@ -209,7 +229,7 @@ const resolveDesktopCoreAdvertisedEndpoints = (
   return endpoints;
 };
 
-type DesktopServerExposurePersistenceOperation = "server-exposure-mode";
+type DesktopServerExposurePersistenceOperation = "server-exposure-mode" | "server-https-enabled";
 
 export class DesktopServerExposureNoNetworkAddressError extends Data.TaggedError(
   "DesktopServerExposureNoNetworkAddressError",
@@ -240,8 +260,10 @@ export type DesktopServerExposureError = DesktopServerExposureSetModeError;
 
 export interface DesktopServerExposureBackendConfig {
   readonly port: number;
+  readonly httpsPort: number | undefined;
   readonly bindHost: string;
   readonly httpBaseUrl: URL;
+  readonly httpsBaseUrl: URL | undefined;
 }
 
 export interface DesktopServerExposureChange {
@@ -254,9 +276,13 @@ export interface DesktopServerExposureShape {
   readonly backendConfig: Effect.Effect<DesktopServerExposureBackendConfig>;
   readonly configureFromSettings: (input: {
     readonly port: number;
+    readonly httpsPort?: number;
   }) => Effect.Effect<DesktopServerExposureState>;
   readonly setMode: (
     mode: DesktopServerExposureMode,
+  ) => Effect.Effect<DesktopServerExposureChange, DesktopServerExposureSetModeError>;
+  readonly setHttpsEnabled: (
+    enabled: boolean,
   ) => Effect.Effect<DesktopServerExposureChange, DesktopServerExposureSetModeError>;
   readonly getAdvertisedEndpoints: Effect.Effect<readonly AdvertisedEndpoint[]>;
 }
@@ -278,12 +304,17 @@ export class DesktopNetworkInterfacesService extends Context.Service<
 interface RuntimeState {
   readonly requestedMode: DesktopServerExposureMode;
   readonly mode: DesktopServerExposureMode;
+  readonly httpsEnabled: boolean;
   readonly port: number;
+  readonly httpsPort: number | undefined;
   readonly bindHost: string;
   readonly localHttpUrl: string;
   readonly localWsUrl: string;
+  readonly localHttpsUrl: Option.Option<string>;
   readonly httpBaseUrl: URL;
+  readonly httpsBaseUrl: Option.Option<URL>;
   readonly endpointUrl: Option.Option<string>;
+  readonly httpsEndpointUrl: Option.Option<string>;
   readonly advertisedHost: Option.Option<string>;
 }
 
@@ -298,30 +329,38 @@ const initialRuntimeState = (): RuntimeState =>
     settings: DEFAULT_DESKTOP_SETTINGS,
     exposure: resolveDesktopServerExposure({
       mode: DEFAULT_DESKTOP_SETTINGS.serverExposureMode,
+      httpsEnabled: DEFAULT_DESKTOP_SETTINGS.serverHttpsEnabled,
       port: 0,
       networkInterfaces: {},
     }),
     port: 0,
+    httpsPort: undefined,
   });
 
 const toContractState = (state: RuntimeState): DesktopServerExposureState => ({
   mode: state.mode,
+  httpsEnabled: state.httpsEnabled,
   endpointUrl: Option.getOrNull(state.endpointUrl),
   advertisedHost: Option.getOrNull(state.advertisedHost),
 });
 
 const toBackendConfig = (state: RuntimeState): DesktopServerExposureBackendConfig => ({
   port: state.port,
+  httpsPort: state.httpsEnabled ? state.httpsPort : undefined,
   bindHost: state.bindHost,
   httpBaseUrl: state.httpBaseUrl,
+  httpsBaseUrl: Option.getOrUndefined(state.httpsBaseUrl),
 });
 
 const toResolvedExposure = (state: RuntimeState): ResolvedDesktopServerExposure => ({
   mode: state.mode,
+  httpsEnabled: state.httpsEnabled,
   bindHost: state.bindHost,
   localHttpUrl: state.localHttpUrl,
   localWsUrl: state.localWsUrl,
+  localHttpsUrl: Option.getOrNull(state.localHttpsUrl),
   endpointUrl: Option.getOrNull(state.endpointUrl),
+  httpsEndpointUrl: Option.getOrNull(state.httpsEndpointUrl),
   advertisedHost: Option.getOrNull(state.advertisedHost),
 });
 
@@ -330,31 +369,42 @@ function runtimeStateFromResolvedExposure(input: {
   readonly settings: DesktopSettings;
   readonly exposure: ResolvedDesktopServerExposure;
   readonly port: number;
+  readonly httpsPort: number | undefined;
 }): RuntimeState {
+  const localHttpsUrl = Option.fromNullishOr(input.exposure.localHttpsUrl);
   return {
     requestedMode: input.requestedMode,
     mode: input.exposure.mode,
+    httpsEnabled: input.exposure.httpsEnabled,
     port: input.port,
+    httpsPort: input.httpsPort,
     bindHost: input.exposure.bindHost,
     localHttpUrl: input.exposure.localHttpUrl,
     localWsUrl: input.exposure.localWsUrl,
+    localHttpsUrl,
     httpBaseUrl: new URL(input.exposure.localHttpUrl),
+    httpsBaseUrl: Option.map(localHttpsUrl, (value) => new URL(value)),
     endpointUrl: Option.fromNullishOr(input.exposure.endpointUrl),
+    httpsEndpointUrl: Option.fromNullishOr(input.exposure.httpsEndpointUrl),
     advertisedHost: Option.fromNullishOr(input.exposure.advertisedHost),
   };
 }
 
 function resolveRuntimeState(input: {
   readonly requestedMode: DesktopServerExposureMode;
+  readonly httpsEnabled: boolean;
   readonly settings: DesktopSettings;
   readonly port: number;
+  readonly httpsPort: number | undefined;
   readonly networkInterfaces: DesktopNetworkInterfaces;
   readonly advertisedHostOverride: Option.Option<string>;
 }): ResolvedRuntimeState {
   const advertisedHostOverride = Option.getOrUndefined(input.advertisedHostOverride);
   const requestedExposure = resolveDesktopServerExposure({
     mode: input.requestedMode,
+    httpsEnabled: input.httpsEnabled,
     port: input.port,
+    ...(input.httpsPort === undefined ? {} : { httpsPort: input.httpsPort }),
     networkInterfaces: input.networkInterfaces,
     ...(advertisedHostOverride ? { advertisedHostOverride } : {}),
   });
@@ -363,7 +413,9 @@ function resolveRuntimeState(input: {
   const exposure = unavailable
     ? resolveDesktopServerExposure({
         mode: "local-only",
+        httpsEnabled: input.httpsEnabled,
         port: input.port,
+        ...(input.httpsPort === undefined ? {} : { httpsPort: input.httpsPort }),
         networkInterfaces: input.networkInterfaces,
         ...(advertisedHostOverride ? { advertisedHostOverride } : {}),
       })
@@ -375,6 +427,7 @@ function resolveRuntimeState(input: {
       settings: input.settings,
       exposure,
       port: input.port,
+      httpsPort: input.httpsPort,
     }),
     unavailable,
   };
@@ -382,8 +435,11 @@ function resolveRuntimeState(input: {
 
 const requiresBackendRelaunch = (previous: RuntimeState, next: RuntimeState): boolean =>
   previous.port !== next.port ||
+  previous.httpsPort !== next.httpsPort ||
+  previous.httpsEnabled !== next.httpsEnabled ||
   previous.bindHost !== next.bindHost ||
-  previous.localHttpUrl !== next.localHttpUrl;
+  previous.localHttpUrl !== next.localHttpUrl ||
+  Option.getOrNull(previous.localHttpsUrl) !== Option.getOrNull(next.localHttpsUrl);
 
 const make = Effect.gen(function* () {
   const config = yield* DesktopConfig.DesktopConfig;
@@ -397,14 +453,16 @@ const make = Effect.gen(function* () {
   const backendConfig = Ref.get(stateRef).pipe(Effect.map(toBackendConfig));
 
   const configureFromSettings = Effect.fn("desktop.serverExposure.configureFromSettings")(
-    function* ({ port }: { readonly port: number }) {
-      yield* Effect.annotateCurrentSpan({ port });
+    function* ({ port, httpsPort }: { readonly port: number; readonly httpsPort?: number }) {
+      yield* Effect.annotateCurrentSpan({ port, httpsPort });
       const settings = yield* desktopSettings.get;
       const currentNetworkInterfaces = yield* readNetworkInterfaces;
       const resolved = resolveRuntimeState({
         requestedMode: settings.serverExposureMode,
+        httpsEnabled: settings.serverHttpsEnabled,
         settings,
         port,
+        httpsPort,
         networkInterfaces: currentNetworkInterfaces,
         advertisedHostOverride: config.desktopLanHostOverride,
       });
@@ -428,6 +486,8 @@ const make = Effect.gen(function* () {
       requestedMode: mode,
       settings: nextSettings,
       port: previous.port,
+      httpsPort: previous.httpsPort,
+      httpsEnabled: nextSettings.serverHttpsEnabled,
       networkInterfaces: currentNetworkInterfaces,
       advertisedHostOverride: config.desktopLanHostOverride,
     });
@@ -453,10 +513,47 @@ const make = Effect.gen(function* () {
     };
   });
 
+  const setHttpsEnabled = Effect.fn("desktop.serverExposure.setHttpsEnabled")(function* (
+    enabled: boolean,
+  ) {
+    yield* Effect.annotateCurrentSpan({ enabled });
+    const previous = yield* Ref.get(stateRef);
+    const currentSettings = yield* desktopSettings.get;
+    const nextSettings = {
+      ...currentSettings,
+      serverHttpsEnabled: enabled,
+    };
+    const currentNetworkInterfaces = yield* readNetworkInterfaces;
+    const resolved = resolveRuntimeState({
+      requestedMode: nextSettings.serverExposureMode,
+      httpsEnabled: enabled,
+      settings: nextSettings,
+      port: previous.port,
+      httpsPort: previous.httpsPort,
+      networkInterfaces: currentNetworkInterfaces,
+      advertisedHostOverride: config.desktopLanHostOverride,
+    });
+
+    const change = yield* desktopSettings.setServerHttpsEnabled(enabled).pipe(
+      Effect.mapError(
+        (cause) =>
+          new DesktopServerExposurePersistenceError({
+            operation: "server-https-enabled",
+            cause,
+          }),
+      ),
+    );
+
+    yield* Ref.set(stateRef, resolved.state);
+    return {
+      state: toContractState(resolved.state),
+      requiresRelaunch: change.changed || requiresBackendRelaunch(previous, resolved.state),
+    };
+  });
+
   const getAdvertisedEndpoints = Effect.gen(function* () {
     const state = yield* Ref.get(stateRef);
     return resolveDesktopCoreAdvertisedEndpoints({
-      port: state.port,
       exposure: toResolvedExposure(state),
       customHttpsEndpointUrls: config.desktopHttpsEndpointUrls,
     });
@@ -467,6 +564,7 @@ const make = Effect.gen(function* () {
     backendConfig,
     configureFromSettings,
     setMode,
+    setHttpsEnabled,
     getAdvertisedEndpoints,
   });
 });

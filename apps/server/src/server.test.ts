@@ -26,6 +26,7 @@ import {
   EditorId,
   type ServerRuntimeLayerDiagnosticsInput,
   type ServerRuntimeLayerDiagnosticsResult,
+  DEFAULT_CLIENT_SETTINGS,
 } from "@cafecode/contracts";
 import { assert, it } from "@effect/vitest";
 import { assertFailure, assertInclude, assertTrue } from "@effect/vitest/utils";
@@ -86,6 +87,10 @@ import { makeManualOnlyProviderMaintenanceCapabilities } from "./provider/provid
 import { ServerLifecycleEvents, type ServerLifecycleEventsShape } from "./serverLifecycleEvents.ts";
 import { ServerRuntimeStartup, type ServerRuntimeStartupShape } from "./serverRuntimeStartup.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "./serverSettings.ts";
+import {
+  ServerClientSettingsService,
+  type ServerClientSettingsShape,
+} from "./serverClientSettings.ts";
 import {
   BrowserTraceCollector,
   type BrowserTraceCollectorShape,
@@ -410,6 +415,7 @@ const buildAppUnderTest = (options?: {
     providerRegistry?: Partial<ProviderRegistryShape>;
     providerService?: Partial<ProviderServiceShape>;
     serverSettings?: Partial<ServerSettingsShape>;
+    clientSettings?: Partial<ServerClientSettingsShape>;
     externalLauncher?: Partial<ExternalLauncher.ExternalLauncherShape>;
     vcsDriver?: Partial<VcsDriver.VcsDriverShape>;
     vcsDriverRegistry?: Partial<VcsDriverRegistry.VcsDriverRegistryShape>;
@@ -447,6 +453,8 @@ const buildAppUnderTest = (options?: {
       otlpServiceName: "cafe-code-server",
       mode: "desktop",
       port: 0,
+      httpsEnabled: false,
+      httpsPort: undefined,
       host: "127.0.0.1",
       cwd: process.cwd(),
       baseDir,
@@ -658,6 +666,16 @@ const buildAppUnderTest = (options?: {
           updateSettings: () => Effect.succeed(DEFAULT_SERVER_SETTINGS),
           streamChanges: Stream.empty,
           ...options?.layers?.serverSettings,
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(ServerClientSettingsService)({
+          start: Effect.void,
+          ready: Effect.void,
+          getSettings: Effect.succeed(DEFAULT_CLIENT_SETTINGS),
+          updateSettings: () => Effect.succeed(DEFAULT_CLIENT_SETTINGS),
+          streamChanges: Stream.empty,
+          ...options?.layers?.clientSettings,
         }),
       ),
       Layer.provide(

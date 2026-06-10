@@ -36,6 +36,21 @@ export const setServerExposureMode = makeIpcMethod({
   }),
 });
 
+export const setServerHttpsEnabled = makeIpcMethod({
+  channel: IpcChannels.SET_SERVER_HTTPS_ENABLED_CHANNEL,
+  payload: Schema.Boolean,
+  result: DesktopServerExposureStateSchema,
+  handler: Effect.fn("desktop.ipc.serverExposure.setHttpsEnabled")(function* (enabled) {
+    const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+    const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
+    const change = yield* serverExposure.setHttpsEnabled(enabled);
+    if (change.requiresRelaunch) {
+      yield* lifecycle.relaunch(`serverHttpsEnabled=${enabled}`);
+    }
+    return change.state;
+  }),
+});
+
 export const getAdvertisedEndpoints = makeIpcMethod({
   channel: IpcChannels.GET_ADVERTISED_ENDPOINTS_CHANNEL,
   payload: Schema.Void,

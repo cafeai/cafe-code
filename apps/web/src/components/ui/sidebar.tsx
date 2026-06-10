@@ -227,7 +227,13 @@ function Sidebar({
         <Sheet onOpenChange={setOpenMobile} open={openMobile} {...props}>
           <SheetPopup
             className={cn(
-              "w-(--sidebar-width) max-w-none bg-sidebar p-0 text-sidebar-foreground",
+              // This Sheet branch only renders below `md` (isMobile === max-md),
+              // so the desktop (>=768px) persistent sidebar is never affected.
+              // Phones (max-sm) get a near-full-bleed Sheet; the 640-767px band
+              // (folding-phone covers, split-screen, small tablets) gets a fixed
+              // slide-over drawer over still-visible content instead of a
+              // full-screen takeover that wastes the extra width.
+              "w-(--sidebar-width) max-w-none bg-sidebar p-0 text-sidebar-foreground sm:w-80",
               className,
             )}
             data-mobile="true"

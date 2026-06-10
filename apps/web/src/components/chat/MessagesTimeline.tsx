@@ -71,6 +71,7 @@ import {
 import { SkillInlineText } from "./SkillInlineText";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
 import { readLocalApi } from "../../localApi";
+import { getLocalShellCapabilities } from "../../localCapabilities";
 import { readEnvironmentApi } from "../../environmentApi";
 import { useSettings } from "../../hooks/useSettings";
 import { useServerAvailableEditors } from "../../rpc/serverState";
@@ -1589,6 +1590,12 @@ function openFileWithPreferredEditor(input: {
   if (!api) {
     return;
   }
+  if (!getLocalShellCapabilities().canOpenLocalEditor) {
+    void navigator.clipboard?.writeText(absolutePath).catch((error: unknown) => {
+      console.warn("Failed to copy file path", error);
+    });
+    return;
+  }
   const editor = resolveFileOpenEditor(input.defaultEditor, input.availableEditors);
   const opened = editor
     ? api.shell.openInEditor(absolutePath, editor)
@@ -1612,6 +1619,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   const { workEntry, workspaceRoot } = props;
   const defaultEditor = useSettings((settings) => settings.defaultEditor);
   const availableEditors = useServerAvailableEditors();
+  const canOpenLocalEditor = getLocalShellCapabilities().canOpenLocalEditor;
   const iconConfig = workToneIcon(workEntry.tone);
   const EntryIcon = workEntryIcon(workEntry);
   const heading = toolWorkEntryHeading(workEntry);
@@ -1749,7 +1757,11 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                   event.stopPropagation();
                   openResolvedFile(filePath);
                 }}
-                title={canOpenFile ? `Open ${displayPath}` : displayPath}
+                title={
+                  canOpenFile
+                    ? `${canOpenLocalEditor ? "Open" : "Copy"} ${displayPath}`
+                    : displayPath
+                }
                 type="button"
               >
                 {displayPath}
@@ -1776,7 +1788,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                   event.stopPropagation();
                   openResolvedFile(filePath);
                 }}
-                title={`Open ${displayPath}`}
+                title={`${canOpenLocalEditor ? "Open" : "Copy"} ${displayPath}`}
                 type="button"
               >
                 {displayPath}
@@ -1793,7 +1805,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
       <button
         className="group/file-open block w-full rounded-lg px-1 py-1 text-left transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/35"
         onClick={() => openResolvedFile(primaryChangedFile)}
-        title={`Open ${formatWorkspaceRelativePath(primaryChangedFile, workspaceRoot)}`}
+        title={`${canOpenLocalEditor ? "Open" : "Copy"} ${formatWorkspaceRelativePath(primaryChangedFile, workspaceRoot)}`}
         type="button"
       >
         {rowContent}

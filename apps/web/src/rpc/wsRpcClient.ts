@@ -3,6 +3,7 @@ import {
   type VcsStatusStreamEvent,
   type LocalApi,
   ORCHESTRATION_WS_METHODS,
+  type ClientSettingsPatch,
   type ServerSettingsPatch,
   WS_METHODS,
 } from "@cafecode/contracts";
@@ -113,6 +114,10 @@ export interface WsRpcClient {
     readonly updateSettings: (
       patch: ServerSettingsPatch,
     ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.serverUpdateSettings>>;
+    readonly getClientSettings: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetClientSettings>;
+    readonly updateClientSettings: (
+      patch: ClientSettingsPatch,
+    ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.serverUpdateClientSettings>>;
     readonly discoverSourceControl: RpcUnaryNoArgMethod<
       typeof WS_METHODS.serverDiscoverSourceControl
     >;
@@ -226,6 +231,10 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
       getSettings: () => transport.request((client) => client[WS_METHODS.serverGetSettings]({})),
       updateSettings: (patch) =>
         transport.request((client) => client[WS_METHODS.serverUpdateSettings]({ patch })),
+      getClientSettings: () =>
+        transport.request((client) => client[WS_METHODS.serverGetClientSettings]({})),
+      updateClientSettings: (patch) =>
+        transport.request((client) => client[WS_METHODS.serverUpdateClientSettings]({ patch })),
       discoverSourceControl: () =>
         transport.request((client) => client[WS_METHODS.serverDiscoverSourceControl]({})),
       getTraceDiagnostics: () =>

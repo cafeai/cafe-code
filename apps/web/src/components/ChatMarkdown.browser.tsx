@@ -14,6 +14,12 @@ const { confirmMock, openInPreferredEditorMock, readLocalApiMock } = vi.hoisted(
   })),
 }));
 
+function installDesktopCapabilityStub() {
+  window.desktopBridge = {
+    setTheme: vi.fn(async () => undefined),
+  } as unknown as NonNullable<typeof window.desktopBridge>;
+}
+
 vi.mock("../editorPreferences", () => ({
   openInPreferredEditor: openInPreferredEditorMock,
 }));
@@ -33,12 +39,14 @@ describe("ChatMarkdown", () => {
     openInPreferredEditorMock.mockClear();
     readLocalApiMock.mockClear();
     localStorage.clear();
+    Reflect.deleteProperty(window, "desktopBridge");
     document.body.innerHTML = "";
   });
 
   it("rewrites file uri hrefs into direct paths before rendering", async () => {
     const filePath =
       "/Users/yashsingh/p/sco/claude-code-extract/src/utils/permissions/PermissionRule.ts";
+    installDesktopCapabilityStub();
     const screen = await render(
       <ChatMarkdown
         text={`[PermissionRule.ts](file://${filePath})`}
@@ -64,6 +72,7 @@ describe("ChatMarkdown", () => {
   it("keeps line anchors working after rewriting file uri hrefs", async () => {
     const filePath =
       "/Users/yashsingh/p/sco/claude-code-extract/src/utils/permissions/PermissionRule.ts";
+    installDesktopCapabilityStub();
     const screen = await render(
       <ChatMarkdown
         text={`[PermissionRule.ts:1](file://${filePath}#L1)`}
@@ -89,6 +98,7 @@ describe("ChatMarkdown", () => {
   it("shows column information inline when present", async () => {
     const filePath =
       "/Users/yashsingh/p/sco/claude-code-extract/src/utils/permissions/PermissionRule.ts";
+    installDesktopCapabilityStub();
     const screen = await render(
       <ChatMarkdown
         text={`[PermissionRule.ts](file://${filePath}#L1C7)`}
@@ -249,6 +259,7 @@ describe("ChatMarkdown", () => {
 
   it("asks before opening markdown file links outside the workspace", async () => {
     confirmMock.mockResolvedValueOnce(false);
+    installDesktopCapabilityStub();
     const screen = await render(
       <ChatMarkdown text="[hosts](file:///private/etc/hosts)" cwd="/Users/yashsingh/p/t3code" />,
     );
@@ -262,6 +273,33 @@ describe("ChatMarkdown", () => {
 
       await vi.waitFor(() => {
         expect(confirmMock).toHaveBeenCalledWith(expect.stringContaining("/private/etc/hosts"));
+      });
+      expect(openInPreferredEditorMock).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("copies markdown file paths instead of opening editors in pure browser sessions", async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const filePath = "/Users/yashsingh/p/t3code/apps/web/src/components/ChatMarkdown.tsx";
+    const screen = await render(
+      <ChatMarkdown
+        text={`[ChatMarkdown.tsx](file://${filePath})`}
+        cwd="/Users/yashsingh/p/t3code"
+      />,
+    );
+
+    try {
+      const link = page.getByRole("link", { name: "ChatMarkdown.tsx" });
+      await link.click();
+
+      await vi.waitFor(() => {
+        expect(writeText).toHaveBeenCalledWith(filePath);
       });
       expect(openInPreferredEditorMock).not.toHaveBeenCalled();
     } finally {

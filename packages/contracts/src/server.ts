@@ -19,7 +19,7 @@ import {
 import { EditorId, TerminalAvailability } from "./editor.ts";
 import { ModelCapabilities } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
-import { ServerSettings } from "./settings.ts";
+import { ClientSettingsSchema, ServerSettings } from "./settings.ts";
 
 const KeybindingsMalformedConfigIssue = Schema.Struct({
   kind: Schema.Literal("keybindings.malformed-config"),
@@ -694,6 +694,7 @@ export const ServerConfig = Schema.Struct({
   terminal: Schema.optionalKey(TerminalAvailability),
   observability: ServerObservability,
   settings: ServerSettings,
+  clientSettings: ClientSettingsSchema,
 });
 export type ServerConfig = typeof ServerConfig.Type;
 
@@ -740,6 +741,7 @@ export const ServerConfigUpdatedPayload = Schema.Struct({
   issues: ServerConfigIssues,
   providers: ServerProviders,
   settings: Schema.optional(ServerSettings),
+  clientSettings: Schema.optional(ClientSettingsSchema),
 });
 export type ServerConfigUpdatedPayload = typeof ServerConfigUpdatedPayload.Type;
 
@@ -759,6 +761,12 @@ export const ServerConfigSettingsUpdatedPayload = Schema.Struct({
   settings: ServerSettings,
 });
 export type ServerConfigSettingsUpdatedPayload = typeof ServerConfigSettingsUpdatedPayload.Type;
+
+export const ServerConfigClientSettingsUpdatedPayload = Schema.Struct({
+  clientSettings: ClientSettingsSchema,
+});
+export type ServerConfigClientSettingsUpdatedPayload =
+  typeof ServerConfigClientSettingsUpdatedPayload.Type;
 
 export const ServerConfigStreamSnapshotEvent = Schema.Struct({
   version: Schema.Literal(1),
@@ -791,11 +799,20 @@ export const ServerConfigStreamSettingsUpdatedEvent = Schema.Struct({
 export type ServerConfigStreamSettingsUpdatedEvent =
   typeof ServerConfigStreamSettingsUpdatedEvent.Type;
 
+export const ServerConfigStreamClientSettingsUpdatedEvent = Schema.Struct({
+  version: Schema.Literal(1),
+  type: Schema.Literal("clientSettingsUpdated"),
+  payload: ServerConfigClientSettingsUpdatedPayload,
+});
+export type ServerConfigStreamClientSettingsUpdatedEvent =
+  typeof ServerConfigStreamClientSettingsUpdatedEvent.Type;
+
 export const ServerConfigStreamEvent = Schema.Union([
   ServerConfigStreamSnapshotEvent,
   ServerConfigStreamKeybindingsUpdatedEvent,
   ServerConfigStreamProviderStatusesEvent,
   ServerConfigStreamSettingsUpdatedEvent,
+  ServerConfigStreamClientSettingsUpdatedEvent,
 ]);
 export type ServerConfigStreamEvent = typeof ServerConfigStreamEvent.Type;
 

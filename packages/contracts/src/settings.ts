@@ -165,6 +165,56 @@ export type ClientSettings = typeof ClientSettingsSchema.Type;
 
 export const DEFAULT_CLIENT_SETTINGS: ClientSettings = Schema.decodeSync(ClientSettingsSchema)({});
 
+export type ClientSettingsKey = keyof ClientSettings;
+
+export const CLIENT_SETTINGS_KEYS = Object.keys(
+  ClientSettingsSchema.fields,
+) as ReadonlyArray<ClientSettingsKey>;
+
+export const CLIENT_SETTINGS_CAPABILITY_DEPENDENT_KEYS = [
+  "defaultEditor",
+  "powerSaveBlockerMode",
+] as const satisfies ReadonlyArray<ClientSettingsKey>;
+
+const CLIENT_SETTINGS_CAPABILITY_DEPENDENT_KEY_SET = new Set<ClientSettingsKey>(
+  CLIENT_SETTINGS_CAPABILITY_DEPENDENT_KEYS,
+);
+
+export function isClientSettingsKey(value: string): value is ClientSettingsKey {
+  return CLIENT_SETTINGS_KEYS.includes(value as ClientSettingsKey);
+}
+
+export function isCapabilityDependentClientSettingsKey(
+  value: ClientSettingsKey,
+): value is (typeof CLIENT_SETTINGS_CAPABILITY_DEPENDENT_KEYS)[number] {
+  return CLIENT_SETTINGS_CAPABILITY_DEPENDENT_KEY_SET.has(value);
+}
+
+export const CLIENT_SETTINGS_EXCLUDED_SECRET_STORES = [
+  "saved-environment-bearer-tokens",
+  "ssh-saved-secrets",
+  "auth-cookies",
+  "bearer-sessions",
+  "pairing-bootstrap-tokens",
+  "provider-credentials",
+  "provider-api-keys",
+  "provider-environment-secrets",
+  "tls-private-keys",
+] as const;
+
+export class ClientSettingsError extends Schema.TaggedErrorClass<ClientSettingsError>()(
+  "ClientSettingsError",
+  {
+    settingsPath: Schema.String,
+    detail: Schema.String,
+    cause: Schema.optional(Schema.Defect),
+  },
+) {
+  override get message(): string {
+    return `Client settings error at ${this.settingsPath}: ${this.detail}`;
+  }
+}
+
 // ── Server Settings (server-authoritative) ────────────────────
 
 export const ThreadEnvMode = Schema.Literals(["local", "worktree"]);

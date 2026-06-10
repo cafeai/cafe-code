@@ -16,6 +16,7 @@ import * as DesktopAppSettings from "./DesktopAppSettings.ts";
 
 const DesktopSettingsPatch = Schema.Struct({
   serverExposureMode: Schema.optionalKey(Schema.Literals(["local-only", "network-accessible"])),
+  serverHttpsEnabled: Schema.optionalKey(Schema.Boolean),
   updateChannel: Schema.optionalKey(Schema.Literals(["latest", "nightly"])),
   updateChannelConfiguredByUser: Schema.optionalKey(Schema.Boolean),
 });
@@ -88,6 +89,7 @@ describe("DesktopSettings", () => {
   it("defaults packaged nightly builds to the nightly update channel", () => {
     assert.deepEqual(resolveDefaultDesktopSettings("0.0.17-nightly.20260415.1"), {
       serverExposureMode: "local-only",
+      serverHttpsEnabled: true,
       updateChannel: "nightly",
       updateChannelConfiguredByUser: false,
     } satisfies DesktopSettingsValue);
@@ -99,12 +101,14 @@ describe("DesktopSettings", () => {
         const settings = yield* DesktopAppSettings.DesktopAppSettings;
         yield* writeSettingsPatch({
           serverExposureMode: "network-accessible",
+          serverHttpsEnabled: false,
           updateChannel: "latest",
           updateChannelConfiguredByUser: true,
         });
 
         assert.deepEqual(yield* settings.load, {
           serverExposureMode: "network-accessible",
+          serverHttpsEnabled: false,
           updateChannel: "latest",
           updateChannelConfiguredByUser: true,
         } satisfies DesktopSettingsValue);
@@ -112,6 +116,10 @@ describe("DesktopSettings", () => {
         const exposure = yield* settings.setServerExposureMode("local-only");
         assert.isTrue(exposure.changed);
         assert.equal(exposure.settings.serverExposureMode, "local-only");
+
+        const https = yield* settings.setServerHttpsEnabled(true);
+        assert.isTrue(https.changed);
+        assert.equal(https.settings.serverHttpsEnabled, true);
 
         const updateChannel = yield* settings.setUpdateChannel("nightly");
         assert.isTrue(updateChannel.changed);
@@ -132,6 +140,9 @@ describe("DesktopSettings", () => {
         const updateChannel = yield* settings.setUpdateChannel("latest");
         assert.isFalse(updateChannel.changed);
         assert.equal(updateChannel.settings.updateChannelConfiguredByUser, false);
+
+        const https = yield* settings.setServerHttpsEnabled(true);
+        assert.isFalse(https.changed);
       }),
     ),
   );
@@ -167,6 +178,7 @@ describe("DesktopSettings", () => {
 
         assert.deepEqual(yield* settings.load, {
           serverExposureMode: "network-accessible",
+          serverHttpsEnabled: true,
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
         } satisfies DesktopSettingsValue);
@@ -193,6 +205,25 @@ describe("DesktopSettings", () => {
     ),
   );
 
+  it.effect("persists disabled HTTPS in sparse desktop settings documents", () =>
+    withSettings(
+      Effect.gen(function* () {
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const settings = yield* DesktopAppSettings.DesktopAppSettings;
+
+        yield* settings.setServerHttpsEnabled(false);
+
+        const persisted = yield* decodeDesktopSettingsPatch(
+          yield* fileSystem.readFileString(environment.desktopSettingsPath),
+        );
+        assert.deepEqual(persisted, {
+          serverHttpsEnabled: false,
+        } satisfies typeof DesktopSettingsPatch.Type);
+      }),
+    ),
+  );
+
   it.effect("migrates legacy implicit update channels to the runtime default", () =>
     withSettings(
       Effect.gen(function* () {
@@ -204,6 +235,7 @@ describe("DesktopSettings", () => {
 
         assert.deepEqual(yield* settings.load, {
           serverExposureMode: "local-only",
+          serverHttpsEnabled: true,
           updateChannel: "nightly",
           updateChannelConfiguredByUser: false,
         } satisfies DesktopSettingsValue);
@@ -224,6 +256,7 @@ describe("DesktopSettings", () => {
 
         assert.deepEqual(yield* settings.load, {
           serverExposureMode: "local-only",
+          serverHttpsEnabled: true,
           updateChannel: "latest",
           updateChannelConfiguredByUser: true,
         } satisfies DesktopSettingsValue);

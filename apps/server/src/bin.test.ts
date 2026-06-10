@@ -65,6 +65,8 @@ const makeCliTestServerConfig = (baseDir: string) =>
       otlpServiceName: "cafe-code-server",
       mode: "web",
       port: 0,
+      httpsEnabled: false,
+      httpsPort: undefined,
       host: "127.0.0.1",
       cwd: process.cwd(),
       baseDir,

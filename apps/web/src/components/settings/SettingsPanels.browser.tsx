@@ -4,6 +4,7 @@ import {
   type AuthAccessStreamEvent,
   type AuthAccessSnapshot,
   AuthSessionId,
+  DEFAULT_CLIENT_SETTINGS,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   type DesktopBridge,
@@ -251,6 +252,7 @@ function createBaseServerConfig(): ServerConfig {
       otlpMetricsEnabled: false,
     },
     settings: DEFAULT_SERVER_SETTINGS,
+    clientSettings: DEFAULT_CLIENT_SETTINGS,
   };
 }
 
@@ -506,6 +508,7 @@ const createDesktopBridgeStub = (overrides?: {
   readonly serverExposureState?: Awaited<ReturnType<DesktopBridge["getServerExposureState"]>>;
   readonly advertisedEndpoints?: Awaited<ReturnType<DesktopBridge["getAdvertisedEndpoints"]>>;
   readonly setServerExposureMode?: DesktopBridge["setServerExposureMode"];
+  readonly setServerHttpsEnabled?: DesktopBridge["setServerHttpsEnabled"];
   readonly setUpdateChannel?: DesktopBridge["setUpdateChannel"];
   readonly sourceUpdateState?: DesktopSourceUpdateState;
   readonly checkSourceUpdate?: DesktopBridge["checkSourceUpdate"];
@@ -603,6 +606,7 @@ const createDesktopBridgeStub = (overrides?: {
     getServerExposureState: vi.fn().mockResolvedValue(
       overrides?.serverExposureState ?? {
         mode: "local-only",
+        httpsEnabled: true,
         endpointUrl: null,
         advertisedHost: null,
       },
@@ -611,8 +615,17 @@ const createDesktopBridgeStub = (overrides?: {
       overrides?.setServerExposureMode ??
       vi.fn().mockImplementation(async (mode) => ({
         mode,
+        httpsEnabled: true,
         endpointUrl: mode === "network-accessible" ? "http://192.168.1.44:3773" : null,
         advertisedHost: mode === "network-accessible" ? "192.168.1.44" : null,
+      })),
+    setServerHttpsEnabled:
+      overrides?.setServerHttpsEnabled ??
+      vi.fn().mockImplementation(async (httpsEnabled) => ({
+        mode: "local-only",
+        httpsEnabled,
+        endpointUrl: null,
+        advertisedHost: null,
       })),
     getAdvertisedEndpoints: vi.fn().mockResolvedValue(overrides?.advertisedEndpoints ?? []),
     pickFolder: vi.fn().mockResolvedValue(null),
@@ -642,6 +655,22 @@ const createDesktopBridgeStub = (overrides?: {
     onSourceUpdateState: () => () => {},
   };
 };
+
+function installClientSettingsNativeApi(desktopBridge: DesktopBridge) {
+  const updateClientSettings = vi
+    .fn<LocalApi["server"]["updateClientSettings"]>()
+    .mockResolvedValue(DEFAULT_CLIENT_SETTINGS);
+  window.nativeApi = {
+    persistence: {
+      getClientSettings: desktopBridge.getClientSettings,
+      setClientSettings: desktopBridge.setClientSettings,
+    },
+    server: {
+      updateClientSettings,
+    },
+  } as unknown as LocalApi;
+  return { updateClientSettings };
+}
 
 describe("settings panels", () => {
   let mounted:
@@ -747,6 +776,7 @@ describe("settings panels", () => {
     window.desktopBridge = createDesktopBridgeStub({
       serverExposureState: {
         mode: "local-only",
+        httpsEnabled: true,
         endpointUrl: null,
         advertisedHost: null,
       },
@@ -791,6 +821,7 @@ describe("settings panels", () => {
     window.desktopBridge = createDesktopBridgeStub({
       serverExposureState: {
         mode: "network-accessible",
+        httpsEnabled: true,
         endpointUrl: "http://192.168.86.39:3773",
         advertisedHost: "192.168.86.39",
       },
@@ -962,6 +993,7 @@ describe("settings panels", () => {
   it("persists the keep-awake preference from System settings", async () => {
     const desktopBridge = createDesktopBridgeStub();
     window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
     setServerConfigSnapshot(createBaseServerConfig());
 
     mounted = await renderWithTestRouter(
@@ -976,15 +1008,14 @@ describe("settings panels", () => {
     await page.getByText("During chats", { exact: true }).click();
 
     await vi.waitFor(() => {
-      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
-        expect.objectContaining({ powerSaveBlockerMode: "during-chats" }),
-      );
+      expect(updateClientSettings).toHaveBeenCalledWith({ powerSaveBlockerMode: "during-chats" });
     });
   });
 
   it("persists the chat selection copy preference from Chat settings", async () => {
     const desktopBridge = createDesktopBridgeStub();
     window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
     setServerConfigSnapshot(createBaseServerConfig());
 
     mounted = await renderWithTestRouter(
@@ -999,16 +1030,14 @@ describe("settings panels", () => {
     await page.getByText("Plain text", { exact: true }).click();
 
     await vi.waitFor(() => {
-      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
-        expect.objectContaining({ chatCopyFormat: "plainText" }),
-      );
+      expect(updateClientSettings).toHaveBeenCalledWith({ chatCopyFormat: "plainText" });
     });
   });
 
   it("persists appearance preferences from Appearance settings", async () => {
     const desktopBridge = createDesktopBridgeStub();
     window.desktopBridge = desktopBridge;
-    const setClientSettingsMock = vi.mocked(desktopBridge.setClientSettings);
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
     setServerConfigSnapshot(createBaseServerConfig());
 
     mounted = await renderWithTestRouter(
@@ -1035,9 +1064,7 @@ describe("settings panels", () => {
     setColorInput("Branding prefix", "Acme");
 
     await vi.waitFor(() => {
-      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
-        expect.objectContaining({ brandWordmarkPrefix: "Acme" }),
-      );
+      expect(updateClientSettings).toHaveBeenCalledWith({ brandWordmarkPrefix: "Acme" });
     });
 
     await expect.element(page.getByRole("heading", { name: "Sidebar image" })).toBeInTheDocument();
@@ -1052,14 +1079,14 @@ describe("settings panels", () => {
     imageInput!.dispatchEvent(new Event("change", { bubbles: true }));
 
     await vi.waitFor(() => {
-      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
+      expect(updateClientSettings).toHaveBeenCalledWith(
         expect.objectContaining({
           sidebarBrandImageDataUrl: expect.stringContaining("data:image/png;base64,"),
         }),
       );
     });
 
-    const callsBeforeUnsupportedImage = setClientSettingsMock.mock.calls.length;
+    const callsBeforeUnsupportedImage = updateClientSettings.mock.calls.length;
     Object.defineProperty(imageInput, "files", {
       configurable: true,
       value: [new File(["<svg />"], "brand.svg", { type: "image/svg+xml" })],
@@ -1069,9 +1096,9 @@ describe("settings panels", () => {
     await expect
       .element(page.getByText("Choose a PNG, JPEG, GIF, or WebP image."))
       .toBeInTheDocument();
-    expect(setClientSettingsMock).toHaveBeenCalledTimes(callsBeforeUnsupportedImage);
+    expect(updateClientSettings).toHaveBeenCalledTimes(callsBeforeUnsupportedImage);
 
-    const callsBeforeOversizedImage = setClientSettingsMock.mock.calls.length;
+    const callsBeforeOversizedImage = updateClientSettings.mock.calls.length;
     Object.defineProperty(imageInput, "files", {
       configurable: true,
       value: [
@@ -1083,60 +1110,48 @@ describe("settings panels", () => {
     imageInput!.dispatchEvent(new Event("change", { bubbles: true }));
 
     await expect.element(page.getByText("Choose an image under 1 MB.")).toBeInTheDocument();
-    expect(setClientSettingsMock).toHaveBeenCalledTimes(callsBeforeOversizedImage);
+    expect(updateClientSettings).toHaveBeenCalledTimes(callsBeforeOversizedImage);
 
     await expect.element(page.getByText("Accent color")).toBeInTheDocument();
     setColorInput("App accent color", "#dc2626");
 
     await vi.waitFor(() => {
-      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
-        expect.objectContaining({ appAccentColor: "#dc2626" }),
-      );
+      expect(updateClientSettings).toHaveBeenCalledWith({ appAccentColor: "#dc2626" });
     });
 
     await expect.element(page.getByText("Sidebar color")).toBeInTheDocument();
     setColorInput("Animated sidebar color", "#16a34a");
 
     await vi.waitFor(() => {
-      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
-        expect.objectContaining({ themeAccentColor: "#16a34a" }),
-      );
+      expect(updateClientSettings).toHaveBeenCalledWith({ themeAccentColor: "#16a34a" });
     });
 
     await expect.element(page.getByText("Sidebar mascot")).toBeInTheDocument();
     await page.getByLabelText("Show sidebar mascot").click();
 
     await vi.waitFor(() => {
-      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
-        expect.objectContaining({ showSidebarMascot: false }),
-      );
+      expect(updateClientSettings).toHaveBeenCalledWith({ showSidebarMascot: false });
     });
 
     await expect.element(page.getByText("Sidebar attribution")).toBeInTheDocument();
     await page.getByLabelText("Show sidebar attribution").click();
 
     await vi.waitFor(() => {
-      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
-        expect.objectContaining({ showSidebarAttribution: false }),
-      );
+      expect(updateClientSettings).toHaveBeenCalledWith({ showSidebarAttribution: false });
     });
 
     await expect.element(page.getByText("Background animations")).toBeInTheDocument();
     await page.getByLabelText("Keep animations running in background").click();
 
     await vi.waitFor(() => {
-      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
-        expect.objectContaining({ continueBackgroundAnimations: true }),
-      );
+      expect(updateClientSettings).toHaveBeenCalledWith({ continueBackgroundAnimations: true });
     });
 
     await expect.element(page.getByText("Sidebar star speed")).toBeInTheDocument();
     await page.getByLabelText("Increase sidebar star speed").click();
 
     await vi.waitFor(() => {
-      expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
-        expect.objectContaining({ sidebarStarSpeed: 1.25 }),
-      );
+      expect(updateClientSettings).toHaveBeenCalledWith({ sidebarStarSpeed: 1.25 });
     });
   });
 
@@ -1144,6 +1159,7 @@ describe("settings panels", () => {
     const platformSpy = vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
     const desktopBridge = createDesktopBridgeStub();
     window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
     setServerConfigSnapshot({
       ...createBaseServerConfig(),
       availableEditors: ["vscode", "antigravity", "file-manager"],
@@ -1173,9 +1189,7 @@ describe("settings panels", () => {
       await page.getByText("VS Code", { exact: true }).click();
 
       await vi.waitFor(() => {
-        expect(desktopBridge.setClientSettings).toHaveBeenCalledWith(
-          expect.objectContaining({ defaultEditor: "vscode" }),
-        );
+        expect(updateClientSettings).toHaveBeenCalledWith({ defaultEditor: "vscode" });
       });
       await expect
         .element(
@@ -1194,6 +1208,7 @@ describe("settings panels", () => {
     window.desktopBridge = createDesktopBridgeStub({
       serverExposureState: {
         mode: "network-accessible",
+        httpsEnabled: true,
         endpointUrl: "http://192.168.1.44:3773",
         advertisedHost: "192.168.1.44",
       },
@@ -1310,6 +1325,7 @@ describe("settings panels", () => {
     window.desktopBridge = createDesktopBridgeStub({
       serverExposureState: {
         mode: "network-accessible",
+        httpsEnabled: true,
         endpointUrl: "http://192.168.1.44:3773",
         advertisedHost: "192.168.1.44",
       },
@@ -1356,9 +1372,7 @@ describe("settings panels", () => {
     );
 
     await expect.element(page.getByText("Admin password")).toBeInTheDocument();
-    await expect
-      .element(page.getByText("Password login is disabled for this backend."))
-      .toBeInTheDocument();
+    await expect.element(page.getByText("Password sign-in is off.")).toBeInTheDocument();
     await page.getByLabelText("Enable password authentication").click();
     await expect.element(page.getByText("Enable admin password")).toBeInTheDocument();
     await page
@@ -1369,9 +1383,7 @@ describe("settings panels", () => {
       .fill("correct horse battery staple");
     await page.getByRole("button", { name: "Enable", exact: true }).click();
 
-    await expect
-      .element(page.getByText("Password login is enabled for this backend."))
-      .toBeInTheDocument();
+    await expect.element(page.getByText("Password sign-in is on.")).toBeInTheDocument();
     await expect
       .element(page.getByRole("button", { name: "Change", exact: true }))
       .toBeInTheDocument();
@@ -1380,9 +1392,7 @@ describe("settings panels", () => {
     await expect.element(page.getByText("Disable password authentication?")).toBeInTheDocument();
     await page.getByRole("button", { name: "Disable", exact: true }).click();
 
-    await expect
-      .element(page.getByText("Password login is disabled for this backend."))
-      .toBeInTheDocument();
+    await expect.element(page.getByText("Password sign-in is off.")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:3773/api/auth/admin-password", {
       body: JSON.stringify({ password: "correct horse battery staple" }),
       credentials: "include",
@@ -1397,6 +1407,7 @@ describe("settings panels", () => {
     window.desktopBridge = createDesktopBridgeStub({
       serverExposureState: {
         mode: "network-accessible",
+        httpsEnabled: true,
         endpointUrl: "http://192.168.1.44:3773",
         advertisedHost: "192.168.1.44",
       },
@@ -1502,6 +1513,38 @@ describe("settings panels", () => {
       expect(desktopBridge.setServerExposureMode).toHaveBeenCalledWith("network-accessible");
     });
     await expect.element(page.getByText("http://192.168.1.44:3773")).toBeInTheDocument();
+  });
+
+  it("toggles desktop HTTPS separately from network access", async () => {
+    const setServerHttpsEnabled = vi.fn().mockResolvedValue({
+      mode: "local-only",
+      httpsEnabled: false,
+      endpointUrl: null,
+      advertisedHost: null,
+    });
+    window.desktopBridge = createDesktopBridgeStub({
+      setServerHttpsEnabled,
+    });
+
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ConnectionsSettings />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByText("Pairing links use HTTPS.")).toBeInTheDocument();
+    await page.getByLabelText("Enable HTTPS").click();
+    await expect.element(page.getByText("Disable HTTPS?")).toBeInTheDocument();
+    await expect
+      .element(page.getByText("Cafe Code will restart to update the backend listener."))
+      .toBeInTheDocument();
+    await page.getByRole("button", { name: "Restart and disable", exact: true }).click();
+    await vi.waitFor(() => {
+      expect(setServerHttpsEnabled).toHaveBeenCalledWith(false);
+    });
+    await expect.element(page.getByText("Pairing links use HTTP.")).toBeInTheDocument();
   });
 
   it("adds desktop ssh environments from the add-environment dialog", async () => {
@@ -1797,10 +1840,14 @@ describe("SourceControlSettingsPanel discovery states", () => {
     discoverSourceControl: () => Promise<SourceControlDiscoveryResult>,
   ) {
     window.nativeApi = {
+      persistence: {
+        getClientSettings: vi.fn().mockResolvedValue(null),
+        setClientSettings: vi.fn().mockResolvedValue(undefined),
+      },
       server: {
         discoverSourceControl,
       },
-    } as LocalApi;
+    } as unknown as LocalApi;
   }
 
   it("shows skeleton sections while the first source control scan is pending", async () => {

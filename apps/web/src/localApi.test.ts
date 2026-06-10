@@ -78,6 +78,8 @@ const rpcClientMock = {
     removeKeybinding: vi.fn(),
     getSettings: vi.fn(),
     updateSettings: vi.fn(),
+    getClientSettings: vi.fn(),
+    updateClientSettings: vi.fn(),
     subscribeConfig: vi.fn(),
     subscribeLifecycle: vi.fn(),
     subscribeAuthAccess: vi.fn(),
@@ -190,11 +192,19 @@ function makeDesktopBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridg
     },
     getServerExposureState: async () => ({
       mode: "local-only",
+      httpsEnabled: true,
       endpointUrl: null,
       advertisedHost: null,
     }),
     setServerExposureMode: async () => ({
       mode: "local-only",
+      httpsEnabled: true,
+      endpointUrl: null,
+      advertisedHost: null,
+    }),
+    setServerHttpsEnabled: async (httpsEnabled) => ({
+      mode: "local-only",
+      httpsEnabled,
       endpointUrl: null,
       advertisedHost: null,
     }),
@@ -302,6 +312,7 @@ const baseServerConfig: ServerConfig = {
     otlpMetricsEnabled: false,
   },
   settings: DEFAULT_SERVER_SETTINGS,
+  clientSettings: DEFAULT_CLIENT_SETTINGS,
 };
 
 const baseGitStatus: VcsStatusResult = {
@@ -352,6 +363,29 @@ describe("wsApi", () => {
     expect(rpcClientMock.server.subscribeLifecycle).not.toHaveBeenCalled();
   });
 
+  it("forwards client settings requests directly to the RPC client", async () => {
+    rpcClientMock.server.getClientSettings.mockResolvedValue(DEFAULT_CLIENT_SETTINGS);
+    rpcClientMock.server.updateClientSettings.mockResolvedValue({
+      ...DEFAULT_CLIENT_SETTINGS,
+      brandWordmarkPrefix: "Synced",
+    });
+    const { createLocalApi } = await import("./localApi");
+
+    const api = createLocalApi(rpcClientMock as never);
+
+    await expect(api.server.getClientSettings()).resolves.toEqual(DEFAULT_CLIENT_SETTINGS);
+    await expect(
+      api.server.updateClientSettings({ brandWordmarkPrefix: "Synced" }),
+    ).resolves.toEqual({
+      ...DEFAULT_CLIENT_SETTINGS,
+      brandWordmarkPrefix: "Synced",
+    });
+    expect(rpcClientMock.server.getClientSettings).toHaveBeenCalledWith();
+    expect(rpcClientMock.server.updateClientSettings).toHaveBeenCalledWith({
+      brandWordmarkPrefix: "Synced",
+    });
+  });
+
   it("forwards shell stream events", async () => {
     const { createEnvironmentApi } = await import("./environmentApi");
 
@@ -384,11 +418,24 @@ describe("wsApi", () => {
 
   it("forwards terminal launch requests directly to the RPC client", async () => {
     rpcClientMock.shell.openTerminal.mockResolvedValue(undefined);
+    getWindowForTest().desktopBridge = makeDesktopBridge();
     const { createLocalApi } = await import("./localApi");
     const api = createLocalApi(rpcClientMock as never);
 
     await expect(api.shell.openTerminal("/tmp/project")).resolves.toBeUndefined();
     expect(rpcClientMock.shell.openTerminal).toHaveBeenCalledWith({ cwd: "/tmp/project" });
+  });
+
+  it("does not proxy browser terminal launches to the backend host", async () => {
+    rpcClientMock.shell.openTerminal.mockResolvedValue(undefined);
+    Reflect.deleteProperty(getWindowForTest(), "desktopBridge");
+    const { createLocalApi } = await import("./localApi");
+    const api = createLocalApi(rpcClientMock as never);
+
+    await expect(api.shell.openTerminal("/tmp/project")).rejects.toThrow(
+      "only available in the desktop app",
+    );
+    expect(rpcClientMock.shell.openTerminal).not.toHaveBeenCalled();
   });
 
   it("forwards git status stream events", async () => {

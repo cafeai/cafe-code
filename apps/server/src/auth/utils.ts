@@ -15,6 +15,10 @@ export function resolveSessionCookieName(input: {
   return `${SESSION_COOKIE_NAME}_${input.port}`;
 }
 
+export function resolveHttpsSessionCookieName(input: { readonly port: number }): string {
+  return `${SESSION_COOKIE_NAME}_https_${input.port}`;
+}
+
 export function base64UrlEncode(input: string | Uint8Array): string {
   const buffer = typeof input === "string" ? Buffer.from(input, "utf8") : Buffer.from(input);
   return buffer.toString("base64url");

@@ -13,7 +13,9 @@ import { ServerSecretStoreLive } from "./ServerSecretStore.ts";
 import { SessionCredentialServiceLive } from "./SessionCredentialService.ts";
 
 const makeServerConfigLayer = (
-  overrides?: Partial<Pick<ServerConfigShape, "desktopBootstrapToken">>,
+  overrides?: Partial<
+    Pick<ServerConfigShape, "desktopBootstrapToken" | "httpsEnabled" | "httpsPort">
+  >,
 ) =>
   Layer.effect(
     ServerConfig,
@@ -27,7 +29,9 @@ const makeServerConfigLayer = (
   ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-auth-session-test-" })));
 
 const makeSessionCredentialLayer = (
-  overrides?: Partial<Pick<ServerConfigShape, "desktopBootstrapToken">>,
+  overrides?: Partial<
+    Pick<ServerConfigShape, "desktopBootstrapToken" | "httpsEnabled" | "httpsPort">
+  >,
 ) =>
   SessionCredentialServiceLive.pipe(
     Layer.provide(SqlitePersistenceMemory),
@@ -36,6 +40,22 @@ const makeSessionCredentialLayer = (
   );
 
 it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
+  it.effect("uses a distinct cookie name for the HTTPS sibling listener", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+
+      expect(sessions.cookieName).toBe("t3_session");
+      expect(sessions.httpsCookieName).toBe("t3_session_https_9443");
+    }).pipe(
+      Effect.provide(
+        makeSessionCredentialLayer({
+          httpsEnabled: true,
+          httpsPort: 9443,
+        }),
+      ),
+    ),
+  );
+
   it.effect("issues and verifies signed browser session tokens", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionCredentialService;

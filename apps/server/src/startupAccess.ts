@@ -73,9 +73,10 @@ export const resolveHeadlessConnectionString = (
   host: string | undefined,
   port: number,
   interfaces: NetworkInterfacesMap = networkInterfaces(),
+  protocol: "http" | "https" = "http",
 ): string => {
   const connectionHost = resolveHeadlessConnectionHost(host, interfaces);
-  return `http://${formatHostForUrl(connectionHost)}:${port}`;
+  return `${protocol}://${formatHostForUrl(connectionHost)}:${port}`;
 };
 
 export const resolveListeningPort = (address: unknown, fallbackPort: number): number => {
@@ -131,9 +132,15 @@ export const issueHeadlessServeAccessInfo = Effect.fn("issueHeadlessServeAccessI
   const serverConfig = yield* ServerConfig;
   const httpServer = yield* HttpServer.HttpServer;
   const serverAuth = yield* ServerAuth;
+  const connectionPort =
+    serverConfig.httpsEnabled && serverConfig.httpsPort !== undefined
+      ? serverConfig.httpsPort
+      : resolveListeningPort(httpServer.address, serverConfig.port);
   const connectionString = resolveHeadlessConnectionString(
     serverConfig.host,
-    resolveListeningPort(httpServer.address, serverConfig.port),
+    connectionPort,
+    networkInterfaces(),
+    serverConfig.httpsEnabled && serverConfig.httpsPort !== undefined ? "https" : "http",
   );
   const issued = yield* serverAuth.issuePairingCredential({ role: "owner" });
 

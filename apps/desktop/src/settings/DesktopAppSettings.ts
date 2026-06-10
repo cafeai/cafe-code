@@ -22,6 +22,7 @@ import { resolveDefaultDesktopUpdateChannel } from "../updates/updateChannels.ts
 
 export interface DesktopSettings {
   readonly serverExposureMode: DesktopServerExposureMode;
+  readonly serverHttpsEnabled: boolean;
   readonly updateChannel: DesktopUpdateChannel;
   readonly updateChannelConfiguredByUser: boolean;
 }
@@ -33,12 +34,14 @@ export interface DesktopSettingsChange {
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   serverExposureMode: "local-only",
+  serverHttpsEnabled: true,
   updateChannel: "latest",
   updateChannelConfiguredByUser: false,
 };
 
 const DesktopSettingsDocument = Schema.Struct({
   serverExposureMode: Schema.optionalKey(DesktopServerExposureModeSchema),
+  serverHttpsEnabled: Schema.optionalKey(Schema.Boolean),
   updateChannel: Schema.optionalKey(DesktopUpdateChannelSchema),
   updateChannelConfiguredByUser: Schema.optionalKey(Schema.Boolean),
 });
@@ -68,6 +71,9 @@ export interface DesktopAppSettingsShape {
   readonly get: Effect.Effect<DesktopSettings>;
   readonly setServerExposureMode: (
     mode: DesktopServerExposureMode,
+  ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
+  readonly setServerHttpsEnabled: (
+    enabled: boolean,
   ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
   readonly setUpdateChannel: (
     channel: DesktopUpdateChannel,
@@ -100,6 +106,7 @@ function normalizeDesktopSettingsDocument(
   return {
     serverExposureMode:
       parsed.serverExposureMode === "network-accessible" ? "network-accessible" : "local-only",
+    serverHttpsEnabled: parsed.serverHttpsEnabled ?? defaultSettings.serverHttpsEnabled,
     updateChannel: updateChannelConfiguredByUser
       ? Option.getOrElse(parsedUpdateChannel, () => defaultSettings.updateChannel)
       : defaultSettings.updateChannel,
@@ -115,6 +122,9 @@ function toDesktopSettingsDocument(
 
   if (settings.serverExposureMode !== defaults.serverExposureMode) {
     document.serverExposureMode = settings.serverExposureMode;
+  }
+  if (settings.serverHttpsEnabled !== defaults.serverHttpsEnabled) {
+    document.serverHttpsEnabled = settings.serverHttpsEnabled;
   }
   if (settings.updateChannel !== defaults.updateChannel) {
     document.updateChannel = settings.updateChannel;
@@ -135,6 +145,15 @@ function setServerExposureMode(
     : {
         ...settings,
         serverExposureMode: requestedMode,
+      };
+}
+
+function setServerHttpsEnabled(settings: DesktopSettings, enabled: boolean): DesktopSettings {
+  return settings.serverHttpsEnabled === enabled
+    ? settings
+    : {
+        ...settings,
+        serverHttpsEnabled: enabled,
       };
 }
 
@@ -234,6 +253,10 @@ export const layer = Layer.effect(
         persist((settings) => setServerExposureMode(settings, mode)).pipe(
           Effect.withSpan("desktop.settings.setServerExposureMode", { attributes: { mode } }),
         ),
+      setServerHttpsEnabled: (enabled) =>
+        persist((settings) => setServerHttpsEnabled(settings, enabled)).pipe(
+          Effect.withSpan("desktop.settings.setServerHttpsEnabled", { attributes: { enabled } }),
+        ),
       setUpdateChannel: (channel) =>
         persist((settings) => setUpdateChannel(settings, channel)).pipe(
           Effect.withSpan("desktop.settings.setUpdateChannel", { attributes: { channel } }),
@@ -264,6 +287,8 @@ export const layerTest = (initialSettings: DesktopSettings = DEFAULT_DESKTOP_SET
         load: SynchronizedRef.get(settingsRef),
         setServerExposureMode: (mode) =>
           update((settings) => setServerExposureMode(settings, mode)),
+        setServerHttpsEnabled: (enabled) =>
+          update((settings) => setServerHttpsEnabled(settings, enabled)),
         setUpdateChannel: (channel) => update((settings) => setUpdateChannel(settings, channel)),
       });
     }),

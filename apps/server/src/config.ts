@@ -32,12 +32,16 @@ export interface ServerDerivedPaths {
   readonly keybindingsConfigPath: string;
   readonly systemPromptPath: string;
   readonly settingsPath: string;
+  readonly clientSettingsPath: string;
   readonly providerStatusCacheDir: string;
   readonly worktreesDir: string;
   readonly attachmentsDir: string;
   readonly logsDir: string;
   readonly serverLogPath: string;
   readonly serverTracePath: string;
+  readonly tlsDir: string;
+  readonly httpsCertPath: string;
+  readonly httpsKeyPath: string;
   readonly providerLogsDir: string;
   readonly providerEventLogPath: string;
   readonly anonymousIdPath: string;
@@ -62,6 +66,8 @@ export interface ServerConfigShape extends ServerDerivedPaths {
   readonly otlpServiceName: string;
   readonly mode: RuntimeMode;
   readonly port: number;
+  readonly httpsEnabled: boolean;
+  readonly httpsPort: number | undefined;
   readonly host: string | undefined;
   readonly cwd: string;
   readonly baseDir: string;
@@ -85,6 +91,8 @@ export const deriveServerPaths = Effect.fn(function* (
   const dbPath = join(stateDir, "state.sqlite");
   const attachmentsDir = join(stateDir, "attachments");
   const logsDir = join(stateDir, "logs");
+  const tlsDir = join(stateDir, "tls");
+  const secretsDir = join(stateDir, "secrets");
   const providerLogsDir = join(logsDir, "provider");
   const providerStatusCacheDir = join(baseDir, "caches");
   return {
@@ -93,18 +101,22 @@ export const deriveServerPaths = Effect.fn(function* (
     keybindingsConfigPath: join(stateDir, "keybindings.json"),
     systemPromptPath: join(stateDir, "system-prompt.md"),
     settingsPath: join(stateDir, "settings.json"),
+    clientSettingsPath: join(stateDir, "client-settings.json"),
     providerStatusCacheDir,
     worktreesDir: join(baseDir, "worktrees"),
     attachmentsDir,
     logsDir,
     serverLogPath: join(logsDir, "server.log"),
     serverTracePath: join(logsDir, "server.trace.ndjson"),
+    tlsDir,
+    httpsCertPath: join(tlsDir, "server-cert.pem"),
+    httpsKeyPath: join(secretsDir, "https-server-key.pem"),
     providerLogsDir,
     providerEventLogPath: join(providerLogsDir, "events.log"),
     anonymousIdPath: join(stateDir, "anonymous-id"),
     environmentIdPath: join(stateDir, "environment-id"),
     serverRuntimeStatePath: join(stateDir, "server-runtime.json"),
-    secretsDir: join(stateDir, "secrets"),
+    secretsDir,
   };
 });
 
@@ -116,11 +128,13 @@ export const ensureServerDirectories = Effect.fn(function* (derivedPaths: Server
     [
       fs.makeDirectory(derivedPaths.stateDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.logsDir, { recursive: true }),
+      fs.makeDirectory(derivedPaths.tlsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.providerLogsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.attachmentsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.worktreesDir, { recursive: true }),
       fs.makeDirectory(path.dirname(derivedPaths.keybindingsConfigPath), { recursive: true }),
       fs.makeDirectory(path.dirname(derivedPaths.settingsPath), { recursive: true }),
+      fs.makeDirectory(path.dirname(derivedPaths.clientSettingsPath), { recursive: true }),
       fs.makeDirectory(derivedPaths.providerStatusCacheDir, { recursive: true }),
       fs.makeDirectory(path.dirname(derivedPaths.anonymousIdPath), { recursive: true }),
       fs.makeDirectory(path.dirname(derivedPaths.serverRuntimeStatePath), { recursive: true }),
@@ -170,6 +184,8 @@ export class ServerConfig extends Context.Service<ServerConfig, ServerConfigShap
           providerDaemon: undefined,
           providerSupervisor: undefined,
           port: 0,
+          httpsEnabled: false,
+          httpsPort: undefined,
           host: undefined,
           desktopBootstrapToken: undefined,
           staticDir: undefined,

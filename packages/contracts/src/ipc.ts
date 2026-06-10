@@ -64,7 +64,12 @@ import { AuthBearerBootstrapResult, AuthSessionState, AuthWebSocketTokenResult }
 import { AdvertisedEndpoint } from "./remoteAccess.ts";
 import { EditorId } from "./editor.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
-import type { ClientSettings, ServerSettings, ServerSettingsPatch } from "./settings.ts";
+import type {
+  ClientSettings,
+  ClientSettingsPatch,
+  ServerSettings,
+  ServerSettingsPatch,
+} from "./settings.ts";
 import { PowerSaveBlockerMode } from "./settings.ts";
 import type {
   SourceControlCloneRepositoryInput,
@@ -364,12 +369,14 @@ export const DesktopServerExposureModeSchema = Schema.Literals([
 
 export interface DesktopServerExposureState {
   mode: DesktopServerExposureMode;
+  httpsEnabled: boolean;
   endpointUrl: string | null;
   advertisedHost: string | null;
 }
 
 export const DesktopServerExposureStateSchema = Schema.Struct({
   mode: DesktopServerExposureModeSchema,
+  httpsEnabled: Schema.Boolean,
   endpointUrl: Schema.NullOr(Schema.String),
   advertisedHost: Schema.NullOr(Schema.String),
 });
@@ -430,6 +437,7 @@ export interface DesktopBridge {
   ) => Promise<AuthWebSocketTokenResult>;
   getServerExposureState: () => Promise<DesktopServerExposureState>;
   setServerExposureMode: (mode: DesktopServerExposureMode) => Promise<DesktopServerExposureState>;
+  setServerHttpsEnabled: (enabled: boolean) => Promise<DesktopServerExposureState>;
   getAdvertisedEndpoints: () => Promise<readonly AdvertisedEndpoint[]>;
   pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
   confirm: (message: string) => Promise<boolean>;
@@ -509,6 +517,8 @@ export interface LocalApi {
     removeKeybinding: (input: ServerRemoveKeybindingInput) => Promise<ServerRemoveKeybindingResult>;
     getSettings: () => Promise<ServerSettings>;
     updateSettings: (patch: ServerSettingsPatch) => Promise<ServerSettings>;
+    getClientSettings: () => Promise<ClientSettings>;
+    updateClientSettings: (patch: ClientSettingsPatch) => Promise<ClientSettings>;
     discoverSourceControl: () => Promise<SourceControlDiscoveryResult>;
     getTraceDiagnostics: () => Promise<ServerTraceDiagnosticsResult>;
     getProcessDiagnostics: () => Promise<ServerProcessDiagnosticsResult>;

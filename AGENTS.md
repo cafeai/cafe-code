@@ -66,12 +66,20 @@ If a tradeoff is required, choose correctness, durability, and debuggability ove
 ## Package Roles
 
 - `apps/desktop`: Electron main process, desktop bootstrap, debug server, backend process manager, provider daemon manager, and local process reaper. This is where app startup decides whether to adopt, spawn, stop, or leave detached runtime processes alive.
-- `apps/server`: Node.js backend and provider runtime host. It serves the web assets, exposes WebSocket/API surfaces, owns orchestration, persistence, provider adapters, the provider daemon HTTP/RPC server, and provider supervisor support.
-- `apps/web`: React/Vite Electron renderer. It owns session UX, message timelines, scroll behavior, settings UI, and client-side state. It receives orchestration domain events from the backend and must not invent provider lifecycle state that the backend did not emit.
+- `apps/server`: Node.js backend and provider runtime host. It serves the web assets, exposes HTTP/HTTPS and WebSocket/API surfaces, owns orchestration, persistence, provider adapters, the provider daemon HTTP/RPC server, and provider supervisor support.
+- `apps/web`: React/Vite Electron renderer and browser Web UI. It owns session UX, message timelines, scroll behavior, settings UI, and client-side state. It receives orchestration domain events from the backend and must not invent provider lifecycle state that the backend did not emit.
 - `packages/contracts`: Shared Effect Schema contracts for provider runtime events, orchestration events, daemon RPC/health, supervisor metadata, WebSocket/API protocol, desktop bootstrap, settings, and model/session types. Keep this package schema-only; do not add runtime business logic.
 - `packages/shared`: Shared runtime utilities consumed by server, desktop, and web. Use explicit subpath exports such as `@cafecode/shared/git`; avoid barrel indexes.
 - `packages/effect-codex-app-server`: Typed Codex app-server JSON-RPC client/protocol surface. Keep this aligned with the Codex version we are targeting.
 - `packages/effect-acp`: ACP protocol support used by compatible providers.
+
+## Browser Web UI and Local HTTPS
+
+- The browser Web UI is a first-class remote surface. Any shared renderer feature that opens editors, terminals, paths, folders, or OS dialogs must be gated on explicit local host capability and should use copy-path/copy-command alternatives in pure browser or reverse-proxy sessions.
+- After an authenticated backend connection is available, renderer `ClientSettings` are backend-authoritative and shared across Electron and browser clients. Local desktop/browser client-settings persistence is only a bootstrap/import fallback before backend settings are available.
+- The main backend keeps HTTP available for compatibility and may also serve a self-signed HTTPS/WSS sibling listener on a separate port. In desktop builds, local HTTPS is controlled by an explicit desktop settings toggle, separate from the local-only/network-accessible host exposure toggle. Browser-facing pairing/headless output should prefer HTTPS when it is enabled; Electron desktop bootstrap may keep using HTTP loopback to avoid self-signed certificate handling in the desktop window.
+- HTTPS public certificate material belongs under the server TLS directory, but HTTPS private keys are secrets and must live under the server secrets directory with restrictive permissions where supported. Do not log private key material, generated key output, or TLS secrets.
+- Provider daemons and provider supervisors must not inherit the app HTTPS listener by default. Keep their existing authenticated loopback or IPC transports unless a separate authenticated TLS design is implemented for those runtime layers.
 
 ## Renderer Markdown Math
 

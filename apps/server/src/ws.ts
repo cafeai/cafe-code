@@ -53,6 +53,7 @@ import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner
 import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup.ts";
 import { redactServerSettingsForClient, ServerSettingsService } from "./serverSettings.ts";
+import { ServerClientSettingsService } from "./serverClientSettings.ts";
 import { WorkspaceEntries } from "./workspace/Services/WorkspaceEntries.ts";
 import { WorkspaceFileSystem } from "./workspace/Services/WorkspaceFileSystem.ts";
 import { WorkspacePathOutsideRootError } from "./workspace/Services/WorkspacePaths.ts";
@@ -254,6 +255,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
       const config = yield* ServerConfig;
       const lifecycleEvents = yield* ServerLifecycleEvents;
       const serverSettings = yield* ServerSettingsService;
+      const clientSettings = yield* ServerClientSettingsService;
       const startup = yield* ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem;
@@ -682,6 +684,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
         const keybindingsConfig = yield* keybindings.loadConfigState;
         const providers = yield* providerRegistry.getProviders;
         const settings = redactServerSettingsForClient(yield* serverSettings.getSettings);
+        const syncedClientSettings = yield* clientSettings.getSettings;
         const environment = yield* serverEnvironment.getDescriptor;
         const auth = yield* serverAuth.getDescriptor();
 
@@ -707,6 +710,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
             otlpMetricsEnabled: config.otlpMetricsUrl !== undefined,
           },
           settings,
+          clientSettings: syncedClientSettings,
         };
       });
 
@@ -1049,6 +1053,18 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
               "rpc.aggregate": "server",
             },
           ),
+        [WS_METHODS.serverGetClientSettings]: (_input) =>
+          observeRpcEffect(WS_METHODS.serverGetClientSettings, clientSettings.getSettings, {
+            "rpc.aggregate": "server",
+          }),
+        [WS_METHODS.serverUpdateClientSettings]: ({ patch }) =>
+          observeRpcEffect(
+            WS_METHODS.serverUpdateClientSettings,
+            clientSettings.updateSettings(patch),
+            {
+              "rpc.aggregate": "server",
+            },
+          ),
         [WS_METHODS.serverDiscoverSourceControl]: (_input) =>
           observeRpcEffect(
             WS_METHODS.serverDiscoverSourceControl,
@@ -1276,6 +1292,13 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
                   payload: { settings },
                 })),
               );
+              const clientSettingsUpdates = clientSettings.streamChanges.pipe(
+                Stream.map((settings) => ({
+                  version: 1 as const,
+                  type: "clientSettingsUpdated" as const,
+                  payload: { clientSettings: settings },
+                })),
+              );
 
               yield* providerRegistry
                 .refresh()
@@ -1283,7 +1306,10 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
 
               const liveUpdates = Stream.merge(
                 keybindingsUpdates,
-                Stream.merge(providerStatuses, settingsUpdates),
+                Stream.merge(
+                  providerStatuses,
+                  Stream.merge(settingsUpdates, clientSettingsUpdates),
+                ),
               );
 
               return Stream.concat(

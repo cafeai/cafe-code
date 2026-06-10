@@ -97,7 +97,9 @@ export const ModelListRow = memo(function ModelListRow(props: {
             ) : null}
           </div>
           {props.jumpLabel ? (
-            <Kbd className="h-4 min-w-0 shrink-0 rounded-sm px-1.5 text-[10px]">
+            // Hide the keyboard-shortcut badge on touch-only devices (no
+            // keyboard/hover); desktop and mouse/trackpad devices are unchanged.
+            <Kbd className="h-4 min-w-0 shrink-0 rounded-sm px-1.5 text-[10px] [@media(hover:none)_and_(pointer:coarse)]:hidden">
               {props.jumpLabel}
             </Kbd>
           ) : null}

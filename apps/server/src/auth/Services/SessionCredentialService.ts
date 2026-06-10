@@ -44,6 +44,7 @@ export class SessionCredentialError extends Data.TaggedError("SessionCredentialE
 
 export interface SessionCredentialServiceShape {
   readonly cookieName: string;
+  readonly httpsCookieName: string | undefined;
   readonly issue: (input?: {
     readonly ttl?: Duration.Duration;
     readonly subject?: string;

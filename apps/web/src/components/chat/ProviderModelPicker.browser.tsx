@@ -37,7 +37,9 @@ vi.mock("../../environments/runtime", () => {
     client: {
       server: {
         getConfig: vi.fn(),
-        updateSettings: vi.fn(),
+        updateSettings: vi.fn().mockResolvedValue(undefined),
+        getClientSettings: vi.fn().mockResolvedValue(null),
+        updateClientSettings: vi.fn().mockResolvedValue(undefined),
       },
     },
     ensureBootstrapped: async () => undefined,
@@ -323,10 +325,12 @@ describe("ProviderModelPicker", () => {
   beforeEach(async () => {
     // Reset test environment before each test
     await __resetLocalApiForTests();
+    localStorage.clear();
   });
 
   afterEach(async () => {
     document.body.innerHTML = "";
+    localStorage.clear();
     await __resetLocalApiForTests();
   });
 

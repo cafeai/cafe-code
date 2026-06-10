@@ -21,6 +21,7 @@ import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
 import { ensureLocalApi } from "../../localApi";
+import { getLocalShellCapabilities } from "../../localCapabilities";
 import { cn } from "../../lib/utils";
 import { resolveAndPersistPreferredEditor } from "../../editorPreferences";
 import { formatRelativeTime } from "../../timestampFormat";
@@ -112,7 +113,9 @@ function StatBlock({
   return (
     <div className="min-w-0 border-border/60 px-4 py-3 sm:px-5">
       <div className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
-        <span className="min-w-0 truncate">{label}</span>
+        <span className="min-w-0 truncate max-md:whitespace-normal max-md:break-words">
+          {label}
+        </span>
         {tooltip ? (
           <Tooltip>
             <TooltipTrigger
@@ -137,7 +140,9 @@ function StatBlock({
       </div>
       <div
         className={cn(
-          "mt-1 truncate font-mono text-lg font-semibold tabular-nums text-foreground",
+          // Desktop keeps single-line truncation for density; on mobile (max-md)
+          // let stat values wrap so text like "Not configured" is fully visible.
+          "mt-1 truncate font-mono text-lg font-semibold tabular-nums text-foreground max-md:overflow-visible max-md:whitespace-normal max-md:break-words",
           tone === "warning" && "text-amber-600 dark:text-amber-400",
           tone === "danger" && "text-destructive",
         )}
@@ -1343,6 +1348,7 @@ function ProviderSupervisorTable({
 export function DiagnosticsSettingsPanel() {
   const observability = useServerObservability();
   const availableEditors = useServerAvailableEditors();
+  const canOpenLocalEditor = getLocalShellCapabilities().canOpenLocalEditor;
   const [resourceWindowMs, setResourceWindowMs] = useState(15 * 60_000);
   const selectedResourceWindow =
     RESOURCE_HISTORY_WINDOWS.find((option) => option.windowMs === resourceWindowMs) ??
@@ -1377,6 +1383,26 @@ export function DiagnosticsSettingsPanel() {
     const logsDirectoryPath = observability?.logsDirectoryPath ?? null;
     if (!logsDirectoryPath) return;
 
+    if (!canOpenLocalEditor) {
+      void Promise.resolve()
+        .then(() => navigator.clipboard.writeText(logsDirectoryPath))
+        .then(
+          () => {
+            toastManager.add({
+              title: "Logs path copied",
+              description: logsDirectoryPath,
+              type: "success",
+            });
+          },
+          (error: unknown) => {
+            setOpenLogsDirectoryError(
+              error instanceof Error ? error.message : "Unable to copy logs folder path.",
+            );
+          },
+        );
+      return;
+    }
+
     const editor = resolveAndPersistPreferredEditor(availableEditors ?? []);
     if (!editor) {
       setOpenLogsDirectoryError("No available editors found.");
@@ -1395,7 +1421,7 @@ export function DiagnosticsSettingsPanel() {
       .finally(() => {
         setIsOpeningLogsDirectory(false);
       });
-  }, [availableEditors, observability?.logsDirectoryPath]);
+  }, [availableEditors, canOpenLocalEditor, observability?.logsDirectoryPath]);
 
   const isInitialLoading = isPending && data === null;
   const isRuntimeInitialLoading = isRuntimePending && runtimeData === null;
@@ -1827,13 +1853,19 @@ export function DiagnosticsSettingsPanel() {
                     className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                     disabled={!observability?.logsDirectoryPath || isOpeningLogsDirectory}
                     onClick={openLogsDirectory}
-                    aria-label="Open logs folder"
+                    aria-label={canOpenLocalEditor ? "Open logs folder" : "Copy logs folder path"}
                   >
-                    <FolderOpenIcon className="size-3" />
+                    {canOpenLocalEditor ? (
+                      <FolderOpenIcon className="size-3" />
+                    ) : (
+                      <CopyIcon className="size-3" />
+                    )}
                   </Button>
                 }
               />
-              <TooltipPopup side="top">Open logs folder</TooltipPopup>
+              <TooltipPopup side="top">
+                {canOpenLocalEditor ? "Open logs folder" : "Copy logs folder path"}
+              </TooltipPopup>
             </Tooltip>
             <DiagnosticsRefreshButton
               isPending={isPending}

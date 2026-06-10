@@ -9,7 +9,7 @@
  * write. The hook transparently routes reads/writes to the correct backing
  * store.
  */
-import { useCallback, useMemo, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import { ServerSettings, type ServerSettingsPatch } from "@cafecode/contracts";
 import {
   type ClientSettingsPatch,
@@ -20,10 +20,18 @@ import {
 } from "@cafecode/contracts/settings";
 import { ensureLocalApi } from "~/localApi";
 import * as Struct from "effect/Struct";
+import * as Equal from "effect/Equal";
+import { applyClientSettingsPatch } from "@cafecode/shared/clientSettings";
 import { applyServerSettingsPatch } from "@cafecode/shared/serverSettings";
-import { applySettingsUpdated, getServerConfig, useServerSettings } from "~/rpc/serverState";
 import {
-  __resetClientSettingsPersistenceForTests,
+  applyClientSettingsUpdated,
+  applySettingsUpdated,
+  getServerConfig,
+  useServerConfig,
+  useServerSettings,
+} from "~/rpc/serverState";
+import {
+  __resetClientSettingsPersistenceForTests as resetClientSettingsPersistenceStateForTests,
   clearClientSettingsHydrationPromise,
   getClientSettingsHydratedSnapshot,
   getClientSettingsSnapshot,
@@ -36,6 +44,7 @@ import {
 } from "./clientSettingsState";
 
 const CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE = "[CLIENT_SETTINGS]";
+let clientSettingsImportAttempted = false;
 
 function subscribeClientSettings(listener: () => void): () => void {
   const unsubscribe = subscribeClientSettingsSnapshot(listener);
@@ -79,6 +88,27 @@ async function hydrateClientSettings(): Promise<void> {
   return hydrationPromise;
 }
 
+async function maybeImportLocalClientSettingsToServer(): Promise<void> {
+  if (clientSettingsImportAttempted) {
+    return;
+  }
+  const currentServerConfig = getServerConfig();
+  if (!currentServerConfig) {
+    return;
+  }
+  clientSettingsImportAttempted = true;
+
+  await hydrateClientSettings();
+  const localSettings = getClientSettingsSnapshot();
+  if (
+    Equal.equals(currentServerConfig.clientSettings, DEFAULT_CLIENT_SETTINGS) &&
+    !Equal.equals(localSettings, DEFAULT_CLIENT_SETTINGS)
+  ) {
+    applyClientSettingsUpdated(localSettings);
+    await ensureLocalApi().server.updateClientSettings(localSettings);
+  }
+}
+
 function persistClientSettings(settings: ClientSettings): void {
   replaceClientSettingsSnapshot(settings);
   void ensureLocalApi()
@@ -86,6 +116,10 @@ function persistClientSettings(settings: ClientSettings): void {
     .catch((error) => {
       console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} persist failed`, error);
     });
+}
+
+function reportSettingsWriteFailure(scope: "server" | "client", error: unknown): void {
+  console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} ${scope} update failed`, error);
 }
 
 // ── Key sets for routing patches ─────────────────────────────────────
@@ -124,31 +158,47 @@ function splitPatch(patch: Partial<UnifiedSettings>): {
  * settings without subscribing.
  */
 export function getClientSettings(): ClientSettings {
-  return getClientSettingsSnapshot();
+  return getServerConfig()?.clientSettings ?? getClientSettingsSnapshot();
 }
 
 export function useClientSettingsHydrated(): boolean {
-  return useSyncExternalStore(
+  const serverConfig = useServerConfig();
+  const localHydrated = useSyncExternalStore(
     subscribeClientSettingsHydration,
     getClientSettingsHydratedSnapshot,
     () => false,
   );
+  return serverConfig !== null || localHydrated;
 }
 
-export function useSettings<T = UnifiedSettings>(selector?: (s: UnifiedSettings) => T): T {
-  const serverSettings = useServerSettings();
-  const clientSettings = useSyncExternalStore(
+function useLocalClientSettings(): ClientSettings {
+  return useSyncExternalStore(
     subscribeClientSettings,
     getClientSettingsSnapshot,
     () => DEFAULT_CLIENT_SETTINGS,
   );
+}
+
+export function useSettings<T = UnifiedSettings>(selector?: (s: UnifiedSettings) => T): T {
+  const serverConfig = useServerConfig();
+  const serverSettings = useServerSettings();
+  const localClientSettings = useLocalClientSettings();
+
+  useEffect(() => {
+    if (serverConfig === null) {
+      return;
+    }
+    void maybeImportLocalClientSettingsToServer().catch((error) => {
+      console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} import failed`, error);
+    });
+  }, [serverConfig]);
 
   const merged = useMemo<UnifiedSettings>(
     () => ({
       ...serverSettings,
-      ...clientSettings,
+      ...(serverConfig?.clientSettings ?? localClientSettings),
     }),
-    [clientSettings, serverSettings],
+    [localClientSettings, serverConfig?.clientSettings, serverSettings],
   );
 
   return useMemo(() => (selector ? selector(merged) : (merged as T)), [merged, selector]);
@@ -170,14 +220,37 @@ export function useUpdateSettings() {
         applySettingsUpdated(applyServerSettingsPatch(currentServerConfig.settings, serverPatch));
       }
       // Fire-and-forget RPC — push will reconcile on success
-      void ensureLocalApi().server.updateSettings(serverPatch);
+      try {
+        void ensureLocalApi()
+          .server.updateSettings(serverPatch)
+          .catch((error) => {
+            reportSettingsWriteFailure("server", error);
+          });
+      } catch (error) {
+        reportSettingsWriteFailure("server", error);
+      }
     }
 
     if (Object.keys(clientPatch).length > 0) {
-      persistClientSettings({
-        ...getClientSettingsSnapshot(),
-        ...clientPatch,
-      });
+      const currentServerConfig = getServerConfig();
+      if (currentServerConfig) {
+        const nextClientSettings = applyClientSettingsPatch(
+          currentServerConfig.clientSettings,
+          clientPatch,
+        );
+        applyClientSettingsUpdated(nextClientSettings);
+        try {
+          void ensureLocalApi()
+            .server.updateClientSettings(clientPatch)
+            .catch((error) => {
+              reportSettingsWriteFailure("client", error);
+            });
+        } catch (error) {
+          reportSettingsWriteFailure("client", error);
+        }
+      } else {
+        persistClientSettings(applyClientSettingsPatch(getClientSettingsSnapshot(), clientPatch));
+      }
     }
   }, []);
 
@@ -191,4 +264,7 @@ export function useUpdateSettings() {
   };
 }
 
-export { __resetClientSettingsPersistenceForTests };
+export function __resetClientSettingsPersistenceForTests(): void {
+  clientSettingsImportAttempted = false;
+  resetClientSettingsPersistenceStateForTests();
+}

@@ -1670,7 +1670,13 @@ function OpenCommandPaletteDialog() {
           />
         </CommandPanel>
         <CommandFooter className="gap-3 max-sm:flex-col max-sm:items-start">
-          <div className="flex items-center gap-3">
+          {/*
+           * Keyboard-shortcut hints are meaningless on a touch-only device (no
+           * physical keyboard, no hover). Hide them when the primary pointer is
+           * coarse and hover is unavailable. Desktop (fine pointer / hover) and
+           * any device with a mouse/trackpad keep the hints unchanged.
+           */}
+          <div className="flex items-center gap-3 [@media(hover:none)_and_(pointer:coarse)]:hidden">
             <KbdGroup className="items-center gap-1.5">
               <Kbd>
                 <ArrowUpIcon />

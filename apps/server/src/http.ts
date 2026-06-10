@@ -1,5 +1,8 @@
 import Mime from "@effect/platform-node/Mime";
-import { CAFE_CODE_ENVIRONMENT_ENDPOINT_PATH } from "@cafecode/shared/environmentEndpoint";
+import {
+  CAFE_CODE_ENVIRONMENT_ENDPOINT_PATH,
+  CAFE_CODE_HTTPS_CERTIFICATE_PATH,
+} from "@cafecode/shared/environmentEndpoint";
 import { decodeOtlpTraceRecords } from "@cafecode/shared/observability";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -24,6 +27,7 @@ import {
 } from "./attachmentPaths.ts";
 import { resolveAttachmentPathById } from "./attachmentStore.ts";
 import { resolveStaticDir, ServerConfig } from "./config.ts";
+import { ensureHttpsCertificateMaterial } from "./httpsCertificate.ts";
 import { BrowserTraceCollector } from "./observability/Services/BrowserTraceCollector.ts";
 import { ProjectFaviconResolver } from "./project/Services/ProjectFaviconResolver.ts";
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
@@ -61,6 +65,124 @@ export function resolveDevRedirectUrl(devUrl: URL, requestUrl: URL): string {
   redirectUrl.hash = requestUrl.hash;
   return redirectUrl.toString();
 }
+
+// Remote peer addresses that mean "this machine". IPv4-mapped IPv6 (::ffff:127.x)
+// and the IPv4 loopback range are both treated as loopback so the desktop app and
+// same-machine browser are never shown the HTTPS bootstrap page.
+const LOOPBACK_REMOTE_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1", ""]);
+
+function isLoopbackRemoteAddress(address: string): boolean {
+  const normalized = address
+    .trim()
+    .toLowerCase()
+    .replace(/^\[(.*)\]$/, "$1");
+  return (
+    LOOPBACK_REMOTE_ADDRESSES.has(normalized) ||
+    normalized.startsWith("127.") ||
+    normalized.startsWith("::ffff:127.")
+  );
+}
+
+// True when the request reached this HTTP server through the HTTPS sibling proxy,
+// which stamps these headers (see httpsSiblingServer.ts). Such requests are already
+// encrypted end-to-end for the client, so they must be served the real app.
+function isViaHttpsProxy(headers: Record<string, string | undefined>): boolean {
+  return headers["x-cafe-code-https-proxy"] === "1" || headers["x-forwarded-proto"] === "https";
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// Minimal, self-contained (no external assets) page shown to external clients that
+// hit the plain-HTTP listener while HTTPS is enabled. It explains how to trust the
+// self-signed certificate and links to the secure site, instead of serving the app
+// over cleartext.
+function renderHttpsBootstrapPage(input: {
+  readonly hostname: string;
+  readonly httpsPort: number;
+}): string {
+  const secureOrigin = `https://${input.hostname}:${input.httpsPort}/`;
+  const secureOriginAttr = escapeHtml(secureOrigin);
+  const secureOriginText = escapeHtml(secureOrigin);
+  const certPathAttr = escapeHtml(CAFE_CODE_HTTPS_CERTIFICATE_PATH);
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex" />
+<title>Cafe Code — secure connection required</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+    font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #f6f7f9; color: #1b1d20; padding: 24px; }
+  @media (prefers-color-scheme: dark) { body { background: #0f1113; color: #e9eaec; } }
+  .card { width: 100%; max-width: 420px; background: Canvas; border: 1px solid rgba(128,128,128,.25);
+    border-radius: 16px; padding: 24px; box-shadow: 0 8px 30px rgba(0,0,0,.08); }
+  h1 { font-size: 18px; margin: 0 0 8px; }
+  p { margin: 0 0 12px; color: GrayText; }
+  .btn { display: block; width: 100%; box-sizing: border-box; text-align: center;
+    text-decoration: none; padding: 11px 14px; border-radius: 10px; font-weight: 600; margin-top: 10px; }
+  .primary { background: #2563eb; color: #fff; }
+  .secondary { border: 1px solid rgba(128,128,128,.4); color: inherit; }
+  ol { margin: 14px 0 0; padding-left: 18px; color: GrayText; font-size: 13px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>This server uses HTTPS</h1>
+    <p>For a secure connection, install Cafe Code's certificate on this device, then open the secure site.</p>
+    <a class="btn primary" href="${certPathAttr}" download="cafe-code.crt">Download certificate</a>
+    <a class="btn secondary" href="${secureOriginAttr}">Continue to secure site →</a>
+    <ol>
+      <li><strong>iOS:</strong> open the downloaded profile, then enable it in Settings → General → VPN &amp; Device Management, and turn it on under Certificate Trust Settings.</li>
+      <li><strong>Android:</strong> Settings → Security → install a certificate → CA certificate.</li>
+      <li>Then open <code>${secureOriginText}</code></li>
+    </ol>
+  </div>
+</body>
+</html>`;
+}
+
+// Serves the public self-signed certificate (PEM) so devices can trust the HTTPS
+// listener. Reachable over plain HTTP on purpose (bootstrap), and intentionally
+// unauthenticated because the certificate is public material already presented in
+// every TLS handshake. The private key is never exposed here.
+export const httpsCertificateRouteLayer = HttpRouter.add(
+  "GET",
+  CAFE_CODE_HTTPS_CERTIFICATE_PATH,
+  Effect.gen(function* () {
+    const config = yield* ServerConfig;
+    if (!config.httpsEnabled) {
+      return HttpServerResponse.text("HTTPS is not enabled on this backend.", { status: 404 });
+    }
+
+    const material = yield* ensureHttpsCertificateMaterial(config).pipe(
+      Effect.catch(() => Effect.succeed(null)),
+    );
+    if (!material) {
+      return HttpServerResponse.text("Certificate is not available.", { status: 503 });
+    }
+
+    return HttpServerResponse.text(material.cert, {
+      status: 200,
+      // application/x-x509-ca-cert triggers the certificate install flow on mobile.
+      contentType: "application/x-x509-ca-cert",
+      headers: {
+        "Content-Disposition": 'attachment; filename="cafe-code.crt"',
+        "Cache-Control": "no-store",
+      },
+    });
+  }),
+);
 
 const requireAuthenticatedRequest = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
@@ -251,6 +373,32 @@ export const staticAndDevRouteLayer = HttpRouter.add(
       return HttpServerResponse.redirect(resolveDevRedirectUrl(config.devUrl, url.value), {
         status: 302,
       });
+    }
+
+    // HTTPS bootstrap: when HTTPS is enabled, do not serve the app over plain
+    // cleartext HTTP to other devices. External clients that did not arrive
+    // through the HTTPS proxy get a page explaining how to trust the self-signed
+    // certificate and a link to the secure site. We only intercept when we can
+    // positively confirm the peer is non-loopback, so the desktop app and the
+    // same-machine browser (loopback HTTP) are never affected. The certificate
+    // download route is a more specific route and is matched before this one, so
+    // it stays reachable over HTTP for bootstrapping.
+    if (config.httpsEnabled && config.httpsPort !== undefined) {
+      const remoteAddress = Option.getOrUndefined(request.remoteAddress);
+      const isExternalPeer = remoteAddress !== undefined && !isLoopbackRemoteAddress(remoteAddress);
+      if (isExternalPeer && !isViaHttpsProxy(request.headers)) {
+        return HttpServerResponse.text(
+          renderHttpsBootstrapPage({
+            hostname: url.value.hostname,
+            httpsPort: config.httpsPort,
+          }),
+          {
+            status: 200,
+            contentType: "text/html; charset=utf-8",
+            headers: { "Cache-Control": "no-store" },
+          },
+        );
+      }
     }
 
     const staticDir = config.staticDir ?? (config.devUrl ? yield* resolveStaticDir() : undefined);

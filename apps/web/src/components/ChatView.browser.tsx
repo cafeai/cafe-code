@@ -192,8 +192,8 @@ function createBaseServerConfig(): ServerConfig {
     },
     settings: {
       ...DEFAULT_SERVER_SETTINGS,
-      ...DEFAULT_CLIENT_SETTINGS,
     },
+    clientSettings: DEFAULT_CLIENT_SETTINGS,
   };
 }
 
@@ -1557,11 +1557,19 @@ function createDesktopBridgeForChatViewTests(
     },
     getServerExposureState: async () => ({
       mode: "local-only",
+      httpsEnabled: true,
       endpointUrl: null,
       advertisedHost: null,
     }),
     setServerExposureMode: async () => ({
       mode: "local-only",
+      httpsEnabled: true,
+      endpointUrl: null,
+      advertisedHost: null,
+    }),
+    setServerHttpsEnabled: async (httpsEnabled) => ({
+      mode: "local-only",
+      httpsEnabled,
       endpointUrl: null,
       advertisedHost: null,
     }),
@@ -1876,7 +1884,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
     }
   });
 
-  it("opens the project cwd for draft threads without a worktree path", async () => {
+  it("does not render local editor open controls for draft threads", async () => {
     setDraftThreadWithoutWorktree();
 
     const mounted = await mountChatView({
@@ -1892,30 +1900,16 @@ describe("ChatView timeline estimator parity (full app)", () => {
 
     try {
       await waitForServerConfigToApply();
-      const openButton = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("button")).find(
-            (button) => button.textContent?.trim() === "Open",
-          ) as HTMLButtonElement | null,
-        "Unable to find Open button.",
+      const hasOpenButton = Array.from(document.querySelectorAll("button")).some(
+        (button) => button.textContent?.trim() === "Open",
       );
-      await vi.waitFor(() => {
-        expect(openButton.disabled).toBe(false);
-      });
-      openButton.click();
+      const hasOpenPickerButton =
+        document.querySelector('button[aria-label="Copy options"]') !== null;
 
-      await vi.waitFor(
-        () => {
-          const openRequest = wsRequests.find(
-            (request) => request._tag === WS_METHODS.shellOpenInEditor,
-          );
-          expect(openRequest).toMatchObject({
-            _tag: WS_METHODS.shellOpenInEditor,
-            cwd: "/repo/project",
-            editor: "vscode",
-          });
-        },
-        { timeout: 8_000, interval: 16 },
+      expect(hasOpenButton).toBe(false);
+      expect(hasOpenPickerButton).toBe(false);
+      expect(wsRequests.some((request) => request._tag === WS_METHODS.shellOpenInEditor)).toBe(
+        false,
       );
     } finally {
       await mounted.cleanup();
@@ -1958,16 +1952,6 @@ describe("ChatView timeline estimator parity (full app)", () => {
           ) as HTMLElement | null,
         "Unable to find passive source update badge.",
       );
-      const openButton = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("button")).find(
-            (button) => button.textContent?.trim() === "Open",
-          ) as HTMLButtonElement | null,
-        "Unable to find Open button.",
-      );
-
-      const relativePosition = updateBadge.compareDocumentPosition(openButton);
-      expect(relativePosition & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       expect(updateBadge.getAttribute("title")).toContain("Newer origin/dev commit available");
     } finally {
       await mounted.cleanup();
@@ -2011,257 +1995,6 @@ describe("ChatView timeline estimator parity (full app)", () => {
         "Unable to find passive rebuild badge.",
       );
       expect(updateBadge.getAttribute("title")).toContain("Rebuild and restart to apply dev");
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("opens the project cwd with VS Code Insiders when it is the only available editor", async () => {
-    setDraftThreadWithoutWorktree();
-
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createDraftOnlySnapshot(),
-      configureFixture: (nextFixture) => {
-        nextFixture.serverConfig = {
-          ...nextFixture.serverConfig,
-          availableEditors: ["vscode-insiders"],
-        };
-      },
-    });
-
-    try {
-      await waitForServerConfigToApply();
-      const openButton = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("button")).find(
-            (button) => button.textContent?.trim() === "Open",
-          ) as HTMLButtonElement | null,
-        "Unable to find Open button.",
-      );
-      await vi.waitFor(() => {
-        expect(openButton.disabled).toBe(false);
-      });
-      openButton.click();
-
-      await vi.waitFor(
-        () => {
-          const openRequest = wsRequests.find(
-            (request) => request._tag === WS_METHODS.shellOpenInEditor,
-          );
-          expect(openRequest).toMatchObject({
-            _tag: WS_METHODS.shellOpenInEditor,
-            cwd: "/repo/project",
-            editor: "vscode-insiders",
-          });
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("opens the project cwd with Trae when it is the only available editor", async () => {
-    setDraftThreadWithoutWorktree();
-
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createDraftOnlySnapshot(),
-      configureFixture: (nextFixture) => {
-        nextFixture.serverConfig = {
-          ...nextFixture.serverConfig,
-          availableEditors: ["trae"],
-        };
-      },
-    });
-
-    try {
-      await waitForServerConfigToApply();
-      const openButton = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("button")).find(
-            (button) => button.textContent?.trim() === "Open",
-          ) as HTMLButtonElement | null,
-        "Unable to find Open button.",
-      );
-      await vi.waitFor(() => {
-        expect(openButton.disabled).toBe(false);
-      });
-      openButton.click();
-
-      await vi.waitFor(
-        () => {
-          const openRequest = wsRequests.find(
-            (request) => request._tag === WS_METHODS.shellOpenInEditor,
-          );
-          expect(openRequest).toMatchObject({
-            _tag: WS_METHODS.shellOpenInEditor,
-            cwd: "/repo/project",
-            editor: "trae",
-          });
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("shows Kiro in the open picker menu and opens the project cwd with it", async () => {
-    setDraftThreadWithoutWorktree();
-
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createDraftOnlySnapshot(),
-      configureFixture: (nextFixture) => {
-        nextFixture.serverConfig = {
-          ...nextFixture.serverConfig,
-          availableEditors: ["kiro"],
-        };
-      },
-    });
-
-    try {
-      await waitForServerConfigToApply();
-      const menuButton = await waitForElement(
-        () => document.querySelector('button[aria-label="Copy options"]'),
-        "Unable to find Open picker button.",
-      );
-      (menuButton as HTMLButtonElement).click();
-
-      const kiroItem = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll('[data-slot="menu-item"]')).find((item) =>
-            item.textContent?.includes("Kiro"),
-          ) ?? null,
-        "Unable to find Kiro menu item.",
-      );
-      (kiroItem as HTMLElement).click();
-
-      await vi.waitFor(
-        () => {
-          const openRequest = wsRequests.find(
-            (request) => request._tag === WS_METHODS.shellOpenInEditor,
-          );
-          expect(openRequest).toMatchObject({
-            _tag: WS_METHODS.shellOpenInEditor,
-            cwd: "/repo/project",
-            editor: "kiro",
-          });
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("filters the open picker menu and opens VSCodium from the menu", async () => {
-    setDraftThreadWithoutWorktree();
-
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createDraftOnlySnapshot(),
-      configureFixture: (nextFixture) => {
-        nextFixture.serverConfig = {
-          ...nextFixture.serverConfig,
-          availableEditors: ["vscode-insiders", "vscodium"],
-        };
-      },
-    });
-
-    try {
-      await waitForServerConfigToApply();
-      const menuButton = await waitForElement(
-        () => document.querySelector('button[aria-label="Copy options"]'),
-        "Unable to find Open picker button.",
-      );
-      (menuButton as HTMLButtonElement).click();
-
-      await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll('[data-slot="menu-item"]')).find((item) =>
-            item.textContent?.includes("VS Code Insiders"),
-          ) ?? null,
-        "Unable to find VS Code Insiders menu item.",
-      );
-
-      expect(
-        Array.from(document.querySelectorAll('[data-slot="menu-item"]')).some((item) =>
-          item.textContent?.includes("Zed"),
-        ),
-      ).toBe(false);
-
-      const vscodiumItem = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll('[data-slot="menu-item"]')).find((item) =>
-            item.textContent?.includes("VSCodium"),
-          ) ?? null,
-        "Unable to find VSCodium menu item.",
-      );
-      (vscodiumItem as HTMLElement).click();
-
-      await vi.waitFor(
-        () => {
-          const openRequest = wsRequests.find(
-            (request) => request._tag === WS_METHODS.shellOpenInEditor,
-          );
-          expect(openRequest).toMatchObject({
-            _tag: WS_METHODS.shellOpenInEditor,
-            cwd: "/repo/project",
-            editor: "vscodium",
-          });
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("falls back to the first installed editor when the stored favorite is unavailable", async () => {
-    localStorage.setItem("cafecode:last-editor", JSON.stringify("vscodium"));
-    setDraftThreadWithoutWorktree();
-
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createDraftOnlySnapshot(),
-      configureFixture: (nextFixture) => {
-        nextFixture.serverConfig = {
-          ...nextFixture.serverConfig,
-          availableEditors: ["vscode-insiders"],
-        };
-      },
-    });
-
-    try {
-      await waitForServerConfigToApply();
-      const openButton = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("button")).find(
-            (button) => button.textContent?.trim() === "Open",
-          ) as HTMLButtonElement | null,
-        "Unable to find Open button.",
-      );
-      await vi.waitFor(() => {
-        expect(openButton.disabled).toBe(false);
-      });
-      openButton.click();
-
-      await vi.waitFor(
-        () => {
-          const openRequest = wsRequests.find(
-            (request) => request._tag === WS_METHODS.shellOpenInEditor,
-          );
-          expect(openRequest).toMatchObject({
-            _tag: WS_METHODS.shellOpenInEditor,
-            cwd: "/repo/project",
-            editor: "vscode-insiders",
-          });
-        },
-        { timeout: 8_000, interval: 16 },
-      );
     } finally {
       await mounted.cleanup();
     }
@@ -3785,20 +3518,21 @@ describe("ChatView timeline estimator parity (full app)", () => {
   });
 
   it("shows the confirm archive action after clicking the archive button", async () => {
-    localStorage.setItem(
-      "cafecode:client-settings:v1",
-      JSON.stringify({
-        ...DEFAULT_CLIENT_SETTINGS,
-        confirmThreadArchive: true,
-      }),
-    );
-
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
       snapshot: createSnapshotForTargetUser({
         targetMessageId: "msg-user-archive-confirm-test" as MessageId,
         targetText: "archive confirm target",
       }),
+      configureFixture: (nextFixture) => {
+        nextFixture.serverConfig = {
+          ...nextFixture.serverConfig,
+          clientSettings: {
+            ...nextFixture.serverConfig.clientSettings,
+            confirmThreadArchive: true,
+          },
+        };
+      },
     });
 
     try {
@@ -3815,7 +3549,6 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await expect.element(confirmButton).toBeInTheDocument();
       await expect.element(confirmButton).toBeVisible();
     } finally {
-      localStorage.removeItem("cafecode:client-settings:v1");
       await mounted.cleanup();
     }
   });

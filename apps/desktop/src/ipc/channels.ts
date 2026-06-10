@@ -35,4 +35,5 @@ export const FETCH_SSH_SESSION_STATE_CHANNEL = "desktop:fetch-ssh-session-state"
 export const ISSUE_SSH_WEBSOCKET_TOKEN_CHANNEL = "desktop:issue-ssh-websocket-token";
 export const GET_SERVER_EXPOSURE_STATE_CHANNEL = "desktop:get-server-exposure-state";
 export const SET_SERVER_EXPOSURE_MODE_CHANNEL = "desktop:set-server-exposure-mode";
+export const SET_SERVER_HTTPS_ENABLED_CHANNEL = "desktop:set-server-https-enabled";
 export const GET_ADVERTISED_ENDPOINTS_CHANNEL = "desktop:get-advertised-endpoints";

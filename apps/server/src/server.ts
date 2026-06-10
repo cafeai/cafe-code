@@ -6,6 +6,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { ServerConfig } from "./config.ts";
 import {
   attachmentsRouteLayer,
+  httpsCertificateRouteLayer,
   otlpTracesProxyRouteLayer,
   projectFaviconRouteLayer,
   serverEnvironmentRouteLayer,
@@ -50,6 +51,7 @@ import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
 import { ServerSettingsLive } from "./serverSettings.ts";
+import { ServerClientSettingsLive } from "./serverClientSettings.ts";
 import { ProjectFaviconResolverLive } from "./project/Layers/ProjectFaviconResolver.ts";
 import { RepositoryIdentityResolverLive } from "./project/Layers/RepositoryIdentityResolver.ts";
 import { WorkspaceEntriesLive } from "./workspace/Layers/WorkspaceEntries.ts";
@@ -97,6 +99,7 @@ import {
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
 } from "./serverRuntimeState.ts";
+import { startHttpsSiblingServer } from "./httpsSiblingServer.ts";
 import {
   orchestrationDispatchRouteLayer,
   orchestrationSnapshotRouteLayer,
@@ -285,6 +288,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // logger instances.
   Layer.provideMerge(ProviderEventLoggersLive),
   Layer.provideMerge(ServerSettingsLive),
+  Layer.provideMerge(ServerClientSettingsLive),
   Layer.provideMerge(WorkspaceLayerLive),
   Layer.provideMerge(ProjectFaviconResolverLive),
   Layer.provideMerge(RepositoryIdentityResolverLive),
@@ -331,6 +335,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   orchestrationDispatchRouteLayer,
   orchestrationSnapshotRouteLayer,
   otlpTracesProxyRouteLayer,
+  httpsCertificateRouteLayer,
   projectFaviconRouteLayer,
   serverEnvironmentRouteLayer,
   staticAndDevRouteLayer,
@@ -362,6 +367,7 @@ export const makeServerLayer = Layer.unwrap(
           const state = yield* makePersistedServerRuntimeState({
             config,
             port: address.port,
+            httpsPort: config.httpsEnabled ? config.httpsPort : undefined,
           });
           yield* persistServerRuntimeState({
             path: config.serverRuntimeStatePath,
@@ -371,11 +377,13 @@ export const makeServerLayer = Layer.unwrap(
         () => clearPersistedServerRuntimeState(config.serverRuntimeStatePath),
       ),
     );
+    const httpsSiblingLayer = Layer.effectDiscard(startHttpsSiblingServer);
     const serverApplicationLayer = Layer.mergeAll(
       HttpRouter.serve(makeRoutesLayer, {
         disableLogger: !config.logWebSocketEvents,
       }),
       httpListeningLayer,
+      httpsSiblingLayer,
       runtimeStateLayer,
     );
 

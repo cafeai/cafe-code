@@ -133,6 +133,8 @@ const makeServerConfig = (baseDir: string) =>
       otlpServiceName: "cafe-code-provider-daemon",
       mode: "desktop",
       port: 0,
+      httpsEnabled: false,
+      httpsPort: undefined,
       host: "127.0.0.1",
       cwd: process.cwd(),
       baseDir,

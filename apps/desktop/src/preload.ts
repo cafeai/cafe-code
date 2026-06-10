@@ -58,6 +58,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   getServerExposureState: () => ipcRenderer.invoke(IpcChannels.GET_SERVER_EXPOSURE_STATE_CHANNEL),
   setServerExposureMode: (mode) =>
     ipcRenderer.invoke(IpcChannels.SET_SERVER_EXPOSURE_MODE_CHANNEL, mode),
+  setServerHttpsEnabled: (enabled) =>
+    ipcRenderer.invoke(IpcChannels.SET_SERVER_HTTPS_ENABLED_CHANNEL, enabled),
   getAdvertisedEndpoints: () => ipcRenderer.invoke(IpcChannels.GET_ADVERTISED_ENDPOINTS_CHANNEL),
   pickFolder: (options) => ipcRenderer.invoke(IpcChannels.PICK_FOLDER_CHANNEL, options),
   confirm: (message) => ipcRenderer.invoke(IpcChannels.CONFIRM_CHANNEL, message),

@@ -96,7 +96,7 @@ import { useTheme } from "../hooks/useTheme";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { buildTemporaryWorktreeBranchName } from "@cafecode/shared/git";
-import { useMediaQuery } from "../hooks/useMediaQuery";
+import { useIsMobile, useMediaQuery } from "../hooks/useMediaQuery";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
 import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
@@ -1868,6 +1868,7 @@ export default function ChatView(props: ChatViewProps) {
     Record<string, boolean>
   >({});
   const shouldUsePlanSidebarSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
+  const isMobile = useIsMobile();
   const draftPlanSidebarOpen =
     routeKind === "draft" ? draftPlanSidebarOpenByThreadKey[routeThreadKey] : undefined;
   const planSidebarOpenPreference =
@@ -4443,15 +4444,20 @@ export default function ChatView(props: ChatViewProps) {
     setIsRevertingCheckpoint(false);
   }, [activeThread?.id]);
 
+  // Auto-focusing the composer when a thread opens pops the on-screen keyboard
+  // on mobile, which is disruptive when the user is just browsing threads. Skip
+  // auto-focus on mobile; the user can tap the composer to focus it (the mobile
+  // composer stays collapsed until then). Desktop behavior is unchanged.
   useEffect(() => {
     if (!activeThread?.id) return;
+    if (isMobile) return;
     const frame = window.requestAnimationFrame(() => {
       focusComposer();
     });
     return () => {
       window.cancelAnimationFrame(frame);
     };
-  }, [activeThread?.id, focusComposer]);
+  }, [activeThread?.id, focusComposer, isMobile]);
 
   useEffect(() => {
     if (!activeThread?.id) return;

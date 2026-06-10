@@ -36,6 +36,7 @@ import {
   rewriteMarkdownFileUriHref,
 } from "../markdown-links";
 import { readLocalApi } from "../localApi";
+import { getLocalShellCapabilities } from "../localCapabilities";
 import { cn } from "../lib/utils";
 import { normalizeChatMarkdownMath } from "../lib/chatMarkdownMath";
 import { normalizeCodexCitationMarkers } from "../lib/codexCitations";
@@ -447,38 +448,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   theme,
   className,
 }: MarkdownFileLinkProps) {
-  const handleOpen = useCallback(() => {
-    const api = readLocalApi();
-    if (!api) {
-      toastManager.add({
-        type: "error",
-        title: "Open in editor is unavailable",
-      });
-      return;
-    }
-
-    void (async () => {
-      if (openPolicy === "confirm") {
-        const confirmed = await api.dialogs.confirm(
-          `This file is outside the current workspace:\n\n${targetPath}\n\nOpen it anyway?`,
-        );
-        if (!confirmed) {
-          return;
-        }
-      }
-
-      await openInPreferredEditor(api, targetPath);
-    })().catch((error) => {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Unable to open file",
-          description: error instanceof Error ? error.message : "An error occurred.",
-        }),
-      );
-    });
-  }, [openPolicy, targetPath]);
-
+  const canOpenLocalEditor = getLocalShellCapabilities().canOpenLocalEditor;
   const handleCopy = useCallback((value: string, title: string) => {
     if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
       toastManager.add(
@@ -511,6 +481,43 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     );
   }, []);
 
+  const handleOpen = useCallback(() => {
+    if (!canOpenLocalEditor) {
+      handleCopy(targetPath, "Full path");
+      return;
+    }
+
+    const api = readLocalApi();
+    if (!api) {
+      toastManager.add({
+        type: "error",
+        title: "Open in editor is unavailable",
+      });
+      return;
+    }
+
+    void (async () => {
+      if (openPolicy === "confirm") {
+        const confirmed = await api.dialogs.confirm(
+          `This file is outside the current workspace:\n\n${targetPath}\n\nOpen it anyway?`,
+        );
+        if (!confirmed) {
+          return;
+        }
+      }
+
+      await openInPreferredEditor(api, targetPath);
+    })().catch((error) => {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Unable to open file",
+          description: error instanceof Error ? error.message : "An error occurred.",
+        }),
+      );
+    });
+  }, [canOpenLocalEditor, handleCopy, openPolicy, targetPath]);
+
   const handleContextMenu = useCallback(
     async (event: ReactMouseEvent<HTMLAnchorElement>) => {
       event.preventDefault();
@@ -520,11 +527,16 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       if (!api) return;
 
       const clicked = await api.contextMenu.show(
-        [
-          { id: "open", label: "Open in editor" },
-          { id: "copy-relative", label: "Copy relative path" },
-          { id: "copy-full", label: "Copy full path" },
-        ] as const,
+        canOpenLocalEditor
+          ? ([
+              { id: "open", label: "Open in editor" },
+              { id: "copy-relative", label: "Copy relative path" },
+              { id: "copy-full", label: "Copy full path" },
+            ] as const)
+          : ([
+              { id: "copy-relative", label: "Copy relative path" },
+              { id: "copy-full", label: "Copy full path" },
+            ] as const),
         { x: event.clientX, y: event.clientY },
       );
 
@@ -540,7 +552,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         handleCopy(targetPath, "Full path");
       }
     },
-    [displayPath, handleCopy, handleOpen, targetPath],
+    [canOpenLocalEditor, displayPath, handleCopy, handleOpen, targetPath],
   );
 
   return (

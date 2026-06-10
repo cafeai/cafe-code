@@ -1,6 +1,8 @@
 import { useAtomSubscribe, useAtomValue } from "@effect/atom-react";
 import {
+  DEFAULT_CLIENT_SETTINGS,
   DEFAULT_SERVER_SETTINGS,
+  type ClientSettings,
   type EditorId,
   type ServerConfig,
   type ServerConfigStreamEvent,
@@ -40,6 +42,7 @@ function toServerConfigUpdatedPayload(config: ServerConfig): ServerConfigUpdated
     issues: config.issues,
     providers: config.providers,
     settings: config.settings,
+    clientSettings: config.clientSettings,
   };
 }
 
@@ -64,6 +67,8 @@ const selectProviders = (config: ServerConfig | null) =>
   config?.providers ?? EMPTY_SERVER_PROVIDERS;
 const selectSettings = (config: ServerConfig | null): ServerSettings =>
   config?.settings ?? DEFAULT_SERVER_SETTINGS;
+const selectClientSettings = (config: ServerConfig | null): ClientSettings =>
+  config?.clientSettings ?? DEFAULT_CLIENT_SETTINGS;
 
 export const welcomeAtom = makeStateAtom<ServerLifecycleWelcomePayload | null>(
   "server-welcome",
@@ -125,6 +130,10 @@ export function applyServerConfigEvent(event: ServerConfigStreamEvent): void {
       applySettingsUpdated(event.payload.settings);
       return;
     }
+    case "clientSettingsUpdated": {
+      applyClientSettingsUpdated(event.payload.clientSettings);
+      return;
+    }
   }
 }
 
@@ -156,6 +165,20 @@ export function applySettingsUpdated(settings: ServerSettings): void {
   } satisfies ServerConfig;
   resolveServerConfig(nextConfig);
   emitServerConfigUpdated(toServerConfigUpdatedPayload(nextConfig), "settingsUpdated");
+}
+
+export function applyClientSettingsUpdated(clientSettings: ClientSettings): void {
+  const latestServerConfig = getServerConfig();
+  if (!latestServerConfig) {
+    return;
+  }
+
+  const nextConfig = {
+    ...latestServerConfig,
+    clientSettings,
+  } satisfies ServerConfig;
+  resolveServerConfig(nextConfig);
+  emitServerConfigUpdated(toServerConfigUpdatedPayload(nextConfig), "clientSettingsUpdated");
 }
 
 export function emitWelcome(payload: ServerLifecycleWelcomePayload): void {
@@ -278,6 +301,10 @@ export function useServerConfig(): ServerConfig | null {
 
 export function useServerSettings(): ServerSettings {
   return useAtomValue(serverConfigAtom, selectSettings);
+}
+
+export function useServerClientSettings(): ClientSettings {
+  return useAtomValue(serverConfigAtom, selectClientSettings);
 }
 
 export function useServerProviders(): ReadonlyArray<ServerProvider> {

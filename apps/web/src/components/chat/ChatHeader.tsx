@@ -11,8 +11,6 @@ import { Badge } from "../ui/badge";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { Toggle } from "../ui/toggle";
 import { SidebarTrigger } from "../ui/sidebar";
-import { OpenInPicker } from "./OpenInPicker";
-import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { useDesktopSourceUpdateState } from "../../lib/desktopSourceUpdateReactQuery";
 
 interface ChatHeaderProps {
@@ -34,11 +32,8 @@ export function shouldShowOpenInPicker(input: {
   readonly activeThreadEnvironmentId: EnvironmentId;
   readonly primaryEnvironmentId: EnvironmentId | null;
 }): boolean {
-  return (
-    Boolean(input.activeProjectName) &&
-    input.primaryEnvironmentId !== null &&
-    input.activeThreadEnvironmentId === input.primaryEnvironmentId
-  );
+  void input;
+  return false;
 }
 
 function shouldShowSourceRebuildBadge(state: DesktopSourceUpdateState | null): boolean {
@@ -52,25 +47,14 @@ function shouldShowSourceRebuildBadge(state: DesktopSourceUpdateState | null): b
 }
 
 export const ChatHeader = memo(function ChatHeader({
-  activeThreadEnvironmentId,
   activeThreadTitle,
   activeProjectName,
   isGitRepo,
-  openInCwd,
-  keybindings,
-  availableEditors,
-  terminal,
   diffToggleShortcutLabel,
   diffOpen,
   onToggleDiff,
 }: ChatHeaderProps) {
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
   const sourceUpdateState = useDesktopSourceUpdateState().data ?? null;
-  const showOpenInPicker = shouldShowOpenInPicker({
-    activeProjectName,
-    activeThreadEnvironmentId,
-    primaryEnvironmentId,
-  });
   const shouldShowSourceUpdateBadge =
     sourceUpdateState?.status === "behind" && sourceUpdateState.trackedBranch !== null;
   const shouldShowSourceRebuildBadgeValue = shouldShowSourceRebuildBadge(sourceUpdateState);
@@ -88,7 +72,9 @@ export const ChatHeader = memo(function ChatHeader({
       <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden sm:gap-3">
         <SidebarTrigger className="size-7 shrink-0 md:hidden" />
         <h2
-          className="min-w-0 shrink truncate text-sm font-medium text-foreground"
+          // Desktop keeps a single truncated line; on mobile (max-md) allow up to
+          // two lines so the thread title is not cut off as aggressively.
+          className="min-w-0 shrink truncate text-sm font-medium text-foreground max-md:line-clamp-2 max-md:whitespace-normal"
           title={activeThreadTitle}
         >
           {activeThreadTitle}
@@ -116,14 +102,6 @@ export const ChatHeader = memo(function ChatHeader({
               ? `Rebuild to apply (${sourceUpdateState?.trackedBranch})`
               : `Newer ${sourceUpdateState?.trackedBranch}`}
           </Badge>
-        )}
-        {showOpenInPicker && (
-          <OpenInPicker
-            keybindings={keybindings}
-            availableEditors={availableEditors}
-            terminal={terminal}
-            openInCwd={openInCwd}
-          />
         )}
         <Tooltip>
           <TooltipTrigger

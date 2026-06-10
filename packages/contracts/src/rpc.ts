@@ -78,7 +78,14 @@ import {
   ServerUpsertKeybindingInput,
   ServerUpsertKeybindingResult,
 } from "./server.ts";
-import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
+import {
+  ClientSettingsError,
+  ClientSettingsPatch,
+  ClientSettingsSchema,
+  ServerSettings,
+  ServerSettingsError,
+  ServerSettingsPatch,
+} from "./settings.ts";
 import {
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
@@ -129,6 +136,8 @@ export const WS_METHODS = {
   serverRemoveKeybinding: "server.removeKeybinding",
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
+  serverGetClientSettings: "server.getClientSettings",
+  serverUpdateClientSettings: "server.updateClientSettings",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverGetTraceDiagnostics: "server.getTraceDiagnostics",
   serverGetProcessDiagnostics: "server.getProcessDiagnostics",
@@ -162,7 +171,7 @@ export const WsServerRemoveKeybindingRpc = Rpc.make(WS_METHODS.serverRemoveKeybi
 export const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
   payload: Schema.Struct({}),
   success: ServerConfig,
-  error: Schema.Union([KeybindingsConfigError, ServerSettingsError]),
+  error: Schema.Union([ClientSettingsError, KeybindingsConfigError, ServerSettingsError]),
 });
 
 export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders, {
@@ -206,6 +215,18 @@ export const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSetting
   payload: Schema.Struct({ patch: ServerSettingsPatch }),
   success: ServerSettings,
   error: ServerSettingsError,
+});
+
+export const WsServerGetClientSettingsRpc = Rpc.make(WS_METHODS.serverGetClientSettings, {
+  payload: Schema.Struct({}),
+  success: ClientSettingsSchema,
+  error: ClientSettingsError,
+});
+
+export const WsServerUpdateClientSettingsRpc = Rpc.make(WS_METHODS.serverUpdateClientSettings, {
+  payload: Schema.Struct({ patch: ClientSettingsPatch }),
+  success: ClientSettingsSchema,
+  error: ClientSettingsError,
 });
 
 export const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
@@ -429,7 +450,7 @@ export const WsOrchestrationSubscribeThreadRpc = Rpc.make(
 export const WsSubscribeServerConfigRpc = Rpc.make(WS_METHODS.subscribeServerConfig, {
   payload: Schema.Struct({}),
   success: ServerConfigStreamEvent,
-  error: Schema.Union([KeybindingsConfigError, ServerSettingsError]),
+  error: Schema.Union([ClientSettingsError, KeybindingsConfigError, ServerSettingsError]),
   stream: true,
 });
 
@@ -455,6 +476,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerRemoveKeybindingRpc,
   WsServerGetSettingsRpc,
   WsServerUpdateSettingsRpc,
+  WsServerGetClientSettingsRpc,
+  WsServerUpdateClientSettingsRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerGetTraceDiagnosticsRpc,
   WsServerGetProcessDiagnosticsRpc,

@@ -1,6 +1,7 @@
 import {
   ArchiveIcon,
   ArchiveX,
+  CopyIcon,
   FileTextIcon,
   LoaderIcon,
   PaletteIcon,
@@ -63,6 +64,7 @@ import {
   sortProviderInstanceEntries,
 } from "../../providerInstances";
 import { ensureLocalApi, readLocalApi } from "../../localApi";
+import { getLocalShellCapabilities } from "../../localCapabilities";
 import { useShallow } from "zustand/react/shallow";
 import { selectProjectsAcrossEnvironments, useStore } from "../../store";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
@@ -1050,28 +1052,44 @@ export function ChatSettingsPanel() {
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   const [isOpeningSystemPromptFile, setIsOpeningSystemPromptFile] = useState(false);
+  const canOpenLocalEditor = getLocalShellCapabilities().canOpenLocalEditor;
 
   const openSystemPromptFile = useCallback(() => {
     setIsOpeningSystemPromptFile(true);
     void Promise.resolve()
       .then(() => {
         const api = ensureLocalApi();
-        return api.server
-          .openSystemPromptFile()
-          .then(({ path }) => openInPreferredEditor(api, path));
+        return api.server.openSystemPromptFile().then(async ({ path }) => {
+          if (!canOpenLocalEditor) {
+            await navigator.clipboard.writeText(path);
+            toastManager.add({
+              title: "Path copied",
+              description: path,
+              type: "success",
+            });
+            return;
+          }
+          return openInPreferredEditor(api, path);
+        });
       })
       .catch((error: unknown) => {
         toastManager.add({
-          title: "Unable to open system prompt file",
+          title: canOpenLocalEditor
+            ? "Unable to open system prompt file"
+            : "Unable to copy system prompt path",
           description:
-            error instanceof Error ? error.message : "The system prompt file was not opened.",
+            error instanceof Error
+              ? error.message
+              : canOpenLocalEditor
+                ? "The system prompt file was not opened."
+                : "The system prompt path was not copied.",
           type: "error",
         });
       })
       .finally(() => {
         setIsOpeningSystemPromptFile(false);
       });
-  }, []);
+  }, [canOpenLocalEditor]);
 
   return (
     <SettingsPageContainer>
@@ -1222,10 +1240,12 @@ export function ChatSettingsPanel() {
             >
               {isOpeningSystemPromptFile ? (
                 <LoaderIcon className="size-4 animate-spin" aria-hidden />
-              ) : (
+              ) : canOpenLocalEditor ? (
                 <FileTextIcon className="size-4" aria-hidden />
+              ) : (
+                <CopyIcon className="size-4" aria-hidden />
               )}
-              Open file
+              {canOpenLocalEditor ? "Open file" : "Copy path"}
             </Button>
           }
         />

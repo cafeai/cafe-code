@@ -137,6 +137,7 @@ describe("DesktopServerExposure", () => {
         assert.equal(change.requiresRelaunch, true);
         assert.deepEqual(change.state, {
           mode: "network-accessible",
+          httpsEnabled: true,
           endpointUrl: "http://192.168.1.20:4173",
           advertisedHost: "192.168.1.20",
         });
@@ -164,6 +165,67 @@ describe("DesktopServerExposure", () => {
           endpoints.map((endpoint) => endpoint.httpBaseUrl),
           ["http://127.0.0.1:4173/", "http://192.168.1.20:4173/"],
         );
+      }),
+    ),
+  );
+
+  it.effect("advertises HTTPS and WSS endpoints when a sibling HTTPS port is configured", () =>
+    withHarness(
+      lanNetworkInterfaces,
+      Effect.gen(function* () {
+        const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
+        yield* serverExposure.configureFromSettings({ port: 4173, httpsPort: 4175 });
+        yield* serverExposure.setMode("network-accessible");
+
+        const backendConfig = yield* serverExposure.backendConfig;
+        assert.equal(backendConfig.httpsPort, 4175);
+        assert.equal(backendConfig.httpsBaseUrl?.href, "https://127.0.0.1:4175/");
+
+        const endpoints = yield* serverExposure.getAdvertisedEndpoints;
+        assert.deepEqual(
+          endpoints.map((endpoint) => [
+            endpoint.httpBaseUrl,
+            endpoint.wsBaseUrl,
+            endpoint.isDefault,
+          ]),
+          [
+            ["https://127.0.0.1:4175/", "wss://127.0.0.1:4175/", false],
+            ["https://192.168.1.20:4175/", "wss://192.168.1.20:4175/", true],
+          ],
+        );
+      }),
+    ),
+  );
+
+  it.effect("disables HTTPS without changing the requested network exposure mode", () =>
+    withHarness(
+      lanNetworkInterfaces,
+      Effect.gen(function* () {
+        const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
+        const settings = yield* DesktopAppSettings.DesktopAppSettings;
+        yield* serverExposure.configureFromSettings({ port: 4173, httpsPort: 4175 });
+        yield* serverExposure.setMode("network-accessible");
+
+        const change = yield* serverExposure.setHttpsEnabled(false);
+        assert.equal(change.requiresRelaunch, true);
+        assert.deepEqual(change.state, {
+          mode: "network-accessible",
+          httpsEnabled: false,
+          endpointUrl: "http://192.168.1.20:4173",
+          advertisedHost: "192.168.1.20",
+        });
+
+        const backendConfig = yield* serverExposure.backendConfig;
+        assert.equal(backendConfig.httpsPort, undefined);
+        assert.equal(backendConfig.httpsBaseUrl, undefined);
+
+        const endpoints = yield* serverExposure.getAdvertisedEndpoints;
+        assert.deepEqual(
+          endpoints.map((endpoint) => endpoint.httpBaseUrl),
+          ["http://127.0.0.1:4173/", "http://192.168.1.20:4173/"],
+        );
+        assert.equal((yield* settings.get).serverHttpsEnabled, false);
+        assert.equal((yield* settings.get).serverExposureMode, "network-accessible");
       }),
     ),
   );
@@ -203,7 +265,7 @@ describe("DesktopServerExposure", () => {
         const endpoints = yield* serverExposure.getAdvertisedEndpoints;
         assert.deepEqual(endpoints, [
           {
-            id: "desktop-loopback:3773",
+            id: "desktop-loopback:http://127.0.0.1:3773",
             label: "This machine",
             provider: {
               id: "desktop-core",
@@ -216,6 +278,7 @@ describe("DesktopServerExposure", () => {
             reachability: "loopback",
             source: "desktop-core",
             status: "available",
+            isDefault: false,
             description: "Loopback endpoint for this desktop app.",
           },
           {

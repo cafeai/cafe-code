@@ -27,11 +27,14 @@ const serverExposureLayer = Layer.succeed(DesktopServerExposure.DesktopServerExp
   getState: Effect.die("unexpected getState"),
   backendConfig: Effect.succeed({
     port: 4888,
+    httpsPort: 4890,
     bindHost: "0.0.0.0",
     httpBaseUrl: new URL("http://127.0.0.1:4888"),
+    httpsBaseUrl: new URL("https://127.0.0.1:4890"),
   }),
   configureFromSettings: () => Effect.die("unexpected configureFromSettings"),
   setMode: () => Effect.die("unexpected setMode"),
+  setHttpsEnabled: () => Effect.die("unexpected setHttpsEnabled"),
   getAdvertisedEndpoints: Effect.succeed([]),
 } satisfies DesktopServerExposure.DesktopServerExposureShape);
 
@@ -145,6 +148,8 @@ describe("DesktopBackendConfiguration", () => {
         assert.equal(first.env.ELECTRON_RUN_AS_NODE, "1");
         assert.equal(first.env.CAFE_CODE_SHELL_ENV_HYDRATED, "1");
         assert.isUndefined(first.env.CAFE_CODE_PORT);
+        assert.isUndefined(first.env.CAFE_CODE_HTTPS_ENABLED);
+        assert.isUndefined(first.env.CAFE_CODE_HTTPS_PORT);
         assert.isUndefined(first.env.CAFE_CODE_MODE);
         assert.isUndefined(first.env.CAFE_CODE_DESKTOP_LAN_HOST);
         assert.isUndefined(first.env.CAFE_CODE_DESKTOP_DEV);
@@ -154,6 +159,7 @@ describe("DesktopBackendConfiguration", () => {
         assert.equal(first.bootstrap.mode, "desktop");
         assert.equal(first.bootstrap.noBrowser, true);
         assert.equal(first.bootstrap.port, 4888);
+        assert.equal(first.bootstrap.httpsPort, 4890);
         assert.equal(first.bootstrap.host, "0.0.0.0");
         assert.equal(first.bootstrap.cafeCodeHome, environment.baseDir);
         assert.match(first.bootstrap.desktopBootstrapToken, /^[0-9a-f]{48}$/i);

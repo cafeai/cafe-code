@@ -68,6 +68,10 @@
       "types": "./src/serverSettings.ts",
       "import": "./src/serverSettings.ts"
     },
+    "./clientSettings": {
+      "types": "./src/clientSettings.ts",
+      "import": "./src/clientSettings.ts"
+    },
     "./String": {
       "types": "./src/String.ts",
       "import": "./src/String.ts"

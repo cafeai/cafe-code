@@ -11,9 +11,9 @@ export default defineConfig({
     alwaysBundle: (id) => internalPackagePrefixes.some((prefix) => id.startsWith(prefix)),
     onlyBundle: false,
   },
-  dts: {
-    eager: true,
-  },
+  // The server package publishes CLI/runtime entrypoints, not a typed library API.
+  // rolldown-plugin-dts currently fails or takes a very high-memory eager path here.
+  dts: false,
   checks: {
     pluginTimings: false,
   },

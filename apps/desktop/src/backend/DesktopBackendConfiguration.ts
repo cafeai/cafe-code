@@ -35,6 +35,8 @@ const emptyBackendObservabilitySettings: BackendObservabilitySettings = {
 
 const DESKTOP_BACKEND_ENV_NAMES = [
   "CAFE_CODE_PORT",
+  "CAFE_CODE_HTTPS_ENABLED",
+  "CAFE_CODE_HTTPS_PORT",
   "CAFE_CODE_MODE",
   "CAFE_CODE_NO_BROWSER",
   "CAFE_CODE_HOST",
@@ -130,6 +132,9 @@ const resolveBackendStartConfig = Effect.fn("desktop.backendConfiguration.resolv
         mode: "desktop",
         noBrowser: true,
         port: backendExposure.port,
+        ...(backendExposure.httpsPort !== undefined
+          ? { httpsPort: backendExposure.httpsPort }
+          : {}),
         cafeCodeHome: environment.baseDir,
         host: backendExposure.bindHost,
         desktopBootstrapToken: input.bootstrapToken,

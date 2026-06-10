@@ -2339,66 +2339,105 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           ) : null}
 
           {showCollapsedMobilePromptRow ? (
-            <div className="flex items-center justify-between gap-2 px-3 py-2">
-              <button
-                type="button"
-                className={cn(
-                  "min-w-0 flex-1 truncate bg-transparent p-0 text-left text-[14px] focus:outline-none",
-                  (activePendingProgress ? activePendingProgress.customAnswer : prompt.trim())
-                    ? "text-foreground"
-                    : "text-muted-foreground/35",
-                )}
-                onPointerDown={(event) => event.preventDefault()}
-                onClick={expandMobileComposer}
-                aria-label="Expand composer"
-              >
-                {activePendingProgress
-                  ? activePendingProgress.customAnswer ||
-                    "Type your own answer, or leave this blank to use the selected option"
-                  : prompt.trim() || "Ask anything..."}
-              </button>
-              <button
-                type="button"
-                className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/90 text-primary-foreground disabled:opacity-30"
-                disabled={collapsedComposerPrimaryActionDisabled}
-                aria-label={collapsedComposerPrimaryActionLabel}
-                onPointerDown={(event) => event.preventDefault()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  submitComposer();
-                }}
-              >
-                {collapsedComposerPrimaryActionPending ? (
-                  <svg
-                    width="16"
-                    height="16"
-                    viewBox="0 0 16 16"
-                    fill="none"
-                    className="animate-spin"
-                    aria-hidden="true"
-                  >
-                    <circle
-                      cx="8"
-                      cy="8"
-                      r="6"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeDasharray="22 14"
-                    />
-                  </svg>
-                ) : (
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                    <path
-                      d="M8 3L8 13M8 3L4 7M8 3L12 7"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                )}
-              </button>
+            <div className="flex flex-col gap-1.5 px-3 py-2">
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  className={cn(
+                    "min-w-0 flex-1 truncate bg-transparent p-0 text-left text-[14px] focus:outline-none",
+                    (activePendingProgress ? activePendingProgress.customAnswer : prompt.trim())
+                      ? "text-foreground"
+                      : "text-muted-foreground/35",
+                  )}
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={expandMobileComposer}
+                  aria-label="Expand composer"
+                >
+                  {activePendingProgress
+                    ? activePendingProgress.customAnswer ||
+                      "Type your own answer, or leave this blank to use the selected option"
+                    : prompt.trim() || "Ask anything..."}
+                </button>
+                <button
+                  type="button"
+                  className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/90 text-primary-foreground disabled:opacity-30"
+                  disabled={collapsedComposerPrimaryActionDisabled}
+                  aria-label={collapsedComposerPrimaryActionLabel}
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    submitComposer();
+                  }}
+                >
+                  {collapsedComposerPrimaryActionPending ? (
+                    <svg
+                      width="16"
+                      height="16"
+                      viewBox="0 0 16 16"
+                      fill="none"
+                      className="animate-spin"
+                      aria-hidden="true"
+                    >
+                      <circle
+                        cx="8"
+                        cy="8"
+                        r="6"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeDasharray="22 14"
+                      />
+                    </svg>
+                  ) : (
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                      <path
+                        d="M8 3L8 13M8 3L4 7M8 3L12 7"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  )}
+                </button>
+              </div>
+              {/*
+               * F3: surface the model/provider picker even while the composer is
+               * collapsed on mobile, so model selection is discoverable without
+               * first focusing the input. Wrapped in
+               * data-chat-composer-collapsed-controls so the onFocusCapture guard
+               * above does not treat opening the picker as a composer focus/expand.
+               * This row only exists in the mobile-collapsed branch, so desktop is
+               * unaffected.
+               */}
+              {providerInstanceEntries.length > 0 ? (
+                <div
+                  data-chat-composer-collapsed-controls="true"
+                  className="-mx-1 flex min-w-0 items-center gap-1 overflow-x-auto px-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                >
+                  <ProviderModelPicker
+                    compact
+                    activeInstanceId={selectedInstanceId}
+                    model={selectedModelForPickerWithCustomFallback}
+                    lockedProvider={lockedProvider}
+                    lockedContinuationGroupKey={lockedContinuationGroupKey}
+                    instanceEntries={providerInstanceEntries}
+                    keybindings={keybindings}
+                    modelOptionsByInstance={modelOptionsByInstance}
+                    open={isComposerModelPickerOpen}
+                    {...(composerProviderState.modelPickerIconClassName
+                      ? {
+                          activeProviderIconClassName:
+                            composerProviderState.modelPickerIconClassName,
+                        }
+                      : {})}
+                    onOpenChange={(open) => {
+                      setIsComposerModelPickerOpen(open);
+                    }}
+                    onInstanceModelChange={onProviderModelSelect}
+                  />
+                </div>
+              ) : null}
             </div>
           ) : null}
 

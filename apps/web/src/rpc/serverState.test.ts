@@ -1,4 +1,5 @@
 import {
+  DEFAULT_CLIENT_SETTINGS,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   ProviderDriverKind,
@@ -93,6 +94,7 @@ const baseServerConfig: ServerConfig = {
     otlpMetricsEnabled: false,
   },
   settings: DEFAULT_SERVER_SETTINGS,
+  clientSettings: DEFAULT_CLIENT_SETTINGS,
 };
 
 const serverApi = {
@@ -168,6 +170,7 @@ describe("serverState", () => {
         issues: [],
         providers: defaultProviders,
         settings: DEFAULT_SERVER_SETTINGS,
+        clientSettings: DEFAULT_CLIENT_SETTINGS,
       },
       "snapshot",
     );
@@ -179,6 +182,7 @@ describe("serverState", () => {
         issues: [],
         providers: defaultProviders,
         settings: DEFAULT_SERVER_SETTINGS,
+        clientSettings: DEFAULT_CLIENT_SETTINGS,
       },
       "snapshot",
     );
@@ -318,6 +322,16 @@ describe("serverState", () => {
         },
       },
     });
+    emitServerConfigEvent({
+      version: 1,
+      type: "clientSettingsUpdated",
+      payload: {
+        clientSettings: {
+          ...DEFAULT_CLIENT_SETTINGS,
+          brandWordmarkPrefix: "Synced",
+        },
+      },
+    });
 
     await waitFor(() => {
       expect(getServerConfig()).toEqual({
@@ -329,6 +343,10 @@ describe("serverState", () => {
           ...DEFAULT_SERVER_SETTINGS,
           enableAssistantStreaming: true,
         },
+        clientSettings: {
+          ...DEFAULT_CLIENT_SETTINGS,
+          brandWordmarkPrefix: "Synced",
+        },
       });
     });
 
@@ -339,6 +357,7 @@ describe("serverState", () => {
         issues: [{ kind: "keybindings.malformed-config", message: "bad json" }],
         providers: defaultProviders,
         settings: DEFAULT_SERVER_SETTINGS,
+        clientSettings: DEFAULT_CLIENT_SETTINGS,
       },
       "keybindingsUpdated",
     );
@@ -348,8 +367,22 @@ describe("serverState", () => {
         issues: [{ kind: "keybindings.malformed-config", message: "bad json" }],
         providers: nextProviders,
         settings: DEFAULT_SERVER_SETTINGS,
+        clientSettings: DEFAULT_CLIENT_SETTINGS,
       },
       "providerStatuses",
+    );
+    expect(configListener).toHaveBeenNthCalledWith(
+      4,
+      {
+        issues: [{ kind: "keybindings.malformed-config", message: "bad json" }],
+        providers: nextProviders,
+        settings: {
+          ...DEFAULT_SERVER_SETTINGS,
+          enableAssistantStreaming: true,
+        },
+        clientSettings: DEFAULT_CLIENT_SETTINGS,
+      },
+      "settingsUpdated",
     );
     expect(configListener).toHaveBeenLastCalledWith(
       {
@@ -359,8 +392,12 @@ describe("serverState", () => {
           ...DEFAULT_SERVER_SETTINGS,
           enableAssistantStreaming: true,
         },
+        clientSettings: {
+          ...DEFAULT_CLIENT_SETTINGS,
+          brandWordmarkPrefix: "Synced",
+        },
       },
-      "settingsUpdated",
+      "clientSettingsUpdated",
     );
 
     unsubscribeProviders();

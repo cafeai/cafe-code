@@ -29,6 +29,7 @@ import {
 import {
   base64UrlDecodeUtf8,
   base64UrlEncode,
+  resolveHttpsSessionCookieName,
   resolveSessionCookieName,
   signPayload,
   timingSafeEqualBase64Url,
@@ -104,6 +105,10 @@ export const makeSessionCredentialService = Effect.gen(function* () {
     mode: serverConfig.mode,
     port: serverConfig.port,
   });
+  const httpsCookieName =
+    serverConfig.httpsEnabled && serverConfig.httpsPort !== undefined
+      ? resolveHttpsSessionCookieName({ port: serverConfig.httpsPort })
+      : undefined;
 
   const toSessionCredentialError = (message: string) => (cause: unknown) =>
     new SessionCredentialError({
@@ -511,6 +516,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
 
   return {
     cookieName,
+    httpsCookieName,
     issue,
     verify,
     issueWebSocketToken,

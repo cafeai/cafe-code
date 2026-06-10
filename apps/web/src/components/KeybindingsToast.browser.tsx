@@ -1,6 +1,7 @@
 import "../index.css";
 
 import {
+  DEFAULT_CLIENT_SETTINGS,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   ORCHESTRATION_WS_METHODS,
@@ -125,6 +126,7 @@ function createBaseServerConfig(): ServerConfig {
         },
       },
     },
+    clientSettings: DEFAULT_CLIENT_SETTINGS,
   };
 }
 

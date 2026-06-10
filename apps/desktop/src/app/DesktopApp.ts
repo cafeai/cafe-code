@@ -27,6 +27,7 @@ import * as DesktopSourceUpdates from "../updates/DesktopSourceUpdates.ts";
 import * as DesktopDebugServer from "../debug/DesktopDebugServer.ts";
 
 const DEFAULT_DESKTOP_BACKEND_PORT = 3773;
+const DEFAULT_DESKTOP_BACKEND_HTTPS_PORT = 3775;
 const MAX_TCP_PORT = 65_535;
 const DESKTOP_BACKEND_PORT_PROBE_HOSTS = ["127.0.0.1", "0.0.0.0", "::"] as const;
 const DESKTOP_SHUTDOWN_BACKEND_STOP_TIMEOUT = Duration.seconds(5);
@@ -115,6 +116,38 @@ const resolveDesktopBackendPort = Effect.fn("resolveDesktopBackendPort")(functio
   });
 });
 
+const resolveDesktopBackendHttpsPort = Effect.fn("resolveDesktopBackendHttpsPort")(function* (
+  backendPort: number,
+) {
+  const net = yield* NetService.NetService;
+  const startPort =
+    backendPort + 2 <= MAX_TCP_PORT ? backendPort + 2 : DEFAULT_DESKTOP_BACKEND_HTTPS_PORT;
+
+  for (let port = startPort; port <= MAX_TCP_PORT; port += 1) {
+    if (port === backendPort) {
+      continue;
+    }
+
+    let availableOnEveryHost = true;
+    for (const host of DESKTOP_BACKEND_PORT_PROBE_HOSTS) {
+      if (!(yield* net.canListenOnHost(port, host))) {
+        availableOnEveryHost = false;
+        break;
+      }
+    }
+
+    if (availableOnEveryHost) {
+      return port;
+    }
+  }
+
+  return yield* new DesktopBackendPortUnavailableError({
+    startPort,
+    maxPort: MAX_TCP_PORT,
+    hosts: DESKTOP_BACKEND_PORT_PROBE_HOSTS,
+  });
+});
+
 const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupError")(function* (
   stage: string,
   error: unknown,
@@ -168,6 +201,10 @@ const bootstrap = Effect.gen(function* () {
 
   const backendPortSelection = yield* resolveDesktopBackendPort(environment.configuredBackendPort);
   const backendPort = backendPortSelection.port;
+  const settings = yield* desktopSettings.get;
+  const backendHttpsPort = settings.serverHttpsEnabled
+    ? yield* resolveDesktopBackendHttpsPort(backendPort)
+    : undefined;
   yield* logBootstrapInfo(
     backendPortSelection.selectedByScan
       ? "selected backend port via sequential scan"
@@ -177,14 +214,23 @@ const bootstrap = Effect.gen(function* () {
       ...(backendPortSelection.selectedByScan ? { startPort: DEFAULT_DESKTOP_BACKEND_PORT } : {}),
     },
   );
+  if (backendHttpsPort !== undefined) {
+    yield* logBootstrapInfo("selected backend HTTPS port via sequential scan", {
+      port: backendHttpsPort,
+    });
+  } else {
+    yield* logBootstrapInfo("backend HTTPS endpoint disabled by desktop settings");
+  }
 
-  const settings = yield* desktopSettings.get;
   if (settings.serverExposureMode !== environment.defaultDesktopSettings.serverExposureMode) {
     yield* logBootstrapInfo("bootstrap restoring persisted server exposure mode", {
       mode: settings.serverExposureMode,
     });
   }
-  const serverExposureState = yield* serverExposure.configureFromSettings({ port: backendPort });
+  const serverExposureState = yield* serverExposure.configureFromSettings({
+    port: backendPort,
+    ...(backendHttpsPort === undefined ? {} : { httpsPort: backendHttpsPort }),
+  });
   const backendConfig = yield* serverExposure.backendConfig;
   yield* logBootstrapInfo("bootstrap resolved backend endpoint", {
     baseUrl: backendConfig.httpBaseUrl.href,

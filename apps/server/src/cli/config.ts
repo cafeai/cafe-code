@@ -35,6 +35,11 @@ export const portFlag = Flag.integer("port").pipe(
   Flag.withDescription("Port for the HTTP/WebSocket server."),
   Flag.optional,
 );
+export const httpsPortFlag = Flag.integer("https-port").pipe(
+  Flag.withSchema(PortSchema),
+  Flag.withDescription("Port for the HTTPS/WSS server."),
+  Flag.optional,
+);
 export const hostFlag = Flag.string("host").pipe(
   Flag.withDescription("Host/interface to bind (for example 127.0.0.1, 0.0.0.0, or a Tailnet IP)."),
   Flag.optional,
@@ -50,6 +55,10 @@ export const devUrlFlag = Flag.string("dev-url").pipe(
 );
 export const noBrowserFlag = Flag.boolean("no-browser").pipe(
   Flag.withDescription("Disable automatic browser opening."),
+  Flag.optional,
+);
+export const noHttpsFlag = Flag.boolean("no-https").pipe(
+  Flag.withDescription("Disable the self-signed HTTPS/WSS sibling listener."),
   Flag.optional,
 );
 export const bootstrapFdFlag = Flag.integer("bootstrap-fd").pipe(
@@ -101,6 +110,8 @@ const EnvServerConfig = Config.all({
   ),
   mode: cafeCodeOptionalValueConfig("CAFE_CODE_MODE", (name) => Config.schema(RuntimeMode, name)),
   port: cafeCodeOptionalValueConfig("CAFE_CODE_PORT", Config.port),
+  httpsEnabled: cafeCodeOptionalValueConfig("CAFE_CODE_HTTPS_ENABLED", Config.boolean),
+  httpsPort: cafeCodeOptionalValueConfig("CAFE_CODE_HTTPS_PORT", Config.port),
   host: cafeCodeOptionalValueConfig("CAFE_CODE_HOST", Config.string),
   cafeCodeHome: cafeCodeOptionalValueConfig("CAFE_CODE_HOME", Config.string),
   devUrl: Config.url("CAFE_CODE_DEV_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
@@ -116,11 +127,13 @@ const EnvServerConfig = Config.all({
 export interface CliServerFlags {
   readonly mode: Option.Option<RuntimeMode>;
   readonly port: Option.Option<number>;
+  readonly httpsPort: Option.Option<number>;
   readonly host: Option.Option<string>;
   readonly baseDir: Option.Option<string>;
   readonly cwd: Option.Option<string>;
   readonly devUrl: Option.Option<URL>;
   readonly noBrowser: Option.Option<boolean>;
+  readonly noHttps: Option.Option<boolean>;
   readonly bootstrapFd: Option.Option<number>;
   readonly autoBootstrapProjectFromCwd: Option.Option<boolean>;
   readonly logWebSocketEvents: Option.Option<boolean>;
@@ -143,6 +156,7 @@ export const projectLocationFlags = {
 export const sharedServerCommandFlags = {
   mode: modeFlag,
   port: portFlag,
+  httpsPort: httpsPortFlag,
   host: hostFlag,
   baseDir: baseDirFlag,
   cwd: Argument.string("cwd").pipe(
@@ -153,6 +167,7 @@ export const sharedServerCommandFlags = {
   ),
   devUrl: devUrlFlag,
   noBrowser: noBrowserFlag,
+  noHttps: noHttpsFlag,
   bootstrapFd: bootstrapFdFlag,
   autoBootstrapProjectFromCwd: autoBootstrapProjectFromCwdFlag,
   logWebSocketEvents: logWebSocketEventsFlag,
@@ -163,6 +178,12 @@ export const authLocationFlags = sharedServerLocationFlags;
 const resolveOptionPrecedence = <Value>(
   ...values: ReadonlyArray<Option.Option<Value>>
 ): Option.Option<Value> => Option.firstSomeOf(values);
+
+const defaultHttpsPortStart = (mode: RuntimeMode, httpPort: number): number => {
+  const offset = mode === "desktop" ? 2 : 1;
+  const preferred = httpPort + offset;
+  return preferred <= 65_535 ? preferred : DEFAULT_PORT + offset;
+};
 
 const loadPersistedObservabilitySettings = Effect.fn(function* (settingsPath: string) {
   const fs = yield* FileSystem.FileSystem;
@@ -191,11 +212,13 @@ export const resolveServerConfig = (
     const normalizedFlags = {
       mode: flags.mode ?? Option.none(),
       port: flags.port ?? Option.none(),
+      httpsPort: flags.httpsPort ?? Option.none(),
       host: flags.host ?? Option.none(),
       baseDir: flags.baseDir ?? Option.none(),
       cwd: flags.cwd ?? Option.none(),
       devUrl: flags.devUrl ?? Option.none(),
       noBrowser: flags.noBrowser ?? Option.none(),
+      noHttps: flags.noHttps ?? Option.none(),
       bootstrapFd: flags.bootstrapFd ?? Option.none(),
       autoBootstrapProjectFromCwd: flags.autoBootstrapProjectFromCwd ?? Option.none(),
       logWebSocketEvents: flags.logWebSocketEvents ?? Option.none(),
@@ -266,6 +289,26 @@ export const resolveServerConfig = (
       ),
       () => mode === "desktop",
     );
+    const httpsEnabled = Option.getOrElse(
+      resolveOptionPrecedence(
+        Option.map(normalizedFlags.noHttps, (value) => !value),
+        Option.fromUndefinedOr(env.httpsEnabled),
+      ),
+      () => true,
+    );
+    const httpsPort = httpsEnabled
+      ? yield* Option.match(
+          resolveOptionPrecedence(
+            normalizedFlags.httpsPort,
+            Option.fromUndefinedOr(env.httpsPort),
+            Option.fromUndefinedOr(bootstrap?.httpsPort),
+          ),
+          {
+            onSome: (value) => Effect.succeed(value),
+            onNone: () => findAvailablePort(defaultHttpsPortStart(mode, port)),
+          },
+        )
+      : undefined;
     const desktopBootstrapToken = bootstrap?.desktopBootstrapToken;
     const autoBootstrapProjectFromCwd = Option.getOrElse(
       resolveOptionPrecedence(
@@ -313,6 +356,8 @@ export const resolveServerConfig = (
       otlpServiceName: env.otlpServiceName,
       mode,
       port,
+      httpsEnabled,
+      httpsPort,
       cwd,
       baseDir,
       ...derivedPaths,
@@ -340,11 +385,13 @@ export const resolveCliAuthConfig = (
     {
       mode: Option.none(),
       port: Option.none(),
+      httpsPort: Option.none(),
       host: Option.none(),
       baseDir: flags.baseDir,
       cwd: Option.none(),
       devUrl: flags.devUrl ?? Option.none(),
       noBrowser: Option.none(),
+      noHttps: Option.some(true),
       bootstrapFd: Option.none(),
       autoBootstrapProjectFromCwd: Option.none(),
       logWebSocketEvents: Option.none(),

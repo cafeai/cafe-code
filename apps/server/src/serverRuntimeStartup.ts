@@ -29,6 +29,7 @@ import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnap
 import { OrchestrationReactor } from "./orchestration/Services/OrchestrationReactor.ts";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
 import { ServerSettingsService } from "./serverSettings.ts";
+import { ServerClientSettingsService } from "./serverClientSettings.ts";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
 import { AnalyticsService } from "./telemetry/Services/AnalyticsService.ts";
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
@@ -247,10 +248,21 @@ const resolveStartupBrowserTarget = Effect.gen(function* () {
     serverConfig.host && !isWildcardHost(serverConfig.host)
       ? `http://${formatHostForUrl(serverConfig.host)}:${serverConfig.port}`
       : localUrl;
-  const baseTarget = serverConfig.devUrl?.toString() ?? bindUrl;
-  return yield* Effect.succeed(serverConfig.mode === "desktop" ? baseTarget : undefined).pipe(
+  const secureLocalUrl =
+    serverConfig.httpsEnabled && serverConfig.httpsPort !== undefined
+      ? `https://localhost:${serverConfig.httpsPort}`
+      : localUrl;
+  const secureBindUrl =
+    serverConfig.httpsEnabled && serverConfig.httpsPort !== undefined
+      ? serverConfig.host && !isWildcardHost(serverConfig.host)
+        ? `https://${formatHostForUrl(serverConfig.host)}:${serverConfig.httpsPort}`
+        : secureLocalUrl
+      : bindUrl;
+  const browserBaseTarget =
+    serverConfig.mode === "desktop" ? bindUrl : (serverConfig.devUrl?.toString() ?? secureBindUrl);
+  return yield* Effect.succeed(serverConfig.mode === "desktop" ? bindUrl : undefined).pipe(
     Effect.flatMap((target) =>
-      target ? Effect.succeed(target) : serverAuth.issueStartupPairingUrl(baseTarget),
+      target ? Effect.succeed(target) : serverAuth.issueStartupPairingUrl(browserBaseTarget),
     ),
   );
 });
@@ -285,6 +297,7 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
   const providerSessionReaper = yield* ProviderSessionReaper;
   const lifecycleEvents = yield* ServerLifecycleEvents;
   const serverSettings = yield* ServerSettingsService;
+  const clientSettings = yield* ServerClientSettingsService;
   const serverEnvironment = yield* ServerEnvironment;
 
   const commandGate = yield* makeCommandGate;
@@ -315,6 +328,21 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
       serverSettings.start.pipe(
         Effect.catch((error) =>
           Effect.logWarning("failed to start server settings runtime", {
+            path: error.settingsPath,
+            detail: error.detail,
+            cause: error.cause,
+          }),
+        ),
+        Effect.forkScoped,
+      ),
+    );
+
+    yield* Effect.logDebug("startup phase: starting client settings runtime");
+    yield* runStartupPhase(
+      "client-settings.start",
+      clientSettings.start.pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("failed to start client settings runtime", {
             path: error.settingsPath,
             detail: error.detail,
             cause: error.cause,

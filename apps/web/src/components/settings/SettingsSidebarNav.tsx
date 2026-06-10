@@ -7,8 +7,8 @@ import {
   FileTextIcon,
   GitBranchIcon,
   KeyboardIcon,
-  Link2Icon,
   MessageSquareIcon,
+  MonitorSmartphoneIcon,
   PaletteIcon,
   Settings2Icon,
   Trash2Icon,
@@ -73,7 +73,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
     items: [
       { label: "Providers", to: "/settings/providers", icon: BotIcon },
       { label: "Source Control", to: "/settings/source-control", icon: GitBranchIcon },
-      { label: "WebUI", to: "/settings/connections", icon: Link2Icon },
+      { label: "WebUI", to: "/settings/connections", icon: MonitorSmartphoneIcon },
     ],
   },
   {

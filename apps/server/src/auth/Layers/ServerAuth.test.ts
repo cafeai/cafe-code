@@ -32,10 +32,11 @@ const makeServerAuthLayer = (overrides?: Partial<ServerConfigShape>) =>
 
 const makeCookieRequest = (
   sessionToken: string,
+  cookieName = "t3_session",
 ): Parameters<ServerAuthShape["authenticateHttpRequest"]>[0] =>
   ({
     cookies: {
-      t3_session: sessionToken,
+      [cookieName]: sessionToken,
     },
     headers: {},
   }) as unknown as Parameters<ServerAuthShape["authenticateHttpRequest"]>[0];
@@ -94,6 +95,31 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
       expect(verified.role).toBe("client");
       expect(verified.subject).toBe("one-time-token");
     }).pipe(Effect.provide(makeServerAuthLayer())),
+  );
+
+  it.effect("accepts browser sessions carried by the HTTPS sibling cookie name", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* ServerAuth;
+
+      const pairingCredential = yield* serverAuth.issuePairingCredential();
+      const exchanged = yield* serverAuth.exchangeBootstrapCredential(
+        pairingCredential.credential,
+        requestMetadata,
+      );
+      const verified = yield* serverAuth.authenticateHttpRequest(
+        makeCookieRequest(exchanged.sessionToken, "t3_session_https_9443"),
+      );
+
+      expect(verified.role).toBe("client");
+      expect(verified.subject).toBe("one-time-token");
+    }).pipe(
+      Effect.provide(
+        makeServerAuthLayer({
+          httpsEnabled: true,
+          httpsPort: 9443,
+        }),
+      ),
+    ),
   );
 
   it.effect("issues startup pairing URLs that bootstrap owner sessions", () =>

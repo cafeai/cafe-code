@@ -80,11 +80,14 @@ const desktopServerExposureLayer = Layer.succeed(DesktopServerExposure.DesktopSe
   getState: Effect.die("unexpected getState"),
   backendConfig: Effect.succeed({
     port: 3773,
+    httpsPort: undefined,
     bindHost: "127.0.0.1",
     httpBaseUrl: new URL("http://127.0.0.1:3773"),
+    httpsBaseUrl: undefined,
   }),
   configureFromSettings: () => Effect.die("unexpected configureFromSettings"),
   setMode: () => Effect.die("unexpected setMode"),
+  setHttpsEnabled: () => Effect.die("unexpected setHttpsEnabled"),
   getAdvertisedEndpoints: Effect.die("unexpected getAdvertisedEndpoints"),
 } satisfies DesktopServerExposure.DesktopServerExposureShape);
 

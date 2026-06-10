@@ -7,6 +7,7 @@ export const DesktopBackendBootstrap = Schema.Struct({
   mode: Schema.Literal("desktop"),
   noBrowser: Schema.Boolean,
   port: PortSchema,
+  httpsPort: Schema.optional(PortSchema),
   cafeCodeHome: Schema.String,
   host: Schema.String,
   desktopBootstrapToken: Schema.String,

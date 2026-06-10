@@ -19,6 +19,12 @@ it("keeps explicit bind hosts in the connection string", () => {
   expect(resolveHeadlessConnectionString("::1", 3773)).toBe("http://[::1]:3773");
 });
 
+it("can build HTTPS connection strings for the sibling TLS listener", () => {
+  expect(resolveHeadlessConnectionString("127.0.0.1", 3775, undefined, "https")).toBe(
+    "https://127.0.0.1:3775",
+  );
+});
+
 it("resolves wildcard hosts to a concrete external interface when one is available", () => {
   const connectionString = resolveHeadlessConnectionString("0.0.0.0", 3773, {
     en0: [

@@ -163,6 +163,8 @@ function createClient() {
       upsertKeybinding: vi.fn(async () => undefined),
       getSettings: vi.fn(async () => undefined),
       updateSettings: vi.fn(async () => undefined),
+      getClientSettings: vi.fn(async () => undefined),
+      updateClientSettings: vi.fn(async () => undefined),
     },
     orchestration: {
       subscribeShell: vi.fn(() => () => undefined),

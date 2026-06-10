@@ -1,6 +1,7 @@
 import {
   ChevronDownIcon,
   CircleXIcon,
+  CopyIcon,
   EllipsisIcon,
   FileJsonIcon,
   InfoIcon,
@@ -33,6 +34,7 @@ import { openInPreferredEditor } from "../../editorPreferences";
 import { formatShortcutLabel } from "../../keybindings";
 import { cn } from "../../lib/utils";
 import { ensureLocalApi } from "../../localApi";
+import { getLocalShellCapabilities } from "../../localCapabilities";
 import { useServerKeybindings, useServerKeybindingsConfigPath } from "../../rpc/serverState";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -1061,6 +1063,7 @@ function NewKeybindingTableRow({
 export function KeybindingsSettingsPanel() {
   const keybindings = useServerKeybindings();
   const keybindingsConfigPath = useServerKeybindingsConfigPath();
+  const canOpenLocalEditor = getLocalShellCapabilities().canOpenLocalEditor;
   const [query, setQuery] = useState("");
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -1097,6 +1100,28 @@ export function KeybindingsSettingsPanel() {
 
   const openKeybindingsFile = useCallback(() => {
     if (!keybindingsConfigPath) return;
+    if (!canOpenLocalEditor) {
+      void Promise.resolve()
+        .then(() => navigator.clipboard.writeText(keybindingsConfigPath))
+        .then(
+          () => {
+            toastManager.add({
+              title: "Path copied",
+              description: keybindingsConfigPath,
+              type: "success",
+            });
+          },
+          (error: unknown) => {
+            toastManager.add({
+              title: "Unable to copy keybindings path",
+              description:
+                error instanceof Error ? error.message : "The keybindings path was not copied.",
+              type: "error",
+            });
+          },
+        );
+      return;
+    }
     void openInPreferredEditor(ensureLocalApi(), keybindingsConfigPath).catch((error: unknown) => {
       toastManager.add({
         title: "Unable to open keybindings file",
@@ -1105,7 +1130,7 @@ export function KeybindingsSettingsPanel() {
         type: "error",
       });
     });
-  }, [keybindingsConfigPath]);
+  }, [canOpenLocalEditor, keybindingsConfigPath]);
 
   const saveKeybinding = useCallback((input: ServerUpsertKeybindingInput) => {
     setSavingCommand(input.command);
@@ -1213,13 +1238,21 @@ export function KeybindingsSettingsPanel() {
                     className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
                     disabled={!keybindingsConfigPath}
                     onClick={openKeybindingsFile}
-                    aria-label="Open keybindings.json"
+                    aria-label={
+                      canOpenLocalEditor ? "Open keybindings.json" : "Copy keybindings.json path"
+                    }
                   >
-                    <FileJsonIcon className="size-3" />
+                    {canOpenLocalEditor ? (
+                      <FileJsonIcon className="size-3" />
+                    ) : (
+                      <CopyIcon className="size-3" />
+                    )}
                   </Button>
                 }
               />
-              <TooltipPopup side="top">Open keybindings.json</TooltipPopup>
+              <TooltipPopup side="top">
+                {canOpenLocalEditor ? "Open keybindings.json" : "Copy keybindings.json path"}
+              </TooltipPopup>
             </Tooltip>
           </div>
         }

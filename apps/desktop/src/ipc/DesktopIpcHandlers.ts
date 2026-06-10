@@ -13,6 +13,7 @@ import {
   getAdvertisedEndpoints,
   getServerExposureState,
   setServerExposureMode,
+  setServerHttpsEnabled,
 } from "./methods/serverExposure.ts";
 import {
   bootstrapSshBearerSession,
@@ -72,6 +73,7 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
 
   yield* ipc.handle(getServerExposureState);
   yield* ipc.handle(setServerExposureMode);
+  yield* ipc.handle(setServerHttpsEnabled);
   yield* ipc.handle(getAdvertisedEndpoints);
 
   yield* ipc.handle(pickFolder);

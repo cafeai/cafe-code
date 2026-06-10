@@ -6,14 +6,14 @@ import { shouldShowOpenInPicker } from "./ChatHeader";
 describe("shouldShowOpenInPicker", () => {
   const primaryEnvironmentId = EnvironmentId.make("environment-primary");
 
-  it("shows the picker for projects in the primary environment", () => {
+  it("hides the picker even for projects in the primary environment", () => {
     expect(
       shouldShowOpenInPicker({
         activeProjectName: "codething-mvp",
         activeThreadEnvironmentId: primaryEnvironmentId,
         primaryEnvironmentId,
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("hides the picker when no primary environment is available", () => {

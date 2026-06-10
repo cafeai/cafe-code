@@ -292,6 +292,22 @@ const assertPublishBuildAssets = Effect.fn("assertPublishBuildAssets")(function*
   }
 });
 
+const assertServerRuntimeBuildAssets = Effect.fn("assertServerRuntimeBuildAssets")(function* (
+  serverDir: string,
+) {
+  const path = yield* Path.Path;
+  const fs = yield* FileSystem.FileSystem;
+
+  for (const relPath of ["dist/bin.mjs", "dist/launcher.mjs"]) {
+    const abs = path.join(serverDir, relPath);
+    if (!(yield* fs.exists(abs))) {
+      return yield* new CliError({
+        message: `Missing server runtime build asset: ${abs}. The server bundle did not finish correctly.`,
+      });
+    }
+  }
+});
+
 const assertLocalServerBundleImportsPresent = Effect.fn("assertLocalServerBundleImportsPresent")(
   function* (serverBundlePath: string) {
     const path = yield* Path.Path;
@@ -490,6 +506,7 @@ const buildCmd = Command.make(
           shell: process.platform === "win32",
         }),
       );
+      yield* assertServerRuntimeBuildAssets(serverDir);
 
       const webDist = path.join(repoRoot, "apps/web/dist");
       const clientTarget = path.join(serverDir, "dist/client");
@@ -501,6 +518,8 @@ const buildCmd = Command.make(
       } else {
         yield* Effect.logWarning("[cli] Renderer dist not found — skipping client bundle.");
       }
+
+      yield* assertPublishBuildAssets(serverDir);
     }),
 ).pipe(Command.withDescription("Build the server package (tsdown + bundle renderer client)."));
 

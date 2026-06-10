@@ -16,7 +16,10 @@ import * as Schema from "effect/Schema";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
 import { AuthError, ServerAuth } from "./Services/ServerAuth.ts";
-import { SessionCredentialService } from "./Services/SessionCredentialService.ts";
+import {
+  SessionCredentialService,
+  type SessionCredentialServiceShape,
+} from "./Services/SessionCredentialService.ts";
 import { deriveAuthClientMetadata } from "./utils.ts";
 import { browserApiCorsHeaders } from "../httpCors.ts";
 
@@ -67,6 +70,29 @@ function hasRequestBody(headers: typeof PairingCredentialRequestHeaders.Type) {
   return typeof headers["transfer-encoding"] === "string";
 }
 
+const isHttpsProxyRequest = (request: HttpServerRequest.HttpServerRequest): boolean =>
+  request.headers["x-cafe-code-https-proxy"] === "1" &&
+  request.headers["x-forwarded-proto"]?.split(",", 1)[0]?.trim().toLowerCase() === "https";
+
+const browserSessionCookieOptions = (
+  request: HttpServerRequest.HttpServerRequest,
+  expiresAt: AuthBootstrapResult["expiresAt"],
+) => ({
+  expires: DateTime.toDate(expiresAt),
+  httpOnly: true,
+  path: "/",
+  sameSite: "lax" as const,
+  ...(isHttpsProxyRequest(request) ? { secure: true } : {}),
+});
+
+const browserSessionCookieName = (
+  request: HttpServerRequest.HttpServerRequest,
+  sessions: Pick<SessionCredentialServiceShape, "cookieName" | "httpsCookieName">,
+): string =>
+  isHttpsProxyRequest(request) && sessions.httpsCookieName
+    ? sessions.httpsCookieName
+    : sessions.cookieName;
+
 export const authBootstrapRouteLayer = HttpRouter.add(
   "POST",
   "/api/auth/bootstrap",
@@ -93,12 +119,11 @@ export const authBootstrapRouteLayer = HttpRouter.add(
       status: 200,
       headers: browserApiCorsHeaders,
     }).pipe(
-      HttpServerResponse.setCookie(sessions.cookieName, result.sessionToken, {
-        expires: DateTime.toDate(result.response.expiresAt),
-        httpOnly: true,
-        path: "/",
-        sameSite: "lax",
-      }),
+      HttpServerResponse.setCookie(
+        browserSessionCookieName(request, sessions),
+        result.sessionToken,
+        browserSessionCookieOptions(request, result.response.expiresAt),
+      ),
     );
   }).pipe(Effect.catchTag("AuthError", (error) => respondToAuthError(error))),
 );
@@ -131,6 +156,7 @@ export const authBearerBootstrapRouteLayer = HttpRouter.add(
 );
 
 const setBrowserSessionCookie = (
+  request: HttpServerRequest.HttpServerRequest,
   result: {
     readonly response: AuthBootstrapResult;
     readonly sessionToken: string;
@@ -141,12 +167,11 @@ const setBrowserSessionCookie = (
     status: 200,
     headers: browserApiCorsHeaders,
   }).pipe(
-    HttpServerResponse.setCookie(cookieName, result.sessionToken, {
-      expires: DateTime.toDate(result.response.expiresAt),
-      httpOnly: true,
-      path: "/",
-      sameSite: "lax",
-    }),
+    HttpServerResponse.setCookie(
+      cookieName,
+      result.sessionToken,
+      browserSessionCookieOptions(request, result.response.expiresAt),
+    ),
   );
 
 export const authPasswordBootstrapRouteLayer = HttpRouter.add(
@@ -171,7 +196,11 @@ export const authPasswordBootstrapRouteLayer = HttpRouter.add(
       deriveAuthClientMetadata({ request }),
     );
 
-    return yield* setBrowserSessionCookie(result, sessions.cookieName);
+    return yield* setBrowserSessionCookie(
+      request,
+      result,
+      browserSessionCookieName(request, sessions),
+    );
   }).pipe(Effect.catchTag("AuthError", (error) => respondToAuthError(error))),
 );
 

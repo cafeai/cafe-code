@@ -1,6 +1,7 @@
 import {
   ChevronDownIcon,
   ChevronsLeftRightEllipsisIcon,
+  DownloadIcon,
   KeyRoundIcon,
   PlusIcon,
   QrCodeIcon,
@@ -18,6 +19,7 @@ import {
   type DesktopServerExposureState,
   type EnvironmentId,
 } from "@cafecode/contracts";
+import { CAFE_CODE_HTTPS_CERTIFICATE_PATH } from "@cafecode/shared/environmentEndpoint";
 import * as DateTime from "effect/DateTime";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
@@ -1630,6 +1632,11 @@ export function ConnectionsSettings() {
   const [pendingDesktopServerExposureMode, setPendingDesktopServerExposureMode] = useState<
     DesktopServerExposureState["mode"] | null
   >(null);
+  const [isUpdatingDesktopServerHttps, setIsUpdatingDesktopServerHttps] = useState(false);
+  const [isDesktopServerHttpsDialogOpen, setIsDesktopServerHttpsDialogOpen] = useState(false);
+  const [pendingDesktopServerHttpsEnabled, setPendingDesktopServerHttpsEnabled] = useState<
+    boolean | null
+  >(null);
   const primaryServerConfig = useServerConfig();
   const primaryVersionMismatch = resolveServerConfigVersionMismatch(primaryServerConfig);
   const [isAdvertisedEndpointListExpanded, setIsAdvertisedEndpointListExpanded] = useState(true);
@@ -1679,6 +1686,38 @@ export function ConnectionsSettings() {
     const checked = pendingDesktopServerExposureMode === "network-accessible";
     void handleDesktopServerExposureChange(checked);
   }, [handleDesktopServerExposureChange, pendingDesktopServerExposureMode]);
+
+  const handleDesktopServerHttpsChange = useCallback(
+    async (enabled: boolean) => {
+      if (!desktopBridge) return;
+      setIsUpdatingDesktopServerHttps(true);
+      setDesktopServerExposureError(null);
+      try {
+        const nextState = await desktopBridge.setServerHttpsEnabled(enabled);
+        setDesktopServerExposureState(nextState);
+        setIsDesktopServerHttpsDialogOpen(false);
+        setIsUpdatingDesktopServerHttps(false);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to update HTTPS.";
+        setIsDesktopServerHttpsDialogOpen(false);
+        setDesktopServerExposureError(message);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not update HTTPS",
+            description: message,
+          }),
+        );
+        setIsUpdatingDesktopServerHttps(false);
+      }
+    },
+    [desktopBridge],
+  );
+
+  const handleConfirmDesktopServerHttpsChange = useCallback(() => {
+    if (pendingDesktopServerHttpsEnabled === null) return;
+    void handleDesktopServerHttpsChange(pendingDesktopServerHttpsEnabled);
+  }, [handleDesktopServerHttpsChange, pendingDesktopServerHttpsEnabled]);
 
   const handleRevokeDesktopPairingLink = useCallback(async (id: string) => {
     setRevokingDesktopPairingLinkId(id);
@@ -2419,6 +2458,17 @@ export function ConnectionsSettings() {
       aria-label="Enable network access"
     />
   );
+  const renderHttpsToggle = () => (
+    <Switch
+      checked={desktopServerExposureState?.httpsEnabled ?? false}
+      disabled={!desktopServerExposureState || isUpdatingDesktopServerHttps}
+      onCheckedChange={(checked) => {
+        setPendingDesktopServerHttpsEnabled(checked);
+        setIsDesktopServerHttpsDialogOpen(true);
+      }}
+      aria-label="Enable HTTPS"
+    />
+  );
   const renderEndpointRows = (presentation: AccessSectionPresentation) =>
     isAdvertisedEndpointListExpanded
       ? visibleDesktopNetworkAdvertisedEndpoints.map((endpoint) => {
@@ -2488,6 +2538,38 @@ export function ConnectionsSettings() {
       control={renderNetworkAccessToggle()}
     />
   );
+  const renderHttpsRow = () => (
+    <SettingsRow
+      title="HTTPS"
+      description={
+        desktopServerExposureState ? (
+          desktopServerExposureState.httpsEnabled ? (
+            <span className="flex flex-col items-start gap-1.5">
+              <span>WebUI uses HTTPS.</span>
+              {/*
+               * Phones reject the self-signed certificate until it is installed and
+               * trusted. This downloads the public certificate (served by the backend,
+               * reachable over HTTP too) so it can be imported on another device.
+               */}
+              <a
+                href={CAFE_CODE_HTTPS_CERTIFICATE_PATH}
+                download="cafe-code.crt"
+                className="inline-flex items-center gap-1 font-medium text-primary hover:underline"
+              >
+                <DownloadIcon className="size-3.5" />
+                Download certificate
+              </a>
+            </span>
+          ) : (
+            "WebUI uses HTTP."
+          )
+        ) : (
+          "Loading…"
+        )
+      }
+      control={renderHttpsToggle()}
+    />
+  );
   const renderDisabledNetworkAccessRow = () => (
     <SettingsRow
       title="Network access"
@@ -2540,6 +2622,7 @@ export function ConnectionsSettings() {
               <>
                 {renderNetworkAccessRow()}
                 {renderEndpointRows("endpoint-rail")}
+                {renderHttpsRow()}
               </>
             ) : (
               renderDisabledNetworkAccessRow()
@@ -2613,6 +2696,53 @@ export function ConnectionsSettings() {
                       Restarting…
                     </>
                   ) : pendingDesktopServerExposureMode === "network-accessible" ? (
+                    "Restart and enable"
+                  ) : (
+                    "Restart and disable"
+                  )}
+                </Button>
+              </AlertDialogFooter>
+            </AlertDialogPopup>
+          </AlertDialog>
+          <AlertDialog
+            open={isDesktopServerHttpsDialogOpen}
+            onOpenChange={(open) => {
+              if (isUpdatingDesktopServerHttps) return;
+              setIsDesktopServerHttpsDialogOpen(open);
+            }}
+            onOpenChangeComplete={(open) => {
+              if (!open) setPendingDesktopServerHttpsEnabled(null);
+            }}
+          >
+            <AlertDialogPopup>
+              <AlertDialogHeader>
+                <AlertDialogTitle>
+                  {pendingDesktopServerHttpsEnabled ? "Enable HTTPS?" : "Disable HTTPS?"}
+                </AlertDialogTitle>
+                <AlertDialogDescription>
+                  Cafe Code will restart to update the backend listener.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogClose
+                  disabled={isUpdatingDesktopServerHttps}
+                  render={<Button variant="outline" disabled={isUpdatingDesktopServerHttps} />}
+                >
+                  Cancel
+                </AlertDialogClose>
+                <Button
+                  variant={pendingDesktopServerHttpsEnabled === false ? "destructive" : "default"}
+                  onClick={handleConfirmDesktopServerHttpsChange}
+                  disabled={
+                    pendingDesktopServerHttpsEnabled === null || isUpdatingDesktopServerHttps
+                  }
+                >
+                  {isUpdatingDesktopServerHttps ? (
+                    <>
+                      <Spinner className="size-3.5" />
+                      Restarting…
+                    </>
+                  ) : pendingDesktopServerHttpsEnabled ? (
                     "Restart and enable"
                   ) : (
                     "Restart and disable"

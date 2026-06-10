@@ -75,6 +75,8 @@ const resolveProviderDaemonServerConfig = (input: {
       otlpServiceName: "cafe-code-provider-daemon",
       mode: "desktop",
       port: input.bootstrap.port ?? 1,
+      httpsEnabled: false,
+      httpsPort: undefined,
       cwd: process.cwd(),
       baseDir,
       ...derivedPaths,

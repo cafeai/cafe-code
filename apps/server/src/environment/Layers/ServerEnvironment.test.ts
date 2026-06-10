@@ -36,6 +36,8 @@ const makeServerConfig = Effect.fn(function* (baseDir: string) {
     autoBootstrapProjectFromCwd: false,
     logWebSocketEvents: false,
     port: 0,
+    httpsEnabled: false,
+    httpsPort: undefined,
     host: undefined,
     desktopBootstrapToken: undefined,
     staticDir: undefined,

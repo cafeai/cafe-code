@@ -14,6 +14,8 @@ export const PersistedServerRuntimeState = Schema.Struct({
   host: Schema.optional(Schema.String),
   port: Schema.Int,
   origin: Schema.String,
+  httpsPort: Schema.optional(Schema.Int),
+  httpsOrigin: Schema.optional(Schema.String),
   startedAt: Schema.String,
 });
 export type PersistedServerRuntimeState = typeof PersistedServerRuntimeState.Type;
@@ -25,22 +27,30 @@ const decodePersistedServerRuntimeState = Schema.decodeUnknownEffect(
 const runtimeOriginForConfig = (
   config: Pick<ServerConfigShape, "host">,
   port: number,
+  protocol: "http" | "https",
 ): PersistedServerRuntimeState["origin"] => {
   const hostname =
     config.host && !isWildcardHost(config.host) ? formatHostForUrl(config.host) : "127.0.0.1";
-  return `http://${hostname}:${port}`;
+  return `${protocol}://${hostname}:${port}`;
 };
 
 export const makePersistedServerRuntimeState = (input: {
   readonly config: Pick<ServerConfigShape, "host">;
   readonly port: number;
+  readonly httpsPort?: number | undefined;
 }): Effect.Effect<PersistedServerRuntimeState> =>
   Effect.map(DateTime.now, (now) => ({
     version: 1,
     pid: process.pid,
     ...(input.config.host ? { host: input.config.host } : {}),
     port: input.port,
-    origin: runtimeOriginForConfig(input.config, input.port),
+    origin: runtimeOriginForConfig(input.config, input.port, "http"),
+    ...(input.httpsPort !== undefined
+      ? {
+          httpsPort: input.httpsPort,
+          httpsOrigin: runtimeOriginForConfig(input.config, input.httpsPort, "https"),
+        }
+      : {}),
     startedAt: DateTime.formatIso(now),
   }));
 
