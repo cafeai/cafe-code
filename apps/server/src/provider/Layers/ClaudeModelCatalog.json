@@ -2,6 +2,41 @@
   "schemaVersion": 1,
   "models": [
     {
+      "slug": "claude-fable-5",
+      "name": "Claude Fable 5",
+      "isCustom": false,
+      "minimumClaudeCodeVersion": "2.1.170",
+      "capabilities": {
+        "optionDescriptors": [
+          {
+            "id": "effort",
+            "label": "Reasoning",
+            "type": "select",
+            "options": [
+              { "id": "low", "label": "Low" },
+              { "id": "medium", "label": "Medium" },
+              { "id": "high", "label": "High" },
+              { "id": "xhigh", "label": "Extra High", "isDefault": true },
+              { "id": "max", "label": "Max" },
+              { "id": "ultrathink", "label": "Ultrathink" }
+            ],
+            "currentValue": "xhigh",
+            "promptInjectedValues": ["ultrathink"]
+          },
+          {
+            "id": "contextWindow",
+            "label": "Context Window",
+            "type": "select",
+            "options": [
+              { "id": "200k", "label": "200k", "isDefault": true },
+              { "id": "1m", "label": "1M" }
+            ],
+            "currentValue": "200k"
+          }
+        ]
+      }
+    },
+    {
       "slug": "claude-opus-4-8",
       "name": "Claude Opus 4.8",
       "isCustom": false,
