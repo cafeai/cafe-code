@@ -17,6 +17,7 @@ import {
   DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL,
   DEFAULT_SIDEBAR_STAR_SPEED,
   DEFAULT_SHOW_SIDEBAR_MASCOT,
+  DEFAULT_SHOW_SIDEBAR_SEARCH,
   DEFAULT_THEME_ACCENT_COLOR,
   MAX_BRAND_WORDMARK_PREFIX_LENGTH,
   MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH,
@@ -73,6 +74,7 @@ describe("client settings", () => {
     expect(DEFAULT_CLIENT_SETTINGS.continueBackgroundAnimations).toBe(
       DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
     );
+    expect(DEFAULT_CLIENT_SETTINGS.showSidebarSearch).toBe(DEFAULT_SHOW_SIDEBAR_SEARCH);
     expect(DEFAULT_CLIENT_SETTINGS.showSidebarMascot).toBe(DEFAULT_SHOW_SIDEBAR_MASCOT);
     expect(DEFAULT_CLIENT_SETTINGS.showSidebarAttribution).toBe(DEFAULT_SHOW_SIDEBAR_ATTRIBUTION);
     expect(DEFAULT_CLIENT_SETTINGS.brandWordmarkPrefix).toBe(DEFAULT_BRAND_WORDMARK_PREFIX);
@@ -83,6 +85,7 @@ describe("client settings", () => {
     expect(DEFAULT_CLIENT_SETTINGS.themeAccentColor).toBe(DEFAULT_THEME_ACCENT_COLOR);
     expect(DEFAULT_CLIENT_SETTINGS.appAccentColor).toBe(DEFAULT_APP_ACCENT_COLOR);
     expect(decodeClientSettings({}).continueBackgroundAnimations).toBe(false);
+    expect(decodeClientSettings({}).showSidebarSearch).toBe(true);
     expect(decodeClientSettings({}).showSidebarMascot).toBe(true);
     expect(decodeClientSettings({}).showSidebarAttribution).toBe(true);
     expect(decodeClientSettings({}).brandWordmarkPrefix).toBe("Cafe");
@@ -103,6 +106,7 @@ describe("client settings", () => {
     expect(
       decodeClientSettingsPatch({
         continueBackgroundAnimations: true,
+        showSidebarSearch: false,
         showSidebarMascot: false,
         showSidebarAttribution: false,
         brandWordmarkPrefix: "  Acme  ",
@@ -113,6 +117,7 @@ describe("client settings", () => {
       }),
     ).toEqual({
       continueBackgroundAnimations: true,
+      showSidebarSearch: false,
       showSidebarMascot: false,
       showSidebarAttribution: false,
       brandWordmarkPrefix: "Acme",

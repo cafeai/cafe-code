@@ -3054,6 +3054,7 @@ interface SidebarProjectsContentProps {
   suppressProjectClickForContextMenuRef: React.RefObject<boolean>;
   attachProjectListAutoAnimateRef: (node: HTMLElement | null) => void;
   projectsLength: number;
+  showSidebarSearch: boolean;
   showSidebarMascot: boolean;
   sidebarBrandImageDataUrl: string;
   showSidebarAttribution: boolean;
@@ -3100,6 +3101,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     suppressProjectClickForContextMenuRef,
     attachProjectListAutoAnimateRef,
     projectsLength,
+    showSidebarSearch,
     showSidebarMascot,
     sidebarBrandImageDataUrl,
     showSidebarAttribution,
@@ -3132,29 +3134,31 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
 
   return (
     <SidebarContent className="min-h-full gap-0">
-      <SidebarGroup className="px-2 pt-2 pb-1">
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <CommandDialogTrigger
-              render={
-                <SidebarMenuButton
-                  size="sm"
-                  className="gap-2 px-2 py-1.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground focus-visible:ring-0"
-                  data-testid="command-palette-trigger"
-                />
-              }
-            >
-              <SearchIcon className="size-3.5" />
-              <span className="flex-1 truncate text-left text-xs">Search</span>
-              {commandPaletteShortcutLabel ? (
-                <Kbd className="h-4 min-w-0 rounded-sm px-1.5 text-[10px]">
-                  {commandPaletteShortcutLabel}
-                </Kbd>
-              ) : null}
-            </CommandDialogTrigger>
-          </SidebarMenuItem>
-        </SidebarMenu>
-      </SidebarGroup>
+      {showSidebarSearch ? (
+        <SidebarGroup className="px-2 pt-2 pb-1">
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <CommandDialogTrigger
+                render={
+                  <SidebarMenuButton
+                    size="sm"
+                    className="gap-2 px-2 py-1.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground focus-visible:ring-0"
+                    data-testid="command-palette-trigger"
+                  />
+                }
+              >
+                <SearchIcon className="size-3.5" />
+                <span className="flex-1 truncate text-left text-xs">Search</span>
+                {commandPaletteShortcutLabel ? (
+                  <Kbd className="h-4 min-w-0 rounded-sm px-1.5 text-[10px]">
+                    {commandPaletteShortcutLabel}
+                  </Kbd>
+                ) : null}
+              </CommandDialogTrigger>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        </SidebarGroup>
+      ) : null}
       {showArm64IntelBuildWarning && arm64IntelBuildWarningDescription ? (
         <SidebarGroup className="px-2 pt-2 pb-0">
           <Alert variant="warning" className="rounded-2xl border-warning/40 bg-warning/8">
@@ -3351,6 +3355,7 @@ export default function Sidebar() {
   const sidebarProjectGroupingMode = useSettings((s) => s.sidebarProjectGroupingMode);
   const projectGroupingSettings = useSettings(selectProjectGroupingSettings);
   const sidebarThreadPreviewCount = useSettings((s) => s.sidebarThreadPreviewCount);
+  const showSidebarSearch = useSettings((s) => s.showSidebarSearch);
   const showSidebarMascot = useSettings((s) => s.showSidebarMascot);
   const sidebarBrandImageDataUrl = useSettings((s) => s.sidebarBrandImageDataUrl);
   const showSidebarAttribution = useSettings((s) => s.showSidebarAttribution);
@@ -4002,6 +4007,7 @@ export default function Sidebar() {
               suppressProjectClickForContextMenuRef={suppressProjectClickForContextMenuRef}
               attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
               projectsLength={projects.length}
+              showSidebarSearch={showSidebarSearch}
               showSidebarMascot={showSidebarMascot}
               sidebarBrandImageDataUrl={sidebarBrandImageDataUrl}
               showSidebarAttribution={showSidebarAttribution}

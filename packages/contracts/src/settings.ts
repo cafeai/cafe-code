@@ -27,6 +27,7 @@ export type PowerSaveBlockerMode = typeof PowerSaveBlockerMode.Type;
 export const DEFAULT_POWER_SAVE_BLOCKER_MODE: PowerSaveBlockerMode = "off";
 
 export const DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS = false;
+export const DEFAULT_SHOW_SIDEBAR_SEARCH = true;
 export const DEFAULT_SHOW_SIDEBAR_MASCOT = true;
 export const DEFAULT_SHOW_SIDEBAR_ATTRIBUTION = true;
 export const DEFAULT_BRAND_WORDMARK_PREFIX = "Cafe";
@@ -85,6 +86,9 @@ export const ClientSettingsSchema = Schema.Struct({
   diffWordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   continueBackgroundAnimations: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS)),
+  ),
+  showSidebarSearch: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SHOW_SIDEBAR_SEARCH)),
   ),
   showSidebarMascot: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SHOW_SIDEBAR_MASCOT)),
@@ -495,6 +499,7 @@ export const ClientSettingsPatch = Schema.Struct({
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   diffWordWrap: Schema.optionalKey(Schema.Boolean),
   continueBackgroundAnimations: Schema.optionalKey(Schema.Boolean),
+  showSidebarSearch: Schema.optionalKey(Schema.Boolean),
   showSidebarMascot: Schema.optionalKey(Schema.Boolean),
   showSidebarAttribution: Schema.optionalKey(Schema.Boolean),
   brandWordmarkPrefix: Schema.optionalKey(

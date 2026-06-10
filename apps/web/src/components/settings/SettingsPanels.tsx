@@ -32,6 +32,7 @@ import {
   DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL,
   DEFAULT_SIDEBAR_STAR_SPEED,
   DEFAULT_SHOW_SIDEBAR_MASCOT,
+  DEFAULT_SHOW_SIDEBAR_SEARCH,
   DEFAULT_THEME_ACCENT_COLOR,
   MAX_BRAND_WORDMARK_PREFIX_LENGTH,
   MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH,
@@ -448,6 +449,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.showSidebarMascot !== DEFAULT_UNIFIED_SETTINGS.showSidebarMascot
         ? ["Sidebar mascot"]
         : []),
+      ...(settings.showSidebarSearch !== DEFAULT_UNIFIED_SETTINGS.showSidebarSearch
+        ? ["Sidebar search"]
+        : []),
       ...(settings.showSidebarAttribution !== DEFAULT_UNIFIED_SETTINGS.showSidebarAttribution
         ? ["Sidebar attribution"]
         : []),
@@ -518,6 +522,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.defaultEditor,
       settings.appAccentColor,
       settings.brandWordmarkPrefix,
+      settings.showSidebarSearch,
       settings.showSidebarMascot,
       settings.showSidebarAttribution,
       settings.sidebarBrandImageDataUrl,
@@ -546,6 +551,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
       continueBackgroundAnimations: DEFAULT_UNIFIED_SETTINGS.continueBackgroundAnimations,
       appAccentColor: DEFAULT_UNIFIED_SETTINGS.appAccentColor,
+      showSidebarSearch: DEFAULT_UNIFIED_SETTINGS.showSidebarSearch,
       showSidebarMascot: DEFAULT_UNIFIED_SETTINGS.showSidebarMascot,
       showSidebarAttribution: DEFAULT_UNIFIED_SETTINGS.showSidebarAttribution,
       brandWordmarkPrefix: DEFAULT_UNIFIED_SETTINGS.brandWordmarkPrefix,
@@ -895,6 +901,26 @@ export function AppearanceSettingsPanel() {
                 onChange={(event) => void handleSidebarImageChange(event)}
               />
             </div>
+          }
+        />
+
+        <SettingsRow
+          title="Sidebar search"
+          description="Show the search button at the top of the sidebar."
+          resetAction={
+            settings.showSidebarSearch !== DEFAULT_UNIFIED_SETTINGS.showSidebarSearch ? (
+              <SettingResetButton
+                label="sidebar search"
+                onClick={() => updateSettings({ showSidebarSearch: DEFAULT_SHOW_SIDEBAR_SEARCH })}
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.showSidebarSearch}
+              onCheckedChange={(checked) => updateSettings({ showSidebarSearch: Boolean(checked) })}
+              aria-label="Show sidebar search"
+            />
           }
         />
 

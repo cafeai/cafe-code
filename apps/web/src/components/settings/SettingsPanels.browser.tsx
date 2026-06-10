@@ -1126,6 +1126,13 @@ describe("settings panels", () => {
       expect(updateClientSettings).toHaveBeenCalledWith({ themeAccentColor: "#16a34a" });
     });
 
+    await expect.element(page.getByText("Sidebar search")).toBeInTheDocument();
+    await page.getByLabelText("Show sidebar search").click();
+
+    await vi.waitFor(() => {
+      expect(updateClientSettings).toHaveBeenCalledWith({ showSidebarSearch: false });
+    });
+
     await expect.element(page.getByText("Sidebar mascot")).toBeInTheDocument();
     await page.getByLabelText("Show sidebar mascot").click();
 
