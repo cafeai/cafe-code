@@ -206,6 +206,21 @@ export const serverEnvironmentRouteLayer = HttpRouter.add(
   serverEnvironmentRouteHandler,
 );
 
+// Receives DOM/state debug events from the web UI (see
+// apps/web/src/lib/mobileDebugLog.ts) and echoes them to the server log so
+// mobile composer behavior can be diagnosed without devtools on the device.
+// The client only posts here when its debug flag is enabled (off by default).
+export const clientDebugLogRouteLayer = HttpRouter.add(
+  "POST",
+  "/api/client-debug-log",
+  Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const body = yield* request.json.pipe(Effect.catch(() => Effect.succeed("<unparseable body>")));
+    yield* Effect.logInfo("[client-debug]", body);
+    return HttpServerResponse.empty({ status: 204, headers: browserApiCorsHeaders });
+  }),
+);
+
 class DecodeOtlpTraceRecordsError extends Data.TaggedError("DecodeOtlpTraceRecordsError")<{
   readonly cause: unknown;
   readonly bodyJson: OtlpTracer.TraceData;

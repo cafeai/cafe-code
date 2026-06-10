@@ -1572,7 +1572,7 @@ function OpenCommandPaletteDialog() {
               variant="outline"
               size="xs"
               tabIndex={-1}
-              className="absolute inset-e-2.5 top-1/2 gap-1.5 pe-1 ps-2 -translate-y-1/2"
+              className="absolute inset-e-2.5 top-1/2 gap-1.5 pe-1 ps-2 -translate-y-1/2 [@media(hover:none)_and_(pointer:coarse)]:pe-2"
               aria-label={`${remoteProjectButtonLabel ?? "Continue"} (Enter)`}
               disabled={!canSubmitRemoteProjectFlow}
               onMouseDown={(event) => {
@@ -1584,7 +1584,8 @@ function OpenCommandPaletteDialog() {
               title={`${remoteProjectButtonLabel ?? "Continue"} (Enter)`}
             >
               <span>{isRemoteProjectPending ? "Working" : remoteProjectButtonLabel}</span>
-              <KbdGroup className="pointer-events-none -me-0.5 items-center gap-1">
+              {/* Keyboard hint is meaningless on touch-only devices; see CommandFooter below. */}
+              <KbdGroup className="pointer-events-none -me-0.5 items-center gap-1 [@media(hover:none)_and_(pointer:coarse)]:hidden">
                 <Kbd>Enter</Kbd>
               </KbdGroup>
             </Button>
@@ -1594,7 +1595,7 @@ function OpenCommandPaletteDialog() {
               size="xs"
               tabIndex={-1}
               className={cn(
-                "absolute inset-e-2.5 top-1/2 pe-1 ps-2 -translate-y-1/2",
+                "absolute inset-e-2.5 top-1/2 pe-1 ps-2 -translate-y-1/2 [@media(hover:none)_and_(pointer:coarse)]:pe-2",
                 hasHighlightedBrowseItem ? "gap-1" : "gap-1.5",
               )}
               aria-label={`${submitActionLabel} (${addShortcutLabel})`}
@@ -1619,7 +1620,8 @@ function OpenCommandPaletteDialog() {
               <span>
                 {isCloneDestinationStep && isRemoteProjectPending ? "Cloning" : submitActionLabel}
               </span>
-              <KbdGroup className="pointer-events-none -me-0.5 items-center gap-1">
+              {/* Keyboard hint is meaningless on touch-only devices; see CommandFooter below. */}
+              <KbdGroup className="pointer-events-none -me-0.5 items-center gap-1 [@media(hover:none)_and_(pointer:coarse)]:hidden">
                 <Kbd>{hasHighlightedBrowseItem ? `${submitModifierLabel} Enter` : "Enter"}</Kbd>
               </KbdGroup>
             </Button>

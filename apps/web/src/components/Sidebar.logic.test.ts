@@ -5,6 +5,7 @@ import {
   createThreadJumpHintVisibilityController,
   getSidebarThreadIdsToPrewarm,
   getVisibleSidebarThreadIds,
+  isProjectDeleteRequiresForceError,
   resolveAdjacentThreadId,
   getFallbackThreadIdAfterDelete,
   getVisibleThreadsForProject,
@@ -810,6 +811,35 @@ describe("getFallbackThreadIdAfterDelete", () => {
     });
 
     expect(fallbackThreadId).toBe(ThreadId.make("thread-next"));
+  });
+});
+
+describe("isProjectDeleteRequiresForceError", () => {
+  it("detects the non-empty project delete invariant", () => {
+    expect(
+      isProjectDeleteRequiresForceError(
+        new Error(
+          "Orchestration command invariant failed (project.delete): Project 'project-1' is not empty and cannot be deleted without force=true.",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isProjectDeleteRequiresForceError({
+        commandType: "project.delete",
+        detail: "Project 'project-1' is not empty and cannot be deleted without force=true.",
+      }),
+    ).toBe(true);
+  });
+
+  it("ignores unrelated command failures", () => {
+    expect(
+      isProjectDeleteRequiresForceError(
+        new Error(
+          "Orchestration command invariant failed (thread.delete): Thread 'thread-1' cannot be deleted.",
+        ),
+      ),
+    ).toBe(false);
+    expect(isProjectDeleteRequiresForceError("Project API unavailable.")).toBe(false);
   });
 });
 describe("sortProjectsForSidebar", () => {

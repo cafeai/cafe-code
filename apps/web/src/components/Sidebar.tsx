@@ -161,6 +161,7 @@ import { useThreadSelectionStore } from "../threadSelectionStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import {
   getSidebarThreadIdsToPrewarm,
+  isProjectDeleteRequiresForceError,
   resolveAdjacentThreadId,
   isContextMenuPointerDown,
   resolveProjectStatusIndicator,
@@ -1350,6 +1351,90 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     [],
   );
 
+  const confirmAndForceRemoveProject = useCallback(
+    async (member: SidebarProjectGroupMember): Promise<void> => {
+      const api = readLocalApi();
+      if (!api) {
+        return;
+      }
+
+      const memberProjectRef = scopeProjectRef(member.environmentId, member.id);
+      const latestProjectThreads = selectSidebarThreadsForProjectRefs(useStore.getState(), [
+        memberProjectRef,
+      ]);
+      const confirmed = await api.dialogs.confirm(
+        latestProjectThreads.length > 0
+          ? [
+              `Remove project "${member.name}" and delete its ${latestProjectThreads.length} thread${
+                latestProjectThreads.length === 1 ? "" : "s"
+              }?`,
+              `Path: ${member.cwd}`,
+              ...(member.environmentLabel ? [`Environment: ${member.environmentLabel}`] : []),
+              "This permanently clears conversation history for those threads.",
+              "This removes only this project entry.",
+              "This action cannot be undone.",
+            ].join("\n")
+          : [
+              `Force remove project "${member.name}"?`,
+              `Path: ${member.cwd}`,
+              ...(member.environmentLabel ? [`Environment: ${member.environmentLabel}`] : []),
+              "Cafe Code still sees hidden or stale thread state attached to this project.",
+              "This removes the project entry and any backend-visible project threads.",
+              "This action cannot be undone.",
+            ].join("\n"),
+      );
+      if (!confirmed) {
+        return;
+      }
+
+      await removeProject(member, { force: true });
+    },
+    [removeProject],
+  );
+
+  const showForceRemoveProjectToast = useCallback(
+    (member: SidebarProjectGroupMember, description: string): void => {
+      const forceToastId = toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: `Could not remove "${member.name}"`,
+          description,
+          actionVariant: "destructive",
+          actionProps: {
+            children: "Force remove",
+            onClick: () => {
+              void (async () => {
+                toastManager.close(forceToastId);
+                await new Promise<void>((resolve) => {
+                  window.setTimeout(resolve, 180);
+                });
+                await confirmAndForceRemoveProject(member);
+              })().catch((forceError) => {
+                const message =
+                  forceError instanceof Error
+                    ? forceError.message
+                    : "Unknown error force-removing project.";
+                console.error("Failed to force remove project", {
+                  projectId: member.id,
+                  environmentId: member.environmentId,
+                  error: forceError,
+                });
+                toastManager.add(
+                  stackedThreadToast({
+                    type: "error",
+                    title: `Failed to force remove "${member.name}"`,
+                    description: message,
+                  }),
+                );
+              });
+            },
+          },
+        }),
+      );
+    },
+    [confirmAndForceRemoveProject],
+  );
+
   const handleRemoveProject = useCallback(
     async (member: SidebarProjectGroupMember) => {
       const api = readLocalApi();
@@ -1357,7 +1442,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         return;
       }
 
-      const memberProjectRef = scopeProjectRef(member.environmentId, member.id);
       const memberThreadCount = memberThreadCountByPhysicalKey.get(member.physicalProjectKey) ?? 0;
       if (memberThreadCount > 0) {
         const warningToastId = toastManager.add(
@@ -1374,39 +1458,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                   await new Promise<void>((resolve) => {
                     window.setTimeout(resolve, 180);
                   });
-
-                  const latestProjectThreads = selectSidebarThreadsForProjectRefs(
-                    useStore.getState(),
-                    [memberProjectRef],
-                  );
-                  const confirmed = await api.dialogs.confirm(
-                    latestProjectThreads.length > 0
-                      ? [
-                          `Remove project "${member.name}" and delete its ${latestProjectThreads.length} thread${
-                            latestProjectThreads.length === 1 ? "" : "s"
-                          }?`,
-                          `Path: ${member.cwd}`,
-                          ...(member.environmentLabel
-                            ? [`Environment: ${member.environmentLabel}`]
-                            : []),
-                          "This permanently clears conversation history for those threads.",
-                          "This removes only this project entry.",
-                          "This action cannot be undone.",
-                        ].join("\n")
-                      : [
-                          `Remove project "${member.name}"?`,
-                          `Path: ${member.cwd}`,
-                          ...(member.environmentLabel
-                            ? [`Environment: ${member.environmentLabel}`]
-                            : []),
-                          "This removes only this project entry.",
-                        ].join("\n"),
-                  );
-                  if (!confirmed) {
-                    return;
-                  }
-
-                  await removeProject(member, { force: true });
+                  await confirmAndForceRemoveProject(member);
                 })().catch((error) => {
                   const message =
                     error instanceof Error ? error.message : "Unknown error removing project.";
@@ -1445,6 +1497,18 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         await removeProject(member);
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown error removing project.";
+        if (isProjectDeleteRequiresForceError(error)) {
+          console.warn("Project removal requires force after backend invariant rejection", {
+            projectId: member.id,
+            environmentId: member.environmentId,
+            error,
+          });
+          showForceRemoveProjectToast(
+            member,
+            "Cafe Code still sees hidden or stale thread state attached to this project. You can force remove it and clear any backend-visible project threads.",
+          );
+          return;
+        }
         console.error("Failed to remove project", {
           projectId: member.id,
           environmentId: member.environmentId,
@@ -1459,7 +1523,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         );
       }
     },
-    [memberThreadCountByPhysicalKey, removeProject],
+    [
+      confirmAndForceRemoveProject,
+      memberThreadCountByPhysicalKey,
+      removeProject,
+      showForceRemoveProjectToast,
+    ],
   );
 
   const handleProjectButtonContextMenu = useCallback(

@@ -96,7 +96,7 @@ import { useTheme } from "../hooks/useTheme";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { buildTemporaryWorktreeBranchName } from "@cafecode/shared/git";
-import { useIsMobile, useMediaQuery } from "../hooks/useMediaQuery";
+import { useHasOnScreenKeyboard, useIsMobile, useMediaQuery } from "../hooks/useMediaQuery";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
 import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
@@ -1869,6 +1869,7 @@ export default function ChatView(props: ChatViewProps) {
   >({});
   const shouldUsePlanSidebarSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
   const isMobile = useIsMobile();
+  const hasOnScreenKeyboard = useHasOnScreenKeyboard();
   const draftPlanSidebarOpen =
     routeKind === "draft" ? draftPlanSidebarOpenByThreadKey[routeThreadKey] : undefined;
   const planSidebarOpenPreference =
@@ -4450,14 +4451,14 @@ export default function ChatView(props: ChatViewProps) {
   // composer stays collapsed until then). Desktop behavior is unchanged.
   useEffect(() => {
     if (!activeThread?.id) return;
-    if (isMobile) return;
+    if (isMobile || hasOnScreenKeyboard) return;
     const frame = window.requestAnimationFrame(() => {
       focusComposer();
     });
     return () => {
       window.cancelAnimationFrame(frame);
     };
-  }, [activeThread?.id, focusComposer, isMobile]);
+  }, [activeThread?.id, focusComposer, hasOnScreenKeyboard, isMobile]);
 
   useEffect(() => {
     if (!activeThread?.id) return;
@@ -6217,11 +6218,13 @@ export default function ChatView(props: ChatViewProps) {
   const shouldRenderPlanSidebar = planSidebarOpen && hasPlanSidebarContent;
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
-      {/* Top bar */}
+    <div className="group/chat-view flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
+      {/* Top bar — hidden while the mobile composer has the on-screen keyboard
+          open (data attribute set by ChatComposer) to maximize vertical room. */}
       <header
+        data-chat-view-header="true"
         className={cn(
-          "border-b border-border",
+          "border-b border-border group-has-[[data-chat-composer-keyboard-open=true]]/chat-view:hidden",
           isElectron
             ? cn(
                 "drag-region flex h-[52px] items-center px-3 sm:px-5 wco:h-[env(titlebar-area-height)]",

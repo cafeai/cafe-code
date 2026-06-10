@@ -29,6 +29,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { projectSearchEntriesQueryOptions } from "~/lib/projectReactQuery";
@@ -109,7 +110,8 @@ import type { PendingApproval, PendingUserInput } from "../../session-logic";
 import { deriveLatestContextWindowSnapshot } from "../../lib/contextWindow";
 import { formatProviderSkillDisplayName } from "../../providerSkillPresentation";
 import { searchProviderSkills } from "../../providerSkillSearch";
-import { useMediaQuery } from "../../hooks/useMediaQuery";
+import { useHasOnScreenKeyboard } from "../../hooks/useMediaQuery";
+import { domSnapshot, mobileDebugLog } from "../../lib/mobileDebugLog";
 
 const IMAGE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024))}MB`;
 
@@ -338,7 +340,7 @@ export interface ChatComposerHandle {
     composerEditorDisabled: boolean;
     composerFocusRequestRevision: number;
     isComposerFocused: boolean;
-    isMobileViewport: boolean;
+    isOnScreenKeyboardDevice: boolean;
     isComposerCollapsedMobile: boolean;
     isSendBusy: boolean;
     isConnecting: boolean;
@@ -1066,8 +1068,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
   const [isComposerFocused, setIsComposerFocused] = useState(false);
   const [composerFocusRequestRevision, setComposerFocusRequestRevision] = useState(0);
-  const isMobileViewport = useMediaQuery("max-sm");
-  const isComposerCollapsedMobile = isMobileViewport && !isComposerFocused;
+  // Touch capability, not viewport width: foldables and tablets can be wider
+  // than any phone breakpoint while still typing through an on-screen keyboard.
+  const isOnScreenKeyboardDevice = useHasOnScreenKeyboard();
+  const isComposerCollapsedMobile = isOnScreenKeyboardDevice && !isComposerFocused;
+
+  // TEMPORARY: mobile DOM debugging — remove with lib/mobileDebugLog.ts.
+  useEffect(() => {
+    mobileDebugLog("composer-state", {
+      isOnScreenKeyboardDevice,
+      isComposerFocused,
+      isComposerCollapsedMobile,
+      ...domSnapshot(),
+    });
+  }, [isComposerCollapsedMobile, isComposerFocused, isOnScreenKeyboardDevice]);
 
   // ------------------------------------------------------------------
   // Refs
@@ -1331,16 +1345,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         : null,
     [activePendingIsResponding, activePendingProgress, activePendingResolvedAnswers],
   );
-  const collapsedComposerPrimaryActionDisabled =
-    phase === "running" || isSendBusy || isConnecting || !composerSendState.hasSendableContent;
-  const collapsedComposerPrimaryActionPending = isSendBusy || isConnecting || isPreparingWorktree;
-  const collapsedComposerPrimaryActionLabel = collapsedComposerPrimaryActionPending
-    ? isConnecting
-      ? "Connecting"
-      : "Sending"
-    : "Send message";
-  const showMobilePendingAnswerActions =
-    isMobileViewport && !isComposerCollapsedMobile && pendingPrimaryAction !== null;
+  // While the composer is expanded on mobile (on-screen keyboard likely open),
+  // the footer toolbar is hidden to free vertical space and the primary action
+  // is overlaid on the editor instead. Approval state keeps its own footer.
+  const showMobileComposerActionsOverlay =
+    isOnScreenKeyboardDevice && !isComposerCollapsedMobile && !isComposerApprovalState;
   const composerEditorDisabled =
     isSendBusy ||
     isConnecting ||
@@ -1844,21 +1853,82 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     setComposerFocusRequestRevision((revision) => revision + 1);
   }, []);
 
+  // On mobile, sending dismisses the on-screen keyboard; refocusing the editor
+  // afterwards would pop it right back open while the prompt is processed.
+  // Blur and collapse instead so the keyboard stays closed until the user taps
+  // the composer again.
+  const dismissMobileComposerKeyboard = useCallback(() => {
+    const activeElement = document.activeElement;
+    if (
+      activeElement instanceof HTMLElement &&
+      composerSurfaceRef.current?.contains(activeElement)
+    ) {
+      activeElement.blur();
+    }
+    setIsComposerFocused(false);
+    mobileDebugLog("dismiss-keyboard", domSnapshot());
+  }, []);
+
+  // Detect the on-screen keyboard being dismissed without a blur (e.g. the
+  // Android back button): the visual viewport grows back to its full height
+  // while the editor still has focus. Collapse the composer when that happens
+  // so the header/footer come back without requiring a tap outside the box.
+  useEffect(() => {
+    if (!isOnScreenKeyboardDevice || !isComposerFocused) return;
+    const visualViewport = window.visualViewport;
+    if (!visualViewport) return;
+    // Baseline is captured on focus, before the keyboard animates in. Track
+    // the max seen so fold/rotation changes mid-session update it.
+    let baselineHeight = Math.max(visualViewport.height, window.innerHeight);
+    let sawKeyboardOpen = false;
+    const handleViewportResize = () => {
+      baselineHeight = Math.max(baselineHeight, visualViewport.height, window.innerHeight);
+      const keyboardInset = baselineHeight - visualViewport.height;
+      if (keyboardInset > 120) {
+        if (!sawKeyboardOpen) {
+          sawKeyboardOpen = true;
+          mobileDebugLog("keyboard-open-detected", { keyboardInset, ...domSnapshot() });
+        }
+        return;
+      }
+      if (sawKeyboardOpen && keyboardInset < 60) {
+        mobileDebugLog("keyboard-close-detected", { keyboardInset, ...domSnapshot() });
+        dismissMobileComposerKeyboard();
+      }
+    };
+    visualViewport.addEventListener("resize", handleViewportResize);
+    return () => {
+      visualViewport.removeEventListener("resize", handleViewportResize);
+    };
+  }, [dismissMobileComposerKeyboard, isComposerFocused, isOnScreenKeyboardDevice]);
+
   const submitComposer = useCallback(
     (event?: { preventDefault: () => void }) => {
+      const keepKeyboardClosed = isOnScreenKeyboardDevice;
+      mobileDebugLog("submit-start", { keepKeyboardClosed, ...domSnapshot() });
       void Promise.resolve(onSend(event)).finally(() => {
+        mobileDebugLog("submit-settled", { keepKeyboardClosed, ...domSnapshot() });
+        if (keepKeyboardClosed) {
+          dismissMobileComposerKeyboard();
+          return;
+        }
         requestComposerEditorFocus();
       });
     },
-    [onSend, requestComposerEditorFocus],
+    [dismissMobileComposerKeyboard, isOnScreenKeyboardDevice, onSend, requestComposerEditorFocus],
   );
   const steerComposer = useCallback(
     (event?: { preventDefault: () => void }) => {
+      const keepKeyboardClosed = isOnScreenKeyboardDevice;
       void Promise.resolve(onSteer(event)).finally(() => {
+        if (keepKeyboardClosed) {
+          dismissMobileComposerKeyboard();
+          return;
+        }
         requestComposerEditorFocus();
       });
     },
-    [onSteer, requestComposerEditorFocus],
+    [dismissMobileComposerKeyboard, isOnScreenKeyboardDevice, onSteer, requestComposerEditorFocus],
   );
 
   useEffect(() => {
@@ -1867,8 +1937,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (!wasDisabled || composerEditorDisabled || activeThreadId === null) {
       return;
     }
+    // Re-enabling after a send (busy -> idle) must not reopen the on-screen
+    // keyboard on mobile.
+    if (isOnScreenKeyboardDevice) {
+      mobileDebugLog("editor-reenabled-skip-refocus", domSnapshot());
+      return;
+    }
     requestComposerEditorFocus();
-  }, [activeThreadId, composerEditorDisabled, requestComposerEditorFocus]);
+  }, [activeThreadId, composerEditorDisabled, isOnScreenKeyboardDevice, requestComposerEditorFocus]);
   const expandMobileComposer = useCallback(() => {
     if (composerBlurFrameRef.current !== null) {
       window.cancelAnimationFrame(composerBlurFrameRef.current);
@@ -1881,14 +1957,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       window.cancelAnimationFrame(mobileComposerExpandReleaseFrameRef.current);
     }
     mobileComposerExpandInFlightRef.current = true;
-    setIsComposerFocused(true);
-    mobileComposerExpandFrameRef.current = window.requestAnimationFrame(() => {
-      mobileComposerExpandFrameRef.current = null;
-      composerEditorRef.current?.focusAtEnd();
-      mobileComposerExpandReleaseFrameRef.current = window.requestAnimationFrame(() => {
-        mobileComposerExpandReleaseFrameRef.current = null;
-        mobileComposerExpandInFlightRef.current = false;
-      });
+    // Commit the expanded state synchronously and focus within the same tap
+    // gesture. Deferring the focus to an animation frame raced the React
+    // commit (the editor could still be display:hidden, so focus silently
+    // failed) and mobile browsers only open the on-screen keyboard for focus
+    // calls made during a user gesture.
+    flushSync(() => {
+      setIsComposerFocused(true);
+    });
+    composerEditorRef.current?.focusAtEnd();
+    mobileDebugLog("expand-mobile-composer", domSnapshot());
+    mobileComposerExpandReleaseFrameRef.current = window.requestAnimationFrame(() => {
+      mobileComposerExpandReleaseFrameRef.current = null;
+      mobileComposerExpandInFlightRef.current = false;
     });
   }, []);
 
@@ -2046,7 +2127,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     void onImplementPlanInNewThread();
   }, [onImplementPlanInNewThread]);
   const scheduleComposerCollapseCheck = useCallback(() => {
-    if (!isMobileViewport) {
+    if (!isOnScreenKeyboardDevice) {
       return;
     }
     if (mobileComposerExpandInFlightRef.current) {
@@ -2074,7 +2155,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
       setIsComposerFocused(false);
     });
-  }, [isMobileViewport]);
+  }, [isOnScreenKeyboardDevice]);
 
   useEffect(() => {
     return () => {
@@ -2115,7 +2196,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         composerEditorDisabled,
         composerFocusRequestRevision,
         isComposerFocused,
-        isMobileViewport,
+        isOnScreenKeyboardDevice,
         isComposerCollapsedMobile,
         isSendBusy,
         isConnecting,
@@ -2163,7 +2244,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       isComposerCollapsedMobile,
       isComposerFocused,
       isConnecting,
-      isMobileViewport,
+      isOnScreenKeyboardDevice,
       isSendBusy,
       phase,
       readComposerSnapshot,
@@ -2209,19 +2290,53 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         <div
           ref={composerSurfaceRef}
           data-chat-composer-mobile-collapsed={isComposerCollapsedMobile ? "true" : "false"}
+          data-chat-composer-keyboard-open={
+            isOnScreenKeyboardDevice && isComposerFocused ? "true" : "false"
+          }
           className={cn(
             "rounded-[20px] border bg-card transition-colors duration-200 has-focus-visible:border-ring/45",
             isDragOverComposer ? "border-primary/70 bg-accent/30" : "border-border",
             environmentUnavailable ? "opacity-75" : null,
             composerProviderState.composerSurfaceClassName,
           )}
+          onClick={(event) => {
+            // Taps on the collapsed surface's padding/edges should expand the
+            // composer just like tapping the prompt preview; without this a tap
+            // that misses the preview button does nothing (or worse, leaves a
+            // half-expanded state with no keyboard).
+            if (!isComposerCollapsedMobile) return;
+            if (
+              event.target instanceof Element &&
+              event.target.closest(
+                '[data-chat-composer-collapsed-controls="true"], button, [role="button"], a, input, textarea, [contenteditable="true"]',
+              )
+            ) {
+              return;
+            }
+            mobileDebugLog("surface-edge-tap-expand", domSnapshot());
+            expandMobileComposer();
+          }}
           onFocusCapture={(event) => {
             const activeElement = event.target;
+            // While collapsed, only focus landing on the editor itself may
+            // expand the composer. Buttons (preview row, toolbar controls) can
+            // receive raw focus from a tap before their click fires; expanding
+            // on that focus re-renders the surface mid-gesture, swallows the
+            // click, and leaves an expanded composer with no keyboard. Those
+            // controls expand via their own click handlers instead.
             if (
               isComposerCollapsedMobile &&
-              activeElement instanceof HTMLElement &&
-              activeElement.closest('[data-chat-composer-collapsed-controls="true"]')
+              !(
+                activeElement instanceof HTMLElement &&
+                activeElement.closest('[data-testid="composer-editor"]')
+              )
             ) {
+              mobileDebugLog("collapsed-focus-ignored", {
+                target:
+                  activeElement instanceof HTMLElement
+                    ? (activeElement.getAttribute("aria-label") ?? activeElement.tagName)
+                    : "<unknown>",
+              });
               return;
             }
             if (composerBlurFrameRef.current !== null) {
@@ -2339,105 +2454,30 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           ) : null}
 
           {showCollapsedMobilePromptRow ? (
-            <div className="flex flex-col gap-1.5 px-3 py-2">
-              <div className="flex items-center justify-between gap-2">
-                <button
-                  type="button"
-                  className={cn(
-                    "min-w-0 flex-1 truncate bg-transparent p-0 text-left text-[14px] focus:outline-none",
-                    (activePendingProgress ? activePendingProgress.customAnswer : prompt.trim())
-                      ? "text-foreground"
-                      : "text-muted-foreground/35",
-                  )}
-                  onPointerDown={(event) => event.preventDefault()}
-                  onClick={expandMobileComposer}
-                  aria-label="Expand composer"
-                >
-                  {activePendingProgress
-                    ? activePendingProgress.customAnswer ||
-                      "Type your own answer, or leave this blank to use the selected option"
-                    : prompt.trim() || "Ask anything..."}
-                </button>
-                <button
-                  type="button"
-                  className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/90 text-primary-foreground disabled:opacity-30"
-                  disabled={collapsedComposerPrimaryActionDisabled}
-                  aria-label={collapsedComposerPrimaryActionLabel}
-                  onPointerDown={(event) => event.preventDefault()}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    submitComposer();
-                  }}
-                >
-                  {collapsedComposerPrimaryActionPending ? (
-                    <svg
-                      width="16"
-                      height="16"
-                      viewBox="0 0 16 16"
-                      fill="none"
-                      className="animate-spin"
-                      aria-hidden="true"
-                    >
-                      <circle
-                        cx="8"
-                        cy="8"
-                        r="6"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeDasharray="22 14"
-                      />
-                    </svg>
-                  ) : (
-                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                      <path
-                        d="M8 3L8 13M8 3L4 7M8 3L12 7"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                  )}
-                </button>
-              </div>
-              {/*
-               * F3: surface the model/provider picker even while the composer is
-               * collapsed on mobile, so model selection is discoverable without
-               * first focusing the input. Wrapped in
-               * data-chat-composer-collapsed-controls so the onFocusCapture guard
-               * above does not treat opening the picker as a composer focus/expand.
-               * This row only exists in the mobile-collapsed branch, so desktop is
-               * unaffected.
-               */}
-              {providerInstanceEntries.length > 0 ? (
-                <div
-                  data-chat-composer-collapsed-controls="true"
-                  className="-mx-1 flex min-w-0 items-center gap-1 overflow-x-auto px-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-                >
-                  <ProviderModelPicker
-                    compact
-                    activeInstanceId={selectedInstanceId}
-                    model={selectedModelForPickerWithCustomFallback}
-                    lockedProvider={lockedProvider}
-                    lockedContinuationGroupKey={lockedContinuationGroupKey}
-                    instanceEntries={providerInstanceEntries}
-                    keybindings={keybindings}
-                    modelOptionsByInstance={modelOptionsByInstance}
-                    open={isComposerModelPickerOpen}
-                    {...(composerProviderState.modelPickerIconClassName
-                      ? {
-                          activeProviderIconClassName:
-                            composerProviderState.modelPickerIconClassName,
-                        }
-                      : {})}
-                    onOpenChange={(open) => {
-                      setIsComposerModelPickerOpen(open);
-                    }}
-                    onInstanceModelChange={onProviderModelSelect}
-                  />
-                </div>
-              ) : null}
+            // Collapsed (keyboard down) the composer shows a one-line prompt
+            // preview; the full bottom toolbar below keeps every control (model,
+            // modes, traits, send) available, matching the desktop layout.
+            // Horizontal padding mirrors the bottom toolbar (px-2.5 sm:px-3) plus
+            // the model picker trigger's internal px-2, so the preview text lines
+            // up with the picker's icon below it.
+            <div className="flex items-center gap-2 px-2.5 pb-1 pt-3 sm:px-3">
+              <button
+                type="button"
+                className={cn(
+                  "min-w-0 flex-1 truncate bg-transparent py-0 pl-2 pr-0 text-left text-[16px] leading-relaxed focus:outline-none",
+                  (activePendingProgress ? activePendingProgress.customAnswer : prompt.trim())
+                    ? "text-foreground"
+                    : "text-muted-foreground/35",
+                )}
+                onPointerDown={(event) => event.preventDefault()}
+                onClick={expandMobileComposer}
+                aria-label="Expand composer"
+              >
+                {activePendingProgress
+                  ? activePendingProgress.customAnswer ||
+                    "Type your own answer, or leave this blank to use the selected option"
+                  : prompt.trim() || "Ask anything..."}
+              </button>
             </div>
           ) : null}
 
@@ -2548,7 +2588,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 cursor={composerCursor}
                 skills={selectedProviderStatus?.skills ?? []}
                 focusRequestRevision={composerFocusRequestRevision}
-                {...(showMobilePendingAnswerActions ? { className: "max-sm:pb-11" } : {})}
+                {...(showMobileComposerActionsOverlay
+                  ? { className: "max-h-40 pb-11" }
+                  : {})}
                 onChange={onPromptChange}
                 onCommandKeyDown={onComposerCommandKey}
                 onPaste={onComposerPaste}
@@ -2571,7 +2613,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 }
                 disabled={composerEditorDisabled}
               />
-              {showMobilePendingAnswerActions ? (
+              {showMobileComposerActionsOverlay ? (
                 <div
                   data-chat-composer-mobile-pending-actions="true"
                   className="absolute bottom-0 right-0 flex justify-end"
@@ -2579,14 +2621,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   <ComposerPrimaryActions
                     compact
                     pendingAction={pendingPrimaryAction}
-                    isRunning={false}
-                    showPlanFollowUpPrompt={false}
-                    promptHasText={false}
+                    isRunning={phase === "running"}
+                    showPlanFollowUpPrompt={
+                      pendingUserInputs.length === 0 && showPlanFollowUpPrompt
+                    }
+                    promptHasText={prompt.trim().length > 0}
                     isSendBusy={isSendBusy}
                     isConnecting={isConnecting}
                     isEnvironmentUnavailable={environmentUnavailable !== null}
-                    isPreparingWorktree={false}
-                    hasSendableContent={false}
+                    isPreparingWorktree={isPreparingWorktree}
+                    hasSendableContent={composerSendState.hasSendableContent}
                     preserveComposerFocusOnPointerDown
                     onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                     onInterrupt={handleInterruptPrimaryAction}
@@ -2597,8 +2641,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             </div>
           </div>
 
-          {/* Bottom toolbar */}
-          {isComposerCollapsedMobile ? null : activePendingApproval ? (
+          {/* Bottom toolbar. On touch devices the full toolbar stays available
+              while the composer is collapsed (keyboard down) for parity with
+              desktop; it is hidden only while the on-screen keyboard is open
+              (the editor overlay provides the primary action then). */}
+          {showMobileComposerActionsOverlay ||
+          (isComposerCollapsedMobile && !showCollapsedMobilePromptRow) ? null : activePendingApproval ? (
             <div className="flex items-center justify-end gap-2 px-2.5 pb-2.5 sm:px-3 sm:pb-3">
               <ComposerPendingApprovalActions
                 requestId={activePendingApproval.requestId}
@@ -2610,10 +2658,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             <div
               data-chat-composer-footer="true"
               data-chat-composer-footer-compact={isComposerFooterCompact ? "true" : "false"}
+              data-chat-composer-collapsed-controls="true"
               className={cn(
                 "flex min-w-0 flex-nowrap items-center justify-between gap-2 overflow-visible px-2.5 pb-2.5 sm:px-3 sm:pb-3",
                 isComposerFooterCompact ? "gap-1.5" : "gap-2 sm:gap-0",
-                showMobilePendingAnswerActions && "hidden sm:flex",
               )}
             >
               <div className="-m-1 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">

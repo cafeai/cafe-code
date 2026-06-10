@@ -1533,7 +1533,9 @@ function ComposerPromptEditorInner({
         contentEditable={
           <ContentEditable
             className={cn(
-              "block max-h-50 min-h-17.5 w-full overflow-y-auto whitespace-pre-wrap wrap-break-word bg-transparent text-[16px] leading-relaxed text-foreground focus:outline-none sm:text-[14px]",
+              // 16px on touch devices prevents iOS from zooming the page when
+              // the editor gains focus; pointer devices keep the 14px text.
+              "block max-h-50 min-h-17.5 w-full overflow-y-auto whitespace-pre-wrap wrap-break-word bg-transparent text-[14px] leading-relaxed text-foreground focus:outline-none [@media(hover:none)_and_(pointer:coarse)]:text-[16px]",
               className,
             )}
             contentEditable={!disabled}
@@ -1545,7 +1547,7 @@ function ComposerPromptEditorInner({
           />
         }
         placeholder={
-          <div className="pointer-events-none absolute inset-0 text-[16px] leading-relaxed text-muted-foreground/35 sm:text-[14px]">
+          <div className="pointer-events-none absolute inset-0 text-[14px] leading-relaxed text-muted-foreground/35 [@media(hover:none)_and_(pointer:coarse)]:text-[16px]">
             {placeholder}
           </div>
         }

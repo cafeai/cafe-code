@@ -85,3 +85,12 @@ export function useMediaQuery(query: BreakpointQuery | MediaQueryInput | (string
 export function useIsMobile(): boolean {
   return useMediaQuery("max-md");
 }
+
+/**
+ * True on touch-only devices (phones, tablets, foldables) where focusing an
+ * input opens an on-screen keyboard. Unlike width-based checks this is stable
+ * across orientation/fold changes and never matches desktop windows.
+ */
+export function useHasOnScreenKeyboard(): boolean {
+  return useMediaQuery("(hover: none) and (pointer: coarse)");
+}

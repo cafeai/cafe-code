@@ -12,6 +12,7 @@ import { isLatestTurnSettled } from "../session-logic";
 
 export const THREAD_SELECTION_SAFE_SELECTOR = "[data-thread-item], [data-thread-selection-safe]";
 export const THREAD_JUMP_HINT_SHOW_DELAY_MS = 100;
+const PROJECT_DELETE_REQUIRES_FORCE_MARKER = "cannot be deleted without force=true";
 // Visible sidebar rows are prewarmed into the thread-detail cache so opening a
 // nearby thread usually reuses an already-hot subscription.
 export const SIDEBAR_THREAD_PREWARM_LIMIT = 10;
@@ -108,6 +109,26 @@ export function createThreadJumpHintVisibilityController(input: {
       clearPendingShow();
     },
   };
+}
+
+export function isProjectDeleteRequiresForceError(error: unknown): boolean {
+  if (typeof error === "object" && error !== null) {
+    const record = error as { readonly commandType?: unknown; readonly detail?: unknown };
+    if (
+      record.commandType === "project.delete" &&
+      typeof record.detail === "string" &&
+      record.detail.includes(PROJECT_DELETE_REQUIRES_FORCE_MARKER)
+    ) {
+      return true;
+    }
+  }
+
+  const message =
+    error instanceof Error ? error.message : typeof error === "string" ? error : String(error);
+  return (
+    message.includes("Orchestration command invariant failed (project.delete)") &&
+    message.includes(PROJECT_DELETE_REQUIRES_FORCE_MARKER)
+  );
 }
 
 export function useThreadJumpHintVisibility(): {

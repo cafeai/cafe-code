@@ -10,6 +10,10 @@ import { isElectron } from "./env";
 import { getRouter } from "./router";
 import { APP_DISPLAY_NAME } from "./branding";
 import { syncDocumentWindowControlsOverlayClass } from "./lib/windowControlsOverlay";
+import { installMobileDebugLogging } from "./lib/mobileDebugLog";
+
+// Mobile DOM debugging — no-op unless enabled; see lib/mobileDebugLog.ts.
+installMobileDebugLogging();
 
 // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
 const history = isElectron ? createHashHistory() : createBrowserHistory();
