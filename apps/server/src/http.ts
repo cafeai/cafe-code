@@ -43,6 +43,9 @@ const PROJECT_FAVICON_CACHE_CONTROL = "public, max-age=3600";
 const FALLBACK_PROJECT_FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#6b728080" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-fallback="project-favicon"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg>`;
 const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
+const HASHED_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable";
+const HTML_CACHE_CONTROL = "no-store";
+const STATIC_FILE_CACHE_CONTROL = "public, max-age=3600";
 
 export const browserApiCorsLayer = HttpRouter.cors({
   allowedMethods: [...browserApiCorsAllowedMethods],
@@ -82,6 +85,120 @@ function isLoopbackRemoteAddress(address: string): boolean {
     normalized.startsWith("::ffff:127.")
   );
 }
+
+function acceptsContentEncoding(rawHeader: string | undefined, encoding: "br" | "gzip"): boolean {
+  if (!rawHeader) return false;
+
+  for (const rawToken of rawHeader.split(",")) {
+    const [rawCoding, ...rawParameters] = rawToken.split(";");
+    const coding = rawCoding?.trim().toLowerCase();
+    if (!coding || (coding !== encoding && coding !== "*")) {
+      continue;
+    }
+
+    const qParameter = rawParameters.find((parameter) =>
+      parameter.trim().toLowerCase().startsWith("q="),
+    );
+    const quality = qParameter ? Number(qParameter.split("=")[1]?.trim()) : 1;
+    if (!Number.isFinite(quality) || quality > 0) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function cacheControlForStaticResponse(input: {
+  readonly requestPath: string;
+  readonly filePath: string;
+  readonly isHtmlFallback: boolean;
+}): string {
+  if (input.isHtmlFallback || input.filePath.toLowerCase().endsWith(".html")) {
+    return HTML_CACHE_CONTROL;
+  }
+
+  if (input.requestPath.startsWith("/assets/")) {
+    return HASHED_ASSET_CACHE_CONTROL;
+  }
+
+  return STATIC_FILE_CACHE_CONTROL;
+}
+
+function staticResponseHeaders(input: {
+  readonly cacheControl: string;
+  readonly contentEncoding?: "br" | "gzip";
+}): Record<string, string> {
+  return {
+    "Cache-Control": input.cacheControl,
+    Vary: "Accept-Encoding",
+    ...(input.contentEncoding ? { "Content-Encoding": input.contentEncoding } : {}),
+  };
+}
+
+const serveStaticFile = (input: {
+  readonly filePath: string;
+  readonly requestPath: string;
+  readonly isHtmlFallback: boolean;
+  readonly acceptEncoding: string | undefined;
+}) =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const contentType = Mime.getType(input.filePath) ?? "application/octet-stream";
+    const cacheControl = cacheControlForStaticResponse({
+      requestPath: input.requestPath,
+      filePath: input.filePath,
+      isHtmlFallback: input.isHtmlFallback,
+    });
+    const compressedCandidates: ReadonlyArray<{
+      readonly encoding: "br" | "gzip";
+      readonly filePath: string;
+    }> = [
+      { encoding: "br", filePath: `${input.filePath}.br` },
+      { encoding: "gzip", filePath: `${input.filePath}.gz` },
+    ];
+
+    for (const candidate of compressedCandidates) {
+      if (!acceptsContentEncoding(input.acceptEncoding, candidate.encoding)) {
+        continue;
+      }
+
+      const exists = yield* fileSystem
+        .exists(candidate.filePath)
+        .pipe(Effect.catch(() => Effect.succeed(false)));
+      if (!exists) {
+        continue;
+      }
+
+      const data = yield* fileSystem
+        .readFile(candidate.filePath)
+        .pipe(Effect.catch(() => Effect.succeed(null)));
+      if (!data) {
+        break;
+      }
+
+      return HttpServerResponse.uint8Array(data, {
+        status: 200,
+        contentType,
+        headers: staticResponseHeaders({
+          cacheControl,
+          contentEncoding: candidate.encoding,
+        }),
+      });
+    }
+
+    const data = yield* fileSystem
+      .readFile(input.filePath)
+      .pipe(Effect.catch(() => Effect.succeed(null)));
+    if (!data) {
+      return HttpServerResponse.text("Internal Server Error", { status: 500 });
+    }
+
+    return HttpServerResponse.uint8Array(data, {
+      status: 200,
+      contentType,
+      headers: staticResponseHeaders({ cacheControl }),
+    });
+  });
 
 // True when the request reached this HTTP server through the HTTPS sibling proxy,
 // which stamps these headers (see httpsSiblingServer.ts). Such requests are already
@@ -468,29 +585,25 @@ export const staticAndDevRouteLayer = HttpRouter.add(
       .pipe(Effect.catch(() => Effect.succeed(null)));
     if (!fileInfo || fileInfo.type !== "File") {
       const indexPath = path.resolve(staticRoot, "index.html");
-      const indexData = yield* fileSystem
-        .readFile(indexPath)
+      const indexInfo = yield* fileSystem
+        .stat(indexPath)
         .pipe(Effect.catch(() => Effect.succeed(null)));
-      if (!indexData) {
+      if (!indexInfo || indexInfo.type !== "File") {
         return HttpServerResponse.text("Not Found", { status: 404 });
       }
-      return HttpServerResponse.uint8Array(indexData, {
-        status: 200,
-        contentType: "text/html; charset=utf-8",
+      return yield* serveStaticFile({
+        filePath: indexPath,
+        requestPath: url.value.pathname,
+        isHtmlFallback: true,
+        acceptEncoding: request.headers["accept-encoding"],
       });
     }
 
-    const contentType = Mime.getType(filePath) ?? "application/octet-stream";
-    const data = yield* fileSystem
-      .readFile(filePath)
-      .pipe(Effect.catch(() => Effect.succeed(null)));
-    if (!data) {
-      return HttpServerResponse.text("Internal Server Error", { status: 500 });
-    }
-
-    return HttpServerResponse.uint8Array(data, {
-      status: 200,
-      contentType,
+    return yield* serveStaticFile({
+      filePath,
+      requestPath: url.value.pathname,
+      isHtmlFallback: false,
+      acceptEncoding: request.headers["accept-encoding"],
     });
   }),
 );

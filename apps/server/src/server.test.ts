@@ -1,6 +1,11 @@
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeCrypto from "node:crypto";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - The compression test must construct the production Node HTTP server layer directly.
+import * as NodeHttp from "node:http";
+import * as NodeNet from "node:net";
+import { brotliCompressSync, constants as zlibConstants, gzipSync } from "node:zlib";
 
 import {
   CommandId,
@@ -58,6 +63,7 @@ const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
 import type { ServerConfigShape } from "./config.ts";
 import { deriveServerPaths, ServerConfig } from "./config.ts";
 import { makeRoutesLayer } from "./server.ts";
+import * as NodeHttpServerCompression from "./nodeHttpServerCompression.ts";
 import { resolveAttachmentRelativePath } from "./attachmentPaths.ts";
 import { GitManager, type GitManagerShape } from "./git/GitManager.ts";
 import { Keybindings, type KeybindingsShape } from "./keybindings.ts";
@@ -914,6 +920,76 @@ const withWsRpcClient = <A, E, R>(
   f: (client: WsRpcClient) => Effect.Effect<A, E, R>,
 ) => makeWsRpcClient.pipe(Effect.flatMap(f), Effect.provide(wsRpcProtocolLayer(wsUrl)));
 
+const getWebSocketUpgradeResponseHeaders = (
+  wsUrl: string,
+  options?: { readonly offerPerMessageDeflate?: boolean },
+) =>
+  Effect.callback<Record<string, string>>((resume) => {
+    const { cookie, url } = parseSessionCookieFromWsUrl(wsUrl);
+    const parsedUrl = new URL(url);
+    const socket = NodeNet.createConnection({
+      host: parsedUrl.hostname,
+      port: Number(parsedUrl.port),
+    });
+    let completed = false;
+    let responseText = "";
+    const complete = (effect: Effect.Effect<Record<string, string>>) => {
+      if (completed) {
+        return;
+      }
+      completed = true;
+      socket.removeAllListeners();
+      socket.destroy();
+      resume(effect);
+    };
+    const key = NodeCrypto.randomBytes(16).toString("base64");
+    const requestLines = [
+      `GET ${parsedUrl.pathname}${parsedUrl.search} HTTP/1.1`,
+      `Host: ${parsedUrl.host}`,
+      "Upgrade: websocket",
+      "Connection: Upgrade",
+      `Sec-WebSocket-Key: ${key}`,
+      "Sec-WebSocket-Version: 13",
+      cookie ? `Cookie: ${cookie}` : undefined,
+      options?.offerPerMessageDeflate === false
+        ? undefined
+        : "Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits",
+      "",
+      "",
+    ].filter((line) => line !== undefined);
+
+    socket.once("connect", () => {
+      socket.write(requestLines.join("\r\n"));
+    });
+    socket.on("data", (chunk) => {
+      responseText += chunk.toString("latin1");
+      if (!responseText.includes("\r\n\r\n")) {
+        return;
+      }
+      const [head] = responseText.split("\r\n\r\n", 1);
+      const headers: Record<string, string> = {};
+      const responseLines = head?.split("\r\n") ?? [];
+      headers[":status"] = responseLines[0] ?? "";
+      for (const line of responseLines.slice(1)) {
+        const separatorIndex = line.indexOf(":");
+        if (separatorIndex <= 0) {
+          continue;
+        }
+        headers[line.slice(0, separatorIndex).trim().toLowerCase()] = line
+          .slice(separatorIndex + 1)
+          .trim();
+      }
+      complete(Effect.succeed(headers));
+    });
+    socket.once("error", (error: Error) => {
+      complete(Effect.die(error));
+    });
+
+    return Effect.sync(() => {
+      socket.destroy();
+    });
+  });
+
 const appendSessionCookieToWsUrl = (url: string, sessionCookieHeader: string) => {
   const isAbsoluteUrl = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(url);
   const next = new URL(url, "http://localhost");
@@ -1181,6 +1257,129 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const response = yield* HttpClient.get("/");
       assert.equal(response.status, 200);
       assert.include(yield* response.text, "router-static-ok");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("serves Brotli static sidecars when the client accepts Brotli", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-router-static-br-",
+      });
+      const assetsDir = path.join(staticDir, "assets");
+      const assetPath = path.join(assetsDir, "app-test.js");
+      yield* fileSystem.makeDirectory(assetsDir, { recursive: true });
+      yield* fileSystem.writeFileString(assetPath, "console.log('brotli');");
+      yield* fileSystem.writeFile(
+        `${assetPath}.br`,
+        brotliCompressSync(Buffer.from("console.log('brotli');"), {
+          params: {
+            [zlibConstants.BROTLI_PARAM_QUALITY]: zlibConstants.BROTLI_MAX_QUALITY,
+          },
+        }),
+      );
+      yield* fileSystem.writeFile(`${assetPath}.gz`, gzipSync(Buffer.from("console.log('gzip');")));
+
+      yield* buildAppUnderTest({ config: { staticDir } });
+
+      const url = yield* getHttpServerUrl("/assets/app-test.js");
+      const response = yield* Effect.promise(() =>
+        fetch(url, { headers: { "accept-encoding": "gzip, br" } }),
+      );
+
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("content-encoding"), "br");
+      assert.equal(response.headers.get("vary"), "Accept-Encoding");
+      assert.equal(response.headers.get("cache-control"), "public, max-age=31536000, immutable");
+      assert.include(response.headers.get("content-type") ?? "", "javascript");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("serves gzip static sidecars when Brotli is not accepted", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-router-static-gzip-",
+      });
+      const assetsDir = path.join(staticDir, "assets");
+      const assetPath = path.join(assetsDir, "app-test.css");
+      yield* fileSystem.makeDirectory(assetsDir, { recursive: true });
+      yield* fileSystem.writeFileString(assetPath, "body { color: red; }");
+      yield* fileSystem.writeFile(
+        `${assetPath}.br`,
+        brotliCompressSync(Buffer.from("body { color: blue; }")),
+      );
+      yield* fileSystem.writeFile(`${assetPath}.gz`, gzipSync(Buffer.from("body { color: red; }")));
+
+      yield* buildAppUnderTest({ config: { staticDir } });
+
+      const url = yield* getHttpServerUrl("/assets/app-test.css");
+      const response = yield* Effect.promise(() =>
+        fetch(url, { headers: { "accept-encoding": "gzip" } }),
+      );
+
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("content-encoding"), "gzip");
+      assert.equal(response.headers.get("vary"), "Accept-Encoding");
+      assert.equal(response.headers.get("cache-control"), "public, max-age=31536000, immutable");
+      assert.include(response.headers.get("content-type") ?? "", "text/css");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("falls back to raw static files when no accepted sidecar exists", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-router-static-raw-",
+      });
+      const assetsDir = path.join(staticDir, "assets");
+      yield* fileSystem.makeDirectory(assetsDir, { recursive: true });
+      yield* fileSystem.writeFileString(path.join(assetsDir, "app-test.js"), "raw-ok");
+
+      yield* buildAppUnderTest({ config: { staticDir } });
+
+      const url = yield* getHttpServerUrl("/assets/app-test.js");
+      const response = yield* Effect.promise(() =>
+        fetch(url, { headers: { "accept-encoding": "br;q=0, gzip;q=0" } }),
+      );
+
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("content-encoding"), null);
+      assert.equal(response.headers.get("vary"), "Accept-Encoding");
+      assert.equal(response.headers.get("cache-control"), "public, max-age=31536000, immutable");
+      assert.equal(yield* Effect.promise(() => response.text()), "raw-ok");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("keeps HTML entrypoints and fallback HTML uncached", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-router-static-html-cache-",
+      });
+      const indexPath = path.join(staticDir, "index.html");
+      yield* fileSystem.writeFileString(indexPath, "<html>fallback</html>");
+      yield* fileSystem.writeFile(
+        `${indexPath}.br`,
+        brotliCompressSync(Buffer.from("<html>fallback</html>")),
+      );
+
+      yield* buildAppUnderTest({ config: { staticDir } });
+
+      const url = yield* getHttpServerUrl("/deep/link");
+      const response = yield* Effect.promise(() =>
+        fetch(url, { headers: { "accept-encoding": "br" } }),
+      );
+
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("content-encoding"), "br");
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal(response.headers.get("vary"), "Accept-Encoding");
+      assert.include(response.headers.get("content-type") ?? "", "text/html");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -2127,6 +2326,62 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(response.auth.policy, "desktop-managed-local");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
+
+  if (process.versions.bun !== undefined) {
+    // Bun's bare `ws` compatibility server accepts upgrades but does not
+    // negotiate permessage-deflate. The production compression layer is for
+    // the Node/Electron backend path, so keep this assertion on that runtime.
+    it.skip("negotiates websocket compression when a client offers permessage-deflate", () => {});
+  } else {
+    it.effect("negotiates websocket compression when a client offers permessage-deflate", () =>
+      Effect.gen(function* () {
+        yield* buildAppUnderTest();
+
+        const bootstrapUrl = yield* getHttpServerUrl("/api/auth/bootstrap");
+        const bootstrapResponse = yield* Effect.promise(() =>
+          fetch(bootstrapUrl, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              credential: defaultDesktopBootstrapToken,
+            }),
+          }),
+        );
+        const cookie = bootstrapResponse.headers.get("set-cookie");
+
+        assert.equal(bootstrapResponse.status, 200);
+        assert.isDefined(cookie);
+
+        const wsUrl = appendSessionCookieToWsUrl(
+          yield* getWsServerUrl("/ws", { authenticated: false }),
+          cookie?.split(";")[0] ?? "",
+        );
+        const negotiatedHeaders = yield* getWebSocketUpgradeResponseHeaders(wsUrl, {
+          offerPerMessageDeflate: true,
+        });
+        const uncompressedHeaders = yield* getWebSocketUpgradeResponseHeaders(wsUrl, {
+          offerPerMessageDeflate: false,
+        });
+
+        assertInclude(negotiatedHeaders[":status"] ?? "", "101");
+        assertInclude(uncompressedHeaders[":status"] ?? "", "101");
+        assertInclude(negotiatedHeaders["sec-websocket-extensions"] ?? "", "permessage-deflate");
+        assert.equal(uncompressedHeaders["sec-websocket-extensions"] ?? "", "");
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            NodeHttpServerCompression.layer(NodeHttp.createServer, {
+              host: "127.0.0.1",
+              port: 0,
+            }),
+            FetchHttpClient.layer,
+          ),
+        ),
+      ),
+    );
+  }
 
   it.effect(
     "rejects websocket rpc handshake when a session token is only provided via query string",

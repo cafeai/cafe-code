@@ -783,6 +783,62 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("drops low-value Codex plugin and skill metadata stderr warnings", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      const baseEvent = {
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "process/stderr",
+        turnId: asTurnId("turn-1"),
+      } as const;
+
+      yield* runtime.emit({
+        ...baseEvent,
+        id: asEventId("evt-plugin-default-prompt"),
+        message:
+          "2026-06-10T00:00:00.000000Z  WARN codex_core_plugins::manifest: ignoring interface.defaultPrompt[0]: prompt must be at most 128 characters path=/tmp/plugin.json",
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        ...baseEvent,
+        id: asEventId("evt-skill-icon-small"),
+        message:
+          "codex_core_skills::loader: ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/",
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        ...baseEvent,
+        id: asEventId("evt-skill-icon-large"),
+        message:
+          "codex_core_skills::loader: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/",
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        ...baseEvent,
+        id: asEventId("evt-real-stderr-warning"),
+        message: "The filename or extension is too long. (os error 206)",
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      assert.equal(firstEvent.value.eventId, "evt-real-stderr-warning");
+      assert.equal(firstEvent.value.type, "runtime.warning");
+      if (firstEvent.value.type !== "runtime.warning") {
+        return;
+      }
+      assert.equal(
+        firstEvent.value.payload.message,
+        "The filename or extension is too long. (os error 206)",
+      );
+    }),
+  );
+
   it.effect("maps Codex turn-start event starvation diagnostics to runtime.warning", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

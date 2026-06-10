@@ -106,6 +106,7 @@ import {
   orchestrationSnapshotRouteLayer,
 } from "./orchestration/http.ts";
 import * as NetService from "@cafecode/shared/Net";
+import * as NodeHttpServerCompression from "./nodeHttpServerCompression.ts";
 
 const HttpServerLive = Layer.unwrap(
   Effect.gen(function* () {
@@ -119,11 +120,8 @@ const HttpServerLive = Layer.unwrap(
         ...(config.host ? { hostname: config.host } : {}),
       });
     } else {
-      const [NodeHttpServer, NodeHttp] = yield* Effect.all([
-        Effect.promise(() => import("@effect/platform-node/NodeHttpServer")),
-        Effect.promise(() => import("node:http")),
-      ]);
-      return NodeHttpServer.layer(NodeHttp.createServer, {
+      const NodeHttp = yield* Effect.promise(() => import("node:http"));
+      return NodeHttpServerCompression.layer(NodeHttp.createServer, {
         host: config.host,
         port: config.port,
       });

@@ -263,6 +263,28 @@ function isCodexResponsesWebsocketStderrDiagnostic(event: ProviderEvent): boolea
   );
 }
 
+function isCodexLowValueMetadataStderrWarning(event: ProviderEvent): boolean {
+  if (event.method !== "process/stderr") {
+    return false;
+  }
+  const message = event.message ?? readPayloadMessage(event);
+  if (!message) {
+    return false;
+  }
+
+  // Codex can emit one stderr line for every plugin/skill metadata issue while
+  // scanning homes and plugin caches. These are retained in native provider logs
+  // but are not useful thread activity, and bursts can dominate WebSocket traffic
+  // on slow links.
+  return (
+    (containsNormalized(message, "codex_core_plugins::manifest") &&
+      containsNormalized(message, "ignoring interface.defaultprompt")) ||
+    (containsNormalized(message, "codex_core_skills::loader") &&
+      (containsNormalized(message, "ignoring interface.icon_small") ||
+        containsNormalized(message, "ignoring interface.icon_large")))
+  );
+}
+
 function isCodexAuthInvalidatedEvent(event: ProviderEvent): boolean {
   const message = readPayloadMessage(event);
   const additionalDetails = readPayloadAdditionalDetails(event);
@@ -1651,6 +1673,9 @@ function mapToRuntimeEvents(
 
   if (event.method === "process/stderr") {
     if (isCodexResponsesWebsocketStderrDiagnostic(event)) {
+      return [];
+    }
+    if (isCodexLowValueMetadataStderrWarning(event)) {
       return [];
     }
     const message = event.message ?? "Codex process stderr";
