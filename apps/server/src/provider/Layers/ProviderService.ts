@@ -30,6 +30,7 @@ import {
 } from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -87,6 +88,7 @@ const ProviderReadThreadInput = Schema.Struct({
 });
 
 const ProviderRuntimeRestartInput = ServerProviderRuntimeRestartInput;
+const PROVIDER_ADAPTER_EVENT_STREAM_RESTART_DELAY = Duration.millis(500);
 
 function toValidationError(
   operation: string,
@@ -519,6 +521,62 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     Effect.map((map) => Array.from(map.entries())),
   );
 
+  const runAdapterEventSubscription = (
+    id: ProviderInstanceId,
+    adapter: ProviderAdapterShape<ProviderAdapterError>,
+  ) =>
+    Effect.gen(function* () {
+      let restartCount = 0;
+      while (true) {
+        const result = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          processRuntimeEventSafely(
+            {
+              instanceId: id,
+              provider: adapter.provider,
+            },
+            event,
+          ),
+        ).pipe(
+          Effect.matchCauseEffect({
+            onFailure: (cause) => {
+              if (Cause.hasInterruptsOnly(cause)) {
+                return Effect.failCause(cause);
+              }
+              return Effect.succeed({
+                kind: "failed" as const,
+                cause: Cause.pretty(cause),
+              });
+            },
+            onSuccess: () =>
+              Effect.succeed({
+                kind: "completed" as const,
+              }),
+          }),
+        );
+
+        const current = yield* Ref.get(subscribedAdapters);
+        if (current.get(id) !== adapter) {
+          yield* Effect.logDebug("provider.runtime.adapter-event-stream-retired", {
+            providerInstanceId: id,
+            provider: adapter.provider,
+            reason: result.kind,
+            restartCount,
+          });
+          return;
+        }
+
+        restartCount += 1;
+        yield* Effect.logWarning("provider.runtime.adapter-event-stream-stopped", {
+          providerInstanceId: id,
+          provider: adapter.provider,
+          reason: result.kind,
+          restartCount,
+          ...(result.kind === "failed" ? { cause: result.cause } : {}),
+        });
+        yield* Effect.sleep(PROVIDER_ADAPTER_EVENT_STREAM_RESTART_DELAY);
+      }
+    });
+
   // Rebuild the map of id → adapter from the registry and fork a new event
   // subscription for every instance that is either brand new or whose adapter
   // identity changed (indicating the underlying `ProviderInstance` was torn
@@ -537,15 +595,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const adapter = adapterOption.value;
       next.set(id, adapter);
       if (previous.get(id) !== adapter) {
-        yield* Stream.runForEach(adapter.streamEvents, (event) =>
-          processRuntimeEventSafely(
-            {
-              instanceId: id,
-              provider: adapter.provider,
-            },
-            event,
-          ),
-        ).pipe(Effect.forkScoped);
+        yield* runAdapterEventSubscription(id, adapter).pipe(Effect.forkScoped);
       }
     }
     yield* Ref.set(subscribedAdapters, next);

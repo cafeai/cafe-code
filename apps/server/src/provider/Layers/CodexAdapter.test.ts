@@ -536,6 +536,93 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("maps the final Codex notification burst through the canonical bridge", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 3).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-final-rate-limits"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "account/rateLimits/updated",
+        threadId: asThreadId("thread-1"),
+        payload: {
+          rateLimits: {
+            limitId: "codex",
+            limitName: null,
+            primary: {
+              usedPercent: 18,
+              windowDurationMins: 300,
+              resetsAt: 1_781_219_828,
+            },
+            secondary: {
+              usedPercent: 7,
+              windowDurationMins: 10_080,
+              resetsAt: 1_781_776_130,
+            },
+            credits: null,
+            individualLimit: null,
+            planType: "pro",
+            rateLimitReachedType: null,
+          },
+        },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-final-thread-idle"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "thread/status/changed",
+        threadId: asThreadId("thread-1"),
+        payload: {
+          threadId: "provider-thread-1",
+          status: { type: "idle" },
+        },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-final-turn-completed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/completed",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        payload: {
+          threadId: "provider-thread-1",
+          turn: {
+            id: "turn-1",
+            items: [],
+            itemsView: "notLoaded",
+            status: "completed",
+            error: null,
+            startedAt: 1_781_212_032,
+            completedAt: 1_781_212_040,
+            durationMs: 7_502,
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      assert.deepStrictEqual(
+        runtimeEvents.map((event) => event.type),
+        ["account.rate-limits.updated", "thread.state.changed", "turn.completed"],
+      );
+      assert.deepStrictEqual(
+        runtimeEvents.map((event) => event.eventId),
+        [
+          asEventId("evt-final-rate-limits"),
+          asEventId("evt-final-thread-idle"),
+          asEventId("evt-final-turn-completed"),
+        ],
+      );
+    }),
+  );
+
   it.effect("maps completed plan items to canonical proposed-plan completion events", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

@@ -29,6 +29,7 @@ import {
   ProviderSendTurnInput,
   RuntimeTaskId,
 } from "@cafecode/contracts";
+import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -302,6 +303,42 @@ function isCodexTransportPolicyPersistenceEnabled(environment: NodeJS.ProcessEnv
 
 function isCodexTurnTerminalEvent(event: ProviderEvent): boolean {
   return event.method === "turn/completed" || event.method === "turn/aborted";
+}
+
+function shouldAuditCodexBridgeEvent(event: ProviderEvent): boolean {
+  return (
+    isCodexTurnTerminalEvent(event) ||
+    event.method === "thread/status/changed" ||
+    event.method === "account/rateLimits/updated" ||
+    event.method === "item/completed"
+  );
+}
+
+function bridgeEventLogContext(
+  event: ProviderEvent,
+  extra?: {
+    readonly runtimeEvents?: ReadonlyArray<ProviderRuntimeEvent>;
+    readonly stage?: string;
+    readonly cause?: unknown;
+  },
+): Record<string, unknown> {
+  return {
+    provider: event.provider,
+    providerInstanceId: event.providerInstanceId,
+    threadId: event.threadId,
+    turnId: event.turnId,
+    itemId: event.itemId,
+    eventId: event.id,
+    method: event.method,
+    ...(extra?.stage ? { stage: extra.stage } : {}),
+    ...(extra?.runtimeEvents
+      ? {
+          canonicalEventCount: extra.runtimeEvents.length,
+          canonicalEventTypes: extra.runtimeEvents.map((entry) => entry.type),
+        }
+      : {}),
+    ...(extra?.cause ? { cause: extra.cause } : {}),
+  };
 }
 
 function codexTransportPolicyKey(input: {
@@ -2015,21 +2052,65 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
           Effect.gen(function* () {
-            yield* writeNativeEvent(event);
-            const runtimeEvents = mapToRuntimeEvents(event, event.threadId);
+            yield* writeNativeEvent(event).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("codex.runtime.bridge.native-log-write-failed", {
+                  ...bridgeEventLogContext(event, {
+                    stage: "native-log",
+                    cause: Cause.pretty(cause),
+                  }),
+                }),
+              ),
+            );
+
+            const runtimeEvents = yield* Effect.sync(() =>
+              mapToRuntimeEvents(event, event.threadId),
+            ).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("codex.runtime.bridge.map-failed", {
+                  ...bridgeEventLogContext(event, {
+                    stage: "map",
+                    cause: Cause.pretty(cause),
+                  }),
+                }).pipe(Effect.as([] as ReadonlyArray<ProviderRuntimeEvent>)),
+              ),
+            );
+
             if (runtimeEvents.length === 0) {
-              yield* Effect.logDebug("ignoring unhandled Codex provider event", {
-                method: event.method,
-                threadId: event.threadId,
-                turnId: event.turnId,
-                itemId: event.itemId,
+              const context = bridgeEventLogContext(event, {
+                stage: "map",
+                runtimeEvents,
               });
+              if (shouldAuditCodexBridgeEvent(event)) {
+                yield* Effect.logWarning("codex.runtime.bridge.important-event-unmapped", context);
+              } else {
+                yield* Effect.logDebug("ignoring unhandled Codex provider event", context);
+              }
               return;
             }
             if (isCodexResponsesWebsocketFallbackEvent(event)) {
               yield* disableResponsesWebsocketsFromEvent(event);
             }
-            yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
+            const enqueued = yield* Queue.offerAll(runtimeEventQueue, runtimeEvents).pipe(
+              Effect.as(true),
+              Effect.catchCause((cause) =>
+                Effect.logWarning("codex.runtime.bridge.enqueue-failed", {
+                  ...bridgeEventLogContext(event, {
+                    stage: "enqueue",
+                    runtimeEvents,
+                    cause: Cause.pretty(cause),
+                  }),
+                }).pipe(Effect.as(false)),
+              ),
+            );
+            if (enqueued && shouldAuditCodexBridgeEvent(event)) {
+              yield* Effect.logDebug("codex.runtime.bridge.enqueued", {
+                ...bridgeEventLogContext(event, {
+                  stage: "enqueue",
+                  runtimeEvents,
+                }),
+              });
+            }
             if (isCodexAuthInvalidatedEvent(event)) {
               yield* prepareRuntimeHome.pipe(
                 Effect.tapError((cause) =>
@@ -2066,7 +2147,19 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 event.message ?? `${event.method} received from Codex runtime`,
               );
             }
-          }),
+          }).pipe(
+            Effect.catchCause((cause) => {
+              if (Cause.hasInterruptsOnly(cause)) {
+                return Effect.failCause(cause);
+              }
+              return Effect.logWarning("codex.runtime.bridge.event-failed", {
+                ...bridgeEventLogContext(event, {
+                  stage: "event",
+                  cause: Cause.pretty(cause),
+                }),
+              });
+            }),
+          ),
         ).pipe(
           // This bridge is the only path from the Codex runtime's native
           // event queue into the provider daemon journal. It must be owned by

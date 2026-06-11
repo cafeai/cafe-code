@@ -93,7 +93,7 @@ type LegacyProviderRuntimeEvent = {
 
 function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
   const sessions = new Map<ThreadId, ProviderSession>();
-  const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
+  let runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
 
   const startSession = vi.fn(
     (input: ProviderSessionStartInput): Effect.Effect<ProviderSession, ProviderAdapterError> =>
@@ -254,6 +254,12 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     Effect.runSync(PubSub.publish(runtimeEventPubSub, event as unknown as ProviderRuntimeEvent));
   };
 
+  const replaceEventStream = (): void => {
+    const previous = runtimeEventPubSub;
+    runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
+    Effect.runSync(PubSub.shutdown(previous));
+  };
+
   const updateSession = (
     threadId: ThreadId,
     update: (session: ProviderSession) => ProviderSession,
@@ -281,6 +287,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     readThread,
     rollbackThread,
     stopAll,
+    replaceEventStream,
   };
 }
 
@@ -2049,6 +2056,43 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
       assert.deepEqual(
         received.map((event) => event.eventId),
         [asEventId("evt-fanout-valid-after-malformed")],
+      );
+    }),
+  );
+
+  it.effect("restarts a current adapter event subscription after the stream ends", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const session = yield* provider.startSession(asThreadId("thread-stream-restart"), {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId: asThreadId("thread-stream-restart"),
+        runtimeMode: "full-access",
+      });
+
+      const receivedFiber = yield* Stream.take(provider.streamEvents, 1).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* advanceTestClock(50);
+
+      fanout.codex.replaceEventStream();
+      yield* advanceTestClock(600);
+
+      fanout.codex.emit({
+        type: "turn.completed",
+        eventId: asEventId("evt-after-stream-restart"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        threadId: session.threadId,
+        turnId: asTurnId("turn-1"),
+        status: "completed",
+      });
+
+      const received = Array.from(yield* Fiber.join(receivedFiber));
+      assert.deepEqual(
+        received.map((event) => event.eventId),
+        [asEventId("evt-after-stream-restart")],
       );
     }),
   );
