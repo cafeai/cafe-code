@@ -18,6 +18,7 @@ import {
   ProviderItemId,
   ProviderRuntimeEvent,
   type RuntimeMode,
+  RuntimeTaskId,
   ThreadId,
   ProviderInstanceId,
 } from "@cafecode/contracts";
@@ -1838,6 +1839,94 @@ describe("ClaudeAdapterLive", () => {
       if (usageEvent && progressEvent) {
         assert.notStrictEqual(usageEvent.eventId, progressEvent.eventId);
       }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("maps Claude task_updated patches without runtime warnings", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const context = yield* Effect.context<never>();
+      const runFork = Effect.runForkWith(context);
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+
+      const runtimeEventsFiber = runFork(
+        Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            runtimeEvents.push(event);
+          }),
+        ),
+      );
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEvents.length = 0;
+
+      harness.query.emit({
+        type: "system",
+        subtype: "task_updated",
+        task_id: "task-update-running",
+        patch: {
+          status: "running",
+          summary: "Background agent is checking imports.",
+        },
+        session_id: "sdk-session-task-updated",
+        uuid: "task-update-running-1",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      harness.query.emit({
+        type: "system",
+        subtype: "task_updated",
+        task_id: "task-update-completed",
+        patch: {
+          status: "completed",
+          end_time: 1_781_176_454_986,
+        },
+        session_id: "sdk-session-task-updated",
+        uuid: "task-update-completed-1",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      const progressEvent = runtimeEvents.find(
+        (event) =>
+          event.type === "task.progress" &&
+          event.payload.taskId === RuntimeTaskId.make("task-update-running"),
+      );
+      assert.equal(progressEvent?.type, "task.progress");
+      if (progressEvent?.type === "task.progress") {
+        assert.equal(progressEvent.payload.description, "Task running");
+        assert.equal(progressEvent.payload.summary, "Background agent is checking imports.");
+      }
+
+      const completedEvent = runtimeEvents.find(
+        (event) =>
+          event.type === "task.completed" &&
+          event.payload.taskId === RuntimeTaskId.make("task-update-completed"),
+      );
+      assert.equal(completedEvent?.type, "task.completed");
+      if (completedEvent?.type === "task.completed") {
+        assert.equal(completedEvent.payload.status, "completed");
+      }
+
+      assert.equal(
+        runtimeEvents.some((event) => event.type === "runtime.warning"),
+        false,
+      );
+      runtimeEventsFiber.interruptUnsafe();
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

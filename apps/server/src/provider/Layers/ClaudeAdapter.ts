@@ -255,6 +255,27 @@ function isClaudeAuthFailureSystemMessage(message: SDKMessage): boolean {
   );
 }
 
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function trimmedStringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function claudeTaskTerminalStatus(value: unknown): "completed" | "failed" | "stopped" | undefined {
+  const status = trimmedStringValue(value)?.toLowerCase();
+  if (status === "completed" || status === "failed" || status === "stopped") {
+    return status;
+  }
+  if (status === "killed" || status === "cancelled" || status === "canceled") {
+    return "stopped";
+  }
+  return undefined;
+}
+
 function resultPrimaryError(result: SDKResultMessage): string | undefined {
   if ("errors" in result && Array.isArray(result.errors)) {
     const first = result.errors.find((entry): entry is string => typeof entry === "string");
@@ -2932,6 +2953,80 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         });
         return;
+      case "task_updated": {
+        // Claude Code 2.1.173 started emitting task_updated as a patch-style
+        // lifecycle message for the same background task ids previously
+        // announced through task_started/task_progress/task_notification.
+        // The SDK types can lag behind the binary, so treat the patch as
+        // untrusted provider data: copy only structured fields Cafe already
+        // understands, keep the complete payload only in the raw native event,
+        // and avoid surfacing a runtime warning for a valid upstream subtype.
+        const record = message as Record<string, unknown>;
+        const patch = recordValue(record.patch) ?? {};
+        const taskId = trimmedStringValue(record.task_id);
+        if (!taskId) {
+          yield* emitRuntimeWarning(context, "Claude task update was missing a task id.", message);
+          return;
+        }
+
+        const usage = patch.usage ?? record.usage;
+        if (usage) {
+          const normalizedUsage = normalizeClaudeTokenUsage(
+            usage,
+            context.selectedContextWindowTokens ?? context.lastKnownContextWindow,
+          );
+          if (normalizedUsage) {
+            context.lastKnownTokenUsage = normalizedUsage;
+            const usageStamp = yield* makeEventStamp();
+            yield* offerRuntimeEvent({
+              ...base,
+              eventId: usageStamp.eventId,
+              createdAt: usageStamp.createdAt,
+              type: "thread.token-usage.updated",
+              payload: {
+                usage: normalizedUsage,
+              },
+            });
+          }
+        }
+
+        const terminalStatus = claudeTaskTerminalStatus(patch.status ?? record.status);
+        if (terminalStatus) {
+          yield* offerRuntimeEvent({
+            ...base,
+            type: "task.completed",
+            payload: {
+              taskId: RuntimeTaskId.make(taskId),
+              status: terminalStatus,
+              ...(trimmedStringValue(patch.summary ?? record.summary)
+                ? { summary: trimmedStringValue(patch.summary ?? record.summary) }
+                : {}),
+              ...(usage !== undefined ? { usage } : {}),
+            },
+          });
+          return;
+        }
+
+        const rawStatus = trimmedStringValue(patch.status ?? record.status);
+        const summary = trimmedStringValue(patch.summary ?? record.summary);
+        const description =
+          trimmedStringValue(patch.description ?? record.description) ??
+          (rawStatus ? `Task ${rawStatus}` : "Task updated");
+        yield* offerRuntimeEvent({
+          ...base,
+          type: "task.progress",
+          payload: {
+            taskId: RuntimeTaskId.make(taskId),
+            description,
+            ...(summary ? { summary } : {}),
+            ...(usage !== undefined ? { usage } : {}),
+            ...(trimmedStringValue(patch.last_tool_name ?? record.last_tool_name)
+              ? { lastToolName: trimmedStringValue(patch.last_tool_name ?? record.last_tool_name) }
+              : {}),
+          },
+        });
+        return;
+      }
       case "task_notification":
         if (message.usage) {
           const normalizedUsage = normalizeClaudeTokenUsage(
