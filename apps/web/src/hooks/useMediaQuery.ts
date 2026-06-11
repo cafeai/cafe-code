@@ -86,11 +86,18 @@ export function useIsMobile(): boolean {
   return useMediaQuery("max-md");
 }
 
+const ON_SCREEN_KEYBOARD_MEDIA_QUERY = "(hover: none) and (pointer: coarse)";
+
 /**
  * True on touch-only devices (phones, tablets, foldables) where focusing an
  * input opens an on-screen keyboard. Unlike width-based checks this is stable
  * across orientation/fold changes and never matches desktop windows.
  */
 export function useHasOnScreenKeyboard(): boolean {
-  return useMediaQuery("(hover: none) and (pointer: coarse)");
+  return useMediaQuery(ON_SCREEN_KEYBOARD_MEDIA_QUERY);
+}
+
+/** Non-reactive variant of useHasOnScreenKeyboard for use in event handlers. */
+export function hasOnScreenKeyboard(): boolean {
+  return typeof window !== "undefined" && window.matchMedia(ON_SCREEN_KEYBOARD_MEDIA_QUERY).matches;
 }

@@ -64,6 +64,7 @@ import {
   type TimestampFormat,
 } from "@cafecode/contracts/settings";
 import { formatTimestamp } from "../../timestampFormat";
+import { hasOnScreenKeyboard } from "../../hooks/useMediaQuery";
 import {
   isWholeMessageSelection,
   prepareChatMessageMarkdownCopyText,
@@ -831,6 +832,12 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
   );
   const handleContextMenu = useCallback(
     async (event: ReactMouseEvent<HTMLDivElement>) => {
+      // On touch devices the contextmenu event comes from a long-press, which
+      // should start native text selection rather than open the custom copy
+      // menu — otherwise text on the page can never be selected.
+      if (hasOnScreenKeyboard()) {
+        return;
+      }
       if (hasActiveTextSelection()) {
         return;
       }

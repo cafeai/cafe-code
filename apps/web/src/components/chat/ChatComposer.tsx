@@ -2018,6 +2018,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         steerComposer();
         return true;
       }
+      // On touch devices a bare Enter from the on-screen keyboard inserts a
+      // newline; sending is done with the send button. Modifier shortcuts
+      // (e.g. Ctrl+Enter from a paired hardware keyboard) still submit.
+      if (isOnScreenKeyboardDevice && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        return false;
+      }
       if (command === "composer.submit" || (!event.metaKey && !event.ctrlKey && !event.altKey)) {
         submitComposer();
         return true;
