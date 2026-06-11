@@ -476,7 +476,10 @@ describe("isContextMenuPointerDown", () => {
 
 describe("buildSidebarThreadContextMenuItems", () => {
   it("includes thread-wide provider repair on the thread context menu", () => {
-    const items = buildSidebarThreadContextMenuItems({ repairRunning: false });
+    const items = buildSidebarThreadContextMenuItems({
+      debugEnabled: true,
+      repairRunning: false,
+    });
     const repairItem = items.find((item) => item.id === "repair-thread");
 
     expect(repairItem).toMatchObject({
@@ -495,11 +498,29 @@ describe("buildSidebarThreadContextMenuItems", () => {
   });
 
   it("disables thread repair while another repair is running", () => {
-    const repairItem = buildSidebarThreadContextMenuItems({ repairRunning: true }).find(
-      (item) => item.id === "repair-thread",
-    );
+    const repairItem = buildSidebarThreadContextMenuItems({
+      debugEnabled: true,
+      repairRunning: true,
+    }).find((item) => item.id === "repair-thread");
 
     expect(repairItem?.disabled).toBe(true);
+  });
+
+  it("hides thread repair outside debug mode", () => {
+    const items = buildSidebarThreadContextMenuItems({
+      debugEnabled: false,
+      repairRunning: false,
+    });
+
+    expect(items.some((item) => item.id === "repair-thread")).toBe(false);
+    expect(items.map((item) => item.id)).toEqual([
+      "rename",
+      "duplicate",
+      "move",
+      "copy-path",
+      "copy-thread-id",
+      "delete",
+    ]);
   });
 });
 

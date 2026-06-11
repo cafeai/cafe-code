@@ -89,6 +89,7 @@ import {
 import { useModelPickerOpen } from "../modelPickerOpenState";
 import { useShortcutModifierState } from "../shortcutModifierState";
 import { useGitStatus } from "../lib/gitStatusState";
+import { useDesktopDebugEnabled } from "../lib/desktopDebugState";
 import { readLocalApi } from "../localApi";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
@@ -1019,6 +1020,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
 interface SidebarProjectItemProps {
   project: SidebarProjectSnapshot;
   bootstrappedEnvironmentIds: ReadonlySet<string>;
+  desktopDebugEnabled: boolean;
   isThreadListExpanded: boolean;
   activeRouteThreadKey: string | null;
   newThreadShortcutLabel: string | null;
@@ -1040,6 +1042,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const {
     project,
     bootstrappedEnvironmentIds,
+    desktopDebugEnabled,
     isThreadListExpanded,
     activeRouteThreadKey,
     newThreadShortcutLabel,
@@ -2349,6 +2352,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       const threadWorkspacePath = thread.worktreePath ?? threadProject?.cwd ?? project.cwd ?? null;
       const clicked = await api.contextMenu.show(
         buildSidebarThreadContextMenuItems({
+          debugEnabled: desktopDebugEnabled,
           repairRunning: threadRepairDialog?.phase === "running",
         }),
         position,
@@ -2444,6 +2448,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       appSettingsConfirmThreadDelete,
       copyPathToClipboard,
       copyThreadIdToClipboard,
+      desktopDebugEnabled,
       deleteThread,
       memberProjectByScopedKey,
       openThreadMoveDialog,
@@ -3251,6 +3256,7 @@ interface SidebarProjectsContentProps {
   desktopUpdateButtonAction: "download" | "install" | "none";
   desktopUpdateButtonDisabled: boolean;
   handleDesktopUpdateButtonClick: () => void;
+  desktopDebugEnabled: boolean;
   projectSortOrder: SidebarProjectSortOrder;
   threadSortOrder: SidebarThreadSortOrder;
   projectGroupingMode: SidebarProjectGroupingMode;
@@ -3298,6 +3304,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     desktopUpdateButtonAction,
     desktopUpdateButtonDisabled,
     handleDesktopUpdateButtonClick,
+    desktopDebugEnabled,
     projectSortOrder,
     threadSortOrder,
     projectGroupingMode,
@@ -3464,6 +3471,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                       <SidebarProjectItem
                         project={project}
                         bootstrappedEnvironmentIds={bootstrappedEnvironmentIds}
+                        desktopDebugEnabled={desktopDebugEnabled}
                         isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                         activeRouteThreadKey={
                           activeRouteProjectKey === project.projectKey ? routeThreadKey : null
@@ -3497,6 +3505,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 key={project.projectKey}
                 project={project}
                 bootstrappedEnvironmentIds={bootstrappedEnvironmentIds}
+                desktopDebugEnabled={desktopDebugEnabled}
                 isThreadListExpanded={expandedThreadListsByProject.has(project.projectKey)}
                 activeRouteThreadKey={
                   activeRouteProjectKey === project.projectKey ? routeThreadKey : null
@@ -3586,6 +3595,7 @@ export default function Sidebar() {
   const showSidebarMascot = useSettings((s) => s.showSidebarMascot);
   const sidebarBrandImageDataUrl = useSettings((s) => s.sidebarBrandImageDataUrl);
   const showSidebarAttribution = useSettings((s) => s.showSidebarAttribution);
+  const desktopDebugEnabled = useDesktopDebugEnabled();
   const { updateSettings } = useUpdateSettings();
   const { handleNewThread } = useNewThreadHandler();
   const { archiveThread, deleteThread } = useThreadActions();
@@ -4204,6 +4214,7 @@ export default function Sidebar() {
               desktopUpdateButtonAction={desktopUpdateButtonAction}
               desktopUpdateButtonDisabled={desktopUpdateButtonDisabled}
               handleDesktopUpdateButtonClick={handleDesktopUpdateButtonClick}
+              desktopDebugEnabled={desktopDebugEnabled}
               projectSortOrder={sidebarProjectSortOrder}
               threadSortOrder={sidebarThreadSortOrder}
               projectGroupingMode={sidebarProjectGroupingMode}

@@ -36,6 +36,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } fro
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useShallow } from "zustand/react/shallow";
 import { useGitStatus } from "~/lib/gitStatusState";
+import { useDesktopDebugEnabled } from "~/lib/desktopDebugState";
 import { usePrimaryEnvironmentId } from "../environments/primary";
 import { readEnvironmentApi } from "../environmentApi";
 import { isElectron } from "../env";
@@ -1902,7 +1903,7 @@ export default function ChatView(props: ChatViewProps) {
   >({});
   const [pendingSteerInterruptRecoveryByThreadId, setPendingSteerInterruptRecoveryByThreadId] =
     useState<Record<string, PendingSteerInterruptRecovery>>({});
-  const [desktopDebugEnabled, setDesktopDebugEnabled] = useState(false);
+  const desktopDebugEnabled = useDesktopDebugEnabled();
   const [desktopDebugRevision, setDesktopDebugRevision] = useState(0);
   const lastDesktopDebugSnapshotPublishedAtMsRef = useRef(0);
   const desktopDebugSnapshotThrottleTimeoutRef = useRef<number | null>(null);
@@ -1978,30 +1979,6 @@ export default function ChatView(props: ChatViewProps) {
     },
     [desktopDebugEnabled],
   );
-  useEffect(() => {
-    const bridge = window.desktopBridge;
-    if (!bridge?.getDebugEndpointState) {
-      return;
-    }
-
-    let cancelled = false;
-    void bridge
-      .getDebugEndpointState()
-      .then((debugState) => {
-        if (!cancelled) {
-          setDesktopDebugEnabled(debugState.enabled);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setDesktopDebugEnabled(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
   useEffect(() => {
     if (!desktopDebugEnabled) {
       return;

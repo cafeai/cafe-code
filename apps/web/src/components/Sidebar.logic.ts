@@ -43,21 +43,27 @@ export interface SidebarThreadContextMenuItem {
 }
 
 export function buildSidebarThreadContextMenuItems(input: {
+  readonly debugEnabled: boolean;
   readonly repairRunning: boolean;
 }): ReadonlyArray<SidebarThreadContextMenuItem> {
-  return [
+  const items: SidebarThreadContextMenuItem[] = [
     { id: "rename", label: "Rename thread" },
     { id: "duplicate", label: "Duplicate thread" },
     { id: "move", label: "Move Thread..." },
     { id: "copy-path", label: "Copy Path" },
     { id: "copy-thread-id", label: "Copy Thread ID" },
-    {
+  ];
+
+  if (input.debugEnabled) {
+    items.push({
       id: "repair-thread",
       label: "Attempt repair from provider history",
       disabled: input.repairRunning,
-    },
-    { id: "delete", label: "Move to Recycle Bin", destructive: true },
-  ];
+    });
+  }
+
+  items.push({ id: "delete", label: "Move to Recycle Bin", destructive: true });
+  return items;
 }
 
 export interface ThreadStatusPill {
