@@ -2,10 +2,12 @@ import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Random from "effect/Random";
 import * as Ref from "effect/Ref";
 
+import type { ProviderDaemonClientConfig } from "@cafecode/contracts";
 import * as NetService from "@cafecode/shared/Net";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
@@ -31,6 +33,7 @@ const DEFAULT_DESKTOP_BACKEND_HTTPS_PORT = 3775;
 const MAX_TCP_PORT = 65_535;
 const DESKTOP_BACKEND_PORT_PROBE_HOSTS = ["127.0.0.1", "0.0.0.0", "::"] as const;
 const DESKTOP_SHUTDOWN_BACKEND_STOP_TIMEOUT = Duration.seconds(5);
+const PROVIDER_DAEMON_STARTING_ENDPOINT_POLL_INTERVAL = Duration.millis(10);
 
 const makeDesktopRunId = Random.nextUUIDv4.pipe(
   Effect.map((value) => value.replaceAll("-", "").slice(0, 12)),
@@ -185,6 +188,25 @@ const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupErr
 const fatalStartupCause = <E>(stage: string, cause: Cause.Cause<E>) =>
   handleFatalStartupError(stage, Cause.pretty(cause)).pipe(Effect.andThen(Effect.failCause(cause)));
 
+const waitForProviderDaemonStartingEndpoint = Effect.fn(
+  "desktop.bootstrap.waitForProviderDaemonStartingEndpoint",
+)(function* (
+  providerDaemonManager: DesktopProviderDaemonManager.DesktopProviderDaemonManagerShape,
+  readyFiber: Fiber.Fiber<ProviderDaemonClientConfig, never>,
+) {
+  const waitForCurrentConfig = Effect.gen(function* () {
+    while (true) {
+      const currentConfig = yield* providerDaemonManager.currentConfig;
+      if (Option.isSome(currentConfig)) {
+        return currentConfig.value;
+      }
+      yield* Effect.sleep(PROVIDER_DAEMON_STARTING_ENDPOINT_POLL_INTERVAL);
+    }
+  });
+
+  return yield* Effect.raceFirst(waitForCurrentConfig, Fiber.join(readyFiber));
+});
+
 const bootstrap = Effect.gen(function* () {
   const backendManager = yield* DesktopBackendManager.DesktopBackendManager;
   const providerDaemonManager = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
@@ -235,9 +257,13 @@ const bootstrap = Effect.gen(function* () {
   yield* logBootstrapInfo("bootstrap resolved backend endpoint", {
     baseUrl: backendConfig.httpBaseUrl.href,
   });
-  const providerDaemon = yield* providerDaemonManager.ensureRunning;
-  yield* logBootstrapInfo("bootstrap provider daemon ready", {
-    endpoint: providerDaemon.httpBaseUrl,
+  const providerDaemonReadyFiber = yield* Effect.forkScoped(providerDaemonManager.ensureRunning);
+  const providerDaemonEndpoint = yield* waitForProviderDaemonStartingEndpoint(
+    providerDaemonManager,
+    providerDaemonReadyFiber,
+  );
+  yield* logBootstrapInfo("bootstrap provider daemon endpoint prepared", {
+    endpoint: providerDaemonEndpoint.httpBaseUrl,
   });
   if (serverExposureState.endpointUrl) {
     yield* logBootstrapInfo("bootstrap enabled network access", {
@@ -256,6 +282,10 @@ const bootstrap = Effect.gen(function* () {
     yield* backendManager.start;
     yield* logBootstrapInfo("bootstrap backend start requested");
   }
+  const providerDaemon = yield* Fiber.join(providerDaemonReadyFiber);
+  yield* logBootstrapInfo("bootstrap provider daemon ready", {
+    endpoint: providerDaemon.httpBaseUrl,
+  });
 }).pipe(Effect.withSpan("desktop.bootstrap"));
 
 const startup = Effect.gen(function* () {

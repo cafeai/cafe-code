@@ -36,6 +36,7 @@
     "dev:desktop": "node scripts/dev-runner.ts dev:desktop",
     "start": "turbo run start --filter=@cafeai/cafe-code",
     "start:desktop": "turbo run start --filter=@cafecode/desktop",
+    "profile:desktop-startup": "node scripts/profile-desktop-startup.ts",
     "start:mock-update-server": "node scripts/mock-update-server.ts",
     "build": "turbo run build",
     "build:desktop": "turbo run build --filter=@cafecode/desktop --filter=@cafeai/cafe-code",

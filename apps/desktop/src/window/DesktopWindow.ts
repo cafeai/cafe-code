@@ -7,6 +7,7 @@ import * as Ref from "effect/Ref";
 
 import type * as Electron from "electron";
 
+import { stopStartupCpuProfiler } from "@cafecode/shared/startupProfiler";
 import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
@@ -277,6 +278,7 @@ const make = Effect.gen(function* () {
     }
     bindFirstRevealTrigger(revealSubscribers, () => {
       void runPromise(electronWindow.reveal(window));
+      void stopStartupCpuProfiler("desktop-window-revealed");
     });
 
     if (environment.isDevelopment) {

@@ -7,6 +7,7 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@cafecode/contracts";
+import { stopStartupCpuProfiler } from "@cafecode/shared/startupProfiler";
 import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -476,6 +477,9 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
         yield* runStartupPhase("browser.open", maybeOpenBrowser(startupBrowserTarget));
       }
       yield* Effect.logDebug("startup phase: complete");
+      yield* Effect.promise(() => stopStartupCpuProfiler("server-startup-complete")).pipe(
+        Effect.ignore,
+      );
     }),
   );
 

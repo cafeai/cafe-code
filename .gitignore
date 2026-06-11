@@ -28,3 +28,4 @@ squashfs-root/
 .selene/
 dist-electron/
 .electron-runtime/
+.startup-profiles/

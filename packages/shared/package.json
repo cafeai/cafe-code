@@ -115,6 +115,10 @@
     "./providerDaemonHttp": {
       "types": "./src/providerDaemonHttp.ts",
       "import": "./src/providerDaemonHttp.ts"
+    },
+    "./startupProfiler": {
+      "types": "./src/startupProfiler.ts",
+      "import": "./src/startupProfiler.ts"
     }
   },
   "scripts": {

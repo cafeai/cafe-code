@@ -10,6 +10,7 @@ import * as Electron from "electron";
 
 import * as NetService from "@cafecode/shared/Net";
 import { resolveRemoteCafeCodeCliPackageSpec } from "@cafecode/ssh/command";
+import { startStartupCpuProfiler } from "@cafecode/shared/startupProfiler";
 import type { RemoteCafeCodeRunnerOptions } from "@cafecode/ssh/tunnel";
 import serverPackageJson from "../../server/package.json" with { type: "json" };
 
@@ -48,6 +49,8 @@ import * as DesktopUpdates from "./updates/DesktopUpdates.ts";
 import * as DesktopSourceUpdates from "./updates/DesktopSourceUpdates.ts";
 import * as DesktopWindow from "./window/DesktopWindow.ts";
 import { resolveLinuxSafeStoragePasswordStore } from "./app/LinuxSafeStorageCommandLine.ts";
+
+startStartupCpuProfiler({ role: "desktop-main" });
 
 if (process.platform === "linux") {
   const passwordStore = resolveLinuxSafeStoragePasswordStore(process.env);

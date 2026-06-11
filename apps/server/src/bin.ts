@@ -5,12 +5,21 @@ import * as Layer from "effect/Layer";
 import { Command } from "effect/unstable/cli";
 
 import * as NetService from "@cafecode/shared/Net";
+import { startStartupCpuProfiler } from "@cafecode/shared/startupProfiler";
 import packageJson from "../package.json" with { type: "json" };
 import { authCommand } from "./cli/auth.ts";
 import { sharedServerCommandFlags } from "./cli/config.ts";
 import { projectCommand } from "./cli/project.ts";
 import { providerDaemonCommand, providerSupervisorCommand } from "./cli/providerDaemon.ts";
 import { runServerCommand, serveCommand, startCommand } from "./cli/server.ts";
+
+function resolveStartupProfilerRole(argv: readonly string[]): string {
+  if (argv.includes("provider-daemon")) return "provider-daemon";
+  if (argv.includes("provider-supervisor")) return "provider-supervisor";
+  return "server";
+}
+
+startStartupCpuProfiler({ role: resolveStartupProfilerRole(process.argv.slice(2)) });
 
 const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
 
