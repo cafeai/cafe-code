@@ -184,20 +184,22 @@ describe("DesktopBackendConfiguration", () => {
     ),
   );
 
-  it.effect("disables backend HTTPS through child env when desktop exposure has no HTTPS port", () =>
-    withHarness(
-      Effect.gen(function* () {
-        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
-        const config = yield* configuration.resolve;
+  it.effect(
+    "disables backend HTTPS through child env when desktop exposure has no HTTPS port",
+    () =>
+      withHarness(
+        Effect.gen(function* () {
+          const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+          const config = yield* configuration.resolve;
 
-        assert.equal(config.env.CAFE_CODE_HTTPS_ENABLED, "false");
-        assert.isUndefined(config.env.CAFE_CODE_HTTPS_PORT);
-        assert.isUndefined(config.bootstrap.httpsPort);
-      }),
-      {
-        serverExposureLayer: serverExposureWithoutHttpsLayer,
-      },
-    ),
+          assert.equal(config.env.CAFE_CODE_HTTPS_ENABLED, "false");
+          assert.isUndefined(config.env.CAFE_CODE_HTTPS_PORT);
+          assert.isUndefined(config.bootstrap.httpsPort);
+        }),
+        {
+          serverExposureLayer: serverExposureWithoutHttpsLayer,
+        },
+      ),
   );
 
   it.effect("includes persisted backend observability endpoints when present", () =>
