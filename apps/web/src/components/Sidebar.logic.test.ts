@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProviderDriverKind } from "@cafecode/contracts";
 
 import {
+  buildSidebarThreadContextMenuItems,
   createThreadJumpHintVisibilityController,
   getSidebarThreadIdsToPrewarm,
   getVisibleSidebarThreadIds,
@@ -470,6 +471,35 @@ describe("isContextMenuPointerDown", () => {
         isMac: false,
       }),
     ).toBe(false);
+  });
+});
+
+describe("buildSidebarThreadContextMenuItems", () => {
+  it("includes thread-wide provider repair on the thread context menu", () => {
+    const items = buildSidebarThreadContextMenuItems({ repairRunning: false });
+    const repairItem = items.find((item) => item.id === "repair-thread");
+
+    expect(repairItem).toMatchObject({
+      label: "Attempt repair from provider history",
+      disabled: false,
+    });
+    expect(items.map((item) => item.id)).toEqual([
+      "rename",
+      "duplicate",
+      "move",
+      "copy-path",
+      "copy-thread-id",
+      "repair-thread",
+      "delete",
+    ]);
+  });
+
+  it("disables thread repair while another repair is running", () => {
+    const repairItem = buildSidebarThreadContextMenuItems({ repairRunning: true }).find(
+      (item) => item.id === "repair-thread",
+    );
+
+    expect(repairItem?.disabled).toBe(true);
   });
 });
 

@@ -21,6 +21,8 @@ import {
   ThreadTurnStartCommand,
   ThreadCreatedPayload,
   ThreadTurnStartRequestedPayload,
+  ProviderJournalMessageRepairResult,
+  ProviderThreadAssistantMessagesRepairResult,
 } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
@@ -48,6 +50,12 @@ const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationComma
 const decodeClientOrchestrationCommand = Schema.decodeUnknownEffect(ClientOrchestrationCommand);
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
+const decodeProviderJournalMessageRepairResult = Schema.decodeUnknownEffect(
+  ProviderJournalMessageRepairResult,
+);
+const decodeProviderThreadAssistantMessagesRepairResult = Schema.decodeUnknownEffect(
+  ProviderThreadAssistantMessagesRepairResult,
+);
 
 it.effect("trims branded ids and command string fields at decode boundaries", () =>
   Effect.gen(function* () {
@@ -183,6 +191,104 @@ it.effect("rejects command fields that become empty after trim", () =>
         createdAt: "2026-01-01T00:00:00.000Z",
       }),
     );
+    assert.strictEqual(result._tag, "Failure");
+  }),
+);
+
+it.effect("decodes safe provider journal message repair results", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeProviderJournalMessageRepairResult({
+      status: "repaired",
+      threadId: "thread-1",
+      messageId: "assistant:item-1",
+      reason: "suffix-appended",
+      oldLength: 5,
+      newLength: 12,
+      appendedLength: 7,
+      candidateCount: 1,
+      provider: "codex",
+      providerInstanceId: "codex",
+      itemId: "item-1",
+      sourceEventId: "evt-item-completed",
+      source: "provider-journal",
+    });
+
+    assert.strictEqual(parsed.status, "repaired");
+    assert.strictEqual(parsed.threadId, "thread-1");
+    assert.strictEqual(parsed.messageId, "assistant:item-1");
+    assert.strictEqual("suffix" in parsed, false);
+    assert.strictEqual("completionText" in parsed, false);
+  }),
+);
+
+it.effect("decodes safe thread assistant message repair aggregates", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeProviderThreadAssistantMessagesRepairResult({
+      threadId: "thread-1",
+      sourcePolicy: "local-then-upstream",
+      counts: {
+        totalMessages: 2,
+        eligibleMessages: 2,
+        localAttempts: 2,
+        upstreamAttempts: 1,
+        repaired: 1,
+        unchanged: 0,
+        notEligible: 0,
+        sourceNotFound: 0,
+        ambiguousSource: 0,
+        diverged: 0,
+        upstreamUnavailable: 1,
+        failed: 0,
+      },
+      results: [
+        {
+          status: "repaired",
+          threadId: "thread-1",
+          messageId: "assistant:item-1",
+          oldLength: 5,
+          newLength: 12,
+          appendedLength: 7,
+          provider: "codex",
+          providerInstanceId: "codex",
+          itemId: "item-1",
+          source: "upstream-provider",
+        },
+        {
+          status: "upstream-unavailable",
+          threadId: "thread-1",
+          messageId: "assistant:item-2",
+          reason: "upstream-thread-read-failed",
+          source: "upstream-provider",
+        },
+      ],
+    });
+
+    assert.strictEqual(parsed.counts.repaired, 1);
+    assert.strictEqual(parsed.results[0]?.source, "upstream-provider");
+    assert.strictEqual("suffix" in parsed.results[0]!, false);
+    assert.strictEqual("completionText" in parsed.results[0]!, false);
+  }),
+);
+
+it.effect("keeps provider journal repair out of client-dispatchable commands", () =>
+  Effect.gen(function* () {
+    const result = yield* Effect.exit(
+      decodeClientOrchestrationCommand({
+        type: "thread.message.assistant.repair-suffix",
+        commandId: "cmd-repair",
+        threadId: "thread-1",
+        messageId: "assistant:item-1",
+        turnId: "turn-1",
+        suffix: "raw provider suffix",
+        provider: "codex",
+        sourceEventId: "evt-item-completed",
+        oldLength: 5,
+        newLength: 24,
+        appendedLength: 19,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+
     assert.strictEqual(result._tag, "Failure");
   }),
 );

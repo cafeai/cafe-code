@@ -40,6 +40,9 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       getDeletedShellSnapshot: rpcClient.orchestration.getDeletedShellSnapshot,
       getThreadTurnActivityPage: rpcClient.orchestration.getThreadTurnActivityPage,
       hardDeleteThread: rpcClient.orchestration.hardDeleteThread,
+      repairAssistantMessageFromProviderJournal:
+        rpcClient.orchestration.repairAssistantMessageFromProviderJournal,
+      repairThreadAssistantMessages: rpcClient.orchestration.repairThreadAssistantMessages,
       subscribeShell: (callback, options) =>
         rpcClient.orchestration.subscribeShell(callback, options),
       subscribeThread: (input, callback, options) =>

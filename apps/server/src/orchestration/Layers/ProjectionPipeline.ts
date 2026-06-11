@@ -1003,6 +1003,20 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
         }
 
+        case "thread.message.assistant-repair-applied": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            updatedAt: maxIso(existingRow.value.updatedAt, event.occurredAt),
+          });
+          return;
+        }
+
         case "thread.proposed-plan-upserted":
         case "thread.approval-response-requested":
         case "thread.user-input-response-requested": {
@@ -1241,6 +1255,25 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                     maxIso(previousMessage?.updatedAt ?? null, event.payload.updatedAt),
                     terminalTurnCompletedAt,
                   ),
+          });
+          return;
+        }
+
+        case "thread.message.assistant-repair-applied": {
+          const existingMessage = yield* projectionThreadMessageRepository.getByThreadAndMessageId({
+            threadId: event.payload.threadId,
+            messageId: event.payload.messageId,
+          });
+          if (Option.isNone(existingMessage) || existingMessage.value.role !== "assistant") {
+            return;
+          }
+
+          yield* projectionThreadMessageRepository.upsert({
+            ...existingMessage.value,
+            text: `${existingMessage.value.text}${event.payload.suffix}`,
+            isStreaming: false,
+            turnId: event.payload.turnId,
+            updatedAt: maxIso(existingMessage.value.updatedAt, event.payload.repairedAt),
           });
           return;
         }

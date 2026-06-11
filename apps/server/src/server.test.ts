@@ -72,6 +72,10 @@ import {
   OrchestrationEngineService,
   type OrchestrationEngineShape,
 } from "./orchestration/Services/OrchestrationEngine.ts";
+import {
+  ProviderJournalMessageRepair,
+  type ProviderJournalMessageRepairShape,
+} from "./orchestration/Services/ProviderJournalMessageRepair.ts";
 import { OrchestrationListenerCallbackError } from "./orchestration/Errors.ts";
 import {
   ProjectionSnapshotQuery,
@@ -431,6 +435,7 @@ const buildAppUnderTest = (options?: {
     vcsStatusBroadcaster?: Partial<VcsStatusBroadcaster.VcsStatusBroadcasterShape>;
     projectSetupScriptRunner?: Partial<ProjectSetupScriptRunnerShape>;
     orchestrationEngine?: Partial<OrchestrationEngineShape>;
+    providerJournalMessageRepair?: Partial<ProviderJournalMessageRepairShape>;
     projectionSnapshotQuery?: Partial<ProjectionSnapshotQueryShape>;
     checkpointStore?: Partial<CheckpointStoreShape>;
     browserTraceCollector?: Partial<BrowserTraceCollectorShape>;
@@ -773,12 +778,44 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provide(
-        Layer.mock(OrchestrationEngineService)({
-          readEvents: () => Stream.empty,
-          dispatch: () => Effect.succeed({ sequence: 0 }),
-          streamDomainEvents: Stream.empty,
-          ...options?.layers?.orchestrationEngine,
-        }),
+        Layer.mergeAll(
+          Layer.mock(OrchestrationEngineService)({
+            readEvents: () => Stream.empty,
+            dispatch: () => Effect.succeed({ sequence: 0 }),
+            streamDomainEvents: Stream.empty,
+            ...options?.layers?.orchestrationEngine,
+          }),
+          Layer.mock(ProviderJournalMessageRepair)({
+            repairAssistantMessage: (input) =>
+              Effect.succeed({
+                status: "source-not-found",
+                threadId: input.threadId,
+                messageId: input.messageId,
+                reason: "test-default",
+              }),
+            repairThreadAssistantMessages: (input) =>
+              Effect.succeed({
+                threadId: input.threadId,
+                sourcePolicy: input.sourcePolicy ?? "local-then-upstream",
+                counts: {
+                  totalMessages: 0,
+                  eligibleMessages: 0,
+                  localAttempts: 0,
+                  upstreamAttempts: 0,
+                  repaired: 0,
+                  unchanged: 0,
+                  notEligible: 0,
+                  sourceNotFound: 0,
+                  ambiguousSource: 0,
+                  diverged: 0,
+                  upstreamUnavailable: 0,
+                  failed: 0,
+                },
+                results: [],
+              }),
+            ...options?.layers?.providerJournalMessageRepair,
+          }),
+        ),
       ),
       Layer.provide(
         Layer.mock(ProjectionSnapshotQuery)({
@@ -3995,6 +4032,48 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           : null,
         repositoryIdentity,
       );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes websocket rpc provider journal repair requests", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.repairAssistantMessageFromProviderJournal]({
+            threadId: ThreadId.make("thread-repair-rpc"),
+            messageId: MessageId.make("assistant:item-rpc"),
+          }),
+        ),
+      );
+
+      assert.equal(result.status, "not-eligible");
+      assert.equal(result.reason, "message-not-found");
+      assert.equal(result.threadId, "thread-repair-rpc");
+      assert.equal(result.messageId, "assistant:item-rpc");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes websocket rpc thread assistant repair requests", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.repairThreadAssistantMessages]({
+            threadId: ThreadId.make("thread-repair-rpc"),
+            sourcePolicy: "local-then-upstream",
+          }),
+        ),
+      );
+
+      assert.equal(result.threadId, "thread-repair-rpc");
+      assert.equal(result.sourcePolicy, "local-then-upstream");
+      assert.equal(result.counts.totalMessages, 0);
+      assert.deepEqual(result.results, []);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

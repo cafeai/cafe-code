@@ -148,6 +148,12 @@ export interface WsRpcClient {
       typeof ORCHESTRATION_WS_METHODS.getThreadTurnActivityPage
     >;
     readonly hardDeleteThread: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.hardDeleteThread>;
+    readonly repairAssistantMessageFromProviderJournal: RpcUnaryMethod<
+      typeof ORCHESTRATION_WS_METHODS.repairAssistantMessageFromProviderJournal
+    >;
+    readonly repairThreadAssistantMessages: RpcUnaryMethod<
+      typeof ORCHESTRATION_WS_METHODS.repairThreadAssistantMessages
+    >;
     readonly subscribeShell: RpcStreamMethod<typeof ORCHESTRATION_WS_METHODS.subscribeShell>;
     readonly subscribeThread: RpcInputStreamMethod<typeof ORCHESTRATION_WS_METHODS.subscribeThread>;
   };
@@ -292,6 +298,14 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         ),
       hardDeleteThread: (input) =>
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.hardDeleteThread](input)),
+      repairAssistantMessageFromProviderJournal: (input) =>
+        transport.request((client) =>
+          client[ORCHESTRATION_WS_METHODS.repairAssistantMessageFromProviderJournal](input),
+        ),
+      repairThreadAssistantMessages: (input) =>
+        transport.request((client) =>
+          client[ORCHESTRATION_WS_METHODS.repairThreadAssistantMessages](input),
+        ),
       subscribeShell: (listener, options) =>
         transport.subscribe(
           (client) => client[ORCHESTRATION_WS_METHODS.subscribeShell]({}),

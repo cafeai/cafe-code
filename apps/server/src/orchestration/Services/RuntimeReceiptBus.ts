@@ -1,20 +1,27 @@
 /**
  * RuntimeReceiptBus - Internal checkpoint-reactor synchronization receipts.
  *
- * This service exists to expose short-lived orchestration milestones that are
- * useful in tests and harnesses but are not part of the production runtime
- * event model. `CheckpointReactor` publishes receipts such as baseline capture,
- * diff finalization, and turn-processing quiescence so integration tests can
- * wait for those exact points without inferring them indirectly from persisted
- * state.
+ * This service exposes short-lived orchestration milestones that are not part
+ * of the durable domain event model. Production lifecycle code uses provider
+ * ingestion receipts to synchronize independent provider-event consumers, while
+ * tests can subscribe to the same receipt stream instead of inferring milestones
+ * indirectly from persisted state.
  *
- * Production code should only call `publish`. Test code may subscribe via
- * `streamEventsForTest`, which is intentionally named to make the intended
- * usage explicit.
+ * Receipts are process-local coordination facts. They must not contain prompts,
+ * model output, secrets, or unrestricted filesystem paths.
  *
  * @module RuntimeReceiptBus
  */
-import { CheckpointRef, IsoDateTime, NonNegativeInt, ThreadId, TurnId } from "@cafecode/contracts";
+import {
+  CheckpointRef,
+  EventId,
+  IsoDateTime,
+  NonNegativeInt,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+  TurnId,
+} from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
@@ -49,15 +56,37 @@ export const TurnProcessingQuiescedReceipt = Schema.Struct({
 });
 export type TurnProcessingQuiescedReceipt = typeof TurnProcessingQuiescedReceipt.Type;
 
+export const ProviderTurnIngestionQuiescedReceipt = Schema.Struct({
+  type: Schema.Literal("provider.turn.ingestion-quiesced"),
+  threadId: ThreadId,
+  turnId: TurnId,
+  provider: ProviderDriverKind,
+  providerInstanceId: Schema.optional(ProviderInstanceId),
+  sourceEventId: EventId,
+  createdAt: IsoDateTime,
+});
+export type ProviderTurnIngestionQuiescedReceipt = typeof ProviderTurnIngestionQuiescedReceipt.Type;
+
 export const OrchestrationRuntimeReceipt = Schema.Union([
   CheckpointBaselineCapturedReceipt,
   CheckpointDiffFinalizedReceipt,
   TurnProcessingQuiescedReceipt,
+  ProviderTurnIngestionQuiescedReceipt,
 ]);
 export type OrchestrationRuntimeReceipt = typeof OrchestrationRuntimeReceipt.Type;
 
+export interface AwaitTurnIngestionQuiescedInput {
+  readonly threadId: ThreadId;
+  readonly turnId: TurnId;
+  readonly provider: ProviderDriverKind;
+  readonly providerInstanceId?: ProviderInstanceId | undefined;
+}
+
 export interface RuntimeReceiptBusShape {
   readonly publish: (receipt: OrchestrationRuntimeReceipt) => Effect.Effect<void>;
+  readonly awaitTurnIngestionQuiesced: (
+    input: AwaitTurnIngestionQuiescedInput,
+  ) => Effect.Effect<ProviderTurnIngestionQuiescedReceipt>;
   readonly streamEventsForTest: Stream.Stream<OrchestrationRuntimeReceipt>;
 }
 

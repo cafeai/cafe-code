@@ -26,6 +26,40 @@ type SidebarProject = {
 
 export type ThreadTraversalDirection = "previous" | "next";
 
+export type SidebarThreadContextMenuAction =
+  | "rename"
+  | "duplicate"
+  | "move"
+  | "copy-path"
+  | "copy-thread-id"
+  | "repair-thread"
+  | "delete";
+
+export interface SidebarThreadContextMenuItem {
+  readonly id: SidebarThreadContextMenuAction;
+  readonly label: string;
+  readonly disabled?: boolean;
+  readonly destructive?: boolean;
+}
+
+export function buildSidebarThreadContextMenuItems(input: {
+  readonly repairRunning: boolean;
+}): ReadonlyArray<SidebarThreadContextMenuItem> {
+  return [
+    { id: "rename", label: "Rename thread" },
+    { id: "duplicate", label: "Duplicate thread" },
+    { id: "move", label: "Move Thread..." },
+    { id: "copy-path", label: "Copy Path" },
+    { id: "copy-thread-id", label: "Copy Thread ID" },
+    {
+      id: "repair-thread",
+      label: "Attempt repair from provider history",
+      disabled: input.repairRunning,
+    },
+    { id: "delete", label: "Move to Recycle Bin", destructive: true },
+  ];
+}
+
 export interface ThreadStatusPill {
   label:
     | "Working"

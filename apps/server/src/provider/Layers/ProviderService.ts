@@ -82,6 +82,10 @@ const ProviderRollbackConversationInput = Schema.Struct({
   numTurns: NonNegativeInt,
 });
 
+const ProviderReadThreadInput = Schema.Struct({
+  threadId: ThreadId,
+});
+
 const ProviderRuntimeRestartInput = ServerProviderRuntimeRestartInput;
 
 function toValidationError(
@@ -1397,6 +1401,44 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const getInstanceInfo: ProviderServiceShape["getInstanceInfo"] = (instanceId) =>
     registry.getInstanceInfo(instanceId);
 
+  const readThread: NonNullable<ProviderServiceShape["readThread"]> = Effect.fn("readThread")(
+    function* (rawInput) {
+      const input = yield* decodeInputOrValidationError({
+        operation: "ProviderService.readThread",
+        schema: ProviderReadThreadInput,
+        payload: rawInput,
+      });
+      let metricProvider = "unknown";
+      return yield* Effect.gen(function* () {
+        const routed = yield* resolveRoutableSession({
+          threadId: input.threadId,
+          operation: "ProviderService.readThread",
+          allowRecovery: true,
+        });
+        metricProvider = routed.adapter.provider;
+        yield* Effect.annotateCurrentSpan({
+          "provider.operation": "read-thread",
+          "provider.kind": routed.adapter.provider,
+          "provider.thread_id": input.threadId,
+        });
+        const snapshot = yield* routed.adapter.readThread(routed.threadId);
+        return {
+          provider: routed.adapter.provider,
+          providerInstanceId: routed.instanceId,
+          snapshot,
+        };
+      }).pipe(
+        withMetrics({
+          counter: providerTurnsTotal,
+          outcomeAttributes: () =>
+            providerMetricAttributes(metricProvider, {
+              operation: "read-thread",
+            }),
+        }),
+      );
+    },
+  );
+
   const rollbackConversation: ProviderServiceShape["rollbackConversation"] = Effect.fn(
     "rollbackConversation",
   )(function* (rawInput) {
@@ -1538,6 +1580,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     listSessions,
     getCapabilities,
     getInstanceInfo,
+    readThread,
     rollbackConversation,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each

@@ -421,6 +421,24 @@ export const WsOrchestrationHardDeleteThreadRpc = Rpc.make(
   },
 );
 
+export const WsOrchestrationRepairAssistantMessageFromProviderJournalRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.repairAssistantMessageFromProviderJournal,
+  {
+    payload: OrchestrationRpcSchemas.repairAssistantMessageFromProviderJournal.input,
+    success: OrchestrationRpcSchemas.repairAssistantMessageFromProviderJournal.output,
+    error: OrchestrationGetSnapshotError,
+  },
+);
+
+export const WsOrchestrationRepairThreadAssistantMessagesRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.repairThreadAssistantMessages,
+  {
+    payload: OrchestrationRpcSchemas.repairThreadAssistantMessages.input,
+    success: OrchestrationRpcSchemas.repairThreadAssistantMessages.output,
+    error: OrchestrationGetSnapshotError,
+  },
+);
+
 export const WsOrchestrationGetThreadTurnActivityPageRpc = Rpc.make(
   ORCHESTRATION_WS_METHODS.getThreadTurnActivityPage,
   {
@@ -511,6 +529,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationGetArchivedShellSnapshotRpc,
   WsOrchestrationGetDeletedShellSnapshotRpc,
   WsOrchestrationHardDeleteThreadRpc,
+  WsOrchestrationRepairAssistantMessageFromProviderJournalRpc,
+  WsOrchestrationRepairThreadAssistantMessagesRpc,
   WsOrchestrationGetThreadTurnActivityPageRpc,
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,

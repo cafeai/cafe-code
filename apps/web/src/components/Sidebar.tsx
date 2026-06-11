@@ -41,6 +41,7 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   type ContextMenuItem,
   type DesktopUpdateState,
+  type ProviderThreadAssistantMessagesRepairResult,
   ProjectId,
   type ScopedThreadRef,
   type SidebarProjectGroupingMode,
@@ -160,6 +161,7 @@ import {
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import {
+  buildSidebarThreadContextMenuItems,
   getSidebarThreadIdsToPrewarm,
   isProjectDeleteRequiresForceError,
   resolveAdjacentThreadId,
@@ -332,6 +334,123 @@ interface SidebarThreadRowProps {
   cancelRename: () => void;
   attemptArchiveThread: (threadRef: ScopedThreadRef) => Promise<void>;
   openPrLink: (event: React.MouseEvent<HTMLElement>, prUrl: string) => void;
+}
+
+type ThreadRepairDialogState =
+  | {
+      readonly phase: "running";
+      readonly thread: SidebarThreadSummary;
+    }
+  | {
+      readonly phase: "complete";
+      readonly thread: SidebarThreadSummary;
+      readonly result: ProviderThreadAssistantMessagesRepairResult;
+    }
+  | {
+      readonly phase: "error";
+      readonly thread: SidebarThreadSummary;
+      readonly message: string;
+    };
+
+function repairDialogSkippedCount(result: ProviderThreadAssistantMessagesRepairResult): number {
+  const counts = result.counts;
+  return (
+    counts.notEligible +
+    counts.sourceNotFound +
+    counts.ambiguousSource +
+    counts.diverged +
+    counts.upstreamUnavailable
+  );
+}
+
+function ThreadRepairProgressDialog({
+  state,
+  onClose,
+}: {
+  state: ThreadRepairDialogState | null;
+  onClose: () => void;
+}) {
+  const running = state?.phase === "running";
+  const result = state?.phase === "complete" ? state.result : null;
+  const skipped = result ? repairDialogSkippedCount(result) : 0;
+
+  return (
+    <Dialog
+      open={state !== null}
+      onOpenChange={(open) => {
+        if (!open && !running) {
+          onClose();
+        }
+      }}
+    >
+      <DialogPopup className="max-w-md" showCloseButton={!running}>
+        <DialogHeader>
+          <DialogTitle>Repair thread messages</DialogTitle>
+          <DialogDescription>
+            {state ? `"${state.thread.title}"` : "Repairing selected thread."}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogPanel className="space-y-4">
+          {running ? (
+            <div className="space-y-3">
+              <div
+                role="progressbar"
+                aria-label="Repair progress"
+                className="h-2 overflow-hidden rounded-full bg-muted"
+              >
+                <div className="h-full w-1/2 animate-pulse rounded-full bg-primary" />
+              </div>
+              <p className="text-sm text-muted-foreground">
+                Checking local provider journal and upstream provider history.
+              </p>
+            </div>
+          ) : null}
+
+          {result ? (
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              <div className="rounded-md border bg-muted/25 px-3 py-2">
+                <span className="block text-xs text-muted-foreground">Messages</span>
+                <span className="font-medium">{result.counts.totalMessages}</span>
+              </div>
+              <div className="rounded-md border bg-muted/25 px-3 py-2">
+                <span className="block text-xs text-muted-foreground">Repaired</span>
+                <span className="font-medium">{result.counts.repaired}</span>
+              </div>
+              <div className="rounded-md border bg-muted/25 px-3 py-2">
+                <span className="block text-xs text-muted-foreground">Already complete</span>
+                <span className="font-medium">{result.counts.unchanged}</span>
+              </div>
+              <div className="rounded-md border bg-muted/25 px-3 py-2">
+                <span className="block text-xs text-muted-foreground">Skipped</span>
+                <span className="font-medium">{skipped}</span>
+              </div>
+              <div className="rounded-md border bg-muted/25 px-3 py-2">
+                <span className="block text-xs text-muted-foreground">Local checks</span>
+                <span className="font-medium">{result.counts.localAttempts}</span>
+              </div>
+              <div className="rounded-md border bg-muted/25 px-3 py-2">
+                <span className="block text-xs text-muted-foreground">Upstream checks</span>
+                <span className="font-medium">{result.counts.upstreamAttempts}</span>
+              </div>
+            </div>
+          ) : null}
+
+          {state?.phase === "error" ? (
+            <Alert variant="error">
+              <TriangleAlertIcon className="size-4" />
+              <AlertTitle>Unable to repair thread</AlertTitle>
+              <AlertDescription>{state.message}</AlertDescription>
+            </Alert>
+          ) : null}
+        </DialogPanel>
+        {!running ? (
+          <DialogFooter>
+            <Button onClick={onClose}>Close</Button>
+          </DialogFooter>
+        ) : null}
+      </DialogPopup>
+    </Dialog>
+  );
 }
 
 const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowProps) {
@@ -1092,6 +1211,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const [threadMoveTarget, setThreadMoveTarget] = useState<SidebarThreadSummary | null>(null);
   const [threadMoveProjectId, setThreadMoveProjectId] = useState<ProjectId | null>(null);
   const [threadMoveSubmitting, setThreadMoveSubmitting] = useState(false);
+  const [threadRepairDialog, setThreadRepairDialog] = useState<ThreadRepairDialogState | null>(
+    null,
+  );
   const renamingCommittedRef = useRef(false);
   const renamingInputRef = useRef<HTMLInputElement | null>(null);
   const confirmArchiveButtonRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -2181,6 +2303,39 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     }
   }, [closeThreadMoveDialog, threadMoveCandidateProjects, threadMoveProjectId, threadMoveTarget]);
 
+  const closeThreadRepairDialog = useCallback(() => {
+    setThreadRepairDialog((current) => (current?.phase === "running" ? current : null));
+  }, []);
+
+  const startThreadRepair = useCallback(async (thread: SidebarThreadSummary) => {
+    const api = readEnvironmentApi(thread.environmentId);
+    if (!api) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Unable to repair thread",
+          description: "The environment for this thread is not available.",
+        }),
+      );
+      return;
+    }
+
+    setThreadRepairDialog({ phase: "running", thread });
+    try {
+      const result = await api.orchestration.repairThreadAssistantMessages({
+        threadId: thread.id,
+        sourcePolicy: "local-then-upstream",
+      });
+      setThreadRepairDialog({ phase: "complete", thread, result });
+    } catch (error) {
+      setThreadRepairDialog({
+        phase: "error",
+        thread,
+        message: error instanceof Error ? error.message : "The repair request failed.",
+      });
+    }
+  }, []);
+
   const handleThreadContextMenu = useCallback(
     async (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
       const api = readLocalApi();
@@ -2193,14 +2348,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       );
       const threadWorkspacePath = thread.worktreePath ?? threadProject?.cwd ?? project.cwd ?? null;
       const clicked = await api.contextMenu.show(
-        [
-          { id: "rename", label: "Rename thread" },
-          { id: "duplicate", label: "Duplicate thread" },
-          { id: "move", label: "Move Thread..." },
-          { id: "copy-path", label: "Copy Path" },
-          { id: "copy-thread-id", label: "Copy Thread ID" },
-          { id: "delete", label: "Move to Recycle Bin", destructive: true },
-        ],
+        buildSidebarThreadContextMenuItems({
+          repairRunning: threadRepairDialog?.phase === "running",
+        }),
         position,
       );
 
@@ -2272,6 +2422,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         copyThreadIdToClipboard(thread.id, { threadId: thread.id });
         return;
       }
+      if (clicked === "repair-thread") {
+        await startThreadRepair(thread);
+        return;
+      }
       if (clicked !== "delete") return;
       if (appSettingsConfirmThreadDelete) {
         const confirmed = await api.dialogs.confirm(
@@ -2295,6 +2449,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       openThreadMoveDialog,
       project.cwd,
       router,
+      startThreadRepair,
+      threadRepairDialog?.phase,
     ],
   );
 
@@ -2437,6 +2593,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         expandThreadListForProject={expandThreadListForProject}
         collapseThreadListForProject={collapseThreadListForProject}
       />
+
+      <ThreadRepairProgressDialog state={threadRepairDialog} onClose={closeThreadRepairDialog} />
 
       <Dialog
         open={projectRenameTarget !== null}

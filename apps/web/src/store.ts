@@ -1469,6 +1469,38 @@ function applyThreadMessageSentEvent(
   return markThreadShellUpdated(nextState, event.payload.threadId, event.occurredAt);
 }
 
+function applyThreadMessageAssistantRepairAppliedEvent(
+  state: EnvironmentState,
+  event: Extract<OrchestrationEvent, { type: "thread.message.assistant-repair-applied" }>,
+): EnvironmentState {
+  const previousById = state.messageByThreadId[event.payload.threadId] ?? {};
+  const previousMessage = previousById[event.payload.messageId];
+  if (!previousMessage || previousMessage.role !== "assistant") {
+    return state;
+  }
+
+  const nextMessage: ChatMessage = {
+    ...previousMessage,
+    text: `${previousMessage.text}${event.payload.suffix}`,
+    streaming: false,
+    turnId: event.payload.turnId,
+    completedAt: event.payload.repairedAt,
+  };
+
+  const nextState: EnvironmentState = {
+    ...state,
+    messageByThreadId: {
+      ...state.messageByThreadId,
+      [event.payload.threadId]: {
+        ...previousById,
+        [event.payload.messageId]: nextMessage,
+      },
+    },
+  };
+
+  return markThreadShellUpdated(nextState, event.payload.threadId, event.occurredAt);
+}
+
 function buildProjectState(
   projects: ReadonlyArray<Project>,
 ): Pick<EnvironmentState, "projectIds" | "projectById"> {
@@ -1876,6 +1908,9 @@ function applyEnvironmentOrchestrationEvent(
 
     case "thread.message-sent":
       return applyThreadMessageSentEvent(state, event, environmentId);
+
+    case "thread.message.assistant-repair-applied":
+      return applyThreadMessageAssistantRepairAppliedEvent(state, event);
 
     case "thread.session-set":
       return updateThreadState(state, event.payload.threadId, (thread) => {

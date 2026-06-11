@@ -116,6 +116,8 @@ vi.mock("../../rpc/wsRpcClient", () => ({
     },
     orchestration: {
       subscribeThread: vi.fn(() => () => {}),
+      repairAssistantMessageFromProviderJournal: vi.fn(),
+      repairThreadAssistantMessages: vi.fn(),
     },
   })),
 }));

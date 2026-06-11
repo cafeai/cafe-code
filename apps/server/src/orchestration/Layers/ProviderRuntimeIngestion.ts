@@ -44,6 +44,12 @@ import {
   ProviderRuntimeIngestionService,
   type ProviderRuntimeIngestionShape,
 } from "../Services/ProviderRuntimeIngestion.ts";
+import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
+import {
+  assistantCompletionTextFromRuntimeEvent,
+  completedAssistantTextDelta,
+  hasRenderableAssistantText,
+} from "../providerAssistantCompletionText.ts";
 import { sanitizeProviderToolData } from "@cafecode/shared/activityPayloadSanitizer";
 import { ServerSettingsService } from "../../serverSettings.ts";
 
@@ -209,37 +215,6 @@ function normalizeProposedPlanMarkdown(planMarkdown: string | undefined): string
     return undefined;
   }
   return trimmed;
-}
-
-function hasRenderableAssistantText(text: string | undefined): boolean {
-  return (text?.trim().length ?? 0) > 0;
-}
-
-function completedAssistantTextDelta(input: {
-  readonly projectedText: string | undefined;
-  readonly bufferedText: string;
-  readonly fallbackText: string | undefined;
-}): string {
-  if (input.bufferedText.length > 0) {
-    return input.bufferedText;
-  }
-
-  const fallbackText = input.fallbackText;
-  if (!hasRenderableAssistantText(fallbackText)) {
-    return "";
-  }
-
-  const projectedText = input.projectedText ?? "";
-  if (projectedText.length === 0) {
-    return fallbackText!;
-  }
-
-  // Codex item/completed carries the authoritative final assistant item text.
-  // When Cafe has only projected a streamed prefix, append exactly the missing
-  // suffix before the terminal marker. Do not append divergent completion text:
-  // that would duplicate visible content and corrupt the append-only message
-  // event stream. Divergence remains visible through provider/runtime logs.
-  return fallbackText!.startsWith(projectedText) ? fallbackText!.slice(projectedText.length) : "";
 }
 
 function normalizedAssistantDedupText(text: string | undefined): string | undefined {
@@ -795,6 +770,7 @@ const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
+  const receiptBus = yield* RuntimeReceiptBus;
   const projectionStateRepository = yield* ProjectionStateRepository;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
@@ -1914,7 +1890,7 @@ const make = Effect.gen(function* () {
               messageId: MessageId.make(
                 `assistant:${event.itemId ?? event.turnId ?? event.eventId}`,
               ),
-              fallbackText: event.payload.detail,
+              fallbackText: assistantCompletionTextFromRuntimeEvent(event),
             }
           : undefined;
       const proposedPlanCompletion =
@@ -2140,6 +2116,27 @@ const make = Effect.gen(function* () {
   const processRuntimeEventOnce = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
       const eventKey = providerRuntimeEventKey(event);
+      const publishTurnIngestionQuiesced = () => {
+        const turnId = toTurnId(event.turnId);
+        if (event.type !== "turn.completed" || !turnId) {
+          return Effect.void;
+        }
+
+        // This is the synchronization boundary for independent provider-event
+        // consumers. By publishing only after processRuntimeEvent, replay
+        // dedupe, and daemon cursor persistence have completed, checkpoint
+        // terminalization can wait for text/proposed-plan buffers to flush
+        // without relying on arbitrary quiet-time delays.
+        return receiptBus.publish({
+          type: "provider.turn.ingestion-quiesced",
+          threadId: event.threadId,
+          turnId,
+          provider: event.provider,
+          ...(event.providerInstanceId ? { providerInstanceId: event.providerInstanceId } : {}),
+          sourceEventId: event.eventId,
+          createdAt: event.createdAt,
+        });
+      };
       const alreadyProcessed = yield* Cache.getOption(processedRuntimeEventIds, eventKey);
       if (Option.isSome(alreadyProcessed)) {
         yield* Effect.logDebug("skipping replayed provider runtime event").pipe(
@@ -2149,6 +2146,7 @@ const make = Effect.gen(function* () {
             threadId: event.threadId,
           }),
         );
+        yield* publishTurnIngestionQuiesced();
         return;
       }
 
@@ -2161,6 +2159,7 @@ const make = Effect.gen(function* () {
       if (providerDaemonCursor !== undefined) {
         yield* persistProviderDaemonCursor(providerDaemonCursor);
       }
+      yield* publishTurnIngestionQuiesced();
     });
 
   const processInput = (input: RuntimeIngestionInput) =>

@@ -223,6 +223,12 @@ function createMockEnvironmentApi(input: {
       hardDeleteThread: (() => {
         throw new Error("Not implemented in browser test.");
       }) as EnvironmentApi["orchestration"]["hardDeleteThread"],
+      repairAssistantMessageFromProviderJournal: (() => {
+        throw new Error("Not implemented in browser test.");
+      }) as EnvironmentApi["orchestration"]["repairAssistantMessageFromProviderJournal"],
+      repairThreadAssistantMessages: (() => {
+        throw new Error("Not implemented in browser test.");
+      }) as EnvironmentApi["orchestration"]["repairThreadAssistantMessages"],
       subscribeShell: (() => () => undefined) as EnvironmentApi["orchestration"]["subscribeShell"],
       subscribeThread: (() => () =>
         undefined) as EnvironmentApi["orchestration"]["subscribeThread"],

@@ -41,6 +41,8 @@ import {
   type OrchestrationEngineShape,
 } from "./orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ProviderJournalMessageRepairLive } from "./orchestration/Layers/ProviderJournalMessageRepair.ts";
+import { ProviderJournalMessageRepair } from "./orchestration/Services/ProviderJournalMessageRepair.ts";
 import { ThreadDetailSubscriptionRegistry } from "./orchestration/Services/ThreadDetailSubscriptionRegistry.ts";
 import {
   observeRpcEffect,
@@ -101,6 +103,7 @@ function isThreadDetailEvent(event: OrchestrationEvent): event is Extract<
   {
     type:
       | "thread.message-sent"
+      | "thread.message.assistant-repair-applied"
       | "thread.proposed-plan-upserted"
       | "thread.activity-appended"
       | "thread.turn-diff-completed"
@@ -110,6 +113,7 @@ function isThreadDetailEvent(event: OrchestrationEvent): event is Extract<
 > {
   return (
     event.type === "thread.message-sent" ||
+    event.type === "thread.message.assistant-repair-applied" ||
     event.type === "thread.proposed-plan-upserted" ||
     event.type === "thread.activity-appended" ||
     event.type === "thread.turn-diff-completed" ||
@@ -243,6 +247,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
     Effect.gen(function* () {
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
       const orchestrationEngine = yield* OrchestrationEngineService;
+      const providerJournalMessageRepair = yield* ProviderJournalMessageRepair;
       const threadDetailSubscriptionRegistry = yield* ThreadDetailSubscriptionRegistry;
       const keybindings = yield* Keybindings;
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
@@ -885,6 +890,34 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
             ),
             { "rpc.aggregate": "orchestration" },
           ),
+        [ORCHESTRATION_WS_METHODS.repairAssistantMessageFromProviderJournal]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.repairAssistantMessageFromProviderJournal,
+            providerJournalMessageRepair.repairAssistantMessage(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationGetSnapshotError({
+                    message: "Failed to repair assistant message from provider journal",
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_WS_METHODS.repairThreadAssistantMessages]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.repairThreadAssistantMessages,
+            providerJournalMessageRepair.repairThreadAssistantMessages(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationGetSnapshotError({
+                    message: "Failed to repair thread assistant messages",
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "orchestration" },
+          ),
         [ORCHESTRATION_WS_METHODS.getThreadTurnActivityPage]: (input) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.getThreadTurnActivityPage,
@@ -1390,6 +1423,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
           Effect.provide(
             makeWsRpcLayer(session.sessionId).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
+              Layer.provide(ProviderJournalMessageRepairLive),
               Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(
                 SourceControlDiscoveryLayer.layer.pipe(

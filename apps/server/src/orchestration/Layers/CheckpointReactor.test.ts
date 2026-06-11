@@ -22,6 +22,7 @@ import {
 } from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -42,6 +43,7 @@ import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import { RuntimeReceiptBusLive } from "./RuntimeReceiptBus.ts";
+import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -107,6 +109,7 @@ type LegacyProviderRuntimeEvent = {
   readonly turnId?: string | undefined;
   readonly itemId?: string | undefined;
   readonly requestId?: string | undefined;
+  readonly providerInstanceId?: ProviderInstanceId | undefined;
   readonly payload?: unknown | undefined;
   readonly [key: string]: unknown;
 };
@@ -301,7 +304,11 @@ async function waitForGitRefMissing(cwd: string, ref: string, timeoutMs = 15_000
 
 describe("CheckpointReactor", () => {
   let runtime: ManagedRuntime.ManagedRuntime<
-    OrchestrationEngineService | CheckpointReactor | CheckpointStore | ProjectionSnapshotQuery,
+    | OrchestrationEngineService
+    | CheckpointReactor
+    | CheckpointStore
+    | ProjectionSnapshotQuery
+    | RuntimeReceiptBus,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -332,6 +339,8 @@ describe("CheckpointReactor", () => {
     readonly providerSessionCwd?: string;
     readonly providerName?: ProviderDriverKind;
     readonly gitStatusRefreshCalls?: Array<string>;
+    readonly autoPublishIngestionReceipt?: boolean;
+    readonly runtimeReceiptBusLayer?: Layer.Layer<RuntimeReceiptBus>;
   }) {
     const cwd = createGitRepository();
     tempDirs.push(cwd);
@@ -379,7 +388,7 @@ describe("CheckpointReactor", () => {
     const layer = CheckpointReactorLive.pipe(
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
-      Layer.provideMerge(RuntimeReceiptBusLive),
+      Layer.provideMerge(options?.runtimeReceiptBusLayer ?? RuntimeReceiptBusLive),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(vcsStatusBroadcasterLayer),
       Layer.provideMerge(CheckpointStoreLive.pipe(Layer.provide(VcsDriverRegistry.layer))),
@@ -400,9 +409,32 @@ describe("CheckpointReactor", () => {
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const reactor = await runtime.runPromise(Effect.service(CheckpointReactor));
     const checkpointStore = await runtime.runPromise(Effect.service(CheckpointStore));
+    const receiptBus = await runtime.runPromise(Effect.service(RuntimeReceiptBus));
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(reactor.drain);
+    const publishIngestionReceipt = (event: LegacyProviderRuntimeEvent) => {
+      if (event.type !== "turn.completed" || !event.turnId) {
+        return Promise.resolve();
+      }
+      return runtime!.runPromise(
+        receiptBus.publish({
+          type: "provider.turn.ingestion-quiesced",
+          threadId: event.threadId,
+          turnId: TurnId.make(String(event.turnId)),
+          provider: event.provider,
+          ...(event.providerInstanceId ? { providerInstanceId: event.providerInstanceId } : {}),
+          sourceEventId: event.eventId,
+          createdAt: event.createdAt,
+        }),
+      );
+    };
+    const emit = (event: LegacyProviderRuntimeEvent): void => {
+      provider.emit(event);
+      if (options?.autoPublishIngestionReceipt !== false) {
+        void publishIngestionReceipt(event);
+      }
+    };
 
     const createdAt = "2026-01-01T00:00:00.000Z";
     await Effect.runPromise(
@@ -464,7 +496,11 @@ describe("CheckpointReactor", () => {
     return {
       engine,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
-      provider,
+      provider: {
+        ...provider,
+        emit,
+      },
+      publishIngestionReceipt,
       cwd,
       drain,
       checkpointStore,
@@ -545,6 +581,66 @@ describe("CheckpointReactor", () => {
         "README.md",
       ),
     ).toBe("v2\n");
+  });
+
+  it("waits for provider ingestion quiescence before dispatching terminal turn diff completion", async () => {
+    const receiptAwaited = Effect.runSync(Deferred.make<void>());
+    const releaseReceipt = Effect.runSync(Deferred.make<void>());
+    const runtimeReceiptBusLayer = Layer.succeed(RuntimeReceiptBus, {
+      publish: () => Effect.void,
+      awaitTurnIngestionQuiesced: (input) =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(receiptAwaited, undefined);
+          yield* Deferred.await(releaseReceipt);
+          return {
+            type: "provider.turn.ingestion-quiesced" as const,
+            threadId: input.threadId,
+            turnId: input.turnId,
+            provider: input.provider,
+            ...(input.providerInstanceId ? { providerInstanceId: input.providerInstanceId } : {}),
+            sourceEventId: EventId.make("evt-controlled-ingestion-quiesced"),
+            createdAt: "2026-01-01T00:00:00.000Z",
+          };
+        }),
+      streamEventsForTest: Stream.empty,
+    });
+    const harness = await createHarness({
+      seedFilesystemCheckpoints: false,
+      autoPublishIngestionReceipt: false,
+      runtimeReceiptBusLayer,
+    });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    fs.writeFileSync(path.join(harness.cwd, "README.md"), "v2\n", "utf8");
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make("evt-turn-completed-waits-for-ingestion"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-waits-for-ingestion"),
+      payload: { state: "completed" },
+    });
+
+    await Effect.runPromise(Deferred.await(receiptAwaited).pipe(Effect.timeout("2 seconds")));
+    const eventsBeforeReceipt = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    expect(eventsBeforeReceipt.some((event) => event.type === "thread.turn-diff-completed")).toBe(
+      false,
+    );
+
+    await Effect.runPromise(Deferred.succeed(releaseReceipt, undefined));
+
+    await waitForEvent(harness.engine, (event) => event.type === "thread.turn-diff-completed");
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.latestTurn?.turnId === "turn-waits-for-ingestion" && entry.checkpoints.length === 1,
+    );
+    expect(thread.checkpoints[0]?.checkpointTurnCount).toBe(1);
   });
 
   it("does not replace a provider diff placeholder while the turn is still running", async () => {

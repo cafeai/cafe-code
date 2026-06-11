@@ -892,6 +892,40 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.message.assistant.repair-suffix": {
+      yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.message.assistant-repair-applied",
+        payload: {
+          threadId: command.threadId,
+          messageId: command.messageId,
+          turnId: command.turnId,
+          suffix: command.suffix,
+          provider: command.provider,
+          ...(command.providerInstanceId !== undefined
+            ? { providerInstanceId: command.providerInstanceId }
+            : {}),
+          ...(command.itemId !== undefined ? { itemId: command.itemId } : {}),
+          ...(command.source !== undefined ? { source: command.source } : {}),
+          ...(command.sourceEventId !== undefined ? { sourceEventId: command.sourceEventId } : {}),
+          oldLength: command.oldLength,
+          newLength: command.newLength,
+          appendedLength: command.appendedLength,
+          repairedAt: command.createdAt,
+        },
+      };
+    }
+
     case "thread.proposed-plan.upsert": {
       yield* requireThread({
         readModel,

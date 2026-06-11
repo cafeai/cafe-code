@@ -39,6 +39,8 @@ function createTestClient() {
     },
     orchestration: {
       dispatchCommand: vi.fn(async () => undefined),
+      repairAssistantMessageFromProviderJournal: vi.fn(),
+      repairThreadAssistantMessages: vi.fn(),
       subscribeShell: vi.fn(
         (
           listener: (event: any) => void,

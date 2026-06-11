@@ -54,6 +54,10 @@ import type {
   OrchestrationShellStreamItem,
   OrchestrationThreadTurnActivityPage,
   OrchestrationThreadTurnActivityPageInput,
+  ProviderJournalMessageRepairInput,
+  ProviderJournalMessageRepairResult,
+  ProviderThreadAssistantMessagesRepairInput,
+  ProviderThreadAssistantMessagesRepairResult,
   ThreadHardDeleteInput,
   ThreadHardDeleteResult,
   OrchestrationSubscribeThreadInput,
@@ -589,6 +593,12 @@ export interface EnvironmentApi {
       input: OrchestrationThreadTurnActivityPageInput,
     ) => Promise<OrchestrationThreadTurnActivityPage>;
     hardDeleteThread: (input: ThreadHardDeleteInput) => Promise<ThreadHardDeleteResult>;
+    repairAssistantMessageFromProviderJournal: (
+      input: ProviderJournalMessageRepairInput,
+    ) => Promise<ProviderJournalMessageRepairResult>;
+    repairThreadAssistantMessages: (
+      input: ProviderThreadAssistantMessagesRepairInput,
+    ) => Promise<ProviderThreadAssistantMessagesRepairResult>;
     subscribeShell: (
       callback: (event: OrchestrationShellStreamItem) => void,
       options?: {

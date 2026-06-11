@@ -44,9 +44,11 @@ import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import { ProviderRuntimeIngestionLive } from "./ProviderRuntimeIngestion.ts";
+import { RuntimeReceiptBusLive } from "./RuntimeReceiptBus.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -194,7 +196,10 @@ async function waitForThread(
 
 describe("ProviderRuntimeIngestion", () => {
   let runtime: ManagedRuntime.ManagedRuntime<
-    OrchestrationEngineService | ProviderRuntimeIngestionService | ProjectionSnapshotQuery,
+    | OrchestrationEngineService
+    | ProviderRuntimeIngestionService
+    | ProjectionSnapshotQuery
+    | RuntimeReceiptBus,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -240,6 +245,7 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(SqlitePersistenceMemory),
+      Layer.provideMerge(RuntimeReceiptBusLive),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
@@ -249,6 +255,7 @@ describe("ProviderRuntimeIngestion", () => {
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const ingestion = await runtime.runPromise(Effect.service(ProviderRuntimeIngestionService));
+    const receiptBus = await runtime.runPromise(Effect.service(RuntimeReceiptBus));
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(ingestion.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(ingestion.drain);
@@ -317,6 +324,7 @@ describe("ProviderRuntimeIngestion", () => {
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       emit: provider.emit,
       setProviderSession: provider.setSession,
+      receiptBus,
       drain,
     };
   }
@@ -361,6 +369,38 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("turn failed");
+  });
+
+  it("publishes provider turn ingestion quiescence after processing turn completion", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const turnId = asTurnId("turn-ingestion-quiesced");
+    const awaitingReceipt = runtime!.runPromise(
+      harness.receiptBus.awaitTurnIngestionQuiesced({
+        threadId: asThreadId("thread-1"),
+        turnId,
+        provider: ProviderDriverKind.make("codex"),
+      }),
+    );
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-ingestion-quiesced"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: now,
+      turnId,
+      payload: { state: "completed" },
+    });
+
+    const receipt = await awaitingReceipt;
+    expect(receipt.sourceEventId).toBe("evt-turn-completed-ingestion-quiesced");
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.status === "ready" && entry.session.activeTurnId === null,
+    );
+    expect(thread.session?.status).toBe("ready");
   });
 
   it("does not write redundant session heartbeats for active content deltas", async () => {
@@ -1065,6 +1105,80 @@ describe("ProviderRuntimeIngestion", () => {
     );
     const message = thread.messages.find(
       (entry: ProviderRuntimeTestMessage) => entry.id === "assistant:item-completion-prefix-repair",
+    );
+
+    expect(message?.text).toBe(finalText);
+    expect(message?.streaming).toBe(false);
+  });
+
+  it("appends missing suffix from assistant item completion detail after streamed prefix and buffered tail", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
+    const now = "2026-01-01T00:00:00.000Z";
+    const turnId = asTurnId("turn-completion-prefix-buffered-tail-repair");
+    const itemId = asItemId("item-completion-prefix-buffered-tail-repair");
+    const finalText = "Here is the complete answer.";
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-completion-buffered-tail-repair-delta-1"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId,
+      payload: {
+        streamKind: "assistant_text",
+        delta: "Here",
+      },
+    });
+
+    await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-completion-prefix-buffered-tail-repair" &&
+          message.streaming &&
+          message.text === "Here",
+      ),
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-completion-buffered-tail-repair-delta-2"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId,
+      payload: {
+        streamKind: "assistant_text",
+        delta: " is",
+      },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-completion-buffered-tail-repair-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId,
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+        detail: finalText,
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-completion-prefix-buffered-tail-repair" &&
+          !message.streaming,
+      ),
+    );
+    const message = thread.messages.find(
+      (entry: ProviderRuntimeTestMessage) =>
+        entry.id === "assistant:item-completion-prefix-buffered-tail-repair",
     );
 
     expect(message?.text).toBe(finalText);

@@ -14,11 +14,12 @@ import {
   PositiveInt,
   ProjectId,
   ProviderItemId,
+  RuntimeItemId,
   ThreadId,
   TrimmedNonEmptyString,
   TurnId,
 } from "./baseSchemas.ts";
-import { ProviderInstanceId } from "./providerInstance.ts";
+import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
@@ -27,6 +28,9 @@ export const ORCHESTRATION_WS_METHODS = {
   getDeletedShellSnapshot: "orchestration.getDeletedShellSnapshot",
   getThreadTurnActivityPage: "orchestration.getThreadTurnActivityPage",
   hardDeleteThread: "orchestration.hardDeleteThread",
+  repairAssistantMessageFromProviderJournal:
+    "orchestration.repairAssistantMessageFromProviderJournal",
+  repairThreadAssistantMessages: "orchestration.repairThreadAssistantMessages",
   subscribeShell: "orchestration.subscribeShell",
   subscribeThread: "orchestration.subscribeThread",
 } as const;
@@ -44,6 +48,20 @@ export const ProviderSandboxMode = Schema.Literals([
   "danger-full-access",
 ]);
 export type ProviderSandboxMode = typeof ProviderSandboxMode.Type;
+
+export const ProviderMessageRepairSource = Schema.Literals([
+  "provider-journal",
+  "upstream-provider",
+]);
+export type ProviderMessageRepairSource = typeof ProviderMessageRepairSource.Type;
+
+export const ProviderThreadMessageRepairSourcePolicy = Schema.Literals([
+  "local-only",
+  "local-then-upstream",
+  "upstream-only",
+]);
+export type ProviderThreadMessageRepairSourcePolicy =
+  typeof ProviderThreadMessageRepairSourcePolicy.Type;
 
 /**
  * `ModelSelection` — selection of a model on a configured provider instance.
@@ -793,6 +811,24 @@ const ThreadMessageAssistantCompleteCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadMessageAssistantRepairSuffixCommand = Schema.Struct({
+  type: Schema.Literal("thread.message.assistant.repair-suffix"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messageId: MessageId,
+  turnId: TurnId,
+  suffix: Schema.String,
+  provider: ProviderDriverKind,
+  providerInstanceId: Schema.optional(ProviderInstanceId),
+  itemId: Schema.optional(RuntimeItemId),
+  source: Schema.optional(ProviderMessageRepairSource),
+  sourceEventId: Schema.optional(EventId),
+  oldLength: NonNegativeInt,
+  newLength: NonNegativeInt,
+  appendedLength: NonNegativeInt,
+  createdAt: IsoDateTime,
+});
+
 const ThreadProposedPlanUpsertCommand = Schema.Struct({
   type: Schema.Literal("thread.proposed-plan.upsert"),
   commandId: CommandId,
@@ -835,6 +871,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
   ThreadMessageAssistantCompleteCommand,
+  ThreadMessageAssistantRepairSuffixCommand,
   ThreadProposedPlanUpsertCommand,
   ThreadTurnDiffCompleteCommand,
   ThreadActivityAppendCommand,
@@ -862,6 +899,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.runtime-mode-set",
   "thread.interaction-mode-set",
   "thread.message-sent",
+  "thread.message.assistant-repair-applied",
   "thread.turn-start-requested",
   "thread.turn-interrupt-requested",
   "thread.turn-steer-requested",
@@ -985,6 +1023,22 @@ export const ThreadMessageSentPayload = Schema.Struct({
   streaming: Schema.Boolean,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
+});
+
+export const ThreadMessageAssistantRepairAppliedPayload = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+  turnId: TurnId,
+  suffix: Schema.String,
+  provider: ProviderDriverKind,
+  providerInstanceId: Schema.optional(ProviderInstanceId),
+  itemId: Schema.optional(RuntimeItemId),
+  source: Schema.optional(ProviderMessageRepairSource),
+  sourceEventId: Schema.optional(EventId),
+  oldLength: NonNegativeInt,
+  newLength: NonNegativeInt,
+  appendedLength: NonNegativeInt,
+  repairedAt: IsoDateTime,
 });
 
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
@@ -1157,6 +1211,11 @@ export const OrchestrationEvent = Schema.Union([
   }),
   Schema.Struct({
     ...EventBaseFields,
+    type: Schema.Literal("thread.message.assistant-repair-applied"),
+    payload: ThreadMessageAssistantRepairAppliedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
     type: Schema.Literal("thread.turn-start-requested"),
     payload: ThreadTurnStartRequestedPayload,
   }),
@@ -1290,6 +1349,74 @@ export const ThreadHardDeleteResult = Schema.Struct({
 });
 export type ThreadHardDeleteResult = typeof ThreadHardDeleteResult.Type;
 
+export const ProviderJournalMessageRepairStatus = Schema.Literals([
+  "repaired",
+  "unchanged",
+  "not-eligible",
+  "source-not-found",
+  "ambiguous-source",
+  "diverged",
+  "upstream-unavailable",
+  "failed",
+]);
+export type ProviderJournalMessageRepairStatus = typeof ProviderJournalMessageRepairStatus.Type;
+
+export const ProviderJournalMessageRepairInput = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+});
+export type ProviderJournalMessageRepairInput = typeof ProviderJournalMessageRepairInput.Type;
+
+export const ProviderJournalMessageRepairResult = Schema.Struct({
+  status: ProviderJournalMessageRepairStatus,
+  threadId: ThreadId,
+  messageId: MessageId,
+  reason: Schema.optional(Schema.String),
+  oldLength: Schema.optional(NonNegativeInt),
+  newLength: Schema.optional(NonNegativeInt),
+  appendedLength: Schema.optional(NonNegativeInt),
+  candidateCount: Schema.optional(NonNegativeInt),
+  provider: Schema.optional(ProviderDriverKind),
+  providerInstanceId: Schema.optional(ProviderInstanceId),
+  itemId: Schema.optional(RuntimeItemId),
+  sourceEventId: Schema.optional(EventId),
+  source: Schema.optional(ProviderMessageRepairSource),
+});
+export type ProviderJournalMessageRepairResult = typeof ProviderJournalMessageRepairResult.Type;
+
+export const ProviderThreadAssistantMessagesRepairInput = Schema.Struct({
+  threadId: ThreadId,
+  sourcePolicy: Schema.optional(ProviderThreadMessageRepairSourcePolicy),
+});
+export type ProviderThreadAssistantMessagesRepairInput =
+  typeof ProviderThreadAssistantMessagesRepairInput.Type;
+
+export const ProviderThreadAssistantMessagesRepairCounts = Schema.Struct({
+  totalMessages: NonNegativeInt,
+  eligibleMessages: NonNegativeInt,
+  localAttempts: NonNegativeInt,
+  upstreamAttempts: NonNegativeInt,
+  repaired: NonNegativeInt,
+  unchanged: NonNegativeInt,
+  notEligible: NonNegativeInt,
+  sourceNotFound: NonNegativeInt,
+  ambiguousSource: NonNegativeInt,
+  diverged: NonNegativeInt,
+  upstreamUnavailable: NonNegativeInt,
+  failed: NonNegativeInt,
+});
+export type ProviderThreadAssistantMessagesRepairCounts =
+  typeof ProviderThreadAssistantMessagesRepairCounts.Type;
+
+export const ProviderThreadAssistantMessagesRepairResult = Schema.Struct({
+  threadId: ThreadId,
+  sourcePolicy: ProviderThreadMessageRepairSourcePolicy,
+  counts: ProviderThreadAssistantMessagesRepairCounts,
+  results: Schema.Array(ProviderJournalMessageRepairResult),
+});
+export type ProviderThreadAssistantMessagesRepairResult =
+  typeof ProviderThreadAssistantMessagesRepairResult.Type;
+
 export const OrchestrationRpcSchemas = {
   dispatchCommand: {
     input: ClientOrchestrationCommand,
@@ -1310,6 +1437,14 @@ export const OrchestrationRpcSchemas = {
   hardDeleteThread: {
     input: ThreadHardDeleteInput,
     output: ThreadHardDeleteResult,
+  },
+  repairAssistantMessageFromProviderJournal: {
+    input: ProviderJournalMessageRepairInput,
+    output: ProviderJournalMessageRepairResult,
+  },
+  repairThreadAssistantMessages: {
+    input: ProviderThreadAssistantMessagesRepairInput,
+    output: ProviderThreadAssistantMessagesRepairResult,
   },
   getThreadTurnActivityPage: {
     input: OrchestrationThreadTurnActivityPageInput,

@@ -629,6 +629,37 @@ export function projectEvent(
         };
       });
 
+    case "thread.message.assistant-repair-applied":
+      return Effect.sync(() => {
+        const thread = nextBase.threads.find((entry) => entry.id === event.payload.threadId);
+        if (!thread) {
+          return nextBase;
+        }
+
+        const messages: Array<(typeof thread.messages)[number]> = [];
+        for (const message of thread.messages) {
+          if (message.id === event.payload.messageId && message.role === "assistant") {
+            messages.push({
+              ...message,
+              text: `${message.text}${event.payload.suffix}`,
+              streaming: false,
+              updatedAt: event.payload.repairedAt,
+              turnId: event.payload.turnId,
+            });
+          } else {
+            messages.push(message);
+          }
+        }
+
+        return {
+          ...nextBase,
+          threads: updateThread(nextBase.threads, event.payload.threadId, {
+            messages,
+            updatedAt: event.occurredAt,
+          }),
+        };
+      });
+
     case "thread.session-set":
       return Effect.gen(function* () {
         const payload = yield* decodeForEvent(

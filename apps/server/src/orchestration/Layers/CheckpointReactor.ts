@@ -40,6 +40,7 @@ import { WorkspaceEntries } from "../../workspace/Services/WorkspaceEntries.ts";
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const CHECKPOINT_REFS_RETAINED_PER_THREAD = 3;
 const CHECKPOINT_REF_PRUNE_WARNING_SAMPLE_SIZE = 20;
+const PROVIDER_TURN_INGESTION_QUIESCENCE_TIMEOUT = "30 seconds";
 
 export function computeCheckpointRefPrunePlan(input: {
   readonly threadId: ThreadId;
@@ -981,6 +982,36 @@ const make = Effect.gen(function* () {
 
     if (event.type === "turn.completed") {
       const turnId = toTurnId(event.turnId);
+      if (turnId) {
+        // `CheckpointReactor` and `ProviderRuntimeIngestion` consume the same
+        // provider stream independently. A long assistant answer can leave
+        // ingestion processing earlier content while this reactor already sees
+        // `turn.completed`; waiting for the ingestion receipt prevents terminal
+        // checkpoint/diff state from closing still-flushing assistant text.
+        const ingestionReceipt = yield* receiptBus
+          .awaitTurnIngestionQuiesced({
+            threadId: event.threadId,
+            turnId,
+            provider: event.provider,
+            ...(event.providerInstanceId ? { providerInstanceId: event.providerInstanceId } : {}),
+          })
+          .pipe(Effect.timeoutOption(PROVIDER_TURN_INGESTION_QUIESCENCE_TIMEOUT));
+
+        if (Option.isNone(ingestionReceipt)) {
+          yield* Effect.logWarning(
+            "checkpoint reactor skipped terminal checkpoint capture because provider ingestion did not quiesce",
+            {
+              threadId: event.threadId,
+              turnId,
+              provider: event.provider,
+              providerInstanceId: event.providerInstanceId,
+              eventId: event.eventId,
+            },
+          );
+          return;
+        }
+      }
+
       yield* refreshLocalGitStatusFromTurnCompletion(event);
       yield* captureCheckpointFromTurnCompletion(event).pipe(
         Effect.catch((error) =>

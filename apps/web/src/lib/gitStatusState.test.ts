@@ -127,6 +127,8 @@ function createRegisteredGitStatusClient(environmentId: EnvironmentId) {
     },
     orchestration: {
       dispatchCommand: vi.fn(async () => undefined),
+      repairAssistantMessageFromProviderJournal: vi.fn(),
+      repairThreadAssistantMessages: vi.fn(),
       subscribeShell: vi.fn(() => () => undefined),
       subscribeThread: vi.fn(() => () => undefined),
     },

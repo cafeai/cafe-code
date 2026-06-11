@@ -3,6 +3,7 @@ import {
   EventId,
   ProjectId,
   ProviderDriverKind,
+  RuntimeItemId,
   ThreadId,
   TurnId,
   type OrchestrationEvent,
@@ -98,6 +99,93 @@ describe("orchestration projector", () => {
         session: null,
       },
     ]);
+  });
+
+  it("applies assistant repair suffix events without reopening streaming state", async () => {
+    const now = "2026-01-01T00:00:00.000Z";
+    const created = await Effect.runPromise(
+      projectEvent(
+        createEmptyReadModel(now),
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-repair",
+          occurredAt: now,
+          commandId: "cmd-thread-create",
+          payload: {
+            threadId: "thread-repair",
+            projectId: "project-1",
+            title: "Repair Thread",
+            modelSelection: {
+              instanceId: "codex",
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        }),
+      ),
+    );
+    const withMessage = await Effect.runPromise(
+      projectEvent(
+        created,
+        makeEvent({
+          sequence: 2,
+          type: "thread.message-sent",
+          aggregateKind: "thread",
+          aggregateId: "thread-repair",
+          occurredAt: "2026-01-01T00:00:01.000Z",
+          commandId: "cmd-message",
+          payload: {
+            threadId: "thread-repair",
+            messageId: "assistant:item-1",
+            role: "assistant",
+            text: "visible prefix",
+            turnId: "turn-1",
+            streaming: false,
+            createdAt: "2026-01-01T00:00:01.000Z",
+            updatedAt: "2026-01-01T00:00:01.000Z",
+          },
+        }),
+      ),
+    );
+    const repaired = await Effect.runPromise(
+      projectEvent(
+        withMessage,
+        makeEvent({
+          sequence: 3,
+          type: "thread.message.assistant-repair-applied",
+          aggregateKind: "thread",
+          aggregateId: "thread-repair",
+          occurredAt: "2026-01-01T00:00:02.000Z",
+          commandId: "cmd-repair",
+          payload: {
+            threadId: "thread-repair",
+            messageId: "assistant:item-1",
+            turnId: "turn-1",
+            suffix: " plus repaired suffix",
+            provider: ProviderDriverKind.make("codex"),
+            providerInstanceId: "codex",
+            itemId: RuntimeItemId.make("item-1"),
+            sourceEventId: "evt-item-completed",
+            oldLength: "visible prefix".length,
+            newLength: "visible prefix plus repaired suffix".length,
+            appendedLength: " plus repaired suffix".length,
+            repairedAt: "2026-01-01T00:00:02.000Z",
+          },
+        }),
+      ),
+    );
+
+    const thread = repaired.threads.find((entry) => entry.id === "thread-repair");
+    expect(thread?.messages[0]?.text).toBe("visible prefix plus repaired suffix");
+    expect(thread?.messages[0]?.streaming).toBe(false);
+    expect(thread?.session?.activeTurnId ?? null).toBe(null);
   });
 
   it("moves threads between projects on thread.meta-updated events", async () => {

@@ -12,6 +12,7 @@
  * @module ProviderService
  */
 import type {
+  ProviderDriverKind,
   ProviderInterruptTurnInput,
   ProviderInstanceId,
   ProviderRespondToRequestInput,
@@ -32,8 +33,14 @@ import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 
 import type { ProviderServiceError } from "../Errors.ts";
-import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
+import type { ProviderAdapterCapabilities, ProviderThreadSnapshot } from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
+
+export interface ProviderThreadReadResult {
+  readonly provider: ProviderDriverKind;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly snapshot: ProviderThreadSnapshot;
+}
 
 /**
  * ProviderServiceShape - Service API for provider session and turn orchestration.
@@ -123,6 +130,17 @@ export interface ProviderServiceShape {
   readonly getInstanceInfo: (
     instanceId: ProviderInstanceId,
   ) => Effect.Effect<ProviderInstanceRoutingInfo, ProviderServiceError>;
+
+  /**
+   * Read provider-owned thread history for the selected Cafe thread.
+   *
+   * The call routes through the configured provider adapter, so Codex/OpenAI
+   * history reads use Codex app-server `thread/read` and provider account/home
+   * checks remain inside the adapter layer.
+   */
+  readonly readThread?: (input: {
+    readonly threadId: ThreadId;
+  }) => Effect.Effect<ProviderThreadReadResult, ProviderServiceError>;
 
   /**
    * Roll back provider conversation state by a number of turns.

@@ -1,11 +1,20 @@
 import "../../index.css";
 
-import { EnvironmentId, ProviderDriverKind } from "@cafecode/contracts";
+import {
+  EnvironmentId,
+  MessageId,
+  ProviderDriverKind,
+  ThreadId,
+  TurnId,
+  type LocalApi,
+} from "@cafecode/contracts";
 import { createRef } from "react";
 import type { LegendListRef } from "@legendapp/list/react";
 import { page } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
+import { __resetEnvironmentApiOverridesForTests } from "../../environmentApi";
+import { __resetLocalApiForTests } from "../../localApi";
 
 const scrollToEndSpy = vi.fn();
 const scrollToIndexSpy = vi.fn();
@@ -117,13 +126,54 @@ function buildUserTimelineEntry(text: string) {
   };
 }
 
+function buildAssistantTimelineEntry(input?: {
+  text?: string;
+  streaming?: boolean;
+  turnId?: TurnId | null;
+}) {
+  return {
+    id: "assistant-entry",
+    kind: "message" as const,
+    createdAt: MESSAGE_CREATED_AT,
+    message: {
+      id: MessageId.make("assistant:item-1"),
+      role: "assistant" as const,
+      text: input?.text ?? "assistant answer",
+      createdAt: MESSAGE_CREATED_AT,
+      completedAt: input?.streaming === true ? undefined : "2026-04-13T12:00:03.000Z",
+      streaming: input?.streaming ?? false,
+      turnId: input?.turnId === undefined ? TurnId.make("turn-1") : input.turnId,
+    },
+  };
+}
+
+function setNativeContextMenuMock(
+  show: (items: readonly unknown[], position?: { x: number; y: number }) => Promise<unknown>,
+) {
+  (window as typeof window & { nativeApi?: unknown }).nativeApi = {
+    contextMenu: { show: show as never },
+    persistence: {
+      getClientSettings: async () => null,
+      setClientSettings: async () => undefined,
+      getSavedEnvironmentRegistry: async () => null,
+      setSavedEnvironmentRegistry: async () => undefined,
+      getSavedEnvironmentSecret: async () => null,
+      setSavedEnvironmentSecret: async () => undefined,
+      removeSavedEnvironmentSecret: async () => undefined,
+    },
+  } as unknown as LocalApi;
+}
+
 describe("MessagesTimeline", () => {
-  afterEach(() => {
+  afterEach(async () => {
     scrollToEndSpy.mockReset();
     scrollToIndexSpy.mockReset();
     getStateSpy.mockClear();
     legendListPropsSpy.mockReset();
     vi.restoreAllMocks();
+    __resetEnvironmentApiOverridesForTests();
+    delete (window as typeof window & { nativeApi?: unknown }).nativeApi;
+    await __resetLocalApiForTests();
     document.body.innerHTML = "";
   });
 
@@ -467,6 +517,131 @@ describe("MessagesTimeline", () => {
 
       const messageBody = document.querySelector("[data-user-message-body='true']");
       expect(messageBody?.getAttribute("data-user-message-collapsed")).toBe("true");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("opens an assistant message context menu without message repair", async () => {
+    const threadId = ThreadId.make("thread-1");
+    const showContextMenu = vi.fn(
+      async (_items: readonly unknown[], _position?: { x: number; y: number }) => null,
+    );
+    setNativeContextMenuMock(showContextMenu);
+
+    const screen = await render(
+      <MessagesTimeline
+        {...buildProps()}
+        activeThreadId={threadId}
+        timelineEntries={[buildAssistantTimelineEntry()]}
+      />,
+    );
+
+    try {
+      const assistantRegion = document.querySelector("[data-chat-copy-region='assistant']");
+      assistantRegion?.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+          clientX: 25,
+          clientY: 30,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(showContextMenu).toHaveBeenCalledTimes(1);
+      });
+      expect(showContextMenu).toHaveBeenCalledWith(
+        expect.arrayContaining([expect.objectContaining({ id: "copy-message" })]),
+        { x: 25, y: 30 },
+      );
+      const items = showContextMenu.mock.calls[0]?.[0] as unknown as ReadonlyArray<{ id: string }>;
+      expect(items.map((item) => item.id)).not.toContain("repair-from-provider-journal");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("does not open the assistant context menu while text is selected", async () => {
+    const showContextMenu = vi.fn(
+      async (_items: readonly unknown[], _position?: { x: number; y: number }) =>
+        "repair-from-provider-journal",
+    );
+    setNativeContextMenuMock(showContextMenu);
+    vi.spyOn(window, "getSelection").mockReturnValue({
+      isCollapsed: false,
+      toString: () => "selected assistant text",
+    } as Selection);
+
+    const screen = await render(
+      <MessagesTimeline
+        {...buildProps()}
+        activeThreadId={ThreadId.make("thread-1")}
+        timelineEntries={[buildAssistantTimelineEntry()]}
+      />,
+    );
+
+    try {
+      const assistantRegion = document.querySelector("[data-chat-copy-region='assistant']");
+      assistantRegion?.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+          clientX: 25,
+          clientY: 30,
+        }),
+      );
+
+      expect(showContextMenu).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("lets Markdown file links keep their own context menu inside assistant messages", async () => {
+    const showContextMenu = vi.fn(
+      async (_items: readonly unknown[], _position?: { x: number; y: number }) => null,
+    );
+    setNativeContextMenuMock(showContextMenu);
+
+    const screen = await render(
+      <MessagesTimeline
+        {...buildProps()}
+        activeThreadId={ThreadId.make("thread-1")}
+        markdownCwd="/tmp/project"
+        workspaceRoot="/tmp/project"
+        timelineEntries={[
+          buildAssistantTimelineEntry({
+            text: "Open [App.tsx](file:///tmp/project/src/App.tsx)",
+          }),
+        ]}
+      />,
+    );
+
+    try {
+      await vi.waitFor(() => {
+        expect(document.querySelector("a.chat-markdown-file-link")).not.toBeNull();
+      });
+      const link = document.querySelector("a.chat-markdown-file-link");
+      link?.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+          clientX: 10,
+          clientY: 11,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(showContextMenu).toHaveBeenCalledTimes(1);
+      });
+      const items = showContextMenu.mock.calls[0]?.[0] as unknown as ReadonlyArray<{
+        id: string;
+      }>;
+      const itemIds = items.map((item) => item.id);
+      expect(itemIds).toContain("copy-relative");
+      expect(itemIds).toContain("copy-full");
+      expect(itemIds).not.toContain("repair-from-provider-journal");
     } finally {
       await screen.unmount();
     }

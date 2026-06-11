@@ -88,6 +88,8 @@ const rpcClientMock = {
     dispatchCommand: vi.fn(),
     getThreadTurnActivityPage: vi.fn(),
     hardDeleteThread: vi.fn(),
+    repairAssistantMessageFromProviderJournal: vi.fn(),
+    repairThreadAssistantMessages: vi.fn(),
     subscribeShell: vi.fn((listener: (event: OrchestrationShellStreamItem) => void) =>
       registerListener(shellStreamListeners, listener),
     ),

@@ -18,6 +18,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
@@ -44,6 +45,7 @@ import { Button } from "../ui/button";
 import { buildExpandedImagePreview, ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import { MessageCopyButton } from "./MessageCopyButton";
+import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
   computeStableMessagesTimelineRows,
   MAX_VISIBLE_WORK_LOG_ENTRIES,
@@ -619,6 +621,15 @@ type TimelineRow = MessagesTimelineRow;
 const SYNTHETIC_ASSISTANT_STREAM_MIN_JUMP_CHARS = 80;
 const SYNTHETIC_ASSISTANT_STREAM_FRAME_MS = 24;
 const SYNTHETIC_ASSISTANT_STREAM_MAX_FRAMES = 36;
+type AssistantMessageContextMenuAction = "copy-message";
+
+function hasActiveTextSelection(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  const selection = window.getSelection();
+  return selection !== null && !selection.isCollapsed && selection.toString().trim().length > 0;
+}
 
 const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: TimelineRow }) {
   return (
@@ -818,9 +829,52 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
     row.message.id,
     sourceMessageText,
   );
+  const handleContextMenu = useCallback(
+    async (event: ReactMouseEvent<HTMLDivElement>) => {
+      if (hasActiveTextSelection()) {
+        return;
+      }
+
+      const localApi = readLocalApi();
+      if (!localApi) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const clicked = await localApi.contextMenu.show<AssistantMessageContextMenuAction>(
+        [{ id: "copy-message", label: "Copy message" }],
+        { x: event.clientX, y: event.clientY },
+      );
+
+      if (clicked === "copy-message") {
+        const copyText = prepareChatMessageMarkdownCopyText(row.message.text ?? "", {
+          provider: ctx.activeProvider,
+        });
+        try {
+          if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
+            throw new Error("Clipboard is unavailable.");
+          }
+          await navigator.clipboard.writeText(copyText);
+          toastManager.add(stackedThreadToast({ type: "success", title: "Copied message" }));
+        } catch (error) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Unable to copy message",
+              description: error instanceof Error ? error.message : "Clipboard write failed.",
+            }),
+          );
+        }
+        return;
+      }
+    },
+    [ctx.activeProvider, row.message.text],
+  );
 
   return (
-    <div className="min-w-0 px-1 py-0.5">
+    <div className="min-w-0 px-1 py-0.5" onContextMenu={handleContextMenu}>
       <div data-chat-copy-region="assistant" data-chat-copy-message-id={row.message.id}>
         <ChatMarkdown
           text={messageText}
