@@ -38,6 +38,21 @@ const serverExposureLayer = Layer.succeed(DesktopServerExposure.DesktopServerExp
   getAdvertisedEndpoints: Effect.succeed([]),
 } satisfies DesktopServerExposure.DesktopServerExposureShape);
 
+const serverExposureWithoutHttpsLayer = Layer.succeed(DesktopServerExposure.DesktopServerExposure, {
+  getState: Effect.die("unexpected getState"),
+  backendConfig: Effect.succeed({
+    port: 4888,
+    httpsPort: undefined,
+    bindHost: "0.0.0.0",
+    httpBaseUrl: new URL("http://127.0.0.1:4888"),
+    httpsBaseUrl: undefined,
+  }),
+  configureFromSettings: () => Effect.die("unexpected configureFromSettings"),
+  setMode: () => Effect.die("unexpected setMode"),
+  setHttpsEnabled: () => Effect.die("unexpected setHttpsEnabled"),
+  getAdvertisedEndpoints: Effect.succeed([]),
+} satisfies DesktopServerExposure.DesktopServerExposureShape);
+
 const providerDaemonLayer = Layer.succeed(
   DesktopProviderDaemonManager.DesktopProviderDaemonManager,
   {
@@ -112,6 +127,7 @@ const withHarness = <A, E, R>(
   >,
   options?: {
     readonly providerDaemonLayer?: Layer.Layer<DesktopProviderDaemonManager.DesktopProviderDaemonManager>;
+    readonly serverExposureLayer?: Layer.Layer<DesktopServerExposure.DesktopServerExposure>;
   },
 ) =>
   Effect.gen(function* () {
@@ -123,7 +139,7 @@ const withHarness = <A, E, R>(
     return yield* effect.pipe(
       Effect.provide(
         DesktopBackendConfiguration.layer.pipe(
-          Layer.provideMerge(serverExposureLayer),
+          Layer.provideMerge(options?.serverExposureLayer ?? serverExposureLayer),
           Layer.provideMerge(options?.providerDaemonLayer ?? providerDaemonLayer),
           Layer.provideMerge(makeEnvironmentLayer(baseDir)),
         ),
@@ -165,6 +181,22 @@ describe("DesktopBackendConfiguration", () => {
         assert.match(first.bootstrap.desktopBootstrapToken, /^[0-9a-f]{48}$/i);
         assert.equal(second.bootstrap.desktopBootstrapToken, first.bootstrap.desktopBootstrapToken);
       }),
+    ),
+  );
+
+  it.effect("disables backend HTTPS through child env when desktop exposure has no HTTPS port", () =>
+    withHarness(
+      Effect.gen(function* () {
+        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+        const config = yield* configuration.resolve;
+
+        assert.equal(config.env.CAFE_CODE_HTTPS_ENABLED, "false");
+        assert.isUndefined(config.env.CAFE_CODE_HTTPS_PORT);
+        assert.isUndefined(config.bootstrap.httpsPort);
+      }),
+      {
+        serverExposureLayer: serverExposureWithoutHttpsLayer,
+      },
     ),
   );
 

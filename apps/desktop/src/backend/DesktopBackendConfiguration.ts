@@ -125,6 +125,7 @@ const resolveBackendStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       cwd: environment.backendCwd,
       env: {
         ...backendChildEnvPatch(),
+        ...(backendExposure.httpsPort === undefined ? { CAFE_CODE_HTTPS_ENABLED: "false" } : {}),
         ELECTRON_RUN_AS_NODE: "1",
         [CAFE_CODE_SHELL_ENV_HYDRATED]: "1",
       },
