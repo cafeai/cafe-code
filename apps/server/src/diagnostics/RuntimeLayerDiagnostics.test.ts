@@ -3,6 +3,7 @@ import type { ProviderDaemonHealth } from "@cafecode/contracts";
 
 import {
   buildLayerSummaries,
+  buildProjectionProgress,
   buildProjectorCursors,
   buildRuntimeProcessEntries,
   buildStaleStateFlags,
@@ -241,6 +242,42 @@ describe("RuntimeLayerDiagnostics", () => {
       "terminal-streaming-message",
       "daemon-stream-without-active-turn",
     ]);
+  });
+
+  it("ignores provider-daemon ingestion cursors when deriving orchestrator projection lag", () => {
+    const projectorCursors = buildProjectorCursors({
+      latestEventSequence: 174_102,
+      projectors: [
+        {
+          projector: "provider-daemon-runtime-ingestion",
+          lastAppliedSequence: 62_294,
+          updatedAt: readAt,
+        },
+        {
+          projector: "projection.threads",
+          lastAppliedSequence: 174_102,
+          updatedAt: readAt,
+        },
+        {
+          projector: "projection.thread-messages",
+          lastAppliedSequence: 174_102,
+          updatedAt: readAt,
+        },
+      ],
+    });
+
+    expect(
+      projectorCursors.map((cursor) => [cursor.projector, cursor.lag, cursor.status]),
+    ).toContainEqual(["provider-daemon-runtime-ingestion", 111_808, "offline"]);
+    expect(
+      buildProjectionProgress({
+        latestEventSequence: 174_102,
+        projectorCursors,
+      }),
+    ).toEqual({
+      projectionSequence: 174_102,
+      projectionLag: 0,
+    });
   });
 
   it("describes the orchestrator as an in-process backend subsystem", () => {

@@ -430,6 +430,36 @@ export function buildProjectorCursors(input: {
   });
 }
 
+function isProjectionProjector(projector: string): boolean {
+  return projector.startsWith("projection.");
+}
+
+export function buildProjectionProgress(input: {
+  readonly latestEventSequence: number;
+  readonly projectorCursors: ReadonlyArray<
+    Pick<ServerOrchestratorProjectorCursor, "projector" | "cursor">
+  >;
+}): {
+  readonly projectionSequence: number;
+  readonly projectionLag: number;
+} {
+  // `projection_state` also contains operational cursors such as
+  // `provider-daemon-runtime-ingestion`. Those rows track daemon replay/reconciliation
+  // progress and can validly lag far behind durable UI projections. The Orchestrator
+  // layer status should describe renderer-visible projections only, otherwise an idle
+  // backend with caught-up projections can be reported as offline.
+  const projectionCursors = input.projectorCursors.filter((cursor) =>
+    isProjectionProjector(cursor.projector),
+  );
+  const projectionSequence =
+    projectionCursors.length === 0
+      ? 0
+      : Math.min(...projectionCursors.map((projector) => projector.cursor));
+  const projectionLag = Math.max(0, input.latestEventSequence - projectionSequence);
+
+  return { projectionSequence, projectionLag };
+}
+
 export function buildStaleStateFlags(input: {
   readonly counts: StaleStateCountsRow;
   readonly daemonActiveStreams: number;
@@ -813,11 +843,10 @@ export const make = Effect.fn("makeRuntimeLayerDiagnostics")(function* () {
         latestEventSequence,
         projectors: projectorRows,
       });
-      const projectionSequence =
-        projectorCursors.length === 0
-          ? 0
-          : Math.min(...projectorCursors.map((projector) => projector.cursor));
-      const projectionLag = Math.max(0, latestEventSequence - projectionSequence);
+      const { projectionSequence, projectionLag } = buildProjectionProgress({
+        latestEventSequence,
+        projectorCursors,
+      });
 
       const engineSnapshot =
         engineSnapshotResult._tag === "Success"
