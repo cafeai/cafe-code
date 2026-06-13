@@ -12,13 +12,23 @@ import {
   resolveClaudeHomePath,
 } from "./ClaudeHome.ts";
 
+// The derived-config-dir assertions below must not see an ambient
+// CLAUDE_CONFIG_DIR (e.g. when this suite runs inside a Claude Code session),
+// since makeClaudeEnvironment deliberately preserves an explicit one. Drop it so
+// the "no override configured" path is exercised deterministically.
+const baseEnvWithoutClaudeConfigDir = (): NodeJS.ProcessEnv => {
+  const env = { ...process.env };
+  delete env.CLAUDE_CONFIG_DIR;
+  return env;
+};
+
 it.layer(NodeServices.layer)("ClaudeHome", (it) => {
   describe("Claude home resolution", () => {
     it.effect("uses the process home when no Claude home override is configured", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const resolved = path.resolve(NodeOS.homedir());
-        const env = yield* makeClaudeEnvironment({ homePath: "" });
+        const env = yield* makeClaudeEnvironment({ homePath: "" }, baseEnvWithoutClaudeConfigDir());
 
         expect(yield* resolveClaudeHomePath({ homePath: "" })).toBe(resolved);
         expect(env.HOME).toBe(resolved);
@@ -31,7 +41,7 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
         const path = yield* Path.Path;
         const homePath = "~/.claude-work";
         const resolved = path.resolve(NodeOS.homedir(), ".claude-work");
-        const env = yield* makeClaudeEnvironment({ homePath });
+        const env = yield* makeClaudeEnvironment({ homePath }, baseEnvWithoutClaudeConfigDir());
 
         expect(yield* resolveClaudeHomePath({ homePath })).toBe(resolved);
         expect(env.HOME).toBe(resolved);
