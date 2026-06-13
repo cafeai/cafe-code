@@ -11,6 +11,7 @@ import { Badge } from "../ui/badge";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { Toggle } from "../ui/toggle";
 import { SidebarTriggerWithUnreadDot } from "../sidebar/unseenCompletions";
+import { ConnectionStatusIndicator } from "./ConnectionStatusIndicator";
 import { useDesktopSourceUpdateState } from "../../lib/desktopSourceUpdateReactQuery";
 
 interface ChatHeaderProps {
@@ -103,6 +104,7 @@ export const ChatHeader = memo(function ChatHeader({
               : `Newer ${sourceUpdateState?.trackedBranch}`}
           </Badge>
         )}
+        <ConnectionStatusIndicator />
         <Tooltip>
           <TooltipTrigger
             render={
