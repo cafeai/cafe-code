@@ -4690,7 +4690,12 @@ export default function ChatView(props: ChatViewProps) {
     }));
     setThreadError(activeThread.id, null);
     clearActiveComposerContent();
-    scheduleComposerFocus();
+    // On touch devices queueing comes from the send button while the agent
+    // runs; refocusing would reopen the on-screen keyboard the user just
+    // implicitly closed by sending.
+    if (!hasOnScreenKeyboard) {
+      scheduleComposerFocus();
+    }
   };
 
   const removeFollowUpQueueItem = (targetThreadId: ThreadId, itemId: string, revoke: boolean) => {

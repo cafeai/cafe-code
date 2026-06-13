@@ -12,7 +12,7 @@ import { stackedThreadToast, toastManager } from "./ui/toast";
 import { getPrimaryEnvironmentConnection } from "../environments/runtime";
 
 const FORCED_WS_RECONNECT_DEBOUNCE_MS = 5_000;
-type WsAutoReconnectTrigger = "focus" | "online";
+type WsAutoReconnectTrigger = "focus" | "online" | "visible";
 
 function formatRetryCountdown(nextRetryAt: string, nowMs: number): string {
   const remainingMs = Math.max(0, new Date(nextRetryAt).getTime() - nowMs);
@@ -133,15 +133,28 @@ export function WebSocketConnectionCoordinator() {
     const handleFocus = () => {
       triggerAutoReconnect("focus");
     };
+    // Mobile browsers freeze background tabs (the socket dies and the backoff
+    // timer stops ticking) and often resume them without firing window focus —
+    // only visibilitychange/pageshow. Reconnect immediately on return instead
+    // of waiting out a stale retry timer.
+    const handleVisible = () => {
+      if (document.visibilityState === "visible") {
+        triggerAutoReconnect("visible");
+      }
+    };
 
     syncBrowserOnlineStatus();
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", syncBrowserOnlineStatus);
     window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisible);
+    window.addEventListener("pageshow", handleVisible);
     return () => {
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", syncBrowserOnlineStatus);
       window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisible);
+      window.removeEventListener("pageshow", handleVisible);
     };
   }, []);
 
