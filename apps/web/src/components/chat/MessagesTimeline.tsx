@@ -163,6 +163,7 @@ interface MessagesTimelineProps {
   activeThreadId?: ThreadId;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   stickToEndRevision: number;
+  autoFollowTail: boolean;
   onIsAtEndChange: (isAtEnd: boolean) => void;
   onUserScrollIntent: () => void;
 }
@@ -194,6 +195,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   activeThreadId: activeThreadIdProp,
   skills = EMPTY_TIMELINE_SKILLS,
   stickToEndRevision,
+  autoFollowTail,
   onIsAtEndChange,
   onUserScrollIntent,
 }: MessagesTimelineProps) {
@@ -550,7 +552,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           renderItem={renderItem}
           estimatedItemSize={90}
           initialScrollAtEnd
-          maintainScrollAtEnd
+          maintainScrollAtEnd={autoFollowTail}
           maintainScrollAtEndThreshold={TIMELINE_MAINTAIN_SCROLL_AT_END_THRESHOLD}
           maintainVisibleContentPosition={TIMELINE_MAINTAIN_VISIBLE_CONTENT_POSITION}
           onScroll={handleScroll}
