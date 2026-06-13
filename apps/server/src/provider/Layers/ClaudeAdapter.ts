@@ -542,6 +542,96 @@ function normalizeClaudeTokenUsage(
   };
 }
 
+const CLAUDE_MESSAGE_USAGE_COUNTER_FIELDS = [
+  "input_tokens",
+  "cache_creation_input_tokens",
+  "cache_read_input_tokens",
+  "output_tokens",
+] as const;
+
+function hasClaudeMessageUsageCounters(value: unknown): boolean {
+  const usage = recordValue(value);
+  if (!usage) {
+    return false;
+  }
+
+  return CLAUDE_MESSAGE_USAGE_COUNTER_FIELDS.some((key) => {
+    const counter = usage[key];
+    return typeof counter === "number" && Number.isFinite(counter);
+  });
+}
+
+function normalizeClaudeMessageTokenUsage(
+  value: unknown,
+  contextWindow?: number,
+): ThreadTokenUsageSnapshot | undefined {
+  // Claude task/subagent updates can also carry a `usage.total_tokens` shape,
+  // but those counters describe the background task, not the main transcript's
+  // current context window. Only message/result-style usage with Anthropic's
+  // token fields is eligible for live context-window projection.
+  return hasClaudeMessageUsageCounters(value)
+    ? normalizeClaudeTokenUsage(value, contextWindow)
+    : undefined;
+}
+
+function claudeStreamEventUsagePayload(message: SDKMessage): unknown {
+  if (message.type !== "stream_event") {
+    return undefined;
+  }
+
+  const event = recordValue(message.event);
+  if (!event) {
+    return undefined;
+  }
+
+  if (event.type === "message_start") {
+    return recordValue(event.message)?.usage;
+  }
+  if (event.type === "message_delta") {
+    return event.usage;
+  }
+
+  return undefined;
+}
+
+function claudeAssistantUsagePayload(message: SDKMessage): unknown {
+  if (message.type !== "assistant") {
+    return undefined;
+  }
+
+  return recordValue(message.message)?.usage;
+}
+
+const THREAD_TOKEN_USAGE_SNAPSHOT_KEYS = [
+  "usedTokens",
+  "totalProcessedTokens",
+  "maxTokens",
+  "inputTokens",
+  "cachedInputTokens",
+  "outputTokens",
+  "reasoningOutputTokens",
+  "lastUsedTokens",
+  "lastInputTokens",
+  "lastCachedInputTokens",
+  "lastOutputTokens",
+  "lastReasoningOutputTokens",
+  "toolUses",
+  "durationMs",
+  "compactsAutomatically",
+  "autoCompactTokenLimit",
+] as const satisfies ReadonlyArray<keyof ThreadTokenUsageSnapshot>;
+
+function sameThreadTokenUsageSnapshot(
+  left: ThreadTokenUsageSnapshot | undefined,
+  right: ThreadTokenUsageSnapshot,
+): boolean {
+  if (!left) {
+    return false;
+  }
+
+  return THREAD_TOKEN_USAGE_SNAPSHOT_KEYS.every((key) => left[key] === right[key]);
+}
+
 function asCanonicalTurnId(value: TurnId): TurnId {
   return value;
 }
@@ -1561,6 +1651,30 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const offerRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Queue.offer(runtimeEventQueue, event).pipe(Effect.asVoid);
 
+  const emitThreadTokenUsageUpdate = Effect.fn("emitThreadTokenUsageUpdate")(function* (
+    context: ClaudeSessionContext,
+    usage: ThreadTokenUsageSnapshot,
+  ) {
+    if (sameThreadTokenUsageSnapshot(context.lastKnownTokenUsage, usage)) {
+      return;
+    }
+
+    context.lastKnownTokenUsage = usage;
+    const usageStamp = yield* makeEventStamp();
+    yield* offerRuntimeEvent({
+      type: "thread.token-usage.updated",
+      eventId: usageStamp.eventId,
+      provider: PROVIDER,
+      createdAt: usageStamp.createdAt,
+      threadId: context.session.threadId,
+      ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
+      payload: {
+        usage,
+      },
+      providerRefs: nativeProviderRefs(context),
+    });
+  });
+
   const logNativeSdkMessage = Effect.fn("logNativeSdkMessage")(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
@@ -2091,9 +2205,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     // The SDK result.usage contains *accumulated* totals across all API calls
     // (input_tokens, cache_read_input_tokens, etc. summed over every request).
-    // This does NOT represent the current context window size.
-    // Instead, use the last known context-window-accurate usage from task_progress
-    // events and treat the accumulated total as totalProcessedTokens.
+    // This does NOT necessarily represent the current context window size.
+    // Prefer the last message-level usage snapshot from message_start/message_delta
+    // as the current-window estimate, and attach the accumulated result total as
+    // totalProcessedTokens for cost/throughput diagnostics.
     const accumulatedSnapshot = normalizeClaudeTokenUsage(result?.usage, effectiveContextWindow);
     const accumulatedTotalProcessedTokens =
       accumulatedSnapshot?.totalProcessedTokens ?? accumulatedSnapshot?.usedTokens;
@@ -2118,18 +2233,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const turnState = context.turnState;
     if (!turnState) {
       if (usageSnapshot) {
-        const usageStamp = yield* makeEventStamp();
-        yield* offerRuntimeEvent({
-          type: "thread.token-usage.updated",
-          eventId: usageStamp.eventId,
-          provider: PROVIDER,
-          createdAt: usageStamp.createdAt,
-          threadId: context.session.threadId,
-          payload: {
-            usage: usageSnapshot,
-          },
-          providerRefs: {},
-        });
+        yield* emitThreadTokenUsageUpdate(context, usageSnapshot);
       }
 
       const stamp = yield* makeEventStamp();
@@ -2211,19 +2315,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* updateResumeCursor(context);
 
     if (usageSnapshot) {
-      const usageStamp = yield* makeEventStamp();
-      yield* offerRuntimeEvent({
-        type: "thread.token-usage.updated",
-        eventId: usageStamp.eventId,
-        provider: PROVIDER,
-        createdAt: usageStamp.createdAt,
-        threadId: context.session.threadId,
-        turnId: turnState.turnId,
-        payload: {
-          usage: usageSnapshot,
-        },
-        providerRefs: nativeProviderRefs(context),
-      });
+      yield* emitThreadTokenUsageUpdate(context, usageSnapshot);
     }
 
     const stamp = yield* makeEventStamp();
@@ -2271,6 +2363,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     const { event } = message;
+    const normalizedUsage = normalizeClaudeMessageTokenUsage(
+      claudeStreamEventUsagePayload(message),
+      context.selectedContextWindowTokens ?? context.lastKnownContextWindow,
+    );
+    if (normalizedUsage) {
+      yield* emitThreadTokenUsageUpdate(context, normalizedUsage);
+    }
 
     if (event.type === "content_block_delta") {
       if (
@@ -2684,6 +2783,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
+    const normalizedUsage = normalizeClaudeMessageTokenUsage(
+      claudeAssistantUsagePayload(message),
+      context.selectedContextWindowTokens ?? context.lastKnownContextWindow,
+    );
+    if (normalizedUsage) {
+      yield* emitThreadTokenUsageUpdate(context, normalizedUsage);
+    }
+
     const content = message.message?.content;
     if (Array.isArray(content)) {
       for (const block of content) {
@@ -2922,25 +3029,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
         return;
       case "task_progress":
-        if (message.usage) {
-          const normalizedUsage = normalizeClaudeTokenUsage(
-            message.usage,
-            context.selectedContextWindowTokens ?? context.lastKnownContextWindow,
-          );
-          if (normalizedUsage) {
-            context.lastKnownTokenUsage = normalizedUsage;
-            const usageStamp = yield* makeEventStamp();
-            yield* offerRuntimeEvent({
-              ...base,
-              eventId: usageStamp.eventId,
-              createdAt: usageStamp.createdAt,
-              type: "thread.token-usage.updated",
-              payload: {
-                usage: normalizedUsage,
-              },
-            });
-          }
-        }
         yield* offerRuntimeEvent({
           ...base,
           type: "task.progress",
@@ -2970,26 +3058,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         }
 
         const usage = patch.usage ?? record.usage;
-        if (usage) {
-          const normalizedUsage = normalizeClaudeTokenUsage(
-            usage,
-            context.selectedContextWindowTokens ?? context.lastKnownContextWindow,
-          );
-          if (normalizedUsage) {
-            context.lastKnownTokenUsage = normalizedUsage;
-            const usageStamp = yield* makeEventStamp();
-            yield* offerRuntimeEvent({
-              ...base,
-              eventId: usageStamp.eventId,
-              createdAt: usageStamp.createdAt,
-              type: "thread.token-usage.updated",
-              payload: {
-                usage: normalizedUsage,
-              },
-            });
-          }
-        }
-
         const terminalStatus = claudeTaskTerminalStatus(patch.status ?? record.status);
         if (terminalStatus) {
           yield* offerRuntimeEvent({
@@ -3028,25 +3096,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         return;
       }
       case "task_notification":
-        if (message.usage) {
-          const normalizedUsage = normalizeClaudeTokenUsage(
-            message.usage,
-            context.selectedContextWindowTokens ?? context.lastKnownContextWindow,
-          );
-          if (normalizedUsage) {
-            context.lastKnownTokenUsage = normalizedUsage;
-            const usageStamp = yield* makeEventStamp();
-            yield* offerRuntimeEvent({
-              ...base,
-              eventId: usageStamp.eventId,
-              createdAt: usageStamp.createdAt,
-              type: "thread.token-usage.updated",
-              payload: {
-                usage: normalizedUsage,
-              },
-            });
-          }
-        }
         yield* offerRuntimeEvent({
           ...base,
           type: "task.completed",

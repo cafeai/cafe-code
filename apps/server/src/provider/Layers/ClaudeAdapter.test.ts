@@ -1747,11 +1747,17 @@ describe("ClaudeAdapterLive", () => {
   it.effect("forwards Claude task progress summaries for subagent updates", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
+      const context = yield* Effect.context<never>();
+      const runFork = Effect.runForkWith(context);
       const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
 
-      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 6).pipe(
-        Stream.runCollect,
-        Effect.forkChild,
+      const runtimeEventsFiber = runFork(
+        Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            runtimeEvents.push(event);
+          }),
+        ),
       );
 
       yield* adapter.startSession({
@@ -1759,6 +1765,10 @@ describe("ClaudeAdapterLive", () => {
         provider: ProviderDriverKind.make("claudeAgent"),
         runtimeMode: "full-access",
       });
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEvents.length = 0;
 
       harness.query.emit({
         type: "system",
@@ -1774,8 +1784,10 @@ describe("ClaudeAdapterLive", () => {
         session_id: "sdk-session-task-summary",
         uuid: "task-progress-1",
       } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
 
-      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
       const progressEvent = runtimeEvents.find((event) => event.type === "task.progress");
       assert.equal(progressEvent?.type, "task.progress");
       if (progressEvent?.type === "task.progress") {
@@ -1785,20 +1797,27 @@ describe("ClaudeAdapterLive", () => {
         );
         assert.equal(progressEvent.payload.description, "Running background teammate");
       }
+      runtimeEventsFiber.interruptUnsafe();
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
     );
   });
 
-  it.effect("emits thread token usage updates from Claude task progress", () => {
+  it.effect("keeps Claude task progress usage out of context window updates", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
+      const context = yield* Effect.context<never>();
+      const runFork = Effect.runForkWith(context);
       const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
 
-      const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 6).pipe(
-        Stream.runCollect,
-        Effect.forkChild,
+      const runtimeEventsFiber = runFork(
+        Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            runtimeEvents.push(event);
+          }),
+        ),
       );
 
       yield* adapter.startSession({
@@ -1806,6 +1825,10 @@ describe("ClaudeAdapterLive", () => {
         provider: ProviderDriverKind.make("claudeAgent"),
         runtimeMode: "full-access",
       });
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEvents.length = 0;
 
       harness.query.emit({
         type: "system",
@@ -1820,30 +1843,198 @@ describe("ClaudeAdapterLive", () => {
         session_id: "sdk-session-task-usage",
         uuid: "task-usage-progress-1",
       } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
 
-      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
       const usageEvent = runtimeEvents.find((event) => event.type === "thread.token-usage.updated");
       const progressEvent = runtimeEvents.find((event) => event.type === "task.progress");
-      assert.equal(usageEvent?.type, "thread.token-usage.updated");
-      if (usageEvent?.type === "thread.token-usage.updated") {
-        assert.deepEqual(usageEvent.payload, {
-          usage: {
-            usedTokens: 321,
-            lastUsedTokens: 321,
-            toolUses: 2,
-            durationMs: 654,
-          },
+      assert.equal(usageEvent, undefined);
+      assert.equal(progressEvent?.type, "task.progress");
+      if (progressEvent?.type === "task.progress") {
+        assert.deepEqual(progressEvent.payload.usage, {
+          total_tokens: 321,
+          tool_uses: 2,
+          duration_ms: 654,
         });
       }
-      assert.equal(progressEvent?.type, "task.progress");
-      if (usageEvent && progressEvent) {
-        assert.notStrictEqual(usageEvent.eventId, progressEvent.eventId);
-      }
+      runtimeEventsFiber.interruptUnsafe();
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
     );
   });
+
+  it.effect(
+    "uses Claude message usage for the live context window and result totals for throughput",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const context = yield* Effect.context<never>();
+        const runFork = Effect.runForkWith(context);
+        const adapter = yield* ClaudeAdapter;
+        const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+        const modelSelection = createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-fable-5",
+          [{ id: "contextWindow", value: "1m" }],
+        );
+
+        const runtimeEventsFiber = runFork(
+          Stream.runForEach(adapter.streamEvents, (event) =>
+            Effect.sync(() => {
+              runtimeEvents.push(event);
+            }),
+          ),
+        );
+
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          modelSelection,
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "hello",
+          modelSelection,
+          attachments: [],
+        });
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        runtimeEvents.length = 0;
+
+        harness.query.emit({
+          type: "stream_event",
+          event: {
+            type: "message_start",
+            message: {
+              model: "claude-fable-5",
+              id: "msg-fable-live-usage",
+              type: "message",
+              role: "assistant",
+              content: [],
+              stop_reason: null,
+              stop_sequence: null,
+              stop_details: null,
+              usage: {
+                input_tokens: 2,
+                cache_creation_input_tokens: 395_871,
+                cache_read_input_tokens: 15_939,
+                output_tokens: 3,
+                cache_creation: {
+                  ephemeral_5m_input_tokens: 0,
+                  ephemeral_1h_input_tokens: 395_871,
+                },
+                service_tier: "standard",
+              },
+            },
+          },
+          session_id: "sdk-session-fable-live-usage",
+          parent_tool_use_id: null,
+          uuid: "stream-fable-live-usage",
+          ttft_ms: 10,
+        } as unknown as SDKMessage);
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+
+        harness.query.emit({
+          type: "system",
+          subtype: "task_progress",
+          task_id: "task-fable-subagent-usage",
+          description: "Background subagent progress",
+          usage: {
+            total_tokens: 9_093,
+            tool_uses: 1,
+            duration_ms: 1_991,
+          },
+          session_id: "sdk-session-fable-live-usage",
+          uuid: "task-fable-subagent-usage",
+        } as unknown as SDKMessage);
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          duration_ms: 1234,
+          duration_api_ms: 1200,
+          num_turns: 2,
+          result: "done",
+          stop_reason: "end_turn",
+          session_id: "sdk-session-fable-live-usage",
+          usage: {
+            input_tokens: 400,
+            cache_creation_input_tokens: 788_309,
+            cache_read_input_tokens: 31_878,
+            output_tokens: 1_396,
+          },
+          modelUsage: {
+            "claude-fable-5": {
+              contextWindow: 1_000_000,
+              maxOutputTokens: 64_000,
+            },
+          },
+        } as unknown as SDKMessage);
+        harness.query.finish();
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+
+        const usageEvents = runtimeEvents.filter(
+          (event) => event.type === "thread.token-usage.updated",
+        );
+        assert.equal(usageEvents.length, 2);
+
+        const liveUsageEvent = usageEvents[0];
+        assert.equal(liveUsageEvent?.type, "thread.token-usage.updated");
+        if (liveUsageEvent?.type === "thread.token-usage.updated") {
+          assert.deepEqual(liveUsageEvent.payload, {
+            usage: {
+              usedTokens: 411_815,
+              lastUsedTokens: 411_815,
+              inputTokens: 411_812,
+              outputTokens: 3,
+              maxTokens: 1_000_000,
+            },
+          });
+        }
+
+        const finalUsageEvent = usageEvents.at(-1);
+        assert.equal(finalUsageEvent?.type, "thread.token-usage.updated");
+        if (finalUsageEvent?.type === "thread.token-usage.updated") {
+          assert.deepEqual(finalUsageEvent.payload, {
+            usage: {
+              usedTokens: 411_815,
+              lastUsedTokens: 411_815,
+              totalProcessedTokens: 821_983,
+              inputTokens: 411_812,
+              outputTokens: 3,
+              maxTokens: 1_000_000,
+            },
+          });
+        }
+
+        assert.equal(
+          usageEvents.some(
+            (event) =>
+              event.type === "thread.token-usage.updated" &&
+              event.payload.usage.usedTokens === 9_093,
+          ),
+          false,
+        );
+
+        runtimeEventsFiber.interruptUnsafe();
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
 
   it.effect("maps Claude task_updated patches without runtime warnings", () => {
     const harness = makeHarness();
@@ -2209,86 +2400,100 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect(
-    "preserves oversized Claude result totals after task progress snapshots are recorded",
-    () => {
-      const harness = makeHarness();
-      return Effect.gen(function* () {
-        const adapter = yield* ClaudeAdapter;
+  it.effect("does not let Claude task progress snapshots override result context totals", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const context = yield* Effect.context<never>();
+      const runFork = Effect.runForkWith(context);
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
 
-        const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 9).pipe(
-          Stream.runCollect,
-          Effect.forkChild,
-        );
-
-        yield* adapter.startSession({
-          threadId: THREAD_ID,
-          provider: ProviderDriverKind.make("claudeAgent"),
-          runtimeMode: "full-access",
-        });
-
-        yield* adapter.sendTurn({
-          threadId: THREAD_ID,
-          input: "hello",
-          attachments: [],
-        });
-
-        harness.query.emit({
-          type: "system",
-          subtype: "task_progress",
-          task_id: "task-usage-clamped",
-          description: "Thinking through the patch",
-          usage: {
-            total_tokens: 190000,
-          },
-          session_id: "sdk-session-task-usage-clamped",
-          uuid: "task-usage-progress-clamped",
-        } as unknown as SDKMessage);
-
-        harness.query.emit({
-          type: "result",
-          subtype: "success",
-          is_error: false,
-          duration_ms: 1234,
-          duration_api_ms: 1200,
-          num_turns: 1,
-          result: "done",
-          stop_reason: "end_turn",
-          session_id: "sdk-session-result-usage-clamped-after-progress",
-          usage: {
-            total_tokens: 535000,
-          },
-          modelUsage: {
-            "claude-opus-4-6": {
-              contextWindow: 200000,
-              maxOutputTokens: 64000,
-            },
-          },
-        } as unknown as SDKMessage);
-        harness.query.finish();
-
-        const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
-        const usageEvents = runtimeEvents.filter(
-          (event) => event.type === "thread.token-usage.updated",
-        );
-        const finalUsageEvent = usageEvents.at(-1);
-        assert.equal(finalUsageEvent?.type, "thread.token-usage.updated");
-        if (finalUsageEvent?.type === "thread.token-usage.updated") {
-          assert.deepEqual(finalUsageEvent.payload, {
-            usage: {
-              usedTokens: 190000,
-              lastUsedTokens: 190000,
-              totalProcessedTokens: 535000,
-              maxTokens: 200000,
-            },
-          });
-        }
-      }).pipe(
-        Effect.provideService(Random.Random, makeDeterministicRandomService()),
-        Effect.provide(harness.layer),
+      const runtimeEventsFiber = runFork(
+        Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            runtimeEvents.push(event);
+          }),
+        ),
       );
-    },
-  );
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "hello",
+        attachments: [],
+      });
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEvents.length = 0;
+
+      harness.query.emit({
+        type: "system",
+        subtype: "task_progress",
+        task_id: "task-usage-clamped",
+        description: "Thinking through the patch",
+        usage: {
+          total_tokens: 190000,
+        },
+        session_id: "sdk-session-task-usage-clamped",
+        uuid: "task-usage-progress-clamped",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        duration_ms: 1234,
+        duration_api_ms: 1200,
+        num_turns: 1,
+        result: "done",
+        stop_reason: "end_turn",
+        session_id: "sdk-session-result-usage-clamped-after-progress",
+        usage: {
+          total_tokens: 535000,
+        },
+        modelUsage: {
+          "claude-opus-4-6": {
+            contextWindow: 200000,
+            maxOutputTokens: 64000,
+          },
+        },
+      } as unknown as SDKMessage);
+      harness.query.finish();
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      const usageEvents = runtimeEvents.filter(
+        (event) => event.type === "thread.token-usage.updated",
+      );
+      assert.equal(usageEvents.length, 1);
+      const finalUsageEvent = usageEvents.at(-1);
+      assert.equal(finalUsageEvent?.type, "thread.token-usage.updated");
+      if (finalUsageEvent?.type === "thread.token-usage.updated") {
+        assert.deepEqual(finalUsageEvent.payload, {
+          usage: {
+            usedTokens: 200000,
+            lastUsedTokens: 200000,
+            totalProcessedTokens: 535000,
+            maxTokens: 200000,
+          },
+        });
+      }
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 
   it.effect(
     "emits completion only after turn result when assistant frames arrive before deltas",
