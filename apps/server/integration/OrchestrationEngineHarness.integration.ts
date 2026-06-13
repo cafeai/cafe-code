@@ -60,6 +60,7 @@ import {
 } from "../src/orchestration/Services/OrchestrationEngine.ts";
 import { ThreadDeletionReactor } from "../src/orchestration/Services/ThreadDeletionReactor.ts";
 import { OrchestrationReactor } from "../src/orchestration/Services/OrchestrationReactor.ts";
+import { WebPushNotificationsTest } from "../src/notifications/WebPushNotifications.ts";
 import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
   RuntimeReceiptBus,
@@ -364,6 +365,7 @@ export const makeOrchestrationIntegrationHarness = (
           drain: Effect.void,
         }),
       ),
+      Layer.provideMerge(WebPushNotificationsTest),
     );
     const layer = Layer.empty.pipe(
       Layer.provideMerge(runtimeServicesLayer),

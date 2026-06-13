@@ -14,6 +14,7 @@ import { APP_DISPLAY_NAME } from "../branding";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
 import { CommandPalette } from "../components/CommandPalette";
 import { InitialBackendBootstrapSurface } from "../components/InitialBackendBootstrapSurface";
+import { DesktopNotificationWatcher } from "../components/DesktopNotificationWatcher";
 import { ProviderUpdateLaunchNotification } from "../components/ProviderUpdateLaunchNotification";
 import {
   WebSocketConnectionCoordinator,
@@ -159,6 +160,7 @@ function RootRouteView() {
         <PowerSaveBlockerSync />
         {primaryEnvironmentAuthenticated ? <EventRouter /> : null}
         {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
+        {primaryEnvironmentAuthenticated ? <DesktopNotificationWatcher /> : null}
         {primaryEnvironmentAuthenticated ? <WebSocketConnectionCoordinator /> : null}
         {primaryEnvironmentAuthenticated ? (
           <WebSocketConnectionSurface>

@@ -3,6 +3,7 @@ import {
   ActivityIcon,
   ArchiveIcon,
   ArrowLeftIcon,
+  BellIcon,
   BotIcon,
   FileTextIcon,
   GitBranchIcon,
@@ -33,6 +34,7 @@ export type SettingsSectionPath =
   | "/settings/files-diffs"
   | "/settings/general"
   | "/settings/keybindings"
+  | "/settings/notifications"
   | "/settings/providers"
   | "/settings/source-control"
   | "/settings/connections"
@@ -64,6 +66,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
         activePaths: ["/settings/general"],
       },
       { label: "Chat & Threads", to: "/settings/chat-threads", icon: MessageSquareIcon },
+      { label: "Notifications", to: "/settings/notifications", icon: BellIcon },
       { label: "Files & Diffs", to: "/settings/files-diffs", icon: FileTextIcon },
       { label: "Keybindings", to: "/settings/keybindings", icon: KeyboardIcon },
     ],

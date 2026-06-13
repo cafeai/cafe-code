@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import { cast } from "effect/Function";
 import {
   HttpBody,
@@ -29,6 +30,11 @@ import { resolveAttachmentPathById } from "./attachmentStore.ts";
 import { resolveStaticDir, ServerConfig } from "./config.ts";
 import { ensureHttpsCertificateMaterial } from "./httpsCertificate.ts";
 import { BrowserTraceCollector } from "./observability/Services/BrowserTraceCollector.ts";
+import {
+  WebPushNotifications,
+  type WebPushNotificationsError,
+  WebPushSubscriptionInput,
+} from "./notifications/WebPushNotifications.ts";
 import { ProjectFaviconResolver } from "./project/Services/ProjectFaviconResolver.ts";
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
 import { respondToAuthError } from "./auth/http.ts";
@@ -321,6 +327,81 @@ export const serverEnvironmentRouteLayer = HttpRouter.add(
   "GET",
   CAFE_CODE_ENVIRONMENT_ENDPOINT_PATH,
   serverEnvironmentRouteHandler,
+);
+
+const WebPushSubscribeRequest = Schema.Struct({
+  subscription: WebPushSubscriptionInput,
+  label: Schema.optional(Schema.String),
+});
+
+const WebPushUnsubscribeRequest = Schema.Struct({
+  endpoint: Schema.String,
+});
+
+const respondToWebPushError = (error: WebPushNotificationsError) =>
+  Effect.logWarning("web push route failed", { detail: error.detail, cause: error.cause }).pipe(
+    Effect.as(HttpServerResponse.text("Web push storage failed.", { status: 500 })),
+  );
+
+export const webPushPublicKeyRouteLayer = HttpRouter.add(
+  "GET",
+  "/api/notifications/web-push/public-key",
+  Effect.gen(function* () {
+    yield* requireAuthenticatedRequest;
+    const webPush = yield* WebPushNotifications;
+    const publicKey = yield* webPush.getPublicKey();
+    return HttpServerResponse.jsonUnsafe({ publicKey }, { headers: browserApiCorsHeaders });
+  }).pipe(
+    Effect.catchTag("AuthError", respondToAuthError),
+    Effect.catchTag("WebPushNotificationsError", respondToWebPushError),
+  ),
+);
+
+export const webPushSubscribeRouteLayer = HttpRouter.add(
+  "POST",
+  "/api/notifications/web-push/subscriptions",
+  Effect.gen(function* () {
+    yield* requireAuthenticatedRequest;
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const body = yield* request.json.pipe(Effect.catch(() => Effect.succeed(null)));
+    const decoded = yield* Schema.decodeUnknownEffect(WebPushSubscribeRequest)(body).pipe(
+      Effect.catch(() => Effect.succeed(null)),
+    );
+    if (decoded === null) {
+      return HttpServerResponse.text("Invalid subscription payload.", { status: 400 });
+    }
+    const webPush = yield* WebPushNotifications;
+    yield* webPush.saveSubscription({
+      subscription: decoded.subscription,
+      label: decoded.label,
+    });
+    return HttpServerResponse.empty({ status: 204, headers: browserApiCorsHeaders });
+  }).pipe(
+    Effect.catchTag("AuthError", respondToAuthError),
+    Effect.catchTag("WebPushNotificationsError", respondToWebPushError),
+  ),
+);
+
+export const webPushUnsubscribeRouteLayer = HttpRouter.add(
+  "POST",
+  "/api/notifications/web-push/unsubscribe",
+  Effect.gen(function* () {
+    yield* requireAuthenticatedRequest;
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const body = yield* request.json.pipe(Effect.catch(() => Effect.succeed(null)));
+    const decoded = yield* Schema.decodeUnknownEffect(WebPushUnsubscribeRequest)(body).pipe(
+      Effect.catch(() => Effect.succeed(null)),
+    );
+    if (decoded === null) {
+      return HttpServerResponse.text("Invalid unsubscribe payload.", { status: 400 });
+    }
+    const webPush = yield* WebPushNotifications;
+    yield* webPush.removeSubscription(decoded.endpoint);
+    return HttpServerResponse.empty({ status: 204, headers: browserApiCorsHeaders });
+  }).pipe(
+    Effect.catchTag("AuthError", respondToAuthError),
+    Effect.catchTag("WebPushNotificationsError", respondToWebPushError),
+  ),
 );
 
 // Receives DOM/state debug events from the web UI (see

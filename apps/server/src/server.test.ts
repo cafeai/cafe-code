@@ -63,6 +63,7 @@ const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
 import type { ServerConfigShape } from "./config.ts";
 import { deriveServerPaths, ServerConfig } from "./config.ts";
 import { makeRoutesLayer } from "./server.ts";
+import { WebPushNotificationsTest } from "./notifications/WebPushNotifications.ts";
 import * as NodeHttpServerCompression from "./nodeHttpServerCompression.ts";
 import { resolveAttachmentRelativePath } from "./attachmentPaths.ts";
 import { GitManager, type GitManagerShape } from "./git/GitManager.ts";
@@ -905,6 +906,7 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provideMerge(makeAuthTestLayer()),
+      Layer.provideMerge(WebPushNotificationsTest),
       Layer.provideMerge(ThreadDetailSubscriptionRegistryLive),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provide(workspaceAndProjectServicesLayer),

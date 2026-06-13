@@ -9,6 +9,9 @@ import {
   clientDebugLogRouteLayer,
   httpsCertificateRouteLayer,
   otlpTracesProxyRouteLayer,
+  webPushPublicKeyRouteLayer,
+  webPushSubscribeRouteLayer,
+  webPushUnsubscribeRouteLayer,
   projectFaviconRouteLayer,
   serverEnvironmentRouteLayer,
   staticAndDevRouteLayer,
@@ -49,6 +52,7 @@ import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus.
 import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRuntimeIngestion.ts";
 import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderCommandReactor.ts";
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
+import { WebPushNotificationsLive } from "./notifications/WebPushNotifications.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
 import { ServerSettingsLive } from "./serverSettings.ts";
@@ -147,6 +151,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ProviderCommandReactorLive),
   Layer.provideMerge(CheckpointReactorLive),
   Layer.provideMerge(ThreadDeletionReactorLive),
+  Layer.provideMerge(WebPushNotificationsLive),
   Layer.provideMerge(RuntimeReceiptBusLive),
 );
 
@@ -339,6 +344,9 @@ export const makeRoutesLayer = Layer.mergeAll(
   projectFaviconRouteLayer,
   serverEnvironmentRouteLayer,
   staticAndDevRouteLayer,
+  webPushPublicKeyRouteLayer,
+  webPushSubscribeRouteLayer,
+  webPushUnsubscribeRouteLayer,
   websocketRpcRouteLayer,
 ).pipe(Layer.provide(browserApiCorsLayer));
 

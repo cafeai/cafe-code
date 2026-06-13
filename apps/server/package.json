@@ -51,10 +51,12 @@
     "@effect/platform-node-shared": "catalog:",
     "@effect/sql-sqlite-bun": "catalog:",
     "@pierre/diffs": "catalog:",
+    "@types/web-push": "^3.6.4",
     "effect": "catalog:",
     "electron": "42.2.0",
     "electron-updater": "^6.6.2",
-    "node-pty": "^1.1.0"
+    "node-pty": "^1.1.0",
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
     "@cafecode/contracts": "workspace:*",

@@ -10,7 +10,7 @@ import { DiffIcon } from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { Toggle } from "../ui/toggle";
-import { SidebarTrigger } from "../ui/sidebar";
+import { SidebarTriggerWithUnreadDot } from "../sidebar/unseenCompletions";
 import { useDesktopSourceUpdateState } from "../../lib/desktopSourceUpdateReactQuery";
 
 interface ChatHeaderProps {
@@ -70,7 +70,7 @@ export const ChatHeader = memo(function ChatHeader({
   return (
     <div className="@container/header-actions flex min-w-0 flex-1 items-center gap-2">
       <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden sm:gap-3">
-        <SidebarTrigger className="size-7 shrink-0 md:hidden" />
+        <SidebarTriggerWithUnreadDot className="md:hidden" />
         <h2
           // Desktop keeps a single truncated line; on mobile (max-md) allow up to
           // two lines so the thread title is not cut off as aggressively.

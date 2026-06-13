@@ -156,7 +156,6 @@ import {
   SidebarMenuSubButton,
   SidebarMenuSubItem,
   SidebarSeparator,
-  SidebarTrigger,
   useSidebar,
 } from "./ui/sidebar";
 import { useThreadSelectionStore } from "../threadSelectionStore";
@@ -204,6 +203,11 @@ import {
   type SidebarProjectSnapshot,
 } from "../sidebarProjectGrouping";
 import { SidebarProviderUpdatePill } from "./sidebar/SidebarProviderUpdatePill";
+import {
+  SidebarTriggerWithUnreadDot,
+  UnseenCompletionsDot,
+  useHasUnseenThreadCompletions,
+} from "./sidebar/unseenCompletions";
 const SIDEBAR_SORT_LABELS: Record<SidebarProjectSortOrder, string> = {
   updated_at: "Last user message",
   created_at: "Created at",
@@ -3136,7 +3140,7 @@ const SidebarChromeHeader = memo(function SidebarChromeHeader({
     <div className="flex min-w-0 flex-1 items-center gap-2 group-data-[collapsible=icon]:justify-center">
       {open ? (
         <>
-          <SidebarTrigger className="shrink-0 md:hidden" />
+          <SidebarTriggerWithUnreadDot className="md:hidden" />
           <Tooltip>
             <TooltipTrigger
               render={
@@ -3190,6 +3194,7 @@ const SidebarChromeHeader = memo(function SidebarChromeHeader({
 const SidebarChromeFooter = memo(function SidebarChromeFooter() {
   const navigate = useNavigate();
   const { isMobile, open, setOpen, setOpenMobile } = useSidebar();
+  const hasUnseenCompletions = useHasUnseenThreadCompletions();
   const ToggleIcon = open ? PanelLeftCloseIcon : PanelLeftIcon;
   const toggleLabel = open ? "Hide sidebar" : "Show sidebar";
   const handleSettingsClick = useCallback(() => {
@@ -3221,27 +3226,34 @@ const SidebarChromeFooter = memo(function SidebarChromeFooter() {
               <span className="text-xs">Settings</span>
             </SidebarMenuButton>
           ) : null}
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  aria-label={toggleLabel}
-                  className="hidden size-7 shrink-0 text-muted-foreground/70 hover:bg-accent hover:text-foreground md:inline-flex"
-                  onClick={() => {
-                    void setOpen(!open);
-                  }}
-                  size="icon"
-                  type="button"
-                  variant="ghost"
-                />
-              }
-            >
-              <ToggleIcon className="size-4" />
-            </TooltipTrigger>
-            <TooltipPopup side="top" sideOffset={2}>
-              {toggleLabel}
-            </TooltipPopup>
-          </Tooltip>
+          <span className="relative hidden shrink-0 md:inline-flex">
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    aria-label={toggleLabel}
+                    className="size-7 shrink-0 text-muted-foreground/70 hover:bg-accent hover:text-foreground"
+                    onClick={() => {
+                      void setOpen(!open);
+                    }}
+                    size="icon"
+                    type="button"
+                    variant="ghost"
+                  />
+                }
+              >
+                <ToggleIcon className="size-4" />
+              </TooltipTrigger>
+              <TooltipPopup side="top" sideOffset={2}>
+                {toggleLabel}
+              </TooltipPopup>
+            </Tooltip>
+            {/* When the desktop sidebar is collapsed the thread status pills are
+                hidden, so the toggle carries the unseen-completion dot instead. */}
+            {!open && hasUnseenCompletions ? (
+              <UnseenCompletionsDot className="right-0 top-0 ring-sidebar" />
+            ) : null}
+          </span>
         </SidebarMenuItem>
       </SidebarMenu>
     </SidebarFooter>

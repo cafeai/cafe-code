@@ -10,6 +10,7 @@ import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
+import { WebPushNotifications } from "../../notifications/WebPushNotifications.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
 
 describe("OrchestrationReactor", () => {
@@ -63,6 +64,17 @@ describe("OrchestrationReactor", () => {
             drain: Effect.void,
           }),
         ),
+        Layer.provideMerge(
+          Layer.succeed(WebPushNotifications, {
+            getPublicKey: () => Effect.succeed("test-vapid-public-key"),
+            saveSubscription: () => Effect.void,
+            removeSubscription: () => Effect.void,
+            start: () => {
+              started.push("web-push-notifications");
+              return Effect.void;
+            },
+          }),
+        ),
       ),
     );
 
@@ -75,6 +87,7 @@ describe("OrchestrationReactor", () => {
       "provider-command-reactor",
       "checkpoint-reactor",
       "thread-deletion-reactor",
+      "web-push-notifications",
     ]);
 
     await Effect.runPromise(Scope.close(scope, Exit.void));

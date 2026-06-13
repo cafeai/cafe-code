@@ -17,6 +17,7 @@ import { Route as SettingsSystemRouteImport } from './routes/settings.system'
 import { Route as SettingsSourceControlRouteImport } from './routes/settings.source-control'
 import { Route as SettingsRecentlyDeletedRouteImport } from './routes/settings.recently-deleted'
 import { Route as SettingsProvidersRouteImport } from './routes/settings.providers'
+import { Route as SettingsNotificationsRouteImport } from './routes/settings.notifications'
 import { Route as SettingsKeybindingsRouteImport } from './routes/settings.keybindings'
 import { Route as SettingsGeneralRouteImport } from './routes/settings.general'
 import { Route as SettingsFilesDiffsRouteImport } from './routes/settings.files-diffs'
@@ -65,6 +66,11 @@ const SettingsRecentlyDeletedRoute = SettingsRecentlyDeletedRouteImport.update({
 const SettingsProvidersRoute = SettingsProvidersRouteImport.update({
   id: '/providers',
   path: '/providers',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsNotificationsRoute = SettingsNotificationsRouteImport.update({
+  id: '/notifications',
+  path: '/notifications',
   getParentRoute: () => SettingsRoute,
 } as any)
 const SettingsKeybindingsRoute = SettingsKeybindingsRouteImport.update({
@@ -131,6 +137,7 @@ export interface FileRoutesByFullPath {
   '/settings/files-diffs': typeof SettingsFilesDiffsRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
+  '/settings/notifications': typeof SettingsNotificationsRoute
   '/settings/providers': typeof SettingsProvidersRoute
   '/settings/recently-deleted': typeof SettingsRecentlyDeletedRoute
   '/settings/source-control': typeof SettingsSourceControlRoute
@@ -149,6 +156,7 @@ export interface FileRoutesByTo {
   '/settings/files-diffs': typeof SettingsFilesDiffsRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
+  '/settings/notifications': typeof SettingsNotificationsRoute
   '/settings/providers': typeof SettingsProvidersRoute
   '/settings/recently-deleted': typeof SettingsRecentlyDeletedRoute
   '/settings/source-control': typeof SettingsSourceControlRoute
@@ -170,6 +178,7 @@ export interface FileRoutesById {
   '/settings/files-diffs': typeof SettingsFilesDiffsRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
+  '/settings/notifications': typeof SettingsNotificationsRoute
   '/settings/providers': typeof SettingsProvidersRoute
   '/settings/recently-deleted': typeof SettingsRecentlyDeletedRoute
   '/settings/source-control': typeof SettingsSourceControlRoute
@@ -192,6 +201,7 @@ export interface FileRouteTypes {
     | '/settings/files-diffs'
     | '/settings/general'
     | '/settings/keybindings'
+    | '/settings/notifications'
     | '/settings/providers'
     | '/settings/recently-deleted'
     | '/settings/source-control'
@@ -210,6 +220,7 @@ export interface FileRouteTypes {
     | '/settings/files-diffs'
     | '/settings/general'
     | '/settings/keybindings'
+    | '/settings/notifications'
     | '/settings/providers'
     | '/settings/recently-deleted'
     | '/settings/source-control'
@@ -230,6 +241,7 @@ export interface FileRouteTypes {
     | '/settings/files-diffs'
     | '/settings/general'
     | '/settings/keybindings'
+    | '/settings/notifications'
     | '/settings/providers'
     | '/settings/recently-deleted'
     | '/settings/source-control'
@@ -301,6 +313,13 @@ declare module '@tanstack/react-router' {
       path: '/providers'
       fullPath: '/settings/providers'
       preLoaderRoute: typeof SettingsProvidersRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/notifications': {
+      id: '/settings/notifications'
+      path: '/notifications'
+      fullPath: '/settings/notifications'
+      preLoaderRoute: typeof SettingsNotificationsRouteImport
       parentRoute: typeof SettingsRoute
     }
     '/settings/keybindings': {
@@ -399,6 +418,7 @@ interface SettingsRouteChildren {
   SettingsFilesDiffsRoute: typeof SettingsFilesDiffsRoute
   SettingsGeneralRoute: typeof SettingsGeneralRoute
   SettingsKeybindingsRoute: typeof SettingsKeybindingsRoute
+  SettingsNotificationsRoute: typeof SettingsNotificationsRoute
   SettingsProvidersRoute: typeof SettingsProvidersRoute
   SettingsRecentlyDeletedRoute: typeof SettingsRecentlyDeletedRoute
   SettingsSourceControlRoute: typeof SettingsSourceControlRoute
@@ -414,6 +434,7 @@ const SettingsRouteChildren: SettingsRouteChildren = {
   SettingsFilesDiffsRoute: SettingsFilesDiffsRoute,
   SettingsGeneralRoute: SettingsGeneralRoute,
   SettingsKeybindingsRoute: SettingsKeybindingsRoute,
+  SettingsNotificationsRoute: SettingsNotificationsRoute,
   SettingsProvidersRoute: SettingsProvidersRoute,
   SettingsRecentlyDeletedRoute: SettingsRecentlyDeletedRoute,
   SettingsSourceControlRoute: SettingsSourceControlRoute,
