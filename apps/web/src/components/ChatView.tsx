@@ -1846,6 +1846,7 @@ export default function ChatView(props: ChatViewProps) {
   const localComposerRef = useRef<ChatComposerHandle | null>(null);
   const composerRef = useComposerHandleContext() ?? localComposerRef;
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [timelineAutoFollowTail, setTimelineAutoFollowTail] = useState(true);
   const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
   const [optimisticUserMessages, setOptimisticUserMessages] = useState<ChatMessage[]>([]);
   const [stickTimelineToEndRevision, setStickTimelineToEndRevision] = useState(0);
@@ -4331,6 +4332,7 @@ export default function ChatView(props: ChatViewProps) {
   const hideScrollToBottom = useCallback(() => {
     isAtEndRef.current = true;
     timelineUserScrollIntentSinceResetRef.current = false;
+    setTimelineAutoFollowTail(true);
     showScrollDebouncer.current.cancel();
     setShowScrollToBottom(false);
   }, []);
@@ -4362,6 +4364,7 @@ export default function ChatView(props: ChatViewProps) {
   }, [hideScrollToBottom]);
   const onTimelineUserScrollIntent = useCallback(() => {
     timelineUserScrollIntentSinceResetRef.current = true;
+    setTimelineAutoFollowTail(false);
   }, []);
   const onIsAtEndChange = useCallback(
     (isAtEnd: boolean) => {
@@ -4387,6 +4390,7 @@ export default function ChatView(props: ChatViewProps) {
     setPullRequestDialogState(null);
     isAtEndRef.current = true;
     timelineUserScrollIntentSinceResetRef.current = false;
+    setTimelineAutoFollowTail(true);
     showScrollDebouncer.current.cancel();
     setShowScrollToBottom(false);
     if (planSidebarOpenOnNextThreadRef.current) {
@@ -6263,6 +6267,7 @@ export default function ChatView(props: ChatViewProps) {
               workspaceRoot={activeWorkspaceRoot}
               skills={activeProviderStatus?.skills ?? EMPTY_PROVIDER_SKILLS}
               stickToEndRevision={stickTimelineToEndRevision}
+              autoFollowTail={timelineAutoFollowTail}
               onIsAtEndChange={onIsAtEndChange}
               onUserScrollIntent={onTimelineUserScrollIntent}
             />

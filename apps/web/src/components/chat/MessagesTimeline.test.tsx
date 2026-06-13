@@ -102,6 +102,7 @@ function buildProps() {
     timestampFormat: "locale" as const,
     workspaceRoot: undefined,
     stickToEndRevision: 0,
+    autoFollowTail: true,
     onIsAtEndChange: () => {},
     onUserScrollIntent: () => {},
   };

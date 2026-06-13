@@ -42,6 +42,7 @@ vi.mock("@legendapp/list/react", async () => {
     onPointerDown?: React.PointerEventHandler<HTMLDivElement>;
     onKeyDown?: React.KeyboardEventHandler<HTMLDivElement>;
     onScroll?: React.UIEventHandler<HTMLDivElement>;
+    maintainScrollAtEnd?: boolean;
     maintainVisibleContentPosition?: unknown;
     ref?: React.Ref<LegendListRef>;
   }) {
@@ -100,6 +101,7 @@ function buildProps() {
     timestampFormat: "24-hour" as const,
     workspaceRoot: undefined,
     stickToEndRevision: 0,
+    autoFollowTail: true,
     onIsAtEndChange: vi.fn(),
     onUserScrollIntent: vi.fn(),
   };
@@ -360,6 +362,104 @@ describe("MessagesTimeline", () => {
         data: false,
         size: true,
       });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("controls LegendList tail following from the parent state", async () => {
+    const props = buildProps();
+    const screen = await render(
+      <MessagesTimeline
+        {...props}
+        autoFollowTail={false}
+        timelineEntries={[buildUserTimelineEntry("read older context while output streams")]}
+      />,
+    );
+
+    try {
+      const firstProps = legendListPropsSpy.mock.calls.at(-1)?.[0] as
+        | { maintainScrollAtEnd?: boolean }
+        | undefined;
+      expect(firstProps?.maintainScrollAtEnd).toBe(false);
+
+      await screen.rerender(
+        <MessagesTimeline
+          {...props}
+          autoFollowTail={true}
+          timelineEntries={[buildUserTimelineEntry("read older context while output streams")]}
+        />,
+      );
+
+      const lastProps = legendListPropsSpy.mock.calls.at(-1)?.[0] as
+        | { maintainScrollAtEnd?: boolean }
+        | undefined;
+      expect(lastProps?.maintainScrollAtEnd).toBe(true);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("does not force-scroll appended streaming rows while tail following is disabled", async () => {
+    const requestAnimationFrameSpy = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback: FrameRequestCallback) => {
+        callback(0);
+        return 1;
+      });
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+
+    const props = buildProps();
+    const firstEntry = buildUserTimelineEntry("existing conversation tail");
+    const screen = await render(
+      <MessagesTimeline
+        {...props}
+        autoFollowTail={false}
+        timelineEntries={[firstEntry]}
+        isWorking={true}
+        activeTurnInProgress={true}
+      />,
+    );
+
+    try {
+      scrollToEndSpy.mockClear();
+      scrollToIndexSpy.mockClear();
+
+      const streamingEntry = {
+        ...buildAssistantTimelineEntry({
+          text: "streaming output that should not steal scroll position",
+          streaming: true,
+        }),
+        id: "assistant-entry-streaming",
+        message: {
+          ...buildAssistantTimelineEntry({
+            text: "streaming output that should not steal scroll position",
+            streaming: true,
+          }).message,
+          id: MessageId.make("assistant:item-streaming"),
+        },
+      };
+
+      await screen.rerender(
+        <MessagesTimeline
+          {...props}
+          autoFollowTail={false}
+          timelineEntries={[firstEntry, streamingEntry]}
+          isWorking={true}
+          activeTurnInProgress={true}
+        />,
+      );
+
+      await expect
+        .element(page.getByText("streaming output that should not steal scroll position"))
+        .toBeVisible();
+      const lastProps = legendListPropsSpy.mock.calls.at(-1)?.[0] as
+        | { maintainScrollAtEnd?: boolean }
+        | undefined;
+      expect(lastProps?.maintainScrollAtEnd).toBe(false);
+      expect(scrollToEndSpy).not.toHaveBeenCalled();
+      expect(scrollToIndexSpy).not.toHaveBeenCalled();
+      expect(requestAnimationFrameSpy).toHaveBeenCalled();
     } finally {
       await screen.unmount();
     }
