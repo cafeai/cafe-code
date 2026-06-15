@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { isElectron } from "../../env";
-import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
+import { useClientSettingsHydrated, useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import {
   disableWebPushNotifications,
   enableWebPushNotifications,
@@ -20,11 +20,31 @@ import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsL
 export function NotificationsSettingsPanel() {
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
+  const settingsHydrated = useClientSettingsHydrated();
   const [isApplying, setIsApplying] = useState(false);
   const [toggleError, setToggleError] = useState<string | null>(null);
 
   const webPushSupport = getWebPushSupport();
   const toggleDisabled = isApplying || (!isElectron && !webPushSupport.supported);
+
+  // The persisted setting is authoritative for this device. Once it has
+  // hydrated, if it reads off but a push subscription is still live — e.g. one
+  // orphaned before notificationsEnabled persisted correctly — tear it down so
+  // pushes actually stop instead of arriving while the toggle reads off. Gated
+  // on hydration so we never unsubscribe during the pre-hydration window (when
+  // the setting transiently defaults to off); a no-op when nothing is subscribed.
+  useEffect(() => {
+    if (
+      isElectron ||
+      !webPushSupport.supported ||
+      !settingsHydrated ||
+      isApplying ||
+      settings.notificationsEnabled
+    ) {
+      return;
+    }
+    void disableWebPushNotifications().catch(() => {});
+  }, [settingsHydrated, isApplying, settings.notificationsEnabled, webPushSupport.supported]);
 
   const handleToggle = async (nextEnabled: boolean) => {
     setToggleError(null);

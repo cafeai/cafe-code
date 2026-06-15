@@ -49,6 +49,20 @@ describe("client settings", () => {
     expect(() => decodeClientSettingsPatch({ chatCopyFormat: "html" })).toThrow();
   });
 
+  it("exposes every client setting through ClientSettingsPatch", () => {
+    // A settings key that exists in ClientSettingsSchema but not in
+    // ClientSettingsPatch can never be saved: the update RPC decodes the patch
+    // against ClientSettingsPatch and silently drops unknown keys, so the
+    // toggle flips and snaps back. Keys updated through their own dedicated
+    // flow rather than the generic patch RPC are allowlisted here.
+    const NON_PATCHABLE_KEYS = new Set(["dismissedProviderUpdateNotificationKeys"]);
+    const patchKeys = new Set(Object.keys(ClientSettingsPatch.fields));
+    const missing = Object.keys(ClientSettingsSchema.fields).filter(
+      (key) => !patchKeys.has(key) && !NON_PATCHABLE_KEYS.has(key),
+    );
+    expect(missing).toEqual([]);
+  });
+
   it("classifies synced client settings without including secret stores", () => {
     expect(CLIENT_SETTINGS_KEYS).toContain("sidebarBrandImageDataUrl");
     expect(CLIENT_SETTINGS_KEYS).toContain("defaultEditor");

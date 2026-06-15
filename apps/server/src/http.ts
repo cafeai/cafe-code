@@ -51,6 +51,7 @@ const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
 const HASHED_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const HTML_CACHE_CONTROL = "no-store";
+const PWA_CONTROL_FILE_CACHE_CONTROL = "no-cache";
 const STATIC_FILE_CACHE_CONTROL = "public, max-age=3600";
 
 export const browserApiCorsLayer = HttpRouter.cors({
@@ -125,6 +126,11 @@ function cacheControlForStaticResponse(input: {
 
   if (input.requestPath.startsWith("/assets/")) {
     return HASHED_ASSET_CACHE_CONTROL;
+  }
+
+  const requestPath = input.requestPath.toLowerCase();
+  if (requestPath === "/sw.js" || requestPath.endsWith(".webmanifest")) {
+    return PWA_CONTROL_FILE_CACHE_CONTROL;
   }
 
   return STATIC_FILE_CACHE_CONTROL;

@@ -126,7 +126,12 @@ export function ConnectionStatusIndicator({ className }: { readonly className?: 
           </button>
         }
       />
-      <PopoverPopup tooltipStyle side="bottom" align="end" className="w-max max-w-[260px] px-3 py-2">
+      <PopoverPopup
+        tooltipStyle
+        side="bottom"
+        align="end"
+        className="w-max max-w-[260px] px-3 py-2"
+      >
         <div className="space-y-1.5 leading-tight">
           <div className="text-[12px] font-medium text-foreground">
             {issue === "offline"

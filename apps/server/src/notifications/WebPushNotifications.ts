@@ -253,8 +253,7 @@ const make = Effect.gen(function* () {
             },
           },
         ),
-      catch: (cause) =>
-        new WebPushDeliveryError({ statusCode: deliveryStatusCode(cause), cause }),
+      catch: (cause) => new WebPushDeliveryError({ statusCode: deliveryStatusCode(cause), cause }),
     });
 
   const notifyTurnCompleted = Effect.fn("notifyTurnCompleted")(function* (threadId: ThreadId) {

@@ -1422,6 +1422,39 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("serves PWA control files with revalidation cache headers", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-router-static-pwa-",
+      });
+      yield* fileSystem.writeFileString(
+        path.join(staticDir, "sw.js"),
+        "self.addEventListener('fetch', () => {});",
+      );
+      yield* fileSystem.writeFileString(
+        path.join(staticDir, "manifest.webmanifest"),
+        '{"name":"Cafe Code","start_url":"/","display":"standalone"}',
+      );
+
+      yield* buildAppUnderTest({ config: { staticDir } });
+
+      const serverUrl = yield* getHttpServerUrl();
+      const serviceWorkerResponse = yield* Effect.promise(() => fetch(`${serverUrl}/sw.js`));
+      const manifestResponse = yield* Effect.promise(() =>
+        fetch(`${serverUrl}/manifest.webmanifest`),
+      );
+
+      assert.equal(serviceWorkerResponse.status, 200);
+      assert.equal(serviceWorkerResponse.headers.get("cache-control"), "no-cache");
+      assert.include(serviceWorkerResponse.headers.get("content-type") ?? "", "javascript");
+      assert.equal(manifestResponse.status, 200);
+      assert.equal(manifestResponse.headers.get("cache-control"), "no-cache");
+      assert.include(manifestResponse.headers.get("content-type") ?? "", "manifest+json");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("redirects to dev URL when configured", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest({

@@ -7,7 +7,14 @@
 
 export type WebPushSupport =
   | { readonly supported: true }
-  | { readonly supported: false; readonly reason: "insecure-context" | "no-service-worker" | "no-push-manager" | "no-notifications" };
+  | {
+      readonly supported: false;
+      readonly reason:
+        | "insecure-context"
+        | "no-service-worker"
+        | "no-push-manager"
+        | "no-notifications";
+    };
 
 export function getWebPushSupport(): WebPushSupport {
   if (typeof window === "undefined" || !window.isSecureContext) {
@@ -37,7 +44,9 @@ function urlBase64ToUint8Array(base64String: string): Uint8Array {
 }
 
 async function ensureServiceWorkerRegistration(): Promise<ServiceWorkerRegistration> {
-  const registration = await navigator.serviceWorker.register("/sw.js");
+  const registration = await navigator.serviceWorker.register("/sw.js", {
+    updateViaCache: "none",
+  });
   await navigator.serviceWorker.ready;
   return registration;
 }
@@ -103,7 +112,9 @@ export async function disableWebPushNotifications(): Promise<void> {
   await subscription.unsubscribe().catch(() => {});
 }
 
-function describeUnsupported(reason: Exclude<WebPushSupport, { supported: true }>["reason"]): string {
+function describeUnsupported(
+  reason: Exclude<WebPushSupport, { supported: true }>["reason"],
+): string {
   switch (reason) {
     case "insecure-context":
       return "Push notifications require HTTPS. Connect to the server over HTTPS to enable them on this device.";

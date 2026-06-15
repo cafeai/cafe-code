@@ -1,10 +1,9 @@
 /**
- * Cafe Code service worker — Web Push only.
+ * Cafe Code service worker — Web Push + PWA install.
  *
  * Renders push payloads from the server (see apps/server/src/notifications/
  * WebPushNotifications.ts) as system notifications and routes notification
- * clicks back into the app. Intentionally has no fetch handler: the app is
- * not offline-capable and request interception is not wanted.
+ * clicks back into the app.
  *
  * Payload shape: { title, body, tag, threadPath }
  */
@@ -15,6 +14,14 @@ self.addEventListener("install", () => {
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(self.clients.claim());
+});
+
+// Navigation-only pass-through. Cafe is not offline-capable, so we leave API and
+// asset requests alone, but navigation handling gives browsers a real fetch
+// event path for PWA installability while preserving network-first semantics.
+self.addEventListener("fetch", (event) => {
+  if (event.request.mode !== "navigate") return;
+  event.respondWith(fetch(event.request));
 });
 
 self.addEventListener("push", (event) => {
