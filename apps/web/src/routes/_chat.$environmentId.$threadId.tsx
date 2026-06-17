@@ -33,6 +33,7 @@ import { createThreadSelectorByRef } from "../storeSelectors";
 import { resolveThreadRouteRef, buildThreadRouteParams } from "../threadRoutes";
 import { RightPanelSheet } from "../components/RightPanelSheet";
 import { Sidebar, SidebarInset, SidebarProvider, SidebarRail } from "~/components/ui/sidebar";
+import { usePrimaryEnvironmentId } from "../environments/primary";
 
 const DiffPanel = lazy(() => import("../components/DiffPanel"));
 const DIFF_INLINE_SIDEBAR_WIDTH_STORAGE_KEY = "chat_diff_sidebar_width";
@@ -215,7 +216,12 @@ function ChatThreadRouteView() {
   const threadRef = Route.useParams({
     select: (params) => resolveThreadRouteRef(params),
   });
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
   const search = Route.useSearch();
+  const routeMatchesPrimaryEnvironment =
+    threadRef !== null &&
+    primaryEnvironmentId !== null &&
+    threadRef.environmentId === primaryEnvironmentId;
   const bootstrapComplete = useStore(
     (store) => selectEnvironmentState(store, threadRef?.environmentId ?? null).bootstrapComplete,
   );
@@ -297,13 +303,19 @@ function ChatThreadRouteView() {
   }, [bootstrapComplete, environmentHasAnyThreads, navigate, routeThreadExists, threadRef]);
 
   useEffect(() => {
+    if (threadRef !== null && primaryEnvironmentId !== null && !routeMatchesPrimaryEnvironment) {
+      void navigate({ to: "/", replace: true });
+    }
+  }, [navigate, primaryEnvironmentId, routeMatchesPrimaryEnvironment, threadRef]);
+
+  useEffect(() => {
     if (!threadRef || !serverThreadStarted || !draftThread?.promotedTo) {
       return;
     }
     finalizePromotedDraftThreadByRef(threadRef);
   }, [draftThread?.promotedTo, serverThreadStarted, threadRef]);
 
-  if (!threadRef || !bootstrapComplete || !routeThreadExists) {
+  if (!threadRef || !routeMatchesPrimaryEnvironment || !bootstrapComplete || !routeThreadExists) {
     return null;
   }
 

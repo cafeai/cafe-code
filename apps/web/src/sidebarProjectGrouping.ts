@@ -8,8 +8,6 @@ import {
 } from "./logicalProject";
 import type { Project } from "./types";
 
-export type EnvironmentPresence = "local-only" | "remote-only" | "mixed";
-
 export interface SidebarProjectGroupMember extends Project {
   physicalProjectKey: string;
   environmentLabel: string | null;
@@ -19,10 +17,8 @@ export interface SidebarProjectSnapshot extends Project {
   projectKey: string;
   displayName: string;
   groupedProjectCount: number;
-  environmentPresence: EnvironmentPresence;
   memberProjects: readonly SidebarProjectGroupMember[];
   memberProjectRefs: readonly ScopedProjectRef[];
-  remoteEnvironmentLabels: readonly string[];
 }
 
 export function buildPhysicalToLogicalProjectKeyMap(input: {
@@ -79,22 +75,6 @@ export function buildSidebarProjectSnapshots(input: {
       continue;
     }
 
-    const hasLocal =
-      input.primaryEnvironmentId !== null &&
-      members.some((member) => member.environmentId === input.primaryEnvironmentId);
-    const hasRemote =
-      input.primaryEnvironmentId !== null
-        ? members.some((member) => member.environmentId !== input.primaryEnvironmentId)
-        : false;
-    const remoteEnvironmentLabels = members
-      .filter(
-        (member) =>
-          input.primaryEnvironmentId !== null &&
-          member.environmentId !== input.primaryEnvironmentId,
-      )
-      .flatMap((member) => (member.environmentLabel ? [member.environmentLabel] : []))
-      .filter((label, index, labels) => labels.indexOf(label) === index);
-
     result.push({
       ...representative,
       projectKey: logicalKey,
@@ -106,11 +86,8 @@ export function buildSidebarProjectSnapshots(input: {
             })
           : representative.name,
       groupedProjectCount: members.length,
-      environmentPresence:
-        hasLocal && hasRemote ? "mixed" : hasRemote ? "remote-only" : "local-only",
       memberProjects: members,
       memberProjectRefs: members.map((member) => scopeProjectRef(member.environmentId, member.id)),
-      remoteEnvironmentLabels,
     });
   }
 

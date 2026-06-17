@@ -29,13 +29,12 @@ import {
   DEFAULT_BRAND_WORDMARK_PREFIX,
   DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
   DEFAULT_SHOW_SIDEBAR_ATTRIBUTION,
-  DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL,
+  DEFAULT_SIDEBAR_BRAND_IMAGE,
   DEFAULT_SIDEBAR_STAR_SPEED,
   DEFAULT_SHOW_SIDEBAR_MASCOT,
   DEFAULT_SHOW_SIDEBAR_SEARCH,
   DEFAULT_THEME_ACCENT_COLOR,
   MAX_BRAND_WORDMARK_PREFIX_LENGTH,
-  MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH,
   MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
   MAX_SIDEBAR_STAR_SPEED,
   MIN_SIDEBAR_STAR_SPEED,
@@ -116,6 +115,12 @@ import {
 import { resolveEditorOpenOptions, type EditorOpenOption } from "../../editorOpenOptions";
 import { openInPreferredEditor } from "../../editorPreferences";
 import { normalizeAccentColor } from "../../themeAccent";
+import {
+  DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES,
+  DEFAULT_SIDEBAR_BRAND_IMAGE_SRC_SET,
+  resolveSidebarBrandImageSrc,
+  uploadSidebarBrandImage,
+} from "../../brandingImages";
 
 const THEME_OPTIONS = [
   {
@@ -145,23 +150,6 @@ function clampSidebarStarSpeed(value: number | null): number {
     return DEFAULT_SIDEBAR_STAR_SPEED;
   }
   return Math.min(MAX_SIDEBAR_STAR_SPEED, Math.max(MIN_SIDEBAR_STAR_SPEED, value));
-}
-
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.addEventListener("error", () =>
-      reject(reader.error ?? new Error("Failed to read image file.")),
-    );
-    reader.addEventListener("load", () => {
-      if (typeof reader.result === "string") {
-        resolve(reader.result);
-        return;
-      }
-      reject(new Error("Failed to read image file."));
-    });
-    reader.readAsDataURL(file);
-  });
 }
 
 const TIMESTAMP_FORMAT_LABELS = {
@@ -458,7 +446,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.brandWordmarkPrefix !== DEFAULT_UNIFIED_SETTINGS.brandWordmarkPrefix
         ? ["Branding prefix"]
         : []),
-      ...(settings.sidebarBrandImageDataUrl !== DEFAULT_UNIFIED_SETTINGS.sidebarBrandImageDataUrl
+      ...(settings.sidebarBrandImage !== DEFAULT_UNIFIED_SETTINGS.sidebarBrandImage
         ? ["Sidebar image"]
         : []),
       ...(settings.sidebarStarSpeed !== DEFAULT_UNIFIED_SETTINGS.sidebarStarSpeed
@@ -525,7 +513,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.showSidebarSearch,
       settings.showSidebarMascot,
       settings.showSidebarAttribution,
-      settings.sidebarBrandImageDataUrl,
+      settings.sidebarBrandImage,
       settings.sidebarStarSpeed,
       settings.themeAccentColor,
       settings.automaticGitFetchInterval,
@@ -555,7 +543,8 @@ export function useSettingsRestore(onRestored?: () => void) {
       showSidebarMascot: DEFAULT_UNIFIED_SETTINGS.showSidebarMascot,
       showSidebarAttribution: DEFAULT_UNIFIED_SETTINGS.showSidebarAttribution,
       brandWordmarkPrefix: DEFAULT_UNIFIED_SETTINGS.brandWordmarkPrefix,
-      sidebarBrandImageDataUrl: DEFAULT_UNIFIED_SETTINGS.sidebarBrandImageDataUrl,
+      sidebarBrandImage: DEFAULT_UNIFIED_SETTINGS.sidebarBrandImage,
+      sidebarBrandImageDataUrl: "",
       sidebarStarSpeed: DEFAULT_UNIFIED_SETTINGS.sidebarStarSpeed,
       themeAccentColor: DEFAULT_UNIFIED_SETTINGS.themeAccentColor,
       defaultEditor: DEFAULT_UNIFIED_SETTINGS.defaultEditor,
@@ -690,9 +679,43 @@ export function AppearanceSettingsPanel() {
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   const sidebarImageInputRef = useRef<HTMLInputElement | null>(null);
+  const sidebarImagePreviewUrlRef = useRef<string | null>(null);
   const [sidebarImageError, setSidebarImageError] = useState<string | null>(null);
+  const [sidebarImagePreviewUrl, setSidebarImagePreviewUrl] = useState<string | null>(null);
+  const [sidebarImageUploading, setSidebarImageUploading] = useState(false);
   const renderedBrandPrefix = settings.brandWordmarkPrefix.trim() || DEFAULT_BRAND_WORDMARK_PREFIX;
-  const sidebarImageSrc = settings.sidebarBrandImageDataUrl || "/cafe-code-sidebar-icon.png";
+  const sidebarImageSrc =
+    sidebarImagePreviewUrl ?? resolveSidebarBrandImageSrc(settings.sidebarBrandImage);
+  const sidebarImageUsesDefault =
+    sidebarImagePreviewUrl === null && settings.sidebarBrandImage === DEFAULT_SIDEBAR_BRAND_IMAGE;
+  const sidebarImageSrcSet = sidebarImageUsesDefault
+    ? DEFAULT_SIDEBAR_BRAND_IMAGE_SRC_SET
+    : undefined;
+
+  const clearSidebarImagePreviewUrl = useCallback(() => {
+    if (sidebarImagePreviewUrlRef.current) {
+      if (typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
+        URL.revokeObjectURL(sidebarImagePreviewUrlRef.current);
+      }
+      sidebarImagePreviewUrlRef.current = null;
+    }
+    setSidebarImagePreviewUrl(null);
+  }, []);
+
+  const setTemporarySidebarImagePreviewUrl = useCallback(
+    (file: File) => {
+      clearSidebarImagePreviewUrl();
+      if (typeof URL === "undefined" || typeof URL.createObjectURL !== "function") {
+        return;
+      }
+      const previewUrl = URL.createObjectURL(file);
+      sidebarImagePreviewUrlRef.current = previewUrl;
+      setSidebarImagePreviewUrl(previewUrl);
+    },
+    [clearSidebarImagePreviewUrl],
+  );
+
+  useEffect(() => clearSidebarImagePreviewUrl, [clearSidebarImagePreviewUrl]);
 
   const handleSidebarImageChange = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
@@ -712,19 +735,23 @@ export function AppearanceSettingsPanel() {
         return;
       }
 
+      setTemporarySidebarImagePreviewUrl(file);
+      setSidebarImageUploading(true);
       try {
-        const dataUrl = await readFileAsDataUrl(file);
-        if (dataUrl.length > MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH) {
-          setSidebarImageError("Choose a smaller image file.");
-          return;
-        }
+        const sidebarBrandImage = await uploadSidebarBrandImage(file);
         setSidebarImageError(null);
-        updateSettings({ sidebarBrandImageDataUrl: dataUrl });
-      } catch {
-        setSidebarImageError("Could not read that image file.");
+        updateSettings({ sidebarBrandImage, sidebarBrandImageDataUrl: "" });
+        clearSidebarImagePreviewUrl();
+      } catch (error) {
+        clearSidebarImagePreviewUrl();
+        setSidebarImageError(
+          error instanceof Error ? error.message : "Could not upload that image.",
+        );
+      } finally {
+        setSidebarImageUploading(false);
       }
     },
-    [updateSettings],
+    [clearSidebarImagePreviewUrl, setTemporarySidebarImagePreviewUrl, updateSettings],
   );
 
   return (
@@ -841,14 +868,15 @@ export function AppearanceSettingsPanel() {
           title="Sidebar image"
           description="Use a local PNG, JPEG, GIF, or WebP image at the bottom of the sidebar."
           resetAction={
-            settings.sidebarBrandImageDataUrl !==
-            DEFAULT_UNIFIED_SETTINGS.sidebarBrandImageDataUrl ? (
+            settings.sidebarBrandImage !== DEFAULT_UNIFIED_SETTINGS.sidebarBrandImage ? (
               <SettingResetButton
                 label="sidebar image"
                 onClick={() => {
                   setSidebarImageError(null);
+                  clearSidebarImagePreviewUrl();
                   updateSettings({
-                    sidebarBrandImageDataUrl: DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL,
+                    sidebarBrandImage: DEFAULT_SIDEBAR_BRAND_IMAGE,
+                    sidebarBrandImageDataUrl: "",
                   });
                 }}
               />
@@ -865,24 +893,30 @@ export function AppearanceSettingsPanel() {
                   aria-hidden="true"
                   className="h-14 w-11 shrink-0 rounded-lg object-cover ring-1 ring-border"
                   draggable={false}
+                  sizes={DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES}
                   src={sidebarImageSrc}
+                  srcSet={sidebarImageSrcSet}
                 />
                 <div className="flex min-w-0 flex-1 items-center gap-2">
                   <Button
+                    disabled={sidebarImageUploading}
                     size="xs"
                     variant="outline"
                     onClick={() => sidebarImageInputRef.current?.click()}
                   >
-                    Choose image
+                    {sidebarImageUploading ? "Uploading..." : "Choose image"}
                   </Button>
-                  {settings.sidebarBrandImageDataUrl ? (
+                  {settings.sidebarBrandImage ? (
                     <Button
+                      disabled={sidebarImageUploading}
                       size="xs"
                       variant="ghost"
                       onClick={() => {
                         setSidebarImageError(null);
+                        clearSidebarImagePreviewUrl();
                         updateSettings({
-                          sidebarBrandImageDataUrl: DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL,
+                          sidebarBrandImage: DEFAULT_SIDEBAR_BRAND_IMAGE,
+                          sidebarBrandImageDataUrl: "",
                         });
                       }}
                     >

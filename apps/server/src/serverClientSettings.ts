@@ -34,6 +34,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { writeFileStringAtomically } from "./atomicWrite.ts";
+import { BrandingImageStore } from "./branding/BrandingImageStore.ts";
 import { ServerConfig } from "./config.ts";
 
 const encodeClientSettings = Schema.encodeEffect(ClientSettingsSchema);
@@ -116,6 +117,7 @@ const makeServerClientSettings = Effect.gen(function* () {
   const { clientSettingsPath } = yield* ServerConfig;
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
+  const brandingImages = yield* BrandingImageStore;
   const writeSemaphore = yield* Semaphore.make(1);
   const cacheKey = "client-settings" as const;
   const changesPubSub = yield* PubSub.unbounded<ClientSettings>();
@@ -148,29 +150,39 @@ const makeServerClientSettings = Effect.gen(function* () {
       Effect.mapError((cause) => toSettingsError("failed to read client settings file", cause)),
     );
 
-  const loadSettingsFromDisk = Effect.gen(function* () {
-    if (!(yield* readConfigExists)) {
-      return DEFAULT_CLIENT_SETTINGS;
-    }
+  const migrateLegacySidebarBrandImage = (settings: ClientSettings) =>
+    Effect.gen(function* () {
+      const legacyDataUrl = settings.sidebarBrandImageDataUrl.trim();
+      if (legacyDataUrl.length === 0) {
+        return settings;
+      }
 
-    const raw = yield* readRawConfig;
-    const decoded = decodeClientSettingsJsonExit(raw);
-    if (decoded._tag === "Failure") {
-      yield* Effect.logWarning("failed to parse client-settings.json, using defaults", {
-        path: clientSettingsPath,
-        issues: Cause.pretty(decoded.cause),
-      });
-      return DEFAULT_CLIENT_SETTINGS;
-    }
-    return decoded.value;
-  });
+      if (settings.sidebarBrandImage !== null) {
+        return {
+          ...settings,
+          sidebarBrandImageDataUrl: "",
+        };
+      }
 
-  const settingsCache = yield* Cache.make<typeof cacheKey, ClientSettings, ClientSettingsError>({
-    capacity: 1,
-    lookup: () => loadSettingsFromDisk,
-  });
+      const migrated = yield* Effect.exit(brandingImages.storeLegacyDataUrl(legacyDataUrl));
+      if (migrated._tag === "Failure") {
+        yield* Effect.logWarning("failed to migrate legacy sidebar branding image", {
+          settingsPath: clientSettingsPath,
+          result: "cleared",
+        });
+        return {
+          ...settings,
+          sidebarBrandImage: null,
+          sidebarBrandImageDataUrl: "",
+        };
+      }
 
-  const getSettingsFromCache = Cache.get(settingsCache, cacheKey);
+      return {
+        ...settings,
+        sidebarBrandImage: migrated.value,
+        sidebarBrandImageDataUrl: "",
+      };
+    });
 
   const writeSettingsAtomically = Effect.fnUntraced(
     function* (settings: ClientSettings) {
@@ -186,6 +198,34 @@ const makeServerClientSettings = Effect.gen(function* () {
     },
     Effect.mapError((cause) => toSettingsError("failed to write client settings file", cause)),
   );
+
+  const loadSettingsFromDisk = Effect.gen(function* () {
+    if (!(yield* readConfigExists)) {
+      return DEFAULT_CLIENT_SETTINGS;
+    }
+
+    const raw = yield* readRawConfig;
+    const decoded = decodeClientSettingsJsonExit(raw);
+    if (decoded._tag === "Failure") {
+      yield* Effect.logWarning("failed to parse client-settings.json, using defaults", {
+        path: clientSettingsPath,
+        issues: Cause.pretty(decoded.cause),
+      });
+      return DEFAULT_CLIENT_SETTINGS;
+    }
+    const migrated = yield* migrateLegacySidebarBrandImage(decoded.value);
+    if (migrated !== decoded.value) {
+      yield* writeSettingsAtomically(migrated);
+    }
+    return migrated;
+  });
+
+  const settingsCache = yield* Cache.make<typeof cacheKey, ClientSettings, ClientSettingsError>({
+    capacity: 1,
+    lookup: () => loadSettingsFromDisk,
+  });
+
+  const getSettingsFromCache = Cache.get(settingsCache, cacheKey);
 
   const revalidateAndEmit = writeSemaphore.withPermits(1)(
     Effect.gen(function* () {
@@ -256,7 +296,10 @@ const makeServerClientSettings = Effect.gen(function* () {
       writeSemaphore.withPermits(1)(
         Effect.gen(function* () {
           const current = yield* getSettingsFromCache;
-          const next = yield* normalizeClientSettings(applyClientSettingsPatch(current, patch));
+          const normalized = yield* normalizeClientSettings(
+            applyClientSettingsPatch(current, patch),
+          );
+          const next = yield* migrateLegacySidebarBrandImage(normalized);
           yield* writeSettingsAtomically(next);
           yield* Cache.set(settingsCache, cacheKey, next);
           yield* emitChange(next);

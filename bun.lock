@@ -21,7 +21,6 @@
       "dependencies": {
         "@cafecode/contracts": "workspace:*",
         "@cafecode/shared": "workspace:*",
-        "@cafecode/ssh": "workspace:*",
         "@effect/platform-node": "catalog:",
         "effect": "catalog:",
         "electron": "42.2.0",
@@ -213,22 +212,6 @@
         "vitest": "catalog:",
       },
     },
-    "packages/ssh": {
-      "name": "@cafecode/ssh",
-      "dependencies": {
-        "@cafecode/contracts": "workspace:*",
-        "@cafecode/shared": "workspace:*",
-        "effect": "catalog:",
-      },
-      "devDependencies": {
-        "@effect/language-service": "catalog:",
-        "@effect/platform-node": "catalog:",
-        "@effect/vitest": "catalog:",
-        "@types/node": "catalog:",
-        "typescript": "catalog:",
-        "vitest": "catalog:",
-      },
-    },
     "scripts": {
       "name": "@cafecode/scripts",
       "dependencies": {
@@ -372,8 +355,6 @@
     "@cafecode/scripts": ["@cafecode/scripts@workspace:scripts"],
 
     "@cafecode/shared": ["@cafecode/shared@workspace:packages/shared"],
-
-    "@cafecode/ssh": ["@cafecode/ssh@workspace:packages/ssh"],
 
     "@cafecode/web": ["@cafecode/web@workspace:apps/web"],
 

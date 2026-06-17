@@ -102,6 +102,7 @@ import {
   ServerClientSettingsService,
   type ServerClientSettingsShape,
 } from "./serverClientSettings.ts";
+import { BrandingImageStoreLive } from "./branding/BrandingImageStore.ts";
 import {
   BrowserTraceCollector,
   type BrowserTraceCollectorShape,
@@ -159,6 +160,12 @@ const testEnvironmentDescriptor = {
     repositoryIdentity: true,
   },
 };
+const tinyPngBytes = Uint8Array.from(
+  Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+    "base64",
+  ),
+);
 const makeDefaultOrchestrationReadModel = () => {
   const now = "2026-01-01T00:00:00.000Z";
   return {
@@ -911,6 +918,7 @@ const buildAppUnderTest = (options?: {
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provide(workspaceAndProjectServicesLayer),
       Layer.provideMerge(FetchHttpClient.layer),
+      Layer.provideMerge(BrandingImageStoreLive),
       Layer.provide(layerConfig),
     );
 
@@ -2554,6 +2562,113 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
       assert.equal(response.status, 200);
       assert.equal(yield* response.text, "attachment-encoded-ok");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("uploads and serves authenticated sidebar branding images", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+
+      const uploadResponse = yield* HttpClient.post("/api/branding/sidebar-image", {
+        headers: {
+          cookie,
+          "content-type": "image/png",
+        },
+        body: HttpBody.uint8Array(tinyPngBytes, "image/png"),
+      });
+      const uploadBody = (yield* uploadResponse.json) as {
+        readonly sidebarBrandImage: {
+          readonly id: string;
+          readonly url: string;
+          readonly mimeType: string;
+          readonly width: number;
+          readonly height: number;
+          readonly sizeBytes: number;
+        };
+      };
+
+      assert.equal(uploadResponse.status, 200);
+      assert.match(uploadBody.sidebarBrandImage.id, /^sha256-[a-f0-9]{64}\.png$/);
+      assert.equal(
+        uploadBody.sidebarBrandImage.url,
+        `/api/branding/sidebar-image/${uploadBody.sidebarBrandImage.id}`,
+      );
+      assert.equal(uploadBody.sidebarBrandImage.mimeType, "image/png");
+      assert.equal(uploadBody.sidebarBrandImage.width, 1);
+      assert.equal(uploadBody.sidebarBrandImage.height, 1);
+      assert.equal(uploadBody.sidebarBrandImage.sizeBytes, tinyPngBytes.byteLength);
+      assert.isFalse(
+        Object.values(uploadBody.sidebarBrandImage).some((value) =>
+          String(value).includes("data:image"),
+        ),
+      );
+
+      const imageResponse = yield* HttpClient.get(uploadBody.sidebarBrandImage.url, {
+        headers: { cookie },
+      });
+      assert.equal(imageResponse.status, 200);
+      assert.equal(
+        getHeader(imageResponse.headers, "cache-control"),
+        "private, max-age=31536000, immutable",
+      );
+      assert.include(getHeader(imageResponse.headers, "content-type") ?? "", "image/png");
+      assert.deepEqual(
+        Array.from(new Uint8Array(yield* imageResponse.arrayBuffer)),
+        Array.from(tinyPngBytes),
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rejects unauthenticated sidebar branding image routes", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const uploadResponse = yield* HttpClient.post("/api/branding/sidebar-image", {
+        headers: {
+          "content-type": "image/png",
+        },
+        body: HttpBody.uint8Array(tinyPngBytes, "image/png"),
+      });
+      const imageResponse = yield* HttpClient.get(
+        "/api/branding/sidebar-image/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+      );
+
+      assert.equal(uploadResponse.status, 401);
+      assert.equal(imageResponse.status, 401);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rejects invalid sidebar branding uploads and missing images safely", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+
+      const unsupportedResponse = yield* HttpClient.post("/api/branding/sidebar-image", {
+        headers: {
+          cookie,
+          "content-type": "image/svg+xml",
+        },
+        body: HttpBody.uint8Array(tinyPngBytes, "image/svg+xml"),
+      });
+      const invalidResponse = yield* HttpClient.post("/api/branding/sidebar-image", {
+        headers: {
+          cookie,
+          "content-type": "image/png",
+        },
+        body: HttpBody.uint8Array(new Uint8Array([1, 2, 3, 4]), "image/png"),
+      });
+      const missingResponse = yield* HttpClient.get(
+        "/api/branding/sidebar-image/sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.png",
+        { headers: { cookie } },
+      );
+
+      assert.equal(unsupportedResponse.status, 415);
+      assert.equal(invalidResponse.status, 400);
+      assert.equal(missingResponse.status, 404);
+      assert.isFalse((yield* unsupportedResponse.text).includes("data:image"));
+      assert.isFalse((yield* invalidResponse.text).includes("data:image"));
+      assert.isFalse((yield* missingResponse.text).includes("data:image"));
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

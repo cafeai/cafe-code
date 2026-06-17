@@ -37,7 +37,7 @@ import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useShallow } from "zustand/react/shallow";
 import { useGitStatus } from "~/lib/gitStatusState";
 import { useDesktopDebugEnabled } from "~/lib/desktopDebugState";
-import { usePrimaryEnvironmentId } from "../environments/primary";
+import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../environments/primary";
 import { readEnvironmentApi } from "../environmentApi";
 import { isElectron } from "../env";
 import { readLocalApi } from "../localApi";
@@ -102,7 +102,7 @@ import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
 import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
 import PlanSidebar from "./PlanSidebar";
-import { ChevronDownIcon, TriangleAlertIcon, WifiOffIcon } from "lucide-react";
+import { ChevronDownIcon, TriangleAlertIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { newCommandId, newDraftId, newMessageId, newThreadId } from "~/lib/utils";
@@ -113,11 +113,6 @@ import {
   deriveLogicalProjectKeyFromSettings,
   selectProjectGroupingSettings,
 } from "../logicalProject";
-import {
-  reconnectSavedEnvironment,
-  useSavedEnvironmentRegistryStore,
-  useSavedEnvironmentRuntimeStore,
-} from "../environments/runtime";
 import { buildDraftThreadRouteParams } from "../threadRoutes";
 import {
   type ComposerImageAttachment,
@@ -186,7 +181,6 @@ import { sanitizeThreadErrorMessage } from "~/rpc/transportError";
 import { retainThreadDetailSubscription } from "../environments/runtime/service";
 import { RightPanelSheet } from "./RightPanelSheet";
 import { deriveDebugWaitReasons } from "./chat/debugWaitReasons";
-import { Button } from "./ui/button";
 import {
   buildVersionMismatchDismissalKey,
   dismissVersionMismatch,
@@ -2485,84 +2479,10 @@ export default function ChatView(props: ChatViewProps) {
   }, [environmentId, routeKind, threadId]);
 
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const savedEnvironmentRegistry = useSavedEnvironmentRegistryStore((s) => s.byId);
-  const savedEnvironmentRuntimeById = useSavedEnvironmentRuntimeStore((s) => s.byId);
-  const savedEnvironmentRegistryRef = useRef(savedEnvironmentRegistry);
-  const savedEnvironmentRuntimeByIdRef = useRef(savedEnvironmentRuntimeById);
-  savedEnvironmentRegistryRef.current = savedEnvironmentRegistry;
-  savedEnvironmentRuntimeByIdRef.current = savedEnvironmentRuntimeById;
-  const activeSavedEnvironmentRecord =
-    activeThread && activeThread.environmentId !== primaryEnvironmentId
-      ? (savedEnvironmentRegistry[activeThread.environmentId] ?? null)
-      : null;
-  const activeSavedEnvironmentRuntime = activeSavedEnvironmentRecord
-    ? (savedEnvironmentRuntimeById[activeSavedEnvironmentRecord.environmentId] ?? null)
-    : null;
-  const activeSavedEnvironmentConnectionState = activeSavedEnvironmentRecord
-    ? (activeSavedEnvironmentRuntime?.connectionState ?? "disconnected")
-    : "connected";
-  const activeEnvironmentUnavailable =
-    activeSavedEnvironmentRecord !== null && activeSavedEnvironmentConnectionState !== "connected";
-  const activeSavedEnvironmentId = activeSavedEnvironmentRecord?.environmentId ?? null;
-  const activeEnvironmentUnavailableLabel = activeSavedEnvironmentRecord
-    ? resolveEnvironmentOptionLabel({
-        isPrimary: false,
-        environmentId: activeSavedEnvironmentRecord.environmentId,
-        runtimeLabel: activeSavedEnvironmentRuntime?.descriptor?.label ?? null,
-        savedLabel: activeSavedEnvironmentRecord.label,
-      })
-    : null;
-  const activeEnvironmentUnavailableState = useMemo<EnvironmentUnavailableState | null>(() => {
-    if (
-      !activeEnvironmentUnavailable ||
-      !activeEnvironmentUnavailableLabel ||
-      !activeSavedEnvironmentId
-    ) {
-      return null;
-    }
-
-    return {
-      environmentId: activeSavedEnvironmentId,
-      label: activeEnvironmentUnavailableLabel,
-      connectionState:
-        activeSavedEnvironmentConnectionState === "connecting" ||
-        activeSavedEnvironmentConnectionState === "error"
-          ? activeSavedEnvironmentConnectionState
-          : "disconnected",
-    };
-  }, [
-    activeEnvironmentUnavailable,
-    activeEnvironmentUnavailableLabel,
-    activeSavedEnvironmentConnectionState,
-    activeSavedEnvironmentId,
-  ]);
-  const [reconnectingEnvironmentId, setReconnectingEnvironmentId] = useState<EnvironmentId | null>(
-    null,
-  );
-  const handleReconnectActiveEnvironment = useCallback(
-    async (environmentId: EnvironmentId, label: string) => {
-      setReconnectingEnvironmentId(environmentId);
-      try {
-        await reconnectSavedEnvironment(environmentId);
-        toastManager.add({
-          type: "success",
-          title: "Environment reconnected",
-          description: `${label} is ready.`,
-        });
-      } catch (error) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Could not reconnect environment",
-            description: error instanceof Error ? error.message : "Failed to reconnect.",
-          }),
-        );
-      } finally {
-        setReconnectingEnvironmentId(null);
-      }
-    },
-    [],
-  );
+  const primaryEnvironmentLabel = readPrimaryEnvironmentDescriptor()?.label ?? null;
+  const activeEnvironmentUnavailable = false;
+  const activeEnvironmentUnavailableLabel: string | null = null;
+  const activeEnvironmentUnavailableState: EnvironmentUnavailableState | null = null;
   const projectGroupingSettings = useSettings(selectProjectGroupingSettings);
   const logicalProjectEnvironments = useMemo(() => {
     if (!activeProject) return [];
@@ -2581,13 +2501,10 @@ export default function ChatView(props: ChatViewProps) {
       if (seen.has(p.environmentId)) continue;
       seen.add(p.environmentId);
       const isPrimary = p.environmentId === primaryEnvironmentId;
-      const savedRecord = savedEnvironmentRegistry[p.environmentId];
-      const runtimeState = savedEnvironmentRuntimeById[p.environmentId];
       const label = resolveEnvironmentOptionLabel({
         isPrimary,
         environmentId: p.environmentId,
-        runtimeLabel: runtimeState?.descriptor?.label ?? null,
-        savedLabel: savedRecord?.label ?? null,
+        runtimeLabel: isPrimary ? primaryEnvironmentLabel : null,
       });
       envs.push({
         environmentId: p.environmentId,
@@ -2607,8 +2524,7 @@ export default function ChatView(props: ChatViewProps) {
     allProjects,
     projectGroupingSettings,
     primaryEnvironmentId,
-    savedEnvironmentRegistry,
-    savedEnvironmentRuntimeById,
+    primaryEnvironmentLabel,
   ]);
   const hasMultipleEnvironments = logicalProjectEnvironments.length > 1;
 
@@ -2750,16 +2666,7 @@ export default function ChatView(props: ChatViewProps) {
     threadProvider,
   });
   const primaryServerConfig = useServerConfig();
-  const activeEnvRuntimeState = useSavedEnvironmentRuntimeStore((s) =>
-    activeThread?.environmentId ? s.byId[activeThread.environmentId] : null,
-  );
-  // Use the server config for the thread's environment.  For the primary
-  // environment fall back to the global atom; for remote environments use
-  // the runtime state stored by the environment manager.
-  const serverConfig =
-    primaryEnvironmentId && activeThread?.environmentId === primaryEnvironmentId
-      ? primaryServerConfig
-      : (activeEnvRuntimeState?.serverConfig ?? primaryServerConfig);
+  const serverConfig = primaryServerConfig;
   const versionMismatch = resolveServerConfigVersionMismatch(serverConfig);
   const versionMismatchDismissKey =
     versionMismatch && activeThread
@@ -2773,77 +2680,9 @@ export default function ChatView(props: ChatViewProps) {
     isVersionMismatchDismissed(versionMismatchDismissKey);
   const showVersionMismatchBanner =
     versionMismatch !== null && versionMismatchDismissKey !== null && !versionMismatchDismissed;
-  const hasMultipleRegisteredEnvironments = Object.keys(savedEnvironmentRegistry).length > 0;
-  const versionMismatchServerLabel = useMemo(() => {
-    if (!hasMultipleRegisteredEnvironments || !activeThread) {
-      return "server";
-    }
-
-    const isPrimary = activeThread.environmentId === primaryEnvironmentId;
-    const savedRecord = savedEnvironmentRegistry[activeThread.environmentId];
-    const runtimeState = savedEnvironmentRuntimeById[activeThread.environmentId];
-    return `${resolveEnvironmentOptionLabel({
-      isPrimary,
-      environmentId: activeThread.environmentId,
-      runtimeLabel: runtimeState?.descriptor?.label ?? serverConfig?.environment.label ?? null,
-      savedLabel: savedRecord?.label ?? null,
-    })} server`;
-  }, [
-    activeThread,
-    hasMultipleRegisteredEnvironments,
-    primaryEnvironmentId,
-    savedEnvironmentRegistry,
-    savedEnvironmentRuntimeById,
-    serverConfig?.environment.label,
-  ]);
+  const versionMismatchServerLabel = "server";
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const items: ComposerBannerStackItem[] = [];
-    if (activeEnvironmentUnavailableState) {
-      items.push({
-        id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
-        variant:
-          activeEnvironmentUnavailableState.connectionState === "error" ? "error" : "warning",
-        icon: <WifiOffIcon />,
-        title: (
-          <>
-            {activeEnvironmentUnavailableState.label} is{" "}
-            {activeEnvironmentUnavailableState.connectionState === "connecting"
-              ? "connecting"
-              : "disconnected"}
-          </>
-        ),
-        description: "Reconnect this environment before sending messages or running actions.",
-        actions: (
-          <>
-            <Button
-              size="xs"
-              disabled={
-                activeEnvironmentUnavailableState.connectionState === "connecting" ||
-                reconnectingEnvironmentId === activeEnvironmentUnavailableState.environmentId
-              }
-              onClick={() =>
-                void handleReconnectActiveEnvironment(
-                  activeEnvironmentUnavailableState.environmentId,
-                  activeEnvironmentUnavailableState.label,
-                )
-              }
-            >
-              {activeEnvironmentUnavailableState.connectionState === "connecting" ||
-              reconnectingEnvironmentId === activeEnvironmentUnavailableState.environmentId
-                ? "Reconnecting..."
-                : "Reconnect"}
-            </Button>
-            <Button
-              size="xs"
-              variant="outline"
-              onClick={() => void navigate({ to: "/settings/connections" })}
-            >
-              WebUI
-            </Button>
-          </>
-        ),
-      });
-    }
     if (showVersionMismatchBanner && versionMismatch && versionMismatchDismissKey) {
       items.push({
         id: `version-mismatch:${versionMismatchDismissKey}`,
@@ -2865,10 +2704,6 @@ export default function ChatView(props: ChatViewProps) {
     }
     return items;
   }, [
-    activeEnvironmentUnavailableState,
-    handleReconnectActiveEnvironment,
-    navigate,
-    reconnectingEnvironmentId,
     showVersionMismatchBanner,
     versionMismatch,
     versionMismatchDismissKey,
@@ -3312,21 +3147,7 @@ export default function ChatView(props: ChatViewProps) {
       ),
     [],
   );
-  const isThreadEnvironmentUnavailable = useCallback(
-    (thread: Thread): boolean => {
-      if (thread.environmentId === primaryEnvironmentId) {
-        return false;
-      }
-      const savedEnvironment = savedEnvironmentRegistryRef.current[thread.environmentId] ?? null;
-      if (savedEnvironment === null) {
-        return false;
-      }
-      const runtime =
-        savedEnvironmentRuntimeByIdRef.current[savedEnvironment.environmentId] ?? null;
-      return (runtime?.connectionState ?? "disconnected") !== "connected";
-    },
-    [primaryEnvironmentId],
-  );
+  const isThreadEnvironmentUnavailable = useCallback((_thread: Thread): boolean => false, []);
   const activeFollowUpQueue =
     activeThreadId !== null
       ? (followUpQueueByThreadId[activeThreadId] ?? EMPTY_FOLLOW_UP_QUEUE)
@@ -5599,7 +5420,6 @@ export default function ChatView(props: ChatViewProps) {
     dispatchGateRevision,
     followUpQueueByThreadId,
     queuedFollowUpPendingDispatchByThreadId,
-    savedEnvironmentRuntimeById,
     tryDispatchNextQueuedFollowUp,
   ]);
 

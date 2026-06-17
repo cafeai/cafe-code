@@ -6,6 +6,8 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { ServerConfig } from "./config.ts";
 import {
   attachmentsRouteLayer,
+  brandingSidebarImageServeRouteLayer,
+  brandingSidebarImageUploadRouteLayer,
   clientDebugLogRouteLayer,
   httpsCertificateRouteLayer,
   otlpTracesProxyRouteLayer,
@@ -57,6 +59,7 @@ import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletion
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
 import { ServerSettingsLive } from "./serverSettings.ts";
 import { ServerClientSettingsLive } from "./serverClientSettings.ts";
+import { BrandingImageStoreLive } from "./branding/BrandingImageStore.ts";
 import { ProjectFaviconResolverLive } from "./project/Layers/ProjectFaviconResolver.ts";
 import { RepositoryIdentityResolverLive } from "./project/Layers/RepositoryIdentityResolver.ts";
 import { WorkspaceEntriesLive } from "./workspace/Layers/WorkspaceEntries.ts";
@@ -268,6 +271,10 @@ const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
   Layer.provideMerge(OrchestrationLayerLive),
 );
 
+const ServerClientSettingsLayerLive = ServerClientSettingsLive.pipe(
+  Layer.provide(BrandingImageStoreLive),
+);
+
 const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // Core Services
   Layer.provideMerge(ThreadDetailSubscriptionRegistryLive),
@@ -292,7 +299,8 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // logger instances.
   Layer.provideMerge(ProviderEventLoggersLive),
   Layer.provideMerge(ServerSettingsLive),
-  Layer.provideMerge(ServerClientSettingsLive),
+  Layer.provideMerge(BrandingImageStoreLive),
+  Layer.provideMerge(ServerClientSettingsLayerLive),
   Layer.provideMerge(WorkspaceLayerLive),
   Layer.provideMerge(ProjectFaviconResolverLive),
   Layer.provideMerge(RepositoryIdentityResolverLive),
@@ -336,6 +344,8 @@ export const makeRoutesLayer = Layer.mergeAll(
   authSessionRouteLayer,
   authWebSocketTokenRouteLayer,
   attachmentsRouteLayer,
+  brandingSidebarImageServeRouteLayer,
+  brandingSidebarImageUploadRouteLayer,
   clientDebugLogRouteLayer,
   orchestrationDispatchRouteLayer,
   orchestrationSnapshotRouteLayer,
@@ -397,6 +407,7 @@ export const makeServerLayer = Layer.unwrap(
 
     return serverApplicationLayer.pipe(
       Layer.provideMerge(RuntimeServicesLive),
+      Layer.provideMerge(BrandingImageStoreLive),
       Layer.provideMerge(ThreadDetailSubscriptionRegistryLive),
       Layer.provideMerge(HttpServerLive),
       Layer.provide(ObservabilityLive),

@@ -56,7 +56,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           "@effect/platform-node": "catalog:",
           "@cafecode/contracts": "workspace:*",
           "@cafecode/shared": "workspace:*",
-          "@cafecode/ssh": "workspace:*",
           effect: "catalog:",
           electron: "41.5.0",
         },

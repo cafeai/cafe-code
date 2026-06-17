@@ -13,10 +13,12 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import { ServerConfig } from "./config.ts";
+import { BrandingImageStoreLive } from "./branding/BrandingImageStore.ts";
 import { ServerClientSettingsLive, ServerClientSettingsService } from "./serverClientSettings.ts";
 
 const makeServerClientSettingsLayer = () =>
   ServerClientSettingsLive.pipe(
+    Layer.provideMerge(BrandingImageStoreLive),
     Layer.provideMerge(
       Layer.fresh(
         ServerConfig.layerTest(process.cwd(), {
@@ -38,7 +40,42 @@ it.layer(NodeServices.layer)("server client settings", (it) => {
     }),
   );
 
-  it.effect("reads legacy desktop client-settings.json from the server state dir", () =>
+  it.effect("migrates legacy desktop client-settings.json branding images", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const config = yield* ServerConfig;
+      const legacyPngDataUrl =
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+      yield* fs.writeFileString(
+        config.clientSettingsPath,
+        // @effect-diagnostics-next-line preferSchemaOverJson:off
+        JSON.stringify({
+          brandWordmarkPrefix: "Acme",
+          sidebarBrandImageDataUrl: legacyPngDataUrl,
+          chatCopyFormat: "plainText",
+        }),
+      );
+
+      const service = yield* ServerClientSettingsService;
+      const settings = yield* service.getSettings;
+      const raw = yield* fs.readFileString(config.clientSettingsPath);
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      const persisted = JSON.parse(raw) as typeof settings;
+
+      assert.equal(settings.brandWordmarkPrefix, "Acme");
+      assert.equal(settings.sidebarBrandImageDataUrl, "");
+      assert.isNotNull(settings.sidebarBrandImage);
+      assert.equal(settings.sidebarBrandImage?.mimeType, "image/png");
+      assert.equal(settings.sidebarBrandImage?.width, 1);
+      assert.equal(settings.sidebarBrandImage?.height, 1);
+      assert.equal(persisted.sidebarBrandImageDataUrl, "");
+      assert.isFalse(raw.includes("data:image"));
+      assert.equal(settings.chatCopyFormat, "plainText");
+      assert.equal(settings.showSidebarMascot, DEFAULT_CLIENT_SETTINGS.showSidebarMascot);
+    }).pipe(Effect.provide(makeServerClientSettingsLayer())),
+  );
+
+  it.effect("clears invalid legacy desktop client-settings.json branding images", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const config = yield* ServerConfig;
@@ -46,19 +83,17 @@ it.layer(NodeServices.layer)("server client settings", (it) => {
         config.clientSettingsPath,
         // @effect-diagnostics-next-line preferSchemaOverJson:off
         JSON.stringify({
-          brandWordmarkPrefix: "Acme",
-          sidebarBrandImageDataUrl: "data:image/png;base64,abc123",
-          chatCopyFormat: "plainText",
+          sidebarBrandImageDataUrl: "data:image/png;base64,not-image",
         }),
       );
 
       const service = yield* ServerClientSettingsService;
       const settings = yield* service.getSettings;
+      const raw = yield* fs.readFileString(config.clientSettingsPath);
 
-      assert.equal(settings.brandWordmarkPrefix, "Acme");
-      assert.equal(settings.sidebarBrandImageDataUrl, "data:image/png;base64,abc123");
-      assert.equal(settings.chatCopyFormat, "plainText");
-      assert.equal(settings.showSidebarMascot, DEFAULT_CLIENT_SETTINGS.showSidebarMascot);
+      assert.equal(settings.sidebarBrandImageDataUrl, "");
+      assert.isNull(settings.sidebarBrandImage);
+      assert.isFalse(raw.includes("data:image"));
     }).pipe(Effect.provide(makeServerClientSettingsLayer())),
   );
 

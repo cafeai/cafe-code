@@ -15,6 +15,7 @@ import {
   DEFAULT_POWER_SAVE_BLOCKER_MODE,
   DEFAULT_SHOW_SIDEBAR_ATTRIBUTION,
   DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL,
+  DEFAULT_SIDEBAR_BRAND_IMAGE,
   DEFAULT_SIDEBAR_STAR_SPEED,
   DEFAULT_SHOW_SIDEBAR_MASCOT,
   DEFAULT_SHOW_SIDEBAR_SEARCH,
@@ -22,6 +23,7 @@ import {
   MAX_BRAND_WORDMARK_PREFIX_LENGTH,
   MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH,
   MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
+  MAX_SIDEBAR_BRAND_IMAGE_ID_LENGTH,
   MAX_SIDEBAR_STAR_SPEED,
   MIN_SIDEBAR_STAR_SPEED,
   isCapabilityDependentClientSettingsKey,
@@ -65,9 +67,11 @@ describe("client settings", () => {
 
   it("classifies synced client settings without including secret stores", () => {
     expect(CLIENT_SETTINGS_KEYS).toContain("sidebarBrandImageDataUrl");
+    expect(CLIENT_SETTINGS_KEYS).toContain("sidebarBrandImage");
     expect(CLIENT_SETTINGS_KEYS).toContain("defaultEditor");
     expect(CLIENT_SETTINGS_KEYS).toContain("powerSaveBlockerMode");
     expect(isClientSettingsKey("sidebarBrandImageDataUrl")).toBe(true);
+    expect(isClientSettingsKey("sidebarBrandImage")).toBe(true);
     expect(isClientSettingsKey("providerCredentials")).toBe(false);
     expect(CLIENT_SETTINGS_EXCLUDED_SECRET_STORES).toContain("provider-api-keys");
     expect(CLIENT_SETTINGS_EXCLUDED_SECRET_STORES).toContain("tls-private-keys");
@@ -92,6 +96,7 @@ describe("client settings", () => {
     expect(DEFAULT_CLIENT_SETTINGS.showSidebarMascot).toBe(DEFAULT_SHOW_SIDEBAR_MASCOT);
     expect(DEFAULT_CLIENT_SETTINGS.showSidebarAttribution).toBe(DEFAULT_SHOW_SIDEBAR_ATTRIBUTION);
     expect(DEFAULT_CLIENT_SETTINGS.brandWordmarkPrefix).toBe(DEFAULT_BRAND_WORDMARK_PREFIX);
+    expect(DEFAULT_CLIENT_SETTINGS.sidebarBrandImage).toBe(DEFAULT_SIDEBAR_BRAND_IMAGE);
     expect(DEFAULT_CLIENT_SETTINGS.sidebarBrandImageDataUrl).toBe(
       DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL,
     );
@@ -103,6 +108,7 @@ describe("client settings", () => {
     expect(decodeClientSettings({}).showSidebarMascot).toBe(true);
     expect(decodeClientSettings({}).showSidebarAttribution).toBe(true);
     expect(decodeClientSettings({}).brandWordmarkPrefix).toBe("Cafe");
+    expect(decodeClientSettings({}).sidebarBrandImage).toBeNull();
     expect(decodeClientSettings({}).sidebarBrandImageDataUrl).toBe("");
     expect(decodeClientSettings({}).sidebarStarSpeed).toBe(1);
     expect(decodeClientSettings({}).themeAccentColor).toBe("");
@@ -124,6 +130,14 @@ describe("client settings", () => {
         showSidebarMascot: false,
         showSidebarAttribution: false,
         brandWordmarkPrefix: "  Acme  ",
+        sidebarBrandImage: {
+          id: "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+          url: "/api/branding/sidebar-image/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+          mimeType: "image/png",
+          width: 128,
+          height: 160,
+          sizeBytes: 12345,
+        },
         sidebarBrandImageDataUrl: "  data:image/png;base64,abc123  ",
         sidebarStarSpeed: 1.5,
         themeAccentColor: "  #16a34a  ",
@@ -135,6 +149,14 @@ describe("client settings", () => {
       showSidebarMascot: false,
       showSidebarAttribution: false,
       brandWordmarkPrefix: "Acme",
+      sidebarBrandImage: {
+        id: "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+        url: "/api/branding/sidebar-image/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+        mimeType: "image/png",
+        width: 128,
+        height: 160,
+        sizeBytes: 12345,
+      },
       sidebarBrandImageDataUrl: "data:image/png;base64,abc123",
       sidebarStarSpeed: 1.5,
       themeAccentColor: "#16a34a",
@@ -144,6 +166,7 @@ describe("client settings", () => {
 
   it("bounds runtime branding settings", () => {
     expect(MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES).toBe(1_000_000);
+    expect(MAX_SIDEBAR_BRAND_IMAGE_ID_LENGTH).toBe(96);
     expect(MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH).toBeGreaterThanOrEqual(
       Math.ceil((MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES * 4) / 3) + 128,
     );
@@ -151,11 +174,27 @@ describe("client settings", () => {
     expect(
       decodeClientSettingsPatch({
         brandWordmarkPrefix: "x".repeat(MAX_BRAND_WORDMARK_PREFIX_LENGTH),
+        sidebarBrandImage: {
+          id: "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.webp",
+          url: "/api/branding/sidebar-image/sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.webp",
+          mimeType: "image/webp",
+          width: 4096,
+          height: 4096,
+          sizeBytes: MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
+        },
         sidebarBrandImageDataUrl: "x".repeat(MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH),
         sidebarStarSpeed: MIN_SIDEBAR_STAR_SPEED,
       }),
     ).toEqual({
       brandWordmarkPrefix: "x".repeat(MAX_BRAND_WORDMARK_PREFIX_LENGTH),
+      sidebarBrandImage: {
+        id: "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.webp",
+        url: "/api/branding/sidebar-image/sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.webp",
+        mimeType: "image/webp",
+        width: 4096,
+        height: 4096,
+        sizeBytes: MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
+      },
       sidebarBrandImageDataUrl: "x".repeat(MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH),
       sidebarStarSpeed: MIN_SIDEBAR_STAR_SPEED,
     });
@@ -179,5 +218,62 @@ describe("client settings", () => {
         sidebarBrandImageDataUrl: "x".repeat(MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH + 1),
       }),
     ).toThrow();
+    expect(() =>
+      decodeClientSettingsPatch({
+        sidebarBrandImage: {
+          id: "brand.png",
+          url: "/api/branding/sidebar-image/brand.png",
+          mimeType: "image/png",
+          width: 128,
+          height: 160,
+          sizeBytes: 1024,
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeClientSettingsPatch({
+        sidebarBrandImage: {
+          id: "sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.png",
+          url: "/api/branding/sidebar-image/sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.png",
+          mimeType: "image/svg+xml",
+          width: 128,
+          height: 160,
+          sizeBytes: 1024,
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeClientSettingsPatch({
+        sidebarBrandImage: {
+          id: "sha256-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.png",
+          url: "/api/branding/sidebar-image/sha256-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.png",
+          mimeType: "image/png",
+          width: 4097,
+          height: 160,
+          sizeBytes: 1024,
+        },
+      }),
+    ).toThrow();
+  });
+
+  it("decodes legacy data URL settings alongside compact branding metadata", () => {
+    expect(
+      decodeClientSettings({
+        sidebarBrandImageDataUrl: "data:image/png;base64,abc123",
+      }).sidebarBrandImageDataUrl,
+    ).toBe("data:image/png;base64,abc123");
+
+    expect(
+      decodeClientSettings({
+        sidebarBrandImage: {
+          id: "sha256-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.jpg",
+          url: "/api/branding/sidebar-image/sha256-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.jpg",
+          mimeType: "image/jpeg",
+          width: 320,
+          height: 400,
+          sizeBytes: 2048,
+        },
+      }).sidebarBrandImageDataUrl,
+    ).toBe("");
   });
 });

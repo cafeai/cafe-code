@@ -1,4 +1,4 @@
-import { ProjectId, ThreadId } from "@cafecode/contracts";
+import { EnvironmentId, ProjectId, ThreadId } from "@cafecode/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -8,6 +8,7 @@ import {
   PERSISTED_STATE_KEY,
   type PersistedUiState,
   persistState,
+  removeThreadUiForNonPrimaryEnvironment,
   reorderProjects,
   setDefaultAdvertisedEndpointKey,
   setNavigationSidebarOpen,
@@ -342,6 +343,36 @@ describe("uiStateStore pure functions", () => {
     });
     expect(next.threadPlanSidebarOpenById).toEqual({
       [thread1]: false,
+    });
+  });
+
+  it("removeThreadUiForNonPrimaryEnvironment prunes stale scoped thread UI state", () => {
+    const primaryEnvironmentId = EnvironmentId.make("environment-primary");
+    const primaryThreadKey = "environment-primary:thread-1";
+    const staleThreadKey = "environment-stale:thread-2";
+    const legacyThreadKey = ThreadId.make("thread-legacy");
+    const initialState = makeUiState({
+      threadLastVisitedAtById: {
+        [primaryThreadKey]: "2026-02-25T12:35:00.000Z",
+        [staleThreadKey]: "2026-02-25T12:36:00.000Z",
+        [legacyThreadKey]: "2026-02-25T12:37:00.000Z",
+      },
+      threadPlanSidebarOpenById: {
+        [primaryThreadKey]: false,
+        [staleThreadKey]: true,
+        [legacyThreadKey]: true,
+      },
+    });
+
+    const next = removeThreadUiForNonPrimaryEnvironment(initialState, primaryEnvironmentId);
+
+    expect(next.threadLastVisitedAtById).toEqual({
+      [primaryThreadKey]: "2026-02-25T12:35:00.000Z",
+      [legacyThreadKey]: "2026-02-25T12:37:00.000Z",
+    });
+    expect(next.threadPlanSidebarOpenById).toEqual({
+      [primaryThreadKey]: false,
+      [legacyThreadKey]: true,
     });
   });
 

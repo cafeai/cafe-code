@@ -20,17 +20,17 @@ describe("shouldShowOpenInPicker", () => {
     expect(
       shouldShowOpenInPicker({
         activeProjectName: "codething-mvp",
-        activeThreadEnvironmentId: EnvironmentId.make("environment-remote"),
+        activeThreadEnvironmentId: EnvironmentId.make("environment-stale"),
         primaryEnvironmentId: null,
       }),
     ).toBe(false);
   });
 
-  it("hides the picker for remote environments", () => {
+  it("hides the picker for stale non-primary environment ids", () => {
     expect(
       shouldShowOpenInPicker({
         activeProjectName: "codething-mvp",
-        activeThreadEnvironmentId: EnvironmentId.make("environment-remote"),
+        activeThreadEnvironmentId: EnvironmentId.make("environment-stale"),
         primaryEnvironmentId,
       }),
     ).toBe(false);

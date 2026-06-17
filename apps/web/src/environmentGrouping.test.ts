@@ -1,7 +1,13 @@
-import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@cafecode/contracts";
 import { scopeProjectRef } from "@cafecode/client-runtime";
+import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@cafecode/contracts";
 import { describe, expect, it } from "vitest";
 
+import {
+  deriveLogicalProjectKey,
+  deriveLogicalProjectKeyFromSettings,
+  derivePhysicalProjectKey,
+  resolveProjectGroupingMode,
+} from "./logicalProject";
 import {
   selectProjectsAcrossEnvironments,
   selectSidebarThreadsAcrossEnvironments,
@@ -10,38 +16,24 @@ import {
   type AppState,
   type EnvironmentState,
 } from "./store";
-import {
-  deriveLogicalProjectKey,
-  deriveLogicalProjectKeyFromSettings,
-  derivePhysicalProjectKey,
-  resolveProjectGroupingMode,
-} from "./logicalProject";
 import type { Project, SidebarThreadSummary } from "./types";
 import { DEFAULT_INTERACTION_MODE } from "./types";
 
-// ── Fixture Identifiers ──────────────────────────────────────────────
-
 const primaryEnvId = EnvironmentId.make("env-primary");
-const remoteEnvId = EnvironmentId.make("env-remote");
+const repoRootProjectId = ProjectId.make("repo-root-proj");
+const repoNestedProjectId = ProjectId.make("repo-nested-proj");
+const standaloneProjectId = ProjectId.make("standalone-proj");
 
-const sharedProjectPrimaryId = ProjectId.make("shared-proj-primary");
-const sharedProjectRemoteId = ProjectId.make("shared-proj-remote");
-const localOnlyProjectId = ProjectId.make("local-only-proj");
-const remoteOnlyProjectId = ProjectId.make("remote-only-proj");
+const threadRoot1 = ThreadId.make("thread-root-1");
+const threadRoot2 = ThreadId.make("thread-root-2");
+const threadNested1 = ThreadId.make("thread-nested-1");
+const threadStandalone1 = ThreadId.make("thread-standalone-1");
 
-const threadP1 = ThreadId.make("thread-shared-primary-1");
-const threadP2 = ThreadId.make("thread-shared-primary-2");
-const threadR1 = ThreadId.make("thread-shared-remote-1");
-const threadL1 = ThreadId.make("thread-local-only-1");
-const threadRO1 = ThreadId.make("thread-remote-only-1");
-
-const SHARED_REPO_CANONICAL_KEY = "github.com/example/shared-repo";
+const REPO_CANONICAL_KEY = "github.com/example/shared-repo";
 const DEFAULT_GROUPING_SETTINGS = {
   sidebarProjectGroupingMode: "repository" as const,
   sidebarProjectGroupingOverrides: {},
 };
-
-// ── Factory Helpers ──────────────────────────────────────────────────
 
 function makeProject(
   overrides: Partial<Project> & Pick<Project, "id" | "environmentId" | "name">,
@@ -99,343 +91,137 @@ function makeEmptyEnvironmentState(): EnvironmentState {
   };
 }
 
-// ── Fixture: Two environments, shared + local-only + remote-only projects ──
+function makeRepoRootProject(): Project {
+  return makeProject({
+    id: repoRootProjectId,
+    environmentId: primaryEnvId,
+    name: "shared-repo",
+    cwd: "/workspace/repo",
+    repositoryIdentity: {
+      canonicalKey: REPO_CANONICAL_KEY,
+      rootPath: "/workspace/repo",
+      locator: {
+        source: "git-remote",
+        remoteName: "origin",
+        remoteUrl: "https://github.com/example/shared-repo.git",
+      },
+    },
+  });
+}
+
+function makeRepoNestedProject(): Project {
+  return makeProject({
+    id: repoNestedProjectId,
+    environmentId: primaryEnvId,
+    name: "web",
+    cwd: "/workspace/repo/apps/web",
+    repositoryIdentity: {
+      canonicalKey: REPO_CANONICAL_KEY,
+      rootPath: "/workspace/repo",
+      locator: {
+        source: "git-remote",
+        remoteName: "origin",
+        remoteUrl: "https://github.com/example/shared-repo.git",
+      },
+    },
+  });
+}
 
 function makeFixtureState(): AppState {
-  // Shared project: same repo in both envs
-  const sharedProjectPrimary = makeProject({
-    id: sharedProjectPrimaryId,
+  const repoRootProject = makeRepoRootProject();
+  const repoNestedProject = makeRepoNestedProject();
+  const standaloneProject = makeProject({
+    id: standaloneProjectId,
     environmentId: primaryEnvId,
-    name: "shared-repo",
-    repositoryIdentity: {
-      canonicalKey: SHARED_REPO_CANONICAL_KEY,
-      locator: {
-        source: "git-remote",
-        remoteName: "origin",
-        remoteUrl: "https://github.com/example/shared-repo.git",
-      },
-    },
-  });
-  const sharedProjectRemote = makeProject({
-    id: sharedProjectRemoteId,
-    environmentId: remoteEnvId,
-    name: "shared-repo",
-    repositoryIdentity: {
-      canonicalKey: SHARED_REPO_CANONICAL_KEY,
-      locator: {
-        source: "git-remote",
-        remoteName: "origin",
-        remoteUrl: "https://github.com/example/shared-repo.git",
-      },
-    },
-  });
-  // Local-only project
-  const localOnlyProject = makeProject({
-    id: localOnlyProjectId,
-    environmentId: primaryEnvId,
-    name: "local-only",
-  });
-  // Remote-only project
-  const remoteOnlyProject = makeProject({
-    id: remoteOnlyProjectId,
-    environmentId: remoteEnvId,
-    name: "remote-only",
+    name: "standalone",
   });
 
-  // Threads
-  const summaryP1 = makeSidebarThreadSummary({
-    id: threadP1,
-    environmentId: primaryEnvId,
-    projectId: sharedProjectPrimaryId,
-    title: "Shared primary thread 1",
-  });
-  const summaryP2 = makeSidebarThreadSummary({
-    id: threadP2,
-    environmentId: primaryEnvId,
-    projectId: sharedProjectPrimaryId,
-    title: "Shared primary thread 2",
-  });
-  const summaryR1 = makeSidebarThreadSummary({
-    id: threadR1,
-    environmentId: remoteEnvId,
-    projectId: sharedProjectRemoteId,
-    title: "Shared remote thread 1",
-  });
-  const summaryL1 = makeSidebarThreadSummary({
-    id: threadL1,
-    environmentId: primaryEnvId,
-    projectId: localOnlyProjectId,
-    title: "Local only thread 1",
-  });
-  const summaryRO1 = makeSidebarThreadSummary({
-    id: threadRO1,
-    environmentId: remoteEnvId,
-    projectId: remoteOnlyProjectId,
-    title: "Remote only thread 1",
-  });
-
-  const primaryEnvState: EnvironmentState = {
+  const environmentState: EnvironmentState = {
     ...makeEmptyEnvironmentState(),
-    projectIds: [sharedProjectPrimaryId, localOnlyProjectId],
+    projectIds: [repoRootProjectId, repoNestedProjectId, standaloneProjectId],
     projectById: {
-      [sharedProjectPrimaryId]: sharedProjectPrimary,
-      [localOnlyProjectId]: localOnlyProject,
+      [repoRootProjectId]: repoRootProject,
+      [repoNestedProjectId]: repoNestedProject,
+      [standaloneProjectId]: standaloneProject,
     },
-    threadIds: [threadP1, threadP2, threadL1],
+    threadIds: [threadRoot1, threadRoot2, threadNested1, threadStandalone1],
     threadIdsByProjectId: {
-      [sharedProjectPrimaryId]: [threadP1, threadP2],
-      [localOnlyProjectId]: [threadL1],
+      [repoRootProjectId]: [threadRoot1, threadRoot2],
+      [repoNestedProjectId]: [threadNested1],
+      [standaloneProjectId]: [threadStandalone1],
     },
     sidebarThreadSummaryById: {
-      [threadP1]: summaryP1,
-      [threadP2]: summaryP2,
-      [threadL1]: summaryL1,
-    },
-  };
-
-  const remoteEnvState: EnvironmentState = {
-    ...makeEmptyEnvironmentState(),
-    projectIds: [sharedProjectRemoteId, remoteOnlyProjectId],
-    projectById: {
-      [sharedProjectRemoteId]: sharedProjectRemote,
-      [remoteOnlyProjectId]: remoteOnlyProject,
-    },
-    threadIds: [threadR1, threadRO1],
-    threadIdsByProjectId: {
-      [sharedProjectRemoteId]: [threadR1],
-      [remoteOnlyProjectId]: [threadRO1],
-    },
-    sidebarThreadSummaryById: {
-      [threadR1]: summaryR1,
-      [threadRO1]: summaryRO1,
+      [threadRoot1]: makeSidebarThreadSummary({
+        id: threadRoot1,
+        environmentId: primaryEnvId,
+        projectId: repoRootProjectId,
+        title: "Repo root thread 1",
+      }),
+      [threadRoot2]: makeSidebarThreadSummary({
+        id: threadRoot2,
+        environmentId: primaryEnvId,
+        projectId: repoRootProjectId,
+        title: "Repo root thread 2",
+      }),
+      [threadNested1]: makeSidebarThreadSummary({
+        id: threadNested1,
+        environmentId: primaryEnvId,
+        projectId: repoNestedProjectId,
+        title: "Nested project thread 1",
+      }),
+      [threadStandalone1]: makeSidebarThreadSummary({
+        id: threadStandalone1,
+        environmentId: primaryEnvId,
+        projectId: standaloneProjectId,
+        title: "Standalone thread 1",
+      }),
     },
   };
 
   return {
     activeEnvironmentId: primaryEnvId,
     environmentStateById: {
-      [primaryEnvId]: primaryEnvState,
-      [remoteEnvId]: remoteEnvState,
+      [primaryEnvId]: environmentState,
     },
   };
 }
 
-// ── Tests ────────────────────────────────────────────────────────────
-
 describe("environment grouping", () => {
   describe("deriveLogicalProjectKey", () => {
     it("uses repositoryIdentity.canonicalKey when present", () => {
-      const project = makeProject({
-        id: sharedProjectPrimaryId,
-        environmentId: primaryEnvId,
-        name: "shared-repo",
-        repositoryIdentity: {
-          canonicalKey: SHARED_REPO_CANONICAL_KEY,
-          locator: {
-            source: "git-remote",
-            remoteName: "origin",
-            remoteUrl: "https://github.com/example/shared-repo.git",
-          },
-        },
-      });
-      expect(deriveLogicalProjectKey(project)).toBe(SHARED_REPO_CANONICAL_KEY);
+      expect(deriveLogicalProjectKey(makeRepoRootProject())).toBe(REPO_CANONICAL_KEY);
     });
 
-    it("falls back to scoped project key when no repositoryIdentity", () => {
+    it("falls back to scoped project key when no repositoryIdentity exists", () => {
       const project = makeProject({
-        id: localOnlyProjectId,
+        id: standaloneProjectId,
         environmentId: primaryEnvId,
-        name: "local-only",
+        name: "standalone",
       });
+
       expect(deriveLogicalProjectKey(project)).toBe(derivePhysicalProjectKey(project));
     });
 
-    it("groups projects from different environments that share the same canonical key", () => {
-      const primary = makeProject({
-        id: sharedProjectPrimaryId,
-        environmentId: primaryEnvId,
-        name: "shared-repo",
-        repositoryIdentity: {
-          canonicalKey: SHARED_REPO_CANONICAL_KEY,
-          locator: {
-            source: "git-remote",
-            remoteName: "origin",
-            remoteUrl: "https://github.com/example/shared-repo.git",
-          },
-        },
-      });
-      const remote = makeProject({
-        id: sharedProjectRemoteId,
-        environmentId: remoteEnvId,
-        name: "shared-repo",
-        repositoryIdentity: {
-          canonicalKey: SHARED_REPO_CANONICAL_KEY,
-          locator: {
-            source: "git-remote",
-            remoteName: "origin",
-            remoteUrl: "https://github.com/example/shared-repo.git",
-          },
-        },
-      });
-      expect(deriveLogicalProjectKey(primary)).toBe(deriveLogicalProjectKey(remote));
-    });
-
     it("groups repo root and nested projects from the same repository by default", () => {
-      const rootProject = makeProject({
-        id: sharedProjectPrimaryId,
-        environmentId: primaryEnvId,
-        name: "shared-repo",
-        cwd: "/workspace/repo",
-        repositoryIdentity: {
-          canonicalKey: SHARED_REPO_CANONICAL_KEY,
-          rootPath: "/workspace/repo",
-          locator: {
-            source: "git-remote",
-            remoteName: "origin",
-            remoteUrl: "https://github.com/example/shared-repo.git",
-          },
-        },
-      });
-      const nestedProject = makeProject({
-        id: localOnlyProjectId,
-        environmentId: primaryEnvId,
-        name: "web",
-        cwd: "/workspace/repo/apps/web",
-        repositoryIdentity: {
-          canonicalKey: SHARED_REPO_CANONICAL_KEY,
-          rootPath: "/workspace/repo",
-          locator: {
-            source: "git-remote",
-            remoteName: "origin",
-            remoteUrl: "https://github.com/example/shared-repo.git",
-          },
-        },
-      });
-
-      expect(deriveLogicalProjectKey(rootProject)).toBe(SHARED_REPO_CANONICAL_KEY);
-      expect(deriveLogicalProjectKey(nestedProject)).toBe(SHARED_REPO_CANONICAL_KEY);
+      expect(deriveLogicalProjectKey(makeRepoRootProject())).toBe(REPO_CANONICAL_KEY);
+      expect(deriveLogicalProjectKey(makeRepoNestedProject())).toBe(REPO_CANONICAL_KEY);
     });
 
     it("uses repository path grouping when requested", () => {
-      const rootProject = makeProject({
-        id: sharedProjectPrimaryId,
-        environmentId: primaryEnvId,
-        name: "shared-repo",
-        cwd: "/workspace/repo",
-        repositoryIdentity: {
-          canonicalKey: SHARED_REPO_CANONICAL_KEY,
-          rootPath: "/workspace/repo",
-          locator: {
-            source: "git-remote",
-            remoteName: "origin",
-            remoteUrl: "https://github.com/example/shared-repo.git",
-          },
-        },
-      });
-      const nestedProject = makeProject({
-        id: localOnlyProjectId,
-        environmentId: primaryEnvId,
-        name: "web",
-        cwd: "/workspace/repo/apps/web",
-        repositoryIdentity: {
-          canonicalKey: SHARED_REPO_CANONICAL_KEY,
-          rootPath: "/workspace/repo",
-          locator: {
-            source: "git-remote",
-            remoteName: "origin",
-            remoteUrl: "https://github.com/example/shared-repo.git",
-          },
-        },
-      });
-
       expect(
-        deriveLogicalProjectKey(rootProject, {
+        deriveLogicalProjectKey(makeRepoRootProject(), {
           groupingMode: "repository_path",
         }),
-      ).toBe(SHARED_REPO_CANONICAL_KEY);
+      ).toBe(REPO_CANONICAL_KEY);
       expect(
-        deriveLogicalProjectKey(nestedProject, {
+        deriveLogicalProjectKey(makeRepoNestedProject(), {
           groupingMode: "repository_path",
         }),
-      ).toBe(`${SHARED_REPO_CANONICAL_KEY}::apps/web`);
-    });
-
-    it("groups matching nested project paths across environments when repo roots differ", () => {
-      const primary = makeProject({
-        id: sharedProjectPrimaryId,
-        environmentId: primaryEnvId,
-        name: "web",
-        cwd: "/workspace/repo/apps/web",
-        repositoryIdentity: {
-          canonicalKey: SHARED_REPO_CANONICAL_KEY,
-          rootPath: "/workspace/repo",
-          locator: {
-            source: "git-remote",
-            remoteName: "origin",
-            remoteUrl: "https://github.com/example/shared-repo.git",
-          },
-        },
-      });
-      const remote = makeProject({
-        id: sharedProjectRemoteId,
-        environmentId: remoteEnvId,
-        name: "web",
-        cwd: "/srv/checkout/apps/web",
-        repositoryIdentity: {
-          canonicalKey: SHARED_REPO_CANONICAL_KEY,
-          rootPath: "/srv/checkout",
-          locator: {
-            source: "git-remote",
-            remoteName: "origin",
-            remoteUrl: "https://github.com/example/shared-repo.git",
-          },
-        },
-      });
-
-      expect(
-        deriveLogicalProjectKey(primary, {
-          groupingMode: "repository_path",
-        }),
-      ).toBe(`${SHARED_REPO_CANONICAL_KEY}::apps/web`);
-      expect(
-        deriveLogicalProjectKey(primary, {
-          groupingMode: "repository_path",
-        }),
-      ).toBe(
-        deriveLogicalProjectKey(remote, {
-          groupingMode: "repository_path",
-        }),
-      );
-    });
-
-    it("does NOT group projects without shared canonical key", () => {
-      const local = makeProject({
-        id: localOnlyProjectId,
-        environmentId: primaryEnvId,
-        name: "local-only",
-      });
-      const remote = makeProject({
-        id: remoteOnlyProjectId,
-        environmentId: remoteEnvId,
-        name: "remote-only",
-      });
-      expect(deriveLogicalProjectKey(local)).not.toBe(deriveLogicalProjectKey(remote));
+      ).toBe(`${REPO_CANONICAL_KEY}::apps/web`);
     });
 
     it("uses per-project overrides from settings", () => {
-      const project = makeProject({
-        id: sharedProjectPrimaryId,
-        environmentId: primaryEnvId,
-        name: "shared-repo",
-        repositoryIdentity: {
-          canonicalKey: SHARED_REPO_CANONICAL_KEY,
-          locator: {
-            source: "git-remote",
-            remoteName: "origin",
-            remoteUrl: "https://github.com/example/shared-repo.git",
-          },
-        },
-      });
+      const project = makeRepoRootProject();
 
       expect(resolveProjectGroupingMode(project, DEFAULT_GROUPING_SETTINGS)).toBe("repository");
       expect(
@@ -449,166 +235,95 @@ describe("environment grouping", () => {
     });
   });
 
-  describe("selectProjectsAcrossEnvironments", () => {
-    it("returns all projects from all environments", () => {
-      const state = makeFixtureState();
-      const projects = selectProjectsAcrossEnvironments(state);
-      expect(projects).toHaveLength(4);
-      const names = projects.map((p) => p.name).toSorted();
-      expect(names).toEqual(["local-only", "remote-only", "shared-repo", "shared-repo"]);
-    });
-  });
+  describe("store selectors", () => {
+    it("returns primary projects", () => {
+      const projects = selectProjectsAcrossEnvironments(makeFixtureState());
 
-  describe("selectSidebarThreadsAcrossEnvironments", () => {
-    it("returns all sidebar thread summaries from all environments", () => {
-      const state = makeFixtureState();
-      const threads = selectSidebarThreadsAcrossEnvironments(state);
-      expect(threads).toHaveLength(5);
-      const ids = new Set(threads.map((t) => t.id));
-      expect(ids).toContain(threadP1);
-      expect(ids).toContain(threadP2);
-      expect(ids).toContain(threadR1);
-      expect(ids).toContain(threadL1);
-      expect(ids).toContain(threadRO1);
+      expect(projects).toHaveLength(3);
+      expect(projects.map((project) => project.name).toSorted()).toEqual([
+        "shared-repo",
+        "standalone",
+        "web",
+      ]);
     });
-  });
 
-  describe("selectSidebarThreadsForProjectRef", () => {
+    it("returns primary sidebar thread summaries", () => {
+      const threads = selectSidebarThreadsAcrossEnvironments(makeFixtureState());
+
+      expect(threads.map((thread) => thread.id)).toEqual([
+        threadRoot1,
+        threadRoot2,
+        threadNested1,
+        threadStandalone1,
+      ]);
+    });
+
     it("returns threads for a single project ref", () => {
-      const state = makeFixtureState();
-      const ref = scopeProjectRef(primaryEnvId, sharedProjectPrimaryId);
-      const threads = selectSidebarThreadsForProjectRef(state, ref);
-      expect(threads).toHaveLength(2);
-      expect(threads.map((t) => t.id)).toEqual([threadP1, threadP2]);
+      const ref = scopeProjectRef(primaryEnvId, repoRootProjectId);
+      const threads = selectSidebarThreadsForProjectRef(makeFixtureState(), ref);
+
+      expect(threads.map((thread) => thread.id)).toEqual([threadRoot1, threadRoot2]);
     });
 
-    it("returns empty array for null ref", () => {
+    it("returns empty array for null or nonexistent refs", () => {
       const state = makeFixtureState();
+
       expect(selectSidebarThreadsForProjectRef(state, null)).toEqual([]);
+      expect(
+        selectSidebarThreadsForProjectRef(
+          state,
+          scopeProjectRef(primaryEnvId, ProjectId.make("missing-project")),
+        ),
+      ).toEqual([]);
     });
 
-    it("returns empty array for nonexistent environment", () => {
-      const state = makeFixtureState();
-      const ref = scopeProjectRef(EnvironmentId.make("nonexistent"), sharedProjectPrimaryId);
-      expect(selectSidebarThreadsForProjectRef(state, ref)).toEqual([]);
-    });
-  });
-
-  describe("selectSidebarThreadsForProjectRefs", () => {
-    it("returns empty for empty refs", () => {
-      const state = makeFixtureState();
-      expect(selectSidebarThreadsForProjectRefs(state, [])).toEqual([]);
-    });
-
-    it("returns threads for a single ref", () => {
-      const state = makeFixtureState();
-      const refs = [scopeProjectRef(primaryEnvId, sharedProjectPrimaryId)];
-      const threads = selectSidebarThreadsForProjectRefs(state, refs);
-      expect(threads).toHaveLength(2);
-      expect(threads.map((t) => t.id)).toEqual([threadP1, threadP2]);
-    });
-
-    it("returns combined threads from multiple refs across environments", () => {
-      const state = makeFixtureState();
+    it("returns combined threads from grouped primary project refs", () => {
       const refs = [
-        scopeProjectRef(primaryEnvId, sharedProjectPrimaryId),
-        scopeProjectRef(remoteEnvId, sharedProjectRemoteId),
+        scopeProjectRef(primaryEnvId, repoRootProjectId),
+        scopeProjectRef(primaryEnvId, repoNestedProjectId),
       ];
-      const threads = selectSidebarThreadsForProjectRefs(state, refs);
-      expect(threads).toHaveLength(3);
-      const ids = new Set(threads.map((t) => t.id));
-      expect(ids).toContain(threadP1);
-      expect(ids).toContain(threadP2);
-      expect(ids).toContain(threadR1);
-    });
+      const threads = selectSidebarThreadsForProjectRefs(makeFixtureState(), refs);
 
-    it("returns threads from remote-only project", () => {
-      const state = makeFixtureState();
-      const refs = [scopeProjectRef(remoteEnvId, remoteOnlyProjectId)];
-      const threads = selectSidebarThreadsForProjectRefs(state, refs);
-      expect(threads).toHaveLength(1);
-      expect(threads[0]?.id).toBe(threadRO1);
-    });
-
-    it("returns threads from local-only project", () => {
-      const state = makeFixtureState();
-      const refs = [scopeProjectRef(primaryEnvId, localOnlyProjectId)];
-      const threads = selectSidebarThreadsForProjectRefs(state, refs);
-      expect(threads).toHaveLength(1);
-      expect(threads[0]?.id).toBe(threadL1);
-    });
-
-    it("handles refs with nonexistent environment gracefully", () => {
-      const state = makeFixtureState();
-      const refs = [
-        scopeProjectRef(primaryEnvId, sharedProjectPrimaryId),
-        scopeProjectRef(EnvironmentId.make("nonexistent"), ProjectId.make("nope")),
-      ];
-      const threads = selectSidebarThreadsForProjectRefs(state, refs);
-      // Only returns threads from the valid ref
-      expect(threads).toHaveLength(2);
-      expect(threads.map((t) => t.id)).toEqual([threadP1, threadP2]);
+      expect(threads.map((thread) => thread.id)).toEqual([threadRoot1, threadRoot2, threadNested1]);
     });
   });
 
   describe("logical project grouping for sidebar", () => {
-    it("computes correct logical key for grouped projects and aggregates threads", () => {
+    it("aggregates threads for grouped primary projects", () => {
       const state = makeFixtureState();
       const allProjects = selectProjectsAcrossEnvironments(state);
-
-      // Group by logical key
       const groups = new Map<string, Project[]>();
+
       for (const project of allProjects) {
         const key = deriveLogicalProjectKey(project);
-        const existing = groups.get(key) ?? [];
-        existing.push(project);
-        groups.set(key, existing);
+        groups.set(key, [...(groups.get(key) ?? []), project]);
       }
 
-      // Shared project should be grouped
-      const sharedGroup = groups.get(SHARED_REPO_CANONICAL_KEY);
-      expect(sharedGroup).toBeDefined();
-      expect(sharedGroup).toHaveLength(2);
-      expect(sharedGroup!.map((p) => p.environmentId).toSorted()).toEqual(
-        [primaryEnvId, remoteEnvId].toSorted(),
-      );
+      const repoGroup = groups.get(REPO_CANONICAL_KEY);
+      expect(repoGroup).toBeDefined();
+      expect(repoGroup).toHaveLength(2);
 
-      // Build member refs for the grouped project and fetch threads
-      const memberRefs = sharedGroup!.map((p) => scopeProjectRef(p.environmentId, p.id));
+      const memberRefs = repoGroup!.map((project) =>
+        scopeProjectRef(project.environmentId, project.id),
+      );
       const threads = selectSidebarThreadsForProjectRefs(state, memberRefs);
-      expect(threads).toHaveLength(3);
-      const threadIds = threads.map((t) => t.id);
-      expect(threadIds).toContain(threadP1);
-      expect(threadIds).toContain(threadP2);
-      expect(threadIds).toContain(threadR1);
+      expect(threads.map((thread) => thread.id)).toEqual([threadRoot1, threadRoot2, threadNested1]);
     });
 
-    it("local-only and remote-only projects remain ungrouped", () => {
-      const state = makeFixtureState();
-      const allProjects = selectProjectsAcrossEnvironments(state);
-
+    it("keeps standalone projects ungrouped", () => {
+      const allProjects = selectProjectsAcrossEnvironments(makeFixtureState());
       const groups = new Map<string, Project[]>();
+
       for (const project of allProjects) {
         const key = deriveLogicalProjectKey(project);
-        const existing = groups.get(key) ?? [];
-        existing.push(project);
-        groups.set(key, existing);
+        groups.set(key, [...(groups.get(key) ?? []), project]);
       }
 
-      // Should have 3 groups total: shared, local-only, remote-only
-      expect(groups.size).toBe(3);
-
-      // Local-only group
-      const localKey = deriveLogicalProjectKey(
-        allProjects.find((p) => p.id === localOnlyProjectId)!,
+      expect(groups.size).toBe(2);
+      const standaloneKey = deriveLogicalProjectKey(
+        allProjects.find((project) => project.id === standaloneProjectId)!,
       );
-      expect(groups.get(localKey)).toHaveLength(1);
-
-      // Remote-only group
-      const remoteKey = deriveLogicalProjectKey(
-        allProjects.find((p) => p.id === remoteOnlyProjectId)!,
-      );
-      expect(groups.get(remoteKey)).toHaveLength(1);
+      expect(groups.get(standaloneKey)).toHaveLength(1);
     });
   });
 });

@@ -157,11 +157,6 @@ function setNativeContextMenuMock(
     persistence: {
       getClientSettings: async () => null,
       setClientSettings: async () => undefined,
-      getSavedEnvironmentRegistry: async () => null,
-      setSavedEnvironmentRegistry: async () => undefined,
-      getSavedEnvironmentSecret: async () => null,
-      setSavedEnvironmentSecret: async () => undefined,
-      removeSavedEnvironmentSecret: async () => undefined,
     },
   } as unknown as LocalApi;
 }

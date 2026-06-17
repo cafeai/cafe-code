@@ -1,4 +1,6 @@
 import { Debouncer } from "@tanstack/react-pacer";
+import { parseScopedThreadKey } from "@cafecode/client-runtime";
+import type { EnvironmentId } from "@cafecode/contracts";
 import { create } from "zustand";
 
 export const PERSISTED_STATE_KEY = "cafe-code:ui-state:v1";
@@ -402,6 +404,41 @@ export function syncThreads(state: UiState, threads: readonly SyncThreadInput[])
   };
 }
 
+function isThreadUiKeyForPrimaryEnvironment(
+  threadKey: string,
+  primaryEnvironmentId: EnvironmentId,
+): boolean {
+  const threadRef = parseScopedThreadKey(threadKey);
+  return threadRef === null || threadRef.environmentId === primaryEnvironmentId;
+}
+
+export function removeThreadUiForNonPrimaryEnvironment(
+  state: UiState,
+  primaryEnvironmentId: EnvironmentId,
+): UiState {
+  const threadLastVisitedAtById = Object.fromEntries(
+    Object.entries(state.threadLastVisitedAtById).filter(([threadKey]) =>
+      isThreadUiKeyForPrimaryEnvironment(threadKey, primaryEnvironmentId),
+    ),
+  );
+  const threadPlanSidebarOpenById = Object.fromEntries(
+    Object.entries(state.threadPlanSidebarOpenById).filter(([threadKey]) =>
+      isThreadUiKeyForPrimaryEnvironment(threadKey, primaryEnvironmentId),
+    ),
+  );
+  if (
+    recordsEqual(state.threadLastVisitedAtById, threadLastVisitedAtById) &&
+    recordsEqual(state.threadPlanSidebarOpenById, threadPlanSidebarOpenById)
+  ) {
+    return state;
+  }
+  return {
+    ...state,
+    threadLastVisitedAtById,
+    threadPlanSidebarOpenById,
+  };
+}
+
 export function markThreadVisited(state: UiState, threadId: string, visitedAt?: string): UiState {
   const at = visitedAt ?? new Date().toISOString();
   const visitedAtMs = Date.parse(at);
@@ -544,6 +581,7 @@ export function reorderProjects(
 interface UiStateStore extends UiState {
   syncProjects: (projects: readonly SyncProjectInput[]) => void;
   syncThreads: (threads: readonly SyncThreadInput[]) => void;
+  removeThreadUiForNonPrimaryEnvironment: (primaryEnvironmentId: EnvironmentId) => void;
   markThreadVisited: (threadId: string, visitedAt?: string) => void;
   clearThreadUi: (threadId: string) => void;
   setThreadPlanSidebarOpen: (threadId: string, open: boolean) => void;
@@ -561,6 +599,8 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
   ...readPersistedState(),
   syncProjects: (projects) => set((state) => syncProjects(state, projects)),
   syncThreads: (threads) => set((state) => syncThreads(state, threads)),
+  removeThreadUiForNonPrimaryEnvironment: (primaryEnvironmentId) =>
+    set((state) => removeThreadUiForNonPrimaryEnvironment(state, primaryEnvironmentId)),
   markThreadVisited: (threadId, visitedAt) =>
     set((state) => markThreadVisited(state, threadId, visitedAt)),
   clearThreadUi: (threadId) => set((state) => clearThreadUi(state, threadId)),

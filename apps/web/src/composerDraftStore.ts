@@ -2621,6 +2621,61 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
 
 export const useComposerDraftStore = composerDraftStore;
 
+function isThreadKeyForPrimaryEnvironment(
+  threadKey: string,
+  primaryEnvironmentId: EnvironmentId,
+): boolean {
+  const threadRef = parseScopedThreadKey(threadKey);
+  return threadRef === null || threadRef.environmentId === primaryEnvironmentId;
+}
+
+export function removeComposerDraftsForNonPrimaryEnvironment(
+  primaryEnvironmentId: EnvironmentId,
+): void {
+  useComposerDraftStore.setState((state) => {
+    const retainedDraftThreadKeys = new Set(
+      Object.entries(state.draftThreadsByThreadKey)
+        .filter(([, draftThread]) => draftThread.environmentId === primaryEnvironmentId)
+        .map(([threadKey]) => threadKey),
+    );
+    const draftThreadsByThreadKey = Object.fromEntries(
+      Object.entries(state.draftThreadsByThreadKey).filter(([threadKey]) =>
+        retainedDraftThreadKeys.has(threadKey),
+      ),
+    ) as Record<string, DraftThreadState>;
+    const draftsByThreadKey = Object.fromEntries(
+      Object.entries(state.draftsByThreadKey).filter(
+        ([threadKey]) =>
+          retainedDraftThreadKeys.has(threadKey) ||
+          (state.draftThreadsByThreadKey[threadKey] === undefined &&
+            isThreadKeyForPrimaryEnvironment(threadKey, primaryEnvironmentId)),
+      ),
+    );
+    const logicalProjectDraftThreadKeyByLogicalProjectKey = Object.fromEntries(
+      Object.entries(state.logicalProjectDraftThreadKeyByLogicalProjectKey).filter(
+        ([, threadKey]) => retainedDraftThreadKeys.has(threadKey),
+      ),
+    );
+
+    if (
+      Object.keys(draftThreadsByThreadKey).length ===
+        Object.keys(state.draftThreadsByThreadKey).length &&
+      Object.keys(draftsByThreadKey).length === Object.keys(state.draftsByThreadKey).length &&
+      Object.keys(logicalProjectDraftThreadKeyByLogicalProjectKey).length ===
+        Object.keys(state.logicalProjectDraftThreadKeyByLogicalProjectKey).length
+    ) {
+      return state;
+    }
+
+    return {
+      ...state,
+      draftsByThreadKey,
+      draftThreadsByThreadKey,
+      logicalProjectDraftThreadKeyByLogicalProjectKey,
+    };
+  });
+}
+
 export function useComposerThreadDraft(threadRef: ComposerThreadTarget): ComposerThreadDraftState {
   return useComposerDraftStore((state) => {
     return getComposerDraftState(state, threadRef) ?? EMPTY_THREAD_DRAFT;

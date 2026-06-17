@@ -16,19 +16,19 @@ describe("known environment bootstrap helpers", () => {
   it("creates known environments from explicit server base urls", () => {
     expect(
       createKnownEnvironment({
-        label: "Remote environment",
+        label: "Networked environment",
         target: {
-          httpBaseUrl: "https://remote.example.com",
-          wsBaseUrl: "wss://remote.example.com",
+          httpBaseUrl: "https://backend.example.com",
+          wsBaseUrl: "wss://backend.example.com",
         },
       }),
     ).toEqual({
-      id: "ws:Remote environment",
-      label: "Remote environment",
+      id: "ws:Networked environment",
+      label: "Networked environment",
       source: "manual",
       target: {
-        httpBaseUrl: "https://remote.example.com",
-        wsBaseUrl: "wss://remote.example.com",
+        httpBaseUrl: "https://backend.example.com",
+        wsBaseUrl: "wss://backend.example.com",
       },
     });
   });
@@ -49,14 +49,14 @@ describe("known environment bootstrap helpers", () => {
     expect(
       getKnownEnvironmentHttpBaseUrl(
         createKnownEnvironment({
-          label: "Remote environment",
+          label: "Networked environment",
           target: {
-            httpBaseUrl: "https://remote.example.com/api",
-            wsBaseUrl: "wss://remote.example.com/api",
+            httpBaseUrl: "https://backend.example.com/api",
+            wsBaseUrl: "wss://backend.example.com/api",
           },
         }),
       ),
-    ).toBe("https://remote.example.com/api");
+    ).toBe("https://backend.example.com/api");
   });
 });
 

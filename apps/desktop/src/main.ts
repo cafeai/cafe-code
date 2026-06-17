@@ -4,17 +4,12 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeOS from "node:os";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 
 import * as Electron from "electron";
 
 import * as NetService from "@cafecode/shared/Net";
-import { resolveRemoteCafeCodeCliPackageSpec } from "@cafecode/ssh/command";
 import { startStartupCpuProfiler } from "@cafecode/shared/startupProfiler";
-import type { RemoteCafeCodeRunnerOptions } from "@cafecode/ssh/tunnel";
-import serverPackageJson from "../../server/package.json" with { type: "json" };
 
-import type { DesktopSettings as DesktopSettingsValue } from "./settings/DesktopAppSettings.ts";
 import * as DesktopIpc from "./ipc/DesktopIpc.ts";
 import * as ElectronApp from "./electron/ElectronApp.ts";
 import * as ElectronDialog from "./electron/ElectronDialog.ts";
@@ -39,11 +34,9 @@ import * as DesktopObservability from "./app/DesktopObservability.ts";
 import * as DesktopPowerSaveBlocker from "./app/DesktopPowerSaveBlocker.ts";
 import * as DesktopServerExposure from "./backend/DesktopServerExposure.ts";
 import * as DesktopClientSettings from "./settings/DesktopClientSettings.ts";
-import * as DesktopSavedEnvironments from "./settings/DesktopSavedEnvironments.ts";
+import * as DesktopLegacySavedEnvironmentCleanup from "./settings/DesktopLegacySavedEnvironmentCleanup.ts";
 import * as DesktopAppSettings from "./settings/DesktopAppSettings.ts";
 import * as DesktopShellEnvironment from "./shell/DesktopShellEnvironment.ts";
-import * as DesktopSshEnvironment from "./ssh/DesktopSshEnvironment.ts";
-import * as DesktopSshRemoteApi from "./ssh/DesktopSshRemoteApi.ts";
 import * as DesktopState from "./app/DesktopState.ts";
 import * as DesktopUpdates from "./updates/DesktopUpdates.ts";
 import * as DesktopSourceUpdates from "./updates/DesktopSourceUpdates.ts";
@@ -80,39 +73,6 @@ const desktopEnvironmentLayer = Layer.unwrap(
   }),
 );
 
-const resolveDesktopSshCliRunner = (
-  environment: DesktopEnvironment.DesktopEnvironmentShape,
-  settings: DesktopSettingsValue,
-): RemoteCafeCodeRunnerOptions => {
-  const devRemoteEntryPath = Option.getOrUndefined(environment.devRemoteServerEntryPath);
-  if (environment.isDevelopment && devRemoteEntryPath !== undefined) {
-    return {
-      nodeScriptPath: devRemoteEntryPath,
-      nodeEngineRange: serverPackageJson.engines.node,
-    };
-  }
-  return {
-    packageSpec: resolveRemoteCafeCodeCliPackageSpec({
-      appVersion: environment.appVersion,
-      updateChannel: settings.updateChannel,
-      isDevelopment: environment.isDevelopment,
-    }),
-    nodeEngineRange: serverPackageJson.engines.node,
-  };
-};
-
-const desktopSshEnvironmentLayer = Layer.unwrap(
-  Effect.gen(function* () {
-    const environment = yield* DesktopEnvironment.DesktopEnvironment;
-    const settings = yield* DesktopAppSettings.DesktopAppSettings;
-    return DesktopSshEnvironment.layer({
-      resolveCliRunner: settings.get.pipe(
-        Effect.map((currentSettings) => resolveDesktopSshCliRunner(environment, currentSettings)),
-      ),
-    });
-  }),
-);
-
 const electronLayer = Layer.mergeAll(
   ElectronApp.layer,
   ElectronDialog.layer,
@@ -132,13 +92,11 @@ const desktopFoundationLayer = Layer.mergeAll(
   DesktopLifecycle.layerShutdown,
   DesktopAppSettings.layer,
   DesktopClientSettings.layer,
-  DesktopSavedEnvironments.layer,
+  DesktopLegacySavedEnvironmentCleanup.layer,
   DesktopAssets.layer,
   DesktopObservability.layer,
   DesktopPowerSaveBlocker.layer,
 ).pipe(Layer.provideMerge(desktopEnvironmentLayer));
-
-const desktopSshLayer = Layer.mergeAll(desktopSshEnvironmentLayer, DesktopSshRemoteApi.layer);
 
 const desktopServerExposureLayer = DesktopServerExposure.layer.pipe(
   Layer.provideMerge(DesktopServerExposure.networkInterfacesLayer),
@@ -162,7 +120,6 @@ const desktopApplicationLayer = Layer.mergeAll(
   DesktopLifecycle.layer,
   DesktopApplicationMenu.layer,
   DesktopShellEnvironment.layer,
-  desktopSshLayer,
 ).pipe(
   Layer.provideMerge(DesktopUpdates.layer),
   Layer.provideMerge(DesktopSourceUpdates.layer),

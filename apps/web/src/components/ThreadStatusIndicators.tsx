@@ -1,12 +1,7 @@
 import { scopeProjectRef, scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
 import type { VcsStatusResult } from "@cafecode/contracts";
-import { CloudIcon, GitPullRequestIcon } from "lucide-react";
+import { GitPullRequestIcon } from "lucide-react";
 import { useMemo } from "react";
-import { usePrimaryEnvironmentId } from "../environments/primary";
-import {
-  useSavedEnvironmentRegistryStore,
-  useSavedEnvironmentRuntimeStore,
-} from "../environments/runtime";
 import { useGitStatus } from "../lib/gitStatusState";
 import { type AppState, selectProjectByRef, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
@@ -159,45 +154,6 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
   );
 }
 
-/**
- * Non-interactive trailing status icons for a thread row in compact contexts
- * like the command palette. Shows the remote environment indicator, matching
- * the sidebar's trailing indicators.
- */
-export function ThreadRowTrailingStatus({ thread }: { thread: SidebarThreadSummary }) {
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const isRemoteThread =
-    primaryEnvironmentId !== null && thread.environmentId !== primaryEnvironmentId;
-  const remoteEnvLabel = useSavedEnvironmentRuntimeStore(
-    (state) => state.byId[thread.environmentId]?.descriptor?.label ?? null,
-  );
-  const remoteEnvSavedLabel = useSavedEnvironmentRegistryStore(
-    (state) => state.byId[thread.environmentId]?.label ?? null,
-  );
-  const threadEnvironmentLabel = isRemoteThread
-    ? (remoteEnvLabel ?? remoteEnvSavedLabel ?? "Remote")
-    : null;
-  if (!isRemoteThread) {
-    return null;
-  }
-
-  return (
-    <span className="inline-flex shrink-0 items-center gap-1.5">
-      {isRemoteThread ? (
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <span
-                aria-label={threadEnvironmentLabel ?? "Remote"}
-                className="inline-flex items-center justify-center"
-              />
-            }
-          >
-            <CloudIcon className="size-3 text-muted-foreground/60" />
-          </TooltipTrigger>
-          <TooltipPopup side="top">{threadEnvironmentLabel}</TooltipPopup>
-        </Tooltip>
-      ) : null}
-    </span>
-  );
+export function ThreadRowTrailingStatus(_props: { thread: SidebarThreadSummary }) {
+  return null;
 }

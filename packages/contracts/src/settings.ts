@@ -32,6 +32,7 @@ export const DEFAULT_SHOW_SIDEBAR_MASCOT = true;
 export const DEFAULT_SHOW_SIDEBAR_ATTRIBUTION = true;
 export const DEFAULT_BRAND_WORDMARK_PREFIX = "Cafe";
 export const DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL = "";
+export const DEFAULT_SIDEBAR_BRAND_IMAGE = null;
 export const DEFAULT_APP_ACCENT_COLOR = "";
 export const DEFAULT_THEME_ACCENT_COLOR = "";
 export const MIN_SIDEBAR_STAR_SPEED = 0.25;
@@ -41,6 +42,42 @@ export const MAX_BRAND_WORDMARK_PREFIX_LENGTH = 64;
 export const MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES = 1_000_000;
 export const MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH =
   Math.ceil((MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES * 4) / 3) + 128;
+export const MAX_SIDEBAR_BRAND_IMAGE_DIMENSION = 4096;
+export const MAX_SIDEBAR_BRAND_IMAGE_PIXEL_COUNT = 16_777_216;
+export const MAX_SIDEBAR_BRAND_IMAGE_ID_LENGTH = 96;
+export const MAX_SIDEBAR_BRAND_IMAGE_URL_LENGTH = 256;
+export const SidebarBrandImageId = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(MAX_SIDEBAR_BRAND_IMAGE_ID_LENGTH),
+  Schema.isPattern(/^sha256-[a-f0-9]{64}\.(?:gif|jpe?g|png|webp)$/),
+);
+export type SidebarBrandImageId = typeof SidebarBrandImageId.Type;
+export const SidebarBrandImageMimeType = Schema.Literals([
+  "image/gif",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+]);
+export type SidebarBrandImageMimeType = typeof SidebarBrandImageMimeType.Type;
+export const SidebarBrandImageAsset = Schema.Struct({
+  id: SidebarBrandImageId,
+  url: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(MAX_SIDEBAR_BRAND_IMAGE_URL_LENGTH),
+    Schema.isPattern(
+      /^\/api\/branding\/sidebar-image\/sha256-[a-f0-9]{64}\.(?:gif|jpe?g|png|webp)$/,
+    ),
+  ),
+  mimeType: SidebarBrandImageMimeType,
+  width: Schema.Int.check(
+    Schema.isBetween({ minimum: 1, maximum: MAX_SIDEBAR_BRAND_IMAGE_DIMENSION }),
+  ),
+  height: Schema.Int.check(
+    Schema.isBetween({ minimum: 1, maximum: MAX_SIDEBAR_BRAND_IMAGE_DIMENSION }),
+  ),
+  sizeBytes: Schema.Int.check(
+    Schema.isBetween({ minimum: 1, maximum: MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES }),
+  ),
+});
+export type SidebarBrandImageAsset = typeof SidebarBrandImageAsset.Type;
 export const SidebarStarSpeed = Schema.Number.check(
   Schema.isBetween({
     minimum: MIN_SIDEBAR_STAR_SPEED,
@@ -103,6 +140,11 @@ export const ClientSettingsSchema = Schema.Struct({
   brandWordmarkPrefix: TrimmedString.check(
     Schema.isMaxLength(MAX_BRAND_WORDMARK_PREFIX_LENGTH),
   ).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_BRAND_WORDMARK_PREFIX))),
+  sidebarBrandImage: Schema.NullOr(SidebarBrandImageAsset).pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_BRAND_IMAGE)),
+  ),
+  // Legacy migration input only. New upload flows store `sidebarBrandImage`
+  // metadata while image bytes live in the authenticated server asset store.
   sidebarBrandImageDataUrl: TrimmedString.check(
     Schema.isMaxLength(MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH),
   ).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL))),
@@ -199,8 +241,6 @@ export function isCapabilityDependentClientSettingsKey(
 }
 
 export const CLIENT_SETTINGS_EXCLUDED_SECRET_STORES = [
-  "saved-environment-bearer-tokens",
-  "ssh-saved-secrets",
   "auth-cookies",
   "bearer-sessions",
   "pairing-bootstrap-tokens",
@@ -372,6 +412,38 @@ export const ClaudeSettings = makeProviderSettingsSchema(
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;
 
+export const GeminiSettings = makeProviderSettingsSchema(
+  {
+    enabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(true)),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    binaryPath: makeBinaryPathSetting("gemini").pipe(
+      Schema.annotateKey({
+        title: "Binary path",
+        description: "Path to the Gemini binary used by this instance.",
+        providerSettingsForm: { placeholder: "gemini", clearWhenEmpty: "omit" },
+      }),
+    ),
+    authMethod: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("oauth-personal")),
+      Schema.annotateKey({
+        title: "Authentication method",
+        description: "Gemini ACP authentication method id used during session setup.",
+        providerSettingsForm: { placeholder: "oauth-personal", clearWhenEmpty: "omit" },
+      }),
+    ),
+    customModels: Schema.Array(Schema.String).pipe(
+      Schema.withDecodingDefault(Effect.succeed([])),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+  },
+  {
+    order: ["binaryPath", "authMethod"],
+  },
+);
+export type GeminiSettings = typeof GeminiSettings.Type;
+
 export const ObservabilitySettings = Schema.Struct({
   otlpTracesUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   otlpMetricsUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
@@ -513,6 +585,7 @@ export const ClientSettingsPatch = Schema.Struct({
   sidebarBrandImageDataUrl: Schema.optionalKey(
     TrimmedString.check(Schema.isMaxLength(MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH)),
   ),
+  sidebarBrandImage: Schema.optionalKey(Schema.NullOr(SidebarBrandImageAsset)),
   sidebarStarSpeed: Schema.optionalKey(SidebarStarSpeed),
   themeAccentColor: Schema.optionalKey(TrimmedString),
   appAccentColor: Schema.optionalKey(TrimmedString),

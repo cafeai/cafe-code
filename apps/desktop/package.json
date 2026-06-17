@@ -18,7 +18,6 @@
   "dependencies": {
     "@cafecode/contracts": "workspace:*",
     "@cafecode/shared": "workspace:*",
-    "@cafecode/ssh": "workspace:*",
     "@effect/platform-node": "catalog:",
     "effect": "catalog:",
     "electron": "42.2.0",

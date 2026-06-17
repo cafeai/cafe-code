@@ -163,8 +163,6 @@ const authAccessHarness = vi.hoisted(() => {
   };
 });
 
-const mockConnectDesktopSshEnvironment = vi.hoisted(() => vi.fn());
-
 vi.mock("../../environments/runtime", () => {
   const primaryConnection = {
     kind: "primary" as const,
@@ -192,33 +190,15 @@ vi.mock("../../environments/runtime", () => {
 
   return {
     getEnvironmentHttpBaseUrl: () => "http://localhost:3000",
-    getSavedEnvironmentRecord: () => null,
-    getSavedEnvironmentRuntimeState: () => null,
-    hasSavedEnvironmentRegistryHydrated: () => true,
-    listSavedEnvironmentRecords: () => [],
-    resetSavedEnvironmentRegistryStoreForTests: () => undefined,
-    resetSavedEnvironmentRuntimeStoreForTests: () => undefined,
-    resolveEnvironmentHttpUrl: (_environmentId: unknown, path: string) =>
-      new URL(path, "http://localhost:3000").toString(),
-    waitForSavedEnvironmentRegistryHydration: async () => undefined,
-    addSavedEnvironment: vi.fn(),
-    connectDesktopSshEnvironment: mockConnectDesktopSshEnvironment,
-    disconnectSavedEnvironment: vi.fn(),
+    resolveEnvironmentHttpUrl: (input: { readonly pathname: string }) =>
+      new URL(input.pathname, "http://localhost:3000").toString(),
     ensureEnvironmentConnectionBootstrapped: async () => undefined,
     getPrimaryEnvironmentConnection: () => primaryConnection,
     readEnvironmentConnection: () => primaryConnection,
-    reconnectSavedEnvironment: vi.fn(),
-    removeSavedEnvironment: vi.fn(),
     requireEnvironmentConnection: () => primaryConnection,
     resetEnvironmentServiceForTests: () => undefined,
     startEnvironmentConnectionService: () => undefined,
     subscribeEnvironmentConnections: () => () => {},
-    useSavedEnvironmentRegistryStore: (
-      selector: (state: { byId: Record<string, never> }) => unknown,
-    ) => selector({ byId: {} }),
-    useSavedEnvironmentRuntimeStore: (
-      selector: (state: { byId: Record<string, never> }) => unknown,
-    ) => selector({ byId: {} }),
   };
 });
 
@@ -504,7 +484,6 @@ function makeClientSession(input: {
 }
 
 const createDesktopBridgeStub = (overrides?: {
-  readonly discoverSshHosts?: DesktopBridge["discoverSshHosts"];
   readonly serverExposureState?: Awaited<ReturnType<DesktopBridge["getServerExposureState"]>>;
   readonly advertisedEndpoints?: Awaited<ReturnType<DesktopBridge["getAdvertisedEndpoints"]>>;
   readonly setServerExposureMode?: DesktopBridge["setServerExposureMode"];
@@ -555,54 +534,6 @@ const createDesktopBridgeStub = (overrides?: {
     getClientSettings: vi.fn().mockResolvedValue(null),
     setClientSettings: vi.fn().mockResolvedValue(undefined),
     setPowerSaveBlockerState: vi.fn().mockResolvedValue(undefined),
-    getSavedEnvironmentRegistry: vi.fn().mockResolvedValue([]),
-    setSavedEnvironmentRegistry: vi.fn().mockResolvedValue(undefined),
-    getSavedEnvironmentSecret: vi.fn().mockResolvedValue(null),
-    setSavedEnvironmentSecret: vi.fn().mockResolvedValue(true),
-    removeSavedEnvironmentSecret: vi.fn().mockResolvedValue(undefined),
-    discoverSshHosts: overrides?.discoverSshHosts ?? vi.fn().mockResolvedValue([]),
-    ensureSshEnvironment: vi.fn().mockImplementation(async (target) => ({
-      target,
-      httpBaseUrl: "http://127.0.0.1:3774/",
-      wsBaseUrl: "ws://127.0.0.1:3774/",
-      pairingToken: "ssh-pairing-token",
-    })),
-    disconnectSshEnvironment: vi.fn().mockResolvedValue(undefined),
-    fetchSshEnvironmentDescriptor: vi.fn().mockResolvedValue({
-      environmentId: "environment-ssh",
-      label: "SSH environment",
-      platform: {
-        os: "linux",
-        arch: "x64",
-      },
-      serverVersion: "0.0.0-test",
-      capabilities: {
-        repositoryIdentity: true,
-      },
-    }),
-    bootstrapSshBearerSession: vi.fn().mockResolvedValue({
-      authenticated: true,
-      role: "owner",
-      sessionMethod: "bearer-session-token",
-      expiresAt: "2026-05-01T12:00:00.000Z",
-      sessionToken: "ssh-bearer-token",
-    }),
-    fetchSshSessionState: vi.fn().mockResolvedValue({
-      authenticated: true,
-      auth: {
-        policy: "remote-reachable",
-        bootstrapMethods: ["one-time-token"],
-        sessionMethods: ["browser-session-cookie", "bearer-session-token"],
-        sessionCookieName: "t3_session",
-      },
-      role: "owner",
-      sessionMethod: "bearer-session-token",
-      expiresAt: "2026-05-01T12:00:00.000Z",
-    }),
-    issueSshWebSocketToken: vi.fn().mockResolvedValue({
-      token: "ssh-ws-token",
-      expiresAt: "2026-05-01T12:05:00.000Z",
-    }),
     getServerExposureState: vi.fn().mockResolvedValue(
       overrides?.serverExposureState ?? {
         mode: "local-only",
@@ -686,7 +617,6 @@ describe("settings panels", () => {
     localStorage.clear();
     useUiStateStore.setState({ defaultAdvertisedEndpointKey: null });
     authAccessHarness.reset();
-    mockConnectDesktopSshEnvironment.mockReset();
   });
 
   afterEach(async () => {
@@ -767,9 +697,6 @@ describe("settings panels", () => {
       .toBeInTheDocument();
     await expect.element(page.getByText("Authorized clients")).not.toBeInTheDocument();
     await expect.element(page.getByText("Chrome on Mac")).not.toBeInTheDocument();
-    await expect
-      .element(page.getByRole("heading", { name: "Remote environments", exact: true }))
-      .toBeInTheDocument();
   });
 
   it("hides advertised endpoint rows when desktop network access is disabled", async () => {
@@ -1067,6 +994,33 @@ describe("settings panels", () => {
       expect(updateClientSettings).toHaveBeenCalledWith({ brandWordmarkPrefix: "Acme" });
     });
 
+    const uploadFetch = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/api/branding/sidebar-image") && init?.method === "POST") {
+        expect(init.body).toBeInstanceOf(File);
+        expect(init.headers).toMatchObject({ "content-type": "image/png" });
+        return new Response(
+          JSON.stringify({
+            sidebarBrandImage: {
+              id: "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+              url: "/api/branding/sidebar-image/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+              mimeType: "image/png",
+              width: 128,
+              height: 160,
+              sizeBytes: 1234,
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+
+      throw new Error(`Unhandled fetch ${url}`);
+    });
+    vi.stubGlobal("fetch", uploadFetch);
+
     await expect.element(page.getByRole("heading", { name: "Sidebar image" })).toBeInTheDocument();
     const imageInput = document.querySelector(
       'input[aria-label="Sidebar image file"]',
@@ -1081,10 +1035,19 @@ describe("settings panels", () => {
     await vi.waitFor(() => {
       expect(updateClientSettings).toHaveBeenCalledWith(
         expect.objectContaining({
-          sidebarBrandImageDataUrl: expect.stringContaining("data:image/png;base64,"),
+          sidebarBrandImage: {
+            id: "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+            url: "/api/branding/sidebar-image/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+            mimeType: "image/png",
+            width: 128,
+            height: 160,
+            sizeBytes: 1234,
+          },
+          sidebarBrandImageDataUrl: "",
         }),
       );
     });
+    expect(uploadFetch).toHaveBeenCalledTimes(1);
 
     const callsBeforeUnsupportedImage = updateClientSettings.mock.calls.length;
     Object.defineProperty(imageInput, "files", {
@@ -1541,7 +1504,7 @@ describe("settings panels", () => {
       </AppAtomRegistryProvider>,
     );
 
-    await expect.element(page.getByText("Pairing links use HTTPS.")).toBeInTheDocument();
+    await expect.element(page.getByText("WebUI uses HTTPS.")).toBeInTheDocument();
     await page.getByLabelText("Enable HTTPS").click();
     await expect.element(page.getByText("Disable HTTPS?")).toBeInTheDocument();
     await expect
@@ -1551,77 +1514,7 @@ describe("settings panels", () => {
     await vi.waitFor(() => {
       expect(setServerHttpsEnabled).toHaveBeenCalledWith(false);
     });
-    await expect.element(page.getByText("Pairing links use HTTP.")).toBeInTheDocument();
-  });
-
-  it("adds desktop ssh environments from the add-environment dialog", async () => {
-    const discoverSshHosts = vi.fn().mockResolvedValue([
-      {
-        alias: "devbox",
-        hostname: "devbox.example.com",
-        username: "julius",
-        port: 22,
-        source: "ssh-config" as const,
-      },
-    ]);
-    window.desktopBridge = createDesktopBridgeStub({
-      discoverSshHosts,
-    });
-    mockConnectDesktopSshEnvironment.mockResolvedValue({
-      environmentId: EnvironmentId.make("environment-devbox"),
-      label: "Build box",
-      wsBaseUrl: "ws://127.0.0.1:3774/",
-      httpBaseUrl: "http://127.0.0.1:3774/",
-      createdAt: "2036-04-07T00:00:00.000Z",
-      lastConnectedAt: "2036-04-07T00:00:00.000Z",
-      desktopSsh: {
-        alias: "devbox.example.com",
-        hostname: "devbox.example.com",
-        username: "julius",
-        port: 2222,
-      },
-    });
-
-    setServerConfigSnapshot(createBaseServerConfig());
-
-    mounted = await render(
-      <AppAtomRegistryProvider>
-        <ConnectionsSettings />
-      </AppAtomRegistryProvider>,
-    );
-
-    await page.getByRole("button", { name: "Add environment", exact: true }).click();
-    const addEnvironmentDialog = page.getByRole("dialog", { name: "Add Environment" });
-    await expect
-      .element(addEnvironmentDialog.getByRole("heading", { name: "Add Environment", exact: true }))
-      .toBeInTheDocument();
-    await addEnvironmentDialog.getByRole("button", { name: /^SSH\b/ }).click();
-    await vi.waitFor(() => {
-      expect(discoverSshHosts).toHaveBeenCalledTimes(1);
-    });
-    await expect
-      .element(page.getByRole("heading", { name: "devbox", exact: true }))
-      .toBeInTheDocument();
-
-    await addEnvironmentDialog.getByLabelText("SSH host or alias").fill("devbox.example.com");
-    await addEnvironmentDialog.getByLabelText("Username").fill("julius");
-    await addEnvironmentDialog.getByLabelText("Port").fill("2222");
-    await addEnvironmentDialog
-      .getByRole("button", { name: "Add environment", exact: true })
-      .first()
-      .click();
-
-    await vi.waitFor(() => {
-      expect(mockConnectDesktopSshEnvironment).toHaveBeenCalledWith(
-        {
-          alias: "devbox.example.com",
-          hostname: "devbox.example.com",
-          username: "julius",
-          port: 2222,
-        },
-        { label: "" },
-      );
-    });
+    await expect.element(page.getByText("WebUI uses HTTP.")).toBeInTheDocument();
   });
 
   it("opens the logs folder in the preferred editor", async () => {

@@ -2,7 +2,6 @@ import {
   ArchiveIcon,
   ArrowUpDownIcon,
   ChevronRightIcon,
-  CloudIcon,
   FolderPlusIcon,
   PanelLeftCloseIcon,
   PanelLeftIcon,
@@ -60,6 +59,7 @@ import {
   DEFAULT_BRAND_WORDMARK_PREFIX,
   MAX_SIDEBAR_THREAD_PREVIEW_COUNT,
   MIN_SIDEBAR_THREAD_PREVIEW_COUNT,
+  type SidebarBrandImageAsset,
   type SidebarProjectSortOrder,
   type SidebarThreadPreviewCount,
   type SidebarThreadSortOrder,
@@ -67,6 +67,11 @@ import {
 import { usePrimaryEnvironmentId } from "../environments/primary";
 import { isElectron } from "../env";
 import { APP_STAGE_LABEL, APP_VERSION } from "../branding";
+import {
+  DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES,
+  DEFAULT_SIDEBAR_BRAND_IMAGE_SRC_SET,
+  resolveSidebarBrandImageSrc,
+} from "../brandingImages";
 import { cn, isMacPlatform, newCommandId, newThreadId } from "../lib/utils";
 import {
   selectBootstrapCompleteForEnvironment,
@@ -191,10 +196,6 @@ import {
   getProjectOrderKey,
   selectProjectGroupingSettings,
 } from "../logicalProject";
-import {
-  useSavedEnvironmentRegistryStore,
-  useSavedEnvironmentRuntimeStore,
-} from "../environments/runtime";
 import type { Project, SidebarThreadSummary } from "../types";
 import {
   buildPhysicalToLogicalProjectKeyMap,
@@ -221,7 +222,6 @@ const SIDEBAR_LIST_ANIMATION_OPTIONS = {
   duration: 180,
   easing: "ease-out",
 } as const;
-const SIDEBAR_BRAND_ICON_SRC = "/cafe-code-sidebar-icon.png";
 const EMPTY_THREAD_JUMP_LABELS = new Map<string, string>();
 const PATH_SEPARATOR_REGEX = /[/\\]+/g;
 
@@ -487,18 +487,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const threadKey = scopedThreadKey(threadRef);
   const lastVisitedAt = useUiStateStore((state) => state.threadLastVisitedAtById[threadKey]);
   const isSelected = useThreadSelectionStore((state) => state.selectedThreadKeys.has(threadKey));
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const isRemoteThread =
-    primaryEnvironmentId !== null && thread.environmentId !== primaryEnvironmentId;
-  const remoteEnvLabel = useSavedEnvironmentRuntimeStore(
-    (s) => s.byId[thread.environmentId]?.descriptor?.label ?? null,
-  );
-  const remoteEnvSavedLabel = useSavedEnvironmentRegistryStore(
-    (s) => s.byId[thread.environmentId]?.label ?? null,
-  );
-  const threadEnvironmentLabel = isRemoteThread
-    ? (remoteEnvLabel ?? remoteEnvSavedLabel ?? "Remote")
-    : null;
   // For grouped projects, the thread may belong to a different environment
   // than the representative project.  Look up the thread's own project cwd
   // so git status (and thus PR detection) queries the correct path.
@@ -746,11 +734,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           )}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
-          <div
-            className={`flex min-w-12 justify-end ${
-              isRemoteThread ? "max-md:min-w-24" : "max-md:min-w-20"
-            }`}
-          >
+          <div className={`flex min-w-12 justify-end ${"max-md:min-w-20"}`}>
             {isConfirmingArchive ? (
               <button
                 ref={handleConfirmArchiveRef}
@@ -803,43 +787,26 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               )
             ) : null}
             <span className={threadMetaClassName}>
-              <span className="inline-flex items-center gap-1">
-                {isRemoteThread && (
-                  <Tooltip>
-                    <TooltipTrigger
-                      render={
-                        <span
-                          aria-label={threadEnvironmentLabel ?? "Remote"}
-                          className="inline-flex h-5 items-center justify-center"
-                        />
-                      }
-                    >
-                      <CloudIcon className="block size-3 text-muted-foreground/60" />
-                    </TooltipTrigger>
-                    <TooltipPopup side="top">{threadEnvironmentLabel}</TooltipPopup>
-                  </Tooltip>
-                )}
-                {jumpLabel ? (
-                  <span
-                    className="inline-flex h-5 items-center rounded-full border border-border/80 bg-background/90 px-1.5 font-mono text-[10px] font-medium tracking-tight text-foreground shadow-sm"
-                    title={jumpLabel}
-                  >
-                    {jumpLabel}
-                  </span>
-                ) : (
-                  <span
-                    className={`text-[10px] ${
-                      isHighlighted
-                        ? "text-foreground/72 dark:text-foreground/82"
-                        : "text-muted-foreground/40"
-                    }`}
-                  >
-                    {formatRelativeTimeLabel(
-                      thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
-                    )}
-                  </span>
-                )}
-              </span>
+              {jumpLabel ? (
+                <span
+                  className="inline-flex h-5 items-center rounded-full border border-border/80 bg-background/90 px-1.5 font-mono text-[10px] font-medium tracking-tight text-foreground shadow-sm"
+                  title={jumpLabel}
+                >
+                  {jumpLabel}
+                </span>
+              ) : (
+                <span
+                  className={`text-[10px] ${
+                    isHighlighted
+                      ? "text-foreground/72 dark:text-foreground/82"
+                      : "text-muted-foreground/40"
+                  }`}
+                >
+                  {formatRelativeTimeLabel(
+                    thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
+                  )}
+                </span>
+              )}
             </span>
           </div>
         </div>
@@ -2521,30 +2488,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             ) : null}
           </span>
         </SidebarMenuButton>
-        {/* Environment badge – visible by default, crossfades with the
-            "new thread" button on hover using the same pointer-events +
-            opacity pattern as the thread row archive/timestamp swap. */}
-        {project.environmentPresence === "remote-only" && (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <span
-                  aria-label={
-                    project.environmentPresence === "remote-only"
-                      ? "Remote project"
-                      : "Available in multiple environments"
-                  }
-                  className="pointer-events-none absolute top-1 right-1.5 inline-flex size-5 items-center justify-center rounded-md text-muted-foreground/60 transition-opacity duration-150 max-md:right-7 group-hover/project-header:opacity-0 group-focus-within/project-header:opacity-0 max-md:group-hover/project-header:opacity-100 max-md:group-focus-within/project-header:opacity-100"
-                />
-              }
-            >
-              <CloudIcon className="size-3" />
-            </TooltipTrigger>
-            <TooltipPopup side="top">
-              Remote environment: {project.remoteEnvironmentLabels.join(", ")}
-            </TooltipPopup>
-          </Tooltip>
-        )}
         <Tooltip>
           <TooltipTrigger
             render={
@@ -3301,7 +3244,7 @@ interface SidebarProjectsContentProps {
   projectsLength: number;
   showSidebarSearch: boolean;
   showSidebarMascot: boolean;
-  sidebarBrandImageDataUrl: string;
+  sidebarBrandImage: SidebarBrandImageAsset | null;
   showSidebarAttribution: boolean;
 }
 
@@ -3349,7 +3292,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     projectsLength,
     showSidebarSearch,
     showSidebarMascot,
-    sidebarBrandImageDataUrl,
+    sidebarBrandImage,
     showSidebarAttribution,
   } = props;
 
@@ -3555,7 +3498,11 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
             aria-hidden="true"
             className="h-32 w-[6.4rem] select-none rounded-[1.35rem] object-cover ring-1 ring-black/10 dark:ring-white/10"
             draggable={false}
-            src={sidebarBrandImageDataUrl || SIDEBAR_BRAND_ICON_SRC}
+            height={128}
+            sizes={DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES}
+            src={resolveSidebarBrandImageSrc(sidebarBrandImage)}
+            srcSet={sidebarBrandImage ? undefined : DEFAULT_SIDEBAR_BRAND_IMAGE_SRC_SET}
+            width={102}
           />
           {showSidebarAttribution ? (
             <a
@@ -3605,7 +3552,7 @@ export default function Sidebar() {
   const sidebarThreadPreviewCount = useSettings((s) => s.sidebarThreadPreviewCount);
   const showSidebarSearch = useSettings((s) => s.showSidebarSearch);
   const showSidebarMascot = useSettings((s) => s.showSidebarMascot);
-  const sidebarBrandImageDataUrl = useSettings((s) => s.sidebarBrandImageDataUrl);
+  const sidebarBrandImage = useSettings((s) => s.sidebarBrandImage);
   const showSidebarAttribution = useSettings((s) => s.showSidebarAttribution);
   const desktopDebugEnabled = useDesktopDebugEnabled();
   const { updateSettings } = useUpdateSettings();
@@ -3632,8 +3579,6 @@ export default function Sidebar() {
   const platform = navigator.platform;
   const shortcutModifiers = useShortcutModifierState();
   const modelPickerOpen = useModelPickerOpen();
-  const savedEnvironmentRegistry = useSavedEnvironmentRegistryStore((s) => s.byId);
-  const savedEnvironmentRuntimeById = useSavedEnvironmentRuntimeStore((s) => s.byId);
   const orderedProjects = useMemo(() => {
     return orderItemsByPreferredIds({
       items: projects,
@@ -3667,19 +3612,9 @@ export default function Sidebar() {
       projects: orderedProjects,
       settings: projectGroupingSettings,
       primaryEnvironmentId,
-      resolveEnvironmentLabel: (environmentId) => {
-        const rt = savedEnvironmentRuntimeById[environmentId];
-        const saved = savedEnvironmentRegistry[environmentId];
-        return rt?.descriptor?.label ?? saved?.label ?? null;
-      },
+      resolveEnvironmentLabel: () => null,
     });
-  }, [
-    orderedProjects,
-    projectGroupingSettings,
-    primaryEnvironmentId,
-    savedEnvironmentRegistry,
-    savedEnvironmentRuntimeById,
-  ]);
+  }, [orderedProjects, projectGroupingSettings, primaryEnvironmentId]);
 
   const sidebarProjectByKey = useMemo(
     () => new Map(sidebarProjects.map((project) => [project.projectKey, project] as const)),
@@ -4259,7 +4194,7 @@ export default function Sidebar() {
               projectsLength={projects.length}
               showSidebarSearch={showSidebarSearch}
               showSidebarMascot={showSidebarMascot}
-              sidebarBrandImageDataUrl={sidebarBrandImageDataUrl}
+              sidebarBrandImage={sidebarBrandImage}
               showSidebarAttribution={showSidebarAttribution}
             />
 

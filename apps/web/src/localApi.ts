@@ -7,10 +7,6 @@ import { resetRequestLatencyStateForTests } from "./rpc/requestLatencyState";
 import { resetServerStateForTests } from "./rpc/serverState";
 import { resetWsConnectionStateForTests } from "./rpc/wsConnectionState";
 import {
-  resetSavedEnvironmentRegistryStoreForTests,
-  resetSavedEnvironmentRuntimeStoreForTests,
-} from "./environments/runtime";
-import {
   getPrimaryEnvironmentConnection,
   resetEnvironmentServiceForTests,
 } from "./environments/runtime";
@@ -19,13 +15,9 @@ import { type WsRpcClient } from "./rpc/wsRpcClient";
 import { showContextMenuFallback } from "./contextMenuFallback";
 import { getLocalShellCapabilities } from "./localCapabilities";
 import {
+  clearBrowserSavedEnvironmentPersistence,
   readBrowserClientSettings,
-  readBrowserSavedEnvironmentRegistry,
-  readBrowserSavedEnvironmentSecret,
-  removeBrowserSavedEnvironmentSecret,
   writeBrowserClientSettings,
-  writeBrowserSavedEnvironmentRegistry,
-  writeBrowserSavedEnvironmentSecret,
 } from "./clientPersistenceStorage";
 
 let cachedApi: LocalApi | undefined;
@@ -39,6 +31,8 @@ function unavailableLocalShellCapabilityError(action: string): Error {
 }
 
 function createBrowserLocalApi(rpcClient?: WsRpcClient): LocalApi {
+  clearBrowserSavedEnvironmentPersistence();
+
   return {
     dialogs: {
       pickFolder: async (options) => {
@@ -113,36 +107,6 @@ function createBrowserLocalApi(rpcClient?: WsRpcClient): LocalApi {
           return window.desktopBridge.setClientSettings(settings);
         }
         writeBrowserClientSettings(settings);
-      },
-      getSavedEnvironmentRegistry: async () => {
-        if (window.desktopBridge) {
-          return window.desktopBridge.getSavedEnvironmentRegistry();
-        }
-        return readBrowserSavedEnvironmentRegistry();
-      },
-      setSavedEnvironmentRegistry: async (records) => {
-        if (window.desktopBridge) {
-          return window.desktopBridge.setSavedEnvironmentRegistry(records);
-        }
-        writeBrowserSavedEnvironmentRegistry(records);
-      },
-      getSavedEnvironmentSecret: async (environmentId) => {
-        if (window.desktopBridge) {
-          return window.desktopBridge.getSavedEnvironmentSecret(environmentId);
-        }
-        return readBrowserSavedEnvironmentSecret(environmentId);
-      },
-      setSavedEnvironmentSecret: async (environmentId, secret) => {
-        if (window.desktopBridge) {
-          return window.desktopBridge.setSavedEnvironmentSecret(environmentId, secret);
-        }
-        return writeBrowserSavedEnvironmentSecret(environmentId, secret);
-      },
-      removeSavedEnvironmentSecret: async (environmentId) => {
-        if (window.desktopBridge) {
-          return window.desktopBridge.removeSavedEnvironmentSecret(environmentId);
-        }
-        removeBrowserSavedEnvironmentSecret(environmentId);
       },
     },
     server: {
@@ -244,13 +208,12 @@ export function ensureLocalApi(): LocalApi {
 
 export async function __resetLocalApiForTests() {
   cachedApi = undefined;
+  clearBrowserSavedEnvironmentPersistence();
   __resetClientSettingsPersistenceForTests();
   await resetEnvironmentServiceForTests();
   resetGitStatusStateForTests();
   resetSourceControlDiscoveryStateForTests();
   resetRequestLatencyStateForTests();
-  resetSavedEnvironmentRegistryStoreForTests();
-  resetSavedEnvironmentRuntimeStoreForTests();
   resetServerStateForTests();
   resetWsConnectionStateForTests();
 }

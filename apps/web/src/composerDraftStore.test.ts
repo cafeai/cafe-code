@@ -63,6 +63,7 @@ import {
   markPromotedDraftThreadByRef,
   markPromotedDraftThreads,
   markPromotedDraftThreadsByRef,
+  removeComposerDraftsForNonPrimaryEnvironment,
   type ComposerImageAttachment,
   useComposerDraftStore,
   DraftId,
@@ -315,6 +316,89 @@ describe("composerDraftStore syncPersistedAttachments", () => {
 
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.persistedAttachments).toEqual([]);
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.nonPersistedImageIds).toEqual([image.id]);
+  });
+});
+
+describe("composerDraftStore environment cleanup", () => {
+  beforeEach(() => {
+    resetComposerDraftStore();
+  });
+
+  it("drops draft sessions and server drafts for non-primary environments", () => {
+    const primaryThreadId = ThreadId.make("thread-primary-draft-cleanup");
+    const staleThreadId = ThreadId.make("thread-stale-draft-cleanup");
+    const legacyThreadId = ThreadId.make("thread-legacy-draft-cleanup");
+    const primaryThreadKey = scopedThreadKey(scopeThreadRef(TEST_ENVIRONMENT_ID, primaryThreadId));
+    const staleThreadKey = scopedThreadKey(
+      scopeThreadRef(OTHER_TEST_ENVIRONMENT_ID, staleThreadId),
+    );
+    const emptyDraft = {
+      prompt: "",
+      images: [],
+      nonPersistedImageIds: [],
+      persistedAttachments: [],
+      modelSelectionByProvider: {},
+      activeProvider: null,
+      runtimeMode: null,
+      interactionMode: null,
+    };
+
+    useComposerDraftStore.setState({
+      draftsByThreadKey: {
+        [primaryThreadKey]: { ...emptyDraft, prompt: "primary" },
+        [staleThreadKey]: { ...emptyDraft, prompt: "stale" },
+        [legacyThreadId]: { ...emptyDraft, prompt: "legacy" },
+      },
+      draftThreadsByThreadKey: {
+        [primaryThreadKey]: {
+          threadId: primaryThreadId,
+          environmentId: TEST_ENVIRONMENT_ID,
+          projectId: ProjectId.make("project-primary-draft-cleanup"),
+          logicalProjectKey: "primary-logical",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          envMode: "local",
+        },
+        [staleThreadKey]: {
+          threadId: staleThreadId,
+          environmentId: OTHER_TEST_ENVIRONMENT_ID,
+          projectId: ProjectId.make("project-stale-draft-cleanup"),
+          logicalProjectKey: "stale-logical",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          envMode: "local",
+        },
+      },
+      logicalProjectDraftThreadKeyByLogicalProjectKey: {
+        "primary-logical": primaryThreadKey,
+        "stale-logical": staleThreadKey,
+      },
+      stickyModelSelectionByProvider: {},
+      stickyActiveProvider: null,
+    });
+
+    removeComposerDraftsForNonPrimaryEnvironment(TEST_ENVIRONMENT_ID);
+
+    expect(useComposerDraftStore.getState().draftsByThreadKey).toHaveProperty(primaryThreadKey);
+    expect(useComposerDraftStore.getState().draftsByThreadKey).toHaveProperty(legacyThreadId);
+    expect(useComposerDraftStore.getState().draftsByThreadKey).not.toHaveProperty(staleThreadKey);
+    expect(useComposerDraftStore.getState().draftThreadsByThreadKey).toHaveProperty(
+      primaryThreadKey,
+    );
+    expect(useComposerDraftStore.getState().draftThreadsByThreadKey).not.toHaveProperty(
+      staleThreadKey,
+    );
+    expect(
+      useComposerDraftStore.getState().logicalProjectDraftThreadKeyByLogicalProjectKey,
+    ).toEqual({
+      "primary-logical": primaryThreadKey,
+    });
   });
 });
 

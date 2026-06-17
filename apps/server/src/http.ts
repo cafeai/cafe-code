@@ -3,6 +3,7 @@ import {
   CAFE_CODE_ENVIRONMENT_ENDPOINT_PATH,
   CAFE_CODE_HTTPS_CERTIFICATE_PATH,
 } from "@cafecode/shared/environmentEndpoint";
+import { MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES } from "@cafecode/contracts/settings";
 import { decodeOtlpTraceRecords } from "@cafecode/shared/observability";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -38,6 +39,7 @@ import {
 import { ProjectFaviconResolver } from "./project/Services/ProjectFaviconResolver.ts";
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
 import { respondToAuthError } from "./auth/http.ts";
+import { BrandingImageError, BrandingImageStore } from "./branding/BrandingImageStore.ts";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
 import {
   browserApiCorsAllowedHeaders,
@@ -50,9 +52,11 @@ const FALLBACK_PROJECT_FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" vi
 const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
 const HASHED_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable";
+const PRIVATE_HASHED_ASSET_CACHE_CONTROL = "private, max-age=31536000, immutable";
 const HTML_CACHE_CONTROL = "no-store";
 const PWA_CONTROL_FILE_CACHE_CONTROL = "no-cache";
 const STATIC_FILE_CACHE_CONTROL = "public, max-age=3600";
+const BRANDING_IMAGE_ROUTE_PREFIX = "/api/branding/sidebar-image/";
 
 export const browserApiCorsLayer = HttpRouter.cors({
   allowedMethods: [...browserApiCorsAllowedMethods],
@@ -349,6 +353,28 @@ const respondToWebPushError = (error: WebPushNotificationsError) =>
     Effect.as(HttpServerResponse.text("Web push storage failed.", { status: 500 })),
   );
 
+const respondToBrandingImageError = (error: BrandingImageError) =>
+  Effect.gen(function* () {
+    if (error.status >= 500) {
+      yield* Effect.logError("branding image route failed", {
+        code: error.code,
+        cause: error.cause,
+      });
+    }
+    return HttpServerResponse.text(error.message, {
+      status: error.status,
+      headers: browserApiCorsHeaders,
+    });
+  });
+
+function decodeBrandingImageId(rawId: string): string | null {
+  try {
+    return decodeURIComponent(rawId);
+  } catch {
+    return null;
+  }
+}
+
 export const webPushPublicKeyRouteLayer = HttpRouter.add(
   "GET",
   "/api/notifications/web-push/public-key",
@@ -429,6 +455,101 @@ export const clientDebugLogRouteLayer = HttpRouter.add(
     yield* Effect.logInfo("[client-debug]", body);
     return HttpServerResponse.empty({ status: 204, headers: browserApiCorsHeaders });
   }),
+);
+
+export const brandingSidebarImageUploadRouteLayer = HttpRouter.add(
+  "POST",
+  "/api/branding/sidebar-image",
+  Effect.gen(function* () {
+    yield* requireAuthenticatedRequest;
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const contentLengthHeader = request.headers["content-length"];
+    if (contentLengthHeader) {
+      const contentLength = Number.parseInt(contentLengthHeader, 10);
+      if (Number.isFinite(contentLength) && contentLength > MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES) {
+        return HttpServerResponse.text("Sidebar image is too large.", {
+          status: 413,
+          headers: browserApiCorsHeaders,
+        });
+      }
+    }
+
+    const body = yield* request.arrayBuffer.pipe(
+      Effect.mapError(
+        (cause) =>
+          new BrandingImageError({
+            code: "invalid-image",
+            status: 400,
+            message: "Sidebar image data is invalid.",
+            cause,
+          }),
+      ),
+    );
+    const brandingImages = yield* BrandingImageStore;
+    const sidebarBrandImage = yield* brandingImages.storeUploadedImage({
+      bytes: new Uint8Array(body),
+      declaredMimeType: request.headers["content-type"],
+    });
+
+    return HttpServerResponse.jsonUnsafe(
+      { sidebarBrandImage },
+      {
+        status: 200,
+        headers: browserApiCorsHeaders,
+      },
+    );
+  }).pipe(
+    Effect.catchTag("AuthError", respondToAuthError),
+    Effect.catchTag("BrandingImageError", respondToBrandingImageError),
+  ),
+);
+
+export const brandingSidebarImageServeRouteLayer = HttpRouter.add(
+  "GET",
+  `${BRANDING_IMAGE_ROUTE_PREFIX}*`,
+  Effect.gen(function* () {
+    yield* requireAuthenticatedRequest;
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const url = HttpServerRequest.toURL(request);
+    if (Option.isNone(url)) {
+      return HttpServerResponse.text("Bad Request", { status: 400 });
+    }
+    const rawId = decodeBrandingImageId(
+      url.value.pathname.slice(BRANDING_IMAGE_ROUTE_PREFIX.length),
+    );
+    if (!rawId) {
+      return HttpServerResponse.text("Sidebar image was not found.", {
+        status: 404,
+        headers: browserApiCorsHeaders,
+      });
+    }
+    const brandingImages = yield* BrandingImageStore;
+    const stored = yield* brandingImages.resolveStoredImage(rawId);
+    const fileSystem = yield* FileSystem.FileSystem;
+    const data = yield* fileSystem.readFile(stored.filePath).pipe(
+      Effect.mapError(
+        (cause) =>
+          new BrandingImageError({
+            code: "storage-failed",
+            status: 500,
+            message: "Sidebar image could not be loaded.",
+            cause,
+          }),
+      ),
+    );
+
+    return HttpServerResponse.uint8Array(data, {
+      status: 200,
+      contentType: stored.mimeType,
+      headers: {
+        "Cache-Control": PRIVATE_HASHED_ASSET_CACHE_CONTROL,
+        ...browserApiCorsHeaders,
+      },
+    });
+  }).pipe(
+    Effect.catchTag("AuthError", respondToAuthError),
+    Effect.catchTag("BrandingImageError", respondToBrandingImageError),
+  ),
 );
 
 class DecodeOtlpTraceRecordsError extends Data.TaggedError("DecodeOtlpTraceRecordsError")<{

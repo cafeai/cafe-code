@@ -1,24 +1,7 @@
-import { EnvironmentId, type PersistedSavedEnvironmentRecord } from "@cafecode/contracts";
+import { DEFAULT_CLIENT_SETTINGS } from "@cafecode/contracts/settings";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const testEnvironmentId = EnvironmentId.make("environment-1");
-
-const savedRegistryRecord: PersistedSavedEnvironmentRecord = {
-  environmentId: testEnvironmentId,
-  label: "Remote environment",
-  httpBaseUrl: "https://remote.example.com/",
-  wsBaseUrl: "wss://remote.example.com/",
-  createdAt: "2026-04-09T00:00:00.000Z",
-  lastConnectedAt: null,
-  desktopSsh: {
-    alias: "devbox",
-    hostname: "devbox.example.com",
-    username: "julius",
-    port: 22,
-  },
-};
-
-function createLocalStorageStub(): Storage {
+function createStorageStub(): Storage {
   const store = new Map<string, string>();
   return {
     getItem: (key) => store.get(key) ?? null,
@@ -38,93 +21,80 @@ function createLocalStorageStub(): Storage {
   };
 }
 
-function getTestWindow(): Window & typeof globalThis {
-  const localStorage = createLocalStorageStub();
-  const sessionStorage = createLocalStorageStub();
-  const testWindow = {
+async function loadStorageModule() {
+  const localStorage = createStorageStub();
+  const sessionStorage = createStorageStub();
+  vi.stubGlobal("window", {
     localStorage,
     sessionStorage,
-  } as Window & typeof globalThis;
-  vi.stubGlobal("window", testWindow);
-  vi.stubGlobal("localStorage", localStorage);
-  vi.stubGlobal("sessionStorage", sessionStorage);
-  return testWindow;
+  });
+  vi.resetModules();
+  const storage = await import("./clientPersistenceStorage");
+  return { storage, localStorage, sessionStorage };
 }
 
-afterEach(() => {
-  vi.resetModules();
-  vi.unstubAllGlobals();
-  vi.restoreAllMocks();
-});
-
 describe("clientPersistenceStorage", () => {
-  it("migrates legacy browser client settings into the Cafe Code key", async () => {
-    const testWindow = getTestWindow();
-    const { DEFAULT_CLIENT_SETTINGS } = await import("@cafecode/contracts/settings");
-    const {
-      CLIENT_SETTINGS_STORAGE_KEY,
-      LEGACY_CLIENT_SETTINGS_STORAGE_KEY,
-      readBrowserClientSettings,
-    } = await import("./clientPersistenceStorage");
-    testWindow.localStorage.setItem(
-      LEGACY_CLIENT_SETTINGS_STORAGE_KEY,
-      JSON.stringify(DEFAULT_CLIENT_SETTINGS),
-    );
-
-    expect(readBrowserClientSettings()).toEqual(DEFAULT_CLIENT_SETTINGS);
-    expect(testWindow.localStorage.getItem(CLIENT_SETTINGS_STORAGE_KEY)).not.toBeNull();
-    expect(testWindow.localStorage.getItem(LEGACY_CLIENT_SETTINGS_STORAGE_KEY)).toBeNull();
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
   });
 
-  it("migrates legacy saved environments into the Cafe Code key", async () => {
-    const testWindow = getTestWindow();
-    const {
-      LEGACY_SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
-      SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
-      readBrowserSavedEnvironmentRegistry,
-    } = await import("./clientPersistenceStorage");
-    testWindow.localStorage.setItem(
-      LEGACY_SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
-      JSON.stringify({ version: 1, records: [savedRegistryRecord] }),
+  it("removes saved environment registry and secret keys idempotently", async () => {
+    const { storage, localStorage, sessionStorage } = await loadStorageModule();
+    localStorage.setItem(
+      storage.SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
+      [
+        "{",
+        '  "version": 1,',
+        '  "records": [{ "environmentId": "environment-1", "bearerToken": "legacy-token" }]',
+        "}",
+      ].join("\n"),
+    );
+    localStorage.setItem(storage.LEGACY_SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY, "{malformed-json");
+    sessionStorage.setItem(
+      storage.SAVED_ENVIRONMENT_SESSION_SECRETS_STORAGE_KEY,
+      '{ "version": 1, "secrets": { "environment-1": "bearer-token" } }',
     );
 
-    expect(readBrowserSavedEnvironmentRegistry()).toEqual([savedRegistryRecord]);
-    expect(testWindow.localStorage.getItem(SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY)).not.toBeNull();
+    storage.clearBrowserSavedEnvironmentPersistence();
+    storage.clearBrowserSavedEnvironmentPersistence();
+
+    expect(localStorage.getItem(storage.SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY)).toBeNull();
+    expect(localStorage.getItem(storage.LEGACY_SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY)).toBeNull();
     expect(
-      testWindow.localStorage.getItem(LEGACY_SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY),
+      sessionStorage.getItem(storage.SAVED_ENVIRONMENT_SESSION_SECRETS_STORAGE_KEY),
     ).toBeNull();
   });
 
-  it("stores browser secrets in sessionStorage without writing bearer material to localStorage", async () => {
-    const testWindow = getTestWindow();
-    const {
-      SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
-      SAVED_ENVIRONMENT_SESSION_SECRETS_STORAGE_KEY,
-      readBrowserSavedEnvironmentRegistry,
-      readBrowserSavedEnvironmentSecret,
-      writeBrowserSavedEnvironmentRegistry,
-      writeBrowserSavedEnvironmentSecret,
-    } = await import("./clientPersistenceStorage");
+  it("cleans legacy saved environments during client settings reads and writes", async () => {
+    const { storage, localStorage, sessionStorage } = await loadStorageModule();
+    localStorage.setItem(
+      storage.SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
+      '{ "records": [{ "bearerToken": "legacy-token" }] }',
+    );
+    sessionStorage.setItem(
+      storage.SAVED_ENVIRONMENT_SESSION_SECRETS_STORAGE_KEY,
+      '{ "secrets": { "environment-1": "bearer-token" } }',
+    );
 
-    writeBrowserSavedEnvironmentRegistry([savedRegistryRecord]);
-    expect(writeBrowserSavedEnvironmentSecret(testEnvironmentId, "bearer-token")).toBe(true);
-    writeBrowserSavedEnvironmentRegistry([savedRegistryRecord]);
+    expect(storage.readBrowserClientSettings()).toBeNull();
+    expect(localStorage.getItem(storage.SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY)).toBeNull();
+    expect(
+      sessionStorage.getItem(storage.SAVED_ENVIRONMENT_SESSION_SECRETS_STORAGE_KEY),
+    ).toBeNull();
 
-    expect(readBrowserSavedEnvironmentRegistry()).toEqual([savedRegistryRecord]);
-    expect(readBrowserSavedEnvironmentSecret(testEnvironmentId)).toBe("bearer-token");
+    localStorage.setItem(storage.SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY, "{malformed-json");
+    sessionStorage.setItem(
+      storage.SAVED_ENVIRONMENT_SESSION_SECRETS_STORAGE_KEY,
+      "{malformed-json",
+    );
+
+    storage.writeBrowserClientSettings(DEFAULT_CLIENT_SETTINGS);
+
+    expect(localStorage.getItem(storage.CLIENT_SETTINGS_STORAGE_KEY)).not.toBeNull();
+    expect(localStorage.getItem(storage.SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY)).toBeNull();
     expect(
-      JSON.parse(testWindow.localStorage.getItem(SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY)!),
-    ).toEqual({
-      version: 1,
-      records: [savedRegistryRecord],
-    });
-    expect(
-      JSON.parse(testWindow.sessionStorage.getItem(SAVED_ENVIRONMENT_SESSION_SECRETS_STORAGE_KEY)!),
-    ).toEqual({
-      version: 1,
-      secrets: {
-        [testEnvironmentId]: "bearer-token",
-      },
-    });
+      sessionStorage.getItem(storage.SAVED_ENVIRONMENT_SESSION_SECRETS_STORAGE_KEY),
+    ).toBeNull();
   });
 });
