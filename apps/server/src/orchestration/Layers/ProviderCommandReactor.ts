@@ -487,14 +487,18 @@ const make = Effect.gen(function* () {
 
   const recoverInterruptedTurnStartsOnStartup = Effect.fn("recoverInterruptedTurnStartsOnStartup")(
     function* () {
-      const snapshot = yield* projectionSnapshotQuery.getSnapshot();
+      // This startup repair only needs thread shell/session state. Do not use
+      // the full orchestration snapshot here: large long-running workspaces can
+      // contain millions of persisted message/activity rows, and hydrating all
+      // of them during backend boot can push Electron's Node runtime into OOM.
+      const shellSnapshot = yield* projectionSnapshotQuery.getShellSnapshot();
       const activeProviderSessions = yield* providerService.listSessions();
       const runningProviderThreadIds = new Set(
         activeProviderSessions
           .filter((session) => session.status === "running")
           .map((session) => String(session.threadId)),
       );
-      const interruptedThreads = snapshot.threads.filter(
+      const interruptedThreads = shellSnapshot.threads.filter(
         (thread) =>
           thread.session?.status === "starting" &&
           thread.session.activeTurnId === null &&
@@ -934,7 +938,11 @@ const make = Effect.gen(function* () {
   const recoverPostTerminalStaleSteerMessagesOnStartup = Effect.fn(
     "recoverPostTerminalStaleSteerMessagesOnStartup",
   )(function* () {
-    const snapshot = yield* projectionSnapshotQuery.getSnapshot();
+    // Match Codex CLI/TUI stale-steer recovery without bootstrapping every
+    // historical message and work-log row. The shell snapshot identifies the
+    // small set of candidate Codex threads; only those candidates are hydrated
+    // through the bounded thread-detail query below.
+    const shellSnapshot = yield* projectionSnapshotQuery.getShellSnapshot();
     const activeProviderSessions = yield* providerService.listSessions();
     const runningProviderThreadIds = new Set(
       activeProviderSessions
@@ -945,10 +953,28 @@ const make = Effect.gen(function* () {
     const recoveredAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
     let recoveredCount = 0;
 
+    const candidateThreads = shellSnapshot.threads.filter((thread) => {
+      const latestTurn = thread.latestTurn;
+      return (
+        latestTurn !== null &&
+        latestTurn.completedAt !== null &&
+        terminalStates.has(latestTurn.state) &&
+        thread.session?.providerName === "codex" &&
+        !runningProviderThreadIds.has(thread.id)
+      );
+    });
+
     yield* Effect.forEach(
-      snapshot.threads,
-      (thread) =>
+      candidateThreads,
+      (threadShell) =>
         Effect.gen(function* () {
+          const thread = yield* projectionSnapshotQuery
+            .getThreadDetailById(threadShell.id)
+            .pipe(Effect.map(Option.getOrUndefined));
+          if (thread === undefined) {
+            return;
+          }
+
           const latestTurn = thread.latestTurn;
           if (
             latestTurn === null ||
@@ -1053,11 +1079,11 @@ const make = Effect.gen(function* () {
         }).pipe(
           Effect.catchCause((cause) =>
             appendProviderFailureActivity({
-              threadId: thread.id,
+              threadId: threadShell.id,
               kind: "provider.turn.start.failed",
               summary: "Provider turn start failed",
               detail: `Automatic post-terminal steer recovery failed: ${Cause.pretty(cause)}`,
-              turnId: thread.latestTurn?.turnId ?? null,
+              turnId: threadShell.latestTurn?.turnId ?? null,
               createdAt: recoveredAt,
             }),
           ),
