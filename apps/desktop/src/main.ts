@@ -79,7 +79,7 @@ const electronLayer = Layer.mergeAll(
   ElectronMenu.layer,
   ElectronProtocol.layer,
   DesktopSecretStorage.layer,
-  ElectronShell.layer,
+  ElectronShell.layer.pipe(Layer.provide(NodeServices.layer)),
   ElectronPowerSaveBlocker.layer,
   ElectronTheme.layer,
   ElectronUpdater.layer,

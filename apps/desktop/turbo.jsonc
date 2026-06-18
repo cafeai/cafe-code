@@ -15,6 +15,11 @@
       "cache": false,
       "persistent": true,
     },
+    "start:debug": {
+      "dependsOn": ["build", "@cafecode/web#build", "@cafeai/cafe-code#build"],
+      "cache": false,
+      "persistent": true,
+    },
     "smoke-test": {
       "dependsOn": ["build", "@cafecode/web#build", "@cafeai/cafe-code#build"],
       "cache": false,

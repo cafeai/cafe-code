@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   appendBrowsePathSegment,
+  appendProjectPathSegment,
   canNavigateUp,
   getBrowseDirectoryPath,
   findProjectByPath,
@@ -94,6 +95,13 @@ describe("projectPaths", () => {
     expect(getBrowseParentPath("\\\\server\\share\\repo\\")).toBe("\\\\server\\share\\");
     expect(getBrowseParentPath("C:\\")).toBeNull();
     expect(getBrowseParentPath("/home/user\\project/docs/")).toBe("/home/user\\project/");
+  });
+
+  it("appends final path segments without turning them into browse directories", () => {
+    expect(appendProjectPathSegment("~/Development/", "t3-env")).toBe("~/Development/t3-env");
+    expect(appendProjectPathSegment("~/Development", "t3-env")).toBe("~/Development/t3-env");
+    expect(appendProjectPathSegment("C:\\Work\\", "Repo")).toBe("C:\\Work\\Repo");
+    expect(appendProjectPathSegment("/repo", "app")).toBe("/repo/app");
   });
 
   it("detects browse path boundaries", () => {

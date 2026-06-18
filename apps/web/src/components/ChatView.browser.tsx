@@ -4247,6 +4247,13 @@ describe("ChatView timeline estimator parity (full app)", () => {
       },
       resolveRpc: (body) => {
         if (body._tag === WS_METHODS.filesystemBrowse) {
+          if (body.partialPath === "~/Development/") {
+            return {
+              parentPath: "~/Development",
+              entries: [],
+            };
+          }
+
           return {
             parentPath: "~/",
             entries: [{ name: "Development", fullPath: "~/Development" }],
@@ -4300,20 +4307,17 @@ describe("ChatView timeline estimator parity (full app)", () => {
           const clonePathInput = document.querySelector<HTMLInputElement>(
             'input[placeholder="Enter path (e.g. ~/projects/my-app)"]',
           );
-          expect(clonePathInput?.value).toBe("~/");
+          expect(clonePathInput?.value).toBe("~/t3-env");
           expect(document.body.textContent).toContain("Repository");
           expect(document.body.textContent).toContain("t3-oss/t3-env");
           expect(document.body.textContent).toContain("https://github.com/t3-oss/t3-env");
-          expect(document.body.textContent).toContain("Select where to clone");
-          expect(document.body.textContent).toContain("Development");
+          expect(document.body.textContent).toContain("Select parent folder");
           expect(document.body.textContent).toContain("Clone");
         },
         { timeout: 8_000, interval: 16 },
       );
 
-      await page
-        .getByPlaceholder("Enter path (e.g. ~/projects/my-app)")
-        .fill("~/Development/t3env");
+      await page.getByPlaceholder("Enter path (e.g. ~/projects/my-app)").fill("~/Development/");
       const clonePathInput = await waitForCommandPaletteInput(
         "Enter path (e.g. ~/projects/my-app)",
       );
@@ -4326,7 +4330,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
           ) as { destinationPath?: string; remoteUrl?: string } | undefined;
           expect(cloneRequest).toMatchObject({
             remoteUrl: "git@github.com:t3-oss/t3-env.git",
-            destinationPath: "~/Development/t3env",
+            destinationPath: "~/Development/t3-env",
           });
         },
         { timeout: 8_000, interval: 16 },

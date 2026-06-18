@@ -11,6 +11,7 @@
     "dev:electron": "node scripts/dev-electron.mjs",
     "build": "tsdown",
     "start": "node scripts/start-electron.mjs",
+    "start:debug": "node scripts/start-electron.mjs --cafe-debug",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "smoke-test": "node scripts/smoke-test.mjs"

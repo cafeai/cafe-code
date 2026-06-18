@@ -54,6 +54,7 @@ import {
 } from "../lib/chatThreadActions";
 import {
   appendBrowsePathSegment,
+  appendProjectPathSegment,
   canNavigateUp,
   ensureBrowseDirectoryPath,
   findProjectByPath,
@@ -164,6 +165,7 @@ type AddProjectCloneFlow =
       readonly repositoryInput: string;
       readonly repository: SourceControlRepositoryInfo | null;
       readonly remoteUrl: string;
+      readonly cloneDirectoryName: string;
     };
 
 const REMOTE_PROJECT_SOURCES: ReadonlyArray<AddProjectRemoteSource> = [
@@ -318,6 +320,46 @@ function errorMessage(error: unknown): string {
     return error.message;
   }
   return "An error occurred.";
+}
+
+function inferCloneDirectoryNameFromReference(value: string): string | null {
+  const withoutQuery =
+    value
+      .trim()
+      .split(/[?#]/u, 1)[0]
+      ?.replace(/[\\/]+$/u, "") ?? "";
+  const lastSegment = withoutQuery.split(/[\\/]/u).findLast(Boolean);
+  if (!lastSegment) {
+    return null;
+  }
+
+  const withoutGitSuffix = lastSegment.replace(/\.git$/iu, "").trim();
+  if (withoutGitSuffix.length === 0 || withoutGitSuffix === "." || withoutGitSuffix === "..") {
+    return null;
+  }
+
+  return withoutGitSuffix;
+}
+
+function inferCloneDirectoryName(input: {
+  readonly repositoryInput: string;
+  readonly repository: SourceControlRepositoryInfo | null;
+  readonly remoteUrl: string;
+}): string {
+  const candidates = [
+    input.repository?.nameWithOwner ?? "",
+    input.remoteUrl,
+    input.repositoryInput,
+  ];
+
+  for (const candidate of candidates) {
+    const directoryName = inferCloneDirectoryNameFromReference(candidate);
+    if (directoryName) {
+      return directoryName;
+    }
+  }
+
+  return "repository";
 }
 
 export function CommandPalette({ children }: { children: ReactNode }) {
@@ -1115,6 +1157,23 @@ function OpenCommandPaletteDialog() {
     return getAddProjectInitialQueryForEnvironment(environmentId);
   }
 
+  function getDefaultCloneDestinationPath(
+    environmentId: EnvironmentId,
+    cloneDirectoryName: string,
+  ): string {
+    return appendProjectPathSegment(getDefaultCloneParentPath(environmentId), cloneDirectoryName);
+  }
+
+  function shouldTreatCloneDestinationAsParent(rawDestination: string): boolean {
+    if (!addProjectCloneFlow || addProjectCloneFlow.step !== "confirm") {
+      return false;
+    }
+    if (hasTrailingPathSeparator(query.trim())) {
+      return true;
+    }
+    return exactBrowseEntry?.fullPath === rawDestination;
+  }
+
   async function submitAddProjectCloneFlow(destinationPathInput?: string): Promise<void> {
     if (!addProjectCloneFlow) {
       return;
@@ -1140,7 +1199,15 @@ function OpenCommandPaletteDialog() {
 
       const provider = remoteProjectSourceProvider(addProjectCloneFlow.source);
       if (!provider) {
-        const destinationPath = getDefaultCloneParentPath(addProjectCloneFlow.environmentId);
+        const cloneDirectoryName = inferCloneDirectoryName({
+          repositoryInput: rawRepository,
+          repository: null,
+          remoteUrl: rawRepository,
+        });
+        const destinationPath = getDefaultCloneDestinationPath(
+          addProjectCloneFlow.environmentId,
+          cloneDirectoryName,
+        );
         setAddProjectCloneFlow({
           step: "confirm",
           environmentId: addProjectCloneFlow.environmentId,
@@ -1148,6 +1215,7 @@ function OpenCommandPaletteDialog() {
           repositoryInput: rawRepository,
           repository: null,
           remoteUrl: rawRepository,
+          cloneDirectoryName,
         });
         setHighlightedItemValue(null);
         setQuery(destinationPath);
@@ -1161,7 +1229,15 @@ function OpenCommandPaletteDialog() {
           provider,
           repository: rawRepository,
         });
-        const destinationPath = getDefaultCloneParentPath(addProjectCloneFlow.environmentId);
+        const cloneDirectoryName = inferCloneDirectoryName({
+          repositoryInput: rawRepository,
+          repository,
+          remoteUrl: repository.sshUrl,
+        });
+        const destinationPath = getDefaultCloneDestinationPath(
+          addProjectCloneFlow.environmentId,
+          cloneDirectoryName,
+        );
         setAddProjectCloneFlow({
           step: "confirm",
           environmentId: addProjectCloneFlow.environmentId,
@@ -1169,6 +1245,7 @@ function OpenCommandPaletteDialog() {
           repositoryInput: rawRepository,
           repository,
           remoteUrl: repository.sshUrl,
+          cloneDirectoryName,
         });
         setHighlightedItemValue(null);
         setQuery(destinationPath);
@@ -1214,8 +1291,12 @@ function OpenCommandPaletteDialog() {
       return;
     }
 
+    const rawCloneDestination = shouldTreatCloneDestinationAsParent(rawDestination)
+      ? appendProjectPathSegment(rawDestination, addProjectCloneFlow.cloneDirectoryName)
+      : rawDestination;
+
     const destinationPath = resolveProjectPathForDispatch(
-      rawDestination,
+      rawCloneDestination,
       currentProjectCwdForBrowse,
     );
     if (destinationPath.length === 0) {
@@ -1283,7 +1364,7 @@ function OpenCommandPaletteDialog() {
   const cloneDestinationBrowseGroups = useMemo(
     () =>
       browseGroups.map((group) =>
-        group.value === "directories" ? { ...group, label: "Select where to clone" } : group,
+        group.value === "directories" ? { ...group, label: "Select parent folder" } : group,
       ),
     [browseGroups],
   );
@@ -1615,7 +1696,10 @@ function OpenCommandPaletteDialog() {
                       : "Enter a repository path and press Enter to look it up.",
                 }
               : addProjectCloneFlow?.step === "confirm"
-                ? { emptyStateMessage: "Choose a destination path and press Enter to clone." }
+                ? {
+                    emptyStateMessage:
+                      "Choose a parent folder or type a destination path and press Enter to clone.",
+                  }
                 : relativePathNeedsActiveProject
                   ? { emptyStateMessage: "Relative paths require an active project." }
                   : willCreateProjectPath

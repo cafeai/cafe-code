@@ -124,6 +124,22 @@ export function normalizeProjectPathForDispatch(value: string): string {
   return trimTrailingPathSeparators(value.trim());
 }
 
+export function appendProjectPathSegment(currentPath: string, segment: string): string {
+  const normalizedBase = normalizeProjectPathForDispatch(currentPath);
+  const normalizedSegment = segment.trim();
+  if (normalizedBase.length === 0) {
+    return normalizedSegment;
+  }
+  if (normalizedSegment.length === 0) {
+    return normalizedBase;
+  }
+
+  const separator = preferredPathSeparator(normalizedBase);
+  return hasTrailingPathSeparator(normalizedBase)
+    ? `${normalizedBase}${normalizedSegment}`
+    : `${normalizedBase}${separator}${normalizedSegment}`;
+}
+
 export function resolveProjectPathForDispatch(value: string, cwd?: string | null): string {
   const trimmedValue = value.trim();
   if (!isExplicitRelativePath(trimmedValue) || !cwd) {

@@ -163,7 +163,7 @@ bun --cwd apps/desktop start
 Debug mode:
 
 ```bash
-bun --cwd apps/desktop start -- --cafe-debug
+bun start:desktop:debug
 ```
 
 The app prints a localhost-only debug URL on startup.
