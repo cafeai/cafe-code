@@ -36,6 +36,7 @@ import { useCommandPaletteStore } from "../commandPaletteStore";
 import { useComposerDraftStore, DraftId } from "../composerDraftStore";
 import { __resetEnvironmentApiOverridesForTests } from "../environmentApi";
 import { isMacPlatform } from "../lib/utils";
+import { resetSourceControlDiscoveryStateForTests } from "../lib/sourceControlDiscoveryState";
 import { __resetLocalApiForTests } from "../localApi";
 import { AppAtomRegistryProvider } from "../rpc/atomRegistry";
 import { getServerConfig } from "../rpc/serverState";
@@ -1673,6 +1674,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
       },
     });
     await __resetLocalApiForTests();
+    resetSourceControlDiscoveryStateForTests();
     await setViewport(DEFAULT_VIEWPORT);
     localStorage.clear();
     document.body.innerHTML = "";
@@ -1885,6 +1887,13 @@ describe("ChatView timeline estimator parity (full app)", () => {
         "Unable to find passive source update badge.",
       );
       expect(updateBadge.getAttribute("title")).toContain("Newer origin/dev commit available");
+      await waitForElement(
+        () =>
+          document.querySelector<HTMLButtonElement>(
+            '[data-chat-view-header="true"] button[aria-label="Copy options"]',
+          ),
+        "Unable to find desktop open project picker.",
+      );
     } finally {
       await mounted.cleanup();
     }
@@ -4211,6 +4220,137 @@ describe("ChatView timeline estimator parity (full app)", () => {
         (path) => UUID_ROUTE_RE.test(path),
         "Route should have changed to a new draft thread after adding a project with Enter.",
       );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("hides unavailable source control providers in the add project source picker", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-command-palette-add-project-source-filter" as MessageId,
+        targetText: "command palette add project source filter",
+      }),
+      configureFixture: (nextFixture) => {
+        nextFixture.serverConfig = {
+          ...nextFixture.serverConfig,
+          keybindings: [
+            {
+              command: "commandPalette.toggle",
+              shortcut: {
+                key: "k",
+                metaKey: false,
+                ctrlKey: false,
+                shiftKey: false,
+                altKey: false,
+                modKey: true,
+              },
+              whenAst: {
+                type: "not",
+                node: { type: "identifier", name: "modelPickerOpen" },
+              },
+            },
+          ],
+        };
+      },
+      resolveRpc: (body) => {
+        if (body._tag === WS_METHODS.serverDiscoverSourceControl) {
+          return {
+            versionControlSystems: [],
+            sourceControlProviders: [
+              {
+                kind: "github",
+                label: "GitHub",
+                executable: "gh",
+                status: "available",
+                version: Option.some("gh version 2.0.0"),
+                installHint: "Install GitHub CLI.",
+                detail: Option.none(),
+                auth: {
+                  status: "authenticated",
+                  account: Option.some("cafe"),
+                  host: Option.some("github.com"),
+                  detail: Option.none(),
+                },
+              },
+              {
+                kind: "gitlab",
+                label: "GitLab",
+                executable: "glab",
+                status: "missing",
+                version: Option.none(),
+                installHint: "Install GitLab CLI.",
+                detail: Option.none(),
+                auth: {
+                  status: "unknown",
+                  account: Option.none(),
+                  host: Option.none(),
+                  detail: Option.none(),
+                },
+              },
+              {
+                kind: "bitbucket",
+                label: "Bitbucket",
+                executable: "Bitbucket REST API",
+                status: "available",
+                version: Option.none(),
+                installHint: "Set Bitbucket API token environment variables.",
+                detail: Option.none(),
+                auth: {
+                  status: "unauthenticated",
+                  account: Option.none(),
+                  host: Option.some("bitbucket.org"),
+                  detail: Option.some("Bitbucket token is not configured."),
+                },
+              },
+              {
+                kind: "azure-devops",
+                label: "Azure DevOps",
+                executable: "az",
+                status: "missing",
+                version: Option.none(),
+                installHint: "Install Azure CLI.",
+                detail: Option.none(),
+                auth: {
+                  status: "unknown",
+                  account: Option.none(),
+                  host: Option.none(),
+                  detail: Option.none(),
+                },
+              },
+            ],
+          };
+        }
+
+        return undefined;
+      },
+    });
+
+    try {
+      await Promise.all([waitForServerConfigToApply(), waitForCommandPaletteShortcutLabel()]);
+      const palette = page.getByTestId("command-palette");
+      await openCommandPaletteFromTrigger();
+
+      await expect.element(palette).toBeInTheDocument();
+      await palette.getByText("Add project", { exact: true }).click();
+      await expect.element(palette.getByText("Local folder", { exact: true })).toBeInTheDocument();
+      await expect.element(palette.getByText("Git URL", { exact: true })).toBeInTheDocument();
+      await expect
+        .element(palette.getByText("GitHub repository", { exact: true }))
+        .toBeInTheDocument();
+      await expect
+        .element(palette.getByText("GitLab repository", { exact: true }))
+        .not.toBeInTheDocument();
+      await expect
+        .element(palette.getByText("Bitbucket repository", { exact: true }))
+        .not.toBeInTheDocument();
+      await expect
+        .element(palette.getByText("Azure DevOps repository", { exact: true }))
+        .not.toBeInTheDocument();
+      await expect
+        .element(palette.getByText("Setup Required", { exact: true }))
+        .not.toBeInTheDocument();
     } finally {
       await mounted.cleanup();
     }

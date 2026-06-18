@@ -516,6 +516,80 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
       });
     }),
   );
+
+  it.effect("prefers Dolphin for the file-manager editor in KDE sessions", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-file-manager-" });
+
+      yield* fs.writeFileString(path.join(dir, "dolphin"), "#!/bin/sh\nexit 0\n");
+      yield* fs.writeFileString(path.join(dir, "gio"), "#!/bin/sh\nexit 0\n");
+      yield* fs.writeFileString(path.join(dir, "xdg-open"), "#!/bin/sh\nexit 0\n");
+      yield* fs.chmod(path.join(dir, "dolphin"), 0o755);
+      yield* fs.chmod(path.join(dir, "gio"), 0o755);
+      yield* fs.chmod(path.join(dir, "xdg-open"), 0o755);
+
+      const launch = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace", editor: "file-manager" },
+        "linux",
+        { PATH: dir, XDG_CURRENT_DESKTOP: "KDE" },
+      );
+
+      assert.deepEqual(launch, {
+        command: "dolphin",
+        args: ["/tmp/workspace"],
+      });
+    }),
+  );
+
+  it.effect("uses gio open for the Linux file-manager editor when available outside KDE", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-file-manager-" });
+
+      yield* fs.writeFileString(path.join(dir, "gio"), "#!/bin/sh\nexit 0\n");
+      yield* fs.writeFileString(path.join(dir, "xdg-open"), "#!/bin/sh\nexit 0\n");
+      yield* fs.chmod(path.join(dir, "gio"), 0o755);
+      yield* fs.chmod(path.join(dir, "xdg-open"), 0o755);
+
+      const launch = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace", editor: "file-manager" },
+        "linux",
+        { PATH: dir, XDG_CURRENT_DESKTOP: "GNOME" },
+      );
+
+      assert.deepEqual(launch, {
+        command: "gio",
+        args: ["open", "/tmp/workspace"],
+      });
+    }),
+  );
+
+  it.effect(
+    "falls back to xdg-open for the Linux file-manager editor when gio is unavailable",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-file-manager-" });
+
+        yield* fs.writeFileString(path.join(dir, "xdg-open"), "#!/bin/sh\nexit 0\n");
+        yield* fs.chmod(path.join(dir, "xdg-open"), 0o755);
+
+        const launch = yield* resolveEditorLaunch(
+          { cwd: "/tmp/workspace", editor: "file-manager" },
+          "linux",
+          { PATH: dir, XDG_CURRENT_DESKTOP: "GNOME" },
+        );
+
+        assert.deepEqual(launch, {
+          command: "xdg-open",
+          args: ["/tmp/workspace"],
+        });
+      }),
+  );
 });
 
 it("resolveBrowserLaunch maps default browser launchers by platform", () => {

@@ -12,6 +12,11 @@ import { Group, GroupSeparator } from "../ui/group";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "../ui/menu";
 import { resolveEditorOpenOptions } from "../../editorOpenOptions";
 import { readLocalApi } from "~/localApi";
+import { toastManager } from "../ui/toast";
+
+function openFailureMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
 
 export const OpenInPicker = memo(function OpenInPicker({
   keybindings,
@@ -38,7 +43,13 @@ export const OpenInPicker = memo(function OpenInPicker({
       if (!api || !openInCwd) return;
       const editor = editorId ?? preferredEditor;
       if (!editor) return;
-      void api.shell.openInEditor(openInCwd, editor);
+      void api.shell.openInEditor(openInCwd, editor).catch((error: unknown) => {
+        toastManager.add({
+          title: "Unable to open project",
+          description: openFailureMessage(error, "The project was not opened."),
+          type: "error",
+        });
+      });
       setPreferredEditor(editor);
     },
     [preferredEditor, openInCwd, setPreferredEditor],
@@ -47,8 +58,14 @@ export const OpenInPicker = memo(function OpenInPicker({
   const openTerminal = useCallback(() => {
     const api = readLocalApi();
     if (!api || !openInCwd || !terminal.available) return;
-    void api.shell.openTerminal(openInCwd);
-  }, [openInCwd, terminal.available]);
+    void api.shell.openTerminal(openInCwd).catch((error: unknown) => {
+      toastManager.add({
+        title: `Unable to open ${terminal.label}`,
+        description: openFailureMessage(error, "The terminal was not opened."),
+        type: "error",
+      });
+    });
+  }, [openInCwd, terminal.available, terminal.label]);
 
   const openFavoriteEditorShortcutLabel = useMemo(
     () => shortcutLabelForCommand(keybindings, "editor.openFavorite"),
@@ -63,7 +80,13 @@ export const OpenInPicker = memo(function OpenInPicker({
       if (!preferredEditor) return;
 
       e.preventDefault();
-      void api.shell.openInEditor(openInCwd, preferredEditor);
+      void api.shell.openInEditor(openInCwd, preferredEditor).catch((error: unknown) => {
+        toastManager.add({
+          title: "Unable to open project",
+          description: openFailureMessage(error, "The project was not opened."),
+          type: "error",
+        });
+      });
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);

@@ -6,12 +6,24 @@ import { shouldShowOpenInPicker } from "./ChatHeader";
 describe("shouldShowOpenInPicker", () => {
   const primaryEnvironmentId = EnvironmentId.make("environment-primary");
 
-  it("hides the picker even for projects in the primary environment", () => {
+  it("shows the picker for local projects in the primary environment", () => {
     expect(
       shouldShowOpenInPicker({
         activeProjectName: "codething-mvp",
         activeThreadEnvironmentId: primaryEnvironmentId,
         primaryEnvironmentId,
+        canOpenLocalEditor: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("hides the picker for browser clients without a local editor bridge", () => {
+    expect(
+      shouldShowOpenInPicker({
+        activeProjectName: "codething-mvp",
+        activeThreadEnvironmentId: primaryEnvironmentId,
+        primaryEnvironmentId,
+        canOpenLocalEditor: false,
       }),
     ).toBe(false);
   });
@@ -22,6 +34,7 @@ describe("shouldShowOpenInPicker", () => {
         activeProjectName: "codething-mvp",
         activeThreadEnvironmentId: EnvironmentId.make("environment-stale"),
         primaryEnvironmentId: null,
+        canOpenLocalEditor: true,
       }),
     ).toBe(false);
   });
@@ -32,6 +45,7 @@ describe("shouldShowOpenInPicker", () => {
         activeProjectName: "codething-mvp",
         activeThreadEnvironmentId: EnvironmentId.make("environment-stale"),
         primaryEnvironmentId,
+        canOpenLocalEditor: true,
       }),
     ).toBe(false);
   });
@@ -42,6 +56,7 @@ describe("shouldShowOpenInPicker", () => {
         activeProjectName: undefined,
         activeThreadEnvironmentId: primaryEnvironmentId,
         primaryEnvironmentId,
+        canOpenLocalEditor: true,
       }),
     ).toBe(false);
   });

@@ -79,6 +79,13 @@ interface RendererSnapshotHistoryEntry {
   readonly activeThreadPressureFlags: readonly string[];
   readonly lifecycleRedFlags: readonly string[];
   readonly queueLifecycleRedFlags: readonly string[];
+  readonly latestTimelineScrollSource: string | null;
+  readonly latestTimelineScrollReason: string | null;
+  readonly latestTimelineScrollCapturedAt: string | null;
+  readonly latestTimelineScrollRemainingDistance: number | null;
+  readonly latestTimelineScrollRowCount: number | null;
+  readonly timelineScrollAutoFollowTail: boolean | null;
+  readonly timelineScrollShowScrollToBottom: boolean | null;
 }
 
 interface DesktopProcessDiagnostic {
@@ -522,6 +529,10 @@ function buildRendererSnapshotHistoryEntry(
     activeThreadPerformance?.latestContextWindowActivity,
   );
   const latestContextWindowUsage = readRecord(latestContextWindowActivity?.usage);
+  const timelineScroll = readRecord(snapshot.timelineScroll);
+  const latestTimelineScroll = readRecord(timelineScroll?.latest);
+  const latestTimelineScrollMetrics = readRecord(latestTimelineScroll?.metrics);
+  const timelineScrollState = readRecord(timelineScroll?.state);
 
   return {
     receivedAt,
@@ -556,6 +567,15 @@ function buildRendererSnapshotHistoryEntry(
     activeThreadPressureFlags: readStringArray(activeThreadPerformance?.pressureFlags),
     lifecycleRedFlags: readStringArray(activeLifecycle?.redFlags),
     queueLifecycleRedFlags: readStringArray(queueCoupling?.redFlags),
+    latestTimelineScrollSource: readString(latestTimelineScroll?.source),
+    latestTimelineScrollReason: readString(latestTimelineScroll?.reason),
+    latestTimelineScrollCapturedAt: readString(latestTimelineScroll?.capturedAt),
+    latestTimelineScrollRemainingDistance: readNumber(
+      latestTimelineScrollMetrics?.remainingScrollDistance,
+    ),
+    latestTimelineScrollRowCount: readNumber(latestTimelineScrollMetrics?.rowCount),
+    timelineScrollAutoFollowTail: readBoolean(timelineScrollState?.autoFollowTail),
+    timelineScrollShowScrollToBottom: readBoolean(timelineScrollState?.showScrollToBottom),
   };
 }
 
@@ -791,6 +811,7 @@ function summarizeRendererForCompactDebug(): Record<string, unknown> {
   const gates = readRecord(snapshot.gates);
   const provider = readRecord(snapshot.provider);
   const diagnostics = readRecord(snapshot.diagnostics);
+  const timelineScroll = readRecord(snapshot.timelineScroll);
 
   return {
     available: true,
@@ -805,6 +826,17 @@ function summarizeRendererForCompactDebug(): Record<string, unknown> {
       online: readBoolean(diagnostics?.online),
       localApi: compactObjectWithoutContentPreviews(diagnostics?.localApi),
     },
+    timelineScroll:
+      timelineScroll === null
+        ? null
+        : {
+            state: compactObjectWithoutContentPreviews(timelineScroll.state),
+            currentListMetrics: compactObjectWithoutContentPreviews(
+              timelineScroll.currentListMetrics,
+            ),
+            latest: compactObjectWithoutContentPreviews(timelineScroll.latest),
+            recentCount: Array.isArray(timelineScroll.recent) ? timelineScroll.recent.length : 0,
+          },
     route: compactObjectWithoutContentPreviews(route),
     project:
       project === null

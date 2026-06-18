@@ -12,7 +12,10 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { Toggle } from "../ui/toggle";
 import { SidebarTriggerWithUnreadDot } from "../sidebar/unseenCompletions";
 import { ConnectionStatusIndicator } from "./ConnectionStatusIndicator";
+import { OpenInPicker } from "./OpenInPicker";
+import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { useDesktopSourceUpdateState } from "../../lib/desktopSourceUpdateReactQuery";
+import { getLocalShellCapabilities } from "../../localCapabilities";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -32,9 +35,14 @@ export function shouldShowOpenInPicker(input: {
   readonly activeProjectName: string | undefined;
   readonly activeThreadEnvironmentId: EnvironmentId;
   readonly primaryEnvironmentId: EnvironmentId | null;
+  readonly canOpenLocalEditor: boolean;
 }): boolean {
-  void input;
-  return false;
+  return (
+    input.canOpenLocalEditor &&
+    Boolean(input.activeProjectName) &&
+    input.primaryEnvironmentId !== null &&
+    input.activeThreadEnvironmentId === input.primaryEnvironmentId
+  );
 }
 
 function shouldShowSourceRebuildBadge(state: DesktopSourceUpdateState | null): boolean {
@@ -48,14 +56,27 @@ function shouldShowSourceRebuildBadge(state: DesktopSourceUpdateState | null): b
 }
 
 export const ChatHeader = memo(function ChatHeader({
+  activeThreadEnvironmentId,
   activeThreadTitle,
   activeProjectName,
   isGitRepo,
+  openInCwd,
+  keybindings,
+  availableEditors,
+  terminal,
   diffToggleShortcutLabel,
   diffOpen,
   onToggleDiff,
 }: ChatHeaderProps) {
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const localShellCapabilities = getLocalShellCapabilities();
   const sourceUpdateState = useDesktopSourceUpdateState().data ?? null;
+  const showOpenInPicker = shouldShowOpenInPicker({
+    activeProjectName,
+    activeThreadEnvironmentId,
+    primaryEnvironmentId,
+    canOpenLocalEditor: localShellCapabilities.canOpenLocalEditor,
+  });
   const shouldShowSourceUpdateBadge =
     sourceUpdateState?.status === "behind" && sourceUpdateState.trackedBranch !== null;
   const shouldShowSourceRebuildBadgeValue = shouldShowSourceRebuildBadge(sourceUpdateState);
@@ -105,6 +126,14 @@ export const ChatHeader = memo(function ChatHeader({
           </Badge>
         )}
         <ConnectionStatusIndicator />
+        {showOpenInPicker && (
+          <OpenInPicker
+            keybindings={keybindings}
+            availableEditors={availableEditors}
+            terminal={terminal}
+            openInCwd={openInCwd}
+          />
+        )}
         <Tooltip>
           <TooltipTrigger
             render={

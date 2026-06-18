@@ -182,6 +182,12 @@ import { retainThreadDetailSubscription } from "../environments/runtime/service"
 import { RightPanelSheet } from "./RightPanelSheet";
 import { deriveDebugWaitReasons } from "./chat/debugWaitReasons";
 import {
+  summarizeTimelineScrollMetrics,
+  type TimelineScrollDebugEvent,
+  type TimelineScrollDebugEventInput,
+  type TimelineScrollDebugSnapshot,
+} from "./chat/timelineScrollDebug";
+import {
   buildVersionMismatchDismissalKey,
   dismissVersionMismatch,
   isVersionMismatchDismissed,
@@ -192,7 +198,7 @@ const IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROPOSED_PLANS: Thread["proposedPlans"] = [];
-const DEBUG_SNAPSHOT_VERSION = 10;
+const DEBUG_SNAPSHOT_VERSION = 11;
 const DEBUG_TEXT_PREVIEW_LIMIT = 120;
 const DEBUG_JSON_PREVIEW_LIMIT = 600;
 const DEBUG_RECENT_MESSAGE_LIMIT = 6;
@@ -207,6 +213,7 @@ const DEBUG_RENDERER_HEARTBEAT_INTERVAL_MS = 5_000;
 const DEBUG_RENDERER_SNAPSHOT_MIN_INTERVAL_MS = 250;
 const DEBUG_LARGE_THREAD_TEXT_CHARS = 1_000_000;
 const DEBUG_LARGE_ACTIVITY_PAYLOAD_CHARS = 1_000_000;
+const DEBUG_TIMELINE_SCROLL_EVENT_LIMIT = 300;
 const DEBUG_SECRET_REDACTIONS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bnpm_[A-Za-z0-9]{8,}\b/g, "npm_[redacted]"],
   [/\bsk-[A-Za-z0-9_-]{16,}\b/g, "sk-[redacted]"],
@@ -1902,6 +1909,8 @@ export default function ChatView(props: ChatViewProps) {
   const [desktopDebugRevision, setDesktopDebugRevision] = useState(0);
   const lastDesktopDebugSnapshotPublishedAtMsRef = useRef(0);
   const desktopDebugSnapshotThrottleTimeoutRef = useRef<number | null>(null);
+  const timelineScrollDebugSequenceRef = useRef(0);
+  const timelineScrollDebugEventsRef = useRef<TimelineScrollDebugEvent[]>([]);
   const followUpQueueDebugRef = useRef({
     watchdogIntervalMs: FOLLOW_UP_QUEUE_WATCHDOG_INTERVAL_MS,
     watchdogTickCount: 0,
@@ -2013,6 +2022,8 @@ export default function ChatView(props: ChatViewProps) {
     Record<string, QueuedFollowUpPendingDispatch>
   >(queuedFollowUpPendingDispatchByThreadId);
   queuedFollowUpPendingDispatchByThreadIdRef.current = queuedFollowUpPendingDispatchByThreadId;
+  const desktopDebugEnabledRef = useRef(desktopDebugEnabled);
+  desktopDebugEnabledRef.current = desktopDebugEnabled;
 
   const fallbackDraftProjectRef = draftThread
     ? scopeProjectRef(draftThread.environmentId, draftThread.projectId)
@@ -2134,6 +2145,35 @@ export default function ChatView(props: ChatViewProps) {
     [],
   );
   const activeLatestTurn = activeThread?.latestTurn ?? null;
+  const recordTimelineScrollDebugEvent = useCallback((input: TimelineScrollDebugEventInput) => {
+    if (!desktopDebugEnabledRef.current) {
+      return;
+    }
+
+    const event: TimelineScrollDebugEvent = {
+      ...input,
+      sequence: timelineScrollDebugSequenceRef.current + 1,
+      capturedAt: new Date().toISOString(),
+    };
+    timelineScrollDebugSequenceRef.current = event.sequence;
+    timelineScrollDebugEventsRef.current = [
+      ...timelineScrollDebugEventsRef.current.slice(1 - DEBUG_TIMELINE_SCROLL_EVENT_LIMIT),
+      event,
+    ];
+    setDesktopDebugRevision((revision) => revision + 1);
+  }, []);
+  const recordChatViewTimelineScrollDebugEvent = useCallback(
+    (reason: string, details?: Record<string, unknown>) => {
+      recordTimelineScrollDebugEvent({
+        source: "ChatView",
+        reason,
+        activeThreadId,
+        activeTurnId: activeLatestTurn?.turnId ?? null,
+        ...(details ? { details } : {}),
+      });
+    },
+    [activeLatestTurn?.turnId, activeThreadId, recordTimelineScrollDebugEvent],
+  );
   useEffect(() => {
     if (!activeThread) {
       return;
@@ -3509,6 +3549,25 @@ export default function ChatView(props: ChatViewProps) {
         ? "queue-sees-idle-while-message-streaming"
         : null,
     ].filter((value): value is string => value !== null);
+    const currentTimelineListState = legendListRef.current?.getState?.() ?? null;
+    const timelineScrollDebug: TimelineScrollDebugSnapshot = {
+      state: {
+        isAtEnd: isAtEndRef.current,
+        userScrollIntentSinceReset: timelineUserScrollIntentSinceResetRef.current,
+        autoFollowTail: timelineAutoFollowTail,
+        showScrollToBottom,
+        stickToEndRevision: stickTimelineToEndRevision,
+      },
+      currentListMetrics: summarizeTimelineScrollMetrics({
+        state: currentTimelineListState,
+        rowCount: timelineEntries.length,
+        autoFollowTail: timelineAutoFollowTail,
+        stickToEndRevision: stickTimelineToEndRevision,
+        nowMs: capturedAtMs,
+      }),
+      latest: timelineScrollDebugEventsRef.current.at(-1) ?? null,
+      recent: timelineScrollDebugEventsRef.current,
+    };
 
     const snapshot: DesktopRendererDebugSnapshot = {
       debugSnapshotVersion: DEBUG_SNAPSHOT_VERSION,
@@ -3536,6 +3595,7 @@ export default function ChatView(props: ChatViewProps) {
             typeof localApi?.server.getProcessResourceHistory === "function",
         },
       },
+      timelineScroll: timelineScrollDebug,
       composer: composerDebugState,
       performance: {
         rendererSnapshotBuildDurationMs: null,
@@ -3933,8 +3993,12 @@ export default function ChatView(props: ChatViewProps) {
     routeKind,
     selectedProvider,
     serverAcknowledgedLocalDispatch,
+    showScrollToBottom,
     steeringFollowUpViewItems,
     threadId,
+    timelineAutoFollowTail,
+    timelineEntries.length,
+    stickTimelineToEndRevision,
   ]);
   const activeProjectCwd = activeProject?.cwd ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
@@ -4150,21 +4214,38 @@ export default function ChatView(props: ChatViewProps) {
   const showScrollDebouncer = useRef(
     new Debouncer(() => setShowScrollToBottom(true), { wait: 150 }),
   );
-  const hideScrollToBottom = useCallback(() => {
-    isAtEndRef.current = true;
-    timelineUserScrollIntentSinceResetRef.current = false;
-    setTimelineAutoFollowTail(true);
-    showScrollDebouncer.current.cancel();
-    setShowScrollToBottom(false);
-  }, []);
+  const hideScrollToBottom = useCallback(
+    (reason = "hide-scroll-to-bottom") => {
+      const isStateChanging =
+        !isAtEndRef.current ||
+        timelineUserScrollIntentSinceResetRef.current ||
+        !timelineAutoFollowTail ||
+        showScrollToBottom;
+      if (isStateChanging || reason.startsWith("local-message-submit")) {
+        recordChatViewTimelineScrollDebugEvent(reason, {
+          previousIsAtEnd: isAtEndRef.current,
+          previousUserScrollIntentSinceReset: timelineUserScrollIntentSinceResetRef.current,
+          previousAutoFollowTail: timelineAutoFollowTail,
+          previousShowScrollToBottom: showScrollToBottom,
+        });
+      }
+      isAtEndRef.current = true;
+      timelineUserScrollIntentSinceResetRef.current = false;
+      setTimelineAutoFollowTail(true);
+      showScrollDebouncer.current.cancel();
+      setShowScrollToBottom(false);
+    },
+    [recordChatViewTimelineScrollDebugEvent, showScrollToBottom, timelineAutoFollowTail],
+  );
 
   // Scroll helpers — LegendList handles auto-scroll via maintainScrollAtEnd.
   const scrollToEnd = useCallback(
     (animated = false) => {
-      hideScrollToBottom();
+      recordChatViewTimelineScrollDebugEvent("scroll-to-end-requested", { animated });
+      hideScrollToBottom("scroll-to-end-hide-pill");
       void legendListRef.current?.scrollToEnd?.({ animated });
     },
-    [hideScrollToBottom],
+    [hideScrollToBottom, recordChatViewTimelineScrollDebugEvent],
   );
   const pinTimelineToEndForLocalMessage = useCallback(() => {
     // Sending a local user message is an explicit request to move to the new
@@ -4173,41 +4254,92 @@ export default function ChatView(props: ChatViewProps) {
     // briefly report "not at end" even though the user's next action should be
     // anchored to the prompt they just submitted.
     shouldPinTimelineToEndForLocalMessage();
-    hideScrollToBottom();
+    recordChatViewTimelineScrollDebugEvent("local-message-submit-pin-start", {
+      previousIsAtEnd: isAtEndRef.current,
+      previousUserScrollIntentSinceReset: timelineUserScrollIntentSinceResetRef.current,
+      previousAutoFollowTail: timelineAutoFollowTail,
+      previousShowScrollToBottom: showScrollToBottom,
+      listAvailable: legendListRef.current !== null,
+    });
+    hideScrollToBottom("local-message-submit-hide-pill");
     setStickTimelineToEndRevision((revision) => revision + 1);
     void legendListRef.current?.scrollToEnd?.({ animated: false });
     window.requestAnimationFrame(() => {
+      recordChatViewTimelineScrollDebugEvent("local-message-submit-pin-raf-1");
       void legendListRef.current?.scrollToEnd?.({ animated: false });
       window.requestAnimationFrame(() => {
+        recordChatViewTimelineScrollDebugEvent("local-message-submit-pin-raf-2");
         void legendListRef.current?.scrollToEnd?.({ animated: false });
       });
     });
-  }, [hideScrollToBottom]);
+  }, [
+    hideScrollToBottom,
+    recordChatViewTimelineScrollDebugEvent,
+    showScrollToBottom,
+    timelineAutoFollowTail,
+  ]);
   const onTimelineUserScrollIntent = useCallback(() => {
+    recordChatViewTimelineScrollDebugEvent("timeline-user-scroll-intent", {
+      previousAutoFollowTail: timelineAutoFollowTail,
+      previousShowScrollToBottom: showScrollToBottom,
+    });
     timelineUserScrollIntentSinceResetRef.current = true;
     setTimelineAutoFollowTail(false);
-  }, []);
+  }, [recordChatViewTimelineScrollDebugEvent, showScrollToBottom, timelineAutoFollowTail]);
   const onIsAtEndChange = useCallback(
     (isAtEnd: boolean) => {
       if (isAtEnd) {
-        hideScrollToBottom();
+        if (
+          !isAtEndRef.current ||
+          timelineUserScrollIntentSinceResetRef.current ||
+          !timelineAutoFollowTail ||
+          showScrollToBottom
+        ) {
+          recordChatViewTimelineScrollDebugEvent("timeline-is-at-end-change", {
+            isAtEnd,
+            action: "hide-pill",
+          });
+        }
+        hideScrollToBottom("timeline-reported-at-end");
         return;
       }
 
       if (!timelineUserScrollIntentSinceResetRef.current) {
+        recordChatViewTimelineScrollDebugEvent("timeline-is-at-end-change", {
+          isAtEnd,
+          action: "ignore-without-user-scroll-intent",
+        });
         showScrollDebouncer.current.cancel();
         setShowScrollToBottom(false);
         return;
       }
 
       if (isAtEndRef.current === false) return;
+      recordChatViewTimelineScrollDebugEvent("timeline-is-at-end-change", {
+        isAtEnd,
+        action: "show-pill-after-debounce",
+      });
       isAtEndRef.current = false;
       showScrollDebouncer.current.maybeExecute();
     },
-    [hideScrollToBottom],
+    [
+      hideScrollToBottom,
+      recordChatViewTimelineScrollDebugEvent,
+      showScrollToBottom,
+      timelineAutoFollowTail,
+    ],
   );
 
   useEffect(() => {
+    recordTimelineScrollDebugEvent({
+      source: "ChatView",
+      reason: "active-thread-scroll-state-reset",
+      activeThreadId: activeThread?.id ?? null,
+      activeTurnId: null,
+      details: {
+        activeThreadId: activeThread?.id ?? null,
+      },
+    });
     setPullRequestDialogState(null);
     isAtEndRef.current = true;
     timelineUserScrollIntentSinceResetRef.current = false;
@@ -4218,7 +4350,7 @@ export default function ChatView(props: ChatViewProps) {
       planSidebarOpenOnNextThreadRef.current = false;
       setPlanSidebarOpenForCurrentThread(true);
     }
-  }, [activeThread?.id, setPlanSidebarOpenForCurrentThread]);
+  }, [activeThread?.id, recordTimelineScrollDebugEvent, setPlanSidebarOpenForCurrentThread]);
 
   // Auto-open the plan sidebar when plan/todo steps arrive for the current turn.
   // Don't auto-open for plans carried over from a previous turn (the user can open manually).
@@ -6095,6 +6227,9 @@ export default function ChatView(props: ChatViewProps) {
               autoFollowTail={timelineAutoFollowTail}
               onIsAtEndChange={onIsAtEndChange}
               onUserScrollIntent={onTimelineUserScrollIntent}
+              {...(desktopDebugEnabled
+                ? { onDebugScrollEvent: recordTimelineScrollDebugEvent }
+                : {})}
             />
 
             {/* scroll to bottom pill — shown when user has scrolled away from the bottom */}

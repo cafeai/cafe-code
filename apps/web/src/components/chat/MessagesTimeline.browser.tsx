@@ -501,6 +501,8 @@ describe("MessagesTimeline", () => {
         scrollLength: 400,
       });
       getStateSpy.mockClear();
+      scrollToEndSpy.mockClear();
+      scrollToIndexSpy.mockClear();
       const lastProps = legendListPropsSpy.mock.calls.at(-1)?.[0] as
         | { onScroll?: React.UIEventHandler<HTMLDivElement> }
         | undefined;
@@ -508,8 +510,197 @@ describe("MessagesTimeline", () => {
 
       expect(props.onIsAtEndChange).toHaveBeenLastCalledWith(true);
       expect(props.onIsAtEndChange).not.toHaveBeenCalledWith(false);
-      expect(getStateSpy).not.toHaveBeenCalled();
+      expect(getStateSpy).toHaveBeenCalledTimes(1);
+      expect(scrollToEndSpy).toHaveBeenCalledWith({ animated: false });
+      expect(scrollToIndexSpy).toHaveBeenCalledWith({
+        index: 1,
+        animated: false,
+        viewPosition: 1,
+      });
       expect(requestAnimationFrameSpy).toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("emits scroll diagnostics while submit pinning suppresses stale top scroll reports", async () => {
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation(
+      (callback: FrameRequestCallback) => {
+        callback(0);
+        return 1;
+      },
+    );
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+
+    const props = buildProps();
+    const onDebugScrollEvent = vi.fn();
+    const firstEntry = buildUserTimelineEntry("existing conversation tail");
+    const screen = await render(
+      <MessagesTimeline
+        {...props}
+        timelineEntries={[firstEntry]}
+        stickToEndRevision={0}
+        onDebugScrollEvent={onDebugScrollEvent}
+      />,
+    );
+
+    try {
+      const nextEntry = {
+        ...buildUserTimelineEntry("queued local prompt submitted from the bottom"),
+        id: "entry-2",
+        message: {
+          ...buildUserTimelineEntry("queued local prompt submitted from the bottom").message,
+          id: "message-2" as never,
+        },
+      };
+
+      await screen.rerender(
+        <MessagesTimeline
+          {...props}
+          timelineEntries={[firstEntry, nextEntry]}
+          stickToEndRevision={1}
+          onDebugScrollEvent={onDebugScrollEvent}
+        />,
+      );
+
+      expect(onDebugScrollEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          source: "MessagesTimeline",
+          reason: "submit-stick-immediate",
+          metrics: expect.objectContaining({
+            rowCount: 2,
+            autoFollowTail: true,
+            stickToEndRevision: 1,
+            submitStickDeadlineRemainingMs: 1_500,
+          }),
+        }),
+      );
+
+      getStateSpy.mockReturnValueOnce({
+        isAtEnd: false,
+        contentLength: 10_000,
+        scroll: 0,
+        scrollLength: 400,
+      });
+      scrollToEndSpy.mockClear();
+      scrollToIndexSpy.mockClear();
+      const lastProps = legendListPropsSpy.mock.calls.at(-1)?.[0] as
+        | { onScroll?: React.UIEventHandler<HTMLDivElement> }
+        | undefined;
+      lastProps?.onScroll?.({} as React.UIEvent<HTMLDivElement>);
+
+      expect(onDebugScrollEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reason: "scroll-event-ignored-during-submit-stick",
+          metrics: expect.objectContaining({
+            isAtEnd: false,
+            contentLength: 10_000,
+            scroll: 0,
+            scrollLength: 400,
+            remainingScrollDistance: 9_600,
+          }),
+          details: expect.objectContaining({
+            resolvedIsAtEnd: true,
+            repinScheduled: true,
+          }),
+        }),
+      );
+      expect(onDebugScrollEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reason: "submit-stick-scroll-event-repin",
+          details: expect.objectContaining({
+            result: "requested",
+            targetIndex: 1,
+          }),
+        }),
+      );
+      expect(props.onIsAtEndChange).toHaveBeenLastCalledWith(true);
+      expect(props.onIsAtEndChange).not.toHaveBeenCalledWith(false);
+      expect(scrollToEndSpy).toHaveBeenCalledWith({ animated: false });
+      expect(scrollToIndexSpy).toHaveBeenCalledWith({
+        index: 1,
+        animated: false,
+        viewPosition: 1,
+      });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps submit pinning active for delayed server row replacement", async () => {
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation(
+      (callback: FrameRequestCallback) => {
+        callback(0);
+        return 1;
+      },
+    );
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+    let nowMs = 1_000;
+    vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+
+    const props = buildProps();
+    const onDebugScrollEvent = vi.fn();
+    const firstEntry = buildUserTimelineEntry("existing conversation tail");
+    const submittedEntry = {
+      ...buildUserTimelineEntry("queued local prompt submitted from the bottom"),
+      id: "entry-2",
+      message: {
+        ...buildUserTimelineEntry("queued local prompt submitted from the bottom").message,
+        id: "message-2" as never,
+      },
+    };
+    const serverAssistantEntry = buildAssistantTimelineEntry({
+      text: "server turn acknowledged after a slow projection update",
+      streaming: true,
+      turnId: TurnId.make("turn-delayed"),
+    });
+    const screen = await render(
+      <MessagesTimeline
+        {...props}
+        timelineEntries={[firstEntry]}
+        stickToEndRevision={0}
+        onDebugScrollEvent={onDebugScrollEvent}
+      />,
+    );
+
+    try {
+      await screen.rerender(
+        <MessagesTimeline
+          {...props}
+          timelineEntries={[firstEntry, submittedEntry]}
+          stickToEndRevision={1}
+          onDebugScrollEvent={onDebugScrollEvent}
+        />,
+      );
+
+      scrollToEndSpy.mockClear();
+      scrollToIndexSpy.mockClear();
+      onDebugScrollEvent.mockClear();
+      nowMs = 2_000;
+
+      await screen.rerender(
+        <MessagesTimeline
+          {...props}
+          timelineEntries={[firstEntry, submittedEntry, serverAssistantEntry]}
+          stickToEndRevision={1}
+          onDebugScrollEvent={onDebugScrollEvent}
+        />,
+      );
+
+      expect(scrollToEndSpy).toHaveBeenCalled();
+      expect(scrollToIndexSpy).toHaveBeenCalled();
+      expect(onDebugScrollEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reason: "submit-stick-row-update",
+          metrics: expect.objectContaining({
+            submitStickDeadlineRemainingMs: 500,
+          }),
+          details: expect.objectContaining({
+            result: "requested",
+          }),
+        }),
+      );
     } finally {
       await screen.unmount();
     }

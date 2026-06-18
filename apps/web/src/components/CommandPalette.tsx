@@ -110,7 +110,6 @@ import {
 import { Button } from "./ui/button";
 import { Kbd, KbdGroup } from "./ui/kbd";
 import { stackedThreadToast, toastManager } from "./ui/toast";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { ComposerHandleContext, useComposerHandleContext } from "../composerHandleContext";
 import type { ChatComposerHandle } from "./chat/ChatComposer";
 
@@ -758,11 +757,6 @@ function OpenCommandPaletteDialog() {
     [],
   );
 
-  const openSourceControlSettings = useCallback(() => {
-    setOpen(false);
-    void navigate({ to: "/settings/source-control" });
-  }, [navigate, setOpen]);
-
   const buildAddProjectSourceGroups = useCallback(
     (
       environmentId: EnvironmentId,
@@ -796,44 +790,8 @@ function OpenCommandPaletteDialog() {
             ? "Clone from a remote URL"
             : `Clone ${label} ${remoteProjectSourcePathHint(source)}`;
         const readiness = readinessBySource[source];
-        const disabledHint = readiness.hint;
-
-        const titleTrailingContent = readiness.ready ? undefined : (
-          <span className="ml-auto">
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    className="h-5 rounded-[.25rem] px-1.5 text-[10px] text-warning-foreground"
-                    onClick={() => {
-                      openSourceControlSettings();
-                    }}
-                  >
-                    Setup Required
-                  </Button>
-                }
-              />
-              <TooltipPopup align="end" side="left">
-                {disabledHint ?? "Open Settings -> Source Control to configure this provider."}
-              </TooltipPopup>
-            </Tooltip>
-          </span>
-        );
 
         if (!readiness.ready) {
-          sourceItems.push({
-            kind: "action",
-            value: `action:add-project:${environmentId}:${source}:not-ready`,
-            searchTerms: ["clone", "remote", "repository", "repo", "git", label, "setup required"],
-            title,
-            description,
-            disabled: true,
-            icon: remoteProjectSourceIcon(source, ITEM_ICON_CLASS),
-            ...(titleTrailingContent ? { titleTrailingContent } : {}),
-            run: async () => {},
-          });
           continue;
         }
 
@@ -844,7 +802,6 @@ function OpenCommandPaletteDialog() {
           title,
           description,
           icon: remoteProjectSourceIcon(source, ITEM_ICON_CLASS),
-          ...(titleTrailingContent ? { titleTrailingContent } : {}),
           keepOpen: true,
           run: async () => {
             startAddProjectClone(environmentId, source);
@@ -854,7 +811,7 @@ function OpenCommandPaletteDialog() {
 
       return [{ value: `sources:${environmentId}`, label: "Sources", items: sourceItems }];
     },
-    [openSourceControlSettings, startAddProjectBrowse, startAddProjectClone],
+    [startAddProjectBrowse, startAddProjectClone],
   );
 
   const startAddProjectSourceSelection = useCallback(

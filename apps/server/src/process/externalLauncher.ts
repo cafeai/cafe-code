@@ -195,14 +195,46 @@ function resolveWindowsBrowserLaunch(target: string, command: string): ProcessLa
   };
 }
 
-function fileManagerCommandForPlatform(platform: NodeJS.Platform): string {
+function isKdeDesktop(env: NodeJS.ProcessEnv): boolean {
+  if (env.KDE_FULL_SESSION === "true") {
+    return true;
+  }
+
+  const desktopNames = [
+    env.XDG_CURRENT_DESKTOP,
+    env.XDG_SESSION_DESKTOP,
+    env.DESKTOP_SESSION,
+  ].flatMap((value) => value?.split(":") ?? []);
+  return desktopNames.some((value) => {
+    const normalized = value.trim().toLowerCase();
+    return normalized === "kde" || normalized === "plasma";
+  });
+}
+
+function fileManagerLaunchForPlatform(
+  target: string,
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+): EditorLaunch {
   switch (platform) {
     case "darwin":
-      return "open";
+      return { command: "open", args: [target] };
     case "win32":
-      return "explorer";
+      return { command: "explorer", args: [target] };
     default:
-      return "xdg-open";
+      if (platform === "linux") {
+        // KDE can route xdg-open for directories through the desktop entry id
+        // (for example org.kde.dolphin.desktop). In some source-launch
+        // environments that id is then treated as an executable name, so prefer
+        // the concrete Dolphin binary when Cafe is running in a KDE session.
+        if (isKdeDesktop(env) && isCommandAvailable("dolphin", { platform, env })) {
+          return { command: "dolphin", args: [target] };
+        }
+        if (isCommandAvailable("gio", { platform, env })) {
+          return { command: "gio", args: ["open", target] };
+        }
+      }
+      return { command: "xdg-open", args: [target] };
   }
 }
 
@@ -242,7 +274,7 @@ export function resolveAvailableEditors(
 
   for (const editor of EDITORS) {
     if (editor.commands === null) {
-      const command = fileManagerCommandForPlatform(platform);
+      const { command } = fileManagerLaunchForPlatform("", platform, env);
       if (isCommandAvailable(command, { platform, env })) {
         available.push(editor.id);
       }
@@ -353,7 +385,7 @@ export const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
     return yield* new ExternalLauncherError({ message: `Unsupported editor: ${input.editor}` });
   }
 
-  return { command: fileManagerCommandForPlatform(platform), args: [input.cwd] };
+  return fileManagerLaunchForPlatform(input.cwd, platform, env);
 });
 
 export function resolveEditorProcessLaunch(

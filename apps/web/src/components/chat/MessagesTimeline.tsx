@@ -84,6 +84,11 @@ import {
   resolveFileOpenEditor,
   resolveWorkspaceFilePath,
 } from "./MessagesTimeline.helpers";
+import {
+  summarizeTimelineScrollMetrics,
+  type TimelineScrollDebugEventInput,
+  type TimelineScrollDebugListState,
+} from "./timelineScrollDebug";
 
 export {
   extractOpenablePathTokens,
@@ -166,6 +171,7 @@ interface MessagesTimelineProps {
   autoFollowTail: boolean;
   onIsAtEndChange: (isAtEnd: boolean) => void;
   onUserScrollIntent: () => void;
+  onDebugScrollEvent?: (event: TimelineScrollDebugEventInput) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +204,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   autoFollowTail,
   onIsAtEndChange,
   onUserScrollIntent,
+  onDebugScrollEvent,
 }: MessagesTimelineProps) {
   const activeThreadId = activeThreadIdProp ?? null;
   const chatCopyFormat = useSettings((settings) => settings.chatCopyFormat);
@@ -230,6 +237,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   );
   const rows = useStableRows(rawRows);
   const stickToEndDeadlineMsRef = useRef(0);
+  const submitStickScrollEventRepinFrameRef = useRef<number | null>(null);
   const assistantMarkdownCopyTextByMessageId = useMemo(() => {
     const values = new Map<string, string>();
     for (const row of rows) {
@@ -258,6 +266,43 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       assistantMarkdownCopyTextByMessageId,
     };
   }, [assistantMarkdownCopyTextByMessageId, chatCopyFormat]);
+  const emitScrollDebugEvent = useCallback(
+    (
+      reason: string,
+      input: {
+        readonly state?: TimelineScrollDebugListState | null;
+        readonly details?: Record<string, unknown>;
+      } = {},
+    ) => {
+      if (!onDebugScrollEvent) {
+        return;
+      }
+      const nowMs = Date.now();
+      onDebugScrollEvent({
+        source: "MessagesTimeline",
+        reason,
+        activeThreadId,
+        activeTurnId: activeTurnId ?? null,
+        metrics: summarizeTimelineScrollMetrics({
+          state: input.state ?? null,
+          rowCount: rows.length,
+          autoFollowTail,
+          stickToEndRevision,
+          submitStickDeadlineMs: stickToEndDeadlineMsRef.current,
+          nowMs,
+        }),
+        ...(input.details ? { details: input.details } : {}),
+      });
+    },
+    [
+      activeThreadId,
+      activeTurnId,
+      autoFollowTail,
+      onDebugScrollEvent,
+      rows.length,
+      stickToEndRevision,
+    ],
+  );
   useEffect(() => {
     const handleDocumentCopy = (event: ClipboardEvent) => {
       const { format, assistantMarkdownCopyTextByMessageId: copyTextByMessageId } =
@@ -299,42 +344,138 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     };
   }, []);
   const forceScrollToEnd = useCallback(
-    (rowCount = rows.length) => {
+    (rowCount = rows.length, reason = "force-scroll-to-end") => {
       if (rowCount <= 0) {
+        emitScrollDebugEvent(reason, {
+          details: {
+            result: "skipped-empty-rows",
+            requestedRowCount: rowCount,
+          },
+        });
         return;
       }
       const list = listRef.current;
       if (!list) {
+        emitScrollDebugEvent(reason, {
+          details: {
+            result: "skipped-missing-list",
+            requestedRowCount: rowCount,
+          },
+        });
         return;
       }
+      const state = onDebugScrollEvent ? list.getState?.() : null;
       void list.scrollToEnd?.({ animated: false });
       void list.scrollToIndex?.({
         index: rowCount - 1,
         animated: false,
         viewPosition: 1,
       });
+      emitScrollDebugEvent(reason, {
+        state: state ?? null,
+        details: {
+          result: "requested",
+          requestedRowCount: rowCount,
+          targetIndex: rowCount - 1,
+        },
+      });
     },
-    [listRef, rows.length],
+    [emitScrollDebugEvent, listRef, onDebugScrollEvent, rows.length],
   );
   const cancelSubmitStickToEnd = useCallback(() => {
     stickToEndDeadlineMsRef.current = 0;
+    if (submitStickScrollEventRepinFrameRef.current !== null) {
+      window.cancelAnimationFrame(submitStickScrollEventRepinFrameRef.current);
+      submitStickScrollEventRepinFrameRef.current = null;
+    }
   }, []);
+  const scheduleSubmitStickScrollEventRepin = useCallback(() => {
+    if (submitStickScrollEventRepinFrameRef.current !== null) {
+      return;
+    }
+    submitStickScrollEventRepinFrameRef.current = window.requestAnimationFrame(() => {
+      submitStickScrollEventRepinFrameRef.current = null;
+      if (Date.now() <= stickToEndDeadlineMsRef.current) {
+        forceScrollToEnd(rows.length, "submit-stick-scroll-event-repin");
+      }
+    });
+  }, [forceScrollToEnd, rows.length]);
+  useEffect(
+    () => () => {
+      if (submitStickScrollEventRepinFrameRef.current !== null) {
+        window.cancelAnimationFrame(submitStickScrollEventRepinFrameRef.current);
+        submitStickScrollEventRepinFrameRef.current = null;
+      }
+    },
+    [],
+  );
 
   const handleScroll = useCallback(() => {
     if (Date.now() <= stickToEndDeadlineMsRef.current) {
+      const state = listRef.current?.getState?.() ?? null;
+      const shouldRepin = state === null || !isTimelineScrolledToEnd(state);
+      emitScrollDebugEvent("scroll-event-ignored-during-submit-stick", {
+        state: state ?? null,
+        details: {
+          resolvedIsAtEnd: true,
+          repinScheduled: shouldRepin,
+        },
+      });
+      if (shouldRepin) {
+        scheduleSubmitStickScrollEventRepin();
+      }
       onIsAtEndChange(true);
       return;
     }
 
     const state = listRef.current?.getState?.();
     if (state) {
-      onIsAtEndChange(isTimelineScrolledToEnd(state));
+      const resolvedIsAtEnd = isTimelineScrolledToEnd(state);
+      emitScrollDebugEvent("scroll-event", {
+        state,
+        details: {
+          resolvedIsAtEnd,
+        },
+      });
+      onIsAtEndChange(resolvedIsAtEnd);
+    } else {
+      emitScrollDebugEvent("scroll-event", {
+        details: {
+          result: "missing-list-state",
+        },
+      });
     }
-  }, [listRef, onIsAtEndChange]);
-  const handleUserScrollIntent = useCallback(() => {
+  }, [emitScrollDebugEvent, listRef, onIsAtEndChange, scheduleSubmitStickScrollEventRepin]);
+  const handleUserScrollIntent = useCallback(
+    (event?: { readonly type?: string }) => {
+      emitScrollDebugEvent("user-scroll-intent", {
+        state: onDebugScrollEvent ? (listRef.current?.getState?.() ?? null) : null,
+        details: {
+          eventType: event?.type ?? "unknown",
+        },
+      });
+      cancelSubmitStickToEnd();
+      onUserScrollIntent();
+    },
+    [cancelSubmitStickToEnd, emitScrollDebugEvent, listRef, onDebugScrollEvent, onUserScrollIntent],
+  );
+  const handleScrollbarScrollIntent = useCallback(() => {
+    emitScrollDebugEvent("user-scroll-intent", {
+      state: onDebugScrollEvent ? (listRef.current?.getState?.() ?? null) : null,
+      details: {
+        eventType: "pointerdown",
+        target: "scrollbar-zone",
+      },
+    });
     cancelSubmitStickToEnd();
     onUserScrollIntent();
-  }, [cancelSubmitStickToEnd, onUserScrollIntent]);
+  }, [
+    cancelSubmitStickToEnd,
+    emitScrollDebugEvent,
+    listRef,
+    onDebugScrollEvent,
+    onUserScrollIntent,
+  ]);
   const handlePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLElement>) => {
       const bounds = event.currentTarget.getBoundingClientRect();
@@ -343,11 +484,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         event.clientX >= bounds.right - scrollbarIntentPx ||
         event.clientY >= bounds.bottom - scrollbarIntentPx
       ) {
-        cancelSubmitStickToEnd();
-        onUserScrollIntent();
+        handleScrollbarScrollIntent();
       }
     },
-    [cancelSubmitStickToEnd, onUserScrollIntent],
+    [handleScrollbarScrollIntent],
   );
   const handleKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLElement>) => {
@@ -360,11 +500,18 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         event.key === "End" ||
         event.key === " "
       ) {
+        emitScrollDebugEvent("user-scroll-intent", {
+          state: onDebugScrollEvent ? (listRef.current?.getState?.() ?? null) : null,
+          details: {
+            eventType: "keydown",
+            key: event.key,
+          },
+        });
         cancelSubmitStickToEnd();
         onUserScrollIntent();
       }
     },
-    [cancelSubmitStickToEnd, onUserScrollIntent],
+    [cancelSubmitStickToEnd, emitScrollDebugEvent, listRef, onDebugScrollEvent, onUserScrollIntent],
   );
 
   const previousRowCountRef = useRef(0);
@@ -384,7 +531,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       const frameId = window.requestAnimationFrame(() => {
         if (cancelled) return;
         attempts += 1;
-        forceScrollToEnd(rows.length);
+        forceScrollToEnd(rows.length, "initial-rows-scroll-to-end");
         if (attempts < 3) {
           scheduleScroll();
         }
@@ -431,7 +578,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       const frameId = window.requestAnimationFrame(() => {
         if (cancelled) return;
         attempts += 1;
-        forceScrollToEnd(rows.length);
+        forceScrollToEnd(rows.length, "submit-stick-animation-frame");
         if (attempts < TIMELINE_SUBMIT_STICK_TO_END_FRAME_ATTEMPTS) {
           scheduleScroll();
         }
@@ -443,7 +590,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         if (cancelled || Date.now() > stickToEndDeadlineMsRef.current) {
           return;
         }
-        forceScrollToEnd(rows.length);
+        forceScrollToEnd(rows.length, `submit-stick-settle-timeout-${delayMs}ms`);
       }, delayMs);
       timeoutIds.push(timeoutId);
     };
@@ -453,7 +600,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     // submit path already decided that the user was at the bottom, so replay
     // that decision after the new rows exist instead of letting the virtualizer
     // settle at the top of the conversation.
-    forceScrollToEnd(rows.length);
+    forceScrollToEnd(rows.length, "submit-stick-immediate");
     scheduleScroll();
     for (const delayMs of TIMELINE_SUBMIT_STICK_TO_END_SETTLE_TIMEOUTS_MS) {
       scheduleSettleScroll(delayMs);
@@ -478,7 +625,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     let cancelled = false;
     const frameId = window.requestAnimationFrame(() => {
       if (!cancelled && Date.now() <= stickToEndDeadlineMsRef.current) {
-        forceScrollToEnd(rows.length);
+        forceScrollToEnd(rows.length, "submit-stick-row-update");
       }
     });
     return () => {
