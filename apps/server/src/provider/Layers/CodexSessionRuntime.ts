@@ -562,7 +562,7 @@ function buildThreadStartParams(input: {
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
 }): CodexThreadStartParamsWithRuntimeWorkspaceRoots {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
-  // Upstream Codex 0.133.0 only auto-compacts when the resolved model info or
+  // Upstream Codex 0.141.0 only auto-compacts when the resolved model info or
   // request config supplies `model_auto_compact_token_limit`. Current Codex
   // model metadata can advertise a large context window while leaving that
   // limit null, so Cafe passes the documented request-config override for
@@ -570,15 +570,12 @@ function buildThreadStartParams(input: {
   // `~/.codex/config.toml`. The shared constant documents why Cafe currently
   // chooses 200k instead of the older 100k override.
   const threadConfig: Record<string, unknown> = {
-    // Upstream Codex rust-v0.136.0 still marks remote_compaction_v2 as an
-    // under-development feature and disables it by default. Cafe pins it off
-    // per managed thread because that v2 path uses the normal Responses tool
-    // plan; with the stable image_generation feature enabled, upstream can add
-    // a hosted image tool that currently targets gpt-image-2 and causes text
-    // compaction to fail for accounts/models that do not expose that image
-    // model. Keeping v2 off preserves the upstream default legacy
-    // /responses/compact path while still leaving the user's shared Codex
-    // config file untouched.
+    // Upstream Codex rust-v0.141.0 marks remote_compaction_v2 stable and
+    // default-enabled, but its compaction request still builds the normal
+    // model-visible tool set. Cafe has observed text compaction failures from
+    // inherited hosted image-generation tools on accounts/models without that
+    // image model, so this remains a deliberate Cafe reliability quarantine
+    // until a live long-context compaction smoke verifies the v2 path.
     [CODEX_REMOTE_COMPACTION_V2_FEATURE_CONFIG_KEY]: false,
     model_auto_compact_token_limit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
     model_auto_compact_token_limit_scope: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT_SCOPE,
@@ -1724,18 +1721,20 @@ function normalizeCodexSnapshotTurnForThreadStatus(
   if (
     turn.status !== "inProgress" ||
     threadStatusType === undefined ||
-    threadStatusType === "active"
+    threadStatusType === "active" ||
+    threadStatusType === "idle" ||
+    threadStatusType === "notLoaded"
   ) {
     return turn;
   }
 
-  // Upstream Codex 0.133.0 applies this same stale-turn rule in
-  // `set_thread_status_and_interrupt_stale_turns`: if `thread/read` can see an
-  // in-progress turn but the live thread status is not Active, the turn is no
-  // longer owned by a running agent and should be exposed as Interrupted. Cafe
-  // repeats the rule defensively before mapping the snapshot into provider
-  // events so a stale app-server history row cannot keep our orchestration
-  // active forever.
+  // Upstream Codex 0.141.0 changed `thread/read` status reconciliation in
+  // `resolve_thread_status`: if a snapshot contains an in-progress turn while
+  // the loaded watch status is `Idle` or `NotLoaded`, app-server resolves the
+  // thread to `Active` instead of interrupting the turn. Preserve that shape
+  // here so delayed snapshot backfill cannot falsely close a live turn. A real
+  // `SystemError` snapshot still remains non-active and therefore terminalizes
+  // an in-progress turn, matching upstream `set_thread_status_and_interrupt_stale_turns`.
   return {
     ...turn,
     status: "interrupted",
@@ -2342,7 +2341,7 @@ export const makeCodexSessionRuntime = (
             warningCount: input.pending.warningCount,
             appServerChildProcesses: childProcesses,
             semantics:
-              "Upstream Codex 0.138.0 stores turn/steer input in the active turn queue and emits the injected userMessage only when the turn loop drains pending input. Cafe has delivered the steer; only child processes classified as active count as turn work. Persistent Codex helper/MCP processes are reported as support processes and do not explain a delayed steer.",
+              "Upstream Codex 0.141.0 stores turn/steer input in the active turn queue and emits the injected userMessage only when the turn loop drains pending input. Cafe has delivered the steer; only child processes classified as active count as turn work. Persistent Codex helper/MCP processes are reported as support processes and do not explain a delayed steer.",
           },
         });
       });
@@ -2766,7 +2765,7 @@ export const makeCodexSessionRuntime = (
             itemSummary,
             appServerChildProcesses: childProcesses,
             semantics:
-              "Cafe follows upstream Codex app-server lifecycle semantics: turn/completed or a terminal thread/read turn closes the turn. If thread/read reports a non-active thread with an in-progress turn, Cafe applies upstream's stale-turn rule and interrupts it before this warning is emitted. Only child processes classified as active count as turn work; persistent Codex helper/MCP processes are reported as support processes and do not explain a delayed terminal event.",
+              "Cafe follows upstream Codex app-server lifecycle semantics: turn/completed or a terminal thread/read turn closes the turn. In Codex 0.141.0, thread/read snapshots that contain an in-progress turn keep the thread effectively active even if the loaded watch status is idle or notLoaded; Cafe only terminalizes an in-progress snapshot when upstream reports a non-active terminal status such as systemError. Only child processes classified as active count as turn work; persistent Codex helper/MCP processes are reported as support processes and do not explain a delayed terminal event.",
           },
         });
       });

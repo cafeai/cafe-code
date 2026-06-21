@@ -17,7 +17,7 @@ import {
 } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-const UPSTREAM_REF = "c18e9f478bc940ef1ef8e1c426364c0fe3d86b73";
+const UPSTREAM_REF = "3fb81667d30d9d24297216ea61fbfcc4351b2aa9";
 const USER_AGENT = "effect-codex-app-server-generator";
 const GITHUB_API_BASE =
   "https://api.github.com/repos/openai/codex/contents/codex-rs/app-server-protocol";

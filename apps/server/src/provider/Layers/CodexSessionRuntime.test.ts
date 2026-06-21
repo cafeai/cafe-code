@@ -95,7 +95,7 @@ function makeThreadOpenResponse(
     approvalsReviewer: "user",
     sandbox: { type: "dangerFullAccess" },
     thread: {
-      cliVersion: "0.138.0",
+      cliVersion: "0.141.0",
       createdAt: 1_713_403_200,
       cwd: "/tmp/project",
       ephemeral: false,
@@ -836,12 +836,46 @@ describe("buildCodexThreadSnapshotBackfillEvents", () => {
     assert.equal(events[1]?.itemId, "target-message");
   });
 
-  it("interrupts stale in-progress turns when thread/read reports a non-active thread", () => {
+  it("keeps in-progress turns running when thread/read reports idle with a live in-progress turn", () => {
     const events = buildCodexThreadSnapshotBackfillEvents({
       threadId: ThreadId.make("thread-1"),
       providerThread: {
         id: "provider-thread-1",
         status: { type: "idle" },
+        turns: [
+          {
+            id: "turn-stale",
+            status: "inProgress",
+            startedAt: 1_779_000_000,
+            completedAt: null,
+            items: [
+              {
+                id: "target-message",
+                type: "agentMessage",
+                text: "target response",
+              },
+            ],
+          },
+        ],
+      },
+      createdAt: "2026-05-24T00:00:00.000Z",
+      reason: "thread-status-idle-reconciliation",
+      focusTurnId: TurnId.make("turn-stale"),
+    });
+
+    assert.deepStrictEqual(
+      events.map((event) => event.method),
+      ["turn/started", "item/completed"],
+    );
+    assert.equal(events.at(-1)?.method, "item/completed");
+  });
+
+  it("interrupts in-progress turns when thread/read reports a system error thread", () => {
+    const events = buildCodexThreadSnapshotBackfillEvents({
+      threadId: ThreadId.make("thread-1"),
+      providerThread: {
+        id: "provider-thread-1",
+        status: { type: "systemError" },
         turns: [
           {
             id: "turn-stale",
