@@ -72,6 +72,7 @@ const BENIGN_ERROR_LOG_SNIPPETS = [
 ];
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
 const CODEX_REMOTE_COMPACTION_V2_FEATURE_CONFIG_KEY = "features.remote_compaction_v2";
+const CODEX_LOCAL_ENVIRONMENT_ID = "local";
 const CODEX_SNAPSHOT_BACKFILL_TURN_LIMIT = 1;
 const CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS = [
   "2 seconds",
@@ -124,13 +125,20 @@ const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 const isCodexUserInputAnswerObject = Schema.is(CodexUserInputAnswerObject);
 
 const CodexRuntimeWorkspaceRoots = Schema.Array(Schema.String);
+const CodexLocalTurnEnvironments = Schema.Array(
+  Schema.Struct({
+    environmentId: Schema.String,
+    cwd: Schema.String,
+  }),
+);
 const CodexThreadStartParamsWithRuntimeWorkspaceRoots = EffectCodexSchema.V2ThreadStartParams.pipe(
   Schema.fieldsAssign({
+    environments: Schema.optionalKey(CodexLocalTurnEnvironments),
     runtimeWorkspaceRoots: Schema.optionalKey(CodexRuntimeWorkspaceRoots),
   }),
 );
 
-// Upstream marks `runtimeWorkspaceRoots` and `collaborationMode` as
+// Upstream marks `environments`, `runtimeWorkspaceRoots`, and `collaborationMode` as
 // experimental, so the public generated TypeScript schema omits them even
 // though the TUI sends them after initializing with `experimentalApi: true`.
 // Cafe opts into the same capability and layers those fields onto the local
@@ -138,6 +146,7 @@ const CodexThreadStartParamsWithRuntimeWorkspaceRoots = EffectCodexSchema.V2Thre
 const CodexTurnStartParamsWithExperimentalFields = EffectCodexSchema.V2TurnStartParams.pipe(
   Schema.fieldsAssign({
     collaborationMode: Schema.optionalKey(EffectCodexSchema.V2TurnStartParams__CollaborationMode),
+    environments: Schema.optionalKey(CodexLocalTurnEnvironments),
     runtimeWorkspaceRoots: Schema.optionalKey(CodexRuntimeWorkspaceRoots),
   }),
 );
@@ -154,6 +163,7 @@ const decodeV2ThreadResumeResponse = Schema.decodeUnknownEffect(
 type CodexThreadStartParamsWithRuntimeWorkspaceRoots =
   typeof CodexThreadStartParamsWithRuntimeWorkspaceRoots.Type;
 type CodexThreadResumeParamsWithRuntimeWorkspaceRoots = EffectCodexSchema.V2ThreadResumeParams & {
+  readonly environments?: ReadonlyArray<{ readonly environmentId: string; readonly cwd: string }>;
   readonly runtimeWorkspaceRoots?: ReadonlyArray<string>;
 };
 export type CodexTurnStartParamsWithExperimentalFields =
@@ -238,6 +248,7 @@ export interface CodexSessionRuntimeOptions {
   readonly threadId: ThreadId;
   readonly providerInstanceId?: ProviderInstanceId;
   readonly binaryPath: string;
+  readonly appServerCwd?: string;
   readonly homePath?: string;
   readonly environment?: NodeJS.ProcessEnv;
   readonly transportPolicy?: CodexTransportPolicy;
@@ -554,6 +565,22 @@ function buildRuntimeWorkspaceRoots(input: {
   return roots;
 }
 
+function buildLocalCodexTurnEnvironments(
+  cwd: string,
+): ReadonlyArray<{ readonly environmentId: string; readonly cwd: string }> {
+  // Codex 0.142 promotes execution environments to the app-server request
+  // layer. The TUI's default local environment selection pairs the fallback
+  // cwd with the local environment id, while additional write roots remain
+  // separate workspace/sandbox policy. Keep this explicit so app-server does
+  // not have to infer the environment from its own process cwd.
+  return [
+    {
+      environmentId: CODEX_LOCAL_ENVIRONMENT_ID,
+      cwd,
+    },
+  ];
+}
+
 function buildThreadStartParams(input: {
   readonly cwd: string;
   readonly runtimeMode: RuntimeMode;
@@ -562,7 +589,7 @@ function buildThreadStartParams(input: {
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
 }): CodexThreadStartParamsWithRuntimeWorkspaceRoots {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
-  // Upstream Codex 0.141.0 only auto-compacts when the resolved model info or
+  // Upstream Codex 0.142.0 only auto-compacts when the resolved model info or
   // request config supplies `model_auto_compact_token_limit`. Current Codex
   // model metadata can advertise a large context window while leaving that
   // limit null, so Cafe passes the documented request-config override for
@@ -570,7 +597,7 @@ function buildThreadStartParams(input: {
   // `~/.codex/config.toml`. The shared constant documents why Cafe currently
   // chooses 200k instead of the older 100k override.
   const threadConfig: Record<string, unknown> = {
-    // Upstream Codex rust-v0.141.0 marks remote_compaction_v2 stable and
+    // Upstream Codex rust-v0.142.0 marks remote_compaction_v2 stable and
     // default-enabled, but its compaction request still builds the normal
     // model-visible tool set. Cafe has observed text compaction failures from
     // inherited hosted image-generation tools on accounts/models without that
@@ -587,6 +614,7 @@ function buildThreadStartParams(input: {
   }
   return {
     cwd: input.cwd,
+    environments: buildLocalCodexTurnEnvironments(input.cwd),
     runtimeWorkspaceRoots: buildRuntimeWorkspaceRoots({
       cwd: input.cwd,
       additionalDirectories: input.additionalDirectories,
@@ -684,6 +712,7 @@ export function buildTurnStartParams(input: {
     ...(input.cwd ? { cwd: input.cwd } : {}),
     ...(input.cwd
       ? {
+          environments: buildLocalCodexTurnEnvironments(input.cwd),
           runtimeWorkspaceRoots: buildRuntimeWorkspaceRoots({
             cwd: input.cwd,
             additionalDirectories: input.additionalDirectories,
@@ -1728,7 +1757,7 @@ function normalizeCodexSnapshotTurnForThreadStatus(
     return turn;
   }
 
-  // Upstream Codex 0.141.0 changed `thread/read` status reconciliation in
+  // Upstream Codex 0.142.0 keeps the `thread/read` status reconciliation from
   // `resolve_thread_status`: if a snapshot contains an in-progress turn while
   // the loaded watch status is `Idle` or `NotLoaded`, app-server resolves the
   // thread to `Active` instead of interrupting the turn. Preserve that shape
@@ -1986,10 +2015,20 @@ export const makeCodexSessionRuntime = (
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
     };
     const appServerArgs = buildCodexAppServerArgs(options.transportPolicy);
+    const appServerCwd = options.appServerCwd ?? process.cwd();
     const child = yield* spawner
       .spawn(
         ChildProcess.make(options.binaryPath, appServerArgs, {
-          cwd: options.cwd,
+          // Codex app-server resolves absolute request cwd values through
+          // `std::env::current_dir()` as of 0.142. Running the app-server
+          // process from a project directory that macOS later denies can make
+          // every `turn/start` fail with `invalid cwd: Operation not
+          // permitted` before Codex even sees the protocol cwd. Keep the
+          // process cwd on Cafe's own backend-owned directory and pass the real
+          // project cwd through `thread/start`/`turn/start` plus local
+          // environment selections, matching the TUI's protocol-level cwd
+          // ownership without depending on process cwd.
+          cwd: appServerCwd,
           env,
           forceKillAfter: CODEX_APP_SERVER_FORCE_KILL_AFTER,
           shell: process.platform === "win32",
@@ -2341,7 +2380,7 @@ export const makeCodexSessionRuntime = (
             warningCount: input.pending.warningCount,
             appServerChildProcesses: childProcesses,
             semantics:
-              "Upstream Codex 0.141.0 stores turn/steer input in the active turn queue and emits the injected userMessage only when the turn loop drains pending input. Cafe has delivered the steer; only child processes classified as active count as turn work. Persistent Codex helper/MCP processes are reported as support processes and do not explain a delayed steer.",
+              "Upstream Codex 0.142.0 stores turn/steer input in the active turn queue and emits the injected userMessage only when the turn loop drains pending input. Cafe has delivered the steer; only child processes classified as active count as turn work. Persistent Codex helper/MCP processes are reported as support processes and do not explain a delayed steer.",
           },
         });
       });
@@ -2765,7 +2804,7 @@ export const makeCodexSessionRuntime = (
             itemSummary,
             appServerChildProcesses: childProcesses,
             semantics:
-              "Cafe follows upstream Codex app-server lifecycle semantics: turn/completed or a terminal thread/read turn closes the turn. In Codex 0.141.0, thread/read snapshots that contain an in-progress turn keep the thread effectively active even if the loaded watch status is idle or notLoaded; Cafe only terminalizes an in-progress snapshot when upstream reports a non-active terminal status such as systemError. Only child processes classified as active count as turn work; persistent Codex helper/MCP processes are reported as support processes and do not explain a delayed terminal event.",
+              "Cafe follows upstream Codex app-server lifecycle semantics: turn/completed or a terminal thread/read turn closes the turn. In Codex 0.142.0, thread/read snapshots that contain an in-progress turn keep the thread effectively active even if the loaded watch status is idle or notLoaded; Cafe only terminalizes an in-progress snapshot when upstream reports a non-active terminal status such as systemError. Only child processes classified as active count as turn work; persistent Codex helper/MCP processes are reported as support processes and do not explain a delayed terminal event.",
           },
         });
       });

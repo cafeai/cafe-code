@@ -2009,6 +2009,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
           cwd: input.cwd ?? process.cwd(),
+          // Keep Codex app-server's process cwd on a Cafe-owned directory.
+          // The requested project cwd is sent separately through the app-server
+          // protocol, so local process cwd should remain stable even if the
+          // workspace is protected by macOS TCC or removed while Cafe runs.
+          appServerCwd: serverConfig.stateDir,
           ...(input.additionalDirectories !== undefined
             ? { additionalDirectories: input.additionalDirectories }
             : {}),

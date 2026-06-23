@@ -95,7 +95,7 @@ function makeThreadOpenResponse(
     approvalsReviewer: "user",
     sandbox: { type: "dangerFullAccess" },
     thread: {
-      cliVersion: "0.141.0",
+      cliVersion: "0.142.0",
       createdAt: 1_713_403_200,
       cwd: "/tmp/project",
       ephemeral: false,
@@ -232,6 +232,12 @@ describe("buildTurnStartParams", () => {
     );
 
     assert.equal(params.cwd, "/tmp/project");
+    assert.deepStrictEqual(params.environments, [
+      {
+        environmentId: "local",
+        cwd: "/tmp/project",
+      },
+    ]);
     assert.deepStrictEqual(params.runtimeWorkspaceRoots, [
       "/tmp/project",
       "/tmp/docs",
@@ -1016,6 +1022,10 @@ describe("openCodexThread", () => {
     for (const call of calls) {
       const payload = call.payload as {
         readonly config?: Record<string, unknown>;
+        readonly environments?: ReadonlyArray<{
+          readonly environmentId: string;
+          readonly cwd: string;
+        }>;
         readonly runtimeWorkspaceRoots?: ReadonlyArray<string>;
       };
       assert.deepStrictEqual(payload.config, {
@@ -1023,6 +1033,12 @@ describe("openCodexThread", () => {
         model_auto_compact_token_limit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
         model_auto_compact_token_limit_scope: "total",
       });
+      assert.deepStrictEqual(payload.environments, [
+        {
+          environmentId: "local",
+          cwd: "/tmp/project",
+        },
+      ]);
       assert.deepStrictEqual(payload.runtimeWorkspaceRoots, ["/tmp/project"]);
     }
   });
@@ -1053,6 +1069,10 @@ describe("openCodexThread", () => {
 
     const payload = calls[0]?.payload as {
       readonly config?: Record<string, unknown>;
+      readonly environments?: ReadonlyArray<{
+        readonly environmentId: string;
+        readonly cwd: string;
+      }>;
       readonly runtimeWorkspaceRoots?: ReadonlyArray<string>;
     };
     assert.deepStrictEqual(payload.config, {
@@ -1063,6 +1083,12 @@ describe("openCodexThread", () => {
         writable_roots: ["/tmp/extra"],
       },
     });
+    assert.deepStrictEqual(payload.environments, [
+      {
+        environmentId: "local",
+        cwd: "/tmp/project",
+      },
+    ]);
     assert.deepStrictEqual(payload.runtimeWorkspaceRoots, ["/tmp/project", "/tmp/extra"]);
   });
 
