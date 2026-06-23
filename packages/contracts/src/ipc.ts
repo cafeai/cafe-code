@@ -34,6 +34,8 @@ import type {
   ServerProcessDiagnosticsResult,
   ServerProcessResourceHistoryInput,
   ServerProcessResourceHistoryResult,
+  ServerProviderLoginInput,
+  ServerProviderLoginResult,
   ServerProviderUpdateInput,
   ServerProviderRuntimeRestartInput,
   ServerProviderRuntimeRestartResult,
@@ -402,6 +404,7 @@ export interface LocalApi {
     refreshProviders: (input?: {
       readonly instanceId?: ProviderInstanceId;
     }) => Promise<ServerProviderUpdatedPayload>;
+    loginProvider: (input: ServerProviderLoginInput) => Promise<ServerProviderLoginResult>;
     updateProvider: (input: ServerProviderUpdateInput) => Promise<ServerProviderUpdatedPayload>;
     restartProviderRuntime: (
       input: ServerProviderRuntimeRestartInput,

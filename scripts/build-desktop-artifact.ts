@@ -8,6 +8,7 @@ import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
 
+import { createHash } from "node:crypto";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -30,6 +31,21 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64", "universal"]);
+
+export const MANAGED_WINDOWS_NODE_VERSION = "24.13.1";
+
+const MANAGED_WINDOWS_NODE_ARCHIVE_HASHES = {
+  x64: "fba577c4bb87df04d54dd87bbdaa5a2272f1f99a2acbf9152e1a91b8b5f0b279",
+  arm64: "0cd29eeb64f3c649db2c4c868779ca277f5a4c49e26c69e5928d01fe0ae06da8",
+} as const;
+
+interface ManagedWindowsNodeArchive {
+  readonly arch: "x64" | "arm64";
+  readonly fileName: string;
+  readonly sourceDirectoryName: string;
+  readonly sha256: string;
+  readonly url: string;
+}
 
 const RepoRoot = Effect.service(Path.Path).pipe(
   Effect.flatMap((path) => path.fromFileUrl(new URL("..", import.meta.url))),
@@ -346,6 +362,55 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
   } satisfies ResolvedBuildOptions;
 });
 
+export function isWindowsNsisInstallerTarget(target: string): boolean {
+  return target === "nsis" || target === "nsis-web";
+}
+
+export function shouldStageWindowsManagedRuntime(
+  platform: typeof BuildPlatform.Type,
+  target: string,
+): boolean {
+  return platform === "win" && isWindowsNsisInstallerTarget(target);
+}
+
+export function desktopArtifactListSatisfiesTarget(
+  platform: typeof BuildPlatform.Type,
+  target: string,
+  artifactPaths: ReadonlyArray<string>,
+): boolean {
+  if (platform === "win" && isWindowsNsisInstallerTarget(target)) {
+    return artifactPaths.some((artifactPath) => artifactPath.toLowerCase().endsWith(".exe"));
+  }
+
+  return artifactPaths.length > 0;
+}
+
+export function resolveManagedWindowsNodeArchive(
+  arch: typeof BuildArch.Type,
+): ManagedWindowsNodeArchive | null {
+  if (arch !== "x64" && arch !== "arm64") {
+    return null;
+  }
+
+  const sourceDirectoryName = `node-v${MANAGED_WINDOWS_NODE_VERSION}-win-${arch}`;
+  const fileName = `${sourceDirectoryName}.zip`;
+  return {
+    arch,
+    fileName,
+    sourceDirectoryName,
+    sha256: MANAGED_WINDOWS_NODE_ARCHIVE_HASHES[arch],
+    url: `https://nodejs.org/dist/v${MANAGED_WINDOWS_NODE_VERSION}/${fileName}`,
+  };
+}
+
+function sha256Hex(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function quotePowerShellString(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
 const commandOutputOptions = (verbose: boolean) =>
   ({
     stdout: verbose ? "inherit" : "ignore",
@@ -456,6 +521,177 @@ function stageWindowsIcons(stageResourcesDir: string, sourceIco: string) {
     yield* fs.copyFile(sourceIco, iconPath);
   });
 }
+
+const ensureManagedWindowsNodeArchive = Effect.fn("ensureManagedWindowsNodeArchive")(function* (
+  archive: ManagedWindowsNodeArchive,
+  cacheDir: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* fs.makeDirectory(cacheDir, { recursive: true });
+
+  const archivePath = path.join(cacheDir, archive.fileName);
+  if (yield* fs.exists(archivePath)) {
+    const cachedBytes = yield* fs.readFile(archivePath);
+    const cachedHash = sha256Hex(cachedBytes);
+    if (cachedHash === archive.sha256) {
+      return archivePath;
+    }
+
+    yield* Effect.logWarning(
+      `[desktop-artifact] Cached managed Node archive hash mismatch; re-downloading ${archive.fileName}.`,
+    ).pipe(
+      Effect.annotateLogs({
+        expectedSha256: archive.sha256,
+        actualSha256: cachedHash,
+      }),
+    );
+    yield* fs.remove(archivePath, { force: true }).pipe(Effect.ignore);
+  }
+
+  yield* Effect.log(`[desktop-artifact] Downloading managed Node runtime ${archive.fileName}...`);
+  const response = yield* Effect.tryPromise({
+    try: () => fetch(archive.url),
+    catch: (cause) =>
+      new BuildScriptError({
+        message: `Failed to download managed Node archive from ${archive.url}`,
+        cause,
+      }),
+  });
+
+  if (!response.ok) {
+    return yield* new BuildScriptError({
+      message: `Failed to download managed Node archive from ${archive.url}: HTTP ${response.status}`,
+    });
+  }
+
+  const bytes = new Uint8Array(
+    yield* Effect.tryPromise({
+      try: () => response.arrayBuffer(),
+      catch: (cause) =>
+        new BuildScriptError({
+          message: `Failed to read managed Node archive response from ${archive.url}`,
+          cause,
+        }),
+    }),
+  );
+  const actualHash = sha256Hex(bytes);
+  if (actualHash !== archive.sha256) {
+    return yield* new BuildScriptError({
+      message: `Downloaded managed Node archive hash mismatch for ${archive.fileName}: expected ${archive.sha256}, got ${actualHash}`,
+    });
+  }
+
+  yield* fs.writeFile(archivePath, bytes);
+  return archivePath;
+});
+
+const extractManagedWindowsNodeArchive = Effect.fn("extractManagedWindowsNodeArchive")(function* (
+  archive: ManagedWindowsNodeArchive,
+  archivePath: string,
+  cacheDir: string,
+  verbose: boolean,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const extractedRoot = path.join(cacheDir, archive.sourceDirectoryName);
+  const nodeExecutablePath = path.join(extractedRoot, "node.exe");
+  const npmCommandPath = path.join(extractedRoot, "npm.cmd");
+  if ((yield* fs.exists(nodeExecutablePath)) && (yield* fs.exists(npmCommandPath))) {
+    return extractedRoot;
+  }
+
+  yield* fs.remove(extractedRoot, { recursive: true, force: true }).pipe(Effect.ignore);
+  yield* fs.makeDirectory(cacheDir, { recursive: true });
+
+  yield* Effect.log(`[desktop-artifact] Extracting managed Node runtime ${archive.fileName}...`);
+  if (process.platform === "win32") {
+    const expandArchiveCommand = [
+      "Expand-Archive",
+      "-LiteralPath",
+      quotePowerShellString(archivePath),
+      "-DestinationPath",
+      quotePowerShellString(cacheDir),
+      "-Force",
+    ].join(" ");
+    yield* runCommand(
+      ChildProcess.make(
+        "powershell.exe",
+        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", expandArchiveCommand],
+        {
+          ...commandOutputOptions(verbose),
+        },
+      ),
+    );
+  } else {
+    yield* runCommand(
+      ChildProcess.make("unzip", ["-q", archivePath, "-d", cacheDir], {
+        ...commandOutputOptions(verbose),
+      }),
+    ).pipe(
+      Effect.mapError(
+        (cause) =>
+          new BuildScriptError({
+            message:
+              "Failed to extract managed Node archive. Install `unzip` or build the Windows NSIS artifact on Windows.",
+            cause,
+          }),
+      ),
+    );
+  }
+
+  if (!(yield* fs.exists(nodeExecutablePath)) || !(yield* fs.exists(npmCommandPath))) {
+    return yield* new BuildScriptError({
+      message: `Managed Node archive did not extract node.exe/npm.cmd at ${extractedRoot}`,
+    });
+  }
+
+  return extractedRoot;
+});
+
+const stageWindowsManagedRuntime = Effect.fn("stageWindowsManagedRuntime")(function* (
+  options: ResolvedBuildOptions,
+  repoRoot: string,
+  stageResourcesDir: string,
+) {
+  if (!shouldStageWindowsManagedRuntime(options.platform, options.target)) {
+    return;
+  }
+
+  const archive = resolveManagedWindowsNodeArchive(options.arch);
+  if (!archive) {
+    return yield* new BuildScriptError({
+      message: `Windows managed provider runtime is only available for x64 and arm64 NSIS builds, not arch '${options.arch}'.`,
+    });
+  }
+
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const cacheDir = path.join(
+    repoRoot,
+    "node_modules",
+    ".cache",
+    "cafecode-managed-node",
+    `v${MANAGED_WINDOWS_NODE_VERSION}`,
+    `win-${archive.arch}`,
+  );
+  const archivePath = yield* ensureManagedWindowsNodeArchive(archive, cacheDir);
+  const extractedRoot = yield* extractManagedWindowsNodeArchive(
+    archive,
+    archivePath,
+    cacheDir,
+    options.verbose,
+  );
+
+  const targetDir = path.join(stageResourcesDir, "managed-runtime", "node", `win-${archive.arch}`);
+  yield* fs.remove(targetDir, { recursive: true, force: true }).pipe(Effect.ignore);
+  yield* fs.makeDirectory(path.dirname(targetDir), { recursive: true });
+  yield* fs.copy(extractedRoot, targetDir);
+
+  yield* Effect.log("[desktop-artifact] Staged Windows managed provider runtime.").pipe(
+    Effect.annotateLogs({ nodeRuntime: targetDir }),
+  );
+});
 
 function validateBundledClientAssets(clientDir: string) {
   return Effect.gen(function* () {
@@ -634,9 +870,25 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     if (signed) {
       winConfig.azureSignOptions = yield* AzureTrustedSigningOptionsConfig;
     } else {
-      winConfig.signAndEditExecutable = false;
+      winConfig.signExecutable = false;
     }
     buildConfig.win = winConfig;
+
+    if (isWindowsNsisInstallerTarget(target)) {
+      buildConfig.extraResources = [
+        {
+          from: "apps/desktop/resources/managed-runtime",
+          to: "managed-runtime",
+        },
+      ];
+      buildConfig.nsis = {
+        oneClick: false,
+        perMachine: false,
+        allowToChangeInstallationDirectory: true,
+        runAfterFinish: true,
+        include: "apps/desktop/resources/installer.nsh",
+      };
+    }
   }
 
   return buildConfig;
@@ -792,6 +1044,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
 
   // electron-builder is filtering out stageResourcesDir directory in the AppImage for production
   yield* fs.copy(stageResourcesDir, path.join(stageAppDir, "apps/desktop/prod-resources"));
+  yield* stageWindowsManagedRuntime(options, repoRoot, stageResourcesDir);
 
   const stagePackageJson: StagePackageJson = {
     name: "cafe-code",
@@ -897,6 +1150,12 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   if (copiedArtifacts.length === 0) {
     return yield* new BuildScriptError({
       message: `Build completed but no files were produced in ${stageDistDir}`,
+    });
+  }
+
+  if (!desktopArtifactListSatisfiesTarget(options.platform, options.target, copiedArtifacts)) {
+    return yield* new BuildScriptError({
+      message: `Build completed but did not produce the expected ${options.platform}/${options.target} artifact in ${stageDistDir}`,
     });
   }
 

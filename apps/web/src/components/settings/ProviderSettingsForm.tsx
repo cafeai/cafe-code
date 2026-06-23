@@ -6,12 +6,14 @@ import * as Schema from "effect/Schema";
 import type {
   ProviderSettingsFormAnnotation,
   ProviderSettingsFormControl,
+  ProviderSettingsFormOption,
   ProviderSettingsFormSchemaAnnotation,
 } from "@cafecode/contracts";
 
 import { cn } from "../../lib/utils";
 import { DraftInput } from "../ui/draft-input";
 import { Input } from "../ui/input";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
 import type { ProviderClientDefinition } from "./providerDriverMeta";
@@ -22,8 +24,10 @@ export interface ProviderSettingsFieldModel {
   readonly label: string;
   readonly description?: string | undefined;
   readonly placeholder?: string | undefined;
+  readonly options?: ReadonlyArray<ProviderSettingsFormOption> | undefined;
   readonly clearWhenEmpty: "omit" | "persist";
   readonly defaultBooleanValue?: boolean | undefined;
+  readonly defaultStringValue?: string | undefined;
 }
 
 function titleizeFieldKey(key: string): string {
@@ -69,6 +73,14 @@ function readFieldBooleanDefault(
   return Option.isSome(decoded) && typeof decoded.value === "boolean" ? decoded.value : undefined;
 }
 
+function readFieldStringDefault(
+  fieldSchema: ProviderClientDefinition["settingsSchema"]["fields"][string],
+): string | undefined {
+  const decodeDefault = Schema.decodeUnknownOption(fieldSchema as Schema.Decoder<unknown>);
+  const decoded = decodeDefault(undefined);
+  return Option.isSome(decoded) && typeof decoded.value === "string" ? decoded.value : undefined;
+}
+
 export function deriveProviderSettingsFields(
   definition: ProviderClientDefinition,
 ): ReadonlyArray<ProviderSettingsFieldModel> {
@@ -102,9 +114,13 @@ export function deriveProviderSettingsFields(
           ...(formAnnotation.placeholder !== undefined
             ? { placeholder: formAnnotation.placeholder }
             : {}),
+          ...(formAnnotation.options !== undefined ? { options: formAnnotation.options } : {}),
           clearWhenEmpty: formAnnotation.clearWhenEmpty ?? "omit",
           ...(formAnnotation.control === "switch"
             ? { defaultBooleanValue: readFieldBooleanDefault(fieldSchema) }
+            : {}),
+          ...(formAnnotation.control === "select"
+            ? { defaultStringValue: readFieldStringDefault(fieldSchema) }
             : {}),
         } satisfies ProviderSettingsFieldModel,
       ];
@@ -146,7 +162,13 @@ export function nextProviderConfigWithFieldValue(
   }
 
   const trimmed = value.trim();
-  if (field.clearWhenEmpty === "omit" && trimmed.length === 0) {
+  if (
+    field.clearWhenEmpty === "omit" &&
+    (trimmed.length === 0 ||
+      (field.control === "select" &&
+        field.defaultStringValue !== undefined &&
+        trimmed === field.defaultStringValue))
+  ) {
     delete base[field.key];
   } else {
     base[field.key] = value;
@@ -234,6 +256,55 @@ function ProviderSettingsFieldRow({
           />
           {description}
         </label>
+      </FieldFrame>
+    );
+  }
+
+  if (field.control === "select") {
+    const options = field.options ?? [];
+    const currentValue =
+      readProviderConfigString(value, field.key) ||
+      field.defaultStringValue ||
+      options[0]?.value ||
+      "";
+
+    return (
+      <FieldFrame variant={variant}>
+        <div className={cn(variant === "card" && "block")}>
+          <span id={inputId}>{label}</span>
+          <Select
+            modal={false}
+            value={currentValue}
+            onValueChange={(next) => {
+              if (next !== null) {
+                onChange(nextProviderConfigWithFieldValue(value, field, next));
+              }
+            }}
+            items={options}
+          >
+            <SelectTrigger
+              aria-labelledby={inputId}
+              className={cn(variant === "card" ? "mt-1.5" : "bg-background")}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectPopup>
+              {options.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  <span className="grid min-w-0 gap-0.5">
+                    <span className="truncate">{option.label}</span>
+                    {option.description ? (
+                      <span className="whitespace-normal text-xs text-muted-foreground">
+                        {option.description}
+                      </span>
+                    ) : null}
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+          {description}
+        </div>
       </FieldFrame>
     );
   }

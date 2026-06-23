@@ -58,6 +58,11 @@ export const ServerProviderAuth = Schema.Struct({
 });
 export type ServerProviderAuth = typeof ServerProviderAuth.Type;
 
+export const ServerProviderAuthActions = Schema.Struct({
+  login: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+});
+export type ServerProviderAuthActions = typeof ServerProviderAuthActions.Type;
+
 export const ServerProviderAccountRateLimitWindow = Schema.Struct({
   // Optional: some providers (e.g. Claude) report a window's reset time without
   // a usage figure. A window with only `resetsAt` is valid — consumers render
@@ -218,6 +223,7 @@ export const ServerProvider = Schema.Struct({
   version: Schema.NullOr(TrimmedNonEmptyString),
   status: ServerProviderState,
   auth: ServerProviderAuth,
+  authActions: Schema.optionalKey(ServerProviderAuthActions),
   checkedAt: IsoDateTime,
   message: Schema.optional(TrimmedNonEmptyString),
   // Optional for back-compat: every legacy producer omits this field and
@@ -867,6 +873,19 @@ export const ServerProviderUpdateInput = Schema.Struct({
 });
 export type ServerProviderUpdateInput = typeof ServerProviderUpdateInput.Type;
 
+export const ServerProviderLoginInput = Schema.Struct({
+  instanceId: ProviderInstanceId,
+});
+export type ServerProviderLoginInput = typeof ServerProviderLoginInput.Type;
+
+export const ServerProviderLoginResult = Schema.Struct({
+  instanceId: ProviderInstanceId,
+  provider: ProviderDriverKind,
+  command: TrimmedNonEmptyString,
+  message: TrimmedNonEmptyString,
+});
+export type ServerProviderLoginResult = typeof ServerProviderLoginResult.Type;
+
 export const ServerProviderRuntimeRestartInput = Schema.Struct({
   instanceId: ProviderInstanceId,
 });
@@ -903,5 +922,18 @@ export class ServerProviderUpdateError extends Schema.TaggedErrorClass<ServerPro
 ) {
   override get message(): string {
     return `Provider update failed for ${this.provider}: ${this.reason}`;
+  }
+}
+
+export class ServerProviderLoginError extends Schema.TaggedErrorClass<ServerProviderLoginError>()(
+  "ServerProviderLoginError",
+  {
+    instanceId: ProviderInstanceId,
+    reason: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect),
+  },
+) {
+  override get message(): string {
+    return `Provider login failed for ${this.instanceId}: ${this.reason}`;
   }
 }

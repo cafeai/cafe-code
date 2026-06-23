@@ -56,6 +56,9 @@ import {
 import {
   ServerConfigStreamEvent,
   ServerConfig,
+  ServerProviderLoginError,
+  ServerProviderLoginInput,
+  ServerProviderLoginResult,
   ServerProviderUpdateError,
   ServerProviderUpdateInput,
   ServerProviderRuntimeRestartError,
@@ -129,6 +132,7 @@ export const WS_METHODS = {
   // Server meta
   serverGetConfig: "server.getConfig",
   serverRefreshProviders: "server.refreshProviders",
+  serverLoginProvider: "server.loginProvider",
   serverUpdateProvider: "server.updateProvider",
   serverRestartProviderRuntime: "server.restartProviderRuntime",
   serverOpenSystemPromptFile: "server.openSystemPromptFile",
@@ -191,6 +195,12 @@ export const WsServerUpdateProviderRpc = Rpc.make(WS_METHODS.serverUpdateProvide
   payload: ServerProviderUpdateInput,
   success: ServerProviderUpdatedPayload,
   error: ServerProviderUpdateError,
+});
+
+export const WsServerLoginProviderRpc = Rpc.make(WS_METHODS.serverLoginProvider, {
+  payload: ServerProviderLoginInput,
+  success: ServerProviderLoginResult,
+  error: ServerProviderLoginError,
 });
 
 export const WsServerRestartProviderRuntimeRpc = Rpc.make(WS_METHODS.serverRestartProviderRuntime, {
@@ -487,6 +497,7 @@ export const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess,
 export const WsRpcGroup = RpcGroup.make(
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
+  WsServerLoginProviderRpc,
   WsServerUpdateProviderRpc,
   WsServerRestartProviderRuntimeRpc,
   WsServerOpenSystemPromptFileRpc,
