@@ -348,6 +348,10 @@ const WebPushUnsubscribeRequest = Schema.Struct({
   endpoint: Schema.String,
 });
 
+// Hoisted compiled decoders — building these per request rebuilds the codec every time.
+const decodeWebPushSubscribeRequest = Schema.decodeUnknownEffect(WebPushSubscribeRequest);
+const decodeWebPushUnsubscribeRequest = Schema.decodeUnknownEffect(WebPushUnsubscribeRequest);
+
 const respondToWebPushError = (error: WebPushNotificationsError) =>
   Effect.logWarning("web push route failed", { detail: error.detail, cause: error.cause }).pipe(
     Effect.as(HttpServerResponse.text("Web push storage failed.", { status: 500 })),
@@ -396,7 +400,7 @@ export const webPushSubscribeRouteLayer = HttpRouter.add(
     yield* requireAuthenticatedRequest;
     const request = yield* HttpServerRequest.HttpServerRequest;
     const body = yield* request.json.pipe(Effect.catch(() => Effect.succeed(null)));
-    const decoded = yield* Schema.decodeUnknownEffect(WebPushSubscribeRequest)(body).pipe(
+    const decoded = yield* decodeWebPushSubscribeRequest(body).pipe(
       Effect.catch(() => Effect.succeed(null)),
     );
     if (decoded === null) {
@@ -421,7 +425,7 @@ export const webPushUnsubscribeRouteLayer = HttpRouter.add(
     yield* requireAuthenticatedRequest;
     const request = yield* HttpServerRequest.HttpServerRequest;
     const body = yield* request.json.pipe(Effect.catch(() => Effect.succeed(null)));
-    const decoded = yield* Schema.decodeUnknownEffect(WebPushUnsubscribeRequest)(body).pipe(
+    const decoded = yield* decodeWebPushUnsubscribeRequest(body).pipe(
       Effect.catch(() => Effect.succeed(null)),
     );
     if (decoded === null) {

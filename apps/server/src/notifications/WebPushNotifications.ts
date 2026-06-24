@@ -90,6 +90,11 @@ const WebPushPayload = Schema.Struct({
 });
 const WebPushPayloadJson = Schema.fromJsonString(WebPushPayload);
 
+// Hoisted compiled codecs — building these per call rebuilds the codec every time.
+const decodeWebPushState = Schema.decodeEffect(WebPushStateJson);
+const encodeWebPushState = Schema.encodeEffect(WebPushStateJson);
+const encodeWebPushPayload = Schema.encodeEffect(WebPushPayloadJson);
+
 export interface WebPushNotificationsShape {
   /** VAPID public key for PushManager.subscribe; generated on first use. */
   readonly getPublicKey: () => Effect.Effect<string, WebPushNotificationsError>;
@@ -140,7 +145,7 @@ const make = Effect.gen(function* () {
       return EMPTY_WEB_PUSH_STATE;
     }
     const contents = yield* fs.readFileString(statePath);
-    return yield* Schema.decodeEffect(WebPushStateJson)(contents);
+    return yield* decodeWebPushState(contents);
   }).pipe(
     Effect.mapError(
       (cause) => new WebPushNotificationsError({ detail: `Failed to read ${statePath}`, cause }),
@@ -159,7 +164,7 @@ const make = Effect.gen(function* () {
   );
 
   const persistState = (state: WebPushState) =>
-    Schema.encodeEffect(WebPushStateJson)(state).pipe(
+    encodeWebPushState(state).pipe(
       Effect.flatMap((contents) =>
         writeFileStringAtomically({ filePath: statePath, contents: `${contents}\n` }).pipe(
           Effect.provideService(FileSystem.FileSystem, fs),
@@ -269,7 +274,7 @@ const make = Effect.gen(function* () {
       return;
     }
     const descriptor = yield* serverEnvironment.getDescriptor;
-    const payload = yield* Schema.encodeEffect(WebPushPayloadJson)({
+    const payload = yield* encodeWebPushPayload({
       title: shell.value.title,
       body: "Finished running",
       tag: `cafe-code-thread-${threadId}`,

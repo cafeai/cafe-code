@@ -56,13 +56,13 @@ export function DesktopNotificationWatcher() {
         body: "Finished running",
         tag: `cafe-code-thread-${thread.id}`,
       });
-      notification.onclick = () => {
+      notification.addEventListener("click", () => {
         window.focus();
         void router.navigate({
           to: "/$environmentId/$threadId",
           params: buildThreadRouteParams(threadRef),
         });
-      };
+      });
     }
   }, [router, threads]);
 
