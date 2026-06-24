@@ -10,6 +10,7 @@ import type {
   ProviderInstanceId,
   ProviderDriverKind,
   ServerProvider,
+  ServerProviderAccountRateLimitWindow,
   ServerProviderUpdateState,
 } from "@cafecode/contracts";
 import * as Context from "effect/Context";
@@ -68,6 +69,21 @@ export interface ProviderRegistryShape {
     readonly action: ProviderMaintenanceActionKind;
     readonly state: ServerProviderUpdateState | null;
   }) => Effect.Effect<ReadonlyArray<ServerProvider>>;
+
+  /**
+   * Merge a single account rate-limit window into one instance's snapshot and
+   * republish if it changed. Used for event-sourced rate limits (e.g. Claude's
+   * `rate_limit_event`), which arrive one window at a time during a session
+   * rather than from the periodic probe. The other window slot is preserved, so
+   * repeated calls accumulate the latest `primary` (5h) and `secondary` (weekly).
+   * No-ops when the instance is not currently tracked.
+   */
+  readonly updateProviderAccountRateLimits: (input: {
+    readonly instanceId: ProviderInstanceId;
+    readonly slot: "primary" | "secondary";
+    readonly window: ServerProviderAccountRateLimitWindow;
+    readonly checkedAt: string;
+  }) => Effect.Effect<void>;
 
   /**
    * Stream of provider snapshot updates — one emission per aggregated

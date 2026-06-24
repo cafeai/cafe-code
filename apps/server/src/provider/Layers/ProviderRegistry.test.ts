@@ -545,6 +545,71 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         ]);
       });
 
+      it("preserves event-sourced account rate limits when a refresh omits them", () => {
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          driver: ProviderDriverKind.make("claudeAgent"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          checkedAt: "2026-04-14T00:00:00.000Z",
+          version: "2026.04.09-f2b0fcd",
+          models: [],
+          slashCommands: [],
+          skills: [],
+          accountRateLimits: {
+            rateLimits: { primary: { windowDurationMins: 300, resetsAt: 1782274800 } },
+            checkedAt: "2026-04-14T00:00:00.000Z",
+          },
+        } as const satisfies ServerProvider;
+        // The Claude probe never sends a prompt, so its refreshed snapshot carries no
+        // accountRateLimits — the merge must keep the previously accrued limits.
+        const { accountRateLimits: _omitted, ...withoutRateLimits } = previousProvider;
+        const refreshedProvider = {
+          ...withoutRateLimits,
+          checkedAt: "2026-04-14T00:05:00.000Z",
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(previousProvider, refreshedProvider).accountRateLimits,
+          previousProvider.accountRateLimits,
+        );
+      });
+
+      it("lets a refresh that reports account rate limits override the previous ones", () => {
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make("codex"),
+          driver: ProviderDriverKind.make("codex"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          checkedAt: "2026-04-14T00:00:00.000Z",
+          version: "2026.04.09-f2b0fcd",
+          models: [],
+          slashCommands: [],
+          skills: [],
+          accountRateLimits: {
+            rateLimits: { primary: { usedPercent: 10, windowDurationMins: 300 } },
+            checkedAt: "2026-04-14T00:00:00.000Z",
+          },
+        } as const satisfies ServerProvider;
+        const refreshedProvider = {
+          ...previousProvider,
+          checkedAt: "2026-04-14T00:05:00.000Z",
+          accountRateLimits: {
+            rateLimits: { primary: { usedPercent: 80, windowDurationMins: 300 } },
+            checkedAt: "2026-04-14T00:05:00.000Z",
+          },
+        } as const satisfies ServerProvider;
+
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(previousProvider, refreshedProvider).accountRateLimits,
+          refreshedProvider.accountRateLimits,
+        );
+      });
+
       it("fills missing capabilities from the previous provider snapshot", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("external_provider"),

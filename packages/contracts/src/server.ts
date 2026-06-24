@@ -59,7 +59,10 @@ export const ServerProviderAuth = Schema.Struct({
 export type ServerProviderAuth = typeof ServerProviderAuth.Type;
 
 export const ServerProviderAccountRateLimitWindow = Schema.Struct({
-  usedPercent: Schema.Number,
+  // Optional: some providers (e.g. Claude) report a window's reset time without
+  // a usage figure. A window with only `resetsAt` is valid — consumers render
+  // the reset and surface usage as "unknown" rather than fabricating a percentage.
+  usedPercent: Schema.optionalKey(Schema.NullOr(Schema.Number)),
   windowDurationMins: Schema.optionalKey(Schema.NullOr(NonNegativeInt)),
   resetsAt: Schema.optionalKey(Schema.NullOr(NonNegativeInt)),
 });

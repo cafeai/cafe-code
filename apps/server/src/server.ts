@@ -33,6 +33,7 @@ import {
   ProviderEventLoggersLive,
   type ProviderEventLoggers,
 } from "./provider/Layers/ProviderEventLoggers.ts";
+import { ProviderAccountRateLimitsReactorLive } from "./provider/Layers/ProviderAccountRateLimitsReactor.ts";
 import { ProviderServiceLive } from "./provider/Layers/ProviderService.ts";
 import { ProviderSessionReaperLive } from "./provider/Layers/ProviderSessionReaper.ts";
 import { CheckpointStoreLive } from "./checkpointing/Layers/CheckpointStore.ts";
@@ -156,6 +157,10 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(WebPushNotificationsLive),
   Layer.provideMerge(RuntimeReceiptBusLive),
+  // Self-starting daemon: forks a consumer of ProviderService.streamEvents that merges
+  // Claude's `rate_limit_event`-sourced usage windows into the provider snapshot.
+  // ProviderService + ProviderRegistry are supplied by RuntimeCoreDependenciesLive.
+  Layer.provideMerge(ProviderAccountRateLimitsReactorLive),
 );
 
 const ProviderSessionDirectoryLayerLive = ProviderSessionDirectoryLive.pipe(

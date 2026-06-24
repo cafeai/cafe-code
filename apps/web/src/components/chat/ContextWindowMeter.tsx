@@ -140,6 +140,11 @@ export function ContextWindowMeter(props: {
                   </span>
                 </div>
               ) : null}
+              {codexRateLimitSummary.primaryReset ? (
+                <div className="whitespace-nowrap text-muted-foreground">
+                  {codexRateLimitSummary.primaryReset}
+                </div>
+              ) : null}
               {codexRateLimitSummary.weeklyReset ? (
                 <div className="whitespace-nowrap text-muted-foreground">
                   {codexRateLimitSummary.weeklyReset}

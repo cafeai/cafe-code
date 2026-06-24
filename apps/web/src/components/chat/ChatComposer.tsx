@@ -984,7 +984,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [selectedProviderEntry],
   );
   const selectedCodexRateLimits =
-    selectedProviderStatus?.driver === "codex" &&
+    (selectedProviderStatus?.driver === "codex" ||
+      selectedProviderStatus?.driver === "claudeAgent") &&
     selectedProviderStatus.auth.status === "authenticated"
       ? (selectedProviderStatus.accountRateLimits ?? null)
       : null;

@@ -13,6 +13,7 @@ export interface CodexRateLimitSummaryLine {
 export interface CodexRateLimitSummary {
   readonly primary: CodexRateLimitSummaryLine | null;
   readonly secondary: CodexRateLimitSummaryLine | null;
+  readonly primaryReset: string | null;
   readonly weeklyReset: string | null;
 }
 
@@ -51,6 +52,16 @@ function formatDays(minutes: number | null | undefined): string | null {
   return `${value} ${rounded === 1 ? "day" : "days"}`;
 }
 
+function formatShortDuration(minutes: number | null | undefined): string | null {
+  if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) {
+    return null;
+  }
+  if (minutes < 1_440) {
+    return `${Math.round(minutes / 60)}h`;
+  }
+  return `${Math.round(minutes / 1_440)}d`;
+}
+
 function formatResetTime(epochSeconds: number, options: FormatOptions): string | null {
   if (!Number.isFinite(epochSeconds) || epochSeconds <= 0) return null;
   try {
@@ -73,6 +84,10 @@ function formatWindowLine(input: {
   readonly durationLabel: string | null;
   readonly window: ServerProviderAccountRateLimitWindow | null | undefined;
 }): CodexRateLimitSummaryLine | null {
+  // Only render a usage line when we actually have a usage figure. A window with just a
+  // reset time (Claude omits utilization unless you're near the limit) is surfaced through
+  // its reset line (primaryReset / weeklyReset) instead — no usage line. An absent window
+  // is omitted entirely.
   const usedPercent = input.window?.usedPercent;
   if (typeof usedPercent !== "number" || !Number.isFinite(usedPercent)) {
     return null;
@@ -110,16 +125,22 @@ export function formatCodexRateLimitSummary(
     durationLabel: formatDays(snapshot.secondary?.windowDurationMins),
     window: snapshot.secondary,
   });
+  const primaryResetAt = snapshot.primary?.resetsAt ?? null;
+  const primaryResetTime = primaryResetAt ? formatResetTime(primaryResetAt, options) : null;
+  const primaryResetLabel = formatShortDuration(snapshot.primary?.windowDurationMins) ?? "Primary";
+  const primaryReset = primaryResetTime ? `${primaryResetLabel} reset: ${primaryResetTime}` : null;
+
   const weeklyResetAt = snapshot.secondary?.resetsAt ?? null;
   const weeklyReset = weeklyResetAt ? formatResetTime(weeklyResetAt, options) : null;
 
-  if (!primary && !secondary && !weeklyReset) {
+  if (!primary && !secondary && !primaryReset && !weeklyReset) {
     return null;
   }
 
   return {
     primary,
     secondary,
+    primaryReset,
     weeklyReset: weeklyReset ? `Weekly reset: ${weeklyReset}` : null,
   };
 }
@@ -130,8 +151,11 @@ export function formatCodexRateLimitInlineText(
 ): string | null {
   const summary = formatCodexRateLimitSummary(rateLimits, options);
   if (!summary) return null;
-  const parts = [summary.primary?.text, summary.secondary?.text, summary.weeklyReset].filter(
-    (part): part is string => Boolean(part),
-  );
+  const parts = [
+    summary.primary?.text,
+    summary.secondary?.text,
+    summary.primaryReset,
+    summary.weeklyReset,
+  ].filter((part): part is string => Boolean(part));
   return parts.length > 0 ? parts.join(" · ") : null;
 }

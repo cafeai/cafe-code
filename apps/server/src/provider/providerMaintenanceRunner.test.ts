@@ -171,6 +171,7 @@ function makeRegistry(
       getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
         Effect.succeed(lifecycleFor(provider)),
       setProviderMaintenanceActionState,
+      updateProviderAccountRateLimits: () => Effect.void,
       streamChanges: Stream.empty,
     };
 

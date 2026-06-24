@@ -27,6 +27,9 @@ import {
   ProviderDriverKind,
   type ProviderInstanceId,
   type ServerProvider,
+  type ServerProviderAccountRateLimits,
+  type ServerProviderAccountRateLimitSnapshot,
+  type ServerProviderAccountRateLimitWindow,
   type ServerProviderUpdateState,
 } from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
@@ -110,6 +113,14 @@ export const mergeProviderSnapshot = (
     : {
         ...nextProvider,
         models: mergeProviderModels(previousProvider.models, nextProvider.models),
+        // Carry forward event-sourced account rate limits when an incoming snapshot
+        // omits them. Claude's periodic probe never sends a prompt, so it produces no
+        // `accountRateLimits`; without this, each refresh would wipe the limits accrued
+        // from `rate_limit_event`s. Probes that DO report limits (Codex) still override.
+        ...(nextProvider.accountRateLimits === undefined &&
+        previousProvider.accountRateLimits !== undefined
+          ? { accountRateLimits: previousProvider.accountRateLimits }
+          : {}),
       };
 
 export const mergeProviderSnapshots = (
@@ -387,6 +398,63 @@ export const ProviderRegistryLive = Layer.effect(
     ) {
       return yield* upsertProviders([provider], options);
     });
+
+    const updateProviderAccountRateLimits = Effect.fn("updateProviderAccountRateLimits")(
+      function* (input: {
+        readonly instanceId: ProviderInstanceId;
+        readonly slot: "primary" | "secondary";
+        readonly window: ServerProviderAccountRateLimitWindow;
+        readonly checkedAt: string;
+      }) {
+        type RateLimitUpdateResult =
+          | { readonly changed: false }
+          | { readonly changed: true; readonly providers: ReadonlyArray<ServerProvider> };
+
+        const result = yield* Ref.modify(
+          providersRef,
+          (
+            previousProviders,
+          ): readonly [RateLimitUpdateResult, ReadonlyArray<ServerProvider>] => {
+            const provider = previousProviders.find(
+              (candidate) => candidate.instanceId === input.instanceId,
+            );
+            if (provider === undefined) {
+              // Event arrived for an instance the aggregator isn't tracking (e.g. a
+              // race at boot). Drop it — the next event will land once it's registered.
+              return [{ changed: false }, previousProviders];
+            }
+            const previousRateLimits = provider.accountRateLimits;
+            const baseSnapshot = previousRateLimits?.rateLimits ?? {};
+            const nextSnapshot: ServerProviderAccountRateLimitSnapshot =
+              input.slot === "primary"
+                ? { ...baseSnapshot, primary: input.window }
+                : { ...baseSnapshot, secondary: input.window };
+            const nextRateLimits: ServerProviderAccountRateLimits = {
+              rateLimits: nextSnapshot,
+              ...(previousRateLimits?.rateLimitsByLimitId != null
+                ? { rateLimitsByLimitId: previousRateLimits.rateLimitsByLimitId }
+                : {}),
+              checkedAt: input.checkedAt,
+            };
+            const nextProvider: ServerProvider = {
+              ...provider,
+              accountRateLimits: nextRateLimits,
+            };
+            if (Equal.equals(provider, nextProvider)) {
+              return [{ changed: false }, previousProviders];
+            }
+            const nextProviders: ReadonlyArray<ServerProvider> = previousProviders.map(
+              (candidate) =>
+                candidate.instanceId === input.instanceId ? nextProvider : candidate,
+            );
+            return [{ changed: true, providers: nextProviders }, nextProviders];
+          },
+        );
+        if (result.changed) {
+          yield* PubSub.publish(changesPubSub, result.providers);
+        }
+      },
+    );
 
     const setProviderMaintenanceActionState = Effect.fn("setProviderMaintenanceActionState")(
       function* (input: {
@@ -687,6 +755,7 @@ export const ProviderRegistryLive = Layer.effect(
         refreshInstance(instanceId).pipe(Effect.catchCause(recoverRefreshFailure)),
       getProviderMaintenanceCapabilitiesForInstance,
       setProviderMaintenanceActionState,
+      updateProviderAccountRateLimits,
       get streamChanges() {
         return Stream.fromPubSub(changesPubSub);
       },

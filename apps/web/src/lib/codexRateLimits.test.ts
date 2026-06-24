@@ -39,6 +39,7 @@ describe("codexRateLimits", () => {
           primary: {
             usedPercent: 25,
             windowDurationMins: 300,
+            resetsAt: 1_779_580_800,
           },
           secondary: {
             usedPercent: 62.5,
@@ -52,8 +53,61 @@ describe("codexRateLimits", () => {
 
     expect(summary?.primary?.text).toBe("Primary window (5 hours): 75% left");
     expect(summary?.secondary?.text).toBe("Secondary window (7 days): 37.5% left");
+    expect(summary?.primaryReset).toContain("5h reset:");
+    expect(summary?.primaryReset).toContain("2026");
     expect(summary?.weeklyReset).toContain("Weekly reset:");
     expect(summary?.weeklyReset).toContain("2026");
+  });
+
+  it("falls back to a generic primary reset label when window duration is unknown", () => {
+    const summary = formatCodexRateLimitSummary(
+      {
+        checkedAt: "2026-05-28T00:00:00.000Z",
+        rateLimits: {
+          limitId: "codex",
+          primary: {
+            usedPercent: 40,
+            resetsAt: 1_779_580_800,
+          },
+        },
+      },
+      { locale: "en-US", timeZone: "UTC" },
+    );
+
+    expect(summary?.primaryReset).toContain("Primary reset:");
+  });
+
+  it("shows only the reset for a window with no usage figure, and omits absent windows", () => {
+    const summary = formatCodexRateLimitSummary(
+      {
+        checkedAt: "2026-06-23T00:00:00.000Z",
+        rateLimits: {
+          limitId: "claude",
+          // Claude often reports a window with only a reset time (no utilization),
+          // and may not report the weekly window at all.
+          primary: {
+            windowDurationMins: 300,
+            resetsAt: 1_782_274_800,
+          },
+        },
+      },
+      { locale: "en-US", timeZone: "UTC" },
+    );
+
+    // No usage figure → no usage line; the reset still surfaces.
+    expect(summary?.primary).toBeNull();
+    expect(summary?.primaryReset).toContain("5h reset:");
+    // No weekly window was reported, so it must not appear at all.
+    expect(summary?.secondary).toBeNull();
+    expect(summary?.weeklyReset).toBeNull();
+  });
+
+  it("returns null when there is no rate-limit information at all", () => {
+    const summary = formatCodexRateLimitSummary({
+      checkedAt: "2026-06-23T00:00:00.000Z",
+      rateLimits: { limitId: "claude" },
+    });
+    expect(summary).toBeNull();
   });
 
   it("produces a compact inline string for settings rows", () => {
