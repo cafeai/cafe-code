@@ -37,6 +37,7 @@ import {
   type ThreadTokenUsageSnapshot,
   type ProviderSteerTurnInput,
   type ProviderUserInputAnswers,
+  type RuntimeSessionState,
   type RuntimeContentStreamKind,
   RuntimeItemId,
   RuntimeRequestId,
@@ -96,6 +97,7 @@ type ClaudeToolResultStreamKind = Extract<
   "command_output" | "file_change_output"
 >;
 type ClaudeSdkEffort = NonNullable<ClaudeQueryOptions["effort"]>;
+type ClaudeSdkThinkingDisplay = "summarized" | "omitted" | null;
 type ClaudePromptInput = Pick<ProviderSendTurnInput, "input" | "attachments"> &
   Partial<Pick<ProviderSendTurnInput, "modelSelection">>;
 
@@ -211,7 +213,10 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
   readonly interrupt: () => Promise<void>;
   readonly setModel: (model?: string) => Promise<void>;
   readonly setPermissionMode: (mode: PermissionMode) => Promise<void>;
-  readonly setMaxThinkingTokens: (maxThinkingTokens: number | null) => Promise<void>;
+  readonly setMaxThinkingTokens: (
+    maxThinkingTokens: number | null,
+    thinkingDisplay?: ClaudeSdkThinkingDisplay,
+  ) => Promise<void>;
   readonly close: () => void;
 }
 
@@ -274,6 +279,19 @@ function claudeTaskTerminalStatus(value: unknown): "completed" | "failed" | "sto
     return "stopped";
   }
   return undefined;
+}
+
+function runtimeStateFromClaudeSessionState(
+  state: "idle" | "running" | "requires_action",
+): RuntimeSessionState {
+  switch (state) {
+    case "idle":
+      return "ready";
+    case "running":
+      return "running";
+    case "requires_action":
+      return "waiting";
+  }
 }
 
 function resultPrimaryError(result: SDKResultMessage): string | undefined {
@@ -2980,6 +2998,139 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // Cafe records the raw native event but does not project a work-log
         // warning or context-window update from it.
         return;
+      case "commands_changed":
+        // Claude Agent SDK 0.3.191 emits this when slash-command metadata
+        // changes. Cafe does not currently render Claude slash commands from
+        // the SDK stream; provider capabilities are refreshed through the
+        // settings/status path instead, while the raw native event remains
+        // available for diagnostics.
+        return;
+      case "memory_recall":
+        // Memory recall is a transcript adornment from Claude's own memory
+        // layer. Cafe preserves the raw event but should not leak local memory
+        // file paths or synthesis content into generic work-log warnings.
+        return;
+      case "elicitation_complete":
+        // Completion of an MCP elicitation handshake is control-plane
+        // bookkeeping. The actual answer/result flows through the SDK's
+        // canonical tool/user messages.
+        return;
+      case "local_command_output": {
+        const record = message as Record<string, unknown>;
+        const content = trimmedStringValue(record.content);
+        if (!content) {
+          return;
+        }
+        yield* offerRuntimeEvent({
+          ...base,
+          type: "item.completed",
+          itemId: asRuntimeItemId(`claude-local-command-${message.uuid}`),
+          payload: {
+            itemType: "assistant_message",
+            status: "completed",
+            title: "Claude command output",
+            detail: content,
+          },
+        });
+        return;
+      }
+      case "informational": {
+        if (message.level === "warning" || message.prevent_continuation === true) {
+          yield* emitRuntimeWarning(context, message.content, {
+            subtype: message.subtype,
+            level: message.level,
+            ...(message.tool_use_id ? { toolUseId: message.tool_use_id } : {}),
+            ...(message.prevent_continuation !== undefined
+              ? { preventContinuation: message.prevent_continuation }
+              : {}),
+          });
+        }
+        return;
+      }
+      case "model_refusal_fallback":
+        yield* emitRuntimeWarning(context, message.content, {
+          subtype: message.subtype,
+          trigger: message.trigger,
+          direction: message.direction,
+          originalModel: message.original_model,
+          fallbackModel: message.fallback_model,
+          requestId: message.request_id,
+          ...(message.api_refusal_category !== undefined
+            ? { apiRefusalCategory: message.api_refusal_category }
+            : {}),
+          ...(message.api_refusal_explanation !== undefined
+            ? { apiRefusalExplanation: message.api_refusal_explanation }
+            : {}),
+          ...(message.retracted_message_uuids !== undefined
+            ? { retractedMessageUuids: message.retracted_message_uuids }
+            : {}),
+        });
+        return;
+      case "session_state_changed":
+        yield* offerRuntimeEvent({
+          ...base,
+          type: "session.state.changed",
+          payload: {
+            state: runtimeStateFromClaudeSessionState(message.state),
+            reason: `session_state_changed:${message.state}`,
+            detail: message,
+          },
+        });
+        return;
+      case "worker_shutting_down":
+        yield* offerRuntimeEvent({
+          ...base,
+          type: "session.state.changed",
+          payload: {
+            state: "waiting",
+            reason: `worker_shutting_down:${message.reason}`,
+            detail: message,
+          },
+        });
+        return;
+      case "notification":
+        if (message.priority === "high" || message.priority === "immediate") {
+          yield* emitRuntimeWarning(context, message.text, {
+            subtype: message.subtype,
+            key: message.key,
+            priority: message.priority,
+            ...(message.timeout_ms !== undefined ? { timeoutMs: message.timeout_ms } : {}),
+          });
+        }
+        return;
+      case "permission_denied":
+        yield* emitRuntimeWarning(context, message.message, {
+          subtype: message.subtype,
+          toolName: message.tool_name,
+          toolUseId: message.tool_use_id,
+          ...(message.agent_id ? { agentId: message.agent_id } : {}),
+          ...(message.decision_reason_type
+            ? { decisionReasonType: message.decision_reason_type }
+            : {}),
+          ...(message.decision_reason ? { decisionReason: message.decision_reason } : {}),
+        });
+        return;
+      case "mirror_error":
+        yield* emitRuntimeWarning(context, "Claude transcript mirror dropped a batch.", {
+          subtype: message.subtype,
+          error: message.error,
+          key: message.key,
+        });
+        return;
+      case "plugin_install":
+        if (message.status === "failed") {
+          yield* emitRuntimeWarning(
+            context,
+            message.error ??
+              `Claude plugin install failed${message.name ? `: ${message.name}` : ""}.`,
+            {
+              subtype: message.subtype,
+              status: message.status,
+              ...(message.name ? { name: message.name } : {}),
+            },
+          );
+        }
+        return;
       case "hook_started":
         yield* offerRuntimeEvent({
           ...base,
@@ -3130,9 +3281,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
         return;
       default:
+        const unknownSystemMessage = message as unknown as Record<string, unknown>;
         yield* emitRuntimeWarning(
           context,
-          `Unhandled Claude system message subtype '${message.subtype}'.`,
+          `Unhandled Claude system message subtype '${String(unknownSystemMessage.subtype)}'.`,
           message,
         );
         return;
@@ -3244,10 +3396,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       case "rate_limit_event":
         yield* handleSdkTelemetryMessage(context, message);
         return;
+      case "prompt_suggestion":
+        // Claude can predict a next user prompt after a turn when prompt
+        // suggestions are enabled. Cafe has no UI for these suggestions yet,
+        // so preserve the raw native event but do not surface a generic
+        // provider warning.
+        return;
       default:
+        const unknownSdkMessage = message as unknown as Record<string, unknown>;
         yield* emitRuntimeWarning(
           context,
-          `Unhandled Claude SDK message type '${message.type}'.`,
+          `Unhandled Claude SDK message type '${String(unknownSdkMessage.type)}'.`,
           message,
         );
         return;

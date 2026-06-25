@@ -6,9 +6,9 @@
  * The Claude Agent SDK emits one window per event — `rate_limit_info.rateLimitType`
  * names the currently-binding window (the server's "representative claim"), so we map
  * each event to one slot and let the registry accumulate the latest per slot:
- *   - `five_hour`                                   → primary   (5h window)
- *   - `seven_day` / `seven_day_opus` / `_sonnet`    → secondary (weekly window)
- *   - `overage` / anything else                     → skipped (null)
+ *   - `five_hour`                                             → primary   (5h window)
+ *   - `seven_day` / model variants / overage-included weekly   → secondary (weekly window)
+ *   - `overage` / anything else                               → skipped (null)
  *
  * `utilization` is frequently absent (it's only populated near a threshold). When it's
  * missing we emit a window with only `resetsAt`; the UI then shows the reset and reports
@@ -61,7 +61,8 @@ function slotForRateLimitType(rateLimitType: unknown): ClaudeRateLimitSlot | und
   if (
     rateLimitType === "seven_day" ||
     rateLimitType === "seven_day_opus" ||
-    rateLimitType === "seven_day_sonnet"
+    rateLimitType === "seven_day_sonnet" ||
+    rateLimitType === "seven_day_overage_included"
   ) {
     return "secondary";
   }

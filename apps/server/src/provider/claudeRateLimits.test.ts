@@ -38,7 +38,12 @@ describe("parseClaudeRateLimitUpdate", () => {
   });
 
   it("maps seven_day and its model-specific variants to the secondary window", () => {
-    for (const rateLimitType of ["seven_day", "seven_day_opus", "seven_day_sonnet"]) {
+    for (const rateLimitType of [
+      "seven_day",
+      "seven_day_opus",
+      "seven_day_sonnet",
+      "seven_day_overage_included",
+    ]) {
       const update = parseClaudeRateLimitUpdate({
         rate_limit_info: { rateLimitType, resetsAt: 1782800000 },
       });

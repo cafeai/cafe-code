@@ -107,7 +107,10 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
     this.setPermissionModeCalls.push(mode);
   };
 
-  readonly setMaxThinkingTokens = async (maxThinkingTokens: number | null): Promise<void> => {
+  readonly setMaxThinkingTokens = async (
+    maxThinkingTokens: number | null,
+    _thinkingDisplay?: "summarized" | "omitted" | null,
+  ): Promise<void> => {
     this.setMaxThinkingTokensCalls.push(maxThinkingTokens);
   };
 
@@ -2193,6 +2196,174 @@ describe("ClaudeAdapterLive", () => {
         ),
         false,
       );
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("handles Claude SDK 0.3.191 system messages without generic warnings", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const context = yield* Effect.context<never>();
+      const runFork = Effect.runForkWith(context);
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+
+      const runtimeEventsFiber = runFork(
+        Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            runtimeEvents.push(event);
+          }),
+        ),
+      );
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEvents.length = 0;
+
+      harness.query.emit({
+        type: "system",
+        subtype: "commands_changed",
+        commands: [],
+        session_id: "sdk-session-191",
+        uuid: "commands-changed-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "informational",
+        content: "Slash command output was rendered.",
+        level: "info",
+        session_id: "sdk-session-191",
+        uuid: "informational-info-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "notification",
+        key: "low",
+        text: "Background notification",
+        priority: "low",
+        session_id: "sdk-session-191",
+        uuid: "notification-low-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "prompt_suggestion",
+        suggestion: "What should I do next?",
+        session_id: "sdk-session-191",
+        uuid: "prompt-suggestion-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "session_state_changed",
+        state: "running",
+        session_id: "sdk-session-191",
+        uuid: "session-state-running-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "worker_shutting_down",
+        reason: "host_exit",
+        session_id: "sdk-session-191",
+        uuid: "worker-shutting-down-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "model_refusal_fallback",
+        trigger: "refusal",
+        direction: "retry",
+        original_model: "claude-fable-5",
+        fallback_model: "claude-sonnet-4-5",
+        request_id: "req-191",
+        api_refusal_category: "cyber",
+        api_refusal_explanation: "Refusal category explanation.",
+        retracted_message_uuids: ["retracted-1"],
+        content: "Claude retried the turn on a fallback model after a model refusal.",
+        session_id: "sdk-session-191",
+        uuid: "model-refusal-fallback-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "informational",
+        content: "Continuation was blocked by a hook.",
+        level: "warning",
+        prevent_continuation: true,
+        session_id: "sdk-session-191",
+        uuid: "informational-warning-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "notification",
+        key: "immediate",
+        text: "Immediate provider notification",
+        priority: "immediate",
+        timeout_ms: 5000,
+        session_id: "sdk-session-191",
+        uuid: "notification-immediate-1",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      assert.equal(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "runtime.warning" &&
+            event.payload.message.startsWith("Unhandled Claude"),
+        ),
+        false,
+      );
+
+      const runningState = runtimeEvents.find(
+        (event) =>
+          event.type === "session.state.changed" &&
+          event.payload.reason === "session_state_changed:running",
+      );
+      assert.equal(runningState?.type, "session.state.changed");
+      if (runningState?.type === "session.state.changed") {
+        assert.equal(runningState.payload.state, "running");
+      }
+
+      const workerState = runtimeEvents.find(
+        (event) =>
+          event.type === "session.state.changed" &&
+          event.payload.reason === "worker_shutting_down:host_exit",
+      );
+      assert.equal(workerState?.type, "session.state.changed");
+      if (workerState?.type === "session.state.changed") {
+        assert.equal(workerState.payload.state, "waiting");
+      }
+
+      assert.equal(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "runtime.warning" && event.payload.message.includes("fallback model"),
+        ),
+        true,
+      );
+      assert.equal(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "runtime.warning" &&
+            event.payload.message === "Continuation was blocked by a hook.",
+        ),
+        true,
+      );
+      assert.equal(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "runtime.warning" &&
+            event.payload.message === "Immediate provider notification",
+        ),
+        true,
+      );
+
       runtimeEventsFiber.interruptUnsafe();
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
