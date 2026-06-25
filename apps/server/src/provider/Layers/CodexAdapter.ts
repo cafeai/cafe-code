@@ -252,7 +252,7 @@ function isCodexResponsesWebsocketStderrDiagnostic(event: ProviderEvent): boolea
     return false;
   }
 
-  // Upstream Codex rust-v0.141.0 reports retry/fallback state through structured
+  // Upstream Codex rust-v0.142.2 reports retry/fallback state through structured
   // StreamError and Warning events. The Responses WebSocket tracing line on
   // stderr is duplicate transport noise, especially after machine sleep/wake
   // DNS loss, so Cafe keeps the structured work-log facts and drops only this
@@ -1396,8 +1396,18 @@ function mapToRuntimeEvents(
     ];
   }
 
+  if (event.method === "model/safetyBuffering/updated") {
+    // Upstream Codex rust-v0.142.2 documents this as a transient notification
+    // that is not persisted in rollout history. The TUI routes it to the
+    // thread target and then intentionally no-ops it in the chat widget, so
+    // Cafe decodes it for protocol compatibility but keeps it out of durable
+    // work-log/debug activity.
+    readPayload(EffectCodexSchema.V2ModelSafetyBufferingUpdatedNotification, event.payload);
+    return [];
+  }
+
   if (event.method === "turn/moderationMetadata") {
-    // Upstream Codex rust-v0.141.0 marks this notification experimental and the
+    // Upstream Codex rust-v0.142.2 marks this notification experimental and the
     // TUI routes it to the thread but does not render it in chat. Do the same
     // and avoid persisting arbitrary moderation metadata into work-log/debug
     // activity payloads.
@@ -1872,7 +1882,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     Effect.gen(function* () {
       const observedAt = DateTime.formatIso(yield* DateTime.now);
       if (!transportPolicyPersistenceEnabled) {
-        // Upstream Codex 0.141.0 keeps Responses WebSocket fallback as
+        // Upstream Codex 0.142.2 keeps Responses WebSocket fallback as
         // session-scoped runtime state: the built-in OpenAI provider still has
         // `supports_websockets = true`, and the fallback flag sticks inside the
         // live session after the official warning. Cafe used to persist this

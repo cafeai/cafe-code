@@ -57,7 +57,9 @@ describe("parseClaudeRateLimitUpdate", () => {
   });
 
   it("skips windows we do not surface and malformed payloads", () => {
-    expect(parseClaudeRateLimitUpdate({ rate_limit_info: { rateLimitType: "overage" } })).toBeNull();
+    expect(
+      parseClaudeRateLimitUpdate({ rate_limit_info: { rateLimitType: "overage" } }),
+    ).toBeNull();
     expect(parseClaudeRateLimitUpdate({ rate_limit_info: { status: "allowed" } })).toBeNull();
     expect(parseClaudeRateLimitUpdate(null)).toBeNull();
     expect(parseClaudeRateLimitUpdate("nope")).toBeNull();
@@ -68,7 +70,10 @@ describe("parseClaudeRateLimitUpdate", () => {
     const update = parseClaudeRateLimitUpdate({
       rate_limit_info: { rateLimitType: "five_hour", resetsAt: 0, utilization: 0.4 },
     });
-    expect(update).toEqual({ slot: "primary", window: { usedPercent: 40, windowDurationMins: 300 } });
+    expect(update).toEqual({
+      slot: "primary",
+      window: { usedPercent: 40, windowDurationMins: 300 },
+    });
     expect(update?.window.resetsAt).toBeUndefined();
   });
 

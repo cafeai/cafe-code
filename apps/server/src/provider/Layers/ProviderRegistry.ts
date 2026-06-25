@@ -412,9 +412,7 @@ export const ProviderRegistryLive = Layer.effect(
 
         const result = yield* Ref.modify(
           providersRef,
-          (
-            previousProviders,
-          ): readonly [RateLimitUpdateResult, ReadonlyArray<ServerProvider>] => {
+          (previousProviders): readonly [RateLimitUpdateResult, ReadonlyArray<ServerProvider>] => {
             const provider = previousProviders.find(
               (candidate) => candidate.instanceId === input.instanceId,
             );
@@ -444,8 +442,7 @@ export const ProviderRegistryLive = Layer.effect(
               return [{ changed: false }, previousProviders];
             }
             const nextProviders: ReadonlyArray<ServerProvider> = previousProviders.map(
-              (candidate) =>
-                candidate.instanceId === input.instanceId ? nextProvider : candidate,
+              (candidate) => (candidate.instanceId === input.instanceId ? nextProvider : candidate),
             );
             return [{ changed: true, providers: nextProviders }, nextProviders];
           },
