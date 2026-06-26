@@ -64,16 +64,139 @@ function normalizeMathFences(text: string): string {
   return output.join("\n");
 }
 
+function trimBlankEdgeLines(lines: ReadonlyArray<string>): ReadonlyArray<string> {
+  let start = 0;
+  let end = lines.length;
+  while (start < end && (lines[start] ?? "").trim().length === 0) {
+    start += 1;
+  }
+  while (end > start && (lines[end - 1] ?? "").trim().length === 0) {
+    end -= 1;
+  }
+  return lines.slice(start, end);
+}
+
+function transformOutsideFences(text: string, transform: (chunk: string) => string): string {
+  const lines = text.split("\n");
+  const output: string[] = [];
+  let activeFence: { indent: string; marker: string } | null = null;
+  let pendingChunk: string[] = [];
+
+  const flushPendingChunk = () => {
+    if (pendingChunk.length === 0) return;
+    output.push(transform(pendingChunk.join("\n")));
+    pendingChunk = [];
+  };
+
+  for (const line of lines) {
+    if (activeFence) {
+      output.push(line);
+      if (isFenceClose(line, activeFence.indent, activeFence.marker)) {
+        activeFence = null;
+      }
+      continue;
+    }
+
+    const fenceStartMatch = line.match(FENCE_START_PATTERN);
+    if (fenceStartMatch) {
+      flushPendingChunk();
+      const [, fenceIndent = "", fenceMarker = ""] = fenceStartMatch;
+      activeFence = { indent: fenceIndent, marker: fenceMarker };
+      output.push(line);
+      continue;
+    }
+
+    pendingChunk.push(line);
+  }
+
+  flushPendingChunk();
+  return output.join("\n");
+}
+
+function normalizeStandaloneSlashDisplayDelimiters(text: string): string {
+  const lines = text.split("\n");
+  const output: string[] = [];
+  let activeBlock: { indent: string; body: string[] } | null = null;
+  let activeFence: { indent: string; marker: string } | null = null;
+
+  for (const line of lines) {
+    if (activeBlock) {
+      if (line.trim() === "\\]") {
+        const { indent } = activeBlock;
+        const body = trimBlankEdgeLines(activeBlock.body).map((bodyLine) =>
+          bodyLine.startsWith(indent) ? bodyLine.slice(indent.length) : bodyLine,
+        );
+
+        // Preserve the list/blockquote continuation indentation on both
+        // delimiters and content. Mixing an indented opening delimiter with a
+        // column-zero closing delimiter makes remark-math split the block and
+        // can turn the following prose into accidental display math.
+        output.push(`${indent}$$`);
+        for (const bodyLine of body) {
+          output.push(`${indent}${bodyLine}`);
+        }
+        output.push(`${indent}$$`);
+        activeBlock = null;
+        continue;
+      }
+
+      activeBlock.body.push(line);
+      continue;
+    }
+
+    if (activeFence) {
+      output.push(line);
+      if (isFenceClose(line, activeFence.indent, activeFence.marker)) {
+        activeFence = null;
+      }
+      continue;
+    }
+
+    const fenceStartMatch = line.match(FENCE_START_PATTERN);
+    if (fenceStartMatch) {
+      const [, fenceIndent = "", fenceMarker = ""] = fenceStartMatch;
+      activeFence = { indent: fenceIndent, marker: fenceMarker };
+      output.push(line);
+      continue;
+    }
+
+    if (line.trim() === "\\[") {
+      const indent = line.slice(0, line.indexOf("\\["));
+      activeBlock = { indent, body: [] };
+      continue;
+    }
+
+    output.push(line);
+  }
+
+  if (activeBlock) {
+    output.push(`${activeBlock.indent}\\[`, ...activeBlock.body);
+  }
+
+  return output.join("\n");
+}
+
+function normalizeInlineSlashDisplayDelimiters(text: string): string {
+  return text.replace(/\\\[([\s\S]*?)\\\]/g, (match: string, math: string, offset: number) => {
+    const before = text.slice(0, offset);
+    const after = text.slice(offset + match.length);
+    const needsLeadingBreak = before.length > 0 && !/\n\s*$/.test(before);
+    const needsTrailingBreak = after.length > 0 && !/^\s*\n/.test(after);
+    return `${needsLeadingBreak ? "\n\n" : ""}$$\n${math.trim()}\n$$${needsTrailingBreak ? "\n\n" : ""}`;
+  });
+}
+
+function normalizeInlineSlashMathDelimiters(text: string): string {
+  return text.replace(/\\\((.*?)\\\)/g, (_match, math: string) => `$${math.trim()}$`);
+}
+
 function normalizeLatexDelimiters(text: string): string {
-  return text
-    .replace(/\\\[([\s\S]*?)\\\]/g, (match: string, math: string, offset: number) => {
-      const before = text.slice(0, offset);
-      const after = text.slice(offset + match.length);
-      const needsLeadingBreak = before.length > 0 && !/\n\s*$/.test(before);
-      const needsTrailingBreak = after.length > 0 && !/^\s*\n/.test(after);
-      return `${needsLeadingBreak ? "\n\n" : ""}$$\n${math.trim()}\n$$${needsTrailingBreak ? "\n\n" : ""}`;
-    })
-    .replace(/\\\((.*?)\\\)/g, (_match, math: string) => `$${math.trim()}$`);
+  const standaloneNormalized = normalizeStandaloneSlashDisplayDelimiters(text);
+  const displayNormalized = transformOutsideFences(
+    standaloneNormalized,
+    normalizeInlineSlashDisplayDelimiters,
+  );
+  return transformOutsideFences(displayNormalized, normalizeInlineSlashMathDelimiters);
 }
 
 function normalizeTableRowMathDelimiters(text: string): string {

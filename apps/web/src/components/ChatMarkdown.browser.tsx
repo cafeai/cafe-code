@@ -212,6 +212,44 @@ describe("ChatMarkdown", () => {
     }
   });
 
+  it("renders Codex slash-display math inside numbered-list follow-up prose", async () => {
+    const screen = await render(
+      <ChatMarkdown
+        text={[
+          "1. **Readback equality**",
+          "   \\[",
+          "   \\mathrm{CvSOrdinaryLimit}(f,\\lambda)",
+          "   =",
+          "   \\mathrm{WeilPacket}(f,\\lambda)",
+          "   \\]",
+          "   for the actual zeta test-function class.",
+          "",
+          "2. **Tail/window interchange**",
+          "   \\[",
+          "   \\lim_{N\\to\\infty}\\left(\\text{CvS truncated packet}_N\\right)",
+          "   =",
+          "   \\text{ordinary zeta explicit-formula packet}",
+          "   \\]",
+          "   with enough domination to move limits through the pole/zero/archimedean lanes.",
+        ].join("\n")}
+        cwd="/repo/project"
+      />,
+    );
+
+    try {
+      await vi.waitFor(() => {
+        expect(document.querySelectorAll(".katex-display").length).toBe(2);
+      });
+      expect(document.body.textContent).toContain("CvSOrdinaryLimit");
+      expect(document.body.textContent).toContain("WeilPacket");
+      expect(document.body.textContent).toContain("with enough domination to move limits");
+      expect(document.querySelector(".katex-error")).toBeNull();
+      expect(document.body.textContent).not.toContain("withenoughdomination");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("keeps wide Markdown tables inside a horizontal scroll container", async () => {
     const screen = await render(
       <ChatMarkdown

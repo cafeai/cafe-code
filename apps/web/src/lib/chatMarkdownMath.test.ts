@@ -57,6 +57,32 @@ describe("normalizeChatMarkdownMath", () => {
     );
   });
 
+  it("preserves list indentation around standalone slash display math", () => {
+    expect(
+      normalizeChatMarkdownMath(
+        [
+          "1. **Readback equality**",
+          "   \\[",
+          "   \\mathrm{CvSOrdinaryLimit}(f,\\lambda)",
+          "   =",
+          "   \\mathrm{WeilPacket}(f,\\lambda)",
+          "   \\]",
+          "   for the actual zeta test-function class.",
+        ].join("\n"),
+      ),
+    ).toBe(
+      [
+        "1. **Readback equality**",
+        "   $$",
+        "   \\mathrm{CvSOrdinaryLimit}(f,\\lambda)",
+        "   =",
+        "   \\mathrm{WeilPacket}(f,\\lambda)",
+        "   $$",
+        "   for the actual zeta test-function class.",
+      ].join("\n"),
+    );
+  });
+
   it("wraps standalone raw TeX paragraphs as display math", () => {
     expect(
       normalizeChatMarkdownMath(
@@ -95,6 +121,11 @@ describe("normalizeChatMarkdownMath", () => {
 
   it("does not rewrite display math delimiters inside non-math code fences", () => {
     const markdown = ["```text", "| Literal | $$x=1$$ |", "```"].join("\n");
+    expect(normalizeChatMarkdownMath(markdown)).toBe(markdown);
+  });
+
+  it("does not rewrite slash display delimiters inside non-math code fences", () => {
+    const markdown = ["```text", "\\[", "x=1", "\\]", "```"].join("\n");
     expect(normalizeChatMarkdownMath(markdown)).toBe(markdown);
   });
 });
