@@ -87,10 +87,19 @@ export const ServerProviderAccountRateLimitSnapshot = Schema.Struct({
 export type ServerProviderAccountRateLimitSnapshot =
   typeof ServerProviderAccountRateLimitSnapshot.Type;
 
+export const ServerProviderAccountRateLimitResetCredits = Schema.Struct({
+  availableCount: NonNegativeInt,
+});
+export type ServerProviderAccountRateLimitResetCredits =
+  typeof ServerProviderAccountRateLimitResetCredits.Type;
+
 export const ServerProviderAccountRateLimits = Schema.Struct({
   rateLimits: ServerProviderAccountRateLimitSnapshot,
   rateLimitsByLimitId: Schema.optionalKey(
     Schema.NullOr(Schema.Record(TrimmedNonEmptyString, ServerProviderAccountRateLimitSnapshot)),
+  ),
+  rateLimitResetCredits: Schema.optionalKey(
+    Schema.NullOr(ServerProviderAccountRateLimitResetCredits),
   ),
   checkedAt: IsoDateTime,
 });

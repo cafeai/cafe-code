@@ -610,6 +610,38 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         );
       });
 
+      it("does not preserve stale Codex account rate limits when a refresh omits them", () => {
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make("codex"),
+          driver: ProviderDriverKind.make("codex"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated", type: "chatgpt", email: "old@example.test" },
+          checkedAt: "2026-04-14T00:00:00.000Z",
+          version: "2026.04.09-f2b0fcd",
+          models: [],
+          slashCommands: [],
+          skills: [],
+          accountRateLimits: {
+            rateLimits: { primary: { usedPercent: 88, windowDurationMins: 300 } },
+            rateLimitResetCredits: { availableCount: 1 },
+            checkedAt: "2026-04-14T00:00:00.000Z",
+          },
+        } as const satisfies ServerProvider;
+        const { accountRateLimits: _omitted, ...withoutRateLimits } = previousProvider;
+        const refreshedProvider = {
+          ...withoutRateLimits,
+          auth: { status: "authenticated", type: "chatgpt", email: "new@example.test" },
+          checkedAt: "2026-04-14T00:05:00.000Z",
+        } as const satisfies ServerProvider;
+
+        assert.strictEqual(
+          mergeProviderSnapshot(previousProvider, refreshedProvider).accountRateLimits,
+          undefined,
+        );
+      });
+
       it("fills missing capabilities from the previous provider snapshot", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("external_provider"),
@@ -1451,6 +1483,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                   unlimited: false,
                   balance: "9.99",
                 },
+                rate_limit_reset_credits: {
+                  available_count: 2,
+                },
                 additional_rate_limits: [
                   {
                     limit_name: "Spark",
@@ -1492,6 +1527,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           assert.strictEqual(status.accountRateLimits?.rateLimits.planType, "pro");
           assert.strictEqual(status.accountRateLimits?.rateLimits.primary?.windowDurationMins, 300);
           assert.strictEqual(status.accountRateLimits?.rateLimits.secondary?.usedPercent, 75);
+          assert.strictEqual(status.accountRateLimits?.rateLimitResetCredits?.availableCount, 2);
           assert.strictEqual(
             status.accountRateLimits?.rateLimitsByLimitId?.codex_bengalfox?.primary
               ?.windowDurationMins,

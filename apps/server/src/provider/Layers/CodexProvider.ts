@@ -264,6 +264,11 @@ function readPositiveInteger(value: unknown): number | undefined {
   return numeric !== undefined && Number.isInteger(numeric) && numeric > 0 ? numeric : undefined;
 }
 
+function readNonNegativeInteger(value: unknown): number | undefined {
+  const numeric = readFiniteNumber(value);
+  return numeric !== undefined && Number.isInteger(numeric) && numeric >= 0 ? numeric : undefined;
+}
+
 function windowMinutesFromSeconds(seconds: number | undefined): number | undefined {
   if (seconds === undefined || seconds <= 0) return undefined;
   return Math.ceil(seconds / 60);
@@ -372,6 +377,17 @@ function mapGeneratedRateLimitSnapshot(
   };
 }
 
+function mapGeneratedRateLimitResetCredits(
+  summary:
+    | CodexSchema.V2GetAccountRateLimitsResponse__RateLimitResetCreditsSummary
+    | null
+    | undefined,
+): ServerProviderAccountRateLimits["rateLimitResetCredits"] | undefined {
+  if (summary === undefined) return undefined;
+  if (summary === null) return null;
+  return { availableCount: summary.availableCount };
+}
+
 function codexAppServerRateLimitsToServer(
   response: CodexSchema.V2GetAccountRateLimitsResponse,
   checkedAt: string,
@@ -385,10 +401,12 @@ function codexAppServerRateLimitsToServer(
             mapGeneratedRateLimitSnapshot(snapshot),
           ]),
         );
+  const rateLimitResetCredits = mapGeneratedRateLimitResetCredits(response.rateLimitResetCredits);
 
   return {
     rateLimits: mapGeneratedRateLimitSnapshot(response.rateLimits),
     ...(byLimitId ? { rateLimitsByLimitId: byLimitId } : {}),
+    ...(rateLimitResetCredits !== undefined ? { rateLimitResetCredits } : {}),
     checkedAt,
   };
 }
@@ -438,6 +456,16 @@ function mapRawRateLimitReachedType(value: unknown): string | undefined {
   return readTrimmedMetadata(record?.kind ?? record?.type);
 }
 
+function mapRawRateLimitResetCredits(
+  value: unknown,
+): ServerProviderAccountRateLimits["rateLimitResetCredits"] | undefined {
+  if (value === null) return null;
+  const record = readRecord(value);
+  if (!record) return undefined;
+  const availableCount = readNonNegativeInteger(record.available_count ?? record.availableCount);
+  return availableCount === undefined ? undefined : { availableCount };
+}
+
 function mapRawRateLimitSnapshot(input: {
   readonly limitId: string;
   readonly limitName?: string | undefined;
@@ -473,6 +501,9 @@ function parseCodexAccountRateLimitsPayload(
   const rateLimitReachedType = mapRawRateLimitReachedType(
     record.rate_limit_reached_type ?? record.rateLimitReachedType,
   );
+  const rateLimitResetCredits = mapRawRateLimitResetCredits(
+    record.rate_limit_reset_credits ?? record.rateLimitResetCredits,
+  );
   const primarySnapshot = mapRawRateLimitSnapshot({
     limitId: "codex",
     rateLimit: record.rate_limit ?? record.rateLimit,
@@ -506,6 +537,7 @@ function parseCodexAccountRateLimitsPayload(
   return {
     rateLimits: rateLimitsByLimitId.codex ?? primarySnapshot,
     rateLimitsByLimitId,
+    ...(rateLimitResetCredits !== undefined ? { rateLimitResetCredits } : {}),
     checkedAt,
   };
 }

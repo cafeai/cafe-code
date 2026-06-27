@@ -116,9 +116,16 @@ export const mergeProviderSnapshot = (
         // Carry forward event-sourced account rate limits when an incoming snapshot
         // omits them. Claude's periodic probe never sends a prompt, so it produces no
         // `accountRateLimits`; without this, each refresh would wipe the limits accrued
-        // from `rate_limit_event`s. Probes that DO report limits (Codex) still override.
+        // from `rate_limit_event`s.
+        //
+        // Codex is different: its account-usage snapshots are account-bound probe
+        // results from upstream `account/rateLimits/read` or the equivalent usage
+        // endpoint. Upstream TUI clears account-derived reset/usage state on account
+        // changes, and an omitted Codex usage snapshot after auth churn should render
+        // as unknown instead of preserving stale percentages from a previous account.
         ...(nextProvider.accountRateLimits === undefined &&
-        previousProvider.accountRateLimits !== undefined
+        previousProvider.accountRateLimits !== undefined &&
+        nextProvider.driver !== ProviderDriverKind.make("codex")
           ? { accountRateLimits: previousProvider.accountRateLimits }
           : {}),
       };
@@ -431,6 +438,9 @@ export const ProviderRegistryLive = Layer.effect(
               rateLimits: nextSnapshot,
               ...(previousRateLimits?.rateLimitsByLimitId != null
                 ? { rateLimitsByLimitId: previousRateLimits.rateLimitsByLimitId }
+                : {}),
+              ...(previousRateLimits?.rateLimitResetCredits !== undefined
+                ? { rateLimitResetCredits: previousRateLimits.rateLimitResetCredits }
                 : {}),
               checkedAt: input.checkedAt,
             };

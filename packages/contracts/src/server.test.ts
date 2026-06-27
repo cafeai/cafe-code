@@ -89,6 +89,9 @@ describe("ServerProvider", () => {
       models: [],
       accountRateLimits: {
         checkedAt: "2026-04-10T00:00:00.000Z",
+        rateLimitResetCredits: {
+          availableCount: 2,
+        },
         rateLimits: {
           limitId: "codex",
           planType: "pro",
@@ -116,6 +119,7 @@ describe("ServerProvider", () => {
 
     expect(parsed.accountRateLimits?.rateLimits.primary?.windowDurationMins).toBe(300);
     expect(parsed.accountRateLimits?.rateLimitsByLimitId?.codex?.primary?.usedPercent).toBe(42.5);
+    expect(parsed.accountRateLimits?.rateLimitResetCredits?.availableCount).toBe(2);
   });
 
   it("decodes lightweight runtime layer diagnostics", () => {
