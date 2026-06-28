@@ -4,7 +4,7 @@ import { X509Certificate, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { isIP } from "node:net";
 import { networkInterfaces } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, win32 as win32Path } from "node:path";
 import { promisify } from "node:util";
 
 import * as Data from "effect/Data";
@@ -16,6 +16,7 @@ import { isWildcardHost } from "./startupAccess.ts";
 const execFileAsync = promisify(execFile);
 const CERT_VALID_DAYS = 397;
 const CERT_RENEWAL_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+const OPENSSL_EXECUTABLE_NAME = "openssl";
 
 export interface HttpsCertificateMaterial {
   readonly cert: string;
@@ -58,6 +59,64 @@ const collectSubjectAltNames = (host: string | undefined): string => {
   }
 
   return [...names].join(",");
+};
+
+interface ResolveOpenSslExecutableOptions {
+  readonly platform?: NodeJS.Platform;
+  readonly env?: NodeJS.ProcessEnv;
+  readonly access?: (path: string) => Promise<void>;
+}
+
+const windowsOpenSslCandidates = (env: NodeJS.ProcessEnv): readonly string[] => {
+  const candidates = new Set<string>();
+  const addGitCandidates = (root: string | undefined) => {
+    if (!root) {
+      return;
+    }
+
+    candidates.add(win32Path.join(root, "Git", "usr", "bin", "openssl.exe"));
+    candidates.add(win32Path.join(root, "Git", "mingw64", "bin", "openssl.exe"));
+  };
+
+  addGitCandidates(env.ProgramFiles);
+  addGitCandidates(env.ProgramW6432);
+  addGitCandidates(env["ProgramFiles(x86)"]);
+  if (env.LocalAppData) {
+    addGitCandidates(win32Path.join(env.LocalAppData, "Programs"));
+  }
+
+  candidates.add("C:\\Program Files\\Git\\usr\\bin\\openssl.exe");
+  candidates.add("C:\\Program Files\\Git\\mingw64\\bin\\openssl.exe");
+  candidates.add("C:\\Program Files (x86)\\Git\\usr\\bin\\openssl.exe");
+  candidates.add("C:\\Program Files (x86)\\Git\\mingw64\\bin\\openssl.exe");
+  candidates.add("C:\\Program Files\\OpenSSL-Win64\\bin\\openssl.exe");
+  candidates.add("C:\\Program Files\\OpenSSL-Win32\\bin\\openssl.exe");
+  candidates.add("C:\\msys64\\usr\\bin\\openssl.exe");
+  candidates.add("C:\\msys64\\mingw64\\bin\\openssl.exe");
+  candidates.add("C:\\Strawberry\\c\\bin\\openssl.exe");
+
+  return [...candidates];
+};
+
+export const resolveOpenSslExecutable = async (
+  options: ResolveOpenSslExecutableOptions = {},
+): Promise<string> => {
+  const platform = options.platform ?? process.platform;
+  if (platform !== "win32") {
+    return OPENSSL_EXECUTABLE_NAME;
+  }
+
+  const access = options.access ?? fs.access;
+  for (const candidate of windowsOpenSslCandidates(options.env ?? process.env)) {
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {
+      // Keep looking; the final fallback preserves PATH-based behavior.
+    }
+  }
+
+  return OPENSSL_EXECUTABLE_NAME;
 };
 
 const certificateIsFresh = async (certPath: string, keyPath: string): Promise<boolean> => {
@@ -104,8 +163,9 @@ const generateCertificate = async (input: {
   const tempKeyPath = join(dirname(input.keyPath), `server-key.${suffix}.tmp`);
 
   try {
+    const opensslExecutable = await resolveOpenSslExecutable();
     await execFileAsync(
-      "openssl",
+      opensslExecutable,
       [
         "req",
         "-x509",
