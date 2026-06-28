@@ -904,10 +904,12 @@ export const runProviderDaemonServer = (
           ),
         );
       });
-
-    yield* Effect.addFinalizer(() =>
-      persistSupervisorBridgeCursor(pendingSupervisorBridgeCursor, { force: true }),
-    );
+    // Do not force-persist this cursor from a Scope finalizer. During desktop
+    // teardown the SQLite service can finalize before server finalizers run,
+    // which turns a harmless shutdown into a noisy warning. The normal
+    // 100-event persistence interval is smaller than the 1000-event replay
+    // overlap, so a clean or abrupt restart still replays enough supervisor
+    // events for the daemon journal to fill any tail gap idempotently.
 
     const appendRecentRpcFailure = (failure: ProviderDaemonRecentRpcFailure): void => {
       rpcMetrics.recentFailures.push(failure);
