@@ -1515,6 +1515,7 @@ function createDesktopBridgeForChatViewTests(
     showContextMenu: async () => null,
     openExternal: async () => true,
     openPath: async () => true,
+    revealPath: async () => true,
     onMenuAction: () => () => undefined,
     getUpdateState: async () => {
       throw new Error("getUpdateState not implemented in ChatView browser test");

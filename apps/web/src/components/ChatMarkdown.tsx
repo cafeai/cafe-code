@@ -37,7 +37,7 @@ import {
 } from "../markdown-links";
 import { readLocalApi } from "../localApi";
 import { getLocalShellCapabilities } from "../localCapabilities";
-import { cn } from "../lib/utils";
+import { cn, isMacPlatform, isWindowsPlatform } from "../lib/utils";
 import { normalizeChatMarkdownMath } from "../lib/chatMarkdownMath";
 import { normalizeCodexCitationMarkers } from "../lib/codexCitations";
 
@@ -363,6 +363,18 @@ const MARKDOWN_FILE_LINK_CLASS_NAME =
 const MARKDOWN_FILE_LINK_ICON_CLASS_NAME = "chat-markdown-file-link-icon size-3.5 shrink-0";
 const MARKDOWN_FILE_LINK_LABEL_CLASS_NAME = "chat-markdown-file-link-label truncate";
 
+function getFileManagerRevealLabel(
+  platform = typeof navigator === "undefined" ? "" : navigator.platform,
+): string {
+  if (isMacPlatform(platform)) {
+    return "Open in Finder";
+  }
+  if (isWindowsPlatform(platform)) {
+    return "Open in Explorer";
+  }
+  return "Open in Files";
+}
+
 function pathParentSegments(path: string): string[] {
   const normalized = path.replaceAll("\\", "/");
   const segments = normalized.split("/").filter((segment) => segment.length > 0);
@@ -448,7 +460,9 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   theme,
   className,
 }: MarkdownFileLinkProps) {
-  const canOpenLocalEditor = getLocalShellCapabilities().canOpenLocalEditor;
+  const localShellCapabilities = getLocalShellCapabilities();
+  const canOpenLocalEditor = localShellCapabilities.canOpenLocalEditor;
+  const canRevealLocalPath = localShellCapabilities.canOpenLocalPath;
   const handleCopy = useCallback((value: string, title: string) => {
     if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
       toastManager.add(
@@ -518,6 +532,44 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     });
   }, [canOpenLocalEditor, handleCopy, openPolicy, targetPath]);
 
+  const handleReveal = useCallback(() => {
+    if (!canRevealLocalPath) {
+      handleCopy(filePath, "Full path");
+      return;
+    }
+
+    const api = readLocalApi();
+    const fileManagerLabel = getFileManagerRevealLabel();
+    if (!api) {
+      toastManager.add({
+        type: "error",
+        title: `${fileManagerLabel} is unavailable`,
+      });
+      return;
+    }
+
+    void (async () => {
+      if (openPolicy === "confirm") {
+        const confirmed = await api.dialogs.confirm(
+          `This file is outside the current workspace:\n\n${targetPath}\n\nReveal it anyway?`,
+        );
+        if (!confirmed) {
+          return;
+        }
+      }
+
+      await api.shell.revealPath(filePath);
+    })().catch((error) => {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: `Unable to ${fileManagerLabel.toLowerCase()}`,
+          description: error instanceof Error ? error.message : "An error occurred.",
+        }),
+      );
+    });
+  }, [canRevealLocalPath, filePath, handleCopy, openPolicy, targetPath]);
+
   const handleContextMenu = useCallback(
     async (event: ReactMouseEvent<HTMLAnchorElement>) => {
       event.preventDefault();
@@ -527,21 +579,23 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       if (!api) return;
 
       const clicked = await api.contextMenu.show(
-        canOpenLocalEditor
-          ? ([
-              { id: "open", label: "Open in editor" },
-              { id: "copy-relative", label: "Copy relative path" },
-              { id: "copy-full", label: "Copy full path" },
-            ] as const)
-          : ([
-              { id: "copy-relative", label: "Copy relative path" },
-              { id: "copy-full", label: "Copy full path" },
-            ] as const),
+        [
+          ...(canOpenLocalEditor ? ([{ id: "open", label: "Open in editor" }] as const) : []),
+          ...(canRevealLocalPath
+            ? ([{ id: "reveal", label: getFileManagerRevealLabel() }] as const)
+            : []),
+          { id: "copy-relative", label: "Copy relative path" },
+          { id: "copy-full", label: "Copy full path" },
+        ] as const,
         { x: event.clientX, y: event.clientY },
       );
 
       if (clicked === "open") {
         handleOpen();
+        return;
+      }
+      if (clicked === "reveal") {
+        handleReveal();
         return;
       }
       if (clicked === "copy-relative") {
@@ -552,7 +606,15 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         handleCopy(targetPath, "Full path");
       }
     },
-    [canOpenLocalEditor, displayPath, handleCopy, handleOpen, targetPath],
+    [
+      canOpenLocalEditor,
+      canRevealLocalPath,
+      displayPath,
+      handleCopy,
+      handleOpen,
+      handleReveal,
+      targetPath,
+    ],
   );
 
   return (

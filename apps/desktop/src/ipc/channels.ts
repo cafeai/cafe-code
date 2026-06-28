@@ -4,6 +4,7 @@ export const SET_THEME_CHANNEL = "desktop:set-theme";
 export const CONTEXT_MENU_CHANNEL = "desktop:context-menu";
 export const OPEN_EXTERNAL_CHANNEL = "desktop:open-external";
 export const OPEN_PATH_CHANNEL = "desktop:open-path";
+export const REVEAL_PATH_CHANNEL = "desktop:reveal-path";
 export const MENU_ACTION_CHANNEL = "desktop:menu-action";
 export const UPDATE_STATE_CHANNEL = "desktop:update-state";
 export const UPDATE_GET_STATE_CHANNEL = "desktop:update-get-state";
