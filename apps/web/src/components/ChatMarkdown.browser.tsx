@@ -4,13 +4,25 @@ import { page } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
-const { confirmMock, openInPreferredEditorMock, readLocalApiMock } = vi.hoisted(() => ({
+const {
+  confirmMock,
+  openInPreferredEditorMock,
+  readLocalApiMock,
+  revealPathMock,
+  showContextMenuMock,
+} = vi.hoisted(() => ({
   confirmMock: vi.fn(async () => true),
   openInPreferredEditorMock: vi.fn(async () => "vscode"),
+  revealPathMock: vi.fn(async () => undefined),
+  showContextMenuMock: vi.fn(async () => null as string | null),
   readLocalApiMock: vi.fn(() => ({
     dialogs: { confirm: confirmMock },
     server: { getConfig: vi.fn(async () => ({ availableEditors: ["vscode"] })) },
-    shell: { openInEditor: vi.fn(async () => undefined) },
+    shell: {
+      openInEditor: vi.fn(async () => undefined),
+      revealPath: revealPathMock,
+    },
+    contextMenu: { show: showContextMenuMock },
   })),
 }));
 
@@ -38,6 +50,8 @@ describe("ChatMarkdown", () => {
     confirmMock.mockClear();
     openInPreferredEditorMock.mockClear();
     readLocalApiMock.mockClear();
+    revealPathMock.mockClear();
+    showContextMenuMock.mockClear();
     localStorage.clear();
     Reflect.deleteProperty(window, "desktopBridge");
     document.body.innerHTML = "";
@@ -119,6 +133,53 @@ describe("ChatMarkdown", () => {
           `${filePath}:1:7`,
         );
       });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("reveals markdown file links in the local file manager without line suffixes", async () => {
+    showContextMenuMock.mockResolvedValueOnce("reveal");
+    const filePath =
+      "/Users/yashsingh/p/sco/claude-code-extract/src/utils/permissions/PermissionRule.ts";
+    installDesktopCapabilityStub();
+    const screen = await render(
+      <ChatMarkdown
+        text={`[PermissionRule.ts](file://${filePath}#L1C7)`}
+        cwd="/Users/yashsingh/p/sco/claude-code-extract"
+      />,
+    );
+
+    try {
+      const link = page.getByRole("link", { name: "PermissionRule.ts · L1:C7" });
+      await expect.element(link).toBeInTheDocument();
+
+      const linkElement = document.querySelector<HTMLAnchorElement>(".chat-markdown-file-link");
+      expect(linkElement).not.toBeNull();
+      linkElement!.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+          clientX: 12,
+          clientY: 34,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(showContextMenuMock).toHaveBeenCalledWith(
+          expect.arrayContaining([
+            expect.objectContaining({
+              id: "reveal",
+              label: expect.stringMatching(/^Open in (Finder|Explorer|Files)$/),
+            }),
+          ]),
+          { x: 12, y: 34 },
+        );
+      });
+      await vi.waitFor(() => {
+        expect(revealPathMock).toHaveBeenCalledWith(filePath);
+      });
+      expect(openInPreferredEditorMock).not.toHaveBeenCalled();
     } finally {
       await screen.unmount();
     }

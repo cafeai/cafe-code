@@ -83,6 +83,15 @@ function createBrowserLocalApi(rpcClient?: WsRpcClient): LocalApi {
           throw new Error("Unable to open file.");
         }
       },
+      revealPath: async (path) => {
+        if (!window.desktopBridge) {
+          throw unavailableLocalBackendError();
+        }
+        const revealed = await window.desktopBridge.revealPath(path);
+        if (!revealed) {
+          throw new Error("Unable to reveal file.");
+        }
+      },
     },
     contextMenu: {
       show: async <T extends string>(

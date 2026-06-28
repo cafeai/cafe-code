@@ -222,6 +222,7 @@ function openWithElectronShell(externalUrl: string): Effect.Effect<boolean> {
 export interface ElectronShellShape {
   readonly openExternal: (rawUrl: unknown) => Effect.Effect<boolean>;
   readonly openPath: (rawPath: unknown) => Effect.Effect<boolean>;
+  readonly revealPath: (rawPath: unknown) => Effect.Effect<boolean>;
   readonly copyText: (text: string) => Effect.Effect<void>;
 }
 
@@ -281,6 +282,30 @@ const make = (spawner: ChildProcessSpawner.ChildProcessSpawner["Service"]) =>
           yield* logWarning("path open failed", metadata);
         }
         return opened;
+      }),
+    revealPath: (rawPath) =>
+      Effect.gen(function* () {
+        if (typeof rawPath !== "string" || rawPath.length === 0 || rawPath.includes("\0")) {
+          yield* logWarning("blocked path reveal", pathLogMetadata(rawPath));
+          return false;
+        }
+
+        const metadata = pathLogMetadata(rawPath);
+        yield* logInfo("revealing path via Electron shell", metadata);
+        const revealed = yield* Effect.sync(() => {
+          try {
+            Electron.shell.showItemInFolder(rawPath);
+            return true;
+          } catch {
+            return false;
+          }
+        });
+        if (revealed) {
+          yield* logInfo("path reveal completed", metadata);
+        } else {
+          yield* logWarning("path reveal failed", metadata);
+        }
+        return revealed;
       }),
     copyText: (text) =>
       Effect.sync(() => {

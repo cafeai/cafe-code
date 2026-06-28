@@ -193,6 +193,7 @@ function makeDesktopBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridg
     showContextMenu: async () => null,
     openExternal: async () => true,
     openPath: async () => true,
+    revealPath: async () => true,
     onMenuAction: () => () => undefined,
     getUpdateState: async () => {
       throw new Error("getUpdateState not implemented in test");
@@ -624,6 +625,17 @@ describe("wsApi", () => {
 
     await expect(api.contextMenu.show(items)).resolves.toBe("delete");
     expect(showContextMenu).toHaveBeenCalledWith(items, undefined);
+  });
+
+  it("forwards reveal path requests to the desktop bridge", async () => {
+    const revealPath = vi.fn().mockResolvedValue(true);
+    getWindowForTest().desktopBridge = makeDesktopBridge({ revealPath });
+
+    const { createLocalApi } = await import("./localApi");
+    const api = createLocalApi(rpcClientMock as never);
+
+    await expect(api.shell.revealPath("/tmp/project/artifact.zip")).resolves.toBeUndefined();
+    expect(revealPath).toHaveBeenCalledWith("/tmp/project/artifact.zip");
   });
 
   it("forwards folder picker options to the desktop bridge", async () => {

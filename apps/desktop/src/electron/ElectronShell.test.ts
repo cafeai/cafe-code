@@ -6,9 +6,17 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { beforeEach, vi } from "vitest";
 
-const { isCommandAvailableMock, openExternalMock, writeTextMock } = vi.hoisted(() => ({
+const {
+  isCommandAvailableMock,
+  openExternalMock,
+  openPathMock,
+  showItemInFolderMock,
+  writeTextMock,
+} = vi.hoisted(() => ({
   isCommandAvailableMock: vi.fn(),
   openExternalMock: vi.fn(),
+  openPathMock: vi.fn(),
+  showItemInFolderMock: vi.fn(),
   writeTextMock: vi.fn(),
 }));
 
@@ -19,6 +27,8 @@ vi.mock("@cafecode/shared/shell", () => ({
 vi.mock("electron", () => ({
   shell: {
     openExternal: openExternalMock,
+    openPath: openPathMock,
+    showItemInFolder: showItemInFolderMock,
   },
   clipboard: {
     writeText: writeTextMock,
@@ -28,6 +38,8 @@ vi.mock("electron", () => ({
 const resetExternalLaunchMocks = () => {
   isCommandAvailableMock.mockReset();
   openExternalMock.mockReset();
+  openPathMock.mockReset();
+  showItemInFolderMock.mockReset();
   writeTextMock.mockReset();
 
   isCommandAvailableMock.mockReturnValue(false);
@@ -147,6 +159,39 @@ describe("ElectronShell", () => {
 
       const electronShell = yield* ElectronShell.ElectronShell;
       const result = yield* electronShell.openExternal("https://example.com/path");
+
+      assert.equal(result, false);
+    }).pipe(Effect.provide(makeShellLayer())),
+  );
+
+  it.effect("reveals valid paths in the system file manager", () =>
+    Effect.gen(function* () {
+      const electronShell = yield* ElectronShell.ElectronShell;
+      const result = yield* electronShell.revealPath("C:\\repo\\artifact.zip");
+
+      assert.equal(result, true);
+      assert.deepEqual(showItemInFolderMock.mock.calls, [["C:\\repo\\artifact.zip"]]);
+    }).pipe(Effect.provide(makeShellLayer())),
+  );
+
+  it.effect("does not reveal invalid paths", () =>
+    Effect.gen(function* () {
+      const electronShell = yield* ElectronShell.ElectronShell;
+
+      assert.equal(yield* electronShell.revealPath(""), false);
+      assert.equal(yield* electronShell.revealPath("C:\\repo\\bad\0path.txt"), false);
+      assert.equal(showItemInFolderMock.mock.calls.length, 0);
+    }).pipe(Effect.provide(makeShellLayer())),
+  );
+
+  it.effect("returns false when Electron cannot reveal a path", () =>
+    Effect.gen(function* () {
+      showItemInFolderMock.mockImplementation(() => {
+        throw new Error("reveal failed");
+      });
+
+      const electronShell = yield* ElectronShell.ElectronShell;
+      const result = yield* electronShell.revealPath("C:\\repo\\missing.txt");
 
       assert.equal(result, false);
     }).pipe(Effect.provide(makeShellLayer())),

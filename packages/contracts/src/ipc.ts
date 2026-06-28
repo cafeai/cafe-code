@@ -349,6 +349,7 @@ export interface DesktopBridge {
   ) => Promise<T | null>;
   openExternal: (url: string) => Promise<boolean>;
   openPath: (path: string) => Promise<boolean>;
+  revealPath: (path: string) => Promise<boolean>;
   onMenuAction: (listener: (action: string) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
@@ -381,6 +382,7 @@ export interface LocalApi {
     openTerminal: (cwd: string) => Promise<void>;
     openExternal: (url: string) => Promise<void>;
     openPath: (path: string) => Promise<void>;
+    revealPath: (path: string) => Promise<void>;
   };
   contextMenu: {
     show: <T extends string>(
