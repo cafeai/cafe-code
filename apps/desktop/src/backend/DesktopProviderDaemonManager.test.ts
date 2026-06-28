@@ -20,6 +20,7 @@ import * as Schema from "effect/Schema";
 import * as NetService from "@cafecode/shared/Net";
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopProviderDaemonManager from "./DesktopProviderDaemonManager.ts";
 
 const TEST_TOKEN = "provider-daemon-test-token-000000000000000000000000";
@@ -147,12 +148,17 @@ function makeManagerLayer(baseDir: string, markerPath: string, backendEntryPath:
     encryptString: (value) => Effect.succeed(new TextEncoder().encode(value)),
     decryptString: (value) => Effect.succeed(new TextDecoder().decode(value)),
   } satisfies ElectronSafeStorage.ElectronSafeStorageShape);
+  const outputLogLayer = Layer.succeed(DesktopObservability.DesktopBackendOutputLog, {
+    writeSessionBoundary: () => Effect.void,
+    writeOutputChunk: () => Effect.void,
+  } satisfies DesktopObservability.DesktopBackendOutputLogShape);
 
   return DesktopProviderDaemonManager.layer.pipe(
     Layer.provideMerge(makeEnvironmentLayer(baseDir, markerPath, backendEntryPath)),
     Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(NetService.layer),
     Layer.provideMerge(safeStorageLayer),
+    Layer.provideMerge(outputLogLayer),
   );
 }
 

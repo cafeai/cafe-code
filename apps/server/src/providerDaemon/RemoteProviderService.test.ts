@@ -4,7 +4,12 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   attachCommandIdToMutatingProviderDaemonRequest,
   isVoidProviderDaemonRpcMethod,
+  remoteProviderCursorProjectorForConfig,
 } from "./RemoteProviderService.ts";
+import {
+  PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
+  PROVIDER_SUPERVISOR_RUNTIME_CURSOR_PROJECTOR,
+} from "./ProviderDaemonRuntimeCursor.ts";
 
 describe("RemoteProviderService", () => {
   it("adds commandId to restartProviderRuntime daemon RPC requests", () => {
@@ -38,5 +43,16 @@ describe("RemoteProviderService", () => {
     assert.isFalse(isVoidProviderDaemonRpcMethod("restartProviderRuntime"));
     assert.isTrue(isVoidProviderDaemonRpcMethod("stopSession"));
     assert.isTrue(isVoidProviderDaemonRpcMethod("rollbackConversation"));
+  });
+
+  it("uses a separate cursor for daemon to supervisor event bridging", () => {
+    assert.equal(
+      remoteProviderCursorProjectorForConfig({ providerDaemon: {} }),
+      PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
+    );
+    assert.equal(
+      remoteProviderCursorProjectorForConfig({ providerSupervisor: {} }),
+      PROVIDER_SUPERVISOR_RUNTIME_CURSOR_PROJECTOR,
+    );
   });
 });

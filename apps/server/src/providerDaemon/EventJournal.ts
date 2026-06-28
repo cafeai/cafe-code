@@ -105,7 +105,7 @@ const PERSISTENT_JOURNAL_STARTUP_PRUNE_DELAY_MS = 5_000;
 const PROVIDER_DAEMON_EVENT_ID_INDEX_NAME = "idx_provider_daemon_events_owner_event_id";
 const TURN_DIFF_JOURNAL_PREVIEW_CHARS = 4_096;
 const TURN_DIFF_JOURNAL_COMPACT_THRESHOLD_CHARS = 256 * 1024;
-const TURN_DIFF_JOURNAL_COMPACT_BATCH_SIZE = 100;
+const TURN_DIFF_JOURNAL_COMPACT_BATCH_SIZE = 1;
 
 interface PersistedEventRow {
   readonly cursor: number;
@@ -290,7 +290,7 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
 
     const compactLargeTurnDiffRows = Effect.fn(
       "ProviderDaemonPersistentEventJournal.compactLargeTurnDiffRows",
-    )(function* () {
+    )(function* (options?: { readonly afterCursor?: number }) {
       // This is intentionally a post-readiness bounded maintenance task, not a
       // migration. Older Cafe builds persisted repeated full Codex
       // `turn/diff/updated` bodies into the daemon journal, and a single active
@@ -299,6 +299,13 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
       // events behind megabytes of JSON parsing, unlike the Codex CLI/TUI. Keep
       // retained diff records cryptographically identifiable while removing the
       // full body from the hot restart/replay path.
+      //
+      // The batch size is deliberately one row. The inherited bad rows can be
+      // roughly 30 MB each, and selecting many of them into JS before compaction
+      // can OOM the daemon before the normal post-readiness maintenance gets a
+      // chance to run. A one-row repair is slower, but it makes replay memory
+      // bounded and preserves the complete event stream.
+      const afterCursor = normalizeCursor(options?.afterCursor ?? 0);
       let compactedCount = TURN_DIFF_JOURNAL_COMPACT_BATCH_SIZE;
       while (compactedCount >= TURN_DIFF_JOURNAL_COMPACT_BATCH_SIZE) {
         const rows = (yield* sql`
@@ -308,6 +315,7 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
             event_json AS "eventJson"
           FROM provider_daemon_events
           WHERE owner_key = ${ownerKey}
+            AND cursor > ${afterCursor}
             AND length(event_json) > ${TURN_DIFF_JOURNAL_COMPACT_THRESHOLD_CHARS}
             AND json_extract(event_json, '$.type') = 'turn.diff.updated'
           ORDER BY cursor ASC
@@ -349,6 +357,11 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
     const replayAfter = (cursor: number): Effect.Effect<ReadonlyArray<ProviderDaemonEventRecord>> =>
       Effect.gen(function* () {
         const normalizedCursor = normalizeCursor(cursor);
+        // Reconnect replay is on the daemon request hot path. Do not decode
+        // inherited giant Codex diff rows here; compact them first in bounded
+        // one-row repairs so the replay remains complete without risking a
+        // multi-gigabyte JS heap spike.
+        yield* compactLargeTurnDiffRows({ afterCursor: normalizedCursor });
         const rows = (yield* sql`
           SELECT
             cursor,

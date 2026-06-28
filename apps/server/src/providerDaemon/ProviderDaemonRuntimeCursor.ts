@@ -1,6 +1,7 @@
 import type { ProviderRuntimeEvent } from "@cafecode/contracts";
 
 export const PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR = "provider-daemon-runtime-ingestion";
+export const PROVIDER_SUPERVISOR_RUNTIME_CURSOR_PROJECTOR = "provider-supervisor-runtime-ingestion";
 
 const PROVIDER_DAEMON_RUNTIME_EVENT_CURSOR_PROPERTY = "__cafecodeProviderDaemonCursor";
 

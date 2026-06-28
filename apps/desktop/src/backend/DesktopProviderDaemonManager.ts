@@ -27,6 +27,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PlatformError from "effect/PlatformError";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -50,6 +51,7 @@ import {
 const PROVIDER_DAEMON_READINESS_TIMEOUT_MS = 30_000;
 const PROVIDER_DAEMON_READINESS_INTERVAL_MS = 100;
 const PROVIDER_DAEMON_PROTOCOL_VERSION = 1;
+const PROVIDER_DAEMON_SPAWN_ATTEMPTS = 2;
 
 const DESKTOP_PROVIDER_DAEMON_ENV_NAMES = [
   "CAFE_CODE_PORT",
@@ -393,6 +395,31 @@ const removeCredential = (credentialPath: string): Effect.Effect<void> =>
       new ProviderDaemonIoError({ operation: "remove provider daemon credential", cause }),
   }).pipe(Effect.ignore);
 
+const removeProviderDaemonIpcSocket = (
+  environment: DesktopEnvironment.DesktopEnvironmentShape,
+): Effect.Effect<void> => {
+  if (environment.platform === "win32") {
+    return Effect.void;
+  }
+
+  return Effect.tryPromise({
+    try: () => fs.rm(providerDaemonIpcSocketPath(environment), { force: true }),
+    catch: (cause) =>
+      new ProviderDaemonIoError({ operation: "remove provider daemon ipc socket", cause }),
+  }).pipe(Effect.ignore);
+};
+
+function drainProviderDaemonOutput(
+  streamName: "stdout" | "stderr",
+  stream: Stream.Stream<Uint8Array, PlatformError.PlatformError>,
+  outputLog: DesktopObservability.DesktopBackendOutputLogShape,
+): Effect.Effect<void> {
+  return stream.pipe(
+    Stream.runForEach((chunk) => outputLog.writeOutputChunk(streamName, chunk)),
+    Effect.ignore,
+  );
+}
+
 const waitForHealth = (
   endpoint: ProviderDaemonClientConfig,
 ): Effect.Effect<ProviderDaemonHealthValue, ProviderDaemonSpawnError> =>
@@ -420,6 +447,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   yield* NetService.NetService;
   const safeStorage = yield* ElectronSafeStorage.ElectronSafeStorage;
+  const providerDaemonOutputLog = yield* DesktopObservability.DesktopBackendOutputLog;
   const daemonScope = yield* Scope.make();
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const state = yield* Ref.make(initialState);
@@ -642,8 +670,12 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         },
         extendEnv: true,
         stdin: "ignore",
-        stdout: "ignore",
-        stderr: "ignore",
+        // Provider daemon bootstrap failures used to be invisible because the
+        // child ran with ignored stdio. Keep the daemon detached from the UI,
+        // but pipe output into the same private rotating child log as the
+        // backend so startup crashes have a local forensic trail.
+        stdout: "pipe",
+        stderr: "pipe",
         killSignal: "SIGTERM",
         additionalFds: {
           fd3: {
@@ -655,6 +687,14 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
     );
     const handle = yield* spawner.spawn(command).pipe(
       Effect.mapError((cause) => new ProviderDaemonSpawnError({ cause })),
+      Scope.provide(daemonScope),
+    );
+    yield* drainProviderDaemonOutput("stdout", handle.stdout, providerDaemonOutputLog).pipe(
+      Effect.forkScoped,
+      Scope.provide(daemonScope),
+    );
+    yield* drainProviderDaemonOutput("stderr", handle.stderr, providerDaemonOutputLog).pipe(
+      Effect.forkScoped,
       Scope.provide(daemonScope),
     );
     yield* handle.unref.pipe(Effect.ignore);
@@ -704,6 +744,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
             Effect.ignore,
             Effect.andThen(removeMarker(environment.providerDaemonMarkerPath)),
             Effect.andThen(removeCredential(environment.providerDaemonCredentialPath)),
+            Effect.andThen(removeProviderDaemonIpcSocket(environment)),
             Effect.andThen(Effect.fail(error)),
           ),
       ),
@@ -720,6 +761,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
             Effect.ignore,
             Effect.andThen(removeMarker(environment.providerDaemonMarkerPath)),
             Effect.andThen(removeCredential(environment.providerDaemonCredentialPath)),
+            Effect.andThen(removeProviderDaemonIpcSocket(environment)),
             Effect.andThen(Effect.fail(error)),
           ),
       ),
@@ -781,6 +823,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
     }
 
     const endpoint = yield* spawnDaemon.pipe(
+      Effect.retry({ times: PROVIDER_DAEMON_SPAWN_ATTEMPTS - 1 }),
       Effect.catch((error) =>
         Ref.update(state, (latest) => ({
           ...latest,
@@ -873,13 +916,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
     });
     yield* removeMarker(environment.providerDaemonMarkerPath);
     yield* removeCredential(environment.providerDaemonCredentialPath);
-    if (environment.platform !== "win32") {
-      yield* Effect.tryPromise({
-        try: () => fs.rm(providerDaemonIpcSocketPath(environment), { force: true }),
-        catch: (cause) =>
-          new ProviderDaemonIoError({ operation: "remove provider daemon ipc socket", cause }),
-      }).pipe(Effect.ignore);
-    }
+    yield* removeProviderDaemonIpcSocket(environment);
     yield* reapStaleProviderRuntimeProcesses([]);
     yield* Ref.set(state, initialState);
     yield* publishDebugSnapshot;

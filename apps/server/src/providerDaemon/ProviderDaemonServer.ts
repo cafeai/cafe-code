@@ -44,6 +44,10 @@ import {
   makePersistentProviderDaemonEventJournal,
   type ProviderDaemonPersistentEventJournal,
 } from "./EventJournal.ts";
+import {
+  PROVIDER_SUPERVISOR_RUNTIME_CURSOR_PROJECTOR,
+  readProviderDaemonRuntimeEventCursor,
+} from "./ProviderDaemonRuntimeCursor.ts";
 import { makeProviderDaemonCommandLedger } from "./CommandLedger.ts";
 import {
   buildProviderDaemonErrorDiagnostics,
@@ -58,6 +62,7 @@ const PROVIDER_DAEMON_HEALTH_SNAPSHOT_BACKFILL_EVENT_LIMIT = 20;
 const PROVIDER_DAEMON_HEALTH_RUNTIME_DIAGNOSTIC_EVENT_LIMIT = 20;
 const PROVIDER_DAEMON_RECENT_RPC_FAILURE_LIMIT = 20;
 const PROVIDER_DAEMON_PROCESS_DIAGNOSTIC_LIMIT = 50;
+const PROVIDER_SUPERVISOR_BRIDGE_CURSOR_PERSIST_INTERVAL = 100;
 
 const decodeRpcRequest = Schema.decodeUnknownEffect(ProviderDaemonRpcRequest);
 const decodeLeaseRequest = Schema.decodeUnknownEffect(ProviderDaemonLeaseRequest);
@@ -804,6 +809,7 @@ export const runProviderDaemonServer = (
     const runtimeInventory = yield* ProviderRuntimeInventory;
     const serverSettings = yield* ServerSettingsService;
     const supervisorRegistry = yield* ProviderSupervisorRegistry;
+    const sql = yield* SqlClient.SqlClient;
     const startedAt = DateTime.formatIso(yield* DateTime.now);
     const mode = options.mode ?? "provider-daemon";
     const transport = options.transport ?? "tcp";
@@ -816,7 +822,92 @@ export const runProviderDaemonServer = (
     const commandLedger = yield* makeProviderDaemonCommandLedger({ ownerKey: mode });
     const leases = new Map<string, ProviderDaemonLease>();
     const rpcMetrics = initialRpcMetrics();
+    const shouldPersistSupervisorBridgeCursor =
+      mode === "provider-daemon" && options.supervisorProcess !== undefined;
+    let lastPersistedSupervisorBridgeCursor = 0;
+    let pendingSupervisorBridgeCursor = 0;
     let activeStreamCount = 0;
+
+    if (shouldPersistSupervisorBridgeCursor) {
+      const supervisorBridgeCursorRows = (yield* sql`
+        SELECT last_applied_sequence AS "lastAppliedSequence"
+        FROM projection_state
+        WHERE projector = ${PROVIDER_SUPERVISOR_RUNTIME_CURSOR_PROJECTOR}
+        LIMIT 1
+      `.pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("provider supervisor bridge cursor read failed", {
+            projector: PROVIDER_SUPERVISOR_RUNTIME_CURSOR_PROJECTOR,
+            cause: Cause.pretty(cause),
+          }).pipe(Effect.as([])),
+        ),
+      )) as unknown as ReadonlyArray<{ readonly lastAppliedSequence: number }>;
+      const lastAppliedSequence = supervisorBridgeCursorRows[0]?.lastAppliedSequence;
+      if (typeof lastAppliedSequence === "number" && Number.isFinite(lastAppliedSequence)) {
+        lastPersistedSupervisorBridgeCursor = Math.max(0, Math.trunc(lastAppliedSequence));
+        pendingSupervisorBridgeCursor = lastPersistedSupervisorBridgeCursor;
+      }
+    }
+
+    const persistSupervisorBridgeCursor = (
+      cursor: number,
+      options?: { readonly force?: boolean },
+    ): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        if (!shouldPersistSupervisorBridgeCursor) {
+          return;
+        }
+
+        const normalizedCursor = Number.isFinite(cursor) ? Math.max(0, Math.trunc(cursor)) : 0;
+        if (normalizedCursor <= lastPersistedSupervisorBridgeCursor) {
+          return;
+        }
+
+        pendingSupervisorBridgeCursor = Math.max(pendingSupervisorBridgeCursor, normalizedCursor);
+        const shouldPersist =
+          options?.force === true ||
+          pendingSupervisorBridgeCursor - lastPersistedSupervisorBridgeCursor >=
+            PROVIDER_SUPERVISOR_BRIDGE_CURSOR_PERSIST_INTERVAL;
+        if (!shouldPersist) {
+          return;
+        }
+
+        const cursorToPersist = pendingSupervisorBridgeCursor;
+        const updatedAt = DateTime.formatIso(yield* DateTime.now);
+        yield* sql`
+          INSERT INTO projection_state (
+            projector,
+            last_applied_sequence,
+            updated_at
+          )
+          VALUES (
+            ${PROVIDER_SUPERVISOR_RUNTIME_CURSOR_PROJECTOR},
+            ${cursorToPersist},
+            ${updatedAt}
+          )
+          ON CONFLICT (projector)
+          DO UPDATE SET
+            last_applied_sequence = excluded.last_applied_sequence,
+            updated_at = excluded.updated_at
+        `.pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              lastPersistedSupervisorBridgeCursor = cursorToPersist;
+            }),
+          ),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("provider supervisor bridge cursor persist failed", {
+              projector: PROVIDER_SUPERVISOR_RUNTIME_CURSOR_PROJECTOR,
+              cursor: cursorToPersist,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        );
+      });
+
+    yield* Effect.addFinalizer(() =>
+      persistSupervisorBridgeCursor(pendingSupervisorBridgeCursor, { force: true }),
+    );
 
     const appendRecentRpcFailure = (failure: ProviderDaemonRecentRpcFailure): void => {
       rpcMetrics.recentFailures.push(failure);
@@ -858,6 +949,12 @@ export const runProviderDaemonServer = (
       while (true) {
         yield* Stream.runForEach(providerService.streamEvents, (event) =>
           journal.publish(event).pipe(
+            Effect.tap(() => {
+              const supervisorCursor = readProviderDaemonRuntimeEventCursor(event);
+              return supervisorCursor === undefined
+                ? Effect.void
+                : persistSupervisorBridgeCursor(supervisorCursor);
+            }),
             Effect.catchCause((cause) => {
               if (Cause.hasInterruptsOnly(cause)) {
                 return Effect.failCause(cause);

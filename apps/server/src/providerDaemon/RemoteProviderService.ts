@@ -1,9 +1,11 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import {
   PROVIDER_DAEMON_EVENTS_PATH,
+  PROVIDER_DAEMON_HEALTH_PATH,
   PROVIDER_DAEMON_RPC_PATH,
   ProviderDaemonAdapterCapabilities,
   ProviderDaemonEventRecord,
+  ProviderDaemonHealth,
   ProviderDaemonInstanceRoutingInfo,
   ProviderDaemonRpcEnvelope,
   ProviderDaemonRpcRequest,
@@ -42,12 +44,14 @@ import { ProjectionStateRepositoryLive } from "../persistence/Layers/ProjectionS
 import {
   attachProviderDaemonRuntimeEventCursor,
   PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
+  PROVIDER_SUPERVISOR_RUNTIME_CURSOR_PROJECTOR,
   rewindProviderDaemonCursorForReplay,
 } from "./ProviderDaemonRuntimeCursor.ts";
 
 const decodeRpcEnvelopeJson = Schema.decodeUnknownSync(
   Schema.fromJsonString(ProviderDaemonRpcEnvelope),
 );
+const decodeHealthJson = Schema.decodeUnknownSync(Schema.fromJsonString(ProviderDaemonHealth));
 const decodeEventRecordJson = Schema.decodeUnknownSync(
   Schema.fromJsonString(ProviderDaemonEventRecord),
 );
@@ -159,6 +163,24 @@ async function readEventStream(
   });
 }
 
+async function readRemoteHealth(
+  daemonConfig: ProviderDaemonClientConfig,
+): Promise<typeof ProviderDaemonHealth.Type> {
+  const response = await requestProviderDaemonJson(daemonConfig, PROVIDER_DAEMON_HEALTH_PATH, {
+    method: "GET",
+  });
+  return decodeHealthJson(response.body);
+}
+
+export function remoteProviderCursorProjectorForConfig(config: {
+  readonly providerDaemon?: unknown;
+  readonly providerSupervisor?: unknown;
+}): string {
+  return config.providerDaemon !== undefined
+    ? PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR
+    : PROVIDER_SUPERVISOR_RUNTIME_CURSOR_PROJECTOR;
+}
+
 const makeRemoteProviderService = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const projectionStateRepository = yield* ProjectionStateRepository;
@@ -166,15 +188,17 @@ const makeRemoteProviderService = Effect.gen(function* () {
   if (daemonConfig === undefined) {
     return yield* toProviderRuntimeEndpointUnavailable();
   }
+  const remoteCursorProjector = remoteProviderCursorProjectorForConfig(config);
 
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const publishContext = yield* Effect.context<never>();
   const publishRuntimeEvent = Effect.runSyncWith(publishContext);
   const initialProjectionState = yield* projectionStateRepository
-    .getByProjector({ projector: PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR })
+    .getByProjector({ projector: remoteCursorProjector })
     .pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("provider daemon event cursor read failed", {
+          projector: remoteCursorProjector,
           cause: Cause.pretty(cause),
         }).pipe(Effect.as(Option.none())),
       ),
@@ -188,9 +212,49 @@ const makeRemoteProviderService = Effect.gen(function* () {
       ),
   });
 
+  if (
+    Option.isNone(initialProjectionState) &&
+    remoteCursorProjector === PROVIDER_SUPERVISOR_RUNTIME_CURSOR_PROJECTOR
+  ) {
+    eventCursor = yield* Effect.tryPromise({
+      try: async () => {
+        const health = await readRemoteHealth(daemonConfig);
+        // A newly-upgraded daemon has no dedicated daemon->supervisor cursor yet.
+        // If the supervisor is idle, start near its live tail rather than replaying
+        // every retained historical event into the daemon again. If sessions are
+        // active, prefer correctness and replay from zero because events may have
+        // arrived while the daemon was down.
+        if (health.activeSessionCount > 0) {
+          return 0;
+        }
+        return rewindProviderDaemonCursorForReplay(
+          health.eventCursor,
+          PROVIDER_DAEMON_REPLAY_OVERLAP_EVENTS,
+        );
+      },
+      catch: (cause) => toRemoteRequestError("health", cause),
+    }).pipe(
+      Effect.tap((cursor) =>
+        cursor > 0
+          ? Effect.logInfo("provider supervisor event stream bootstrapping near idle tail", {
+              projector: remoteCursorProjector,
+              afterCursor: cursor,
+              replayOverlapEvents: PROVIDER_DAEMON_REPLAY_OVERLAP_EVENTS,
+            })
+          : Effect.void,
+      ),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider supervisor event cursor bootstrap failed", {
+          projector: remoteCursorProjector,
+          cause: Cause.pretty(cause),
+        }).pipe(Effect.as(0)),
+      ),
+    );
+  }
+
   if (eventCursor > 0) {
     yield* Effect.logInfo("provider daemon event stream resuming from persisted cursor", {
-      projector: PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
+      projector: remoteCursorProjector,
       afterCursor: eventCursor,
       replayOverlapEvents: PROVIDER_DAEMON_REPLAY_OVERLAP_EVENTS,
     });

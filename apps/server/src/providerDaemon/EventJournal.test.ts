@@ -313,6 +313,57 @@ describe("ProviderDaemonEventJournal", () => {
     );
   });
 
+  it("compacts inherited large turn diff rows before replay decodes them", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const largeDiff = `diff --git a/file.txt b/file.txt\n${"+".repeat(300_000)}`;
+        const before = makeRuntimeEvent("event-before-large-diff");
+        const large = makeTurnDiffEvent("event-replay-large-diff", largeDiff);
+        const after = makeRuntimeEvent("event-after-large-diff");
+        for (const event of [before, large, after]) {
+          yield* sql`
+            INSERT INTO provider_daemon_events (
+              owner_key,
+              emitted_at,
+              event_json
+            )
+            VALUES (
+              ${"provider-daemon"},
+              ${"1970-01-01T00:00:00.000Z"},
+              ${encodeProviderRuntimeEventJsonForTest(event)}
+            )
+          `;
+        }
+
+        const journal = yield* makePersistentProviderDaemonEventJournal({
+          capacity: 10,
+          ownerKey: "provider-daemon",
+          startupPruneDelayMs: 60_000,
+        });
+        const replayed = yield* journal.replayAfter(0);
+        const compacted = replayed[1]?.event;
+
+        expect(replayed.map((record) => record.event.eventId)).toEqual([
+          EventId.make("event-before-large-diff"),
+          EventId.make("event-replay-large-diff"),
+          EventId.make("event-after-large-diff"),
+        ]);
+        expect(compacted?.type).toBe("turn.diff.updated");
+        if (compacted?.type !== "turn.diff.updated") {
+          return;
+        }
+        const rawPayload = compacted.raw?.payload as Record<string, unknown> | undefined;
+        expect(compacted.payload.unifiedDiff).toHaveLength(4_096);
+        expect(rawPayload?.diff).toBeUndefined();
+        expect(rawPayload?.diffPreview).toHaveLength(4_096);
+        expect(rawPayload?.diffCharLength).toBe(largeDiff.length);
+        expect(rawPayload?.diffTruncated).toBe(true);
+        expect(rawPayload?.compactedForProviderJournal).toBe(true);
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
+
   it("prunes oversized persistent owner history when a journal is adopted", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {
