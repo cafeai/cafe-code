@@ -235,16 +235,50 @@ describe("ProcessDiagnostics", () => {
 
   it.effect("queries processes through the ChildProcessSpawner service", () =>
     Effect.gen(function* () {
-      const commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }> =
-        [];
+      const commands: Array<{
+        readonly command: string;
+        readonly args: ReadonlyArray<string>;
+        readonly options: { readonly shell?: boolean } | undefined;
+      }> = [];
       const spawnerLayer = Layer.succeed(
         ChildProcessSpawner.ChildProcessSpawner,
         ChildProcessSpawner.make((command) => {
           const childProcess = command as unknown as {
             readonly command: string;
             readonly args: ReadonlyArray<string>;
+            readonly options?: { readonly shell?: boolean };
           };
-          commands.push({ command: childProcess.command, args: childProcess.args });
+          commands.push({
+            command: childProcess.command,
+            args: childProcess.args,
+            options: childProcess.options,
+          });
+          if (process.platform === "win32") {
+            return Effect.succeed(
+              mockHandle({
+                stdout: JSON.stringify([
+                  {
+                    ProcessId: process.pid,
+                    ParentProcessId: 1,
+                    Name: "node.exe",
+                    CommandLine: "cafe-code server",
+                    WorkingSetSize: 1024,
+                    PercentProcessorTime: 0,
+                    Status: "Running",
+                  },
+                  {
+                    ProcessId: 4242,
+                    ParentProcessId: process.pid,
+                    Name: "agent.exe",
+                    CommandLine: "agent",
+                    WorkingSetSize: 2048,
+                    PercentProcessorTime: 1.5,
+                    Status: "Running",
+                  },
+                ]),
+              }),
+            );
+          }
           return Effect.succeed(
             mockHandle({
               stdout: [
@@ -263,12 +297,78 @@ describe("ProcessDiagnostics", () => {
       );
 
       expect(diagnostics.processes.map((process) => process.pid)).toEqual([4242]);
-      expect(commands).toEqual([
-        {
-          command: "ps",
-          args: ["-axo", "pid=,ppid=,pgid=,stat=,pcpu=,rss=,etime=,command="],
-        },
-      ]);
+      if (process.platform === "win32") {
+        expect(commands[0]?.command).toBe("powershell.exe");
+        expect(commands[0]?.args.slice(0, 3)).toEqual([
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+        ]);
+        expect(commands[0]?.args[3]).toContain("ForEach-Object");
+        expect(commands[0]?.args[3]).toContain("$perfByPid");
+        expect(commands[0]?.args[3]).not.toContain('-Filter "IDProcess = $(');
+        expect(commands[0]?.options?.shell).toBe(false);
+      } else {
+        expect(commands).toEqual([
+          {
+            command: "ps",
+            args: ["-axo", "pid=,ppid=,pgid=,stat=,pcpu=,rss=,etime=,command="],
+            options: { cwd: process.cwd(), shell: false },
+          },
+        ]);
+      }
+    }),
+  );
+
+  it.effect("queries Windows process rows with PowerShell directly", () =>
+    Effect.gen(function* () {
+      const commands: Array<{
+        readonly command: string;
+        readonly args: ReadonlyArray<string>;
+        readonly options: { readonly shell?: boolean } | undefined;
+      }> = [];
+      const spawnerLayer = Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make((command) => {
+          const childProcess = command as unknown as {
+            readonly command: string;
+            readonly args: ReadonlyArray<string>;
+            readonly options?: { readonly shell?: boolean };
+          };
+          commands.push({
+            command: childProcess.command,
+            args: childProcess.args,
+            options: childProcess.options,
+          });
+          return Effect.succeed(
+            mockHandle({
+              stdout: JSON.stringify([
+                {
+                  ProcessId: 100,
+                  ParentProcessId: 4,
+                  Name: "node.exe",
+                  CommandLine: "node dist/bin.mjs",
+                  WorkingSetSize: 1024,
+                  PercentProcessorTime: 0,
+                  Status: "Running",
+                },
+              ]),
+            }),
+          );
+        }),
+      );
+
+      const rows = yield* ProcessDiagnostics.readProcessRows("win32").pipe(
+        Effect.provide(spawnerLayer),
+      );
+
+      expect(rows.map((row) => row.pid)).toEqual([100]);
+      expect(commands[0]?.command).toBe("powershell.exe");
+      expect(commands[0]?.args.slice(0, 3)).toEqual(["-NoProfile", "-NonInteractive", "-Command"]);
+      expect(commands[0]?.args[3]).toContain("ForEach-Object");
+      expect(commands[0]?.args[3]).toContain("$perfByPid");
+      expect(commands[0]?.args[3]).not.toContain('-Filter "IDProcess = $(');
+      expect(commands[0]?.options?.shell).toBe(false);
     }),
   );
 
