@@ -2999,7 +2999,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // warning or context-window update from it.
         return;
       case "commands_changed":
-        // Claude Agent SDK 0.3.191 emits this when slash-command metadata
+        // Claude Agent SDK 0.3.191 and later emit this when slash-command metadata
         // changes. Cafe does not currently render Claude slash commands from
         // the SDK stream; provider capabilities are refreshed through the
         // settings/status path instead, while the raw native event remains
@@ -3063,6 +3063,25 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             : {}),
           ...(message.retracted_message_uuids !== undefined
             ? { retractedMessageUuids: message.retracted_message_uuids }
+            : {}),
+          ...(message.refused_user_message_uuid !== undefined
+            ? { refusedUserMessageUuid: message.refused_user_message_uuid }
+            : {}),
+        });
+        return;
+      case "model_refusal_no_fallback":
+        yield* emitRuntimeWarning(context, message.content, {
+          subtype: message.subtype,
+          originalModel: message.original_model,
+          requestId: message.request_id,
+          ...(message.api_refusal_category !== undefined
+            ? { apiRefusalCategory: message.api_refusal_category }
+            : {}),
+          ...(message.api_refusal_explanation !== undefined
+            ? { apiRefusalExplanation: message.api_refusal_explanation }
+            : {}),
+          ...(message.refused_user_message_uuid !== undefined
+            ? { refusedUserMessageUuid: message.refused_user_message_uuid }
             : {}),
         });
         return;

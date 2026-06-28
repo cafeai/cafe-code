@@ -2203,7 +2203,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("handles Claude SDK 0.3.191 system messages without generic warnings", () => {
+  it.effect("handles current Claude SDK system messages without generic warnings", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const context = yield* Effect.context<never>();
@@ -2290,6 +2290,18 @@ describe("ClaudeAdapterLive", () => {
       } as unknown as SDKMessage);
       harness.query.emit({
         type: "system",
+        subtype: "model_refusal_no_fallback",
+        original_model: "claude-fable-5",
+        request_id: "req-195",
+        api_refusal_category: "cyber",
+        api_refusal_explanation: "Refusal category explanation.",
+        refused_user_message_uuid: "user-message-195",
+        content: "Claude refused the turn and no fallback model was configured.",
+        session_id: "sdk-session-195",
+        uuid: "model-refusal-no-fallback-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
         subtype: "informational",
         content: "Continuation was blocked by a hook.",
         level: "warning",
@@ -2344,6 +2356,15 @@ describe("ClaudeAdapterLive", () => {
         runtimeEvents.some(
           (event) =>
             event.type === "runtime.warning" && event.payload.message.includes("fallback model"),
+        ),
+        true,
+      );
+      assert.equal(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "runtime.warning" &&
+            event.payload.message ===
+              "Claude refused the turn and no fallback model was configured.",
         ),
         true,
       );
