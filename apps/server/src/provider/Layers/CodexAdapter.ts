@@ -85,6 +85,7 @@ const PROVIDER = ProviderDriverKind.make("codex");
 const CODEX_TRANSPORT_POLICY_FILENAME = "codex-transport-policy.json";
 const CODEX_TRANSPORT_POLICY_PERSISTENCE_ENV = "CAFE_CODE_PERSIST_CODEX_HTTP_FALLBACK";
 const CODEX_WEBSOCKET_FALLBACK_REASON = "responses_websocket_stream_disconnected";
+const CODEX_TURN_DIFF_PREVIEW_CHARS = 4_096;
 
 class CodexTransportPolicyFileError extends Data.TaggedError("CodexTransportPolicyFileError")<{
   readonly cause: unknown;
@@ -748,6 +749,42 @@ function eventRawSource(event: ProviderEvent): NonNullable<ProviderRuntimeEvent[
   return event.kind === "request" ? "codex.app-server.request" : "codex.app-server.notification";
 }
 
+function hashTextSha256(text: string): string {
+  return Crypto.createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+function summarizeCodexTurnDiffPayload(payload: {
+  readonly threadId?: unknown;
+  readonly turnId?: unknown;
+  readonly diff: string;
+}): Record<string, unknown> {
+  const diff = payload.diff;
+  return {
+    ...(typeof payload.threadId === "string" ? { threadId: payload.threadId } : {}),
+    ...(typeof payload.turnId === "string" ? { turnId: payload.turnId } : {}),
+    diffPreview: diff.slice(0, CODEX_TURN_DIFF_PREVIEW_CHARS),
+    diffCharLength: diff.length,
+    diffSha256: hashTextSha256(diff),
+    diffTruncated: diff.length > CODEX_TURN_DIFF_PREVIEW_CHARS,
+  };
+}
+
+function sanitizeNativeProviderEventForLog(event: ProviderEvent): ProviderEvent {
+  if (event.method !== "turn/diff/updated") {
+    return event;
+  }
+
+  const payload = readPayload(EffectCodexSchema.V2TurnDiffUpdatedNotification, event.payload);
+  if (!payload) {
+    return event;
+  }
+
+  return {
+    ...event,
+    payload: summarizeCodexTurnDiffPayload(payload),
+  };
+}
+
 function providerRefsFromEvent(
   event: ProviderEvent,
 ): ProviderRuntimeEvent["providerRefs"] | undefined {
@@ -762,6 +799,7 @@ function providerRefsFromEvent(
 function runtimeEventBase(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
+  options?: { readonly rawPayload?: unknown },
 ): Omit<ProviderRuntimeEvent, "type" | "payload"> {
   const refs = providerRefsFromEvent(event);
   return {
@@ -776,7 +814,7 @@ function runtimeEventBase(
     raw: {
       source: eventRawSource(event),
       method: event.method,
-      payload: event.payload ?? {},
+      payload: options?.rawPayload ?? event.payload ?? {},
     },
   };
 }
@@ -1148,12 +1186,23 @@ function mapToRuntimeEvents(
     if (!payload) {
       return [];
     }
+    const summarizedPayload = summarizeCodexTurnDiffPayload(payload);
     return [
       {
-        ...runtimeEventBase(event, canonicalThreadId),
+        ...runtimeEventBase(event, canonicalThreadId, {
+          rawPayload: summarizedPayload,
+        }),
         type: "turn.diff.updated",
         payload: {
-          unifiedDiff: payload.diff,
+          // Codex can emit very large full-worktree diffs many times during a
+          // single long turn. Upstream CLI/TUI behavior treats these as
+          // lightweight change/checkpoint signals; it does not force later user
+          // input/progress through repeated multi-megabyte diff payloads. Keep a
+          // bounded preview plus length/hash metadata in `raw` so diagnostics can
+          // prove which diff Cafe saw without making provider-journal replay,
+          // projection, debug snapshots, and renderer delivery pay for the full
+          // body on every update.
+          unifiedDiff: summarizedPayload.diffPreview as string,
         },
       },
     ];
@@ -2408,7 +2457,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     if (!nativeEventLogger) {
       return;
     }
-    yield* nativeEventLogger.write(event, event.threadId);
+    yield* nativeEventLogger.write(sanitizeNativeProviderEventForLog(event), event.threadId);
   });
 
   const stopSessionInternal = Effect.fn("stopSessionInternal")(function* (

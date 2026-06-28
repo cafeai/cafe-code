@@ -1,4 +1,6 @@
 // @effect-diagnostics globalDate:off
+import * as Crypto from "node:crypto";
+
 import {
   ProviderRuntimeEvent,
   type ProviderDaemonEventRecord,
@@ -101,6 +103,9 @@ const PERSISTENT_JOURNAL_PRUNE_BATCH_SIZE = 10_000;
 const PERSISTENT_JOURNAL_PRUNE_BATCH_PAUSE_MS = 25;
 const PERSISTENT_JOURNAL_STARTUP_PRUNE_DELAY_MS = 5_000;
 const PROVIDER_DAEMON_EVENT_ID_INDEX_NAME = "idx_provider_daemon_events_owner_event_id";
+const TURN_DIFF_JOURNAL_PREVIEW_CHARS = 4_096;
+const TURN_DIFF_JOURNAL_COMPACT_THRESHOLD_CHARS = 256 * 1024;
+const TURN_DIFF_JOURNAL_COMPACT_BATCH_SIZE = 100;
 
 interface PersistedEventRow {
   readonly cursor: number;
@@ -143,6 +148,57 @@ function rowToRecord(row: PersistedEventRow): ProviderDaemonEventRecord {
 
 function runtimeEventId(event: ProviderRuntimeEventValue): string {
   return String(event.eventId);
+}
+
+function hashTextSha256(text: string): string {
+  return Crypto.createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+function readRecordPayload(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function compactTurnDiffEventForJournal(
+  event: ProviderRuntimeEventValue,
+): ProviderRuntimeEventValue {
+  if (event.type !== "turn.diff.updated") {
+    return event;
+  }
+
+  const diff = event.payload.unifiedDiff;
+  const rawPayload = readRecordPayload(event.raw?.payload);
+  const rawDiff = typeof rawPayload.diff === "string" ? rawPayload.diff : undefined;
+  const sourceDiff = rawDiff ?? diff;
+  if (
+    sourceDiff.length <= TURN_DIFF_JOURNAL_COMPACT_THRESHOLD_CHARS &&
+    rawDiff === undefined &&
+    diff.length <= TURN_DIFF_JOURNAL_PREVIEW_CHARS
+  ) {
+    return event;
+  }
+
+  const safeRawPayload = { ...rawPayload };
+  delete safeRawPayload.diff;
+  const diffPreview = sourceDiff.slice(0, TURN_DIFF_JOURNAL_PREVIEW_CHARS);
+  return {
+    ...event,
+    payload: {
+      unifiedDiff: diffPreview,
+    },
+    raw: {
+      ...(event.raw ?? { source: "codex.app-server.notification" as const }),
+      payload: {
+        ...safeRawPayload,
+        diffPreview,
+        diffCharLength: sourceDiff.length,
+        diffSha256: hashTextSha256(sourceDiff),
+        diffTruncated: sourceDiff.length > TURN_DIFF_JOURNAL_PREVIEW_CHARS,
+        compactedForProviderJournal: true,
+      },
+    },
+  };
 }
 
 export const makePersistentProviderDaemonEventJournal = (options?: {
@@ -232,8 +288,58 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
       },
     );
 
+    const compactLargeTurnDiffRows = Effect.fn(
+      "ProviderDaemonPersistentEventJournal.compactLargeTurnDiffRows",
+    )(function* () {
+      // This is intentionally a post-readiness bounded maintenance task, not a
+      // migration. Older Cafe builds persisted repeated full Codex
+      // `turn/diff/updated` bodies into the daemon journal, and a single active
+      // long-running Lean turn can leave many ~30 MB rows near the live replay
+      // cursor. Replaying those rows puts user-message and steer-processing
+      // events behind megabytes of JSON parsing, unlike the Codex CLI/TUI. Keep
+      // retained diff records cryptographically identifiable while removing the
+      // full body from the hot restart/replay path.
+      let compactedCount = TURN_DIFF_JOURNAL_COMPACT_BATCH_SIZE;
+      while (compactedCount >= TURN_DIFF_JOURNAL_COMPACT_BATCH_SIZE) {
+        const rows = (yield* sql`
+          SELECT
+            cursor,
+            emitted_at AS "emittedAt",
+            event_json AS "eventJson"
+          FROM provider_daemon_events
+          WHERE owner_key = ${ownerKey}
+            AND length(event_json) > ${TURN_DIFF_JOURNAL_COMPACT_THRESHOLD_CHARS}
+            AND json_extract(event_json, '$.type') = 'turn.diff.updated'
+          ORDER BY cursor ASC
+          LIMIT ${TURN_DIFF_JOURNAL_COMPACT_BATCH_SIZE}
+        `.pipe(Effect.orDie)) as unknown as ReadonlyArray<PersistedEventRow>;
+
+        compactedCount = 0;
+        for (const row of rows) {
+          const originalEvent = decodeProviderRuntimeEventJson(row.eventJson);
+          const compactedEvent = compactTurnDiffEventForJournal(originalEvent);
+          const compactedJson = encodeProviderRuntimeEventJson(compactedEvent);
+          if (compactedJson === row.eventJson) {
+            continue;
+          }
+          yield* sql`
+            UPDATE provider_daemon_events
+            SET event_json = ${compactedJson}
+            WHERE owner_key = ${ownerKey}
+              AND cursor = ${normalizeSqlNumber(row.cursor, 0)}
+          `.pipe(Effect.orDie);
+          compactedCount += 1;
+        }
+
+        if (compactedCount >= TURN_DIFF_JOURNAL_COMPACT_BATCH_SIZE) {
+          yield* Effect.sleep(Duration.millis(PERSISTENT_JOURNAL_PRUNE_BATCH_PAUSE_MS));
+        }
+      }
+    });
+
     yield* Effect.sleep(Duration.millis(startupPruneDelayMs)).pipe(
       Effect.andThen(pruneToCapacity()),
+      Effect.andThen(compactLargeTurnDiffRows()),
       Effect.andThen(ensureEventIdIndex()),
       Effect.ignoreCause({ log: true }),
       Effect.forkScoped,
@@ -283,7 +389,8 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
 
     const publish = (event: ProviderRuntimeEventValue): Effect.Effect<ProviderDaemonEventRecord> =>
       Effect.gen(function* () {
-        const eventId = runtimeEventId(event);
+        const compactedEvent = compactTurnDiffEventForJournal(event);
+        const eventId = runtimeEventId(compactedEvent);
         if (eventIdIndexReady) {
           const existingRows = (yield* sql`
             SELECT
@@ -312,7 +419,7 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
           VALUES (
             ${ownerKey},
             ${emittedAt},
-            ${encodeProviderRuntimeEventJson(event)}
+            ${encodeProviderRuntimeEventJson(compactedEvent)}
           )
           RETURNING
             cursor,

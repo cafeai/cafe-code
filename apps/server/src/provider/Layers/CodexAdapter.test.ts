@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import assert from "node:assert/strict";
+import * as crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -534,6 +535,54 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       assert.equal(firstEvent.value.itemId, "msg_1");
       assert.equal(firstEvent.value.turnId, "turn-1");
       assert.equal(firstEvent.value.payload.itemType, "assistant_message");
+    }),
+  );
+
+  it.effect("bounds large turn diff updates before they enter the canonical runtime stream", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      const largeDiff = `diff --git a/file.txt b/file.txt\n${"+".repeat(12_000)}`;
+
+      yield* runtime.emit({
+        id: asEventId("evt-turn-diff-large"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/diff/updated",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        payload: {
+          threadId: "provider-thread-1",
+          turnId: "turn-1",
+          diff: largeDiff,
+        },
+      });
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      assert.equal(firstEvent.value.type, "turn.diff.updated");
+      if (firstEvent.value.type !== "turn.diff.updated") {
+        return;
+      }
+      assert.equal(firstEvent.value.payload.unifiedDiff.length, 4_096);
+      assert.notEqual(firstEvent.value.payload.unifiedDiff, largeDiff);
+
+      const rawPayload = firstEvent.value.raw?.payload as Record<string, unknown> | undefined;
+      assert.ok(rawPayload);
+      assert.equal(rawPayload.diffCharLength, largeDiff.length);
+      assert.equal(rawPayload.diffTruncated, true);
+      assert.equal(
+        rawPayload.diffSha256,
+        crypto.createHash("sha256").update(largeDiff, "utf8").digest("hex"),
+      );
+      assert.equal(typeof rawPayload.diffPreview, "string");
+      assert.equal((rawPayload.diffPreview as string).length, 4_096);
+      assert.equal(Object.hasOwn(rawPayload, "diff"), false);
     }),
   );
 

@@ -1618,9 +1618,11 @@ function threadHasSteerProcessingStarted(thread: Thread, pending: PendingSteerDi
     const payload = readDebugRecord(activity.payload);
     const taskId = readDebugString(payload?.taskId);
     const description = readDebugString(payload?.description);
+    const detail = readDebugString(payload?.detail);
     const isSteerProcessingActivity =
       taskId?.startsWith("codex-turn-steer-processing:") === true ||
-      description === "Codex app-server began processing turn/steer.";
+      description === "Codex app-server began processing turn/steer." ||
+      detail === "Codex app-server began processing turn/steer.";
     if (!isSteerProcessingActivity) {
       return false;
     }
