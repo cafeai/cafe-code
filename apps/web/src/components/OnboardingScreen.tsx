@@ -28,7 +28,12 @@ import {
 } from "@cafecode/contracts/settings";
 
 import { APP_BASE_NAME } from "../branding";
-import { resolveSidebarBrandImageSrc, uploadSidebarBrandImage } from "../brandingImages";
+import {
+  DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES,
+  DEFAULT_SIDEBAR_BRAND_IMAGE_SRC_SET,
+  resolveSidebarBrandImageSrc,
+  uploadSidebarBrandImage,
+} from "../brandingImages";
 import { isElectron } from "~/env";
 import { ensureLocalApi } from "~/localApi";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
@@ -495,7 +500,7 @@ function CustomizePage() {
           }
           description={`Shown as “${brandPrefix} Code” in the sidebar.`}
           index={1}
-          title="Name"
+          title="Code Name"
         />
         <CustomizeRow
           control={
@@ -538,15 +543,15 @@ function CustomizePage() {
         <CustomizeRow
           control={
             <div className="flex items-center gap-2">
-              {usesDefaultImage ? null : (
-                <img
-                  alt=""
-                  aria-hidden="true"
-                  className="h-10 w-8 rounded-md object-cover ring-1 ring-border"
-                  draggable={false}
-                  src={imageSrc}
-                />
-              )}
+              <img
+                alt=""
+                aria-hidden="true"
+                className="h-10 w-8 rounded-md object-cover ring-1 ring-border"
+                draggable={false}
+                sizes={usesDefaultImage ? DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES : undefined}
+                src={imageSrc}
+                srcSet={usesDefaultImage ? DEFAULT_SIDEBAR_BRAND_IMAGE_SRC_SET : undefined}
+              />
               <Button
                 disabled={imageUploading}
                 onClick={() => fileInputRef.current?.click()}
