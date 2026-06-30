@@ -1306,3 +1306,11 @@ label:has(> select#reasoning-effort) select {
     animation: none;
   }
 }
+
+/* Theme change crossfade — tunes the View Transitions snapshot fade used when
+   switching between light and dark (see hooks/useTheme.ts). */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 240ms;
+  animation-timing-function: ease;
+}

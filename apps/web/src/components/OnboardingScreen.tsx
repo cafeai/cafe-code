@@ -591,7 +591,10 @@ function CustomizePage() {
               />
             </div>
           }
-          description={imageError ?? "Use your own PNG, JPEG, GIF, or WebP (under 1 MB)."}
+          description={
+            imageError ??
+            "Upload your own PNG, JPEG, GIF, or WebP (under 1 MB), or keep the default."
+          }
           descriptionError={Boolean(imageError)}
           index={4}
           title="Sidebar image"

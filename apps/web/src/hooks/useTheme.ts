@@ -10,7 +10,7 @@ const STORAGE_KEY = "cafe-code:theme";
 const LEGACY_STORAGE_KEY = "cafecode:theme";
 const MEDIA_QUERY = "(prefers-color-scheme: dark)";
 const DEFAULT_THEME_SNAPSHOT: ThemeSnapshot = {
-  theme: "system",
+  theme: "dark",
   systemDark: false,
 };
 const THEME_COLOR_META_NAME = "theme-color";
@@ -94,23 +94,61 @@ export function syncBrowserChromeTheme() {
   ensureThemeColorMetaTag().setAttribute("content", backgroundColor);
 }
 
-function applyTheme(theme: Theme, suppressTransitions = false) {
-  if (typeof document === "undefined" || typeof window === "undefined") return;
-  if (suppressTransitions) {
-    document.documentElement.classList.add("no-transitions");
-  }
+function prefersReducedMotion() {
+  return (
+    typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
+function applyThemeClass(theme: Theme) {
   const isDark = theme === "dark" || (theme === "system" && getSystemDark());
   document.documentElement.classList.toggle("dark", isDark);
   syncBrowserChromeTheme();
   syncDesktopTheme(theme);
-  if (suppressTransitions) {
-    // Force a reflow so the no-transitions class takes effect before removal
-    // oxlint-disable-next-line no-unused-expressions
-    document.documentElement.offsetHeight;
-    requestAnimationFrame(() => {
-      document.documentElement.classList.remove("no-transitions");
-    });
+}
+
+/**
+ * Crossfade the whole document between themes using the View Transitions API.
+ * Returns false when unavailable (or reduced-motion) so the caller can fall
+ * back to an instant swap. We suppress element-level transitions during the
+ * fade so the snapshot crossfade is the only animation.
+ */
+function startThemeCrossfade(mutate: () => void): boolean {
+  const startViewTransition = (
+    document as Document & {
+      startViewTransition?: (callback: () => void) => { finished: Promise<void> };
+    }
+  ).startViewTransition;
+  if (typeof startViewTransition !== "function" || prefersReducedMotion()) {
+    return false;
   }
+  document.documentElement.classList.add("no-transitions");
+  const transition = startViewTransition.call(document, mutate);
+  void transition.finished.finally(() => {
+    document.documentElement.classList.remove("no-transitions");
+  });
+  return true;
+}
+
+function applyTheme(theme: Theme, animate = false) {
+  if (typeof document === "undefined" || typeof window === "undefined") return;
+  if (!animate) {
+    applyThemeClass(theme);
+    return;
+  }
+  if (startThemeCrossfade(() => applyThemeClass(theme))) {
+    return;
+  }
+  // Fallback: instant swap with element transitions suppressed to avoid an
+  // abrupt partial transition.
+  document.documentElement.classList.add("no-transitions");
+  applyThemeClass(theme);
+  // Force a reflow so the no-transitions class takes effect before removal
+  // oxlint-disable-next-line no-unused-expressions
+  document.documentElement.offsetHeight;
+  requestAnimationFrame(() => {
+    document.documentElement.classList.remove("no-transitions");
+  });
 }
 
 function syncDesktopTheme(theme: Theme) {
