@@ -187,6 +187,12 @@ import { SidebarUpdatePill } from "./sidebar/SidebarUpdatePill";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
+import { FirstRunHint } from "./FirstRunHint";
+import {
+  FIRST_RUN_HINT_KEYS,
+  shouldShowAddProjectHint,
+  withDismissedHint,
+} from "../firstRunOnboarding";
 import { readEnvironmentApi } from "../environmentApi";
 import { useSettings, useUpdateSettings } from "~/hooks/useSettings";
 import { useServerKeybindings } from "../rpc/serverState";
@@ -3218,6 +3224,8 @@ interface SidebarProjectsContentProps {
   threadPreviewCount: SidebarThreadPreviewCount;
   updateSettings: ReturnType<typeof useUpdateSettings>["updateSettings"];
   openAddProject: () => void;
+  showAddProjectHint: boolean;
+  onDismissAddProjectHint: () => void;
   isManualProjectSorting: boolean;
   projectDnDSensors: ReturnType<typeof useSensors>;
   projectCollisionDetection: CollisionDetection;
@@ -3266,6 +3274,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     threadPreviewCount,
     updateSettings,
     openAddProject,
+    showAddProjectHint,
+    onDismissAddProjectHint,
     isManualProjectSorting,
     projectDnDSensors,
     projectCollisionDetection,
@@ -3295,6 +3305,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     sidebarBrandImage,
     showSidebarAttribution,
   } = props;
+
+  const addProjectHintAnchorRef = useRef<HTMLButtonElement>(null);
 
   const handleProjectSortOrderChange = useCallback(
     (sortOrder: SidebarProjectSortOrder) => {
@@ -3391,6 +3403,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
               <TooltipTrigger
                 render={
                   <button
+                    ref={addProjectHintAnchorRef}
                     type="button"
                     aria-label="Add project"
                     data-testid="sidebar-add-project-trigger"
@@ -3403,6 +3416,13 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
               </TooltipTrigger>
               <TooltipPopup side="right">Add project</TooltipPopup>
             </Tooltip>
+            <FirstRunHint
+              anchor={addProjectHintAnchorRef}
+              message="Start by adding your first project"
+              onDismiss={onDismissAddProjectHint}
+              open={showAddProjectHint}
+              testId="add-project-hint"
+            />
           </div>
         </div>
 
@@ -3566,6 +3586,26 @@ export default function Sidebar() {
   const routeThreadKey = routeThreadRef ? scopedThreadKey(routeThreadRef) : null;
   const keybindings = useServerKeybindings();
   const openAddProjectCommandPalette = useCommandPaletteStore((store) => store.openAddProject);
+
+  const onboardingCompleted = useSettings((s) => s.onboardingCompleted);
+  const dismissedFirstRunHints = useSettings((s) => s.dismissedFirstRunHints);
+  const showAddProjectHint = shouldShowAddProjectHint({
+    onboardingCompleted,
+    dismissedHints: dismissedFirstRunHints,
+    projectCount: projects.length,
+  });
+  const dismissAddProjectHint = useCallback(() => {
+    updateSettings({
+      dismissedFirstRunHints: withDismissedHint(
+        dismissedFirstRunHints,
+        FIRST_RUN_HINT_KEYS.addFirstProject,
+      ),
+    });
+  }, [dismissedFirstRunHints, updateSettings]);
+  const handleOpenAddProject = useCallback(() => {
+    dismissAddProjectHint();
+    openAddProjectCommandPalette();
+  }, [dismissAddProjectHint, openAddProjectCommandPalette]);
   const [expandedThreadListsByProject, setExpandedThreadListsByProject] = useState<
     ReadonlySet<string>
   >(() => new Set());
@@ -4167,7 +4207,9 @@ export default function Sidebar() {
               projectGroupingMode={sidebarProjectGroupingMode}
               threadPreviewCount={sidebarThreadPreviewCount}
               updateSettings={updateSettings}
-              openAddProject={openAddProjectCommandPalette}
+              openAddProject={handleOpenAddProject}
+              showAddProjectHint={showAddProjectHint}
+              onDismissAddProjectHint={dismissAddProjectHint}
               isManualProjectSorting={isManualProjectSorting}
               projectDnDSensors={projectDnDSensors}
               projectCollisionDetection={projectCollisionDetection}

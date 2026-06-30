@@ -14,6 +14,7 @@ import { APP_DISPLAY_NAME } from "../branding";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
 import { CommandPalette } from "../components/CommandPalette";
 import { InitialBackendBootstrapSurface } from "../components/InitialBackendBootstrapSurface";
+import { OnboardingSurface } from "../components/OnboardingSurface";
 import { DesktopNotificationWatcher } from "../components/DesktopNotificationWatcher";
 import { ProviderUpdateLaunchNotification } from "../components/ProviderUpdateLaunchNotification";
 import {
@@ -164,7 +165,9 @@ function RootRouteView() {
         {primaryEnvironmentAuthenticated ? <WebSocketConnectionCoordinator /> : null}
         {primaryEnvironmentAuthenticated ? (
           <WebSocketConnectionSurface>
-            <InitialBackendBootstrapSurface>{appShell}</InitialBackendBootstrapSurface>
+            <InitialBackendBootstrapSurface>
+              <OnboardingSurface>{appShell}</OnboardingSurface>
+            </InitialBackendBootstrapSurface>
           </WebSocketConnectionSurface>
         ) : (
           appShell

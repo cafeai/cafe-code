@@ -16,6 +16,40 @@ function PopoverTrigger({ className, children, ...props }: PopoverPrimitive.Trig
   );
 }
 
+/**
+ * Chevron extrusion that points back at the anchor. Tuned for horizontal
+ * placement (`side="right"` / `side="left"`): the base shape points left and
+ * is mirrored for the left side, which avoids the cross-axis centering drift
+ * you get from rotating a non-square SVG. Top/bottom fall back to a rotation.
+ */
+function PopoverArrow({ className, ...props }: PopoverPrimitive.Arrow.Props) {
+  return (
+    <PopoverPrimitive.Arrow
+      className={cn(
+        "data-[side=right]:left-[-7px] data-[side=left]:right-[-7px] data-[side=left]:scale-x-[-1]",
+        "data-[side=bottom]:top-[-7px] data-[side=bottom]:rotate-[-90deg] data-[side=top]:bottom-[-7px] data-[side=top]:rotate-90",
+        className,
+      )}
+      data-slot="popover-arrow"
+      {...props}
+    >
+      <svg fill="none" height="16" viewBox="0 0 8 16" width="8">
+        {/* Fill matching the popover surface; base edge (x=8) sits flush against
+            the popup so the seam is hidden. */}
+        <path className="fill-popover" d="M0 8L8 0V16L0 8Z" />
+        {/* Hairline border on just the two outer edges. */}
+        <path
+          className="stroke-border"
+          d="M8 0L0 8L8 16"
+          fill="none"
+          strokeLinejoin="round"
+          strokeWidth="1"
+        />
+      </svg>
+    </PopoverPrimitive.Arrow>
+  );
+}
+
 function PopoverPopup({
   children,
   className,
@@ -25,6 +59,7 @@ function PopoverPopup({
   alignOffset = 0,
   tooltipStyle = false,
   anchor,
+  arrow = false,
   ...props
 }: PopoverPrimitive.Popup.Props & {
   side?: PopoverPrimitive.Positioner.Props["side"];
@@ -33,6 +68,7 @@ function PopoverPopup({
   alignOffset?: PopoverPrimitive.Positioner.Props["alignOffset"];
   tooltipStyle?: boolean;
   anchor?: PopoverPrimitive.Positioner.Props["anchor"];
+  arrow?: boolean;
 }) {
   return (
     <PopoverPrimitive.Portal>
@@ -55,6 +91,7 @@ function PopoverPopup({
           data-slot="popover-popup"
           {...props}
         >
+          {arrow ? <PopoverArrow /> : null}
           <PopoverPrimitive.Viewport
             className={cn(
               "relative size-full max-h-(--available-height) overflow-clip px-(--viewport-inline-padding) py-4 [--viewport-inline-padding:--spacing(4)] has-data-[slot=calendar]:p-2 data-instant:transition-none **:data-current:data-ending-style:opacity-0 **:data-current:data-starting-style:opacity-0 **:data-previous:data-ending-style:opacity-0 **:data-previous:data-starting-style:opacity-0 **:data-current:w-[calc(var(--popup-width)-2*var(--viewport-inline-padding)-2px)] **:data-previous:w-[calc(var(--popup-width)-2*var(--viewport-inline-padding)-2px)] **:data-current:opacity-100 **:data-previous:opacity-100 **:data-current:transition-opacity **:data-previous:transition-opacity",
@@ -102,6 +139,7 @@ export {
   PopoverTrigger,
   PopoverPopup,
   PopoverPopup as PopoverContent,
+  PopoverArrow,
   PopoverTitle,
   PopoverDescription,
   PopoverClose,

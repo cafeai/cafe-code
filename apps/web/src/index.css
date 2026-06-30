@@ -1242,3 +1242,67 @@ label:has(> select#reasoning-effort) select {
 .dark .model-picker-list::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.15);
 }
+
+/* ── First-run onboarding ─────────────────────────────────────────── */
+
+@keyframes cafe-onboarding-surface-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes cafe-onboarding-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes cafe-onboarding-logo-in {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* The whole surface fades in when onboarding mounts. */
+.cafe-onboarding {
+  animation: cafe-onboarding-surface-in 320ms ease-out both;
+}
+
+/* Each step's content rises + fades. Keyed by step so switching pages
+   replays the entrance for a smooth cross-step transition. */
+.cafe-onboarding-step {
+  animation: cafe-onboarding-rise 360ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Staggered children within a step. `--cafe-onboarding-index` sets the
+   per-item delay so rows cascade in. */
+.cafe-onboarding-item {
+  animation: cafe-onboarding-rise 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: calc(var(--cafe-onboarding-index, 0) * 70ms + 90ms);
+}
+
+.cafe-onboarding-logo {
+  animation: cafe-onboarding-logo-in 480ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cafe-onboarding,
+  .cafe-onboarding-step,
+  .cafe-onboarding-item,
+  .cafe-onboarding-logo {
+    animation: none;
+  }
+}

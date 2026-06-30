@@ -114,6 +114,16 @@ export const DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT: SidebarThreadPreviewCount = 6
 
 export const ClientSettingsSchema = Schema.Struct({
   autoOpenPlanSidebar: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // Per-device first-run flow. `onboardingCompleted` gates the full-screen
+  // onboarding surface so it only appears on a fresh install (and never loops
+  // back to itself once finished or skipped). `dismissedFirstRunHints` holds
+  // the keys of the small post-onboarding nudges (e.g. "add your first
+  // project") the user has dismissed — mirrors the
+  // `dismissedProviderUpdateNotificationKeys` pattern so hints never resurface.
+  onboardingCompleted: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  dismissedFirstRunHints: Schema.Array(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   // Per-device: surface system notifications when a thread finishes running
   // (native notifications in the desktop app, Web Push in browsers). Off by
   // default; enabling may prompt for OS-level notification permission.
@@ -570,6 +580,8 @@ export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 
 export const ClientSettingsPatch = Schema.Struct({
   autoOpenPlanSidebar: Schema.optionalKey(Schema.Boolean),
+  onboardingCompleted: Schema.optionalKey(Schema.Boolean),
+  dismissedFirstRunHints: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
   notificationsEnabled: Schema.optionalKey(Schema.Boolean),
   confirmThreadArchive: Schema.optionalKey(Schema.Boolean),
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
