@@ -183,7 +183,7 @@ function createBaseServerConfig(): ServerConfig {
     settings: {
       ...DEFAULT_SERVER_SETTINGS,
     },
-    clientSettings: DEFAULT_CLIENT_SETTINGS,
+    clientSettings: { ...DEFAULT_CLIENT_SETTINGS, onboardingCompleted: true },
   };
 }
 

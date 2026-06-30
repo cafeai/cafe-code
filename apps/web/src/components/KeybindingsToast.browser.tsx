@@ -128,7 +128,7 @@ function createBaseServerConfig(): ServerConfig {
         },
       },
     },
-    clientSettings: DEFAULT_CLIENT_SETTINGS,
+    clientSettings: { ...DEFAULT_CLIENT_SETTINGS, onboardingCompleted: true },
   };
 }
 
