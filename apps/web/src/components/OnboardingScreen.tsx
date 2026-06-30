@@ -476,7 +476,7 @@ function CustomizePage() {
   return (
     <div className="cafe-onboarding-step grid w-full max-w-xl gap-6">
       <div className="cafe-onboarding-item grid gap-2" style={staggerStyle(0)}>
-        <h1 className="font-semibold text-2xl tracking-tight">Make it yours</h1>
+        <h1 className="font-semibold text-2xl tracking-tight">Optional — Make it yours</h1>
         <p className="text-balance text-sm text-muted-foreground leading-6">
           Give {APP_BASE_NAME} your own name, colors, and image — or keep the defaults. You can
           change any of this later in Settings.
