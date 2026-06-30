@@ -290,10 +290,37 @@ const makeBinaryPathSetting = (fallback: string) =>
     Schema.withDecodingDefault(Effect.succeed(fallback)),
   );
 
-export type ProviderSettingsFormControl = "text" | "password" | "textarea" | "switch";
+export const ProviderCliRuntimeSource = Schema.Literals(["system", "bundled"]);
+export type ProviderCliRuntimeSource = typeof ProviderCliRuntimeSource.Type;
+
+const ProviderCliRuntimeSourceOptions = [
+  {
+    value: "system",
+    label: "System CLI",
+    description: "Use the provider CLI from PATH or the configured binary path.",
+  },
+  {
+    value: "bundled",
+    label: "Bundled runtime",
+    description: "Use Cafe Code's managed Windows runtime and provider install.",
+  },
+] as const;
+
+const ProviderCliRuntimeSourceSetting = ProviderCliRuntimeSource.pipe(
+  Schema.withDecodingDefault(Effect.succeed("system" as const)),
+);
+
+export type ProviderSettingsFormControl = "text" | "password" | "textarea" | "switch" | "select";
+
+export interface ProviderSettingsFormOption {
+  readonly value: string;
+  readonly label: string;
+  readonly description?: string | undefined;
+}
 
 export interface ProviderSettingsFormAnnotation {
   readonly control?: ProviderSettingsFormControl | undefined;
+  readonly options?: ReadonlyArray<ProviderSettingsFormOption> | undefined;
   readonly placeholder?: string | undefined;
   readonly hidden?: boolean | undefined;
   readonly clearWhenEmpty?: "omit" | "persist" | undefined;
@@ -340,8 +367,19 @@ export const CodexSettings = makeProviderSettingsSchema(
     binaryPath: makeBinaryPathSetting("codex").pipe(
       Schema.annotateKey({
         title: "Binary path",
-        description: "Path to the Codex binary used by this instance.",
+        description: "Path to the Codex binary used by this instance in System CLI mode.",
         providerSettingsForm: { placeholder: "codex", clearWhenEmpty: "omit" },
+      }),
+    ),
+    runtimeSource: ProviderCliRuntimeSourceSetting.pipe(
+      Schema.annotateKey({
+        title: "Runtime",
+        description: "Choose the Codex CLI runtime used by this instance.",
+        providerSettingsForm: {
+          control: "select",
+          options: ProviderCliRuntimeSourceOptions,
+          clearWhenEmpty: "omit",
+        },
       }),
     ),
     homePath: TrimmedString.pipe(
@@ -373,7 +411,7 @@ export const CodexSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "homePath", "shadowHomePath"],
+    order: ["runtimeSource", "binaryPath", "homePath", "shadowHomePath"],
   },
 );
 export type CodexSettings = typeof CodexSettings.Type;
@@ -387,8 +425,19 @@ export const ClaudeSettings = makeProviderSettingsSchema(
     binaryPath: makeBinaryPathSetting("claude").pipe(
       Schema.annotateKey({
         title: "Binary path",
-        description: "Path to the Claude binary used by this instance.",
+        description: "Path to the Claude binary used by this instance in System CLI mode.",
         providerSettingsForm: { placeholder: "claude", clearWhenEmpty: "omit" },
+      }),
+    ),
+    runtimeSource: ProviderCliRuntimeSourceSetting.pipe(
+      Schema.annotateKey({
+        title: "Runtime",
+        description: "Choose the Claude CLI runtime used by this instance.",
+        providerSettingsForm: {
+          control: "select",
+          options: ProviderCliRuntimeSourceOptions,
+          clearWhenEmpty: "omit",
+        },
       }),
     ),
     homePath: TrimmedString.pipe(
@@ -417,7 +466,7 @@ export const ClaudeSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "homePath", "launchArgs"],
+    order: ["runtimeSource", "binaryPath", "homePath", "launchArgs"],
   },
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;
@@ -538,6 +587,7 @@ const ModelSelectionPatch = Schema.Struct({
 const CodexSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
+  runtimeSource: Schema.optionalKey(ProviderCliRuntimeSource),
   homePath: Schema.optionalKey(TrimmedString),
   shadowHomePath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
@@ -546,6 +596,7 @@ const CodexSettingsPatch = Schema.Struct({
 const ClaudeSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
+  runtimeSource: Schema.optionalKey(ProviderCliRuntimeSource),
   homePath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
   launchArgs: Schema.optionalKey(TrimmedString),

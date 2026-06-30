@@ -71,6 +71,7 @@ const rpcClientMock = {
   server: {
     getConfig: vi.fn(),
     refreshProviders: vi.fn(),
+    loginProvider: vi.fn(),
     updateProvider: vi.fn(),
     restartProviderRuntime: vi.fn(),
     openSystemPromptFile: vi.fn(),
@@ -557,6 +558,26 @@ describe("wsApi", () => {
     });
     expect(rpcClientMock.server.updateProvider).toHaveBeenCalledWith({
       provider: ProviderDriverKind.make("codex"),
+    });
+  });
+
+  it("forwards provider login launches directly to the RPC client", async () => {
+    const loginResult = {
+      instanceId: ProviderInstanceId.make("codex"),
+      provider: ProviderDriverKind.make("codex"),
+      command: "codex login",
+      message: "Opened codex login in PowerShell.",
+    };
+    rpcClientMock.server.loginProvider.mockResolvedValue(loginResult);
+    const { createLocalApi } = await import("./localApi");
+
+    const api = createLocalApi(rpcClientMock as never);
+
+    await expect(
+      api.server.loginProvider({ instanceId: ProviderInstanceId.make("codex") }),
+    ).resolves.toEqual(loginResult);
+    expect(rpcClientMock.server.loginProvider).toHaveBeenCalledWith({
+      instanceId: ProviderInstanceId.make("codex"),
     });
   });
 

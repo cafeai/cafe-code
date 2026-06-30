@@ -46,6 +46,7 @@ import {
   makePackageManagedProviderMaintenanceResolver,
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "../providerMaintenance.ts";
+import { resolveProviderRuntimeEnvironment } from "../managedProviderRuntime.ts";
 import {
   codexContinuationIdentity,
   materializeCodexShadowHome,
@@ -59,12 +60,13 @@ const DRIVER_KIND = ProviderDriverKind.make("codex");
 // `codex --version` / `codex login status` / redacted usage-request path, so
 // this periodic refresh does not create hidden Codex app-server sessions.
 const PERIODIC_SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
-const UPDATE = makePackageManagedProviderMaintenanceResolver({
+const UPDATE_DEFINITION = {
   provider: DRIVER_KIND,
   npmPackageName: "@openai/codex",
   homebrewFormula: "codex",
   nativeUpdate: null,
-});
+} as const;
+const UPDATE = makePackageManagedProviderMaintenanceResolver(UPDATE_DEFINITION);
 const DEFAULT_SHADOW_HOME_ROOT = "~/.cafe-code/codex-homes";
 
 /**
@@ -92,6 +94,7 @@ const withInstanceIdentity =
     readonly displayName: string | undefined;
     readonly accentColor: string | undefined;
     readonly continuationGroupKey: string;
+    readonly authActions: ServerProvider["authActions"] | undefined;
   }) =>
   (snapshot: ServerProviderDraft): ServerProvider => ({
     ...snapshot,
@@ -99,6 +102,7 @@ const withInstanceIdentity =
     driver: DRIVER_KIND,
     ...(input.displayName ? { displayName: input.displayName } : {}),
     ...(input.accentColor ? { accentColor: input.accentColor } : {}),
+    ...(input.authActions ? { authActions: input.authActions } : {}),
     continuation: { groupKey: input.continuationGroupKey },
     runtimeCapabilities: { ...snapshot.runtimeCapabilities, liveSteer: "supported" },
   });
@@ -154,6 +158,10 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         displayName,
         accentColor,
         continuationGroupKey: continuationIdentity.continuationKey,
+        authActions:
+          layoutConfig.runtimeSource === "bundled" && process.platform === "win32"
+            ? { login: true }
+            : undefined,
       });
       if (enabled) {
         yield* materializeCodexShadowHome(homeLayout, { authSource }).pipe(
@@ -177,15 +185,27 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         authSource,
         sqliteState: homeLayout.mode === "authOverlay" ? "shadow-local" : "direct",
       });
+      const runtime = resolveProviderRuntimeEnvironment({
+        provider: DRIVER_KIND,
+        runtimeSource: layoutConfig.runtimeSource,
+        systemBinaryPath: layoutConfig.binaryPath,
+        packageMaintenance: UPDATE_DEFINITION,
+        baseEnv: processEnv,
+      });
       const effectiveConfig = {
         ...layoutConfig,
         enabled,
+        binaryPath: runtime.binaryPath,
         homePath: homeLayout.effectiveHomePath ?? "",
       } satisfies CodexSettings;
-      const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-        binaryPath: effectiveConfig.binaryPath,
-        env: processEnv,
-      });
+      const effectiveEnvironment = runtime.env;
+      const maintenanceCapabilities =
+        effectiveConfig.runtimeSource === "bundled"
+          ? runtime.maintenanceCapabilities
+          : yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
+              binaryPath: effectiveConfig.binaryPath,
+              env: effectiveEnvironment,
+            });
       const refreshCodexShadowHome = materializeCodexShadowHome(homeLayout, { authSource }).pipe(
         Effect.provideService(FileSystem.FileSystem, fileSystem),
         Effect.provideService(Path.Path, path),
@@ -198,11 +218,11 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // spawner-availability failures surfaced from the status probe below.
       const adapter = yield* makeCodexAdapter(effectiveConfig, {
         instanceId,
-        environment: processEnv,
+        environment: effectiveEnvironment,
         prepareRuntimeHome: refreshCodexShadowHome,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });
-      const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, processEnv);
+      const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, effectiveEnvironment);
 
       // Build a managed snapshot whose settings never change — mutations come
       // in as instance rebuilds from the registry rather than in-place
@@ -219,7 +239,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
             detail: cause.message,
           }),
         ),
-        Effect.andThen(checkCodexCliProviderStatus(effectiveConfig, processEnv)),
+        Effect.andThen(checkCodexCliProviderStatus(effectiveConfig, effectiveEnvironment)),
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.provideService(FileSystem.FileSystem, fileSystem),

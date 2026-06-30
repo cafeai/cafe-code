@@ -51,6 +51,7 @@ const TestHttpClientLive = Layer.succeed(
 const makeCodexConfig = (overrides: Partial<CodexSettings>): CodexSettings => ({
   enabled: false,
   binaryPath: "codex",
+  runtimeSource: "system",
   homePath: "",
   shadowHomePath: "",
   customModels: [],
@@ -60,6 +61,7 @@ const makeCodexConfig = (overrides: Partial<CodexSettings>): CodexSettings => ({
 const makeClaudeConfig = (overrides: Partial<ClaudeSettings>): ClaudeSettings => ({
   enabled: false,
   binaryPath: "claude",
+  runtimeSource: "system",
   homePath: "",
   customModels: [],
   launchArgs: "",

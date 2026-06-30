@@ -113,6 +113,7 @@ function createBaseServerConfig(): ServerConfig {
         codex: {
           enabled: true,
           binaryPath: "",
+          runtimeSource: "system",
           homePath: "",
           shadowHomePath: "",
           customModels: [],
@@ -120,6 +121,7 @@ function createBaseServerConfig(): ServerConfig {
         claudeAgent: {
           enabled: true,
           binaryPath: "",
+          runtimeSource: "system",
           homePath: "",
           customModels: [],
           launchArgs: "",

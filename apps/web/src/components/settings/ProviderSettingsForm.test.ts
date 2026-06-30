@@ -15,6 +15,7 @@ describe("ProviderSettingsForm helpers", () => {
 
     expect(codex).toBeDefined();
     expect(deriveProviderSettingsFields(codex!).map((field) => field.key)).toEqual([
+      "runtimeSource",
       "binaryPath",
       "homePath",
       "shadowHomePath",
@@ -25,10 +26,28 @@ describe("ProviderSettingsForm helpers", () => {
     const claude = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("claudeAgent")];
     expect(claude).toBeDefined();
 
-    const launchArgs = deriveProviderSettingsFields(claude!).find(
-      (field) => field.key === "launchArgs",
-    );
+    const fields = deriveProviderSettingsFields(claude!);
+    const runtimeSource = fields.find((field) => field.key === "runtimeSource");
+    const launchArgs = fields.find((field) => field.key === "launchArgs");
 
+    expect(runtimeSource).toMatchObject({
+      label: "Runtime",
+      description: "Choose the Claude CLI runtime used by this instance.",
+      control: "select",
+      defaultStringValue: "system",
+      options: [
+        {
+          value: "system",
+          label: "System CLI",
+          description: "Use the provider CLI from PATH or the configured binary path.",
+        },
+        {
+          value: "bundled",
+          label: "Bundled runtime",
+          description: "Use Cafe Code's managed Windows runtime and provider install.",
+        },
+      ],
+    });
     expect(launchArgs).toMatchObject({
       label: "Launch arguments",
       description: "Additional CLI arguments passed on session start.",
@@ -49,6 +68,24 @@ describe("ProviderSettingsForm helpers", () => {
       { forkOwned: 1, launchArgs: "--verbose" },
       launchArgs!,
       "",
+    );
+
+    expect(next).toEqual({ forkOwned: 1 });
+  });
+
+  it("omits select fields when they are reset to their default value", () => {
+    const codex = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")];
+    expect(codex).toBeDefined();
+
+    const runtimeSource = deriveProviderSettingsFields(codex!).find(
+      (field) => field.key === "runtimeSource",
+    );
+    expect(runtimeSource).toBeDefined();
+
+    const next = nextProviderConfigWithFieldValue(
+      { forkOwned: 1, runtimeSource: "bundled" },
+      runtimeSource!,
+      "system",
     );
 
     expect(next).toEqual({ forkOwned: 1 });

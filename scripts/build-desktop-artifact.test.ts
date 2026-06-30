@@ -5,13 +5,17 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
 import {
+  MANAGED_WINDOWS_NODE_VERSION,
+  desktopArtifactListSatisfiesTarget,
   resolveDesktopRuntimeDependencies,
   resolveBuildOptions,
   resolveDesktopBuildIconAssets,
   resolveDesktopProductName,
   resolveDesktopUpdateChannel,
+  resolveManagedWindowsNodeArchive,
   resolveMockUpdateServerPort,
   resolveMockUpdateServerUrl,
+  shouldStageWindowsManagedRuntime,
 } from "./build-desktop-artifact.ts";
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 
@@ -69,6 +73,50 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         effect: "4.0.0-beta.59",
       },
     );
+  });
+
+  it("stages managed runtimes only for Windows NSIS installers", () => {
+    assert.equal(shouldStageWindowsManagedRuntime("win", "nsis"), true);
+    assert.equal(shouldStageWindowsManagedRuntime("win", "nsis-web"), true);
+    assert.equal(shouldStageWindowsManagedRuntime("win", "portable"), false);
+    assert.equal(shouldStageWindowsManagedRuntime("mac", "dmg"), false);
+    assert.equal(shouldStageWindowsManagedRuntime("linux", "AppImage"), false);
+  });
+
+  it("requires a Windows NSIS exe artifact instead of accepting intermediate files", () => {
+    assert.equal(
+      desktopArtifactListSatisfiesTarget("win", "nsis", [
+        "release/builder-debug.yml",
+        "release/cafe-code-0.0.51-x64.nsis.7z",
+      ]),
+      false,
+    );
+    assert.equal(
+      desktopArtifactListSatisfiesTarget("win", "nsis", [
+        "release/Cafe-Code-0.0.51-x64.exe",
+        "release/cafe-code-0.0.51-x64.nsis.7z",
+      ]),
+      true,
+    );
+    assert.equal(desktopArtifactListSatisfiesTarget("mac", "dmg", ["release/Cafe.dmg"]), true);
+  });
+
+  it("pins Windows managed Node archives by version, arch, and hash", () => {
+    assert.deepStrictEqual(resolveManagedWindowsNodeArchive("x64"), {
+      arch: "x64",
+      fileName: `node-v${MANAGED_WINDOWS_NODE_VERSION}-win-x64.zip`,
+      sourceDirectoryName: `node-v${MANAGED_WINDOWS_NODE_VERSION}-win-x64`,
+      sha256: "fba577c4bb87df04d54dd87bbdaa5a2272f1f99a2acbf9152e1a91b8b5f0b279",
+      url: `https://nodejs.org/dist/v${MANAGED_WINDOWS_NODE_VERSION}/node-v${MANAGED_WINDOWS_NODE_VERSION}-win-x64.zip`,
+    });
+    assert.deepStrictEqual(resolveManagedWindowsNodeArchive("arm64"), {
+      arch: "arm64",
+      fileName: `node-v${MANAGED_WINDOWS_NODE_VERSION}-win-arm64.zip`,
+      sourceDirectoryName: `node-v${MANAGED_WINDOWS_NODE_VERSION}-win-arm64`,
+      sha256: "0cd29eeb64f3c649db2c4c868779ca277f5a4c49e26c69e5928d01fe0ae06da8",
+      url: `https://nodejs.org/dist/v${MANAGED_WINDOWS_NODE_VERSION}/node-v${MANAGED_WINDOWS_NODE_VERSION}-win-arm64.zip`,
+    });
+    assert.equal(resolveManagedWindowsNodeArchive("universal"), null);
   });
 
   it("falls back to the default mock update port when the configured port is blank", () => {
