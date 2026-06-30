@@ -1,4 +1,12 @@
-import { type CSSProperties, useCallback, useMemo, useState } from "react";
+import {
+  type ChangeEvent,
+  type CSSProperties,
+  type ReactNode,
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -7,17 +15,28 @@ import {
   LoaderIcon,
   LogInIcon,
   RefreshCwIcon,
+  UploadIcon,
 } from "lucide-react";
 
 import type { ProviderDriverKind, ServerProvider } from "@cafecode/contracts";
+import {
+  DEFAULT_APP_ACCENT_COLOR,
+  DEFAULT_BRAND_WORDMARK_PREFIX,
+  DEFAULT_SIDEBAR_BRAND_IMAGE,
+  MAX_BRAND_WORDMARK_PREFIX_LENGTH,
+  MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
+} from "@cafecode/contracts/settings";
 
 import { APP_BASE_NAME } from "../branding";
+import { resolveSidebarBrandImageSrc, uploadSidebarBrandImage } from "../brandingImages";
 import { isElectron } from "~/env";
 import { ensureLocalApi } from "~/localApi";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
-import { useUpdateSettings } from "~/hooks/useSettings";
+import { useSettings, useUpdateSettings } from "~/hooks/useSettings";
+import { useTheme } from "~/hooks/useTheme";
 import { useServerProviders } from "~/rpc/serverState";
 import { cn } from "~/lib/utils";
+import { ColorWheelPicker } from "./settings/ColorWheelPicker";
 import { PROVIDER_CLIENT_DEFINITIONS } from "./settings/providerDriverMeta";
 import {
   getProviderSummary,
@@ -26,8 +45,17 @@ import {
 } from "./settings/providerStatus";
 import { RedactedSensitiveText } from "./settings/RedactedSensitiveText";
 import { Button } from "./ui/button";
+import { DraftInput } from "./ui/draft-input";
 import { Spinner } from "./ui/spinner";
 import { stackedThreadToast, toastManager } from "./ui/toast";
+
+const APP_ACCENT_PICKER_FALLBACK = "#2563eb";
+const SIDEBAR_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const THEME_CHOICES = [
+  { value: "system", label: "System" },
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+] as const;
 
 /**
  * Per-driver install docs + login command shown in the onboarding providers
@@ -361,7 +389,221 @@ function ProvidersPage() {
   );
 }
 
-type OnboardingStep = "intro" | "providers";
+function CustomizeRow({
+  index,
+  title,
+  description,
+  descriptionError = false,
+  control,
+}: {
+  readonly index: number;
+  readonly title: string;
+  readonly description: string;
+  readonly descriptionError?: boolean;
+  readonly control: ReactNode;
+}) {
+  return (
+    <li
+      className="cafe-onboarding-item flex items-center justify-between gap-4 rounded-xl border border-border bg-card p-4 text-card-foreground shadow-xs"
+      style={staggerStyle(index)}
+    >
+      <div className="min-w-0">
+        <h2 className="font-semibold text-sm">{title}</h2>
+        <p
+          className={cn(
+            "mt-0.5 text-xs leading-5",
+            descriptionError ? "text-destructive" : "text-muted-foreground",
+          )}
+        >
+          {description}
+        </p>
+      </div>
+      <div className="flex shrink-0 items-center">{control}</div>
+    </li>
+  );
+}
+
+/**
+ * "Make it yours" — exposes the major personalization knobs (name, accent
+ * color, theme, sidebar image) inline so a fresh install can be branded before
+ * entering the app. Each control reuses the same setting plumbing as the
+ * Appearance settings, so changes persist and stay in sync.
+ */
+function CustomizePage() {
+  const { theme, setTheme } = useTheme();
+  const settings = useSettings();
+  const { updateSettings } = useUpdateSettings();
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [imageError, setImageError] = useState<string | null>(null);
+  const [imageUploading, setImageUploading] = useState(false);
+
+  const brandPrefix = settings.brandWordmarkPrefix.trim() || DEFAULT_BRAND_WORDMARK_PREFIX;
+  const usesDefaultImage = settings.sidebarBrandImage === DEFAULT_SIDEBAR_BRAND_IMAGE;
+  const imageSrc = resolveSidebarBrandImageSrc(settings.sidebarBrandImage);
+
+  const handleImageChange = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.currentTarget.files?.[0];
+      event.currentTarget.value = "";
+      if (!file) return;
+      if (!SIDEBAR_IMAGE_MIME_TYPES.has(file.type)) {
+        setImageError("Choose a PNG, JPEG, GIF, or WebP image.");
+        return;
+      }
+      if (file.size > MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES) {
+        setImageError("Choose an image under 1 MB.");
+        return;
+      }
+      setImageUploading(true);
+      try {
+        const sidebarBrandImage = await uploadSidebarBrandImage(file);
+        setImageError(null);
+        updateSettings({ sidebarBrandImage, sidebarBrandImageDataUrl: "" });
+      } catch (error) {
+        setImageError(error instanceof Error ? error.message : "Could not upload that image.");
+      } finally {
+        setImageUploading(false);
+      }
+    },
+    [updateSettings],
+  );
+
+  return (
+    <div className="cafe-onboarding-step grid w-full max-w-xl gap-6">
+      <div className="cafe-onboarding-item grid gap-2" style={staggerStyle(0)}>
+        <h1 className="font-semibold text-2xl tracking-tight">Make it yours</h1>
+        <p className="text-balance text-sm text-muted-foreground leading-6">
+          Give {APP_BASE_NAME} your own name, colors, and image — or keep the defaults. You can
+          change any of this later in Settings.
+        </p>
+      </div>
+      <ul className="grid gap-3">
+        <CustomizeRow
+          control={
+            <DraftInput
+              aria-label="Branding name"
+              className="w-40"
+              maxLength={MAX_BRAND_WORDMARK_PREFIX_LENGTH}
+              placeholder={DEFAULT_BRAND_WORDMARK_PREFIX}
+              value={settings.brandWordmarkPrefix}
+              onCommit={(value) =>
+                updateSettings({
+                  brandWordmarkPrefix: value.trim().slice(0, MAX_BRAND_WORDMARK_PREFIX_LENGTH),
+                })
+              }
+            />
+          }
+          description={`Shown as “${brandPrefix} Code” in the sidebar.`}
+          index={1}
+          title="Name"
+        />
+        <CustomizeRow
+          control={
+            <ColorWheelPicker
+              ariaLabel="App accent color"
+              defaultPickerColor={APP_ACCENT_PICKER_FALLBACK}
+              emptyValue={DEFAULT_APP_ACCENT_COLOR}
+              onCommit={(value) => updateSettings({ appAccentColor: value })}
+              value={settings.appAccentColor}
+            />
+          }
+          description="Used for buttons, focus rings, and highlights."
+          index={2}
+          title="Accent color"
+        />
+        <CustomizeRow
+          control={
+            <div className="flex items-center gap-0.5 rounded-lg border border-border bg-background p-0.5">
+              {THEME_CHOICES.map((choice) => (
+                <button
+                  key={choice.value}
+                  className={cn(
+                    "cursor-pointer rounded-md px-2.5 py-1 font-medium text-xs transition-colors",
+                    theme === choice.value
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                  onClick={() => setTheme(choice.value)}
+                  type="button"
+                >
+                  {choice.label}
+                </button>
+              ))}
+            </div>
+          }
+          description="Match your system, or pick light or dark."
+          index={3}
+          title="Theme"
+        />
+        <CustomizeRow
+          control={
+            <div className="flex items-center gap-2">
+              {usesDefaultImage ? null : (
+                <img
+                  alt=""
+                  aria-hidden="true"
+                  className="h-10 w-8 rounded-md object-cover ring-1 ring-border"
+                  draggable={false}
+                  src={imageSrc}
+                />
+              )}
+              <Button
+                disabled={imageUploading}
+                onClick={() => fileInputRef.current?.click()}
+                size="xs"
+                type="button"
+                variant="outline"
+              >
+                {imageUploading ? (
+                  <LoaderIcon aria-hidden="true" className="size-3.5 animate-spin" />
+                ) : (
+                  <UploadIcon aria-hidden="true" className="size-3.5" />
+                )}
+                {usesDefaultImage ? "Upload" : "Replace"}
+              </Button>
+              {usesDefaultImage ? null : (
+                <Button
+                  onClick={() => {
+                    setImageError(null);
+                    updateSettings({
+                      sidebarBrandImage: DEFAULT_SIDEBAR_BRAND_IMAGE,
+                      sidebarBrandImageDataUrl: "",
+                    });
+                  }}
+                  size="xs"
+                  type="button"
+                  variant="ghost"
+                >
+                  Reset
+                </Button>
+              )}
+              <input
+                accept="image/png,image/jpeg,image/gif,image/webp"
+                className="hidden"
+                onChange={(event) => void handleImageChange(event)}
+                ref={fileInputRef}
+                type="file"
+              />
+            </div>
+          }
+          description={imageError ?? "Use your own PNG, JPEG, GIF, or WebP (under 1 MB)."}
+          descriptionError={Boolean(imageError)}
+          index={4}
+          title="Sidebar image"
+        />
+      </ul>
+    </div>
+  );
+}
+
+const ONBOARDING_STEPS = ["intro", "customize", "providers"] as const;
+type OnboardingStep = (typeof ONBOARDING_STEPS)[number];
+
+const STEP_HEADER_LABEL: Record<OnboardingStep, string> = {
+  intro: "Welcome",
+  customize: "Make it yours",
+  providers: "Connect a provider",
+};
 
 /**
  * Full-window first-run onboarding. Rendered by {@link OnboardingSurface} only
@@ -370,12 +612,22 @@ type OnboardingStep = "intro" | "providers";
  * never loop back to itself.
  */
 export function OnboardingScreen() {
-  const [step, setStep] = useState<OnboardingStep>("intro");
+  const [stepIndex, setStepIndex] = useState(0);
   const { updateSettings } = useUpdateSettings();
+
+  const step = ONBOARDING_STEPS[stepIndex] ?? "intro";
+  const isFirstStep = stepIndex === 0;
+  const isLastStep = stepIndex === ONBOARDING_STEPS.length - 1;
 
   const complete = useCallback(() => {
     updateSettings({ onboardingCompleted: true });
   }, [updateSettings]);
+
+  const goBack = useCallback(() => setStepIndex((index) => Math.max(0, index - 1)), []);
+  const goNext = useCallback(
+    () => setStepIndex((index) => Math.min(ONBOARDING_STEPS.length - 1, index + 1)),
+    [],
+  );
 
   const headerClassName = useMemo(
     () =>
@@ -402,7 +654,7 @@ export function OnboardingScreen() {
 
       <header className={headerClassName}>
         <span className="font-medium text-muted-foreground text-xs tabular-nums">
-          {step === "intro" ? "Welcome" : "Connect a provider"}
+          {STEP_HEADER_LABEL[step]}
         </span>
         <Button
           className="text-muted-foreground hover:text-foreground"
@@ -417,46 +669,45 @@ export function OnboardingScreen() {
       <main className="relative z-10 flex min-h-0 flex-1 flex-col items-center justify-center overflow-y-auto px-6 py-8">
         {/* `key` replays the entrance animation on each step change. */}
         <div className="contents" key={step}>
-          {step === "intro" ? <IntroPage /> : <ProvidersPage />}
+          {step === "intro" ? <IntroPage /> : null}
+          {step === "customize" ? <CustomizePage /> : null}
+          {step === "providers" ? <ProvidersPage /> : null}
         </div>
       </main>
 
       <footer className="relative z-10 flex shrink-0 items-center justify-between gap-3 border-border border-t px-6 py-4">
         <span className="flex items-center gap-1.5" aria-hidden="true">
-          <span
-            className={cn(
-              "h-1.5 rounded-full transition-all duration-300",
-              step === "intro" ? "w-6 bg-primary" : "w-1.5 bg-muted-foreground/40",
-            )}
-          />
-          <span
-            className={cn(
-              "h-1.5 rounded-full transition-all duration-300",
-              step === "providers" ? "w-6 bg-primary" : "w-1.5 bg-muted-foreground/40",
-            )}
-          />
+          {ONBOARDING_STEPS.map((stepName, index) => (
+            <span
+              key={stepName}
+              className={cn(
+                "h-1.5 rounded-full transition-all duration-300",
+                index === stepIndex ? "w-6 bg-primary" : "w-1.5 bg-muted-foreground/40",
+              )}
+            />
+          ))}
         </span>
         <div className="flex items-center gap-2">
-          {step === "providers" ? (
-            <Button className="group" onClick={() => setStep("intro")} size="sm" variant="outline">
+          {isFirstStep ? null : (
+            <Button className="group" onClick={goBack} size="sm" variant="outline">
               <ArrowLeftIcon
                 aria-hidden="true"
                 className="size-4 transition-transform group-hover:-translate-x-0.5"
               />
               Back
             </Button>
-          ) : null}
-          {step === "intro" ? (
-            <Button className="group" onClick={() => setStep("providers")} size="sm">
+          )}
+          {isLastStep ? (
+            <Button onClick={complete} size="sm" data-testid="onboarding-get-started">
+              Get started
+            </Button>
+          ) : (
+            <Button className="group" onClick={goNext} size="sm">
               Next
               <ArrowRightIcon
                 aria-hidden="true"
                 className="size-4 transition-transform group-hover:translate-x-0.5"
               />
-            </Button>
-          ) : (
-            <Button onClick={complete} size="sm" data-testid="onboarding-get-started">
-              Get started
             </Button>
           )}
         </div>
