@@ -1,5 +1,13 @@
 import { type CSSProperties, useCallback, useMemo, useState } from "react";
-import { ArrowLeftIcon, ArrowRightIcon, CheckIcon, CopyIcon, RefreshCwIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  CheckIcon,
+  CopyIcon,
+  LoaderIcon,
+  LogInIcon,
+  RefreshCwIcon,
+} from "lucide-react";
 
 import type { ProviderDriverKind, ServerProvider } from "@cafecode/contracts";
 
@@ -19,6 +27,7 @@ import {
 import { RedactedSensitiveText } from "./settings/RedactedSensitiveText";
 import { Button } from "./ui/button";
 import { Spinner } from "./ui/spinner";
+import { stackedThreadToast, toastManager } from "./ui/toast";
 
 /**
  * Per-driver install docs + login command shown in the onboarding providers
@@ -60,6 +69,75 @@ function ExternalLink({ href }: { readonly href: string }) {
     >
       {href}
     </a>
+  );
+}
+
+/**
+ * Login guidance shown when a provider is installed but signed out: the manual
+ * login command plus — on platforms where the server offers it (Windows) — a
+ * one-click button that launches the provider's login flow.
+ */
+function ProviderLoginGuidance({
+  provider,
+  loginCommand,
+}: {
+  readonly provider: ServerProvider;
+  readonly loginCommand: string;
+}) {
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const canLogIn = provider.authActions?.login === true;
+  const instanceId = provider.instanceId;
+  const displayName = provider.displayName ?? String(provider.driver);
+
+  const logIn = useCallback(() => {
+    setIsLoggingIn(true);
+    ensureLocalApi()
+      .server.loginProvider({ instanceId })
+      .then(() => {
+        toastManager.add({
+          type: "success",
+          title: `${displayName} login opened`,
+          description: "Complete the login in the window that opened, then refresh status.",
+        });
+      })
+      .catch((error) => {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: `Could not open ${displayName} login`,
+            description:
+              error instanceof Error
+                ? error.message
+                : "The provider login command could not be started.",
+          }),
+        );
+      })
+      .finally(() => {
+        setIsLoggingIn(false);
+      });
+  }, [displayName, instanceId]);
+
+  return (
+    <div className="mt-2 grid gap-1.5">
+      <span className="text-muted-foreground text-xs">Log in by running:</span>
+      <LoginCommand command={loginCommand} />
+      {canLogIn ? (
+        <Button
+          className="mt-0.5 h-7 w-fit gap-1.5 px-2 text-xs"
+          disabled={isLoggingIn}
+          onClick={logIn}
+          size="xs"
+          variant="outline"
+        >
+          {isLoggingIn ? (
+            <LoaderIcon aria-hidden="true" className="size-3.5 animate-spin" />
+          ) : (
+            <LogInIcon aria-hidden="true" className="size-3.5" />
+          )}
+          Log In
+        </Button>
+      ) : null}
+    </div>
   );
 }
 
@@ -126,13 +204,8 @@ function ProviderActionArea({
     );
   }
 
-  if (guidance) {
-    return (
-      <div className="mt-2 grid gap-1.5">
-        <span className="text-muted-foreground text-xs">Log in by running:</span>
-        <LoginCommand command={guidance.loginCommand} />
-      </div>
-    );
+  if (guidance && provider) {
+    return <ProviderLoginGuidance loginCommand={guidance.loginCommand} provider={provider} />;
   }
 
   return null;
