@@ -596,13 +596,13 @@ function CustomizePage() {
   );
 }
 
-const ONBOARDING_STEPS = ["intro", "customize", "providers"] as const;
+const ONBOARDING_STEPS = ["intro", "providers", "customize"] as const;
 type OnboardingStep = (typeof ONBOARDING_STEPS)[number];
 
 const STEP_HEADER_LABEL: Record<OnboardingStep, string> = {
   intro: "Welcome",
-  customize: "Make it yours",
   providers: "Connect a provider",
+  customize: "Make it yours",
 };
 
 /**
