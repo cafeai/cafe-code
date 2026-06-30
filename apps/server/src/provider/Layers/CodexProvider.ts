@@ -1149,6 +1149,10 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   if (Result.isFailure(probeResult)) {
     const error = probeResult.failure;
     const installed = !isCodexAppServerSpawnError(error);
+    const missingMessage =
+      codexSettings.runtimeSource === "bundled"
+        ? "Cafe Code bundled Codex runtime is not installed or not configured."
+        : "Codex CLI (`codex`) is not installed or not on PATH.";
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
       enabled: codexSettings.enabled,
@@ -1162,7 +1166,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
         auth: { status: "unknown" },
         message: installed
           ? `Codex app-server provider probe failed: ${error.message}.`
-          : "Codex CLI (`codex`) is not installed or not on PATH.",
+          : missingMessage,
       },
     });
   }

@@ -116,6 +116,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.deepEqual(next.providers.codex, {
         enabled: true,
         binaryPath: "/opt/homebrew/bin/codex",
+        runtimeSource: "system",
         homePath: "/Users/julius/.codex",
         shadowHomePath: "",
         customModels: [],
@@ -123,6 +124,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.deepEqual(next.providers.claudeAgent, {
         enabled: true,
         binaryPath: "/usr/local/bin/claude",
+        runtimeSource: "system",
         homePath: "",
         customModels: ["claude-custom"],
         launchArgs: "",
@@ -352,6 +354,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.deepEqual(next.providers.codex, {
         enabled: true,
         binaryPath: "/opt/homebrew/bin/codex",
+        runtimeSource: "system",
         homePath: "",
         shadowHomePath: "",
         customModels: [],
@@ -359,6 +362,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.deepEqual(next.providers.claudeAgent, {
         enabled: true,
         binaryPath: "/opt/homebrew/bin/claude",
+        runtimeSource: "system",
         homePath: "",
         customModels: [],
         launchArgs: "",

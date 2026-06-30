@@ -497,13 +497,21 @@ const buildCmd = Command.make(
       const serverDir = path.join(repoRoot, "apps/server");
 
       yield* Effect.log("[cli] Running tsdown...");
-      yield* runCommand(
-        ChildProcess.make(process.execPath, ["--run", "build:bundle"], {
-          cwd: serverDir,
-          stdout: config.verbose ? "inherit" : "ignore",
-          stderr: "inherit",
-        }),
-      );
+      const bundleCommand =
+        process.platform === "win32"
+          ? ChildProcess.make("bun", ["run", "build:bundle"], {
+              cwd: serverDir,
+              stdout: config.verbose ? "inherit" : "ignore",
+              stderr: "inherit",
+              // Windows needs shell mode to resolve .cmd shims.
+              shell: true,
+            })
+          : ChildProcess.make(process.execPath, ["--run", "build:bundle"], {
+              cwd: serverDir,
+              stdout: config.verbose ? "inherit" : "ignore",
+              stderr: "inherit",
+            });
+      yield* runCommand(bundleCommand);
       yield* assertServerRuntimeBuildAssets(serverDir);
 
       const webDist = path.join(repoRoot, "apps/web/dist");

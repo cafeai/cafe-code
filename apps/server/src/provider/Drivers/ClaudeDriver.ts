@@ -47,6 +47,7 @@ import {
   normalizeCommandPath,
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "../providerMaintenance.ts";
+import { resolveProviderRuntimeEnvironment } from "../managedProviderRuntime.ts";
 import { makeClaudeCapabilitiesCacheKey, makeClaudeContinuationGroupKey } from "./ClaudeHome.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
@@ -63,7 +64,7 @@ function isClaudeNativeCommandPath(commandPath: string): boolean {
   );
 }
 
-const UPDATE = makePackageManagedProviderMaintenanceResolver({
+const UPDATE_DEFINITION = {
   provider: DRIVER_KIND,
   npmPackageName: "@anthropic-ai/claude-code",
   homebrewFormula: "claude-code",
@@ -73,7 +74,8 @@ const UPDATE = makePackageManagedProviderMaintenanceResolver({
     lockKey: "claude-native",
     isCommandPath: isClaudeNativeCommandPath,
   },
-});
+} as const;
+const UPDATE = makePackageManagedProviderMaintenanceResolver(UPDATE_DEFINITION);
 
 export type ClaudeDriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner
@@ -89,6 +91,7 @@ const withInstanceIdentity =
     readonly displayName: string | undefined;
     readonly accentColor: string | undefined;
     readonly continuationGroupKey: string;
+    readonly authActions: ServerProvider["authActions"] | undefined;
   }) =>
   (snapshot: ServerProviderDraft): ServerProvider => ({
     ...snapshot,
@@ -96,6 +99,7 @@ const withInstanceIdentity =
     driver: DRIVER_KIND,
     ...(input.displayName ? { displayName: input.displayName } : {}),
     ...(input.accentColor ? { accentColor: input.accentColor } : {}),
+    ...(input.authActions ? { authActions: input.authActions } : {}),
     continuation: { groupKey: input.continuationGroupKey },
   });
 
@@ -118,26 +122,45 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         driverKind: DRIVER_KIND,
         instanceId,
       });
-      const effectiveConfig = { ...config, enabled } satisfies ClaudeSettings;
-      const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-        binaryPath: effectiveConfig.binaryPath,
-        env: processEnv,
+      const runtime = resolveProviderRuntimeEnvironment({
+        provider: DRIVER_KIND,
+        runtimeSource: config.runtimeSource,
+        systemBinaryPath: config.binaryPath,
+        packageMaintenance: UPDATE_DEFINITION,
+        baseEnv: processEnv,
       });
+      const effectiveConfig = {
+        ...config,
+        enabled,
+        binaryPath: runtime.binaryPath,
+      } satisfies ClaudeSettings;
+      const effectiveEnvironment = runtime.env;
+      const maintenanceCapabilities =
+        effectiveConfig.runtimeSource === "bundled"
+          ? runtime.maintenanceCapabilities
+          : yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
+              binaryPath: effectiveConfig.binaryPath,
+              env: effectiveEnvironment,
+            });
       const continuationGroupKey = yield* makeClaudeContinuationGroupKey(effectiveConfig);
       const stampIdentity = withInstanceIdentity({
         instanceId,
         displayName,
         accentColor,
         continuationGroupKey,
+        authActions:
+          effectiveConfig.runtimeSource === "bundled" && process.platform === "win32"
+            ? { login: true }
+            : undefined,
       });
 
       const adapterOptions = {
         instanceId,
-        environment: processEnv,
+        environment: effectiveEnvironment,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       };
       const adapter = yield* makeClaudeAdapter(effectiveConfig, adapterOptions);
-      const textGeneration = yield* makeClaudeTextGeneration(effectiveConfig, processEnv);
+      const textGeneration = yield* makeClaudeTextGeneration(effectiveConfig, effectiveEnvironment);
 
       // Per-instance capabilities cache: keyed on binary + resolved HOME so
       // account-specific probes never share auth metadata across instances.
@@ -145,7 +168,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         capacity: 1,
         timeToLive: CAPABILITIES_PROBE_TTL,
         lookup: () =>
-          probeClaudeCapabilities(effectiveConfig, processEnv).pipe(
+          probeClaudeCapabilities(effectiveConfig, effectiveEnvironment).pipe(
             Effect.provideService(Path.Path, path),
           ),
       });
@@ -154,7 +177,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
       const checkProvider = checkClaudeProviderStatus(
         effectiveConfig,
         () => Cache.get(capabilitiesProbeCache, capabilitiesCacheKey),
-        processEnv,
+        effectiveEnvironment,
       ).pipe(
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),

@@ -1609,6 +1609,9 @@ export function ProviderSettingsPanel() {
   const [restartingProviderRuntimeInstanceIds, setRestartingProviderRuntimeInstanceIds] = useState<
     ReadonlySet<ProviderInstanceId>
   >(() => new Set());
+  const [loggingInProviderInstanceIds, setLoggingInProviderInstanceIds] = useState<
+    ReadonlySet<ProviderInstanceId>
+  >(() => new Set());
   const [openInstanceDetails, setOpenInstanceDetails] = useState<Record<string, boolean>>({});
   const refreshingRef = useRef(false);
 
@@ -1737,6 +1740,56 @@ export function ProviderSettingsPanel() {
         );
       } finally {
         setRestartingProviderRuntimeInstanceIds((previous) => {
+          if (!previous.has(input.instanceId)) {
+            return previous;
+          }
+          const next = new Set(previous);
+          next.delete(input.instanceId);
+          return next;
+        });
+      }
+    },
+    [],
+  );
+
+  const logInProvider = useCallback(
+    async (input: { readonly instanceId: ProviderInstanceId; readonly displayName: string }) => {
+      let started = false;
+      setLoggingInProviderInstanceIds((previous) => {
+        if (previous.has(input.instanceId)) {
+          return previous;
+        }
+        started = true;
+        const next = new Set(previous);
+        next.add(input.instanceId);
+        return next;
+      });
+      if (!started) {
+        return;
+      }
+
+      try {
+        await ensureLocalApi().server.loginProvider({
+          instanceId: input.instanceId,
+        });
+        toastManager.add({
+          type: "success",
+          title: `${input.displayName} login opened`,
+          description: "Complete the provider login in the PowerShell window, then refresh status.",
+        });
+      } catch (error) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: `Could not open ${input.displayName} login`,
+            description:
+              error instanceof Error
+                ? error.message
+                : "The provider login command could not be started.",
+          }),
+        );
+      } finally {
+        setLoggingInProviderInstanceIds((previous) => {
           if (!previous.has(input.instanceId)) {
             return previous;
           }
@@ -1995,6 +2048,11 @@ export function ProviderSettingsPanel() {
           const resetLabel = driverOption?.label ?? String(row.driver);
           const providerDisplayName =
             row.instance.displayName?.trim() || driverOption?.label || String(row.driver);
+          const canLogInProvider =
+            liveProvider?.authActions?.login === true &&
+            liveProvider.installed &&
+            liveProvider.auth.status !== "authenticated" &&
+            (row.instance.enabled ?? true);
           const headerAction =
             row.isDefault && row.isDirty ? (
               <SettingResetButton
@@ -2060,6 +2118,16 @@ export function ProviderSettingsPanel() {
                   : undefined
               }
               isUpdating={showInlineUpdateButton ? isDriverUpdateRunning : undefined}
+              onLogIn={
+                canLogInProvider
+                  ? () =>
+                      void logInProvider({
+                        instanceId: row.instanceId,
+                        displayName: providerDisplayName,
+                      })
+                  : undefined
+              }
+              isLoggingIn={loggingInProviderInstanceIds.has(row.instanceId)}
               onRestartRuntime={
                 canRestartProviderRuntime(row.driver)
                   ? () =>

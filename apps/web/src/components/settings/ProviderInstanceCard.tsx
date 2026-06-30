@@ -6,6 +6,7 @@ import {
   CopyIcon,
   DownloadIcon,
   LoaderIcon,
+  LogInIcon,
   PlusIcon,
   RotateCcwIcon,
   Trash2Icon,
@@ -423,6 +424,8 @@ interface ProviderInstanceCardProps {
   readonly onModelOrderChange: (next: ReadonlyArray<string>) => void;
   readonly onRunUpdate?: (() => void) | undefined;
   readonly isUpdating?: boolean | undefined;
+  readonly onLogIn?: (() => void) | undefined;
+  readonly isLoggingIn?: boolean | undefined;
   readonly onRestartRuntime?: (() => void) | undefined;
   readonly isRestartingRuntime?: boolean | undefined;
 }
@@ -469,6 +472,8 @@ export function ProviderInstanceCard({
   onModelOrderChange,
   onRunUpdate,
   isUpdating = false,
+  onLogIn,
+  isLoggingIn = false,
   onRestartRuntime,
   isRestartingRuntime = false,
 }: ProviderInstanceCardProps) {
@@ -805,6 +810,23 @@ export function ProviderInstanceCard({
             ) : null}
           </div>
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
+            {onLogIn ? (
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                className="h-7 gap-1.5 px-2 text-xs"
+                disabled={isLoggingIn}
+                onClick={onLogIn}
+              >
+                {isLoggingIn ? (
+                  <LoaderIcon className="size-3.5 animate-spin" />
+                ) : (
+                  <LogInIcon className="size-3.5" />
+                )}
+                Log In
+              </Button>
+            ) : null}
             {onRestartRuntime ? (
               <Tooltip>
                 <TooltipTrigger

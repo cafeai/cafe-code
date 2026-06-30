@@ -88,12 +88,14 @@ function makeEnvironmentLayer(
   options?: {
     readonly isPackaged?: boolean;
     readonly devServerUrl?: string;
+    readonly platform?: NodeJS.Platform;
+    readonly desktopConfigEnv?: Readonly<Record<string, string | undefined>>;
   },
 ) {
   return DesktopEnvironment.layer({
     dirname: "/repo/apps/desktop/src",
     homeDirectory: baseDir,
-    platform: "darwin",
+    platform: options?.platform ?? "darwin",
     processArch: "x64",
     appVersion: "1.2.3",
     appPath: "/repo",
@@ -110,6 +112,7 @@ function makeEnvironmentLayer(
           CAFE_CODE_MODE: "desktop",
           CAFE_CODE_DESKTOP_LAN_HOST: "192.168.1.50",
           VITE_DEV_SERVER_URL: options?.devServerUrl,
+          ...options?.desktopConfigEnv,
         }),
       ),
     ),
@@ -128,6 +131,7 @@ const withHarness = <A, E, R>(
   options?: {
     readonly providerDaemonLayer?: Layer.Layer<DesktopProviderDaemonManager.DesktopProviderDaemonManager>;
     readonly serverExposureLayer?: Layer.Layer<DesktopServerExposure.DesktopServerExposure>;
+    readonly environmentOptions?: Parameters<typeof makeEnvironmentLayer>[1];
   },
 ) =>
   Effect.gen(function* () {
@@ -141,11 +145,42 @@ const withHarness = <A, E, R>(
         DesktopBackendConfiguration.layer.pipe(
           Layer.provideMerge(options?.serverExposureLayer ?? serverExposureLayer),
           Layer.provideMerge(options?.providerDaemonLayer ?? providerDaemonLayer),
-          Layer.provideMerge(makeEnvironmentLayer(baseDir)),
+          Layer.provideMerge(makeEnvironmentLayer(baseDir, options?.environmentOptions)),
         ),
       ),
     );
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
+
+function withProcessEnvPatch<A, E, R>(
+  patch: Readonly<Record<string, string | undefined>>,
+  effect: Effect.Effect<A, E, R>,
+) {
+  const keys = Object.keys(patch);
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]] as const));
+  return Effect.acquireUseRelease(
+    Effect.sync(() => {
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+    }),
+    () => effect,
+    () =>
+      Effect.sync(() => {
+        for (const key of keys) {
+          const value = previous[key];
+          if (value === undefined) {
+            delete process.env[key];
+          } else {
+            process.env[key] = value;
+          }
+        }
+      }),
+  );
+}
 
 describe("DesktopBackendConfiguration", () => {
   it.effect("resolves backend start config with a stable scoped bootstrap token", () =>
@@ -171,6 +206,9 @@ describe("DesktopBackendConfiguration", () => {
         assert.isUndefined(first.env.CAFE_CODE_DESKTOP_DEV);
         assert.isUndefined(first.env.CAFE_CODE_DEV_URL);
         assert.isUndefined(first.env.VITE_DEV_SERVER_URL);
+        assert.isUndefined(first.env.CAFE_CODE_MANAGED_RUNTIME_ROOT);
+        assert.isUndefined(first.env.CAFE_CODE_BUNDLED_NODE_DIR);
+        assert.isUndefined(first.env.CAFE_CODE_BUNDLED_NPM_PATH);
 
         assert.equal(first.bootstrap.mode, "desktop");
         assert.equal(first.bootstrap.noBrowser, true);
@@ -181,6 +219,84 @@ describe("DesktopBackendConfiguration", () => {
         assert.match(first.bootstrap.desktopBootstrapToken, /^[0-9a-f]{48}$/i);
         assert.equal(second.bootstrap.desktopBootstrapToken, first.bootstrap.desktopBootstrapToken);
       }),
+    ),
+  );
+
+  it.effect("passes Windows managed runtime environment to the backend child", () =>
+    withProcessEnvPatch(
+      {
+        USERPROFILE: "C:\\Users\\throw",
+        APPDATA: "C:\\Users\\throw\\AppData\\Roaming",
+        LOCALAPPDATA: "C:\\Users\\throw\\AppData\\Local",
+        CAFE_CODE_MANAGED_RUNTIME_ROOT: "C:\\Users\\throw\\AppData\\Local\\CafeCode\\managed",
+        CAFE_CODE_BUNDLED_NODE_DIR:
+          "C:\\Users\\throw\\AppData\\Local\\CafeCode\\managed\\node\\current",
+        CAFE_CODE_BUNDLED_NPM_PATH:
+          "C:\\Users\\throw\\AppData\\Local\\CafeCode\\managed\\node\\current\\npm.cmd",
+      },
+      withHarness(
+        Effect.gen(function* () {
+          const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+          const config = yield* configuration.resolve;
+
+          assert.equal(config.env.USERPROFILE, "C:\\Users\\throw");
+          assert.equal(config.env.APPDATA, "C:\\Users\\throw\\AppData\\Roaming");
+          assert.equal(config.env.LOCALAPPDATA, "C:\\Users\\throw\\AppData\\Local");
+          assert.equal(
+            config.env.CAFE_CODE_MANAGED_RUNTIME_ROOT,
+            "C:\\Users\\throw\\AppData\\Local\\CafeCode\\managed",
+          );
+          assert.equal(
+            config.env.CAFE_CODE_BUNDLED_NODE_DIR,
+            "C:\\Users\\throw\\AppData\\Local\\CafeCode\\managed\\node\\current",
+          );
+          assert.equal(
+            config.env.CAFE_CODE_BUNDLED_NPM_PATH,
+            "C:\\Users\\throw\\AppData\\Local\\CafeCode\\managed\\node\\current\\npm.cmd",
+          );
+        }),
+        {
+          environmentOptions: {
+            platform: "win32",
+            desktopConfigEnv: {
+              APPDATA: "C:\\Users\\throw\\AppData\\Roaming",
+            },
+          },
+        },
+      ),
+    ),
+  );
+
+  it.effect("does not pass Windows managed runtime environment on non-Windows platforms", () =>
+    withProcessEnvPatch(
+      {
+        USERPROFILE: "C:\\Users\\throw",
+        APPDATA: "C:\\Users\\throw\\AppData\\Roaming",
+        LOCALAPPDATA: "C:\\Users\\throw\\AppData\\Local",
+        CAFE_CODE_MANAGED_RUNTIME_ROOT: "C:\\Users\\throw\\AppData\\Local\\CafeCode\\managed",
+        CAFE_CODE_BUNDLED_NODE_DIR:
+          "C:\\Users\\throw\\AppData\\Local\\CafeCode\\managed\\node\\current",
+        CAFE_CODE_BUNDLED_NPM_PATH:
+          "C:\\Users\\throw\\AppData\\Local\\CafeCode\\managed\\node\\current\\npm.cmd",
+      },
+      withHarness(
+        Effect.gen(function* () {
+          const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+          const config = yield* configuration.resolve;
+
+          assert.isUndefined(config.env.USERPROFILE);
+          assert.isUndefined(config.env.APPDATA);
+          assert.isUndefined(config.env.LOCALAPPDATA);
+          assert.isUndefined(config.env.CAFE_CODE_MANAGED_RUNTIME_ROOT);
+          assert.isUndefined(config.env.CAFE_CODE_BUNDLED_NODE_DIR);
+          assert.isUndefined(config.env.CAFE_CODE_BUNDLED_NPM_PATH);
+        }),
+        {
+          environmentOptions: {
+            platform: "darwin",
+          },
+        },
+      ),
     ),
   );
 

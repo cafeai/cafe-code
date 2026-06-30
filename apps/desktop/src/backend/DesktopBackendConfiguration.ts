@@ -49,8 +49,52 @@ const DESKTOP_BACKEND_ENV_NAMES = [
   "VITE_DEV_SERVER_URL",
 ] as const;
 
+const WINDOWS_BACKEND_MANAGED_RUNTIME_ENV_NAMES = [
+  "CAFE_CODE_MANAGED_RUNTIME_ROOT",
+  "CAFE_CODE_BUNDLED_NODE_DIR",
+  "CAFE_CODE_BUNDLED_NPM_PATH",
+] as const;
+
 const backendChildEnvPatch = (): Record<string, string | undefined> =>
   Object.fromEntries(DESKTOP_BACKEND_ENV_NAMES.map((name) => [name, undefined] as const));
+
+const trimNonEmptyEnvValue = (value: string | undefined): string | undefined => {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : undefined;
+};
+
+const setIfPresent = (
+  output: Record<string, string | undefined>,
+  name: string,
+  value: string | undefined,
+) => {
+  const normalized = trimNonEmptyEnvValue(value);
+  if (normalized !== undefined) {
+    output[name] = normalized;
+  }
+};
+
+function windowsBackendManagedRuntimeEnvPatch(
+  environment: DesktopEnvironment.DesktopEnvironmentShape,
+): Record<string, string | undefined> {
+  if (environment.platform !== "win32") {
+    return {};
+  }
+
+  const env: Record<string, string | undefined> = {};
+  setIfPresent(env, "USERPROFILE", process.env.USERPROFILE ?? environment.homeDirectory);
+  setIfPresent(env, "APPDATA", process.env.APPDATA ?? environment.appDataDirectory);
+  setIfPresent(
+    env,
+    "LOCALAPPDATA",
+    process.env.LOCALAPPDATA ??
+      environment.path.join(environment.homeDirectory, "AppData", "Local"),
+  );
+  for (const name of WINDOWS_BACKEND_MANAGED_RUNTIME_ENV_NAMES) {
+    setIfPresent(env, name, process.env[name]);
+  }
+  return env;
+}
 
 const { logWarning: logBackendConfigurationWarning } = DesktopObservability.makeComponentLogger(
   "desktop-backend-configuration",
@@ -125,6 +169,7 @@ const resolveBackendStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       cwd: environment.backendCwd,
       env: {
         ...backendChildEnvPatch(),
+        ...windowsBackendManagedRuntimeEnvPatch(environment),
         ...(backendExposure.httpsPort === undefined ? { CAFE_CODE_HTTPS_ENABLED: "false" } : {}),
         ELECTRON_RUN_AS_NODE: "1",
         [CAFE_CODE_SHELL_ENV_HYDRATED]: "1",

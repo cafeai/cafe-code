@@ -4,6 +4,8 @@ import * as Schema from "effect/Schema";
 import {
   ClientSettingsPatch,
   ClientSettingsSchema,
+  CodexSettings,
+  ClaudeSettings,
   CLIENT_SETTINGS_CAPABILITY_DEPENDENT_KEYS,
   CLIENT_SETTINGS_EXCLUDED_SECRET_STORES,
   CLIENT_SETTINGS_KEYS,
@@ -26,12 +28,16 @@ import {
   MAX_SIDEBAR_BRAND_IMAGE_ID_LENGTH,
   MAX_SIDEBAR_STAR_SPEED,
   MIN_SIDEBAR_STAR_SPEED,
+  ServerSettingsPatch,
   isCapabilityDependentClientSettingsKey,
   isClientSettingsKey,
 } from "./settings.ts";
 
 const decodeClientSettings = Schema.decodeSync(ClientSettingsSchema);
 const decodeClientSettingsPatch = Schema.decodeUnknownSync(ClientSettingsPatch);
+const decodeCodexSettings = Schema.decodeSync(CodexSettings);
+const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
+const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 
 describe("client settings", () => {
   it("defaults power-save blocking to off", () => {
@@ -275,5 +281,36 @@ describe("client settings", () => {
         },
       }).sidebarBrandImageDataUrl,
     ).toBe("");
+  });
+});
+
+describe("provider settings", () => {
+  it("defaults Codex and Claude provider runtime source to system", () => {
+    expect(decodeCodexSettings({}).runtimeSource).toBe("system");
+    expect(decodeClaudeSettings({}).runtimeSource).toBe("system");
+  });
+
+  it("accepts bundled provider runtime source in server settings patches", () => {
+    expect(
+      decodeServerSettingsPatch({
+        providers: {
+          codex: { runtimeSource: "bundled" },
+          claudeAgent: { runtimeSource: "bundled" },
+        },
+      }),
+    ).toEqual({
+      providers: {
+        codex: { runtimeSource: "bundled" },
+        claudeAgent: { runtimeSource: "bundled" },
+      },
+    });
+
+    expect(() =>
+      decodeServerSettingsPatch({
+        providers: {
+          codex: { runtimeSource: "global" },
+        },
+      }),
+    ).toThrow();
   });
 });
