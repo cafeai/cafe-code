@@ -1307,10 +1307,19 @@ label:has(> select#reasoning-effort) select {
   }
 }
 
-/* Theme change crossfade — tunes the View Transitions snapshot fade used when
-   switching between light and dark (see hooks/useTheme.ts). */
-::view-transition-old(root),
-::view-transition-new(root) {
-  animation-duration: 240ms;
-  animation-timing-function: ease;
+/* Theme change crossfade — when switching between light and dark, briefly
+   transition color-bearing properties so the swap fades instead of snapping.
+   Toggled on by hooks/useTheme.ts only for the duration of the change. */
+.theme-transition,
+.theme-transition *,
+.theme-transition *::before,
+.theme-transition *::after {
+  transition:
+    background-color 260ms ease,
+    border-color 260ms ease,
+    color 260ms ease,
+    fill 260ms ease,
+    stroke 260ms ease,
+    outline-color 260ms ease !important;
+  transition-delay: 0s !important;
 }
