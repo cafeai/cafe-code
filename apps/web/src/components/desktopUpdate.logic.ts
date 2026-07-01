@@ -1,6 +1,25 @@
-import type { DesktopUpdateActionResult, DesktopUpdateState } from "@cafecode/contracts";
+import type {
+  DesktopReleaseUpdateState,
+  DesktopUpdateActionResult,
+  DesktopUpdateState,
+} from "@cafecode/contracts";
 
 export type DesktopUpdateButtonAction = "download" | "install" | "none";
+
+/**
+ * Whether the notify-only "release available" pill should show. Distinct from
+ * the electron-updater pill: this only links the user to the releases page.
+ */
+export function shouldShowReleaseUpdatePill(state: DesktopReleaseUpdateState | null): boolean {
+  return state?.status === "available" && Boolean(state.releaseUrl);
+}
+
+export function getReleaseUpdateTooltip(state: DesktopReleaseUpdateState | null): string {
+  if (state?.status === "available" && state.latestVersion) {
+    return `${state.latestVersion} is available — open the releases page to download`;
+  }
+  return "A new release is available";
+}
 
 export function resolveDesktopUpdateButtonAction(
   state: DesktopUpdateState,

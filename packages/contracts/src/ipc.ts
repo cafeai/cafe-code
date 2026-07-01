@@ -272,6 +272,45 @@ export const DesktopSourceUpdateStateSchema = Schema.Struct({
   message: Schema.NullOr(Schema.String),
 });
 
+// Notify-only update check for packaged builds: compares the running version
+// against the latest published GitHub release. Unlike DesktopUpdateState
+// (electron-updater download/install), this only surfaces that a newer release
+// exists and links the user to the releases page to download it manually.
+export type DesktopReleaseUpdateStatus =
+  | "idle"
+  | "checking"
+  | "up-to-date"
+  | "available"
+  | "unavailable"
+  | "error";
+
+export const DesktopReleaseUpdateStatusSchema = Schema.Literals([
+  "idle",
+  "checking",
+  "up-to-date",
+  "available",
+  "unavailable",
+  "error",
+]);
+
+export interface DesktopReleaseUpdateState {
+  status: DesktopReleaseUpdateStatus;
+  currentVersion: string;
+  latestVersion: string | null;
+  releaseUrl: string | null;
+  checkedAt: string | null;
+  message: string | null;
+}
+
+export const DesktopReleaseUpdateStateSchema = Schema.Struct({
+  status: DesktopReleaseUpdateStatusSchema,
+  currentVersion: Schema.String,
+  latestVersion: Schema.NullOr(Schema.String),
+  releaseUrl: Schema.NullOr(Schema.String),
+  checkedAt: Schema.NullOr(Schema.String),
+  message: Schema.NullOr(Schema.String),
+});
+
 export interface DesktopEnvironmentBootstrap {
   label: string;
   httpBaseUrl: string | null;
@@ -362,6 +401,9 @@ export interface DesktopBridge {
   getSourceUpdateState: () => Promise<DesktopSourceUpdateState>;
   checkSourceUpdate: () => Promise<DesktopSourceUpdateState>;
   onSourceUpdateState: (listener: (state: DesktopSourceUpdateState) => void) => () => void;
+  getReleaseUpdateState: () => Promise<DesktopReleaseUpdateState>;
+  checkReleaseUpdate: () => Promise<DesktopReleaseUpdateState>;
+  onReleaseUpdateState: (listener: (state: DesktopReleaseUpdateState) => void) => () => void;
 }
 
 /**

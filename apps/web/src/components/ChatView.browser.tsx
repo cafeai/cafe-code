@@ -4,6 +4,7 @@ import "../index.css";
 import {
   EventId,
   type DesktopBridge,
+  type DesktopReleaseUpdateState,
   ORCHESTRATION_WS_METHODS,
   EnvironmentId,
   type DesktopSourceUpdateState,
@@ -1482,6 +1483,15 @@ async function dispatchInputKey(
 function createDesktopBridgeForChatViewTests(
   sourceUpdateState: DesktopSourceUpdateState,
 ): DesktopBridge {
+  const releaseUpdateState: DesktopReleaseUpdateState = {
+    status: "unavailable",
+    currentVersion: "0.0.0-test",
+    latestVersion: null,
+    releaseUrl: null,
+    checkedAt: null,
+    message: "Release update checks are not available in this test.",
+  };
+
   return {
     getAppBranding: () => null,
     getLocalEnvironmentBootstrap: () => null,
@@ -1536,6 +1546,9 @@ function createDesktopBridgeForChatViewTests(
     getSourceUpdateState: vi.fn().mockResolvedValue(sourceUpdateState),
     checkSourceUpdate: vi.fn().mockResolvedValue(sourceUpdateState),
     onSourceUpdateState: vi.fn(() => () => undefined),
+    getReleaseUpdateState: vi.fn().mockResolvedValue(releaseUpdateState),
+    checkReleaseUpdate: vi.fn().mockResolvedValue(releaseUpdateState),
+    onReleaseUpdateState: vi.fn(() => () => undefined),
   };
 }
 

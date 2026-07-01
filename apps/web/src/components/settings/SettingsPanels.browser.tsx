@@ -8,6 +8,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   type DesktopBridge,
+  type DesktopReleaseUpdateState,
   type DesktopSourceUpdateState,
   type DesktopUpdateChannel,
   type DesktopUpdateState,
@@ -520,6 +521,14 @@ const createDesktopBridgeStub = (overrides?: {
     checkedAt: "2026-01-01T00:00:00.000Z",
     message: "Only branches main and dev are tracked.",
   };
+  const releaseUpdateState: DesktopReleaseUpdateState = {
+    status: "unavailable",
+    currentVersion: "0.0.0-test",
+    latestVersion: null,
+    releaseUrl: null,
+    checkedAt: null,
+    message: "Release update checks are not available in this test.",
+  };
 
   return {
     getAppBranding: vi.fn().mockReturnValue(null),
@@ -585,6 +594,9 @@ const createDesktopBridgeStub = (overrides?: {
     getSourceUpdateState: vi.fn().mockResolvedValue(sourceUpdateState),
     checkSourceUpdate: overrides?.checkSourceUpdate ?? vi.fn().mockResolvedValue(sourceUpdateState),
     onSourceUpdateState: () => () => {},
+    getReleaseUpdateState: vi.fn().mockResolvedValue(releaseUpdateState),
+    checkReleaseUpdate: vi.fn().mockResolvedValue(releaseUpdateState),
+    onReleaseUpdateState: () => () => {},
   };
 };
 

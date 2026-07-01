@@ -3,6 +3,7 @@ import {
   DEFAULT_CLIENT_SETTINGS,
   DEFAULT_SERVER_SETTINGS,
   type DesktopBridge,
+  type DesktopReleaseUpdateState,
   EnvironmentId,
   type VcsStatusResult,
   ProjectId,
@@ -161,6 +162,15 @@ function createLocalStorageStub(): Storage {
 }
 
 function makeDesktopBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridge {
+  const releaseUpdateState: DesktopReleaseUpdateState = {
+    status: "unavailable",
+    currentVersion: "0.0.0-test",
+    latestVersion: null,
+    releaseUrl: null,
+    checkedAt: null,
+    message: "Release update checks are not available in this test.",
+  };
+
   return {
     getAppBranding: () => null,
     getLocalEnvironmentBootstrap: () => null,
@@ -237,6 +247,9 @@ function makeDesktopBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridg
       message: "Only branches main and dev are tracked.",
     }),
     onSourceUpdateState: () => () => undefined,
+    getReleaseUpdateState: async () => releaseUpdateState,
+    checkReleaseUpdate: async () => releaseUpdateState,
+    onReleaseUpdateState: () => () => undefined,
     ...overrides,
   };
 }

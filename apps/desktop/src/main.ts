@@ -39,6 +39,7 @@ import * as DesktopAppSettings from "./settings/DesktopAppSettings.ts";
 import * as DesktopShellEnvironment from "./shell/DesktopShellEnvironment.ts";
 import * as DesktopState from "./app/DesktopState.ts";
 import * as DesktopUpdates from "./updates/DesktopUpdates.ts";
+import * as DesktopReleaseUpdates from "./updates/DesktopReleaseUpdates.ts";
 import * as DesktopSourceUpdates from "./updates/DesktopSourceUpdates.ts";
 import * as DesktopWindow from "./window/DesktopWindow.ts";
 import { resolveLinuxSafeStoragePasswordStore } from "./app/LinuxSafeStorageCommandLine.ts";
@@ -123,6 +124,7 @@ const desktopApplicationLayer = Layer.mergeAll(
 ).pipe(
   Layer.provideMerge(DesktopUpdates.layer),
   Layer.provideMerge(DesktopSourceUpdates.layer),
+  Layer.provideMerge(DesktopReleaseUpdates.layer),
   Layer.provideMerge(desktopBackendLayer),
   Layer.provideMerge(desktopProviderDaemonLayer),
 );

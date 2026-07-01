@@ -27,6 +27,7 @@ import * as DesktopShellEnvironment from "../shell/DesktopShellEnvironment.ts";
 import * as DesktopState from "./DesktopState.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
 import * as DesktopSourceUpdates from "../updates/DesktopSourceUpdates.ts";
+import * as DesktopReleaseUpdates from "../updates/DesktopReleaseUpdates.ts";
 import * as DesktopDebugServer from "../debug/DesktopDebugServer.ts";
 
 const DEFAULT_DESKTOP_BACKEND_PORT = 3773;
@@ -305,6 +306,7 @@ const startup = Effect.gen(function* () {
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
   const updates = yield* DesktopUpdates.DesktopUpdates;
   const sourceUpdates = yield* DesktopSourceUpdates.DesktopSourceUpdates;
+  const releaseUpdates = yield* DesktopReleaseUpdates.DesktopReleaseUpdates;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
 
   yield* shellEnvironment.installIntoProcess;
@@ -334,6 +336,7 @@ const startup = Effect.gen(function* () {
   yield* electronProtocol.registerDesktopFileProtocol;
   yield* updates.configure;
   yield* sourceUpdates.configure;
+  yield* releaseUpdates.configure;
   yield* bootstrap.pipe(Effect.catchCause((cause) => fatalStartupCause("bootstrap", cause)));
   return startupRole;
 }).pipe(Effect.withSpan("desktop.startup"));
