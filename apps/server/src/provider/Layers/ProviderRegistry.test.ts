@@ -1814,6 +1814,49 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           ),
       );
 
+      it.effect(
+        "includes Claude Sonnet 5 when Claude Code reports the upstream sonnet alias version",
+        () =>
+          Effect.gen(function* () {
+            const status = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities(),
+            );
+            const sonnet5 = status.models.find((model) => model.slug === "claude-sonnet-5");
+            if (!sonnet5) {
+              assert.fail("Expected Claude Sonnet 5 to be present for Claude Code v2.1.197.");
+            }
+            if (!sonnet5.capabilities) {
+              assert.fail(
+                "Expected Claude Sonnet 5 capabilities to be present for Claude Code v2.1.197.",
+              );
+            }
+            const effortDescriptor = sonnet5.capabilities.optionDescriptors?.find(
+              (descriptor) => descriptor.type === "select" && descriptor.id === "effort",
+            );
+            assert.deepStrictEqual(
+              effortDescriptor?.type === "select"
+                ? effortDescriptor.options.map((option) => option.id)
+                : undefined,
+              ["low", "medium", "high", "xhigh", "max", "ultrathink"],
+            );
+          }).pipe(
+            Effect.provide(
+              mockSpawnerLayer((args) => {
+                const joined = args.join(" ");
+                if (joined === "--version") return { stdout: "2.1.197\n", stderr: "", code: 0 };
+                if (joined === "auth status")
+                  return {
+                    stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
+                    stderr: "",
+                    code: 0,
+                  };
+                throw new Error(`Unexpected args: ${joined}`);
+              }),
+            ),
+          ),
+      );
+
       it.effect("hides version-gated Claude models on older Claude Code versions", () =>
         Effect.gen(function* () {
           const status = yield* checkClaudeProviderStatus(
