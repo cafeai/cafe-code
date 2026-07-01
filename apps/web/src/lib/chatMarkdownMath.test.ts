@@ -91,6 +91,33 @@ describe("normalizeChatMarkdownMath", () => {
     ).toBe(["More explicitly:", "", "$$", "\\sum_{i=1}^n i = \\frac{n(n+1)}{2}", "$$"].join("\n"));
   });
 
+  it("normalizes multiline dollar-display blocks with inline delimiters", () => {
+    expect(
+      normalizeChatMarkdownMath(
+        [
+          "Substituting this in:",
+          "",
+          "$$\\int_1^\\infty \\left[\\frac{\\sqrt t-1}{2}+\\sqrt t\\,\\psi(t)\\right]t^{-s/2-1}\\,dt",
+          "= \\frac12\\int_1^\\infty\\!\\left(t^{-\\frac{s+1}{2}}-t^{-\\frac{s}{2}-1}\\right)dt \\;+\\; \\int_1^\\infty \\psi(t)\\,t^{-\\frac{s+1}{2}}\\,dt.$$",
+        ].join("\n"),
+      ),
+    ).toBe(
+      [
+        "Substituting this in:",
+        "",
+        "$$",
+        "\\int_1^\\infty \\left[\\frac{\\sqrt t-1}{2}+\\sqrt t\\,\\psi(t)\\right]t^{-s/2-1}\\,dt",
+        "= \\frac12\\int_1^\\infty\\!\\left(t^{-\\frac{s+1}{2}}-t^{-\\frac{s}{2}-1}\\right)dt \\;+\\; \\int_1^\\infty \\psi(t)\\,t^{-\\frac{s+1}{2}}\\,dt.",
+        "$$",
+      ].join("\n"),
+    );
+  });
+
+  it("does not rewrite dollar display delimiters inside non-math code fences", () => {
+    const markdown = ["```text", "$$x=1", "y=2$$", "```"].join("\n");
+    expect(normalizeChatMarkdownMath(markdown)).toBe(markdown);
+  });
+
   it("keeps normal prose with incidental TeX macros as prose", () => {
     const markdown =
       "A short inline expression \\(x+1\\) should not turn the paragraph into a block.";

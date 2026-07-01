@@ -273,6 +273,30 @@ describe("ChatMarkdown", () => {
     }
   });
 
+  it("renders Claude multiline dollar-display math without a KaTeX error", async () => {
+    const screen = await render(
+      <ChatMarkdown
+        text={[
+          "Substituting this in:",
+          "",
+          "$$\\int_1^\\infty \\left[\\frac{\\sqrt t-1}{2}+\\sqrt t\\,\\psi(t)\\right]t^{-s/2-1}\\,dt",
+          "= \\frac12\\int_1^\\infty\\!\\left(t^{-\\frac{s+1}{2}}-t^{-\\frac{s}{2}-1}\\right)dt \\;+\\; \\int_1^\\infty \\psi(t)\\,t^{-\\frac{s+1}{2}}\\,dt.$$",
+        ].join("\n")}
+        cwd="/repo/project"
+      />,
+    );
+
+    try {
+      await vi.waitFor(() => {
+        expect(document.querySelector(".katex-display")).not.toBeNull();
+      });
+      expect(document.querySelector(".katex-error")).toBeNull();
+      expect(document.body.textContent).toContain("Substituting this in");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("renders Codex slash-display math inside numbered-list follow-up prose", async () => {
     const screen = await render(
       <ChatMarkdown

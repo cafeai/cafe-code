@@ -241,6 +241,91 @@ function normalizeTableRowMathDelimiters(text: string): string {
   return output.join("\n");
 }
 
+function normalizeDollarDisplayDelimiters(text: string): string {
+  const lines = text.split("\n");
+  const output: string[] = [];
+  let activeFence: { indent: string; marker: string } | null = null;
+  let activeBlock: {
+    readonly indent: string;
+    readonly openingLine: string;
+    readonly body: string[];
+  } | null = null;
+
+  const emitDisplayBlock = (indent: string, bodyLines: ReadonlyArray<string>) => {
+    const body = trimBlankEdgeLines(bodyLines).map((bodyLine) =>
+      bodyLine.startsWith(indent) ? bodyLine.slice(indent.length) : bodyLine,
+    );
+
+    output.push(`${indent}$$`);
+    for (const bodyLine of body) {
+      output.push(`${indent}${bodyLine}`);
+    }
+    output.push(`${indent}$$`);
+  };
+
+  for (const line of lines) {
+    if (activeBlock) {
+      const closeIndex = line.indexOf("$$");
+      if (closeIndex >= 0 && line.slice(closeIndex + 2).trim().length === 0) {
+        activeBlock.body.push(line.slice(0, closeIndex));
+        emitDisplayBlock(activeBlock.indent, activeBlock.body);
+        activeBlock = null;
+        continue;
+      }
+
+      activeBlock.body.push(line);
+      continue;
+    }
+
+    if (activeFence) {
+      output.push(line);
+      if (isFenceClose(line, activeFence.indent, activeFence.marker)) {
+        activeFence = null;
+      }
+      continue;
+    }
+
+    const fenceStartMatch = line.match(FENCE_START_PATTERN);
+    if (fenceStartMatch) {
+      const [, fenceIndent = "", fenceMarker = ""] = fenceStartMatch;
+      activeFence = { indent: fenceIndent, marker: fenceMarker };
+      output.push(line);
+      continue;
+    }
+
+    const openMatch = line.match(/^([ \t]*)\$\$(.*)$/);
+    if (!openMatch) {
+      output.push(line);
+      continue;
+    }
+
+    const [, indent = "", afterOpen = ""] = openMatch;
+    const sameLineCloseIndex = afterOpen.indexOf("$$");
+    if (sameLineCloseIndex >= 0) {
+      const afterClose = afterOpen.slice(sameLineCloseIndex + 2);
+      if (afterClose.trim().length === 0) {
+        emitDisplayBlock(indent, [afterOpen.slice(0, sameLineCloseIndex)]);
+        continue;
+      }
+
+      output.push(line);
+      continue;
+    }
+
+    activeBlock = {
+      indent,
+      openingLine: line,
+      body: [afterOpen],
+    };
+  }
+
+  if (activeBlock) {
+    output.push(activeBlock.openingLine, ...activeBlock.body.slice(1));
+  }
+
+  return output.join("\n");
+}
+
 function removeTexSyntaxForProseCheck(line: string): string {
   return line
     .replace(/\\[A-Za-z]+[*]?/g, " ")
@@ -283,6 +368,8 @@ function normalizeStandaloneMathParagraphs(text: string): string {
  */
 export function normalizeChatMarkdownMath(text: string): string {
   return normalizeStandaloneMathParagraphs(
-    normalizeLatexDelimiters(normalizeTableRowMathDelimiters(normalizeMathFences(text))),
+    normalizeLatexDelimiters(
+      normalizeDollarDisplayDelimiters(normalizeTableRowMathDelimiters(normalizeMathFences(text))),
+    ),
   );
 }
