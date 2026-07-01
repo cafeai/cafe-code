@@ -1352,6 +1352,7 @@ function readNotificationThreadId(notification: CodexServerNotification): string
     case "item/fileChange/outputDelta":
     case "item/fileChange/patchUpdated":
     case "serverRequest/resolved":
+    case "mcpServer/startupStatus/updated":
     case "item/mcpToolCall/progress":
     case "item/reasoning/summaryTextDelta":
     case "item/reasoning/summaryPartAdded":

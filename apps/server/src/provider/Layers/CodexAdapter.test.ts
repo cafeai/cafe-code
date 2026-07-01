@@ -1679,6 +1679,60 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("maps Codex MCP startup status updates to visible work-log diagnostics", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 3)).pipe(
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-mcp-starting"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "mcpServer/startupStatus/updated",
+        payload: {
+          name: "github",
+          status: "starting",
+          threadId: "provider-thread-1",
+        },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-mcp-failed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.001Z",
+        method: "mcpServer/startupStatus/updated",
+        payload: {
+          name: "github",
+          status: "failed",
+          error: "OAuth token expired.",
+          threadId: "provider-thread-1",
+        },
+      } satisfies ProviderEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+
+      assert.equal(events[0]?.type, "task.progress");
+      if (events[0]?.type === "task.progress") {
+        assert.equal(events[0].payload.description, "Codex MCP server 'github' is starting.");
+      }
+
+      assert.equal(events[1]?.type, "task.progress");
+      if (events[1]?.type === "task.progress") {
+        assert.equal(events[1].payload.description, "Codex MCP server 'github' failed to start.");
+      }
+
+      assert.equal(events[2]?.type, "runtime.warning");
+      if (events[2]?.type === "runtime.warning") {
+        assert.equal(events[2].payload.message, "OAuth token expired.");
+      }
+    }),
+  );
+
   it.effect("drops transient Codex safety buffering notifications", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

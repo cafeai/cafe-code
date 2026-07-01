@@ -1552,6 +1552,58 @@ function mapToRuntimeEvents(
     ];
   }
 
+  if (event.method === "mcpServer/startupStatus/updated") {
+    const payload = readPayload(
+      EffectCodexSchema.V2McpServerStatusUpdatedNotification,
+      event.payload,
+    );
+    if (!payload) {
+      return [];
+    }
+
+    const serverName = trimText(payload.name) ?? "MCP server";
+    const error = trimText(payload.error);
+    const description =
+      payload.status === "failed"
+        ? `Codex MCP server '${serverName}' failed to start.`
+        : payload.status === "cancelled"
+          ? `Codex MCP server '${serverName}' startup was cancelled.`
+          : payload.status === "ready"
+            ? `Codex MCP server '${serverName}' is ready.`
+            : `Codex MCP server '${serverName}' is starting.`;
+    const detail = {
+      name: payload.name,
+      status: payload.status,
+      ...(payload.threadId !== undefined ? { providerThreadId: payload.threadId } : {}),
+      ...(error ? { error } : {}),
+    };
+    const base = runtimeEventBase(event, canonicalThreadId);
+
+    return [
+      {
+        type: "task.progress",
+        ...base,
+        payload: {
+          taskId: RuntimeTaskId.make(`codex-mcp-startup:${payload.name}`),
+          description,
+          usage: detail,
+        },
+      },
+      ...(payload.status === "failed"
+        ? [
+            {
+              type: "runtime.warning" as const,
+              ...base,
+              payload: {
+                message: error ?? description,
+                detail,
+              },
+            },
+          ]
+        : []),
+    ];
+  }
+
   if (event.method === "thread/realtime/started") {
     const payload = readPayload(
       EffectCodexSchema.V2ThreadRealtimeStartedNotification,
