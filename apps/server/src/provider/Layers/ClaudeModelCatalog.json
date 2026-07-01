@@ -171,6 +171,31 @@
       }
     },
     {
+      "slug": "claude-sonnet-5",
+      "name": "Claude Sonnet 5",
+      "isCustom": false,
+      "minimumClaudeCodeVersion": "2.1.197",
+      "capabilities": {
+        "optionDescriptors": [
+          {
+            "id": "effort",
+            "label": "Reasoning",
+            "type": "select",
+            "options": [
+              { "id": "low", "label": "Low" },
+              { "id": "medium", "label": "Medium" },
+              { "id": "high", "label": "High", "isDefault": true },
+              { "id": "xhigh", "label": "Extra High" },
+              { "id": "max", "label": "Max" },
+              { "id": "ultrathink", "label": "Ultrathink" }
+            ],
+            "currentValue": "high",
+            "promptInjectedValues": ["ultrathink"]
+          }
+        ]
+      }
+    },
+    {
       "slug": "claude-sonnet-4-6",
       "name": "Claude Sonnet 4.6",
       "isCustom": false,
