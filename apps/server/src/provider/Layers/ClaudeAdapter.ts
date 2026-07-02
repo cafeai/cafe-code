@@ -75,7 +75,7 @@ import {
   normalizeClaudeCliEffort,
   resolveClaudeApiModelId,
   resolveClaudeSelectedContextWindowTokens,
-  resolveClaudeEffort,
+  resolveClaudeSessionEffort,
 } from "./ClaudeProvider.ts";
 import {
   ProviderAdapterProcessError,
@@ -4095,7 +4095,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const apiModelId = modelSelection ? resolveClaudeApiModelId(modelSelection) : undefined;
       const selectedContextWindowTokens = resolveClaudeSelectedContextWindowTokens(modelSelection);
       const rawEffort = getModelSelectionStringOptionValue(modelSelection, "effort");
-      const effort = resolveClaudeEffort(caps, rawEffort) ?? null;
+      const effort = resolveClaudeSessionEffort(caps, rawEffort) ?? null;
       const fastModeSupported = descriptors.some(
         (descriptor) => descriptor.type === "boolean" && descriptor.id === "fastMode",
       );

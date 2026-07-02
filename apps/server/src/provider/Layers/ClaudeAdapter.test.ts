@@ -708,7 +708,45 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("treats ultrathink as a prompt keyword instead of a session effort", () => {
+  it.effect("runs ultrathink at the model's highest effort with the prompt keyword", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-fable-5",
+          [{ id: "effort", value: "ultrathink" }],
+        ),
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Investigate the edge cases",
+        attachments: [],
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-fable-5",
+          [{ id: "effort", value: "ultrathink" }],
+        ),
+      });
+
+      const createInput = harness.getLastCreateQueryInput();
+      // Ultrathink is the top tier: highest concrete CLI effort (max on
+      // Fable 5) plus the upstream deeper-reasoning prompt keyword.
+      assert.equal(createInput?.options.effort, "max");
+      const promptText = yield* Effect.promise(() => readFirstPromptText(createInput));
+      assert.equal(promptText, "Ultrathink:\nInvestigate the edge cases");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("caps ultrathink at the top catalog effort when the model lacks max", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -735,6 +773,8 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const createInput = harness.getLastCreateQueryInput();
+      // Sonnet 4.6's catalog tops out at "high"; ultrathink still applies the
+      // prompt keyword on top of the strongest effort the model supports.
       assert.equal(createInput?.options.effort, "high");
       const promptText = yield* Effect.promise(() => readFirstPromptText(createInput));
       assert.equal(promptText, "Ultrathink:\nInvestigate the edge cases");

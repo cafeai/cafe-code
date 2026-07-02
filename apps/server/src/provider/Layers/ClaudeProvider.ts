@@ -18,6 +18,7 @@ import {
   createModelCapabilities,
   getProviderOptionCurrentValue,
   getProviderOptionDescriptors,
+  resolvePromptInjectedEffort,
 } from "@cafecode/shared/model";
 import { compareSemverVersions } from "@cafecode/shared/semver";
 import {
@@ -157,6 +158,41 @@ export function resolveClaudeSelectedContextWindowTokens(
     default:
       return undefined;
   }
+}
+
+/**
+ * Resolve the CLI effort for a live Claude session.
+ *
+ * Prompt-injected effort selections (`ultrathink`) are a keyword nudge
+ * layered on top of the CLI's real effort scale — upstream Claude Code
+ * detects `\bultrathink\b` in the prompt and injects a deeper-reasoning
+ * reminder without touching `--effort`. Cafe presents Ultrathink as the top
+ * tier, so a session started with it runs at the model's highest concrete
+ * effort (catalog options are ordered lowest → highest: `max` where the
+ * model has it, otherwise its top option) in addition to the prompt prefix,
+ * instead of silently falling back to the default. Background text
+ * generation keeps using {@link resolveClaudeEffort} so titles and commit
+ * messages don't pay max-effort latency.
+ */
+export function resolveClaudeSessionEffort(
+  caps: ModelCapabilities,
+  raw: string | null | undefined,
+): string | undefined {
+  const promptInjected = resolvePromptInjectedEffort(caps, raw);
+  if (!promptInjected) {
+    return resolveClaudeEffort(caps, raw);
+  }
+  const descriptors = getProviderOptionDescriptors({ caps });
+  const effortDescriptor = descriptors.find((descriptor) => descriptor.id === "effort");
+  if (effortDescriptor?.type === "select") {
+    const highestConcreteEffort = effortDescriptor.options.findLast(
+      (option) => !effortDescriptor.promptInjectedValues?.includes(option.id),
+    )?.id;
+    if (highestConcreteEffort) {
+      return highestConcreteEffort;
+    }
+  }
+  return resolveClaudeEffort(caps, raw);
 }
 
 /**
