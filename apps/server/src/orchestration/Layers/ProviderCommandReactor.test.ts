@@ -142,6 +142,7 @@ describe("ProviderCommandReactor", () => {
   async function createHarness(input?: {
     readonly baseDir?: string;
     readonly threadModelSelection?: ModelSelection;
+    readonly missingProviderInstanceIds?: ReadonlySet<string>;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly liveSteer?: "supported" | "unsupported";
     readonly startReactor?: boolean;
@@ -308,6 +309,15 @@ describe("ProviderCommandReactor", () => {
         }),
       getInstanceInfo: (instanceId) => {
         const raw = String(instanceId);
+        if (input?.missingProviderInstanceIds?.has(raw)) {
+          return Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: raw,
+              method: "getInstanceInfo",
+              detail: `Provider instance '${raw}' is not configured.`,
+            }),
+          );
+        }
         const driverKind = ProviderDriverKind.make(
           raw.startsWith("claude") ? "claudeAgent" : raw.startsWith("codex") ? "codex" : raw,
         );
@@ -1566,6 +1576,85 @@ describe("ProviderCommandReactor", () => {
         model: "gpt-5.3-codex",
       },
     });
+  });
+
+  it("ignores stale unknown persisted session instances when starting the selected provider", async () => {
+    const harness = await createHarness({
+      threadModelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-fable-5",
+        options: [
+          { id: "effort", value: "max" },
+          { id: "contextWindow", value: "1m" },
+        ],
+      },
+      missingProviderInstanceIds: new Set(["codex"]),
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-stale-unknown-instance"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "ready",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError:
+            "Thread 'thread-1' references unknown provider instance 'codex'. The instance is not configured in this build.",
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-after-stale-session-instance"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-after-stale-session-instance"),
+          role: "user",
+          text: "continue with the selected Claude model",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+      threadId: ThreadId.make("thread-1"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-fable-5",
+        options: [
+          { id: "effort", value: "max" },
+          { id: "contextWindow", value: "1m" },
+        ],
+      },
+      runtimeMode: "approval-required",
+    });
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      threadId: ThreadId.make("thread-1"),
+    });
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.session?.providerName).toBe(ProviderDriverKind.make("claudeAgent"));
+    expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("claudeAgent"));
+    expect(thread?.session?.lastError).toBeNull();
   });
 
   it("restarts the provider session when runtime mode is updated on the thread", async () => {

@@ -660,6 +660,25 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("enables Claude SDK partial messages and subagent progress summaries", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const createInput = harness.getLastCreateQueryInput();
+      assert.equal(createInput?.options.includePartialMessages, true);
+      assert.equal(createInput?.options.agentProgressSummaries, true);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("ignores claude fast mode for non-opus models", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -2260,6 +2279,26 @@ describe("ClaudeAdapterLive", () => {
         uuid: "prompt-suggestion-1",
       } as unknown as SDKMessage);
       harness.query.emit({
+        type: "control_request_progress",
+        summary: "Refreshing Claude workspace metadata.",
+        request_id: "control-progress-198",
+        session_id: "sdk-session-198",
+        uuid: "control-progress-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "conversation_reset",
+        reason: "remote_reset",
+        session_id: "sdk-session-198",
+        uuid: "conversation-reset-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "active_goal",
+        id: "goal-198",
+        objective: "Finish the requested implementation.",
+        session_id: "sdk-session-198",
+        uuid: "active-goal-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
         type: "system",
         subtype: "session_state_changed",
         state: "running",
@@ -2351,6 +2390,29 @@ describe("ClaudeAdapterLive", () => {
       if (workerState?.type === "session.state.changed") {
         assert.equal(workerState.payload.state, "waiting");
       }
+
+      assert.equal(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "tool.progress" &&
+            event.payload.summary === "Refreshing Claude workspace metadata.",
+        ),
+        true,
+      );
+      assert.equal(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "task.progress" &&
+            event.payload.taskId === RuntimeTaskId.make("goal-198"),
+        ),
+        true,
+      );
+      assert.equal(
+        runtimeEvents.some(
+          (event) => event.type === "thread.state.changed" && event.payload.state === "active",
+        ),
+        true,
+      );
 
       assert.equal(
         runtimeEvents.some(

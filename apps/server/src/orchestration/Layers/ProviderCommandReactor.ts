@@ -599,20 +599,6 @@ const make = Effect.gen(function* () {
           : thread.modelSelection.instanceId;
     const desiredModelSelection = requestedModelSelection ?? thread.modelSelection;
     const desiredInstanceId = desiredModelSelection.instanceId;
-    const currentInfo = yield* providerService.getInstanceInfo(currentInstanceId).pipe(
-      Effect.mapError(
-        () =>
-          new ProviderAdapterRequestError({
-            provider: providerErrorLabelFromInstanceHint({
-              instanceId: String(currentInstanceId),
-              modelSelectionInstanceId: String(thread.modelSelection.instanceId),
-              sessionProvider: thread.session?.providerName ?? undefined,
-            }),
-            method: "thread.turn.start",
-            detail: `Thread '${threadId}' references unknown provider instance '${currentInstanceId}'. The instance is not configured in this build.`,
-          }),
-      ),
-    );
     const desiredInfo = yield* providerService.getInstanceInfo(desiredInstanceId).pipe(
       Effect.mapError(
         () =>
@@ -634,13 +620,30 @@ const make = Effect.gen(function* () {
       });
     }
     const preferredProvider: ProviderDriverKind = desiredDriverKind;
-    const requestedInstanceChange =
-      requestedModelSelection !== undefined &&
-      requestedModelSelection.instanceId !== currentInstanceId;
+    const requestedInstanceChange = desiredInstanceId !== currentInstanceId;
+    const currentInfo = requestedInstanceChange
+      ? activeSession === undefined
+        ? Option.none()
+        : yield* providerService.getInstanceInfo(currentInstanceId).pipe(
+            Effect.tapError(() =>
+              Effect.logWarning(
+                "provider command reactor could not resolve current provider instance while switching sessions",
+                {
+                  threadId,
+                  currentInstanceId,
+                  desiredInstanceId,
+                  currentProvider: thread.session?.providerName ?? null,
+                },
+              ),
+            ),
+            Effect.option,
+          )
+      : Option.some(desiredInfo);
     const providerResumeIdentityChanged =
       requestedInstanceChange &&
-      (currentInfo.driverKind !== desiredInfo.driverKind ||
-        currentInfo.continuationIdentity.continuationKey !==
+      (Option.isNone(currentInfo) ||
+        currentInfo.value.driverKind !== desiredInfo.driverKind ||
+        currentInfo.value.continuationIdentity.continuationKey !==
           desiredInfo.continuationIdentity.continuationKey);
     const project = options?.project ?? (yield* resolveProject(thread.projectId));
     const workspaceDirectories = resolveThreadWorkspaceDirectories({

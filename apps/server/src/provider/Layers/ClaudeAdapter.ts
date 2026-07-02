@@ -3383,6 +3383,73 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
       return;
     }
+
+    const rawMessage = message as unknown as Record<string, unknown>;
+    if (rawMessage.type === "control_request_progress") {
+      // Claude Agent SDK 0.3.198 added progress frames for control-channel
+      // requests. The shape is intentionally loose in the published types, so
+      // only promote obvious human-readable progress text; otherwise the raw
+      // native event remains available through the provider log without
+      // creating a generic "unhandled SDK message" warning.
+      const summary =
+        trimmedStringValue(rawMessage.summary) ??
+        trimmedStringValue(rawMessage.message) ??
+        trimmedStringValue(rawMessage.content) ??
+        trimmedStringValue(rawMessage.text);
+      if (summary) {
+        yield* offerRuntimeEvent({
+          ...base,
+          type: "tool.progress",
+          payload: {
+            summary,
+          },
+        });
+      }
+      return;
+    }
+
+    if (rawMessage.type === "conversation_reset") {
+      // Conversation resets are upstream session lifecycle state, not a turn
+      // failure. Mark the thread active so the next user message can continue
+      // on the fresh upstream conversation without surfacing a scary warning.
+      yield* offerRuntimeEvent({
+        ...base,
+        type: "thread.state.changed",
+        payload: {
+          state: "active",
+          detail: rawMessage,
+        },
+      });
+      return;
+    }
+
+    if (rawMessage.type === "active_goal") {
+      // Claude Code 2.1.198 can forward active-goal frames even though the SDK
+      // declaration currently lists them only on the lower-level stdout union.
+      // Cafe does not have a dedicated active-goal pane, but a concise work-log
+      // progress row is useful and avoids a false unhandled-message warning.
+      const goal =
+        trimmedStringValue(rawMessage.goal) ??
+        trimmedStringValue(rawMessage.objective) ??
+        trimmedStringValue(rawMessage.title) ??
+        trimmedStringValue(rawMessage.description);
+      if (goal) {
+        yield* offerRuntimeEvent({
+          ...base,
+          type: "task.progress",
+          payload: {
+            taskId: RuntimeTaskId.make(
+              trimmedStringValue(rawMessage.goal_id) ??
+                trimmedStringValue(rawMessage.id) ??
+                "claude-active-goal",
+            ),
+            description: "Active goal",
+            summary: goal,
+          },
+        });
+      }
+      return;
+    }
   });
 
   const handleSdkMessage = Effect.fn("handleSdkMessage")(function* (
@@ -3392,6 +3459,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* logNativeSdkMessage(context, message);
     yield* ensureThreadId(context, message);
     yield* recordTurnSdkMessage(context, message);
+
+    const rawMessageType = sdkMessageType(message);
+    if (
+      rawMessageType === "control_request_progress" ||
+      rawMessageType === "conversation_reset" ||
+      rawMessageType === "active_goal"
+    ) {
+      yield* handleSdkTelemetryMessage(context, message);
+      return;
+    }
 
     switch (message.type) {
       case "stream_event":
@@ -4069,6 +4146,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // send upstream resume coordinates after a real persisted Claude
         // transcript has produced a session_id.
         includePartialMessages: true,
+        // Upstream documents this as the CLI-supported way to receive
+        // periodic AI-written summaries for long-running subagents. Without it,
+        // Claude can be doing real background work while Cafe only sees sparse
+        // task/tool lifecycle frames, which makes long turns look silent.
+        agentProgressSummaries: true,
         canUseTool,
         stderr: (data: string) => {
           const lines = splitClaudeStderrLines(data);
@@ -4128,6 +4210,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.resume_session_at": "",
         "claude.query.session_id": "",
         "claude.query.include_partial_messages": true,
+        "claude.query.agent_progress_summaries": true,
         "claude.query.additional_directories": claudeAdditionalDirectories,
         "claude.query.setting_sources": [...CLAUDE_SETTING_SOURCES],
         "claude.query.settings_json": encodeJsonStringForDiagnostics(settings) ?? "",
