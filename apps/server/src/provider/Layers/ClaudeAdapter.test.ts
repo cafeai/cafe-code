@@ -160,6 +160,7 @@ function makeHarness(config?: {
   readonly baseDir?: string;
   readonly claudeConfig?: Partial<ClaudeSettings>;
   readonly instanceId?: ProviderInstanceId;
+  readonly onAuthStatusChanged?: ClaudeAdapterLiveOptions["onAuthStatusChanged"];
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -183,6 +184,11 @@ function makeHarness(config?: {
     ...(config?.nativeEventLogPath
       ? {
           nativeEventLogPath: config.nativeEventLogPath,
+        }
+      : {}),
+    ...(config?.onAuthStatusChanged
+      ? {
+          onAuthStatusChanged: config.onAuthStatusChanged,
         }
       : {}),
   };
@@ -1143,6 +1149,91 @@ describe("ClaudeAdapterLive", () => {
       );
     },
   );
+
+  it.effect("notifies the driver when a Claude turn fails with an auth error", () => {
+    const authStatusChanges: Array<boolean> = [];
+    const harness = makeHarness({
+      onAuthStatusChanged: (failed) =>
+        Effect.sync(() => {
+          authStatusChanges.push(failed);
+        }),
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        api_error_status: 401,
+        result: "Failed to authenticate. API Error: 401 Invalid authentication credentials",
+        errors: [],
+        session_id: "stale-claude-session",
+        uuid: "result-auth-failure",
+      } as unknown as SDKMessage);
+      for (let attempt = 0; attempt < 200 && authStatusChanges.length < 1; attempt += 1) {
+        yield* Effect.yieldNow;
+      }
+      assert.deepEqual(authStatusChanges, [true]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("clears the driver auth-failure signal when a Claude turn completes", () => {
+    const authStatusChanges: Array<boolean> = [];
+    const harness = makeHarness({
+      onAuthStatusChanged: (failed) =>
+        Effect.sync(() => {
+          authStatusChanges.push(failed);
+        }),
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        duration_ms: 5,
+        duration_api_ms: 5,
+        num_turns: 1,
+        result: "All good.",
+        session_id: "fresh-claude-session",
+        uuid: "result-auth-recovered",
+      } as unknown as SDKMessage);
+      for (let attempt = 0; attempt < 200 && authStatusChanges.length < 1; attempt += 1) {
+        yield* Effect.yieldNow;
+      }
+      assert.deepEqual(authStatusChanges, [false]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 
   it.effect("maps Claude reasoning deltas, streamed tool inputs, and tool results", () => {
     const harness = makeHarness();
@@ -2300,6 +2391,23 @@ describe("ClaudeAdapterLive", () => {
       } as unknown as SDKMessage);
       harness.query.emit({
         type: "system",
+        subtype: "post_turn_summary",
+        status_category: "review_ready",
+        status_detail: "Implemented the requested parser fix",
+        needs_action: "Review the diff",
+        summarizes_uuid: "assistant-198",
+        session_id: "sdk-session-198",
+        uuid: "post-turn-summary-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_summary",
+        detail: "Explored the repository layout",
+        session_id: "sdk-session-198",
+        uuid: "task-summary-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
         subtype: "session_state_changed",
         state: "running",
         session_id: "sdk-session-191",
@@ -2391,6 +2499,22 @@ describe("ClaudeAdapterLive", () => {
         assert.equal(workerState.payload.state, "waiting");
       }
 
+      assert.equal(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "tool.progress" &&
+            event.payload.summary === "Implemented the requested parser fix — Review the diff",
+        ),
+        true,
+      );
+      assert.equal(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "tool.progress" &&
+            event.payload.summary === "Explored the repository layout",
+        ),
+        true,
+      );
       assert.equal(
         runtimeEvents.some(
           (event) =>

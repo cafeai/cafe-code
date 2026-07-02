@@ -458,6 +458,12 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     claudeSettings: ClaudeSettings,
   ) => Effect.Effect<ClaudeCapabilitiesProbe | undefined>,
   environment: NodeJS.ProcessEnv = process.env,
+  // Neither the capabilities probe (never sends an authenticated request) nor
+  // `claude auth status` (reads local credential material only) can detect an
+  // expired/revoked credential — both report a logged-in state while real
+  // turns fail with 401. The owning driver observes those 401s at turn time
+  // through the adapter and feeds the result back here.
+  resolveAuthFailure?: Effect.Effect<boolean>,
 ): Effect.fn.Return<
   ServerProviderDraft,
   never,
@@ -560,6 +566,24 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     DEFAULT_CLAUDE_MODEL_CAPABILITIES,
   );
   const modelUpgradeMessage = formatClaudeModelUpgradeMessage(parsedVersion);
+
+  const authFailureSeen = resolveAuthFailure !== undefined && (yield* resolveAuthFailure);
+  if (authFailureSeen) {
+    return buildServerProvider({
+      presentation: CLAUDE_PRESENTATION,
+      enabled: claudeSettings.enabled,
+      checkedAt,
+      models,
+      probe: {
+        installed: true,
+        version: parsedVersion,
+        status: "error",
+        auth: { status: "unauthenticated" },
+        message:
+          "Claude rejected the stored credentials (401 authentication error). Run `claude` in a terminal and use `/login`, then retry.",
+      },
+    });
+  }
 
   const capabilities = resolveCapabilities
     ? yield* resolveCapabilities(claudeSettings).pipe(Effect.orElseSucceed(() => undefined))

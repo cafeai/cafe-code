@@ -18,6 +18,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/unstable/http";
@@ -154,10 +155,34 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
             : undefined,
       });
 
+      // Track Claude auth failures observed at turn time. Expired/revoked
+      // credentials are invisible to the local probes (`--version`, the
+      // capabilities init probe, `claude auth status` — all read local
+      // credential material without an authenticated request), so the adapter
+      // reports 401s here and the status probe consults this flag. On a state
+      // flip, re-run the snapshot check immediately so the provider tile
+      // shows needs-login (or recovers) without waiting for the periodic
+      // refresh.
+      const authFailureRef = yield* Ref.make(false);
+      const snapshotRefreshRef = yield* Ref.make<Effect.Effect<unknown> | undefined>(undefined);
+      const scope = yield* Effect.scope;
+      const onAuthStatusChanged = (failed: boolean): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          const previous = yield* Ref.getAndSet(authFailureRef, failed);
+          if (previous === failed) {
+            return;
+          }
+          const refreshSnapshot = yield* Ref.get(snapshotRefreshRef);
+          if (refreshSnapshot) {
+            yield* refreshSnapshot.pipe(Effect.ignoreCause({ log: true }), Effect.forkIn(scope));
+          }
+        });
+
       const adapterOptions = {
         instanceId,
         environment: effectiveEnvironment,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
+        onAuthStatusChanged,
       };
       const adapter = yield* makeClaudeAdapter(effectiveConfig, adapterOptions);
       const textGeneration = yield* makeClaudeTextGeneration(effectiveConfig, effectiveEnvironment);
@@ -178,6 +203,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         effectiveConfig,
         () => Cache.get(capabilitiesProbeCache, capabilitiesCacheKey),
         effectiveEnvironment,
+        Ref.get(authFailureRef),
       ).pipe(
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -209,6 +235,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
             }),
         ),
       );
+
+      yield* Ref.set(snapshotRefreshRef, snapshot.refresh);
 
       return {
         instanceId,

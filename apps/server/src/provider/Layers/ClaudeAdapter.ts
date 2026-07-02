@@ -229,6 +229,15 @@ export interface ClaudeAdapterLiveOptions {
   }) => ClaudeQueryRuntime;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+  /**
+   * Invoked when the adapter observes upstream Claude authentication state
+   * change: `true` when a turn fails with a 401/authentication error and
+   * `false` when a turn completes successfully again. Lets the owning driver
+   * flip the provider snapshot to needs-login without waiting for a probe —
+   * the local capability probe cannot detect expired credentials because it
+   * never performs an authenticated API request.
+   */
+  readonly onAuthStatusChanged?: (failed: boolean) => Effect.Effect<void>;
 }
 
 function isUuid(value: string): boolean {
@@ -1669,6 +1678,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const offerRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Queue.offer(runtimeEventQueue, event).pipe(Effect.asVoid);
 
+  const notifyAuthStatusChanged = (failed: boolean): Effect.Effect<void> =>
+    options?.onAuthStatusChanged
+      ? options.onAuthStatusChanged(failed).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("claude.auth-status-notify-failed", {
+              failed,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        )
+      : Effect.void;
+
   const emitThreadTokenUsageUpdate = Effect.fn("emitThreadTokenUsageUpdate")(function* (
     context: ClaudeSessionContext,
     usage: ThreadTokenUsageSnapshot,
@@ -2882,6 +2903,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         );
       } else if (authFailure) {
         context.authFailureSeen = true;
+        yield* notifyAuthStatusChanged(true);
         yield* emitRuntimeWarning(
           context,
           "Claude authentication failed; retiring this stale Claude session so the next turn starts with current login material.",
@@ -2899,6 +2921,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       } else {
         yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
       }
+    }
+
+    if (status === "completed") {
+      // A successful turn proves the stored credentials work again (e.g.
+      // after the user re-ran /login), so clear any needs-login provider
+      // state derived from an earlier 401.
+      yield* notifyAuthStatusChanged(false);
     }
 
     yield* completeTurn(context, status, errorMessage, message);
@@ -2934,10 +2963,62 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       },
     };
 
+    const rawSystemSubtype = sdkMessageSubtype(message);
+    if (rawSystemSubtype === "post_turn_summary") {
+      // Claude Code 2.1.198 emits an AI-written end-of-turn status summary
+      // (status_category / status_detail / needs_action) that the published
+      // Agent SDK subtype union does not include yet, so the typed switch
+      // below cannot match it. Promote the human-readable text to a work-log
+      // progress row; the full payload stays available via the raw native
+      // event instead of surfacing an unhandled-subtype warning.
+      const record = message as unknown as Record<string, unknown>;
+      const statusDetail = trimmedStringValue(record.status_detail);
+      const needsAction = trimmedStringValue(record.needs_action);
+      const summary =
+        statusDetail && needsAction && needsAction !== statusDetail
+          ? `${statusDetail} — ${needsAction}`
+          : (statusDetail ?? needsAction);
+      if (summary) {
+        yield* offerRuntimeEvent({
+          ...base,
+          type: "tool.progress",
+          payload: {
+            summary,
+          },
+        });
+      }
+      return;
+    }
+    if (rawSystemSubtype === "task_summary") {
+      // Claude Code 2.1.198 forwards subagent task summaries as
+      // system:task_summary with `detail` holding either the summary text or a
+      // structured record. Same treatment as post_turn_summary: surface
+      // readable text without a generic unhandled-subtype warning.
+      const record = message as unknown as Record<string, unknown>;
+      const detailRecord = recordValue(record.detail);
+      const summary =
+        trimmedStringValue(record.detail) ??
+        trimmedStringValue(detailRecord?.summary) ??
+        trimmedStringValue(detailRecord?.detail) ??
+        trimmedStringValue(detailRecord?.text) ??
+        trimmedStringValue(detailRecord?.description);
+      if (summary) {
+        yield* offerRuntimeEvent({
+          ...base,
+          type: "tool.progress",
+          payload: {
+            summary,
+          },
+        });
+      }
+      return;
+    }
+
     switch (message.subtype) {
       case "api_retry":
         if (isClaudeAuthFailureSystemMessage(message)) {
           context.authFailureSeen = true;
+          yield* notifyAuthStatusChanged(true);
           yield* offerRuntimeEvent({
             ...base,
             type: "runtime.warning",
