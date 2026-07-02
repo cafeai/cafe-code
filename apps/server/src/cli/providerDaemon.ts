@@ -1,4 +1,4 @@
-import { ProviderDaemonBootstrap, type ProviderDaemonSupervisorProcess } from "@cafecode/contracts";
+import { ProviderDaemonBootstrap } from "@cafecode/contracts";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -17,36 +17,13 @@ import {
 } from "../config.ts";
 import { runProviderDaemonServerForever } from "../providerDaemon/ProviderDaemonServer.ts";
 import { ProviderDaemonRuntimeLive } from "../providerDaemon/ProviderDaemonRuntime.ts";
-import {
-  ensureProviderSupervisorProcess,
-  PROVIDER_SUPERVISOR_PROTOCOL_VERSION,
-  type ProviderSupervisorProcessSnapshot,
-} from "../providerDaemon/ProviderSupervisorProcessManager.ts";
+import { PROVIDER_SUPERVISOR_PROTOCOL_VERSION } from "../providerDaemon/ProviderSupervisorProcessManager.ts";
 import packageJson from "../../package.json" with { type: "json" };
 import { bootstrapFdFlag } from "./config.ts";
 
 class ProviderDaemonCliError extends Data.TaggedError("ProviderDaemonCliError")<{
   readonly message: string;
 }> {}
-
-function sanitizeSupervisorProcessSnapshot(
-  input: ProviderSupervisorProcessSnapshot,
-): ProviderDaemonSupervisorProcess {
-  return {
-    status: input.status,
-    pid: input.pid,
-    httpBaseUrl: input.endpoint.httpBaseUrl,
-    transport: input.endpoint.transport,
-    ...(input.endpoint.socketPath === null ? {} : { socketPath: input.endpoint.socketPath }),
-    ...(input.endpoint.leaseId === null ? {} : { leaseId: input.endpoint.leaseId }),
-    markerPath: input.markerPath,
-    appVersion: input.appVersion,
-    protocolVersion: input.protocolVersion,
-    ...(input.runtimeBuildId !== undefined ? { runtimeBuildId: input.runtimeBuildId } : {}),
-    adoptedExistingProcess: input.adoptedExistingProcess,
-    durationMs: input.durationMs,
-  };
-}
 
 const resolveProviderDaemonServerConfig = (input: {
   readonly bootstrap: ProviderDaemonBootstrap;
@@ -122,24 +99,10 @@ export const runProviderDaemonCommand = (flags: { readonly bootstrapFd: Option.O
       bootstrap,
       logLevel,
     });
-    const supervisor = yield* ensureProviderSupervisorProcess({
-      config: baseConfig,
-      version: packageJson.version,
-      ...(bootstrap.runtimeBuildId !== undefined
-        ? { runtimeBuildId: bootstrap.runtimeBuildId }
-        : {}),
+    yield* Effect.logInfo("provider daemon using local provider runtime", {
+      reason:
+        "automatic provider-supervisor handoff is disabled until supervisor restart/fallback preserves the provider registry",
     });
-    yield* Effect.logInfo("provider daemon connected to detached provider supervisor", {
-      supervisorPid: supervisor.snapshot.pid,
-      adoptedExistingProcess: supervisor.snapshot.adoptedExistingProcess,
-      durationMs: supervisor.snapshot.durationMs,
-      transport: supervisor.snapshot.endpoint.transport,
-      socketPath: supervisor.snapshot.endpoint.socketPath,
-    });
-    const config: ServerConfigShape = {
-      ...baseConfig,
-      providerSupervisor: supervisor.endpoint,
-    };
 
     return yield* runProviderDaemonServerForever({
       mode: "provider-daemon",
@@ -153,8 +116,10 @@ export const runProviderDaemonCommand = (flags: { readonly bootstrapFd: Option.O
       ...(bootstrap.runtimeBuildId !== undefined
         ? { runtimeBuildId: bootstrap.runtimeBuildId }
         : {}),
-      supervisorProcess: sanitizeSupervisorProcessSnapshot(supervisor.snapshot),
-    }).pipe(Effect.provide(ProviderDaemonRuntimeLive), Effect.provideService(ServerConfig, config));
+    }).pipe(
+      Effect.provide(ProviderDaemonRuntimeLive),
+      Effect.provideService(ServerConfig, baseConfig),
+    );
   });
 
 export const runProviderSupervisorCommand = (flags: {
