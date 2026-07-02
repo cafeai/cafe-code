@@ -10,6 +10,7 @@
  * @module ProviderServiceLive
  */
 import {
+  EventId,
   ModelSelection,
   NonNegativeInt,
   ThreadId,
@@ -28,6 +29,7 @@ import {
   type ProviderRuntimeEvent,
   type ProviderSession,
 } from "@cafecode/contracts";
+import { randomUUID } from "node:crypto";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -68,6 +70,9 @@ import { AnalyticsService } from "../../telemetry/Services/AnalyticsService.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 const CODEX_NO_ROLLOUT_FOUND_PATTERN = /\bno rollout found for thread id\b/i;
+const CLAUDE_REJECTED_RESUME_CURSOR_PATTERN =
+  /\b(?:no conversation found with session id|no message found with message\.uuid|invalid resume|resume session .*not found|conversation .*not found)\b/i;
+const CLAUDE_PROCESS_EXITED_PATTERN = /\bClaude Code process exited with code\b/i;
 
 /**
  * Hook for tests that want to override the canonical event logger pulled
@@ -148,15 +153,38 @@ function errorMessageChain(error: unknown): string {
   return String(error);
 }
 
-function isCodexMissingRolloutResumeError(input: {
+function isRejectedResumeCursorError(input: {
   readonly provider: ProviderDriverKind;
   readonly error: unknown;
 }): boolean {
-  return (
-    input.provider === ProviderDriverKind.make("codex") &&
-    isProviderAdapterProcessError(input.error) &&
-    CODEX_NO_ROLLOUT_FOUND_PATTERN.test(errorMessageChain(input.error))
-  );
+  if (!isProviderAdapterProcessError(input.error)) {
+    return false;
+  }
+
+  const message = errorMessageChain(input.error);
+  if (input.provider === ProviderDriverKind.make("codex")) {
+    return CODEX_NO_ROLLOUT_FOUND_PATTERN.test(message);
+  }
+
+  if (input.provider === ProviderDriverKind.make("claudeAgent")) {
+    // Claude Code sometimes reports a stale resume cursor as a specific
+    // "No conversation/message found" SDK error, and sometimes only as an
+    // early process exit. This recovery is gated by the caller's known
+    // resume-cursor attempt, so a model/auth error is retried only once and
+    // still surfaces if the fresh start also fails.
+    return (
+      CLAUDE_REJECTED_RESUME_CURSOR_PATTERN.test(message) ||
+      CLAUDE_PROCESS_EXITED_PATTERN.test(message)
+    );
+  }
+
+  return false;
+}
+
+function rejectedResumeCursorRecoveryReason(provider: ProviderDriverKind): string {
+  return provider === ProviderDriverKind.make("codex")
+    ? "Provider rejected the persisted Codex rollout id; starting a fresh session."
+    : "Provider rejected the persisted Claude resume session; starting a fresh session.";
 }
 
 function toRuntimePayloadFromSession(
@@ -369,6 +397,44 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       ),
       Effect.flatMap((canonicalEvent) => PubSub.publish(runtimeEventPubSub, canonicalEvent)),
       Effect.asVoid,
+    );
+
+  const emitRejectedResumeCursorRecoveryWarning = (input: {
+    readonly provider: ProviderDriverKind;
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly threadId: ThreadId;
+    readonly operation: string;
+  }) =>
+    nowIso.pipe(
+      Effect.flatMap((createdAt) =>
+        publishRuntimeEvent({
+          type: "runtime.warning",
+          eventId: EventId.make(randomUUID()),
+          provider: input.provider,
+          providerInstanceId: input.providerInstanceId,
+          threadId: input.threadId,
+          createdAt,
+          payload: {
+            message: "Provider resume state was stale; starting a fresh session.",
+            detail: {
+              operation: input.operation,
+              recovery: "fresh-session-after-rejected-resume-cursor",
+              reason: rejectedResumeCursorRecoveryReason(input.provider),
+              willRetry: true,
+            },
+          },
+          providerRefs: {},
+        }),
+      ),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider.session.resume-cursor-recovery-warning-failed", {
+          threadId: input.threadId,
+          provider: input.provider,
+          providerInstanceId: input.providerInstanceId,
+          operation: input.operation,
+          cause: Cause.pretty(cause),
+        }),
+      ),
     );
 
   const requireBindingInstanceId = (
@@ -656,7 +722,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       );
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
 
-      const resumed = yield* adapter.startSession({
+      const startInput = {
         threadId: input.binding.threadId,
         provider: input.binding.provider,
         providerInstanceId: bindingInstanceId,
@@ -667,7 +733,40 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ...(persistedModelSelection ? { modelSelection: persistedModelSelection } : {}),
         ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
         runtimeMode: input.binding.runtimeMode ?? "full-access",
-      });
+      } satisfies ProviderSessionStartInput;
+      const recoveredFromRejectedResumeCursor = yield* Ref.make(false);
+      const resumed = yield* adapter.startSession(startInput).pipe(
+        Effect.catch((error) => {
+          if (
+            !hasResumeCursor ||
+            !isRejectedResumeCursorError({ provider: input.binding.provider, error })
+          ) {
+            return Effect.fail(error);
+          }
+
+          const { resumeCursor: _staleResumeCursor, ...freshStartInput } = startInput;
+          return Ref.set(recoveredFromRejectedResumeCursor, true).pipe(
+            Effect.andThen(
+              emitRejectedResumeCursorRecoveryWarning({
+                provider: input.binding.provider,
+                providerInstanceId: bindingInstanceId,
+                threadId: input.binding.threadId,
+                operation: input.operation,
+              }),
+            ),
+            Effect.andThen(
+              Effect.logWarning("provider.session.resume-cursor-rejected", {
+                threadId: input.binding.threadId,
+                provider: input.binding.provider,
+                providerInstanceId: bindingInstanceId,
+                operation: input.operation,
+                reason: rejectedResumeCursorRecoveryReason(input.binding.provider),
+              }),
+            ),
+            Effect.andThen(adapter.startSession(freshStartInput)),
+          );
+        }),
+      );
       if (resumed.provider !== adapter.provider) {
         return yield* toValidationError(
           input.operation,
@@ -675,13 +774,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         );
       }
 
+      const usedRejectedResumeCursorRecovery = yield* Ref.get(recoveredFromRejectedResumeCursor);
       yield* upsertSessionBinding(
         { ...resumed, providerInstanceId: bindingInstanceId },
         input.binding.threadId,
+        usedRejectedResumeCursorRecovery && resumed.resumeCursor === undefined
+          ? { resumeCursor: null }
+          : undefined,
       );
       yield* analytics.record("provider.session.recovered", {
         provider: resumed.provider,
-        strategy: "resume-thread",
+        strategy: usedRejectedResumeCursorRecovery
+          ? "fresh-after-rejected-resume"
+          : "resume-thread",
         hasResumeCursor: resumed.resumeCursor !== undefined,
       });
       return { adapter, session: resumed } as const;
@@ -868,7 +973,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           Effect.catch((error) => {
             if (
               effectiveResumeCursor === undefined ||
-              !isCodexMissingRolloutResumeError({ provider: resolvedProvider, error })
+              !isRejectedResumeCursorError({ provider: resolvedProvider, error })
             ) {
               return Effect.fail(error);
             }
@@ -876,11 +981,20 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             const { resumeCursor: _staleResumeCursor, ...freshStartInput } = startInput;
             return Ref.set(recoveredFromRejectedResumeCursor, true).pipe(
               Effect.andThen(
+                emitRejectedResumeCursorRecoveryWarning({
+                  provider: resolvedProvider,
+                  providerInstanceId: resolvedInstanceId,
+                  threadId,
+                  operation: "ProviderService.startSession",
+                }),
+              ),
+              Effect.andThen(
                 Effect.logWarning("provider.session.resume-cursor-rejected", {
                   threadId,
                   provider: resolvedProvider,
                   providerInstanceId: resolvedInstanceId,
-                  reason: "Codex reported no rollout for the persisted thread id; starting fresh.",
+                  operation: "ProviderService.startSession",
+                  reason: rejectedResumeCursorRecoveryReason(resolvedProvider),
                 }),
               ),
               Effect.andThen(adapter.startSession(freshStartInput)),
@@ -906,10 +1020,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           threadId,
           currentInstanceId: resolvedInstanceId,
         });
-        const usedMissingRolloutRecovery = yield* Ref.get(recoveredFromRejectedResumeCursor);
+        const usedRejectedResumeCursorRecovery = yield* Ref.get(recoveredFromRejectedResumeCursor);
         yield* upsertSessionBinding(sessionWithInstance, threadId, {
           modelSelection: input.modelSelection,
-          ...(usedMissingRolloutRecovery && sessionWithInstance.resumeCursor === undefined
+          ...(usedRejectedResumeCursorRecovery && sessionWithInstance.resumeCursor === undefined
             ? { resumeCursor: null }
             : {}),
         });

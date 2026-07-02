@@ -37,7 +37,7 @@ import {
   resolveThreadWorkspaceDirectories,
 } from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
-import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
+import { ProviderAdapterProcessError, ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -56,7 +56,10 @@ import {
   readSystemPromptFileForInjection,
 } from "../../systemPromptFile.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
+const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
+const RAW_PROVIDER_PROCESS_FAILURE_PATTERN =
+  /\b(?:ProviderAdapterProcessError|Provider adapter process error|process exited with code|Claude Code process exited|Codex CLI .*failed to run)\b/i;
 
 type ProviderIntentEvent = Extract<
   OrchestrationEvent,
@@ -215,6 +218,25 @@ function detectCodexNonSteerableTurnKind(
     return "compact";
   }
   return undefined;
+}
+
+function findProviderAdapterProcessError(
+  cause: Cause.Cause<unknown>,
+): ProviderAdapterProcessError | undefined {
+  for (const reason of cause.reasons) {
+    if (!Cause.isFailReason(reason)) continue;
+    const error = reason.error;
+    if (isProviderAdapterProcessError(error)) {
+      return error;
+    }
+  }
+  return undefined;
+}
+
+function sanitizeProviderFailureDetail(detail: string): string {
+  return RAW_PROVIDER_PROCESS_FAILURE_PATTERN.test(detail)
+    ? "Provider runtime exited while starting. Cafe Code attempted automatic fresh-session recovery; if this repeats, check the selected provider account, model access, and local CLI install."
+    : detail;
 }
 
 function isUnsupportedLiveSteerFailure(cause: Cause.Cause<unknown>): boolean {
@@ -432,9 +454,13 @@ const make = Effect.gen(function* () {
       ? failReason.error
       : undefined;
     if (providerError) {
-      return providerError.detail;
+      return sanitizeProviderFailureDetail(providerError.detail);
     }
-    return Cause.pretty(cause);
+    const processError = findProviderAdapterProcessError(cause);
+    if (processError) {
+      return sanitizeProviderFailureDetail(processError.detail);
+    }
+    return sanitizeProviderFailureDetail(Cause.pretty(cause));
   };
 
   const setThreadSession = (input: {
