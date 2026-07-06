@@ -1883,7 +1883,6 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                   workToneClass(workEntry.tone),
                   preview ? "text-muted-foreground/70" : "",
                 )}
-                title={displayText}
               >
                 <span className={cn("text-foreground/80", workToneClass(workEntry.tone))}>
                   {heading}
@@ -1915,11 +1914,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
             </div>
           ) : (
             <Tooltip>
-              <TooltipTrigger
-                className="block min-w-0 w-full text-left"
-                title={displayText}
-                aria-label={displayText}
-              >
+              <TooltipTrigger className="block min-w-0 w-full text-left" aria-label={displayText}>
                 <p
                   className={cn(
                     "truncate text-[11px] leading-5",

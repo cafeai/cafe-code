@@ -350,6 +350,46 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("text-left");
   });
 
+  it("does not add native title tooltips to tool-call summary text", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "entry-command",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:28.000Z",
+            entry: {
+              id: "work-command",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              label: "Ran command",
+              tone: "tool",
+              command: "bun lint",
+            },
+          },
+          {
+            id: "entry-summary",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:29.000Z",
+            entry: {
+              id: "work-summary",
+              createdAt: "2026-03-17T19:12:29.000Z",
+              label: "Read file",
+              tone: "tool",
+              detail: "apps/web/src/components/chat/MessagesTimeline.tsx",
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("Ran command");
+    expect(markup).toContain("Read file");
+    expect(markup).not.toContain('title="Ran command');
+    expect(markup).not.toContain('title="Read file');
+  });
+
   it("does not expose truncated JSON fragments as openable path tokens", async () => {
     const { extractOpenablePathTokens } = await import("./MessagesTimeline.helpers");
 
