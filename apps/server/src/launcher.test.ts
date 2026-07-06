@@ -52,6 +52,10 @@ describe("launcher", () => {
       type: "server",
       args: ["auth", "pairing", "create"],
     });
+    assert.deepEqual(resolveLaunchAction(["killall"]), {
+      type: "server",
+      args: ["killall"],
+    });
   });
 
   it("keeps help and version local to the launcher", () => {

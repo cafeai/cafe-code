@@ -1532,6 +1532,41 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.message.assistant.delta",
+        commandId: CommandId.make("cmd-assistant-claude-before-cross-provider-switch"),
+        threadId: ThreadId.make("thread-1"),
+        messageId: asMessageId("assistant-message-claude-before-cross-provider-switch"),
+        turnId: asTurnId("turn-1"),
+        delta: "Claude inspected the workspace and changed apps/server/src/provider.ts.",
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.message.assistant.complete",
+        commandId: CommandId.make("cmd-assistant-claude-complete-before-cross-provider-switch"),
+        threadId: ThreadId.make("thread-1"),
+        messageId: asMessageId("assistant-message-claude-before-cross-provider-switch"),
+        turnId: asTurnId("turn-1"),
+        createdAt: now,
+      }),
+    );
+    await waitFor(async () => {
+      const thread = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      return (
+        thread?.messages.some(
+          (message) =>
+            message.id === "assistant-message-claude-before-cross-provider-switch" &&
+            message.role === "assistant" &&
+            message.text.includes("Claude inspected the workspace") &&
+            !message.streaming,
+        ) ?? false
+      );
+    });
     await harness.markThreadReady();
 
     await Effect.runPromise(
@@ -1576,6 +1611,18 @@ describe("ProviderCommandReactor", () => {
         model: "gpt-5.3-codex",
       },
     });
+    const codexTurnInput = harness.sendTurn.mock.calls[1]?.[0];
+    const codexPrompt =
+      typeof codexTurnInput === "object" &&
+      codexTurnInput !== null &&
+      "input" in codexTurnInput &&
+      typeof codexTurnInput.input === "string"
+        ? codexTurnInput.input
+        : "";
+    expect(codexPrompt).toContain("You are taking over an existing Cafe Code chat");
+    expect(codexPrompt).toContain("User:\nfirst claude turn");
+    expect(codexPrompt).toContain("Assistant:\nClaude inspected the workspace");
+    expect(codexPrompt).toContain("Current user request:\ncontinue with codex");
   });
 
   it("ignores stale unknown persisted session instances when starting the selected provider", async () => {

@@ -3142,10 +3142,12 @@ const SidebarChromeHeader = memo(function SidebarChromeHeader({
 
 const SidebarChromeFooter = memo(function SidebarChromeFooter() {
   const navigate = useNavigate();
+  const pathname = useLocation({ select: (loc) => loc.pathname });
   const { isMobile, open, setOpen, setOpenMobile } = useSidebar();
   const hasUnseenCompletions = useHasUnseenThreadCompletions();
   const ToggleIcon = open ? PanelLeftCloseIcon : PanelLeftIcon;
   const toggleLabel = open ? "Hide sidebar" : "Show sidebar";
+  const isOnSettingsFooter = pathname.startsWith("/settings");
   const handleSettingsClick = useCallback(() => {
     if (isMobile) {
       setOpenMobile(false);
@@ -3168,7 +3170,10 @@ const SidebarChromeFooter = memo(function SidebarChromeFooter() {
           {open ? (
             <SidebarMenuButton
               size="sm"
-              className="min-w-0 flex-1 gap-2 px-2 py-1.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground"
+              className={cn(
+                "min-w-0 flex-1 gap-2 px-2 py-1.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground",
+                isOnSettingsFooter && "bg-accent text-foreground",
+              )}
               onClick={handleSettingsClick}
             >
               <SettingsIcon className="size-3.5" />

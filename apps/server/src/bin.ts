@@ -9,6 +9,7 @@ import { startStartupCpuProfiler } from "@cafecode/shared/startupProfiler";
 import packageJson from "../package.json" with { type: "json" };
 import { authCommand } from "./cli/auth.ts";
 import { sharedServerCommandFlags } from "./cli/config.ts";
+import { killallCommand } from "./cli/killall.ts";
 import { projectCommand } from "./cli/project.ts";
 import { providerDaemonCommand, providerSupervisorCommand } from "./cli/providerDaemon.ts";
 import { runServerCommand, serveCommand, startCommand } from "./cli/server.ts";
@@ -30,6 +31,7 @@ export const cli = Command.make("cafe-code", { ...sharedServerCommandFlags }).pi
     startCommand,
     serveCommand,
     authCommand,
+    killallCommand,
     projectCommand,
     providerDaemonCommand,
     providerSupervisorCommand,

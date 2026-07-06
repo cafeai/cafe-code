@@ -4,8 +4,10 @@ import {
   EventId,
   type MessageId,
   type ModelSelection,
+  type OrchestrationMessage,
   type OrchestrationEvent,
   type OrchestrationProjectShell,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ProviderDriverKind,
   type ProjectId,
   type OrchestrationSession,
@@ -120,6 +122,8 @@ const HANDLED_TURN_START_KEY_MAX = 10_000;
 const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
 const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 const DEFAULT_THREAD_TITLE = "New thread";
+const PROVIDER_CONTINUATION_BOOTSTRAP_TRANSCRIPT_MAX_CHARS = 40_000;
+const PROVIDER_CONTINUATION_BOOTSTRAP_MIN_TRANSCRIPT_CHARS = 500;
 const ORPHANED_TURN_START_RESTART_DETAIL =
   "Turn start was interrupted by application restart before a provider turn started. The prompt was not resent automatically to avoid duplicate provider work; resend the message to continue.";
 
@@ -148,6 +152,102 @@ function canReplaceThreadTitle(currentTitle: string, titleSeed?: string): boolea
   return trimmedTitleSeed !== undefined && trimmedTitleSeed.length > 0
     ? trimmedCurrentTitle === trimmedTitleSeed
     : false;
+}
+
+function formatProviderBootstrapMessage(message: OrchestrationMessage): string | undefined {
+  if (message.role === "assistant" && message.streaming) {
+    return undefined;
+  }
+  const text = message.text.trim();
+  const attachments = message.attachments ?? [];
+  if (text.length === 0 && attachments.length === 0) {
+    return undefined;
+  }
+  const role =
+    message.role === "assistant" ? "Assistant" : message.role === "system" ? "System" : "User";
+  const attachmentLine =
+    attachments.length > 0
+      ? `\n[attachments: ${attachments.map((attachment) => attachment.name).join(", ")}]`
+      : "";
+  return `${role}:\n${text.length > 0 ? text : "[no text]"}${attachmentLine}`;
+}
+
+function buildBoundedProviderBootstrapTranscript(input: {
+  readonly messages: ReadonlyArray<OrchestrationMessage>;
+  readonly currentMessageId: MessageId | undefined;
+  readonly maxChars: number;
+}): string | undefined {
+  const formattedMessages = input.messages.flatMap((message) => {
+    if (input.currentMessageId !== undefined && message.id === input.currentMessageId) {
+      return [];
+    }
+    const formatted = formatProviderBootstrapMessage(message);
+    return formatted === undefined ? [] : [formatted];
+  });
+  if (
+    formattedMessages.length === 0 ||
+    input.maxChars < PROVIDER_CONTINUATION_BOOTSTRAP_MIN_TRANSCRIPT_CHARS
+  ) {
+    return undefined;
+  }
+
+  const selected: string[] = [];
+  let usedChars = 0;
+  let omittedEarlierMessages = false;
+  for (let index = formattedMessages.length - 1; index >= 0; index -= 1) {
+    const block = formattedMessages[index] as string;
+    const separatorChars = selected.length === 0 ? 0 : 2;
+    const remaining = input.maxChars - usedChars - separatorChars;
+    if (remaining <= 0) {
+      omittedEarlierMessages = true;
+      break;
+    }
+    if (block.length > remaining) {
+      if (remaining >= PROVIDER_CONTINUATION_BOOTSTRAP_MIN_TRANSCRIPT_CHARS) {
+        selected.unshift(`${block.slice(0, remaining - 32)}\n[message truncated]`);
+      }
+      omittedEarlierMessages = true;
+      break;
+    }
+    selected.unshift(block);
+    usedChars += block.length + separatorChars;
+  }
+
+  if (selected.length === 0) {
+    return undefined;
+  }
+  if (omittedEarlierMessages) {
+    selected.unshift("[Earlier Cafe-visible messages omitted due to length.]");
+  }
+  return selected.join("\n\n");
+}
+
+function composeProviderContinuationBootstrapInput(input: {
+  readonly messages: ReadonlyArray<OrchestrationMessage>;
+  readonly currentMessageId: MessageId | undefined;
+  readonly currentUserInput: string | undefined;
+}): string | undefined {
+  const currentUserInput =
+    input.currentUserInput ??
+    "[No text was provided with this request. Use the attached input, if any, with the prior chat context.]";
+  const prefix =
+    "You are taking over an existing Cafe Code chat in a new provider session.\n" +
+    "The previous provider session cannot be resumed by this provider, so Cafe is providing the visible prior chat transcript below. Use it as context for the current request; do not repeat or re-answer earlier messages unless asked.\n\n" +
+    "Prior Cafe-visible chat transcript:\n";
+  const suffix = `\n\nCurrent user request:\n${currentUserInput}`;
+  const transcriptBudget = Math.min(
+    PROVIDER_CONTINUATION_BOOTSTRAP_TRANSCRIPT_MAX_CHARS,
+    PROVIDER_SEND_TURN_MAX_INPUT_CHARS - prefix.length - suffix.length,
+  );
+  const transcript = buildBoundedProviderBootstrapTranscript({
+    messages: input.messages,
+    currentMessageId: input.currentMessageId,
+    maxChars: transcriptBudget,
+  });
+  if (transcript === undefined) {
+    return input.currentUserInput;
+  }
+  return `${prefix}${transcript}${suffix}`;
 }
 
 function findProviderAdapterRequestError(
@@ -816,6 +916,51 @@ const make = Effect.gen(function* () {
     return startedSession;
   });
 
+  const shouldBootstrapProviderContinuationContext = Effect.fn(
+    "shouldBootstrapProviderContinuationContext",
+  )(function* (input: {
+    readonly thread: OrchestrationThread;
+    readonly desiredModelSelection: ModelSelection;
+    readonly activeSession?: ProviderSession | undefined;
+  }) {
+    const currentInstanceId =
+      input.activeSession?.providerInstanceId ?? input.thread.session?.providerInstanceId;
+    if (
+      currentInstanceId === undefined ||
+      currentInstanceId === input.desiredModelSelection.instanceId
+    ) {
+      return false;
+    }
+
+    const desiredInfo = yield* providerService
+      .getInstanceInfo(input.desiredModelSelection.instanceId)
+      .pipe(Effect.option);
+    if (Option.isNone(desiredInfo)) {
+      return false;
+    }
+    const currentInfo = yield* providerService.getInstanceInfo(currentInstanceId).pipe(
+      Effect.tapError(() =>
+        Effect.logWarning(
+          "provider command reactor could not resolve current provider instance for context bootstrap",
+          {
+            threadId: input.thread.id,
+            currentInstanceId,
+            desiredInstanceId: input.desiredModelSelection.instanceId,
+          },
+        ),
+      ),
+      Effect.option,
+    );
+    if (Option.isNone(currentInfo)) {
+      return true;
+    }
+    return (
+      currentInfo.value.driverKind !== desiredInfo.value.driverKind ||
+      currentInfo.value.continuationIdentity.continuationKey !==
+        desiredInfo.value.continuationIdentity.continuationKey
+    );
+  });
+
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
     readonly messageId?: MessageId;
@@ -838,6 +983,16 @@ const make = Effect.gen(function* () {
       .pipe(
         Effect.map((sessions) => sessions.find((session) => session.threadId === input.threadId)),
       );
+    const requestedModelSelection =
+      input.modelSelection ?? threadModelSelections.get(input.threadId) ?? thread.modelSelection;
+    const shouldBootstrapProviderContext =
+      input.modelSelection !== undefined
+        ? yield* shouldBootstrapProviderContinuationContext({
+            thread,
+            desiredModelSelection: input.modelSelection,
+            activeSession,
+          })
+        : false;
     const ensuredSession = yield* ensureSessionForThread(input.threadId, input.createdAt, {
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
       thread,
@@ -860,7 +1015,17 @@ const make = Effect.gen(function* () {
     const providerInput =
       systemPrompt !== undefined
         ? composeSystemPromptProviderInput({ systemPrompt, userMessage: normalizedInput })
-        : normalizedInput;
+        : shouldBootstrapProviderContext
+          ? yield* resolveThread(input.threadId).pipe(
+              Effect.map((latestThread) =>
+                composeProviderContinuationBootstrapInput({
+                  messages: (latestThread ?? thread).messages,
+                  currentMessageId: input.messageId,
+                  currentUserInput: normalizedInput,
+                }),
+              ),
+            )
+          : normalizedInput;
     const normalizedAttachments = input.attachments ?? [];
     const sessionModelSwitch =
       ensuredSession.providerInstanceId === undefined
@@ -871,8 +1036,6 @@ const make = Effect.gen(function* () {
           })
         : (yield* providerService.getCapabilities(ensuredSession.providerInstanceId))
             .sessionModelSwitch;
-    const requestedModelSelection =
-      input.modelSelection ?? threadModelSelections.get(input.threadId) ?? thread.modelSelection;
     const modelForTurn =
       sessionModelSwitch === "unsupported" && input.modelSelection === undefined
         ? ensuredSession.model !== undefined

@@ -19,7 +19,7 @@ const stagedDesktopScript = join(
 );
 const repoDesktopScript = join(repoRoot, "apps", "desktop", "scripts", "start-electron.mjs");
 
-const serverSubcommands = new Set(["start", "serve", "auth", "project"]);
+const serverSubcommands = new Set(["start", "serve", "auth", "killall", "project"]);
 
 export type LaunchAction =
   | {
@@ -93,6 +93,7 @@ function printHelp() {
 Usage:
   cafe-code                 Launch the Electron desktop app
   cafe-code --server <args> Run the server CLI
+  cafe-code killall         Terminate running Cafe Code client/server processes
   cafe-code-server <args>   Run the server CLI
 
 Common server example:

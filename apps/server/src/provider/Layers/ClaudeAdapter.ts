@@ -100,6 +100,54 @@ type ClaudeSdkEffort = NonNullable<ClaudeQueryOptions["effort"]>;
 type ClaudeSdkThinkingDisplay = "summarized" | "omitted" | null;
 type ClaudePromptInput = Pick<ProviderSendTurnInput, "input" | "attachments"> &
   Partial<Pick<ProviderSendTurnInput, "modelSelection">>;
+// The bundled Claude Code binary can emit newer system subtypes before the
+// installed SDK declarations include them. Keep those known runtime shapes in
+// a narrow local union so handlers stay typed without dropping diagnostics.
+type ClaudeForwardCompatibleSystemMessage =
+  | (Record<string, unknown> & {
+      readonly type: "system";
+      readonly subtype: "commands_changed";
+    })
+  | (Record<string, unknown> & {
+      readonly type: "system";
+      readonly subtype: "informational";
+      readonly content: string;
+      readonly level?: string;
+      readonly prevent_continuation?: boolean;
+      readonly tool_use_id?: string;
+    })
+  | (Record<string, unknown> & {
+      readonly type: "system";
+      readonly subtype: "model_refusal_fallback";
+      readonly content: string;
+      readonly trigger?: string;
+      readonly direction?: string;
+      readonly original_model?: string;
+      readonly fallback_model?: string;
+      readonly request_id?: string;
+      readonly api_refusal_category?: string;
+      readonly api_refusal_explanation?: string;
+      readonly retracted_message_uuids?: ReadonlyArray<string>;
+      readonly refused_user_message_uuid?: string;
+    })
+  | (Record<string, unknown> & {
+      readonly type: "system";
+      readonly subtype: "model_refusal_no_fallback";
+      readonly content: string;
+      readonly original_model?: string;
+      readonly request_id?: string;
+      readonly api_refusal_category?: string;
+      readonly api_refusal_explanation?: string;
+      readonly refused_user_message_uuid?: string;
+    })
+  | (Record<string, unknown> & {
+      readonly type: "system";
+      readonly subtype: "worker_shutting_down";
+      readonly reason?: string;
+    });
+type ClaudeSdkMessageWithForwardCompatibleSystem =
+  | SDKMessage
+  | ClaudeForwardCompatibleSystemMessage;
 
 function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
   const result = encodeUnknownJsonStringExit(input);
@@ -2941,8 +2989,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const handleSystemMessage = Effect.fn("handleSystemMessage")(function* (
     context: ClaudeSessionContext,
-    message: SDKMessage,
+    sdkMessage: SDKMessage,
   ) {
+    const message = sdkMessage as ClaudeSdkMessageWithForwardCompatibleSystem;
     if (message.type !== "system") {
       return;
     }
@@ -2957,7 +3006,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       providerRefs: nativeProviderRefs(context),
       raw: {
         source: "claude.sdk.message" as const,
-        method: sdkNativeMethod(message),
+        method: sdkNativeMethod(sdkMessage),
         messageType: `${message.type}:${message.subtype}`,
         payload: message,
       },
