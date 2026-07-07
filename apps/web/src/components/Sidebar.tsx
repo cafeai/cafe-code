@@ -3093,16 +3093,30 @@ const SidebarChromeHeader = memo(function SidebarChromeHeader({
           <Tooltip>
             <TooltipTrigger
               render={
-                <Link
-                  aria-label="Go to threads"
-                  className="ml-1 flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-md outline-hidden ring-ring transition-colors hover:text-foreground focus-visible:ring-2"
-                  to="/"
-                >
-                  <CafeCodeWordmark />
-                  <span className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60">
-                    {APP_STAGE_LABEL}
+                // In Electron the wordmark shares the frameless title bar, so
+                // keep it non-interactive: a <span> inherits the header's
+                // `drag-region` (letting the whole 52px band drag the window),
+                // whereas an <a>/<button> would opt out via `.drag-region a`.
+                // On the web it stays a link back to the threads home.
+                isElectron ? (
+                  <span className="ml-1 flex min-w-0 items-center gap-1">
+                    <CafeCodeWordmark />
+                    <span className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60">
+                      {APP_STAGE_LABEL}
+                    </span>
                   </span>
-                </Link>
+                ) : (
+                  <Link
+                    aria-label="Go to threads"
+                    className="ml-1 flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-md outline-hidden ring-ring transition-colors hover:text-foreground focus-visible:ring-2"
+                    to="/"
+                  >
+                    <CafeCodeWordmark />
+                    <span className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60">
+                      {APP_STAGE_LABEL}
+                    </span>
+                  </Link>
+                )
               }
             />
             <TooltipPopup side="bottom" sideOffset={2}>
