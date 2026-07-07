@@ -92,6 +92,12 @@ export const ProviderDaemonMarker = Schema.Struct({
   httpBaseUrl: Schema.String,
   socketPath: Schema.optional(Schema.String),
   credentialPath: Schema.optional(Schema.String),
+  // Whether the credential file is encrypted with Electron safeStorage. When
+  // absent, readers must assume `true`: markers written before this field
+  // existed always stored an encrypted credential. `false` means the token is
+  // stored as plaintext (protected only by the file's 0600 mode) because OS
+  // keyring encryption was unavailable at spawn time.
+  credentialEncrypted: Schema.optional(Schema.Boolean),
   token: Schema.optional(ProviderDaemonToken),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,

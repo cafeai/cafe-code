@@ -335,50 +335,72 @@ const writeMarker = (input: {
       new ProviderDaemonIoError({ operation: "write provider daemon marker", cause }),
   }).pipe(Effect.mapError((cause) => new ProviderDaemonSpawnError({ cause })));
 
-const writeEncryptedCredential = (input: {
+// Persists the provider daemon token. Encryption is best-effort: the token is
+// an ephemeral, random, loopback-scoped secret already protected by the file's
+// 0600 mode, so when OS keyring encryption is unavailable (headless sessions,
+// locked or competing keyrings, minimal window managers) we degrade to a
+// plaintext file rather than fail startup. Returns whether the token was
+// encrypted so the marker can record how to read it back.
+const writeCredential = (input: {
   readonly credentialPath: string;
   readonly token: string;
-}): Effect.Effect<void, ProviderDaemonSpawnError, ElectronSafeStorage.ElectronSafeStorage> =>
+}): Effect.Effect<boolean, ProviderDaemonSpawnError, ElectronSafeStorage.ElectronSafeStorage> =>
   Effect.gen(function* () {
     const safeStorage = yield* ElectronSafeStorage.ElectronSafeStorage;
     const available = yield* safeStorage.isEncryptionAvailable.pipe(
-      Effect.mapError((cause) => new ProviderDaemonSpawnError({ cause })),
+      Effect.orElseSucceed(() => false),
     );
-    if (!available) {
-      return yield* new ProviderDaemonSpawnError({
-        cause: new Error("Electron safeStorage encryption is unavailable."),
-      });
+    let encryptedBytes = Option.none<Uint8Array>();
+    if (available) {
+      encryptedBytes = yield* safeStorage.encryptString(input.token).pipe(Effect.option);
     }
-    const encrypted = yield* safeStorage
-      .encryptString(input.token)
-      .pipe(Effect.mapError((cause) => new ProviderDaemonSpawnError({ cause })));
+    const encrypted = Option.isSome(encryptedBytes);
+    if (!encrypted) {
+      yield* logWarning(
+        "os keyring encryption unavailable; storing provider daemon credential unencrypted (file mode 0600)",
+        { credentialPath: input.credentialPath, encryptionAvailable: available },
+      );
+    }
+    const payload = Option.match(encryptedBytes, {
+      onNone: () => Buffer.from(input.token, "utf8"),
+      onSome: (bytes) => Buffer.from(bytes),
+    });
     yield* Effect.tryPromise({
       try: async () => {
         const temporaryPath = `${input.credentialPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
         await fs.mkdir(path.dirname(input.credentialPath), { recursive: true });
-        await fs.writeFile(temporaryPath, Buffer.from(encrypted), { mode: 0o600 });
+        await fs.writeFile(temporaryPath, payload, { mode: 0o600 });
         await fs.rename(temporaryPath, input.credentialPath);
         await fs.chmod(input.credentialPath, 0o600);
       },
       catch: (cause) =>
         new ProviderDaemonIoError({ operation: "write provider daemon credential", cause }),
     }).pipe(Effect.mapError((cause) => new ProviderDaemonSpawnError({ cause })));
+    return encrypted;
   });
 
-const readEncryptedCredential = (
+// Reads the provider daemon token written by `writeCredential`. `encrypted`
+// reflects the marker's `credentialEncrypted` flag; a mismatch (or a genuine
+// decrypt failure) resolves to `None`, which the caller treats as a missing
+// credential and respawns cleanly.
+const readCredential = (
   credentialPath: string,
+  encrypted: boolean,
 ): Effect.Effect<Option.Option<string>, never, ElectronSafeStorage.ElectronSafeStorage> =>
   Effect.gen(function* () {
     const safeStorage = yield* ElectronSafeStorage.ElectronSafeStorage;
-    const encrypted = yield* Effect.tryPromise({
+    const raw = yield* Effect.tryPromise({
       try: () => fs.readFile(credentialPath),
       catch: (cause) =>
         new ProviderDaemonIoError({ operation: "read provider daemon credential", cause }),
     }).pipe(Effect.option);
-    if (Option.isNone(encrypted)) {
+    if (Option.isNone(raw)) {
       return Option.none();
     }
-    return yield* safeStorage.decryptString(encrypted.value).pipe(Effect.option);
+    if (!encrypted) {
+      return Option.some(raw.value.toString("utf8"));
+    }
+    return yield* safeStorage.decryptString(raw.value).pipe(Effect.option);
   });
 
 const removeMarker = (markerPath: string): Effect.Effect<void> =>
@@ -556,9 +578,10 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         yield* removeMarker(environment.providerDaemonMarkerPath);
         return Option.none();
       }
-      const token = yield* readEncryptedCredential(credentialPath).pipe(
-        Effect.provideService(ElectronSafeStorage.ElectronSafeStorage, safeStorage),
-      );
+      const token = yield* readCredential(
+        credentialPath,
+        marker.credentialEncrypted ?? true,
+      ).pipe(Effect.provideService(ElectronSafeStorage.ElectronSafeStorage, safeStorage));
       if (Option.isNone(token)) {
         yield* removeMarker(environment.providerDaemonMarkerPath);
         yield* removeCredential(credentialPath);
@@ -698,7 +721,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       Scope.provide(daemonScope),
     );
     yield* handle.unref.pipe(Effect.ignore);
-    yield* writeEncryptedCredential({
+    const credentialEncrypted = yield* writeCredential({
       credentialPath: environment.providerDaemonCredentialPath,
       token,
     }).pipe(Effect.provideService(ElectronSafeStorage.ElectronSafeStorage, safeStorage));
@@ -713,6 +736,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       httpBaseUrl: rootEndpoint.httpBaseUrl,
       socketPath,
       credentialPath: environment.providerDaemonCredentialPath,
+      credentialEncrypted,
       createdAt: now,
       updatedAt: now,
       appVersion: environment.appVersion,
