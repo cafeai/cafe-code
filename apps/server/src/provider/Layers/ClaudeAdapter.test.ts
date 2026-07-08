@@ -2388,6 +2388,19 @@ describe("ClaudeAdapterLive", () => {
       } as unknown as SDKMessage);
       harness.query.emit({
         type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [
+          {
+            task_id: "background-task-204",
+            task_type: "agent",
+            description: "Indexing repository context",
+          },
+        ],
+        session_id: "sdk-session-204",
+        uuid: "background-tasks-changed-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
         subtype: "informational",
         content: "Slash command output was rendered.",
         level: "info",
@@ -2568,6 +2581,15 @@ describe("ClaudeAdapterLive", () => {
           (event) =>
             event.type === "task.progress" &&
             event.payload.taskId === RuntimeTaskId.make("goal-198"),
+        ),
+        true,
+      );
+      assert.equal(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "task.progress" &&
+            event.payload.taskId === RuntimeTaskId.make("background-task-204") &&
+            event.payload.description === "Indexing repository context",
         ),
         true,
       );
@@ -3600,6 +3622,7 @@ describe("ClaudeAdapterLive", () => {
             },
           ],
           toolUseID: "tool-use-1",
+          requestId: "permission-request-1",
         },
       );
 
@@ -3676,6 +3699,7 @@ describe("ClaudeAdapterLive", () => {
         {
           signal: new AbortController().signal,
           toolUseID: "tool-agent-1",
+          requestId: "permission-request-agent-1",
         },
       );
 
@@ -3700,6 +3724,7 @@ describe("ClaudeAdapterLive", () => {
         {
           signal: new AbortController().signal,
           toolUseID: "tool-grep-approval-1",
+          requestId: "permission-request-grep-1",
         },
       );
 
@@ -4666,6 +4691,7 @@ describe("ClaudeAdapterLive", () => {
         {
           signal: new AbortController().signal,
           toolUseID: "tool-exit-1",
+          requestId: "permission-request-exit-1",
         },
       );
 
@@ -4833,6 +4859,7 @@ describe("ClaudeAdapterLive", () => {
       const permissionPromise = canUseTool("AskUserQuestion", askInput, {
         signal: new AbortController().signal,
         toolUseID: "tool-ask-1",
+        requestId: "permission-request-ask-1",
       });
 
       // The adapter should emit a user-input.requested event.
@@ -4959,6 +4986,7 @@ describe("ClaudeAdapterLive", () => {
       const permissionPromise = canUseTool("AskUserQuestion", askInput, {
         signal: new AbortController().signal,
         toolUseID: "tool-ask-2",
+        requestId: "permission-request-ask-2",
       });
 
       // Should still get user-input.requested even in full-access mode.
@@ -5024,6 +5052,7 @@ describe("ClaudeAdapterLive", () => {
         {
           signal: controller.signal,
           toolUseID: "tool-ask-abort",
+          requestId: "permission-request-ask-abort",
         },
       );
 

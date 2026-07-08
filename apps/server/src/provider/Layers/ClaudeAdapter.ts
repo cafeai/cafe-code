@@ -247,6 +247,7 @@ interface ClaudeSessionContext {
     items: Array<unknown>;
   }>;
   readonly inFlightTools: Map<number, ToolInFlight>;
+  readonly backgroundTaskIds: Set<string>;
   turnState: ClaudeTurnState | undefined;
   lastKnownContextWindow: number | undefined;
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
@@ -3135,6 +3136,39 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // settings/status path instead, while the raw native event remains
         // available for diagnostics.
         return;
+      case "background_tasks_changed":
+        // This is a level-set signal rather than a start/completion edge: the
+        // payload replaces the CLI process' current background-task set. Cafe
+        // does not own a separate background-task panel, so promote only live
+        // task descriptions into task.progress rows and let task_updated /
+        // task_notification carry terminal status when Claude emits it.
+        context.backgroundTaskIds.clear();
+        const tasks = Array.isArray((message as Record<string, unknown>).tasks)
+          ? (message as { readonly tasks: ReadonlyArray<unknown> }).tasks
+          : [];
+        for (const task of tasks) {
+          const taskRecord = recordValue(task);
+          if (!taskRecord) {
+            continue;
+          }
+          const taskId = trimmedStringValue(taskRecord.task_id);
+          if (!taskId) {
+            continue;
+          }
+          const description = trimmedStringValue(taskRecord.description) ?? "Background task";
+          const taskType = trimmedStringValue(taskRecord.task_type);
+          context.backgroundTaskIds.add(taskId);
+          yield* offerRuntimeEvent({
+            ...base,
+            type: "task.progress",
+            payload: {
+              taskId: RuntimeTaskId.make(taskId),
+              description,
+              ...(taskType ? { summary: `${taskType} background task is running.` } : {}),
+            },
+          });
+        }
+        return;
       case "memory_recall":
         // Memory recall is a transcript adornment from Claude's own memory
         // layer. Cafe preserves the raw event but should not leak local memory
@@ -4406,6 +4440,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         pendingUserInputs,
         turns: [],
         inFlightTools,
+        backgroundTaskIds: new Set(),
         turnState: undefined,
         lastKnownContextWindow: selectedContextWindowTokens,
         lastKnownTokenUsage: undefined,
