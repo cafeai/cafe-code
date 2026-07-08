@@ -589,7 +589,7 @@ function buildThreadStartParams(input: {
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
 }): CodexThreadStartParamsWithRuntimeWorkspaceRoots {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
-  // Upstream Codex 0.142.2 only auto-compacts when the resolved model info or
+  // Upstream Codex 0.143.0 only auto-compacts when the resolved model info or
   // request config supplies `model_auto_compact_token_limit`. Current Codex
   // model metadata can advertise a large context window while leaving that
   // limit null, so Cafe passes the documented request-config override for
@@ -597,7 +597,7 @@ function buildThreadStartParams(input: {
   // `~/.codex/config.toml`. The shared constant documents why Cafe currently
   // chooses 200k instead of the older 100k override.
   const threadConfig: Record<string, unknown> = {
-    // Upstream Codex rust-v0.142.2 marks remote_compaction_v2 stable and
+    // Upstream Codex rust-v0.143.0 marks remote_compaction_v2 stable and
     // default-enabled, but its compaction request still builds the normal
     // model-visible tool set. Cafe has observed text compaction failures from
     // inherited hosted image-generation tools on accounts/models without that
@@ -1758,7 +1758,7 @@ function normalizeCodexSnapshotTurnForThreadStatus(
     return turn;
   }
 
-  // Upstream Codex 0.142.2 keeps the `thread/read` status reconciliation from
+  // Upstream Codex 0.143.0 keeps the `thread/read` status reconciliation from
   // `resolve_thread_status`: if a snapshot contains an in-progress turn while
   // the loaded watch status is `Idle` or `NotLoaded`, app-server resolves the
   // thread to `Active` instead of interrupting the turn. Preserve that shape
@@ -2381,7 +2381,7 @@ export const makeCodexSessionRuntime = (
             warningCount: input.pending.warningCount,
             appServerChildProcesses: childProcesses,
             semantics:
-              "Upstream Codex 0.142.2 stores turn/steer input in the active turn queue and emits the injected userMessage only when the turn loop drains pending input. Cafe has delivered the steer; only child processes classified as active count as turn work. Persistent Codex helper/MCP processes are reported as support processes and do not explain a delayed steer.",
+              "Upstream Codex 0.143.0 stores turn/steer input in the active turn queue and emits the injected userMessage only when the turn loop drains pending input. Cafe has delivered the steer; only child processes classified as active count as turn work. Persistent Codex helper/MCP processes are reported as support processes and do not explain a delayed steer.",
           },
         });
       });
@@ -2805,7 +2805,7 @@ export const makeCodexSessionRuntime = (
             itemSummary,
             appServerChildProcesses: childProcesses,
             semantics:
-              "Cafe follows upstream Codex app-server lifecycle semantics: turn/completed or a terminal thread/read turn closes the turn. In Codex 0.142.2, thread/read snapshots that contain an in-progress turn keep the thread effectively active even if the loaded watch status is idle or notLoaded; Cafe only terminalizes an in-progress snapshot when upstream reports a non-active terminal status such as systemError. Only child processes classified as active count as turn work; persistent Codex helper/MCP processes are reported as support processes and do not explain a delayed terminal event.",
+              "Cafe follows upstream Codex app-server lifecycle semantics: turn/completed or a terminal thread/read turn closes the turn. In Codex 0.143.0, thread/read snapshots that contain an in-progress turn keep the thread effectively active even if the loaded watch status is idle or notLoaded; Cafe only terminalizes an in-progress snapshot when upstream reports a non-active terminal status such as systemError. Only child processes classified as active count as turn work; persistent Codex helper/MCP processes are reported as support processes and do not explain a delayed terminal event.",
           },
         });
       });

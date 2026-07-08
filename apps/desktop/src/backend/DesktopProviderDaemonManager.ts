@@ -578,10 +578,9 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         yield* removeMarker(environment.providerDaemonMarkerPath);
         return Option.none();
       }
-      const token = yield* readCredential(
-        credentialPath,
-        marker.credentialEncrypted ?? true,
-      ).pipe(Effect.provideService(ElectronSafeStorage.ElectronSafeStorage, safeStorage));
+      const token = yield* readCredential(credentialPath, marker.credentialEncrypted ?? true).pipe(
+        Effect.provideService(ElectronSafeStorage.ElectronSafeStorage, safeStorage),
+      );
       if (Option.isNone(token)) {
         yield* removeMarker(environment.providerDaemonMarkerPath);
         yield* removeCredential(credentialPath);

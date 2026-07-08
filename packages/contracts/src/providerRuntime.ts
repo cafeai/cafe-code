@@ -551,6 +551,7 @@ const McpOauthCompletedPayload = Schema.Struct({
   success: Schema.Boolean,
   name: Schema.optional(TrimmedNonEmptyStringSchema),
   error: Schema.optional(TrimmedNonEmptyStringSchema),
+  providerThreadId: Schema.optional(Schema.NullOr(TrimmedNonEmptyStringSchema)),
 });
 export type McpOauthCompletedPayload = typeof McpOauthCompletedPayload.Type;
 

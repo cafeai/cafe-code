@@ -95,7 +95,7 @@ function makeThreadOpenResponse(
     approvalsReviewer: "user",
     sandbox: { type: "dangerFullAccess" },
     thread: {
-      cliVersion: "0.142.2",
+      cliVersion: "0.143.0",
       createdAt: 1_713_403_200,
       cwd: "/tmp/project",
       ephemeral: false,

@@ -92,8 +92,39 @@ export const ServerProviderAccountRateLimitSnapshot = Schema.Struct({
 export type ServerProviderAccountRateLimitSnapshot =
   typeof ServerProviderAccountRateLimitSnapshot.Type;
 
+export const ServerProviderAccountRateLimitResetCreditStatus = Schema.Literals([
+  "available",
+  "redeeming",
+  "redeemed",
+  "unknown",
+]);
+export type ServerProviderAccountRateLimitResetCreditStatus =
+  typeof ServerProviderAccountRateLimitResetCreditStatus.Type;
+
+export const ServerProviderAccountRateLimitResetType = Schema.Literals([
+  "codexRateLimits",
+  "unknown",
+]);
+export type ServerProviderAccountRateLimitResetType =
+  typeof ServerProviderAccountRateLimitResetType.Type;
+
+export const ServerProviderAccountRateLimitResetCredit = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  resetType: ServerProviderAccountRateLimitResetType,
+  status: ServerProviderAccountRateLimitResetCreditStatus,
+  grantedAt: NonNegativeInt,
+  expiresAt: Schema.optionalKey(Schema.NullOr(NonNegativeInt)),
+  title: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
+  description: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
+});
+export type ServerProviderAccountRateLimitResetCredit =
+  typeof ServerProviderAccountRateLimitResetCredit.Type;
+
 export const ServerProviderAccountRateLimitResetCredits = Schema.Struct({
   availableCount: NonNegativeInt,
+  credits: Schema.optionalKey(
+    Schema.NullOr(Schema.Array(ServerProviderAccountRateLimitResetCredit)),
+  ),
 });
 export type ServerProviderAccountRateLimitResetCredits =
   typeof ServerProviderAccountRateLimitResetCredits.Type;

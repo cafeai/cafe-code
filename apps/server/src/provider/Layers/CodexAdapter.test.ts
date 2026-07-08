@@ -1711,6 +1711,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
           name: "github",
           status: "failed",
           error: "OAuth token expired.",
+          failureReason: "reauthenticationRequired",
           threadId: "provider-thread-1",
         },
       } satisfies ProviderEvent);
@@ -1730,6 +1731,49 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       assert.equal(events[2]?.type, "runtime.warning");
       if (events[2]?.type === "runtime.warning") {
         assert.equal(events[2].payload.message, "OAuth token expired.");
+        assert.deepEqual(events[2].payload.detail, {
+          name: "github",
+          status: "failed",
+          providerThreadId: "provider-thread-1",
+          failureReason: "reauthenticationRequired",
+          error: "OAuth token expired.",
+        });
+      }
+    }),
+  );
+
+  it.effect("maps Codex MCP OAuth completion thread metadata", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 1)).pipe(
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-mcp-oauth-completed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "mcpServer/oauthLogin/completed",
+        payload: {
+          name: "github",
+          success: false,
+          error: "OAuth token expired.",
+          threadId: "provider-thread-1",
+        },
+      } satisfies ProviderEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+
+      assert.equal(events[0]?.type, "mcp.oauth.completed");
+      if (events[0]?.type === "mcp.oauth.completed") {
+        assert.deepEqual(events[0].payload, {
+          success: false,
+          name: "github",
+          providerThreadId: "provider-thread-1",
+          error: "OAuth token expired.",
+        });
       }
     }),
   );

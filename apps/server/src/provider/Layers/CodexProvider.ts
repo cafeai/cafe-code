@@ -24,6 +24,7 @@ import type {
   ServerProviderAccountRateLimits,
   ServerProviderAccountRateLimitSnapshot,
   ServerProviderAccountRateLimitWindow,
+  ServerProviderAccountRateLimitResetCredit,
 } from "@cafecode/contracts";
 import { ServerSettingsError } from "@cafecode/contracts";
 
@@ -67,10 +68,12 @@ const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
   medium: "Medium",
   high: "High",
   xhigh: "Extra High",
+  max: "Max",
+  ultra: "Ultra",
 };
 
 function reasoningEffortLabel(reasoningEffort: string): string {
-  // Codex rust-v0.142.2 keeps reasoning effort as a non-empty
+  // Codex rust-v0.143.0 keeps reasoning effort as a non-empty
   // open string advertised by the model. Keep known friendly labels, but never
   // reject or render an undefined label for a newly introduced upstream effort.
   return REASONING_EFFORT_LABELS[reasoningEffort] ?? reasoningEffort;
@@ -385,7 +388,29 @@ function mapGeneratedRateLimitResetCredits(
 ): ServerProviderAccountRateLimits["rateLimitResetCredits"] | undefined {
   if (summary === undefined) return undefined;
   if (summary === null) return null;
-  return { availableCount: summary.availableCount };
+  return {
+    availableCount: summary.availableCount,
+    ...(summary.credits !== undefined
+      ? {
+          credits:
+            summary.credits === null ? null : summary.credits.map(mapGeneratedRateLimitResetCredit),
+        }
+      : {}),
+  };
+}
+
+function mapGeneratedRateLimitResetCredit(
+  credit: CodexSchema.V2GetAccountRateLimitsResponse__RateLimitResetCredit,
+): ServerProviderAccountRateLimitResetCredit {
+  return {
+    id: credit.id,
+    resetType: credit.resetType,
+    status: credit.status,
+    grantedAt: credit.grantedAt,
+    ...(credit.expiresAt !== undefined ? { expiresAt: credit.expiresAt } : {}),
+    ...(credit.title !== undefined ? { title: credit.title } : {}),
+    ...(credit.description !== undefined ? { description: credit.description } : {}),
+  };
 }
 
 function codexAppServerRateLimitsToServer(
@@ -463,7 +488,57 @@ function mapRawRateLimitResetCredits(
   const record = readRecord(value);
   if (!record) return undefined;
   const availableCount = readNonNegativeInteger(record.available_count ?? record.availableCount);
-  return availableCount === undefined ? undefined : { availableCount };
+  if (availableCount === undefined) return undefined;
+  const rawCredits = record.credits;
+  return {
+    availableCount,
+    ...(rawCredits === null
+      ? { credits: null }
+      : Array.isArray(rawCredits)
+        ? {
+            credits: rawCredits.map(mapRawRateLimitResetCredit).filter(isRateLimitResetCredit),
+          }
+        : {}),
+  };
+}
+
+function isRateLimitResetCredit(
+  value: ServerProviderAccountRateLimitResetCredit | null,
+): value is ServerProviderAccountRateLimitResetCredit {
+  return value !== null;
+}
+
+function mapRawRateLimitResetCredit(
+  value: unknown,
+): ServerProviderAccountRateLimitResetCredit | null {
+  const record = readRecord(value);
+  if (!record) return null;
+  const id = readTrimmedMetadata(record.id);
+  const grantedAt = readNonNegativeInteger(record.granted_at ?? record.grantedAt);
+  if (!id || grantedAt === undefined) return null;
+  const resetType = readTrimmedMetadata(record.reset_type ?? record.resetType);
+  const status = readTrimmedMetadata(record.status);
+  const expiresAt = readNonNegativeInteger(record.expires_at ?? record.expiresAt);
+  const title = readTrimmedMetadata(record.title);
+  const description = readTrimmedMetadata(record.description);
+  return {
+    id,
+    resetType:
+      resetType === "codexRateLimits" || resetType === "codex_rate_limits"
+        ? "codexRateLimits"
+        : "unknown",
+    status:
+      status === "available" ||
+      status === "redeeming" ||
+      status === "redeemed" ||
+      status === "unknown"
+        ? status
+        : "unknown",
+    grantedAt,
+    ...(expiresAt !== undefined ? { expiresAt } : {}),
+    ...(title ? { title } : {}),
+    ...(description ? { description } : {}),
+  };
 }
 
 function mapRawRateLimitSnapshot(input: {
@@ -547,7 +622,7 @@ async function fetchCodexAccountRateLimits(input: {
   readonly checkedAt: string;
 }): Promise<ServerProviderAccountRateLimits | undefined> {
   try {
-    // Upstream Codex 0.142.2 fetches ChatGPT-backed account usage from
+    // Upstream Codex 0.143.0 fetches ChatGPT-backed account usage from
     // `{chatgpt_base_url}/wham/usage` via BackendClient::get_rate_limits_many
     // and sends Authorization plus ChatGPT-Account-ID when available. Cafe's
     // provider badge path intentionally avoids spawning a hidden app-server, so

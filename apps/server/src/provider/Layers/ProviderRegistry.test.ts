@@ -1485,6 +1485,17 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                 },
                 rate_limit_reset_credits: {
                   available_count: 2,
+                  credits: [
+                    {
+                      id: "credit-1",
+                      reset_type: "codex_rate_limits",
+                      status: "available",
+                      granted_at: 1_780_000_010,
+                      expires_at: 1_780_100_010,
+                      title: "Rate limit reset",
+                      description: "Reset Codex usage windows.",
+                    },
+                  ],
                 },
                 additional_rate_limits: [
                   {
@@ -1528,6 +1539,17 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           assert.strictEqual(status.accountRateLimits?.rateLimits.primary?.windowDurationMins, 300);
           assert.strictEqual(status.accountRateLimits?.rateLimits.secondary?.usedPercent, 75);
           assert.strictEqual(status.accountRateLimits?.rateLimitResetCredits?.availableCount, 2);
+          assert.deepStrictEqual(status.accountRateLimits?.rateLimitResetCredits?.credits, [
+            {
+              id: "credit-1",
+              resetType: "codexRateLimits",
+              status: "available",
+              grantedAt: 1_780_000_010,
+              expiresAt: 1_780_100_010,
+              title: "Rate limit reset",
+              description: "Reset Codex usage windows.",
+            },
+          ]);
           assert.strictEqual(
             status.accountRateLimits?.rateLimitsByLimitId?.codex_bengalfox?.primary
               ?.windowDurationMins,

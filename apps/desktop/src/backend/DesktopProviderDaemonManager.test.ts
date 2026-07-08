@@ -229,78 +229,74 @@ describe("DesktopProviderDaemonManager", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
-  it.effect(
-    "adopts a plaintext credential marker when keyring encryption is unavailable",
-    () =>
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-          prefix: "cafe-provider-daemon-manager-plaintext-test-",
-        });
-        const markerPath = `${baseDir}/provider-daemon.json`;
-        const credentialPath = `${baseDir}/provider-daemon-token.bin`;
-        const backendEntryPath = `${baseDir}/backend.mjs`;
-        const backendBundle = "console.log('provider daemon test backend');\n";
-        const runtimeBuildId = makeRuntimeBuildId({
+  it.effect("adopts a plaintext credential marker when keyring encryption is unavailable", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "cafe-provider-daemon-manager-plaintext-test-",
+      });
+      const markerPath = `${baseDir}/provider-daemon.json`;
+      const credentialPath = `${baseDir}/provider-daemon-token.bin`;
+      const backendEntryPath = `${baseDir}/backend.mjs`;
+      const backendBundle = "console.log('provider daemon test backend');\n";
+      const runtimeBuildId = makeRuntimeBuildId({
+        appVersion: "0.0.0-test",
+        backendEntryPath,
+        backendBundle,
+      });
+      yield* fileSystem.writeFileString(backendEntryPath, backendBundle);
+      const fakeDaemon = yield* startFakeProviderDaemon(runtimeBuildId);
+      yield* Effect.addFinalizer(() => fakeDaemon.close);
+      const httpBaseUrl = `http://127.0.0.1:${fakeDaemon.port}`;
+
+      // Token stored as plaintext, exactly as `writeCredential` does when the
+      // OS keyring is unavailable.
+      yield* fileSystem.writeFileString(credentialPath, TEST_TOKEN);
+
+      yield* fileSystem.writeFileString(
+        markerPath,
+        `${encodeProviderDaemonMarkerJson({
+          version: 2,
+          protocolVersion: 1,
+          pid: process.pid,
+          ppid: process.ppid,
+          transport: "tcp",
+          port: fakeDaemon.port,
+          host: "127.0.0.1",
+          httpBaseUrl,
+          credentialPath,
+          credentialEncrypted: false,
+          createdAt: "1970-01-01T00:00:00.000Z",
+          updatedAt: "1970-01-01T00:00:00.000Z",
           appVersion: "0.0.0-test",
-          backendEntryPath,
-          backendBundle,
-        });
-        yield* fileSystem.writeFileString(backendEntryPath, backendBundle);
-        const fakeDaemon = yield* startFakeProviderDaemon(runtimeBuildId);
-        yield* Effect.addFinalizer(() => fakeDaemon.close);
-        const httpBaseUrl = `http://127.0.0.1:${fakeDaemon.port}`;
+          runtimeBuildId,
+        })}\n`,
+      );
 
-        // Token stored as plaintext, exactly as `writeCredential` does when the
-        // OS keyring is unavailable.
-        yield* fileSystem.writeFileString(credentialPath, TEST_TOKEN);
+      // safeStorage reports unavailable and throws if asked to decrypt: the
+      // plaintext path must never touch it.
+      const unavailableSafeStorage = {
+        isEncryptionAvailable: Effect.succeed(false),
+        encryptString: () =>
+          Effect.die(new Error("encryptString must not be called when encryption is unavailable")),
+        decryptString: () =>
+          Effect.die(new Error("decryptString must not be called for a plaintext credential")),
+      } satisfies ElectronSafeStorage.ElectronSafeStorageShape;
 
-        yield* fileSystem.writeFileString(
-          markerPath,
-          `${encodeProviderDaemonMarkerJson({
-            version: 2,
-            protocolVersion: 1,
-            pid: process.pid,
-            ppid: process.ppid,
-            transport: "tcp",
-            port: fakeDaemon.port,
-            host: "127.0.0.1",
-            httpBaseUrl,
-            credentialPath,
-            credentialEncrypted: false,
-            createdAt: "1970-01-01T00:00:00.000Z",
-            updatedAt: "1970-01-01T00:00:00.000Z",
-            appVersion: "0.0.0-test",
-            runtimeBuildId,
-          })}\n`,
-        );
+      yield* Effect.gen(function* () {
+        const manager = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
+        const endpoint = yield* manager.ensureRunning;
+        const snapshot = yield* manager.snapshot;
 
-        // safeStorage reports unavailable and throws if asked to decrypt: the
-        // plaintext path must never touch it.
-        const unavailableSafeStorage = {
-          isEncryptionAvailable: Effect.succeed(false),
-          encryptString: () =>
-            Effect.die(
-              new Error("encryptString must not be called when encryption is unavailable"),
-            ),
-          decryptString: () =>
-            Effect.die(new Error("decryptString must not be called for a plaintext credential")),
-        } satisfies ElectronSafeStorage.ElectronSafeStorageShape;
-
-        yield* Effect.gen(function* () {
-          const manager = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
-          const endpoint = yield* manager.ensureRunning;
-          const snapshot = yield* manager.snapshot;
-
-          assert.equal(endpoint.httpBaseUrl, httpBaseUrl);
-          assert.equal(endpoint.token, "provider-daemon-lease-token-000000000000000000000000");
-          assert.isTrue(snapshot.adoptedExistingProcess);
-          assert.equal(Option.getOrUndefined(snapshot.pid), process.pid);
-        }).pipe(
-          Effect.provide(
-            makeManagerLayer(baseDir, markerPath, backendEntryPath, unavailableSafeStorage),
-          ),
-        );
-      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+        assert.equal(endpoint.httpBaseUrl, httpBaseUrl);
+        assert.equal(endpoint.token, "provider-daemon-lease-token-000000000000000000000000");
+        assert.isTrue(snapshot.adoptedExistingProcess);
+        assert.equal(Option.getOrUndefined(snapshot.pid), process.pid);
+      }).pipe(
+        Effect.provide(
+          makeManagerLayer(baseDir, markerPath, backendEntryPath, unavailableSafeStorage),
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });

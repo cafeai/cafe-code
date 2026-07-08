@@ -91,6 +91,17 @@ describe("ServerProvider", () => {
         checkedAt: "2026-04-10T00:00:00.000Z",
         rateLimitResetCredits: {
           availableCount: 2,
+          credits: [
+            {
+              id: "credit-1",
+              resetType: "codexRateLimits",
+              status: "available",
+              grantedAt: 1_780_000_100,
+              expiresAt: 1_780_100_100,
+              title: "Rate limit reset",
+              description: "Reset primary and secondary Codex usage windows.",
+            },
+          ],
         },
         rateLimits: {
           limitId: "codex",
@@ -120,6 +131,7 @@ describe("ServerProvider", () => {
     expect(parsed.accountRateLimits?.rateLimits.primary?.windowDurationMins).toBe(300);
     expect(parsed.accountRateLimits?.rateLimitsByLimitId?.codex?.primary?.usedPercent).toBe(42.5);
     expect(parsed.accountRateLimits?.rateLimitResetCredits?.availableCount).toBe(2);
+    expect(parsed.accountRateLimits?.rateLimitResetCredits?.credits?.[0]?.id).toBe("credit-1");
   });
 
   it("decodes lightweight runtime layer diagnostics", () => {
