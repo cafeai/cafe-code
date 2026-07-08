@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { type AuthAccessStreamEvent, AuthSessionId } from "@cafecode/contracts/auth";
@@ -54,6 +55,7 @@ import { ProviderService } from "./provider/Services/ProviderService.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ProviderLoginLauncher from "./provider/providerLoginLauncher.ts";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
+import { UsageStatsService } from "./usageStats/Services/UsageStatsService.ts";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup.ts";
 import { redactServerSettingsForClient, ServerSettingsService } from "./serverSettings.ts";
 import { ServerClientSettingsService } from "./serverClientSettings.ts";
@@ -262,6 +264,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
       const lifecycleEvents = yield* ServerLifecycleEvents;
       const serverSettings = yield* ServerSettingsService;
       const clientSettings = yield* ServerClientSettingsService;
+      const usageStats = yield* UsageStatsService;
       const startup = yield* ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem;
@@ -1106,6 +1109,23 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
             {
               "rpc.aggregate": "server",
             },
+          ),
+        [WS_METHODS.usageStatsGet]: (_input) =>
+          observeRpcEffect(WS_METHODS.usageStatsGet, usageStats.get, {
+            "rpc.aggregate": "server",
+          }),
+        [WS_METHODS.subscribeUsageStats]: (_input) =>
+          observeRpcStreamEffect(
+            WS_METHODS.subscribeUsageStats,
+            // Snapshot is a cheap in-memory read; push at ~10 Hz so the client
+            // reflects live in-memory totals in real time (the DB flush cadence
+            // is irrelevant here — reads never touch SQL after startup).
+            Effect.succeed(
+              Stream.fromEffect(usageStats.snapshot).pipe(
+                Stream.repeat(Schedule.spaced(Duration.millis(100))),
+              ),
+            ),
+            { "rpc.aggregate": "server" },
           ),
         [WS_METHODS.serverDiscoverSourceControl]: (_input) =>
           observeRpcEffect(

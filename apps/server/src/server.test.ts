@@ -102,6 +102,10 @@ import {
   ServerClientSettingsService,
   type ServerClientSettingsShape,
 } from "./serverClientSettings.ts";
+import {
+  UsageStatsService,
+  type UsageStatsServiceShape,
+} from "./usageStats/Services/UsageStatsService.ts";
 import { BrandingImageStoreLive } from "./branding/BrandingImageStore.ts";
 import {
   BrowserTraceCollector,
@@ -451,6 +455,7 @@ const buildAppUnderTest = (options?: {
     serverRuntimeStartup?: Partial<ServerRuntimeStartupShape>;
     serverEnvironment?: Partial<ServerEnvironmentShape>;
     repositoryIdentityResolver?: Partial<RepositoryIdentityResolverShape>;
+    usageStats?: Partial<UsageStatsServiceShape>;
   };
 }) =>
   Effect.gen(function* () {
@@ -688,14 +693,35 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provide(
-        Layer.mock(ServerClientSettingsService)({
-          start: Effect.void,
-          ready: Effect.void,
-          getSettings: Effect.succeed(DEFAULT_CLIENT_SETTINGS),
-          updateSettings: () => Effect.succeed(DEFAULT_CLIENT_SETTINGS),
-          streamChanges: Stream.empty,
-          ...options?.layers?.clientSettings,
-        }),
+        Layer.mergeAll(
+          Layer.mock(ServerClientSettingsService)({
+            start: Effect.void,
+            ready: Effect.void,
+            getSettings: Effect.succeed(DEFAULT_CLIENT_SETTINGS),
+            updateSettings: () => Effect.succeed(DEFAULT_CLIENT_SETTINGS),
+            streamChanges: Stream.empty,
+            ...options?.layers?.clientSettings,
+          }),
+          Layer.mock(UsageStatsService)({
+            get: Effect.succeed({
+              totals: { generatingMs: 0, outputTokens: 0, userMessages: 0 },
+              today: { day: "1970-01-01", generatingMs: 0, outputTokens: 0, userMessages: 0 },
+              activeSessionCount: 0,
+              collectionEnabled: true,
+              asOfMs: 0,
+              days: [],
+            }),
+            snapshot: Effect.succeed({
+              totals: { generatingMs: 0, outputTokens: 0, userMessages: 0 },
+              today: { day: "1970-01-01", generatingMs: 0, outputTokens: 0, userMessages: 0 },
+              activeSessionCount: 0,
+              collectionEnabled: true,
+              asOfMs: 0,
+            }),
+            flush: Effect.void,
+            ...options?.layers?.usageStats,
+          }),
+        ),
       ),
       Layer.provide(
         Layer.mock(ExternalLauncher.ExternalLauncher)({

@@ -14,6 +14,7 @@ import { Route as PairRouteImport } from './routes/pair'
 import { Route as ChatRouteImport } from './routes/_chat'
 import { Route as ChatIndexRouteImport } from './routes/_chat.index'
 import { Route as SettingsSystemRouteImport } from './routes/settings.system'
+import { Route as SettingsStatsRouteImport } from './routes/settings.stats'
 import { Route as SettingsSourceControlRouteImport } from './routes/settings.source-control'
 import { Route as SettingsRecentlyDeletedRouteImport } from './routes/settings.recently-deleted'
 import { Route as SettingsProvidersRouteImport } from './routes/settings.providers'
@@ -51,6 +52,11 @@ const ChatIndexRoute = ChatIndexRouteImport.update({
 const SettingsSystemRoute = SettingsSystemRouteImport.update({
   id: '/system',
   path: '/system',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsStatsRoute = SettingsStatsRouteImport.update({
+  id: '/stats',
+  path: '/stats',
   getParentRoute: () => SettingsRoute,
 } as any)
 const SettingsSourceControlRoute = SettingsSourceControlRouteImport.update({
@@ -141,6 +147,7 @@ export interface FileRoutesByFullPath {
   '/settings/providers': typeof SettingsProvidersRoute
   '/settings/recently-deleted': typeof SettingsRecentlyDeletedRoute
   '/settings/source-control': typeof SettingsSourceControlRoute
+  '/settings/stats': typeof SettingsStatsRoute
   '/settings/system': typeof SettingsSystemRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
@@ -160,6 +167,7 @@ export interface FileRoutesByTo {
   '/settings/providers': typeof SettingsProvidersRoute
   '/settings/recently-deleted': typeof SettingsRecentlyDeletedRoute
   '/settings/source-control': typeof SettingsSourceControlRoute
+  '/settings/stats': typeof SettingsStatsRoute
   '/settings/system': typeof SettingsSystemRoute
   '/': typeof ChatIndexRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
@@ -182,6 +190,7 @@ export interface FileRoutesById {
   '/settings/providers': typeof SettingsProvidersRoute
   '/settings/recently-deleted': typeof SettingsRecentlyDeletedRoute
   '/settings/source-control': typeof SettingsSourceControlRoute
+  '/settings/stats': typeof SettingsStatsRoute
   '/settings/system': typeof SettingsSystemRoute
   '/_chat/': typeof ChatIndexRoute
   '/_chat/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
@@ -205,6 +214,7 @@ export interface FileRouteTypes {
     | '/settings/providers'
     | '/settings/recently-deleted'
     | '/settings/source-control'
+    | '/settings/stats'
     | '/settings/system'
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
@@ -224,6 +234,7 @@ export interface FileRouteTypes {
     | '/settings/providers'
     | '/settings/recently-deleted'
     | '/settings/source-control'
+    | '/settings/stats'
     | '/settings/system'
     | '/'
     | '/$environmentId/$threadId'
@@ -245,6 +256,7 @@ export interface FileRouteTypes {
     | '/settings/providers'
     | '/settings/recently-deleted'
     | '/settings/source-control'
+    | '/settings/stats'
     | '/settings/system'
     | '/_chat/'
     | '/_chat/$environmentId/$threadId'
@@ -292,6 +304,13 @@ declare module '@tanstack/react-router' {
       path: '/system'
       fullPath: '/settings/system'
       preLoaderRoute: typeof SettingsSystemRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/stats': {
+      id: '/settings/stats'
+      path: '/stats'
+      fullPath: '/settings/stats'
+      preLoaderRoute: typeof SettingsStatsRouteImport
       parentRoute: typeof SettingsRoute
     }
     '/settings/source-control': {
@@ -422,6 +441,7 @@ interface SettingsRouteChildren {
   SettingsProvidersRoute: typeof SettingsProvidersRoute
   SettingsRecentlyDeletedRoute: typeof SettingsRecentlyDeletedRoute
   SettingsSourceControlRoute: typeof SettingsSourceControlRoute
+  SettingsStatsRoute: typeof SettingsStatsRoute
   SettingsSystemRoute: typeof SettingsSystemRoute
 }
 
@@ -438,6 +458,7 @@ const SettingsRouteChildren: SettingsRouteChildren = {
   SettingsProvidersRoute: SettingsProvidersRoute,
   SettingsRecentlyDeletedRoute: SettingsRecentlyDeletedRoute,
   SettingsSourceControlRoute: SettingsSourceControlRoute,
+  SettingsStatsRoute: SettingsStatsRoute,
   SettingsSystemRoute: SettingsSystemRoute,
 }
 

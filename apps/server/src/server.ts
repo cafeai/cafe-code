@@ -57,6 +57,8 @@ import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderComma
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
 import { WebPushNotificationsLive } from "./notifications/WebPushNotifications.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
+import { UsageStatsRepositoryLive } from "./persistence/Layers/UsageStats.ts";
+import { UsageStatsServiceLive } from "./usageStats/Layers/UsageStatsService.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
 import { ServerSettingsLive } from "./serverSettings.ts";
 import { ServerClientSettingsLive } from "./serverClientSettings.ts";
@@ -161,6 +163,11 @@ const ReactorLayerLive = Layer.empty.pipe(
   // Claude's `rate_limit_event`-sourced usage windows into the provider snapshot.
   // ProviderService + ProviderRegistry are supplied by RuntimeCoreDependenciesLive.
   Layer.provideMerge(ProviderAccountRateLimitsReactorLive),
+  // Self-starting daemon: accumulates lifetime usage counters (tokens, chats,
+  // generating time) from the domain and provider event streams, flushing
+  // per-day deltas to SQLite every few seconds. Exposed to the ws layer for
+  // the settings Usage page.
+  Layer.provideMerge(UsageStatsServiceLive.pipe(Layer.provide(UsageStatsRepositoryLive))),
 );
 
 const ProviderSessionDirectoryLayerLive = ProviderSessionDirectoryLive.pipe(

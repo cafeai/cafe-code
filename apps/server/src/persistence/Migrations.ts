@@ -69,6 +69,8 @@ import Migration0053 from "./Migrations/053_CloseLateTerminalStreamingReplays.ts
 import Migration0054 from "./Migrations/054_BackpressureHotPathIndexes.ts";
 import Migration0055 from "./Migrations/055_ProjectionThreadActivityTurnPageIndexes.ts";
 import Migration0056 from "./Migrations/056_RebuildTruncatedAssistantMessageProjections.ts";
+import Migration0058 from "./Migrations/058_UsageStatsDays.ts";
+import Migration0059 from "./Migrations/059_DropLegacyUsageStatsProjections.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -137,6 +139,13 @@ export const migrationEntries = [
   [54, "BackpressureHotPathIndexes", Migration0054],
   [55, "ProjectionThreadActivityTurnPageIndexes", Migration0055],
   [56, "RebuildTruncatedAssistantMessageProjections", Migration0056],
+  // NOTE: id 57 is intentionally skipped. An earlier, unrelated usage-stats
+  // attempt shipped a `057_ProjectionUsageStats` migration that already ran on
+  // some databases; since the Effect migrator gates purely on numeric id
+  // (`currentId <= latestMigrationId`), reusing 57 would be silently skipped on
+  // those DBs and this table would never be created. Use the next free id.
+  [58, "UsageStatsDays", Migration0058],
+  [59, "DropLegacyUsageStatsProjections", Migration0059],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

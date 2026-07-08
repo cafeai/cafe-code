@@ -3,6 +3,7 @@ import {
   ActivityIcon,
   ArchiveIcon,
   ArrowLeftIcon,
+  BarChart3Icon,
   BellIcon,
   BotIcon,
   FileTextIcon,
@@ -38,6 +39,7 @@ export type SettingsSectionPath =
   | "/settings/providers"
   | "/settings/source-control"
   | "/settings/connections"
+  | "/settings/stats"
   | "/settings/archived"
   | "/settings/recently-deleted"
   | "/settings/system"
@@ -82,6 +84,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
   {
     label: "Data",
     items: [
+      { label: "Usage", to: "/settings/stats", icon: BarChart3Icon },
       { label: "Archive", to: "/settings/archived", icon: ArchiveIcon },
       { label: "Recently Deleted", to: "/settings/recently-deleted", icon: Trash2Icon },
     ],

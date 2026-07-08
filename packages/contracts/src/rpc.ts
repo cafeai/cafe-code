@@ -97,6 +97,7 @@ import {
   SourceControlRepositoryInfo,
   SourceControlRepositoryLookupInput,
 } from "./sourceControl.ts";
+import { UsageStatsGetResult, UsageStatsSnapshot } from "./usageStats.ts";
 import { VcsError } from "./vcs.ts";
 
 export const WS_METHODS = {
@@ -149,6 +150,9 @@ export const WS_METHODS = {
   serverGetRuntimeLayerDiagnostics: "server.getRuntimeLayerDiagnostics",
   serverSignalProcess: "server.signalProcess",
 
+  // Usage stats
+  usageStatsGet: "usageStats.get",
+
   // Source control methods
   sourceControlLookupRepository: "sourceControl.lookupRepository",
   sourceControlCloneRepository: "sourceControl.cloneRepository",
@@ -158,6 +162,7 @@ export const WS_METHODS = {
   subscribeServerConfig: "subscribeServerConfig",
   subscribeServerLifecycle: "subscribeServerLifecycle",
   subscribeAuthAccess: "subscribeAuthAccess",
+  subscribeUsageStats: "subscribeUsageStats",
 } as const;
 
 export const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
@@ -494,6 +499,17 @@ export const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess,
   stream: true,
 });
 
+export const WsUsageStatsGetRpc = Rpc.make(WS_METHODS.usageStatsGet, {
+  payload: Schema.Struct({}),
+  success: UsageStatsGetResult,
+});
+
+export const WsSubscribeUsageStatsRpc = Rpc.make(WS_METHODS.subscribeUsageStats, {
+  payload: Schema.Struct({}),
+  success: UsageStatsSnapshot,
+  stream: true,
+});
+
 export const WsRpcGroup = RpcGroup.make(
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
@@ -535,6 +551,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeServerConfigRpc,
   WsSubscribeServerLifecycleRpc,
   WsSubscribeAuthAccessRpc,
+  WsUsageStatsGetRpc,
+  WsSubscribeUsageStatsRpc,
   WsOrchestrationDispatchCommandRpc,
   WsOrchestrationReplayEventsRpc,
   WsOrchestrationGetArchivedShellSnapshotRpc,
