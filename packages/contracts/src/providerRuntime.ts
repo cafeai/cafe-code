@@ -305,6 +305,10 @@ export type ThreadMetadataUpdatedPayload = typeof ThreadMetadataUpdatedPayload.T
 export const ThreadTokenUsageSnapshot = Schema.Struct({
   usedTokens: NonNegativeInt,
   totalProcessedTokens: Schema.optional(NonNegativeInt),
+  // Session-cumulative output tokens; only adapters whose backends report a
+  // running total (Codex `usage.total`) populate this. Per-message counters
+  // stay in `outputTokens`.
+  totalOutputTokens: Schema.optional(NonNegativeInt),
   maxTokens: Schema.optional(PositiveInt),
   inputTokens: Schema.optional(NonNegativeInt),
   cachedInputTokens: Schema.optional(NonNegativeInt),

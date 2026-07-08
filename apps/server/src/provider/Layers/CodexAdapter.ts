@@ -501,12 +501,14 @@ function normalizeCodexTokenUsage(
   const cachedInputTokens = usage.last.cachedInputTokens;
   const outputTokens = usage.last.outputTokens;
   const reasoningOutputTokens = usage.last.reasoningOutputTokens;
+  const totalOutputTokens = usage.total.outputTokens;
 
   return {
     usedTokens,
     ...(totalProcessedTokens !== undefined && totalProcessedTokens > usedTokens
       ? { totalProcessedTokens }
       : {}),
+    ...(totalOutputTokens !== undefined ? { totalOutputTokens } : {}),
     ...(maxTokens !== undefined ? { maxTokens } : {}),
     ...(inputTokens !== undefined ? { inputTokens } : {}),
     ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),

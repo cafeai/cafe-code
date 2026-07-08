@@ -1663,6 +1663,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       assert.deepEqual(firstEvent.value.payload.usage, {
         usedTokens: 126,
         totalProcessedTokens: 11_839,
+        totalOutputTokens: 6,
         maxTokens: 258_400,
         inputTokens: 120,
         cachedInputTokens: 0,
