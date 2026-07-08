@@ -140,6 +140,18 @@ export function ActivityHeatmap({
     return { weeks: columns, monthLabelByWeek: labels };
   }, [days, today]);
 
+  // Anchor the tooltip to the hovered cell's near edge close to the grid
+  // borders so its overhang isn't clipped by the card's `overflow-hidden`;
+  // center it everywhere in between.
+  const tooltipAlignClass =
+    hovered === null
+      ? "-translate-x-1/2"
+      : hovered.xFraction < 0.2
+        ? "translate-x-0"
+        : hovered.xFraction > 0.8
+          ? "-translate-x-full"
+          : "-translate-x-1/2";
+
   return (
     <div className={className}>
       <div className="flex w-full flex-col gap-1.5">
@@ -158,7 +170,7 @@ export function ActivityHeatmap({
           className="relative grid gap-[3px]"
           style={{ gridTemplateColumns: `repeat(${WEEKS}, minmax(0, 1fr))` }}
           role="img"
-          aria-label="Daily generating time for the last year; darker cells mean more time."
+          aria-label="Daily generating time for the last few months; darker cells mean more time."
           onPointerLeave={() => setHovered(null)}
         >
           {weeks.map((column, week) => (
@@ -186,7 +198,7 @@ export function ActivityHeatmap({
           ))}
           {hovered !== null ? (
             <div
-              className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-[calc(100%+6px)] whitespace-nowrap rounded-md border bg-popover px-2 py-1 text-[11px] text-popover-foreground shadow-md"
+              className={`pointer-events-none absolute z-10 ${tooltipAlignClass} -translate-y-[calc(100%+6px)] whitespace-nowrap rounded-md border bg-popover px-2 py-1 text-[11px] text-popover-foreground shadow-md`}
               style={{
                 left: `${hovered.xFraction * 100}%`,
                 top: `${hovered.yFraction * 100}%`,
