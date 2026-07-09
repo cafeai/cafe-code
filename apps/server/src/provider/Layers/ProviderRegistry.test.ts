@@ -1369,14 +1369,51 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           assert.deepStrictEqual(
             status.models.map((model) => model.slug),
             [
+              "gpt-5.6-sol",
+              "gpt-5.6-terra",
+              "gpt-5.6-luna",
               "gpt-5.5",
               "gpt-5.4",
               "gpt-5.4-mini",
-              "gpt-5.3-codex",
               "gpt-5.3-codex-spark",
-              "gpt-5.2",
             ],
           );
+          const reasoningDescriptor = (slug: string) => {
+            const descriptor = status.models
+              .find((model) => model.slug === slug)
+              ?.capabilities?.optionDescriptors?.find(
+                (candidate) => candidate.id === "reasoningEffort",
+              );
+            if (!descriptor || descriptor.type !== "select") {
+              throw new Error(`Missing reasoning descriptor for ${slug}`);
+            }
+            return descriptor;
+          };
+          const hasFastMode = (slug: string) =>
+            status.models
+              .find((model) => model.slug === slug)
+              ?.capabilities?.optionDescriptors?.some(
+                (descriptor) => descriptor.id === "fastMode" && descriptor.type === "boolean",
+              ) === true;
+
+          assert.deepStrictEqual(
+            reasoningDescriptor("gpt-5.6-sol").options.map((option) => option.id),
+            ["low", "medium", "high", "xhigh", "max", "ultra"],
+          );
+          assert.strictEqual(reasoningDescriptor("gpt-5.6-sol").currentValue, "low");
+          assert.deepStrictEqual(
+            reasoningDescriptor("gpt-5.6-terra").options.map((option) => option.id),
+            ["low", "medium", "high", "xhigh", "max", "ultra"],
+          );
+          assert.strictEqual(reasoningDescriptor("gpt-5.6-terra").currentValue, "medium");
+          assert.deepStrictEqual(
+            reasoningDescriptor("gpt-5.6-luna").options.map((option) => option.id),
+            ["low", "medium", "high", "xhigh", "max"],
+          );
+          assert.strictEqual(reasoningDescriptor("gpt-5.6-luna").currentValue, "medium");
+          assert.strictEqual(hasFastMode("gpt-5.6-sol"), true);
+          assert.strictEqual(hasFastMode("gpt-5.6-terra"), true);
+          assert.strictEqual(hasFastMode("gpt-5.6-luna"), true);
           assert.deepStrictEqual(status.skills, []);
         }),
       );

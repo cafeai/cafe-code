@@ -759,16 +759,54 @@ function makeStaticCodexReasoningCapabilities(input: {
   });
 }
 
+const CODEX_STANDARD_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
+const CODEX_MAX_REASONING_EFFORTS = [...CODEX_STANDARD_REASONING_EFFORTS, "max"] as const;
+// Mirrors Codex app-server `model/list` from codex-cli 0.144.0. The live
+// app-server response remains authoritative when available; this fallback keeps
+// fresh installs usable before the full Codex probe refreshes provider cache.
+const CODEX_ULTRA_REASONING_EFFORTS = [...CODEX_MAX_REASONING_EFFORTS, "ultra"] as const;
+
 // Lightweight provider status deliberately avoids `codex app-server`; keep a
 // conservative model fallback so a fresh install still has selectable Codex
 // models before the full app-server diagnostic path has ever populated cache.
 const STATIC_CODEX_MODELS: ReadonlyArray<ServerProviderModel> = [
+  {
+    slug: "gpt-5.6-sol",
+    name: "GPT-5.6-Sol",
+    isCustom: false,
+    capabilities: makeStaticCodexReasoningCapabilities({
+      defaultEffort: "low",
+      supportedEfforts: CODEX_ULTRA_REASONING_EFFORTS,
+      supportsFastMode: true,
+    }),
+  },
+  {
+    slug: "gpt-5.6-terra",
+    name: "GPT-5.6-Terra",
+    isCustom: false,
+    capabilities: makeStaticCodexReasoningCapabilities({
+      defaultEffort: "medium",
+      supportedEfforts: CODEX_ULTRA_REASONING_EFFORTS,
+      supportsFastMode: true,
+    }),
+  },
+  {
+    slug: "gpt-5.6-luna",
+    name: "GPT-5.6-Luna",
+    isCustom: false,
+    capabilities: makeStaticCodexReasoningCapabilities({
+      defaultEffort: "medium",
+      supportedEfforts: CODEX_MAX_REASONING_EFFORTS,
+      supportsFastMode: true,
+    }),
+  },
   {
     slug: "gpt-5.5",
     name: "GPT-5.5",
     isCustom: false,
     capabilities: makeStaticCodexReasoningCapabilities({
       defaultEffort: "medium",
+      supportedEfforts: CODEX_STANDARD_REASONING_EFFORTS,
       supportsFastMode: true,
     }),
   },
@@ -778,6 +816,7 @@ const STATIC_CODEX_MODELS: ReadonlyArray<ServerProviderModel> = [
     isCustom: false,
     capabilities: makeStaticCodexReasoningCapabilities({
       defaultEffort: "medium",
+      supportedEfforts: CODEX_STANDARD_REASONING_EFFORTS,
       supportsFastMode: true,
     }),
   },
@@ -785,25 +824,19 @@ const STATIC_CODEX_MODELS: ReadonlyArray<ServerProviderModel> = [
     slug: "gpt-5.4-mini",
     name: "GPT-5.4-Mini",
     isCustom: false,
-    capabilities: makeStaticCodexReasoningCapabilities({ defaultEffort: "medium" }),
-  },
-  {
-    slug: "gpt-5.3-codex",
-    name: "GPT-5.3-Codex",
-    isCustom: false,
-    capabilities: makeStaticCodexReasoningCapabilities({ defaultEffort: "medium" }),
+    capabilities: makeStaticCodexReasoningCapabilities({
+      defaultEffort: "medium",
+      supportedEfforts: CODEX_STANDARD_REASONING_EFFORTS,
+    }),
   },
   {
     slug: "gpt-5.3-codex-spark",
     name: "GPT-5.3-Codex-Spark",
     isCustom: false,
-    capabilities: makeStaticCodexReasoningCapabilities({ defaultEffort: "high" }),
-  },
-  {
-    slug: "gpt-5.2",
-    name: "GPT-5.2",
-    isCustom: false,
-    capabilities: makeStaticCodexReasoningCapabilities({ defaultEffort: "medium" }),
+    capabilities: makeStaticCodexReasoningCapabilities({
+      defaultEffort: "high",
+      supportedEfforts: CODEX_STANDARD_REASONING_EFFORTS,
+    }),
   },
 ];
 
