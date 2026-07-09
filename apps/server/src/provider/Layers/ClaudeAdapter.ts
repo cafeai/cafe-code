@@ -110,6 +110,11 @@ type ClaudeForwardCompatibleSystemMessage =
     })
   | (Record<string, unknown> & {
       readonly type: "system";
+      readonly subtype: "background_tasks_changed";
+      readonly tasks?: ReadonlyArray<unknown>;
+    })
+  | (Record<string, unknown> & {
+      readonly type: "system";
       readonly subtype: "informational";
       readonly content: string;
       readonly level?: string;
