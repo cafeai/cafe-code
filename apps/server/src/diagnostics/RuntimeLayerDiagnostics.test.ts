@@ -5,6 +5,7 @@ import {
   buildLayerSummaries,
   buildProjectionProgress,
   buildProjectorCursors,
+  buildProviderRuntimeIngestionDiagnostics,
   buildRuntimeProcessEntries,
   buildStaleStateFlags,
   mapProviderDaemonHealth,
@@ -277,6 +278,20 @@ describe("RuntimeLayerDiagnostics", () => {
     ).toEqual({
       projectionSequence: 174_102,
       projectionLag: 0,
+    });
+    expect(
+      buildProviderRuntimeIngestionDiagnostics({
+        daemonEventCursor: 175_250,
+        lastDaemonEventAt: "2026-05-26T00:01:00.000Z",
+        projectorCursors,
+      }),
+    ).toEqual({
+      cursor: 62_294,
+      daemonEventCursor: 175_250,
+      lag: 112_956,
+      updatedAt: readAt,
+      lastDaemonEventAt: "2026-05-26T00:01:00.000Z",
+      status: "offline",
     });
   });
 

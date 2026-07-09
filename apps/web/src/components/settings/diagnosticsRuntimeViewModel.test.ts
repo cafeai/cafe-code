@@ -112,4 +112,24 @@ describe("diagnosticsRuntimeViewModel", () => {
     ]);
     expect(visibleRuntimeErrors(null, null)).toEqual([]);
   });
+
+  it("surfaces provider runtime ingestion lag as a diagnostic warning", () => {
+    const data = {
+      errors: [],
+      orchestrator: {
+        providerRuntimeIngestion: {
+          lag: 1_250,
+          status: "offline",
+        },
+      },
+    } as unknown as ServerRuntimeLayerDiagnosticsResult;
+
+    expect(visibleRuntimeErrors(data, null)).toEqual([
+      {
+        source: "provider-runtime-ingestion",
+        message:
+          "Provider daemon is 1250 runtime events ahead of backend ingestion. Provider output may still be running while chat projection catches up.",
+      },
+    ]);
+  });
 });

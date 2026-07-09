@@ -22,6 +22,8 @@ const PROCESS_DIAGNOSTIC_HISTORY_LIMIT = 25;
 const EVENT_LOOP_MONITOR_INTERVAL_MS = 1_000;
 const PROVIDER_DAEMON_DEBUG_REFRESH_TIMEOUT_MS = 2_000;
 const PROVIDER_DAEMON_DEBUG_REFRESH_TTL_MS = 5_000;
+const PROVIDER_TO_RENDERER_DEGRADED_LAG_MS = 30_000;
+const PROVIDER_TO_RENDERER_OFFLINE_LAG_MS = 120_000;
 const PROCESS_DIAGNOSTIC_MESSAGE_LIMIT = 4_000;
 const PROCESS_DIAGNOSTIC_STACK_LIMIT = 16_000;
 const COMPACT_STRING_LIMIT = 240;
@@ -262,6 +264,30 @@ function readTimestampAgeMs(value: unknown, nowMs: number = Date.now()): number 
   }
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? Math.max(0, nowMs - parsed) : null;
+}
+
+function readIsoTimestamp(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  return Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+function maxIsoTimestamp(...values: ReadonlyArray<unknown>): string | null {
+  let best: string | null = null;
+  let bestMs = Number.NEGATIVE_INFINITY;
+  for (const value of values) {
+    const timestamp = readIsoTimestamp(value);
+    if (timestamp === null) {
+      continue;
+    }
+    const timestampMs = Date.parse(timestamp);
+    if (timestampMs > bestMs) {
+      best = timestamp;
+      bestMs = timestampMs;
+    }
+  }
+  return best;
 }
 
 function compactString(value: string, maxLength = COMPACT_STRING_LIMIT): string {
@@ -684,6 +710,8 @@ function summarizeProviderDaemonHealthForCompactDebug(
               ? runtimeEvents.recentTurnTimings.length
               : 0,
             lastEventAt: readString(runtimeEvents.lastEventAt),
+            lastThreadId: readString(runtimeEvents.lastThreadId),
+            lastTurnId: readString(runtimeEvents.lastTurnId),
           },
     supervisor:
       supervisor === null
@@ -907,6 +935,103 @@ function summarizeRendererForCompactDebug(): Record<string, unknown> {
   };
 }
 
+function statusForProviderToRendererLag(lagMs: number): "online" | "degraded" | "offline" {
+  if (lagMs <= PROVIDER_TO_RENDERER_DEGRADED_LAG_MS) {
+    return "online";
+  }
+  if (lagMs <= PROVIDER_TO_RENDERER_OFFLINE_LAG_MS) {
+    return "degraded";
+  }
+  return "offline";
+}
+
+function readRendererLatestVisibleTimestamp(snapshot: Record<string, unknown>): string | null {
+  const thread = readRecord(snapshot.thread);
+  const latestTurn = readRecord(thread?.latestTurn);
+  const performance = readRecord(snapshot.performance);
+  const activeThreadPerformance = readRecord(performance?.activeThread);
+  const latestMessage = readRecord(activeThreadPerformance?.latestMessage);
+  const latestActivity = readRecord(activeThreadPerformance?.latestActivity);
+  const latestContextWindowActivity = readRecord(
+    activeThreadPerformance?.latestContextWindowActivity,
+  );
+
+  // This intentionally avoids renderer receive/capture timestamps. A renderer can
+  // publish fresh debug snapshots while the projected thread content is still old.
+  return maxIsoTimestamp(
+    latestMessage?.completedAt,
+    latestMessage?.createdAt,
+    latestActivity?.createdAt,
+    latestContextWindowActivity?.createdAt,
+    latestTurn?.completedAt,
+    latestTurn?.startedAt,
+    latestTurn?.requestedAt,
+  );
+}
+
+function buildProviderRendererFreshnessDiagnostic(): Record<string, unknown> {
+  const providerSnapshot = readRecord(state.providerDaemonSnapshot);
+  const rendererSnapshot = readRecord(state.rendererSnapshot);
+  const providerHealth = readRecord(providerSnapshot?.lastHealth);
+  const runtimeEvents = readRecord(providerHealth?.runtimeEvents);
+  const rendererRoute = readRecord(rendererSnapshot?.route);
+
+  const activeThreadId = readString(rendererRoute?.activeThreadId);
+  const providerLastThreadId = readString(runtimeEvents?.lastThreadId);
+  const providerLastTurnId = readString(runtimeEvents?.lastTurnId);
+  const providerLastEventAt = readIsoTimestamp(runtimeEvents?.lastEventAt);
+  const rendererLatestVisibleAt =
+    rendererSnapshot === null ? null : readRendererLatestVisibleTimestamp(rendererSnapshot);
+  const providerEventCursor =
+    readNumber(providerHealth?.newestEventCursor) ??
+    readNumber(providerHealth?.eventCursor) ??
+    readNumber(providerSnapshot?.eventCursor);
+
+  const notes: string[] = [];
+  if (providerSnapshot === null) {
+    notes.push("Provider daemon snapshot is unavailable.");
+  }
+  if (rendererSnapshot === null) {
+    notes.push("Renderer snapshot is unavailable.");
+  }
+  if (providerLastEventAt === null) {
+    notes.push("Provider daemon has not reported a latest runtime event timestamp.");
+  }
+  if (rendererSnapshot !== null && rendererLatestVisibleAt === null) {
+    notes.push("Renderer snapshot has no projected content timestamp for the active thread.");
+  }
+  if (
+    activeThreadId !== null &&
+    providerLastThreadId !== null &&
+    providerLastThreadId !== activeThreadId
+  ) {
+    notes.push("Provider daemon latest event belongs to a different thread than the renderer.");
+  }
+
+  const comparable =
+    providerLastEventAt !== null &&
+    rendererLatestVisibleAt !== null &&
+    (activeThreadId === null ||
+      providerLastThreadId === null ||
+      activeThreadId === providerLastThreadId);
+  const lagMs = comparable
+    ? Math.max(0, Date.parse(providerLastEventAt) - Date.parse(rendererLatestVisibleAt))
+    : null;
+
+  return {
+    status: lagMs === null ? "unknown" : statusForProviderToRendererLag(lagMs),
+    activeThreadId,
+    providerLastThreadId,
+    providerLastTurnId,
+    providerEventCursor,
+    providerLastEventAt,
+    rendererLatestVisibleAt,
+    rendererSnapshotUpdatedAt: state.rendererSnapshotUpdatedAt,
+    lagMs,
+    notes,
+  };
+}
+
 function buildCompactDebugSnapshot(): Record<string, unknown> {
   const buildStartedAtMs = nodePerformance.now();
   const now = Date.now();
@@ -967,6 +1092,7 @@ function buildCompactDebugSnapshot(): Record<string, unknown> {
     process: summarizeProcessForCompactDebug(),
     providerDaemon: summarizeProviderDaemonForCompactDebug(),
     renderer: summarizeRendererForCompactDebug(),
+    freshness: buildProviderRendererFreshnessDiagnostic(),
   };
 
   (
@@ -1071,6 +1197,7 @@ function buildFullDebugSnapshot(): Record<string, unknown> {
             snapshot: state.rendererSnapshot,
             history: state.rendererSnapshotHistory,
           },
+    freshness: buildProviderRendererFreshnessDiagnostic(),
   };
 
   (

@@ -342,6 +342,14 @@ function createRuntimeLayerDiagnosticsResult(): ServerRuntimeLayerDiagnosticsRes
           status: "online",
         },
       ],
+      providerRuntimeIngestion: {
+        cursor: 10,
+        daemonEventCursor: 10,
+        lag: 0,
+        updatedAt: "2036-04-07T00:00:00.000Z",
+        lastDaemonEventAt: "2036-04-07T00:00:00.000Z",
+        status: "online",
+      },
       staleStateFlags: [],
     },
     subprocesses: [

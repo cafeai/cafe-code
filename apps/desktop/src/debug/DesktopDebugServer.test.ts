@@ -178,6 +178,8 @@ const makeLargeProviderDaemonSnapshot = () => ({
         turnId: `turn-${index}`,
       })),
       lastEventAt: "2026-05-26T00:00:00.000Z",
+      lastThreadId: "thread-1",
+      lastTurnId: "turn-1",
     },
     supervisor: {
       sessionCount: 5,
@@ -220,6 +222,42 @@ describe("DesktopDebugServer compact snapshots", () => {
     assert.equal((full.debug as Record<string, unknown>).detail, "full");
     assert.equal(fullJson.includes("prompt-secret-1"), true);
     assert.equal(fullJson.includes("command-secret-1"), true);
+  });
+
+  it("reports provider-to-renderer freshness lag without reading content previews", () => {
+    debugServer.reset();
+    debugServer.publishRendererSnapshot({
+      ...makeLargeRendererSnapshot(1),
+      performance: {
+        rendererSnapshotBuildDurationMs: 12,
+        activeThread: {
+          latestMessage: {
+            createdAt: "2026-05-26T00:00:00.000Z",
+            textPreview: "hidden assistant text",
+          },
+        },
+      },
+    });
+    debugServer.publishProviderDaemonSnapshot({
+      ...makeLargeProviderDaemonSnapshot(),
+      lastHealth: {
+        ...makeLargeProviderDaemonSnapshot().lastHealth,
+        runtimeEvents: {
+          lastEventAt: "2026-05-26T00:03:00.000Z",
+          lastThreadId: "thread-1",
+          lastTurnId: "turn-1",
+        },
+      },
+    });
+
+    const compact = debugServer.buildCompactDebugSnapshot();
+    const freshness = compact.freshness as Record<string, unknown>;
+
+    assert.equal(freshness.status, "offline");
+    assert.equal(freshness.activeThreadId, "thread-1");
+    assert.equal(freshness.providerLastThreadId, "thread-1");
+    assert.equal(freshness.lagMs, 179_000);
+    assert.equal(JSON.stringify(freshness).includes("hidden assistant text"), false);
   });
 
   it("uses cached provider daemon snapshots for ordinary debug reads", async () => {

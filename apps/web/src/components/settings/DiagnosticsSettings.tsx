@@ -1571,6 +1571,20 @@ export function DiagnosticsSettingsPanel() {
             value={runtimeData ? formatCount(runtimeData.orchestrator.projectionSequence) : "..."}
           />
           <StatBlock
+            label="Provider Ingest Lag"
+            value={
+              runtimeData
+                ? formatCount(runtimeData.orchestrator.providerRuntimeIngestion.lag)
+                : "..."
+            }
+            tone={
+              runtimeData
+                ? runtimeLayerStatusTone(runtimeData.orchestrator.providerRuntimeIngestion.status)
+                : "default"
+            }
+            tooltip="Provider daemon runtime events not yet ingested by the backend. If this grows while the provider daemon has recent events, the provider can be alive while chat projection appears stale."
+          />
+          <StatBlock
             label="Queue"
             value={runtimeData ? formatCount(runtimeData.orchestrator.commandQueueDepth) : "..."}
             tone={

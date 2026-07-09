@@ -9,6 +9,7 @@ import {
   type ServerProviderDaemonDiagnostics,
   type ServerProviderDaemonRecentCommandSummary,
   type ServerProviderDaemonRuntimeEventSummary,
+  type ServerProviderRuntimeIngestionDiagnostics,
   type ServerProviderSupervisorDiagnostics,
   type ServerRuntimeLayerDiagnosticsInput,
   type ServerRuntimeLayerDiagnosticsResult,
@@ -35,6 +36,7 @@ import { toPersistenceSqlError } from "../persistence/Errors.ts";
 import { ProjectionStateRepository } from "../persistence/Services/ProjectionState.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR } from "../providerDaemon/ProviderDaemonRuntimeCursor.ts";
 import {
   isDiagnosticsQueryProcess,
   sanitizeProcessCommand,
@@ -49,6 +51,7 @@ const DEFAULT_BUCKET_MS = 30_000;
 const RECENT_EVENT_WINDOW_LIMIT = 250;
 const MAX_EVENT_TYPE_ROWS = 12;
 const MAX_DAEMON_COMMAND_ROWS = 8;
+const PROVIDER_RUNTIME_INGESTION_OFFLINE_EVENT_LAG = 1_000;
 // The daemon can be busy while it is streaming provider output or compacting its
 // retained event journal. Diagnostics should not falsely mark that daemon as
 // unreachable merely because a health snapshot took slightly longer than a UI
@@ -458,6 +461,40 @@ export function buildProjectionProgress(input: {
   const projectionLag = Math.max(0, input.latestEventSequence - projectionSequence);
 
   return { projectionSequence, projectionLag };
+}
+
+function statusForProviderRuntimeIngestionLag(lag: number): ServerRuntimeLayerStatus {
+  if (lag <= 0) {
+    return "online";
+  }
+  if (lag < PROVIDER_RUNTIME_INGESTION_OFFLINE_EVENT_LAG) {
+    return "degraded";
+  }
+  return "offline";
+}
+
+export function buildProviderRuntimeIngestionDiagnostics(input: {
+  readonly daemonEventCursor: number;
+  readonly lastDaemonEventAt: string | null;
+  readonly projectorCursors: ReadonlyArray<
+    Pick<ServerOrchestratorProjectorCursor, "projector" | "cursor" | "updatedAt">
+  >;
+}): ServerProviderRuntimeIngestionDiagnostics {
+  const cursor = input.projectorCursors.find(
+    (projector) => projector.projector === PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
+  );
+  const daemonEventCursor = Math.max(0, input.daemonEventCursor);
+  const ingestionCursor = Math.max(0, cursor?.cursor ?? 0);
+  const lag = Math.max(0, daemonEventCursor - ingestionCursor);
+
+  return {
+    cursor: ingestionCursor,
+    daemonEventCursor,
+    lag,
+    updatedAt: cursor?.updatedAt ?? null,
+    lastDaemonEventAt: input.lastDaemonEventAt,
+    status: statusForProviderRuntimeIngestionLag(lag),
+  };
 }
 
 export function buildStaleStateFlags(input: {
@@ -871,6 +908,14 @@ export const make = Effect.fn("makeRuntimeLayerDiagnostics")(function* () {
         daemonConfigured: daemonHealth.configured,
         daemonReachable: daemonHealth.reachable,
       });
+      const providerRuntimeIngestion = buildProviderRuntimeIngestionDiagnostics({
+        daemonEventCursor:
+          daemonHealth.health?.newestEventCursor ??
+          daemonHealth.health?.eventCursor ??
+          providerDaemon.eventCursor,
+        lastDaemonEventAt: daemonHealth.health?.runtimeEvents?.lastEventAt ?? null,
+        projectorCursors,
+      });
       if (daemonHealth.error) {
         errors.push({ source: "provider-daemon", message: daemonHealth.error });
       }
@@ -953,6 +998,7 @@ export const make = Effect.fn("makeRuntimeLayerDiagnostics")(function* () {
           activeTurnCount,
           recentEventTypeCounts: eventCounts,
           projectorCursors,
+          providerRuntimeIngestion,
           staleStateFlags,
         },
         subprocesses,

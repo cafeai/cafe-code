@@ -76,5 +76,12 @@ export function visibleRuntimeErrors(
   if (data?.errors) {
     errors.push(...data.errors);
   }
+  const providerRuntimeIngestion = data?.orchestrator?.providerRuntimeIngestion;
+  if (providerRuntimeIngestion && providerRuntimeIngestion.status !== "online") {
+    errors.push({
+      source: "provider-runtime-ingestion",
+      message: `Provider daemon is ${providerRuntimeIngestion.lag} runtime events ahead of backend ingestion. Provider output may still be running while chat projection catches up.`,
+    });
+  }
   return errors;
 }

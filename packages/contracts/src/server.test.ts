@@ -184,6 +184,14 @@ describe("ServerProvider", () => {
             status: "degraded",
           },
         ],
+        providerRuntimeIngestion: {
+          cursor: 9,
+          daemonEventCursor: 10,
+          lag: 1,
+          updatedAt: "2026-05-26T00:00:00.000Z",
+          lastDaemonEventAt: "2026-05-26T00:00:00.000Z",
+          status: "degraded",
+        },
         staleStateFlags: [
           {
             kind: "terminal-streaming-message",
@@ -306,6 +314,7 @@ describe("ServerProvider", () => {
     });
 
     expect(parsed.orchestrator.projectionLag).toBe(2);
+    expect(parsed.orchestrator.providerRuntimeIngestion.lag).toBe(1);
     expect(parsed.providerDaemon.reachable).toBe(true);
   });
 
@@ -334,6 +343,14 @@ describe("ServerProvider", () => {
           activeTurnCount: 0,
           recentEventTypeCounts: [],
           projectorCursors: [],
+          providerRuntimeIngestion: {
+            cursor: 0,
+            daemonEventCursor: 0,
+            lag: 0,
+            updatedAt: null,
+            lastDaemonEventAt: null,
+            status: "online",
+          },
           staleStateFlags: [],
         },
         subprocesses: [],

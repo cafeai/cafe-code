@@ -590,6 +590,17 @@ export const ServerOrchestratorProjectorCursor = Schema.Struct({
 });
 export type ServerOrchestratorProjectorCursor = typeof ServerOrchestratorProjectorCursor.Type;
 
+export const ServerProviderRuntimeIngestionDiagnostics = Schema.Struct({
+  cursor: NonNegativeInt,
+  daemonEventCursor: NonNegativeInt,
+  lag: NonNegativeInt,
+  updatedAt: Schema.NullOr(IsoDateTime),
+  lastDaemonEventAt: Schema.NullOr(IsoDateTime),
+  status: ServerRuntimeLayerStatus,
+});
+export type ServerProviderRuntimeIngestionDiagnostics =
+  typeof ServerProviderRuntimeIngestionDiagnostics.Type;
+
 export const ServerOrchestratorStaleStateFlag = Schema.Struct({
   kind: TrimmedNonEmptyString,
   count: NonNegativeInt,
@@ -613,6 +624,7 @@ export const ServerOrchestratorDiagnostics = Schema.Struct({
   activeTurnCount: NonNegativeInt,
   recentEventTypeCounts: Schema.Array(ServerOrchestratorRecentEventTypeCount),
   projectorCursors: Schema.Array(ServerOrchestratorProjectorCursor),
+  providerRuntimeIngestion: ServerProviderRuntimeIngestionDiagnostics,
   staleStateFlags: Schema.Array(ServerOrchestratorStaleStateFlag),
 });
 export type ServerOrchestratorDiagnostics = typeof ServerOrchestratorDiagnostics.Type;
