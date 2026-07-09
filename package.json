@@ -37,6 +37,7 @@
     "start": "turbo run start --filter=@cafeai/cafe-code",
     "start:desktop": "turbo run start --filter=@cafecode/desktop",
     "start:desktop:debug": "turbo run start:debug --filter=@cafecode/desktop",
+    "restart:desktop": "node scripts/restart-cafe-code.ts",
     "killall": "node apps/server/src/bin.ts killall",
     "profile:desktop-startup": "node scripts/profile-desktop-startup.ts",
     "start:mock-update-server": "node scripts/mock-update-server.ts",
