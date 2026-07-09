@@ -59,6 +59,7 @@ import { ProviderModelPicker } from "./ProviderModelPicker";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
+import { ComposerAttachImageButton } from "./ComposerAttachImageButton";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
@@ -85,6 +86,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   CircleAlertIcon,
+  ImageIcon,
   LoaderCircleIcon,
   ListTodoIcon,
   type LucideIcon,
@@ -1100,6 +1102,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const mobileComposerExpandReleaseFrameRef = useRef<number | null>(null);
   const mobileComposerExpandInFlightRef = useRef(false);
   const dragDepthRef = useRef(0);
+  const composerFileInputRef = useRef<HTMLInputElement>(null);
 
   // ------------------------------------------------------------------
   // Derived: composer send state
@@ -2132,6 +2135,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     addComposerImages(files);
     focusComposer();
   };
+
+  // Touch devices can't paste or drag-drop images, so a file picker is the
+  // only practical way to attach on mobile; desktop gets the affordance too.
+  const openComposerImagePicker = () => {
+    composerFileInputRef.current?.click();
+  };
+
+  const onComposerFileInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    // Reset so picking the same file again after removal still fires change.
+    event.target.value = "";
+    if (files.length === 0) return;
+    addComposerImages(files);
+    focusComposer();
+  };
   const handleInterruptPrimaryAction = useCallback(() => {
     void onInterrupt();
   }, [onInterrupt]);
@@ -2291,6 +2309,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onRemove={onRemoveFollowUpQueueItem}
         onClear={onClearFollowUpQueue}
         onExpandImage={onExpandImage}
+      />
+      <input
+        ref={composerFileInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        tabIndex={-1}
+        aria-hidden="true"
+        onChange={onComposerFileInputChange}
       />
       <div
         className={cn(
@@ -2493,6 +2521,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     "Type your own answer, or leave this blank to use the selected option"
                   : prompt.trim() || "Ask anything..."}
               </button>
+              {composerImages.length > 0 ? (
+                // The image preview strip is hidden while collapsed, so surface
+                // a compact count pill to reassure the user their attachments
+                // are still there. Tapping it expands the composer to manage them.
+                <button
+                  type="button"
+                  className="inline-flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground focus:outline-none"
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={expandMobileComposer}
+                  aria-label={`${composerImages.length} ${
+                    composerImages.length === 1 ? "attachment" : "attachments"
+                  } attached — expand composer`}
+                >
+                  <ImageIcon aria-hidden="true" className="size-3" />
+                  {composerImages.length}{" "}
+                  {composerImages.length === 1 ? "attachment" : "attachments"}
+                </button>
+              ) : null}
             </div>
           ) : null}
 
@@ -2629,8 +2675,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               {showMobileComposerActionsOverlay ? (
                 <div
                   data-chat-composer-mobile-pending-actions="true"
-                  className="absolute bottom-0 right-0 flex justify-end"
+                  className="absolute bottom-0 right-0 flex items-center justify-end gap-1.5"
                 >
+                  {pendingUserInputs.length === 0 ? (
+                    <ComposerAttachImageButton
+                      preserveComposerFocusOnPointerDown
+                      disabled={activeThreadId === null}
+                      className="bg-background/80 hover:bg-background/90"
+                      onClick={openComposerImagePicker}
+                    />
+                  ) : null}
                   <ComposerPrimaryActions
                     compact
                     pendingAction={pendingPrimaryAction}
@@ -2679,6 +2733,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               )}
             >
               <div className="-m-1 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                <ComposerAttachImageButton
+                  disabled={pendingUserInputs.length > 0 || activeThreadId === null}
+                  onClick={openComposerImagePicker}
+                />
                 <ProviderModelPicker
                   compact={isComposerFooterCompact}
                   activeInstanceId={selectedInstanceId}

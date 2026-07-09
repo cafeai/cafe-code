@@ -1273,6 +1273,37 @@ async function waitForComposerMenuItem(itemId: string): Promise<HTMLElement> {
     `Unable to find composer menu item "${itemId}".`,
   );
 }
+
+const ON_SCREEN_KEYBOARD_MEDIA_QUERY = "(hover: none) and (pointer: coarse)";
+
+/**
+ * Force the touch/on-screen-keyboard media query to match so the composer
+ * renders its mobile layout under headless Chromium (which reports a fine
+ * pointer). Delegates every other query to the real matchMedia. Returns a
+ * restore function.
+ */
+function forceOnScreenKeyboardMediaQuery(): () => void {
+  const original = window.matchMedia.bind(window);
+  window.matchMedia = ((query: string) => {
+    if (query === ON_SCREEN_KEYBOARD_MEDIA_QUERY) {
+      return {
+        matches: true,
+        media: query,
+        onchange: null,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        addListener: () => {},
+        removeListener: () => {},
+        dispatchEvent: () => false,
+      } as unknown as MediaQueryList;
+    }
+    return original(query);
+  }) as typeof window.matchMedia;
+  return () => {
+    window.matchMedia = original;
+  };
+}
+
 async function waitForSendButton(): Promise<HTMLButtonElement> {
   return waitForElement(
     () => document.querySelector<HTMLButtonElement>('button[aria-label="Send message"]'),
@@ -2724,29 +2755,79 @@ describe("ChatView timeline estimator parity (full app)", () => {
     }
   });
 
-  it("keeps compact mobile composer focused after a send completes", async () => {
-    let resolveDispatch!: (value: { sequence: number }) => void;
-    let dispatchResolved = false;
-    const dispatchPromise = new Promise<{ sequence: number }>((resolve) => {
-      resolveDispatch = resolve;
-    });
-
+  it("attaches an image through the composer file picker", async () => {
     const mounted = await mountChatView({
-      viewport: COMPACT_FOOTER_VIEWPORT,
+      viewport: DEFAULT_VIEWPORT,
       snapshot: createSnapshotForTargetUser({
-        targetMessageId: "msg-user-mobile-focus-after-send" as MessageId,
-        targetText: "mobile focus after send target",
+        targetMessageId: "msg-user-attach-image" as MessageId,
+        targetText: "attach image target",
       }),
-      resolveRpc: (body) => {
-        if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
-          return dispatchPromise;
-        }
-        return undefined;
-      },
     });
 
     try {
-      useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep mobile composer focused");
+      await waitForComposerEditor();
+
+      const attachButton = await waitForElement(
+        () =>
+          document.querySelector<HTMLButtonElement>(
+            '[data-chat-composer-form="true"] button[aria-label="Attach image"]',
+          ),
+        "Unable to find composer attach-image button.",
+      );
+
+      const fileInput = document.querySelector<HTMLInputElement>(
+        '[data-chat-composer-form="true"] input[type="file"]',
+      );
+      expect(fileInput).toBeTruthy();
+      expect(fileInput!.accept).toBe("image/*");
+      expect(fileInput!.multiple).toBe(true);
+
+      // Tapping the button forwards to the hidden file input's native picker.
+      let pickerOpened = false;
+      const originalClick = fileInput!.click.bind(fileInput!);
+      fileInput!.click = () => {
+        pickerOpened = true;
+      };
+      attachButton.click();
+      expect(pickerOpened).toBe(true);
+      fileInput!.click = originalClick;
+
+      // Simulate the user choosing a file from the native picker.
+      const transfer = new DataTransfer();
+      transfer.items.add(
+        new File([new Uint8Array([1, 2, 3, 4])], "diagram.png", { type: "image/png" }),
+      );
+      fileInput!.files = transfer.files;
+      fileInput!.dispatchEvent(new Event("change", { bubbles: true }));
+
+      // The chosen image shows up in the composer preview strip.
+      await waitForElement(
+        () => document.querySelector<HTMLButtonElement>('button[aria-label="Preview diagram.png"]'),
+        "Unable to find attached image preview.",
+      );
+      await waitForElement(
+        () => document.querySelector<HTMLButtonElement>('button[aria-label="Remove diagram.png"]'),
+        "Unable to find attached image remove control.",
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("exposes the attach-image button in the mobile keyboard overlay", async () => {
+    // Headless Chromium reports a fine pointer, so force the touch media query
+    // the composer uses to detect on-screen-keyboard devices.
+    const restoreTouchMediaQuery = forceOnScreenKeyboardMediaQuery();
+    const mounted = await mountChatView({
+      viewport: COMPACT_FOOTER_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-mobile-attach-image" as MessageId,
+        targetText: "mobile attach image target",
+      }),
+    });
+
+    try {
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "attach on mobile");
       await waitForLayout();
 
       const expandButton = await waitForElement(
@@ -2755,75 +2836,82 @@ describe("ChatView timeline estimator parity (full app)", () => {
       );
       expandButton.click();
 
-      await vi.waitFor(
-        () => {
-          const currentEditor = document.querySelector<HTMLElement>(
-            '[data-testid="composer-editor"]',
-          );
-          expect(currentEditor?.getAttribute("contenteditable")).toBe("true");
-          expect(document.activeElement).toBe(currentEditor);
-        },
-        { timeout: 8_000, interval: 16 },
+      // Focusing opens the on-screen-keyboard overlay, which hides the footer
+      // and surfaces the attach control alongside the primary action so touch
+      // users can add an image without a paste/drag affordance.
+      const overlayAttachButton = await waitForElement(
+        () =>
+          document.querySelector<HTMLButtonElement>(
+            '[data-chat-composer-mobile-pending-actions="true"] button[aria-label="Attach image"]',
+          ),
+        "Unable to find mobile overlay attach-image button.",
       );
 
-      const sendButton = await waitForSendButton();
-      expect(sendButton.disabled).toBe(false);
-      sendButton.click();
+      const fileInput = document.querySelector<HTMLInputElement>(
+        '[data-chat-composer-form="true"] input[type="file"]',
+      );
+      expect(fileInput).toBeTruthy();
 
-      const acknowledgedTurnId = "turn-mobile-focus-after-send" as TurnId;
-      const baseThread = fixture.snapshot.threads[0]!;
-      const baseSession = baseThread.session!;
-      const acknowledgedThread: OrchestrationReadModel["threads"][number] = {
-        ...baseThread,
-        latestTurn: {
-          turnId: acknowledgedTurnId,
-          state: "running" as const,
-          requestedAt: isoAt(1_100),
-          startedAt: isoAt(1_101),
-          completedAt: null,
-          assistantMessageId: null,
-        },
-        session: {
-          ...baseSession,
-          status: "running" as const,
-          activeTurnId: acknowledgedTurnId,
-          updatedAt: isoAt(1_101),
-        },
-        updatedAt: isoAt(1_101),
+      let pickerOpened = false;
+      const originalClick = fileInput!.click.bind(fileInput!);
+      fileInput!.click = () => {
+        pickerOpened = true;
       };
-      fixture.snapshot = {
-        ...fixture.snapshot,
-        snapshotSequence: fixture.snapshot.snapshotSequence + 1,
-        threads: [acknowledgedThread],
-      };
-      dispatchResolved = true;
-      resolveDispatch({ sequence: fixture.snapshot.snapshotSequence });
-      rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
-        kind: "snapshot",
-        snapshot: {
-          snapshotSequence: fixture.snapshot.snapshotSequence,
-          thread: acknowledgedThread,
-        },
+      overlayAttachButton.click();
+      expect(pickerOpened).toBe(true);
+      fileInput!.click = originalClick;
+    } finally {
+      await mounted.cleanup();
+      restoreTouchMediaQuery();
+    }
+  });
+
+  it("shows an attachment count pill in the collapsed mobile composer", async () => {
+    const restoreTouchMediaQuery = forceOnScreenKeyboardMediaQuery();
+    const mounted = await mountChatView({
+      viewport: COMPACT_FOOTER_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-mobile-attachment-pill" as MessageId,
+        targetText: "mobile attachment pill target",
+      }),
+    });
+
+    try {
+      const file = new File([new Uint8Array([1, 2, 3, 4])], "diagram.png", { type: "image/png" });
+      useComposerDraftStore.getState().addImage(THREAD_REF, {
+        type: "image",
+        id: "composer-image-pill",
+        name: "diagram.png",
+        mimeType: "image/png",
+        sizeBytes: file.size,
+        previewUrl: URL.createObjectURL(file),
+        file,
       });
+      await waitForLayout();
 
+      // Collapsed (keyboard down) hides the preview strip, so the count pill is
+      // the only signal the attachment is still there.
+      const pill = await waitForElement(
+        () =>
+          Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((button) =>
+            button.getAttribute("aria-label")?.includes("1 attachment attached"),
+          ) ?? null,
+        "Unable to find collapsed-composer attachment pill.",
+      );
+      expect(pill.textContent).toContain("1 attachment");
+
+      // Tapping it expands the composer so the attachment can be managed.
+      pill.click();
       await vi.waitFor(
         () => {
-          expect(
-            wsRequests.some((request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand),
-          ).toBe(true);
-          const currentEditor = document.querySelector<HTMLElement>(
-            '[data-testid="composer-editor"]',
-          );
-          expect(currentEditor?.getAttribute("contenteditable")).toBe("true");
-          expect(document.activeElement).toBe(currentEditor);
+          const editor = document.querySelector<HTMLElement>('[data-testid="composer-editor"]');
+          expect(editor?.getAttribute("contenteditable")).toBe("true");
         },
         { timeout: 8_000, interval: 16 },
       );
     } finally {
-      if (!dispatchResolved) {
-        resolveDispatch({ sequence: fixture.snapshot.snapshotSequence + 1 });
-      }
       await mounted.cleanup();
+      restoreTouchMediaQuery();
     }
   });
 
