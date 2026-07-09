@@ -177,7 +177,7 @@ import {
   useServerKeybindings,
   useServerTerminal,
 } from "~/rpc/serverState";
-import { sanitizeThreadErrorMessage } from "~/rpc/transportError";
+import { describeSendFailureMessage, sanitizeThreadErrorMessage } from "~/rpc/transportError";
 import { retainThreadDetailSubscription } from "../environments/runtime/service";
 import { RightPanelSheet } from "./RightPanelSheet";
 import { deriveDebugWaitReasons } from "./chat/debugWaitReasons";
@@ -4801,20 +4801,21 @@ export default function ChatView(props: ChatViewProps) {
           return existing.filter((message) => message.id !== messageIdForSend);
         });
       }
+      const queuedFollowUpError = describeSendFailureMessage(
+        err,
+        "Failed to send queued follow-up.",
+      );
       setFollowUpQueueByThreadId((existing) => ({
         ...existing,
         [item.threadId]: [
           {
             ...item,
-            blockedReason: err instanceof Error ? err.message : "Failed to send queued follow-up.",
+            blockedReason: queuedFollowUpError,
           },
           ...(existing[item.threadId] ?? EMPTY_FOLLOW_UP_QUEUE),
         ],
       }));
-      setThreadError(
-        item.threadId,
-        err instanceof Error ? err.message : "Failed to send queued follow-up.",
-      );
+      setThreadError(item.threadId, queuedFollowUpError);
     } finally {
       setQueueDispatchInFlight(false);
       if (isVisibleThread) {
@@ -5240,10 +5241,7 @@ export default function ChatView(props: ChatViewProps) {
         });
         scheduleComposerFocus();
       }
-      setThreadError(
-        threadIdForSend,
-        err instanceof Error ? err.message : "Failed to send message.",
-      );
+      setThreadError(threadIdForSend, describeSendFailureMessage(err, "Failed to send message."));
     });
     setSendInFlight(false);
     if (!turnStartSucceeded) {
@@ -5881,7 +5879,7 @@ export default function ChatView(props: ChatViewProps) {
         );
         setThreadError(
           threadIdForSend,
-          err instanceof Error ? err.message : "Failed to send plan follow-up.",
+          describeSendFailureMessage(err, "Failed to send plan follow-up."),
         );
         setSendInFlight(false);
         resetLocalDispatch();
