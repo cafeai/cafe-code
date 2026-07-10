@@ -1,5 +1,4 @@
 import "../../index.css";
-
 import {
   type AuthAccessStreamEvent,
   type AuthAccessSnapshot,
@@ -542,6 +541,11 @@ const createDesktopBridgeStub = (overrides?: {
     getClientSettings: vi.fn().mockResolvedValue(null),
     setClientSettings: vi.fn().mockResolvedValue(undefined),
     setPowerSaveBlockerState: vi.fn().mockResolvedValue(undefined),
+    getSavedEnvironmentRegistry: vi.fn().mockResolvedValue([]),
+    setSavedEnvironmentRegistry: vi.fn().mockResolvedValue(undefined),
+    getSavedEnvironmentSecret: vi.fn().mockResolvedValue(null),
+    setSavedEnvironmentSecret: vi.fn().mockResolvedValue(true),
+    removeSavedEnvironmentSecret: vi.fn().mockResolvedValue(undefined),
     getServerExposureState: vi.fn().mockResolvedValue(
       overrides?.serverExposureState ?? {
         mode: "local-only",

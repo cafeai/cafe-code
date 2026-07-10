@@ -3,6 +3,13 @@ import * as Effect from "effect/Effect";
 import * as DesktopIpc from "./DesktopIpc.ts";
 import { getClientSettings, setClientSettings } from "./methods/clientSettings.ts";
 import {
+  getSavedEnvironmentRegistry,
+  getSavedEnvironmentSecret,
+  removeSavedEnvironmentSecret,
+  setSavedEnvironmentRegistry,
+  setSavedEnvironmentSecret,
+} from "./methods/savedEnvironments.ts";
+import {
   getAdvertisedEndpoints,
   getServerExposureState,
   setServerExposureMode,
@@ -42,6 +49,11 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
   yield* ipc.handle(getClientSettings);
   yield* ipc.handle(setClientSettings);
   yield* ipc.handle(setPowerSaveBlockerState);
+  yield* ipc.handle(getSavedEnvironmentRegistry);
+  yield* ipc.handle(setSavedEnvironmentRegistry);
+  yield* ipc.handle(getSavedEnvironmentSecret);
+  yield* ipc.handle(setSavedEnvironmentSecret);
+  yield* ipc.handle(removeSavedEnvironmentSecret);
 
   yield* ipc.handle(getServerExposureState);
   yield* ipc.handle(setServerExposureMode);

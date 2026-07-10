@@ -146,3 +146,16 @@ export async function __resetClientTracingForTests() {
 
   await disposeTracerRuntime(runtime, scope);
 }
+
+/**
+ * Enable the same delegating tracer path used in production without starting
+ * an OTLP exporter. Unit tests that only need real trace/span identifiers must
+ * not wait for a localhost export attempt during scope shutdown.
+ */
+export async function __enableInMemoryClientTracingForTests() {
+  await __resetClientTracingForTests();
+  activeConfigKey = "test:in-memory";
+  activeDelegate = Tracer.make({
+    span: (options) => new Tracer.NativeSpan(options),
+  });
+}

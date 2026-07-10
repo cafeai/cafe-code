@@ -58,6 +58,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   COMPOSER_DRAFT_STORAGE_KEY,
+  deriveNewChatComposerDefaults,
   finalizePromotedDraftThreadByRef,
   markPromotedDraftThread,
   markPromotedDraftThreadByRef,
@@ -68,6 +69,7 @@ import {
   useComposerDraftStore,
   DraftId,
 } from "./composerDraftStore";
+import { DEFAULT_UNIFIED_SETTINGS } from "@cafecode/contracts/settings";
 import { removeLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
 import { createDebouncedStorage } from "./lib/storage";
 
@@ -1206,6 +1208,113 @@ describe("composerDraftStore sticky composer settings", () => {
       },
       activeProvider: "claudeAgent",
     });
+  });
+
+  it("lets explicit new-chat defaults win over sticky state", () => {
+    const store = useComposerDraftStore.getState();
+    const threadId = ThreadId.make("thread-defaults-over-sticky");
+    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+
+    store.setStickyModelSelection(
+      modelSelection(CODEX_DRIVER, "gpt-5.3-codex", { reasoningEffort: "medium" }),
+    );
+    store.applyStickyState(threadRef, {
+      activeProvider: CLAUDE_AGENT_INSTANCE,
+      modelSelectionByProvider: {
+        [CODEX_INSTANCE]: modelSelection(CODEX_DRIVER, "gpt-5.6-sol", { reasoningEffort: "high" }),
+        [CLAUDE_AGENT_INSTANCE]: modelSelection(CLAUDE_AGENT_DRIVER, "claude-fable-5"),
+      },
+    });
+
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toMatchObject({
+      activeProvider: "claudeAgent",
+      modelSelectionByProvider: {
+        codex: modelSelection(CODEX_DRIVER, "gpt-5.6-sol", { reasoningEffort: "high" }),
+        claudeAgent: modelSelection(CLAUDE_AGENT_DRIVER, "claude-fable-5"),
+      },
+    });
+  });
+
+  it("applies new-chat defaults when no sticky state exists", () => {
+    const store = useComposerDraftStore.getState();
+    const threadId = ThreadId.make("thread-defaults-without-sticky");
+    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+
+    store.applyStickyState(threadRef, {
+      activeProvider: CODEX_INSTANCE,
+      modelSelectionByProvider: {
+        [CODEX_INSTANCE]: modelSelection(CODEX_DRIVER, "gpt-5.6-sol", { fastMode: true }),
+      },
+    });
+
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toMatchObject({
+      activeProvider: "codex",
+      modelSelectionByProvider: {
+        codex: modelSelection(CODEX_DRIVER, "gpt-5.6-sol", { fastMode: true }),
+      },
+    });
+  });
+});
+
+describe("deriveNewChatComposerDefaults", () => {
+  it("returns null when nothing is configured", () => {
+    expect(deriveNewChatComposerDefaults(DEFAULT_UNIFIED_SETTINGS)).toBeNull();
+  });
+
+  it("builds defaults from configured provider instances", () => {
+    const defaults = deriveNewChatComposerDefaults({
+      ...DEFAULT_UNIFIED_SETTINGS,
+      defaultProviderInstanceId: CODEX_INSTANCE,
+      providerInstances: {
+        [CODEX_INSTANCE]: {
+          driver: CODEX_DRIVER,
+          defaultModel: "gpt-5.6-sol",
+          defaultModelOptions: [
+            { id: "reasoningEffort", value: "high" },
+            { id: "fastMode", value: true },
+          ],
+        },
+      },
+    });
+
+    expect(defaults).toEqual({
+      activeProvider: "codex",
+      modelSelectionByProvider: {
+        codex: createModelSelection(CODEX_INSTANCE, "gpt-5.6-sol", [
+          { id: "reasoningEffort", value: "high" },
+          { id: "fastMode", value: true },
+        ]),
+      },
+    });
+  });
+
+  it("resolves a built-in default provider without an instance envelope", () => {
+    const defaults = deriveNewChatComposerDefaults({
+      ...DEFAULT_UNIFIED_SETTINGS,
+      defaultProviderInstanceId: CODEX_INSTANCE,
+    });
+
+    expect(defaults).toEqual({
+      activeProvider: "codex",
+      modelSelectionByProvider: {},
+    });
+  });
+
+  it("ignores disabled instances and a stale default provider", () => {
+    const customInstance = ProviderInstanceId.make("codex_personal");
+    const defaults = deriveNewChatComposerDefaults({
+      ...DEFAULT_UNIFIED_SETTINGS,
+      defaultProviderInstanceId: customInstance,
+      providerInstances: {
+        [customInstance]: {
+          driver: CODEX_DRIVER,
+          enabled: false,
+          defaultModel: "gpt-5.6-sol",
+        },
+      },
+    });
+
+    expect(defaults).toBeNull();
   });
 });
 

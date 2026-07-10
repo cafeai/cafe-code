@@ -2,6 +2,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
+import { setImmediate as waitForEventLoopTurn } from "node:timers/promises";
 
 import {
   type ChatAttachment,
@@ -55,7 +57,6 @@ import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as Clock from "effect/Clock";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService, type GitWorkflowServiceShape } from "../../git/GitWorkflowService.ts";
@@ -72,19 +73,18 @@ async function waitFor(
   predicate: () => boolean | Promise<boolean>,
   timeoutMs = 2000,
 ): Promise<void> {
-  const deadline = (await Effect.runPromise(Clock.currentTimeMillis)) + timeoutMs;
-  const poll = async (): Promise<void> => {
+  const deadline = performance.now() + timeoutMs;
+  while (true) {
     if (await predicate()) {
       return;
     }
-    if ((await Effect.runPromise(Clock.currentTimeMillis)) >= deadline) {
+    if (performance.now() >= deadline) {
       throw new Error("Timed out waiting for expectation.");
     }
-    await Effect.runPromise(Effect.yieldNow);
-    return poll();
-  };
-
-  return poll();
+    // Reactor fibers can enqueue Node I/O while advancing. Yield a macrotask instead of
+    // recursively spinning Effect fibers so the work under test gets a deterministic turn.
+    await waitForEventLoopTurn();
+  }
 }
 
 describe("ProviderCommandReactor", () => {

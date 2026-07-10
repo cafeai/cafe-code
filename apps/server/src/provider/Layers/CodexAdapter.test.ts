@@ -330,7 +330,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       const adapter = yield* CodexAdapter;
       const result = yield* adapter
         .sendTurn({
-          threadId: asThreadId("sess-missing"),
+          threadId: asThreadId("sess-never-started"),
           input: "hello",
           attachments: [],
         })
@@ -339,7 +339,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       assert.equal(result._tag, "Failure");
       assert.equal(result.failure._tag, "ProviderAdapterSessionNotFoundError");
       assert.equal(result.failure.provider, "codex");
-      assert.equal(result.failure.threadId, "sess-missing");
+      assert.equal(result.failure.threadId, "sess-never-started");
     }),
   );
 

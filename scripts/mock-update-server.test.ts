@@ -54,7 +54,11 @@ it.layer(NodeServices.layer)("mock-update-server", (it) => {
         rootRealPath,
         Effect.gen(function* () {
           const client = yield* HttpClient.HttpClient;
-          const response = yield* client.get("/latest.yml");
+          // File responses use a streaming body. Close the test connection explicitly so the
+          // scoped Node server does not wait for its three-second keep-alive timeout on teardown.
+          const response = yield* client.get("/latest.yml", {
+            headers: { connection: "close" },
+          });
 
           assert.equal(response.status, 200);
           assert.equal(response.headers["content-type"], "text/yaml");

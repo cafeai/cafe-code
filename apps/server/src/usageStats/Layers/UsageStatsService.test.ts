@@ -249,7 +249,7 @@ describe("UsageStatsService", () => {
   it.effect("falls back to turn-completed usage only when no usage events were seen", () =>
     withHarness((harness) =>
       Effect.gen(function* () {
-        // Gemini-style: no token-usage events, per-turn totals on completion.
+        // Completion-only usage: no token-usage events, per-turn totals on completion.
         yield* harness.emitProvider({
           ...providerEventBase(THREAD_1, "g0"),
           type: "turn.started",

@@ -1844,6 +1844,7 @@ export function ProviderSettingsPanel() {
       providerInstances: withoutProviderInstanceKey(settings.providerInstances, id),
       providerModelPreferences: withoutProviderInstanceKey(settings.providerModelPreferences, id),
       favorites: withoutProviderInstanceFavorites(settings.favorites ?? [], id),
+      ...(settings.defaultProviderInstanceId === id ? { defaultProviderInstanceId: null } : {}),
     });
   };
 
@@ -2007,12 +2008,16 @@ export function ProviderSettingsPanel() {
               instance={row.instance}
               driverOption={driverOption}
               liveProvider={liveProvider}
-              isExpanded={openInstanceDetails[row.instanceId] ?? false}
-              onExpandedChange={(open) =>
+              isSettingsOpen={openInstanceDetails[row.instanceId] ?? false}
+              onSettingsOpenChange={(open) =>
                 setOpenInstanceDetails((existing) => ({
                   ...existing,
                   [row.instanceId]: open,
                 }))
+              }
+              isDefaultProvider={settings.defaultProviderInstanceId === row.instanceId}
+              onSetDefaultProvider={(next) =>
+                updateSettings({ defaultProviderInstanceId: next ? row.instanceId : null })
               }
               onUpdate={(next) => {
                 const wasEnabled = row.instance.enabled ?? true;

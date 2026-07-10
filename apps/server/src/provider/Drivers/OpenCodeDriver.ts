@@ -1,22 +1,38 @@
-import { GeminiSettings, type ServerProvider } from "@cafecode/contracts";
+/**
+ * OpenCodeDriver — `ProviderDriver` for the OpenCode runtime.
+ *
+ * Mirrors the Codex / Claude drivers: a plain value whose `create()`
+ * bundles `snapshot` / `adapter` / `textGeneration` closures over the
+ * per-instance `OpenCodeSettings`.
+ *
+ * Two instances with different `serverUrl`s therefore talk to independent
+ * OpenCode servers; when no `serverUrl` is set, the adapter + text-generation
+ * shares spin up their own scoped child processes, and those child
+ * processes are released when the registry scope closes.
+ *
+ * @module provider/Drivers/OpenCodeDriver
+ */
+import { OpenCodeSettings, ProviderDriverKind, type ServerProvider } from "@cafecode/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
-import { makeGeminiTextGeneration } from "../../textGeneration/GeminiTextGeneration.ts";
+import { makeOpenCodeTextGeneration } from "../../textGeneration/OpenCodeTextGeneration.ts";
 import { ServerConfig } from "../../config.ts";
 import { ProviderDriverError } from "../Errors.ts";
-import { makeGeminiAdapter } from "../Layers/GeminiAdapter.ts";
+import { makeOpenCodeAdapter } from "../Layers/OpenCodeAdapter.ts";
 import {
-  checkGeminiProviderStatus,
-  GEMINI_PROVIDER,
-  makePendingGeminiProvider,
-} from "../Layers/GeminiProvider.ts";
+  checkOpenCodeProviderStatus,
+  makePendingOpenCodeProvider,
+} from "../Layers/OpenCodeProvider.ts";
+import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
+import { OpenCodeRuntime } from "../opencodeRuntime.ts";
 import {
   defaultProviderContinuationIdentity,
   type ProviderDriver,
@@ -27,22 +43,41 @@ import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment
 import {
   enrichProviderSnapshotWithVersionAdvisory,
   makePackageManagedProviderMaintenanceResolver,
+  normalizeCommandPath,
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "../providerMaintenance.ts";
+const decodeOpenCodeSettings = Schema.decodeSync(OpenCodeSettings);
 
-const decodeGeminiSettings = Schema.decodeSync(GeminiSettings);
+const DRIVER_KIND = ProviderDriverKind.make("opencode");
 const SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
+
+function isOpenCodeNativeCommandPath(commandPath: string): boolean {
+  const normalized = normalizeCommandPath(commandPath);
+  return (
+    normalized.endsWith("/.opencode/bin/opencode") ||
+    normalized.endsWith("/.opencode/bin/opencode.exe")
+  );
+}
+
 const UPDATE = makePackageManagedProviderMaintenanceResolver({
-  provider: GEMINI_PROVIDER,
-  npmPackageName: "@google/gemini-cli",
-  homebrewFormula: "gemini-cli",
-  nativeUpdate: null,
+  provider: DRIVER_KIND,
+  npmPackageName: "opencode-ai",
+  homebrewFormula: "anomalyco/tap/opencode",
+  nativeUpdate: {
+    executable: "opencode",
+    args: ["upgrade"],
+    lockKey: "opencode-native",
+    isCommandPath: isOpenCodeNativeCommandPath,
+  },
 });
 
-export type GeminiDriverEnv =
+export type OpenCodeDriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
   | HttpClient.HttpClient
+  | OpenCodeRuntime
+  | Path.Path
+  | ProviderEventLoggers
   | ServerConfig;
 
 const withInstanceIdentity =
@@ -55,59 +90,63 @@ const withInstanceIdentity =
   (snapshot: ServerProviderDraft): ServerProvider => ({
     ...snapshot,
     instanceId: input.instanceId,
-    driver: GEMINI_PROVIDER,
+    driver: DRIVER_KIND,
     ...(input.displayName ? { displayName: input.displayName } : {}),
     ...(input.accentColor ? { accentColor: input.accentColor } : {}),
     continuation: { groupKey: input.continuationGroupKey },
-    runtimeCapabilities: { ...snapshot.runtimeCapabilities, liveSteer: "unsupported" },
   });
 
-export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
-  driverKind: GEMINI_PROVIDER,
+export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv> = {
+  driverKind: DRIVER_KIND,
   metadata: {
-    displayName: "Gemini",
+    displayName: "OpenCode",
     supportsMultipleInstances: true,
   },
-  configSchema: GeminiSettings,
-  defaultConfig: (): GeminiSettings => decodeGeminiSettings({}),
+  configSchema: OpenCodeSettings,
+  defaultConfig: (): OpenCodeSettings => decodeOpenCodeSettings({}),
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
-      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const openCodeRuntime = yield* OpenCodeRuntime;
+      const serverConfig = yield* ServerConfig;
       const httpClient = yield* HttpClient.HttpClient;
+      const eventLoggers = yield* ProviderEventLoggers;
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const continuationIdentity = defaultProviderContinuationIdentity({
-        driverKind: GEMINI_PROVIDER,
+        driverKind: DRIVER_KIND,
         instanceId,
       });
-      const effectiveConfig = { ...config, enabled } satisfies GeminiSettings;
       const stampIdentity = withInstanceIdentity({
         instanceId,
         displayName,
         accentColor,
         continuationGroupKey: continuationIdentity.continuationKey,
       });
+      const effectiveConfig = { ...config, enabled } satisfies OpenCodeSettings;
       const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
         binaryPath: effectiveConfig.binaryPath,
         env: processEnv,
       });
 
-      const adapter = yield* makeGeminiAdapter(effectiveConfig, {
+      const adapter = yield* makeOpenCodeAdapter(effectiveConfig, {
         instanceId,
         environment: processEnv,
+        ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });
-      const textGeneration = makeGeminiTextGeneration();
+      const textGeneration = yield* makeOpenCodeTextGeneration(effectiveConfig, processEnv);
 
-      const checkProvider = checkGeminiProviderStatus(effectiveConfig, processEnv).pipe(
-        Effect.map(stampIdentity),
-        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-      );
-      const snapshot = yield* makeManagedServerProvider<GeminiSettings>({
+      const checkProvider = checkOpenCodeProviderStatus(
+        effectiveConfig,
+        serverConfig.cwd,
+        processEnv,
+      ).pipe(Effect.map(stampIdentity), Effect.provideService(OpenCodeRuntime, openCodeRuntime));
+
+      const snapshot = yield* makeManagedServerProvider<OpenCodeSettings>({
         maintenanceCapabilities,
         getSettings: Effect.succeed(effectiveConfig),
         streamSettings: Stream.never,
         haveSettingsChanged: () => false,
         initialSnapshot: (settings) =>
-          makePendingGeminiProvider(settings).pipe(Effect.map(stampIdentity)),
+          makePendingOpenCodeProvider(settings).pipe(Effect.map(stampIdentity)),
         checkProvider,
         enrichSnapshot: ({ snapshot, publishSnapshot }) =>
           enrichProviderSnapshotWithVersionAdvisory(snapshot, maintenanceCapabilities).pipe(
@@ -119,9 +158,9 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
         Effect.mapError(
           (cause) =>
             new ProviderDriverError({
-              driver: GEMINI_PROVIDER,
+              driver: DRIVER_KIND,
               instanceId,
-              detail: `Failed to build Gemini snapshot: ${cause.message ?? String(cause)}`,
+              detail: `Failed to build OpenCode snapshot: ${cause.message ?? String(cause)}`,
               cause,
             }),
         ),
@@ -129,7 +168,7 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
 
       return {
         instanceId,
-        driverKind: GEMINI_PROVIDER,
+        driverKind: DRIVER_KIND,
         continuationIdentity,
         displayName,
         accentColor,

@@ -905,15 +905,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   //      from the model picker (must win, otherwise the UI appears to
   //      ignore picker selections).
   //   2. Thread's persisted instance id (server-side saved selection).
-  //   3. Project default's instance id.
-  //   4. First enabled entry matching the current driver kind.
-  //   5. First enabled entry overall / default instance for the kind.
+  //   3. The global default provider from settings.
+  //   4. Project default's instance id.
+  //   5. First enabled entry matching the current driver kind.
+  //   6. First enabled entry overall / default instance for the kind.
   //
   const selectedInstanceId = useMemo<ProviderInstanceId>(() => {
     const candidates: Array<string | null | undefined> = [
       composerDraft.activeProvider,
       activeThread?.session?.providerInstanceId,
       activeThreadModelSelection?.instanceId,
+      settings.defaultProviderInstanceId,
       activeProjectDefaultModelSelection?.instanceId,
     ];
     for (const candidate of candidates) {
@@ -962,6 +964,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     lockedProvider,
     providerInstanceEntries,
     selectedProvider,
+    settings.defaultProviderInstanceId,
   ]);
 
   const { modelOptions: composerModelOptions, selectedModel } = useEffectiveComposerModelState({

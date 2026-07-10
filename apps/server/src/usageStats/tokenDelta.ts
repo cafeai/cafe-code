@@ -13,8 +13,8 @@
  *   reports a session-cumulative `totalOutputTokens`, which does. Its
  *   `reasoningOutputTokens` is a subset of output; adding it would double
  *   count.
- * - Gemini emits no token-usage events at all; its per-turn totals arrive on
- *   `turn.completed` and are counted separately by the service.
+ * - Providers that emit no token-usage snapshots can report per-turn totals
+ *   on `turn.completed`; the service counts that fallback separately.
  *
  * The watermark rule below turns any monotone-with-resets counter into exact
  * deltas: growth is counted as the difference, and a drop is treated as a

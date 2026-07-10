@@ -83,6 +83,7 @@ import { getPrimaryEnvironmentConnection } from "~/environments/runtime";
 import { useUiStateStore } from "~/uiStateStore";
 import { resolveServerConfigVersionMismatch } from "~/versionSkew";
 import { useServerConfig } from "~/rpc/serverState";
+import { SavedEnvironmentsSettings } from "./SavedEnvironmentsSettings";
 
 const accessTimestampFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
@@ -1814,6 +1815,7 @@ export function ConnectionsSettings() {
 
   return (
     <SettingsPageContainer>
+      <SavedEnvironmentsSettings />
       {canManageLocalBackend ? (
         <>
           <SettingsSection title="Manage local backend">

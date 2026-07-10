@@ -46,6 +46,7 @@ export interface DesktopEnvironmentShape {
   readonly stateDir: string;
   readonly desktopSettingsPath: string;
   readonly clientSettingsPath: string;
+  readonly savedEnvironmentRegistryPath: string;
   readonly providerDaemonMarkerPath: string;
   readonly providerDaemonCredentialPath: string;
   readonly providerDaemonIpcDir: string;
@@ -185,6 +186,7 @@ const makeDesktopEnvironment = Effect.fn("desktop.environment.make")(function* (
     stateDir,
     desktopSettingsPath: path.join(stateDir, "desktop-settings.json"),
     clientSettingsPath: path.join(stateDir, "client-settings.json"),
+    savedEnvironmentRegistryPath: path.join(stateDir, "saved-environments.json"),
     providerDaemonMarkerPath: path.join(stateDir, "provider-daemon.json"),
     providerDaemonCredentialPath: path.join(stateDir, "provider-daemon-token.bin"),
     providerDaemonIpcDir: path.join(stateDir, "provider-daemon-ipc"),

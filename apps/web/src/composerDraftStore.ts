@@ -3,6 +3,7 @@ import {
   DEFAULT_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
   type EnvironmentId,
+  isRetiredProviderDriverKind,
   ModelSelection,
   ProjectId,
   ProviderInstanceId,
@@ -355,7 +356,10 @@ interface ComposerDraftStoreState {
       | null
       | undefined,
   ) => void;
-  applyStickyState: (threadRef: ComposerThreadTarget) => void;
+  applyStickyState: (
+    threadRef: ComposerThreadTarget,
+    newChatDefaults?: NewChatComposerDefaults | null,
+  ) => void;
   setProviderModelOptions: (
     threadRef: ComposerThreadTarget,
     provider: ProviderDriverKind,
@@ -387,6 +391,68 @@ interface ComposerDraftStoreState {
 export interface EffectiveComposerModelState {
   selectedModel: string;
   modelOptions: ProviderOptionSelectionsByProvider | null;
+}
+
+/**
+ * Explicit new-chat defaults resolved from server settings: the global
+ * default provider instance plus each instance's configured default model /
+ * option traits. Applied when a genuinely new draft is created — these win
+ * over the sticky last-used snapshot because they are declared intent.
+ */
+export interface NewChatComposerDefaults {
+  activeProvider: ProviderInstanceId | null;
+  modelSelectionByProvider: Partial<Record<ProviderInstanceId, ModelSelection>>;
+}
+
+function isProviderInstanceEnabledInSettings(
+  settings: UnifiedSettings,
+  instanceId: ProviderInstanceId,
+): boolean {
+  const envelope = settings.providerInstances?.[instanceId];
+  if (envelope) {
+    return (envelope.enabled ?? true) && !isRetiredProviderDriverKind(envelope.driver);
+  }
+  // Built-in default slots without an explicit envelope still live in the
+  // legacy per-driver settings struct (instance id === driver kind there).
+  const legacy = (settings.providers as Record<string, { readonly enabled?: boolean } | undefined>)[
+    instanceId
+  ];
+  return legacy?.enabled ?? false;
+}
+
+/**
+ * Build `NewChatComposerDefaults` from unified settings, or `null` when the
+ * user has not configured any explicit defaults. Instances that are
+ * disabled, retired, or missing are skipped so a stale
+ * `defaultProviderInstanceId` degrades to the historical behavior instead
+ * of pointing new chats at an unusable provider.
+ */
+export function deriveNewChatComposerDefaults(
+  settings: UnifiedSettings,
+): NewChatComposerDefaults | null {
+  const modelSelectionByProvider: Partial<Record<ProviderInstanceId, ModelSelection>> = {};
+  for (const [rawId, instance] of Object.entries(settings.providerInstances ?? {})) {
+    if (!instance.defaultModel) continue;
+    if (instance.enabled === false || isRetiredProviderDriverKind(instance.driver)) continue;
+    const instanceId = rawId as ProviderInstanceId;
+    modelSelectionByProvider[instanceId] = createModelSelection(
+      instanceId,
+      instance.defaultModel,
+      instance.defaultModelOptions,
+    );
+  }
+
+  const configuredDefaultProvider = settings.defaultProviderInstanceId;
+  const activeProvider =
+    configuredDefaultProvider !== null &&
+    isProviderInstanceEnabledInSettings(settings, configuredDefaultProvider)
+      ? configuredDefaultProvider
+      : null;
+
+  if (activeProvider === null && Object.keys(modelSelectionByProvider).length === 0) {
+    return null;
+  }
+  return { activeProvider, modelSelectionByProvider };
 }
 
 interface ComposerDraftModelState {
@@ -778,8 +844,18 @@ export function deriveEffectiveComposerModelState(input: {
   projectModelSelection: ModelSelection | null | undefined;
   settings: UnifiedSettings;
 }): EffectiveComposerModelState {
+  // The instance's configured default model sits between the thread's own
+  // persisted selection and the project-level default: an explicit
+  // per-instance default is more specific than the project fallback but
+  // must never override what a thread already chose.
+  const instanceDefaults = input.selectedInstanceId
+    ? input.settings.providerInstances?.[input.selectedInstanceId]
+    : undefined;
   const baseModelCandidate =
-    input.threadModelSelection?.model ?? input.projectModelSelection?.model ?? null;
+    input.threadModelSelection?.model ??
+    instanceDefaults?.defaultModel ??
+    input.projectModelSelection?.model ??
+    null;
   const baseModel =
     (input.selectedInstanceId
       ? resolveAppModelSelectionForInstance(
@@ -824,10 +900,17 @@ export function deriveEffectiveComposerModelState(input: {
         activeSelection.model,
       ))
     : baseModel;
+  const instanceDefaultOptions =
+    input.selectedInstanceId &&
+    instanceDefaults?.defaultModelOptions &&
+    instanceDefaults.defaultModelOptions.length > 0
+      ? { [input.selectedInstanceId]: instanceDefaults.defaultModelOptions }
+      : null;
   const modelOptions =
     modelSelectionByProviderToOptions(input.draft?.modelSelectionByProvider) ??
     providerSelectionsFromModelSelection(input.threadModelSelection) ??
     providerSelectionsFromModelSelection(input.projectModelSelection) ??
+    instanceDefaultOptions ??
     null;
 
   return {
@@ -2112,7 +2195,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             };
           });
         },
-        applyStickyState: (threadRef) => {
+        applyStickyState: (threadRef, newChatDefaults) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
           if (threadKey.length === 0) {
             return;
@@ -2120,7 +2203,14 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           set((state) => {
             const stickyMap = state.stickyModelSelectionByProvider;
             const stickyActiveProvider = state.stickyActiveProvider;
-            if (Object.keys(stickyMap).length === 0 && stickyActiveProvider === null) {
+            const defaultsMap = newChatDefaults?.modelSelectionByProvider ?? {};
+            const defaultsActiveProvider = newChatDefaults?.activeProvider ?? null;
+            if (
+              Object.keys(stickyMap).length === 0 &&
+              stickyActiveProvider === null &&
+              Object.keys(defaultsMap).length === 0 &&
+              defaultsActiveProvider === null
+            ) {
               return state;
             }
             const existing = state.draftsByThreadKey[threadKey];
@@ -2139,16 +2229,24 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 };
               }
             }
+            // Explicit per-instance defaults from settings replace whatever
+            // the sticky snapshot remembered for those instances.
+            for (const [provider, selection] of Object.entries(defaultsMap)) {
+              if (selection) {
+                nextMap[provider as ProviderInstanceId] = selection;
+              }
+            }
+            const nextActiveProvider = defaultsActiveProvider ?? stickyActiveProvider;
             if (
               Equal.equals(base.modelSelectionByProvider, nextMap) &&
-              base.activeProvider === stickyActiveProvider
+              base.activeProvider === nextActiveProvider
             ) {
               return state;
             }
             const nextDraft: ComposerThreadDraftState = {
               ...base,
               modelSelectionByProvider: nextMap,
-              activeProvider: stickyActiveProvider,
+              activeProvider: nextActiveProvider,
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {

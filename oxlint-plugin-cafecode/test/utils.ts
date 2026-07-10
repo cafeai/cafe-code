@@ -32,21 +32,25 @@ const OXLINT_FIXTURE_TEST_TIMEOUT_MS = process.platform === "win32" ? 30_000 : u
 
 interface RuleHarness {
   readonly run: (
-    source: string,
+    sources: ReadonlyArray<string>,
   ) => Effect.Effect<
     string,
     OxlintFixtureFailure | PlatformError.PlatformError | Schema.SchemaError,
     NodeServices.NodeServices
   >;
   readonly runAndExpectFailure: (
-    source: string,
+    sources: ReadonlyArray<string>,
   ) => Effect.Effect<
     string,
     OxlintFixtureExpectedFailure | PlatformError.PlatformError | Schema.SchemaError,
     NodeServices.NodeServices
   >;
-  readonly valid: (name: string, source: string) => void;
-  readonly invalid: (name: string, source: string, assertion?: (output: string) => void) => void;
+  readonly valid: (name: string, sources: ReadonlyArray<string>) => void;
+  readonly invalid: (
+    name: string,
+    sources: ReadonlyArray<string>,
+    assertion?: (output: string) => void,
+  ) => void;
 }
 
 const collectStreamAsString = <E>(stream: Stream.Stream<Uint8Array, E>): Effect.Effect<string, E> =>
@@ -80,12 +84,12 @@ export const createOxlintRuleHarness = (ruleName: string): RuleHarness => {
     pluginName && shortRuleName ? `${pluginName}\\(${shortRuleName}\\)` : ruleName;
   const test = it.layer(NodeServices.layer);
 
-  const run: RuleHarness["run"] = Effect.fnUntraced(function* (source: string) {
+  const run: RuleHarness["run"] = Effect.fnUntraced(function* (sources: ReadonlyArray<string>) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const fixtureDir = yield* fs.makeTempDirectoryScoped({ prefix: "cafecode-oxlint-" });
     const configPath = path.join(fixtureDir, ".oxlintrc.json");
-    const sourcePath = path.join(fixtureDir, "fixture.ts");
+    const sourcePaths = sources.map((_, index) => path.join(fixtureDir, `fixture-${index + 1}.ts`));
     const repoRoot = path.join(import.meta.dirname, "..", "..");
     const oxlintBin = path.join(repoRoot, "node_modules", ".bin", "oxlint");
     const pluginPath = path.join(repoRoot, "oxlint-plugin-cafecode", "index.ts");
@@ -97,10 +101,14 @@ export const createOxlintRuleHarness = (ruleName: string): RuleHarness => {
         rules: { [ruleName]: "error" },
       }),
     );
-    yield* fs.writeFileString(sourcePath, source);
+    yield* Effect.forEach(
+      sources,
+      (source, index) => fs.writeFileString(sourcePaths[index]!, source),
+      { discard: true },
+    );
 
     const output = yield* spawnAndCollectOutput(
-      ChildProcess.make(oxlintBin, ["--config", configPath, sourcePath], { cwd: repoRoot }),
+      ChildProcess.make(oxlintBin, ["--config", configPath, ...sourcePaths], { cwd: repoRoot }),
     );
 
     if (output.exitCode !== 0) {
@@ -114,8 +122,8 @@ export const createOxlintRuleHarness = (ruleName: string): RuleHarness => {
     return `${output.stdout}${output.stderr}`;
   }, Effect.scoped);
 
-  const runAndExpectFailure: RuleHarness["runAndExpectFailure"] = (source) =>
-    run(source).pipe(
+  const runAndExpectFailure: RuleHarness["runAndExpectFailure"] = (sources) =>
+    run(sources).pipe(
       Effect.matchEffect({
         onFailure: (error) =>
           OxlintFixtureFailure.is(error)
@@ -130,17 +138,17 @@ export const createOxlintRuleHarness = (ruleName: string): RuleHarness => {
   return {
     run,
     runAndExpectFailure,
-    valid(name, source) {
+    valid(name, sources) {
       test(name, (it) => {
-        it.effect("passes", () => run(source), OXLINT_FIXTURE_TEST_TIMEOUT_MS);
+        it.effect("passes", () => run(sources), OXLINT_FIXTURE_TEST_TIMEOUT_MS);
       });
     },
-    invalid(name, source, assertion) {
+    invalid(name, sources, assertion) {
       test(name, (it) => {
         it.effect(
           "reports the rule diagnostic",
           () =>
-            runAndExpectFailure(source).pipe(
+            runAndExpectFailure(sources).pipe(
               Effect.tap((output) =>
                 Effect.sync(() => {
                   assert.match(output, new RegExp(diagnosticRuleName));

@@ -4,6 +4,7 @@ import { useParams, useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 import { useShallow } from "zustand/react/shallow";
 import {
+  deriveNewChatComposerDefaults,
   type DraftThreadEnvMode,
   type DraftThreadState,
   useComposerDraftStore,
@@ -24,6 +25,7 @@ import { useSettings } from "./useSettings";
 function useNewThreadState() {
   const projects = useStore(useShallow((store) => selectProjectsAcrossEnvironments(store)));
   const projectGroupingSettings = useSettings(selectProjectGroupingSettings);
+  const newChatDefaults = useSettings(deriveNewChatComposerDefaults);
   const router = useRouter();
   const getCurrentRouteTarget = useCallback(() => {
     const currentRouteParams = router.state.matches[router.state.matches.length - 1]?.params ?? {};
@@ -127,7 +129,7 @@ function useNewThreadState() {
           envMode: options?.envMode ?? "local",
           runtimeMode: DEFAULT_RUNTIME_MODE,
         });
-        applyStickyState(draftId);
+        applyStickyState(draftId, newChatDefaults);
 
         await router.navigate({
           to: "/draft/$draftId",
@@ -135,7 +137,7 @@ function useNewThreadState() {
         });
       })();
     },
-    [getCurrentRouteTarget, projectGroupingSettings, router, projects],
+    [getCurrentRouteTarget, newChatDefaults, projectGroupingSettings, router, projects],
   );
 }
 

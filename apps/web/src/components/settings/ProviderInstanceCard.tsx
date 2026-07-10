@@ -2,13 +2,14 @@
 
 import {
   ArrowUpCircleIcon,
-  ChevronDownIcon,
   CopyIcon,
   DownloadIcon,
   LoaderIcon,
   LogInIcon,
+  PinIcon,
   PlusIcon,
   RotateCcwIcon,
+  Settings2Icon,
   Trash2Icon,
   XIcon,
 } from "lucide-react";
@@ -16,6 +17,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import {
   isProviderDriverKind,
   type ProviderInstanceConfig,
+  type ProviderInstanceDefaultOption,
   type ProviderInstanceEnvironmentVariable,
   type ProviderInstanceId,
   type ProviderDriverKind,
@@ -29,9 +31,17 @@ import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { normalizeProviderAccentColor } from "../../providerInstances";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { Collapsible, CollapsibleContent } from "../ui/collapsible";
+import {
+  Dialog,
+  DialogDescription,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+} from "../ui/dialog";
 import { DraftInput } from "../ui/draft-input";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { ScrollArea } from "../ui/scroll-area";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -393,13 +403,252 @@ function ProviderEnvironmentSection(props: {
   );
 }
 
+const NO_DEFAULT_SELECT_VALUE = "__no-default__";
+const BOOLEAN_DEFAULT_ON_VALUE = "__on__";
+const BOOLEAN_DEFAULT_OFF_VALUE = "__off__";
+
+type DefaultsSelectItem = {
+  readonly value: string;
+  readonly label: string;
+  readonly description?: string | undefined;
+};
+
+function DefaultsSelectField(props: {
+  readonly id: string;
+  readonly label: string;
+  readonly description?: string | undefined;
+  readonly value: string;
+  readonly items: ReadonlyArray<DefaultsSelectItem>;
+  readonly onValueChange: (next: string) => void;
+}) {
+  return (
+    <div className="grid gap-1.5">
+      <span id={props.id} className="text-xs font-medium text-foreground">
+        {props.label}
+      </span>
+      <Select
+        modal={false}
+        value={props.value}
+        onValueChange={(next) => {
+          if (typeof next === "string") {
+            props.onValueChange(next);
+          }
+        }}
+        items={props.items}
+      >
+        <SelectTrigger aria-labelledby={props.id}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectPopup>
+          {props.items.map((item) => (
+            <SelectItem key={item.value} value={item.value}>
+              <span className="grid min-w-0 gap-0.5">
+                <span className="truncate">{item.label}</span>
+                {item.description ? (
+                  <span className="whitespace-normal text-xs text-muted-foreground">
+                    {item.description}
+                  </span>
+                ) : null}
+              </span>
+            </SelectItem>
+          ))}
+        </SelectPopup>
+      </Select>
+      {props.description ? (
+        <span className="text-xs text-muted-foreground">{props.description}</span>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * "New chat defaults" editor for one provider instance: an explicit default
+ * model plus explicit defaults for the option traits that model reports
+ * (reasoning effort, fast mode, …). Anything left on "No default" falls back
+ * to the composer's usual resolution, so this section only stores values the
+ * user deliberately picked.
+ */
+function ProviderInstanceDefaultsSection(props: {
+  readonly instanceId: ProviderInstanceId;
+  readonly models: ReadonlyArray<ServerProviderModel>;
+  readonly hiddenModels: ReadonlyArray<string>;
+  readonly defaultModel: string | undefined;
+  readonly defaultModelOptions: ReadonlyArray<ProviderInstanceDefaultOption>;
+  readonly onChange: (next: {
+    readonly defaultModel: string | undefined;
+    readonly defaultModelOptions: ReadonlyArray<ProviderInstanceDefaultOption> | undefined;
+  }) => void;
+}) {
+  const selectableModels = props.models.filter(
+    (model) => !props.hiddenModels.includes(model.slug) || model.slug === props.defaultModel,
+  );
+  const selectedModel = props.defaultModel
+    ? props.models.find((model) => model.slug === props.defaultModel)
+    : undefined;
+  const optionDescriptors = selectedModel?.capabilities?.optionDescriptors ?? [];
+
+  const modelItems: DefaultsSelectItem[] = [
+    {
+      value: NO_DEFAULT_SELECT_VALUE,
+      label: "No default",
+      description: "New chats keep the last model used on this instance.",
+    },
+    ...selectableModels.map((model) => ({
+      value: model.slug,
+      label: model.name,
+      description: model.name === model.slug ? undefined : model.slug,
+    })),
+  ];
+  // Keep a stale stored slug selectable (e.g. the provider has not been
+  // probed yet, or the model was retired) so the stored default stays
+  // visible instead of silently rendering as "No default".
+  if (props.defaultModel && !selectableModels.some((model) => model.slug === props.defaultModel)) {
+    modelItems.push({
+      value: props.defaultModel,
+      label: props.defaultModel,
+      description: "Not currently reported by this provider.",
+    });
+  }
+
+  const handleModelChange = (value: string) => {
+    if (value === NO_DEFAULT_SELECT_VALUE) {
+      props.onChange({ defaultModel: undefined, defaultModelOptions: undefined });
+      return;
+    }
+    const nextDescriptors = props.models.find((model) => model.slug === value)?.capabilities
+      ?.optionDescriptors;
+    // Carry option defaults over only when they still exist on the new
+    // model; unknown capabilities keep them untouched.
+    const prunedOptions = nextDescriptors
+      ? props.defaultModelOptions.filter((option) =>
+          nextDescriptors.some(
+            (descriptor) =>
+              descriptor.id === option.id &&
+              (descriptor.type === "boolean"
+                ? typeof option.value === "boolean"
+                : typeof option.value === "string" &&
+                  descriptor.options.some((choice) => choice.id === option.value)),
+          ),
+        )
+      : props.defaultModelOptions;
+    props.onChange({ defaultModel: value, defaultModelOptions: prunedOptions });
+  };
+
+  const setOptionDefault = (id: string, value: string | boolean | null) => {
+    const without = props.defaultModelOptions.filter((option) => option.id !== id);
+    props.onChange({
+      defaultModel: props.defaultModel,
+      defaultModelOptions: value === null ? without : [...without, { id, value }],
+    });
+  };
+
+  return (
+    <div className="grid gap-3">
+      <div className="grid gap-0.5">
+        <span className="text-xs font-medium text-foreground">New chat defaults</span>
+        <span className="text-xs text-muted-foreground">
+          Applied when a new chat starts on this instance. Traits left on “No default” use the
+          model&apos;s own defaults.
+        </span>
+      </div>
+      <DefaultsSelectField
+        id={`provider-instance-${props.instanceId}-default-model`}
+        label="Default model"
+        value={props.defaultModel ?? NO_DEFAULT_SELECT_VALUE}
+        items={modelItems}
+        onValueChange={handleModelChange}
+      />
+      {props.defaultModel && selectedModel && optionDescriptors.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          This model does not report configurable options.
+        </p>
+      ) : null}
+      {props.defaultModel && !selectedModel ? (
+        <p className="text-xs text-muted-foreground">
+          Option defaults become editable once the provider reports this model.
+        </p>
+      ) : null}
+      {optionDescriptors.map((descriptor) => {
+        const current = props.defaultModelOptions.find((option) => option.id === descriptor.id);
+        if (descriptor.type === "boolean") {
+          const value =
+            typeof current?.value === "boolean"
+              ? current.value
+                ? BOOLEAN_DEFAULT_ON_VALUE
+                : BOOLEAN_DEFAULT_OFF_VALUE
+              : NO_DEFAULT_SELECT_VALUE;
+          return (
+            <DefaultsSelectField
+              key={descriptor.id}
+              id={`provider-instance-${props.instanceId}-default-option-${descriptor.id}`}
+              label={descriptor.label}
+              description={descriptor.description}
+              value={value}
+              items={[
+                { value: NO_DEFAULT_SELECT_VALUE, label: "No default" },
+                { value: BOOLEAN_DEFAULT_ON_VALUE, label: "On" },
+                { value: BOOLEAN_DEFAULT_OFF_VALUE, label: "Off" },
+              ]}
+              onValueChange={(next) =>
+                setOptionDefault(
+                  descriptor.id,
+                  next === NO_DEFAULT_SELECT_VALUE ? null : next === BOOLEAN_DEFAULT_ON_VALUE,
+                )
+              }
+            />
+          );
+        }
+        const modelDefaultChoice = descriptor.options.find((choice) => choice.isDefault);
+        const value =
+          typeof current?.value === "string" &&
+          descriptor.options.some((choice) => choice.id === current.value)
+            ? current.value
+            : NO_DEFAULT_SELECT_VALUE;
+        return (
+          <DefaultsSelectField
+            key={descriptor.id}
+            id={`provider-instance-${props.instanceId}-default-option-${descriptor.id}`}
+            label={descriptor.label}
+            description={descriptor.description}
+            value={value}
+            items={[
+              {
+                value: NO_DEFAULT_SELECT_VALUE,
+                label: "No default",
+                ...(modelDefaultChoice
+                  ? { description: `Model default: ${modelDefaultChoice.label}` }
+                  : {}),
+              },
+              ...descriptor.options.map((choice) => ({
+                value: choice.id,
+                label: choice.label,
+                description: choice.description,
+              })),
+            ]}
+            onValueChange={(next) =>
+              setOptionDefault(descriptor.id, next === NO_DEFAULT_SELECT_VALUE ? null : next)
+            }
+          />
+        );
+      })}
+    </div>
+  );
+}
+
 interface ProviderInstanceCardProps {
   readonly instanceId: ProviderInstanceId;
   readonly instance: ProviderInstanceConfig;
   readonly driverOption: DriverOption | undefined;
   readonly liveProvider: ServerProvider | undefined;
-  readonly isExpanded: boolean;
-  readonly onExpandedChange: (open: boolean) => void;
+  readonly isSettingsOpen: boolean;
+  readonly onSettingsOpenChange: (open: boolean) => void;
+  /**
+   * Whether this instance is the global default provider for new chats,
+   * plus the toggle invoked from the header affordance (`true` sets this
+   * instance as the default, `false` clears the default entirely).
+   */
+  readonly isDefaultProvider: boolean;
+  readonly onSetDefaultProvider: (next: boolean) => void;
   readonly onUpdate: (nextInstance: ProviderInstanceConfig) => void;
   /**
    * Pass `undefined` to hide the delete button entirely. Built-in default
@@ -459,8 +708,10 @@ export function ProviderInstanceCard({
   instance,
   driverOption,
   liveProvider,
-  isExpanded,
-  onExpandedChange,
+  isSettingsOpen,
+  onSettingsOpenChange,
+  isDefaultProvider,
+  onSetDefaultProvider,
   onUpdate,
   onDelete,
   headerAction,
@@ -597,6 +848,20 @@ export function ProviderInstanceCard({
         ? ({ ...rest, environment: cleaned } as ProviderInstanceConfig)
         : (rest as ProviderInstanceConfig),
     );
+  };
+
+  const updateNewChatDefaults = (next: {
+    readonly defaultModel: string | undefined;
+    readonly defaultModelOptions: ReadonlyArray<ProviderInstanceDefaultOption> | undefined;
+  }) => {
+    const { defaultModel: _model, defaultModelOptions: _options, ...rest } = instance;
+    onUpdate({
+      ...rest,
+      ...(next.defaultModel !== undefined ? { defaultModel: next.defaultModel } : {}),
+      ...(next.defaultModelOptions !== undefined && next.defaultModelOptions.length > 0
+        ? { defaultModelOptions: next.defaultModelOptions }
+        : {}),
+    } as ProviderInstanceConfig);
   };
 
   const titleIconNode = driverKind ? (
@@ -851,17 +1116,61 @@ export function ProviderInstanceCard({
                 <TooltipPopup side="top">Restart provider runtime</TooltipPopup>
               </Tooltip>
             ) : null}
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
-              onClick={() => onExpandedChange(!isExpanded)}
-              aria-label={`Toggle ${displayName} details`}
-            >
-              <ChevronDownIcon
-                className={cn("size-3.5 transition-transform", isExpanded && "rotate-180")}
+            {isDefaultProvider ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <button
+                      type="button"
+                      className="inline-flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-1.5 text-[10px] font-medium text-primary outline-hidden hover:bg-primary/15"
+                      onClick={() => onSetDefaultProvider(false)}
+                      aria-label={`Clear ${displayName} as default provider`}
+                    >
+                      <PinIcon className="size-3" aria-hidden />
+                      Default
+                    </button>
+                  }
+                />
+                <TooltipPopup side="top">
+                  New chats start on this provider. Click to clear.
+                </TooltipPopup>
+              </Tooltip>
+            ) : enabled ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      type="button"
+                      size="icon-xs"
+                      variant="ghost"
+                      className="size-7 rounded-sm p-0 text-muted-foreground hover:text-foreground"
+                      onClick={() => onSetDefaultProvider(true)}
+                      aria-label={`Set ${displayName} as default provider`}
+                    >
+                      <PinIcon className="size-3.5" />
+                    </Button>
+                  }
+                />
+                <TooltipPopup side="top">Use for new chats by default</TooltipPopup>
+              </Tooltip>
+            ) : null}
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    type="button"
+                    size="icon-xs"
+                    variant="ghost"
+                    className="size-7 rounded-sm p-0 text-muted-foreground hover:text-foreground"
+                    onClick={() => onSettingsOpenChange(true)}
+                    aria-label={`Open ${displayName} settings`}
+                  >
+                    <Settings2Icon className="size-3.5" />
+                  </Button>
+                }
               />
-            </Button>
+              <TooltipPopup side="top">Instance settings</TooltipPopup>
+            </Tooltip>
             <Switch
               checked={enabled}
               onCheckedChange={(checked) => updateEnabled(Boolean(checked))}
@@ -871,78 +1180,102 @@ export function ProviderInstanceCard({
         </div>
       </div>
 
-      <Collapsible open={isExpanded} onOpenChange={onExpandedChange}>
-        <CollapsibleContent>
-          <div className="space-y-0">
-            <div className="border-t border-border/60 px-4 py-3 sm:px-5">
-              <label htmlFor={`provider-instance-${instanceId}-display-name`} className="block">
-                <span className="text-xs font-medium text-foreground">Display name</span>
-                <DraftInput
-                  id={`provider-instance-${instanceId}-display-name`}
-                  className="mt-1.5"
-                  value={instance.displayName ?? ""}
-                  onCommit={updateDisplayName}
-                  placeholder={driverOption?.label ?? "Instance label"}
-                  spellCheck={false}
-                />
-                <span className="mt-1 block text-xs text-muted-foreground">
-                  Optional label shown in the provider list.
-                </span>
-              </label>
-            </div>
+      <Dialog open={isSettingsOpen} onOpenChange={onSettingsOpenChange}>
+        <DialogPopup className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-base">
+              {titleIconNode}
+              <span className="truncate">{displayName} settings</span>
+            </DialogTitle>
+            <DialogDescription>
+              New chat defaults and configuration for this provider instance.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogPanel className="px-0 pb-4">
+            <div className="space-y-0">
+              {driverOption !== undefined ? (
+                <div className="border-t border-border/60 px-4 py-3 sm:px-5 first:border-t-0">
+                  <ProviderInstanceDefaultsSection
+                    instanceId={instanceId}
+                    models={modelsForDisplay}
+                    hiddenModels={hiddenModels}
+                    defaultModel={instance.defaultModel}
+                    defaultModelOptions={instance.defaultModelOptions ?? []}
+                    onChange={updateNewChatDefaults}
+                  />
+                </div>
+              ) : null}
 
-            <div className="border-t border-border/60 px-4 py-3 sm:px-5">
-              <ProviderAccentColorPicker
-                displayName={displayName}
-                value={accentColor}
-                onCommit={updateAccentColor}
-              />
-            </div>
-
-            <div className="border-t border-border/60 px-4 py-3 sm:px-5">
-              <ProviderEnvironmentSection
-                environment={instance.environment ?? []}
-                onChange={updateEnvironment}
-              />
-            </div>
-
-            {driverOption ? (
-              <ProviderSettingsForm
-                definition={driverOption}
-                value={instance.config}
-                idPrefix={`provider-instance-${instanceId}`}
-                variant="card"
-                onChange={updateConfig}
-              />
-            ) : null}
-
-            {driverOption !== undefined ? (
-              <ProviderModelsSection
-                instanceId={instanceId}
-                driverKind={driverKind}
-                models={modelsForDisplay}
-                customModels={customModels}
-                hiddenModels={hiddenModels}
-                favoriteModels={favoriteModels}
-                modelOrder={modelOrder}
-                onChange={updateCustomModels}
-                onHiddenModelsChange={onHiddenModelsChange}
-                onFavoriteModelsChange={onFavoriteModelsChange}
-                onModelOrderChange={onModelOrderChange}
-              />
-            ) : (
-              <div className="border-t border-border/60 px-4 py-3 sm:px-5">
-                <p className="text-xs text-muted-foreground">
-                  This instance uses a driver (
-                  <code className="text-foreground">{String(instance.driver)}</code>) that is not
-                  shipped with the current build. Configuration values are preserved but cannot be
-                  edited from this surface.
-                </p>
+              <div className="border-t border-border/60 px-4 py-3 sm:px-5 first:border-t-0">
+                <label htmlFor={`provider-instance-${instanceId}-display-name`} className="block">
+                  <span className="text-xs font-medium text-foreground">Display name</span>
+                  <DraftInput
+                    id={`provider-instance-${instanceId}-display-name`}
+                    className="mt-1.5"
+                    value={instance.displayName ?? ""}
+                    onCommit={updateDisplayName}
+                    placeholder={driverOption?.label ?? "Instance label"}
+                    spellCheck={false}
+                  />
+                  <span className="mt-1 block text-xs text-muted-foreground">
+                    Optional label shown in the provider list.
+                  </span>
+                </label>
               </div>
-            )}
-          </div>
-        </CollapsibleContent>
-      </Collapsible>
+
+              <div className="border-t border-border/60 px-4 py-3 sm:px-5">
+                <ProviderAccentColorPicker
+                  displayName={displayName}
+                  value={accentColor}
+                  onCommit={updateAccentColor}
+                />
+              </div>
+
+              <div className="border-t border-border/60 px-4 py-3 sm:px-5">
+                <ProviderEnvironmentSection
+                  environment={instance.environment ?? []}
+                  onChange={updateEnvironment}
+                />
+              </div>
+
+              {driverOption ? (
+                <ProviderSettingsForm
+                  definition={driverOption}
+                  value={instance.config}
+                  idPrefix={`provider-instance-${instanceId}`}
+                  variant="card"
+                  onChange={updateConfig}
+                />
+              ) : null}
+
+              {driverOption !== undefined ? (
+                <ProviderModelsSection
+                  instanceId={instanceId}
+                  driverKind={driverKind}
+                  models={modelsForDisplay}
+                  customModels={customModels}
+                  hiddenModels={hiddenModels}
+                  favoriteModels={favoriteModels}
+                  modelOrder={modelOrder}
+                  onChange={updateCustomModels}
+                  onHiddenModelsChange={onHiddenModelsChange}
+                  onFavoriteModelsChange={onFavoriteModelsChange}
+                  onModelOrderChange={onModelOrderChange}
+                />
+              ) : (
+                <div className="border-t border-border/60 px-4 py-3 sm:px-5">
+                  <p className="text-xs text-muted-foreground">
+                    This instance uses a driver (
+                    <code className="text-foreground">{String(instance.driver)}</code>) that is not
+                    shipped with the current build. Configuration values are preserved but cannot be
+                    edited from this surface.
+                  </p>
+                </div>
+              )}
+            </div>
+          </DialogPanel>
+        </DialogPopup>
+      </Dialog>
     </div>
   );
 }

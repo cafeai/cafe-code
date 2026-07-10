@@ -11,6 +11,7 @@ import type {
 } from "@cafecode/contracts";
 
 import { cn } from "../../lib/utils";
+import { Button } from "../ui/button";
 import { DraftInput } from "../ui/draft-input";
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -162,6 +163,15 @@ export function nextProviderConfigWithFieldValue(
   }
 
   const trimmed = value.trim();
+  const redactedFlag = `${field.key}Redacted`;
+  if (field.control === "password" && trimmed.length > 0) {
+    base[field.key] = value;
+    base[redactedFlag] = false;
+    return base;
+  }
+  if (field.control === "password" && base[redactedFlag] === true) {
+    return base;
+  }
   if (
     field.clearWhenEmpty === "omit" &&
     (trimmed.length === 0 ||
@@ -173,6 +183,17 @@ export function nextProviderConfigWithFieldValue(
   } else {
     base[field.key] = value;
   }
+  return Object.keys(base).length > 0 ? base : undefined;
+}
+
+function clearProviderConfigPassword(
+  config: unknown,
+  field: ProviderSettingsFieldModel,
+): Record<string, unknown> | undefined {
+  const base: Record<string, unknown> =
+    config !== null && typeof config === "object" ? { ...(config as Record<string, unknown>) } : {};
+  delete base[field.key];
+  base[`${field.key}Redacted`] = false;
   return Object.keys(base).length > 0 ? base : undefined;
 }
 
@@ -310,37 +331,55 @@ function ProviderSettingsFieldRow({
   }
 
   const type = field.control === "password" ? "password" : undefined;
+  const passwordRedacted =
+    field.control === "password" && readProviderConfigBoolean(value, `${field.key}Redacted`);
+  const placeholder = passwordRedacted
+    ? "Stored secret - enter a new value to replace"
+    : field.placeholder;
   return (
     <FieldFrame variant={variant}>
-      <label htmlFor={inputId} className={cn(variant === "card" && "block")}>
-        {label}
-        {variant === "card" ? (
-          <DraftInput
-            id={inputId}
-            className="mt-1.5"
-            type={type}
-            autoComplete={field.control === "password" ? "off" : undefined}
-            value={readProviderConfigString(value, field.key)}
-            onCommit={(next) => onChange(nextProviderConfigWithFieldValue(value, field, next))}
-            placeholder={field.placeholder}
-            spellCheck={false}
-          />
-        ) : (
-          <Input
-            id={inputId}
-            className="bg-background"
-            type={type}
-            autoComplete={field.control === "password" ? "off" : undefined}
-            value={readProviderConfigString(value, field.key)}
-            onChange={(event) =>
-              onChange(nextProviderConfigWithFieldValue(value, field, event.target.value))
-            }
-            placeholder={field.placeholder}
-            spellCheck={false}
-          />
-        )}
+      <div className={cn(variant === "card" && "block")}>
+        <label htmlFor={inputId}>
+          {label}
+          {variant === "card" ? (
+            <DraftInput
+              id={inputId}
+              className="mt-1.5"
+              type={type}
+              autoComplete={field.control === "password" ? "off" : undefined}
+              value={readProviderConfigString(value, field.key)}
+              onCommit={(next) => onChange(nextProviderConfigWithFieldValue(value, field, next))}
+              placeholder={placeholder}
+              spellCheck={false}
+            />
+          ) : (
+            <Input
+              id={inputId}
+              className="bg-background"
+              type={type}
+              autoComplete={field.control === "password" ? "off" : undefined}
+              value={readProviderConfigString(value, field.key)}
+              onChange={(event) =>
+                onChange(nextProviderConfigWithFieldValue(value, field, event.target.value))
+              }
+              placeholder={placeholder}
+              spellCheck={false}
+            />
+          )}
+        </label>
+        {passwordRedacted ? (
+          <Button
+            type="button"
+            size="xs"
+            variant="ghost"
+            className="mt-1 h-6 px-1.5 text-[11px] text-muted-foreground"
+            onClick={() => onChange(clearProviderConfigPassword(value, field))}
+          >
+            Clear stored password
+          </Button>
+        ) : null}
         {description}
-      </label>
+      </div>
     </FieldFrame>
   );
 }

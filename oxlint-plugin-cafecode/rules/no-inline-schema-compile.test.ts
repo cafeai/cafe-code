@@ -3,11 +3,9 @@ import { assert, describe } from "@effect/vitest";
 import { createOxlintRuleHarness } from "../test/utils.ts";
 
 const rule = createOxlintRuleHarness("cafecode/no-inline-schema-compile");
-const legacyRule = createOxlintRuleHarness("t3code/no-inline-schema-compile");
 
 describe("cafecode/no-inline-schema-compile", () => {
-  rule.valid(
-    "allows schema compilers hoisted to module scope",
+  rule.valid("allows supported schema compilation patterns", [
     `
       import { Schema } from "effect";
 
@@ -16,10 +14,6 @@ describe("cafecode/no-inline-schema-compile", () => {
 
       export const parseUser = (input: unknown) => decodeUser(input);
     `,
-  );
-
-  rule.valid(
-    "allows factory helpers that return a precompiled decoder",
     `
       import { Schema } from "effect";
 
@@ -28,10 +22,6 @@ describe("cafecode/no-inline-schema-compile", () => {
         return (input: unknown) => decode(input);
       };
     `,
-  );
-
-  rule.valid(
-    "allows schema construction helpers that use encode transformations",
     `
       import { Schema } from "effect";
 
@@ -43,56 +33,34 @@ describe("cafecode/no-inline-schema-compile", () => {
           }),
         );
     `,
-  );
-
-  rule.valid(
-    "allows dynamic schema parameters that cannot be hoisted to module scope",
     `
       import { Schema } from "effect";
 
       export const parseWith = <A, I>(schema: Schema.Codec<A, I>, input: unknown) =>
         Schema.decodeUnknownEffect(schema)(input);
     `,
-  );
+  ]);
 
   rule.invalid(
-    "reports schema compilers inside function bodies",
-    `
+    "reports avoidable schema compilation inside function bodies",
+    [
+      `
       import { Schema } from "effect";
 
       const User = Schema.Struct({ name: Schema.String });
 
       export const parseUser = (input: unknown) => Schema.decodeUnknownEffect(User)(input);
     `,
-    (output) => {
-      assert.match(output, /Hoist Schema\.decodeUnknownEffect/);
-    },
-  );
-
-  rule.invalid(
-    "reports inline schema literals as high confidence findings",
-    `
+      `
       import { Schema } from "effect";
 
       export const parseUser = (input: unknown) =>
         Schema.decodeUnknownEffect(Schema.Struct({ name: Schema.String }))(input);
     `,
-    (output) => {
-      assert.match(output, /inline schema literal and the compiled function/);
-    },
-  );
-
-  legacyRule.invalid(
-    "keeps the legacy t3code rule prefix working",
-    `
-      import { Schema } from "effect";
-
-      const User = Schema.Struct({ name: Schema.String });
-
-      export const parseUser = (input: unknown) => Schema.decodeUnknownEffect(User)(input);
-    `,
+    ],
     (output) => {
       assert.match(output, /Hoist Schema\.decodeUnknownEffect/);
+      assert.match(output, /inline schema literal and the compiled function/);
     },
   );
 });

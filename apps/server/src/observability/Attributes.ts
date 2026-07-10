@@ -42,8 +42,5 @@ export function normalizeModelMetricLabel(model: string | null | undefined): str
   if (normalized.includes("claude")) {
     return "claude";
   }
-  if (normalized.includes("gemini")) {
-    return "gemini";
-  }
   return "other";
 }

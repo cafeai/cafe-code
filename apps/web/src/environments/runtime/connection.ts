@@ -10,7 +10,7 @@ import type { KnownEnvironment } from "@cafecode/client-runtime";
 import type { WsRpcClient } from "~/rpc/wsRpcClient";
 
 export interface EnvironmentConnection {
-  readonly kind: "primary";
+  readonly kind: "primary" | "saved";
   readonly environmentId: EnvironmentId;
   readonly knownEnvironment: KnownEnvironment;
   readonly client: WsRpcClient;
@@ -31,7 +31,7 @@ interface OrchestrationHandlers {
 }
 
 interface EnvironmentConnectionInput extends OrchestrationHandlers {
-  readonly kind: "primary";
+  readonly kind: "primary" | "saved";
   readonly knownEnvironment: KnownEnvironment;
   readonly client: WsRpcClient;
   readonly refreshMetadata?: () => Promise<void>;
@@ -81,8 +81,8 @@ export function createEnvironmentConnection(
 
   let disposed = false;
   const bootstrapGate = createBootstrapGate();
-  const shouldObserveLifecycle = input.onWelcome !== undefined;
-  const shouldObserveConfig = input.onConfigSnapshot !== undefined;
+  const shouldObserveLifecycle = input.kind === "saved" || input.onWelcome !== undefined;
+  const shouldObserveConfig = input.kind === "saved" || input.onConfigSnapshot !== undefined;
 
   const observeEnvironmentIdentity = (nextEnvironmentId: EnvironmentId, source: string) => {
     if (environmentId !== nextEnvironmentId) {

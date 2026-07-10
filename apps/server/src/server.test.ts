@@ -1535,6 +1535,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         {
           headers: {
             cookie: yield* getAuthenticatedSessionCookieHeader(),
+            connection: "close",
           },
         },
       );
@@ -2545,57 +2546,45 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  it.effect("serves attachment files from state dir", () =>
+  it.effect("serves attachment ids and URL-encoded paths", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const attachmentId = "thread-11111111-1111-4111-8111-111111111111";
 
       const config = yield* buildAppUnderTest();
-      const attachmentPath = resolveAttachmentRelativePath({
+      const attachmentByIdPath = resolveAttachmentRelativePath({
         attachmentsDir: config.attachmentsDir,
         relativePath: `${attachmentId}.bin`,
       });
-      assert.isNotNull(attachmentPath, "Attachment path should be resolvable");
-
-      yield* fileSystem.makeDirectory(path.dirname(attachmentPath), { recursive: true });
-      yield* fileSystem.writeFileString(attachmentPath, "attachment-ok");
-
-      const response = yield* HttpClient.get(`/attachments/${attachmentId}`, {
-        headers: {
-          cookie: yield* getAuthenticatedSessionCookieHeader(),
-        },
-      });
-      assert.equal(response.status, 200);
-      assert.equal(yield* response.text, "attachment-ok");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
-  );
-
-  it.effect("serves attachment files for URL-encoded paths", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-
-      const config = yield* buildAppUnderTest();
       const attachmentPath = resolveAttachmentRelativePath({
         attachmentsDir: config.attachmentsDir,
         relativePath: "thread%20folder/message%20folder/file%20name.png",
       });
+      assert.isNotNull(attachmentByIdPath, "Attachment ID path should be resolvable");
       assert.isNotNull(attachmentPath, "Attachment path should be resolvable");
 
+      yield* fileSystem.makeDirectory(path.dirname(attachmentByIdPath), { recursive: true });
+      yield* fileSystem.writeFileString(attachmentByIdPath, "attachment-ok");
       yield* fileSystem.makeDirectory(path.dirname(attachmentPath), { recursive: true });
       yield* fileSystem.writeFileString(attachmentPath, "attachment-encoded-ok");
 
-      const response = yield* HttpClient.get(
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const idResponse = yield* HttpClient.get(`/attachments/${attachmentId}`, {
+        // Attachment responses stream files. Closing these test connections avoids waiting for
+        // the Node test server's keep-alive timeout when each scoped server is released.
+        headers: { cookie, connection: "close" },
+      });
+      const encodedResponse = yield* HttpClient.get(
         "/attachments/thread%20folder/message%20folder/file%20name.png",
         {
-          headers: {
-            cookie: yield* getAuthenticatedSessionCookieHeader(),
-          },
+          headers: { cookie, connection: "close" },
         },
       );
-      assert.equal(response.status, 200);
-      assert.equal(yield* response.text, "attachment-encoded-ok");
+      assert.equal(idResponse.status, 200);
+      assert.equal(yield* idResponse.text, "attachment-ok");
+      assert.equal(encodedResponse.status, 200);
+      assert.equal(yield* encodedResponse.text, "attachment-encoded-ok");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

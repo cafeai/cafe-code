@@ -81,6 +81,7 @@ import type {
   SourceControlRepositoryInfo,
   SourceControlRepositoryLookupInput,
 } from "./sourceControl.ts";
+import { EnvironmentId } from "./baseSchemas.ts";
 
 export interface ContextMenuItem<T extends string = string> {
   id: T;
@@ -321,6 +322,16 @@ export const DesktopPowerSaveBlockerStateSchema = Schema.Struct({
 });
 export type DesktopPowerSaveBlockerState = typeof DesktopPowerSaveBlockerStateSchema.Type;
 
+export const PersistedSavedEnvironmentRecordSchema = Schema.Struct({
+  environmentId: EnvironmentId,
+  label: Schema.String,
+  wsBaseUrl: Schema.String,
+  httpBaseUrl: Schema.String,
+  createdAt: Schema.String,
+  lastConnectedAt: Schema.NullOr(Schema.String),
+});
+export type PersistedSavedEnvironmentRecord = typeof PersistedSavedEnvironmentRecordSchema.Type;
+
 export const DesktopDebugEndpointStateSchema = Schema.Struct({
   enabled: Schema.Boolean,
   url: Schema.NullOr(Schema.String),
@@ -338,6 +349,13 @@ export interface DesktopBridge {
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
   setPowerSaveBlockerState: (state: DesktopPowerSaveBlockerState) => Promise<void>;
+  getSavedEnvironmentRegistry: () => Promise<readonly PersistedSavedEnvironmentRecord[]>;
+  setSavedEnvironmentRegistry: (
+    records: readonly PersistedSavedEnvironmentRecord[],
+  ) => Promise<void>;
+  getSavedEnvironmentSecret: (environmentId: EnvironmentId) => Promise<string | null>;
+  setSavedEnvironmentSecret: (environmentId: EnvironmentId, secret: string) => Promise<boolean>;
+  removeSavedEnvironmentSecret: (environmentId: EnvironmentId) => Promise<void>;
   getServerExposureState: () => Promise<DesktopServerExposureState>;
   setServerExposureMode: (mode: DesktopServerExposureMode) => Promise<DesktopServerExposureState>;
   setServerHttpsEnabled: (enabled: boolean) => Promise<DesktopServerExposureState>;
@@ -395,6 +413,13 @@ export interface LocalApi {
   persistence: {
     getClientSettings: () => Promise<ClientSettings | null>;
     setClientSettings: (settings: ClientSettings) => Promise<void>;
+    getSavedEnvironmentRegistry: () => Promise<readonly PersistedSavedEnvironmentRecord[]>;
+    setSavedEnvironmentRegistry: (
+      records: readonly PersistedSavedEnvironmentRecord[],
+    ) => Promise<void>;
+    getSavedEnvironmentSecret: (environmentId: EnvironmentId) => Promise<string | null>;
+    setSavedEnvironmentSecret: (environmentId: EnvironmentId, secret: string) => Promise<boolean>;
+    removeSavedEnvironmentSecret: (environmentId: EnvironmentId) => Promise<void>;
   };
   server: {
     getConfig: () => Promise<ServerConfig>;

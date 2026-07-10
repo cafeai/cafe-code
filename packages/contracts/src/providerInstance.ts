@@ -74,7 +74,7 @@ const isProviderDriverKindValue = Schema.is(ProviderDriverKind);
 export const isProviderDriverKind = (value: unknown): value is ProviderDriverKind =>
   isProviderDriverKindValue(value);
 
-const RETIRED_PROVIDER_DRIVER_KIND_VALUES = new Set(["cursor", "opencode"]);
+const RETIRED_PROVIDER_DRIVER_KIND_VALUES = new Set(["cursor"]);
 
 /**
  * First-party drivers that this build intentionally no longer ships.
@@ -127,6 +127,19 @@ export const ProviderInstanceEnvironment = Schema.Array(ProviderInstanceEnvironm
 export type ProviderInstanceEnvironment = typeof ProviderInstanceEnvironment.Type;
 
 /**
+ * A single explicit option default for an instance (e.g. reasoning effort,
+ * fast mode). Structurally identical to `ProviderOptionSelection` in
+ * `model.ts` — duplicated here because `model.ts` imports this module, so
+ * importing it back would create a cycle. Only the canonical array shape is
+ * accepted: this field is new, so there is no legacy object form to tolerate.
+ */
+export const ProviderInstanceDefaultOption = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  value: Schema.Union([TrimmedNonEmptyString, Schema.Boolean]),
+});
+export type ProviderInstanceDefaultOption = typeof ProviderInstanceDefaultOption.Type;
+
+/**
  * Envelope shape for a provider instance configuration in `ServerSettings`.
  *
  * `driver` is intentionally accepted as any well-formed slug (see module
@@ -134,6 +147,11 @@ export type ProviderInstanceEnvironment = typeof ProviderInstanceEnvironment.Typ
  * each driver registers its own decoder with the runtime registry, and
  * envelopes for unknown drivers are preserved verbatim so they round-trip
  * across version changes without data loss.
+ *
+ * `defaultModel` / `defaultModelOptions` are the user's explicit new-chat
+ * defaults for this instance. Absent means "no explicit default" — the
+ * composer falls back to its usual resolution (sticky selection, project
+ * default, then the provider catalog default).
  */
 export const ProviderInstanceConfig = Schema.Struct({
   driver: ProviderDriverKind,
@@ -142,6 +160,8 @@ export const ProviderInstanceConfig = Schema.Struct({
   environment: Schema.optionalKey(ProviderInstanceEnvironment),
   enabled: Schema.optionalKey(Schema.Boolean),
   config: Schema.optionalKey(Schema.Unknown),
+  defaultModel: Schema.optionalKey(TrimmedNonEmptyString),
+  defaultModelOptions: Schema.optionalKey(Schema.Array(ProviderInstanceDefaultOption)),
 });
 export type ProviderInstanceConfig = typeof ProviderInstanceConfig.Type;
 

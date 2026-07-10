@@ -40,7 +40,7 @@
 
 ## Project Snapshot
 
-Cafe Code is a desktop GUI for coding agents such as Codex and Claude. Cursor and OpenCode provider integrations were retired; their historical settings and persisted thread references must decode safely but should be filtered out of runtime registries and provider settings UI rather than surfaced as unavailable first-party providers. The project is still early and inherited code may be incorrect or overfit to older fork behavior. Prefer evidence-backed fixes, strong diagnostics, and maintainable redesigns over small patches that only hide symptoms.
+Cafe Code is a desktop GUI for coding agents such as Codex, Claude, and OpenCode. Cursor was retired; its historical settings and persisted thread references must decode safely but should be filtered out of runtime registries and provider settings UI rather than surfaced as an unavailable first-party provider. The project is still early and inherited code may be incorrect or overfit to older fork behavior. Prefer evidence-backed fixes, strong diagnostics, and maintainable redesigns over small patches that only hide symptoms.
 
 Core priorities:
 
@@ -56,7 +56,7 @@ If a tradeoff is required, choose correctness, durability, and debuggability ove
 
 - Write all code as if it will run in a security-conscious environment where adversaries will constantly try to attack local transports, provider sessions, provider credentials, persisted command ledgers, and debug surfaces.
 - Local provider daemon and supervisor transports must be loopback-only or IPC by default, authenticated with high-entropy capability tokens, and must never be exposed on a non-loopback interface without an explicit authenticated design.
-- Secrets such as provider daemon tokens, Codex auth, Claude credentials, and app bootstrap credentials must be stored as private files with restrictive permissions where the platform supports them. Never persist secrets in logs, debug JSON, process argv, or user-visible error strings.
+- Secrets such as provider daemon tokens, Codex auth, Claude credentials, OpenCode server passwords, saved-environment bearer sessions, and app bootstrap credentials must be stored as private files with restrictive permissions where the platform supports them. Never persist secrets in logs, debug JSON, process argv, browser local storage, or user-visible error strings.
 - Do not symlink auth files into shadow homes. Copy private auth files when needed, chmod them to `0600`, and reject unsafe symlinked auth material.
 - Debug endpoints may expose operational diagnostics but must not expose raw prompts, full model outputs, bearer tokens, cookies, auth JSON, API keys, or unrestricted filesystem paths unless the user explicitly asks for a local forensic dump.
 - Any change touching provider process ownership, daemon handoff, provider-home materialization, approval handling, command execution, or debug output needs a quick security audit and tests for the failure mode being addressed.
@@ -81,7 +81,6 @@ If a tradeoff is required, choose correctness, durability, and debuggability ove
 - `packages/contracts`: Shared Effect Schema contracts for provider runtime events, orchestration events, daemon RPC/health, supervisor metadata, WebSocket/API protocol, desktop bootstrap, settings, and model/session types. Keep this package schema-only; do not add runtime business logic.
 - `packages/shared`: Shared runtime utilities consumed by server, desktop, and web. Use explicit subpath exports such as `@cafecode/shared/git`; avoid barrel indexes.
 - `packages/effect-codex-app-server`: Typed Codex app-server JSON-RPC client/protocol surface. Keep this aligned with the Codex version we are targeting.
-- `packages/effect-acp`: ACP protocol support used by compatible providers.
 
 ## Browser Web UI and Local HTTPS
 
@@ -90,6 +89,24 @@ If a tradeoff is required, choose correctness, durability, and debuggability ove
 - The main backend keeps HTTP available for compatibility and may also serve a self-signed HTTPS/WSS sibling listener on a separate port. In desktop builds, local HTTPS is controlled by an explicit desktop settings toggle, separate from the local-only/network-accessible host exposure toggle. Browser-facing pairing/headless output should prefer HTTPS when it is enabled; Electron desktop bootstrap may keep using HTTP loopback to avoid self-signed certificate handling in the desktop window.
 - HTTPS public certificate material belongs under the server TLS directory, but HTTPS private keys are secrets and must live under the server secrets directory with restrictive permissions where supported. Do not log private key material, generated key output, or TLS secrets.
 - Provider daemons and provider supervisors must not inherit the app HTTPS listener by default. Keep their existing authenticated loopback or IPC transports unless a separate authenticated TLS design is implemented for those runtime layers.
+
+## Saved Remote Environments
+
+- The renderer can connect directly to additional, already-reachable Cafe servers through a pairing URL or host plus pairing code. Cafe does not manage SSH, tunnels, Tailscale, DNS, reverse proxies, certificates, or hosted frontend deployment; browser mixed-content and certificate policy remain authoritative.
+- Pairing credentials are one-time bootstrap secrets. Exchange them for a bearer session, clear them from UI state immediately, and never persist or retry them. Mint a fresh short-lived WebSocket token from the bearer session for each connection attempt; never place the bearer session in an HTTP or WebSocket URL.
+- Desktop saved-environment bearer sessions are encrypted with Electron `safeStorage` in a private `0600` registry where supported. Browser local storage contains metadata only, while bearer sessions may survive reload only in session storage. A corrupt or undecryptable record must fail closed without deleting unrelated valid records.
+- Normalize remote targets to `http(s)`/`ws(s)`, reject embedded URL credentials and unsupported schemes, and sanitize network/auth failures before they reach logs or UI. Remote response bodies and raw WebSocket close reasons may contain sensitive server details and must not be surfaced directly.
+- Each saved connection is keyed by the server-provided `EnvironmentId`. Project, thread, provider, query, and subscription operations must stay scoped to that environment; disconnecting or removing one environment must not mutate primary-environment state.
+- Important files are `apps/desktop/src/settings/DesktopSavedEnvironments.ts`, `apps/desktop/src/ipc/methods/savedEnvironments.ts`, `apps/web/src/environments/remote/api.ts`, `apps/web/src/environments/runtime/catalog.ts`, `apps/web/src/environments/runtime/connection.ts`, `apps/web/src/environments/runtime/service.ts`, and `apps/web/src/components/settings/SavedEnvironmentsSettings.tsx`.
+
+## OpenCode Integration
+
+- OpenCode is a first-party provider implemented against `@opencode-ai/sdk` v2 compatibility APIs. Cafe either starts `opencode serve` on an available loopback port or connects to an explicit external `serverUrl`; never expose a Cafe-owned OpenCode process on a non-loopback interface automatically.
+- Cafe-owned OpenCode server processes are scoped to the adapter/probe operation and must terminate their process group when the scope closes. External servers are never process-owned by Cafe.
+- External OpenCode passwords live in the server secret store. Settings responses expose only redaction state, and the password is sent only in the SDK authorization header; it must not appear in provider settings JSON, process argv, runtime events, diagnostics, or user-facing errors.
+- The adapter maps OpenCode session, message, tool, permission, question, completion, abort, and error events into canonical provider runtime events. Preserve provider session identity for resume, bind event streams to the relevant working directory/session, and release local server scopes on completion or interruption.
+- Model inventory comes from connected OpenCode upstream providers. Preserve provider/model slugs, model variants, primary agents, attachments, runtime-mode permission rules, question answers, approval decisions, abort/resume, and bounded text generation when updating the SDK.
+- Important files are `apps/server/src/provider/opencodeRuntime.ts`, `apps/server/src/provider/Drivers/OpenCodeDriver.ts`, `apps/server/src/provider/Layers/OpenCodeAdapter.ts`, `apps/server/src/provider/Layers/OpenCodeProvider.ts`, and `apps/server/src/textGeneration/OpenCodeTextGeneration.ts`.
 
 ## Renderer Markdown Math
 
@@ -110,6 +127,7 @@ Cafe Code has three important runtime layers:
 - Electron desktop process: starts the UI, starts/adopts the main backend, starts/adopts the provider daemon, exposes a local debug endpoint, and performs process cleanup when the user exits.
 - Main backend/server: owns app-level orchestration, event sourcing, projections, settings, WebSocket pushes, HTTP routes, and durable persistence.
 - Provider runtime process: the provider daemon owns long-running provider adapters and live sessions by default so provider work can survive UI/backend restarts when possible. A persistent provider supervisor still exists as an explicit runtime role, but automatic provider-daemon handoff to that extra supervisor hop is disabled until supervisor restart/fallback preserves the provider registry and active-session truth under dead IPC sockets.
+- Renderer environment runtime: the renderer always has one primary backend connection and may hydrate additional saved Cafe server connections. Every connection owns its authenticated RPC client and projection subscriptions; environment routing must remain explicit and must not change the primary backend's identity.
 - The desktop backend manager treats sustained repeated backend HTTP health failures as a terminal backend run condition even if the child process remains alive. This prevents a split-brain state where the backend PID is still present but the HTTP listener is gone, leaving the renderer unable to reconnect. The post-readiness watchdog is intentionally more patient than bootstrap readiness because large long-running workspaces can briefly push SQLite/projection work over a one-second health probe. Do not lower the watchdog to short one-second failure windows; brief missed probes should log and recover, while a sustained outage should still restart the backend. On replacement startup, stale desktop backend children are reaped before binding the new backend; provider daemon/supervisor processes are intentionally excluded so provider sessions can survive the recovery.
 - `cafe-code killall` and `cafe-code-server killall` are explicit user-requested process termination paths. They scan for Cafe Code launcher, desktop client, main server/backend, and provider daemon/supervisor processes, protect the current command process and its ancestors, terminate children before parents, and avoid printing raw process argv by default because argv can contain sensitive flags or paths.
 
@@ -366,6 +384,8 @@ Use these as implementation references when designing protocol handling, UX flow
 - Open-source Codex repo: `https://github.com/openai/codex`
 - Official Claude Agent SDK overview: `https://code.claude.com/docs/en/agent-sdk/overview`
 - Official Claude Agent SDK TypeScript reference: `https://code.claude.com/docs/en/agent-sdk/typescript`
+- Official OpenCode server docs: `https://opencode.ai/docs/server/`
+- OpenCode SDK package: `https://www.npmjs.com/package/@opencode-ai/sdk`
 - Codex-Monitor reference implementation: `https://github.com/Dimillian/CodexMonitor`
 
-Provider integrations change frequently. Before implementing or changing Codex/Claude lifecycle behavior, check the current official docs plus the version-pinned local package/source used by this repository, then document the relevant assumption in code comments and tests.
+Provider integrations change frequently. Before implementing or changing Codex, Claude, or OpenCode lifecycle behavior, check the current official docs plus the version-pinned local package/source used by this repository, then document the relevant assumption in code comments and tests.

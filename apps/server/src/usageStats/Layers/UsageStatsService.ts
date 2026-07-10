@@ -12,8 +12,8 @@
  * - user chats: domain `thread.message-sent` events with `role: "user"`.
  * - tokens: `thread.token-usage.updated` snapshots via the watermark helper
  *   (see tokenDelta.ts for the per-provider semantics), with a per-turn
- *   fallback on `turn.completed` for providers that never emit usage events
- *   (Gemini's ACP per-turn totals).
+ *   fallback on `turn.completed` for providers that report usage only in the
+ *   terminal event.
  * - generating time: per-thread accrual between `turn.started` and the turn's
  *   terminal event, advanced on every flush tick so concurrent sessions each
  *   contribute their own wall clock and long turns split across local days.
@@ -60,7 +60,7 @@ interface ThreadTracking {
 
 /**
  * Best-effort output-token extraction from an opaque `turn.completed` usage
- * payload. Understands ACP's camelCase per-turn totals (Gemini), where
+ * payload. Understands camelCase per-turn totals, where
  * `thoughtTokens` is reported separately from `outputTokens`, and Anthropic's
  * snake_case shape, where `output_tokens` already includes thinking.
  */
@@ -72,9 +72,9 @@ function turnCompletedOutputTokens(usage: unknown): number | undefined {
     return undefined;
   }
   const record = usage as Record<string, unknown>;
-  const acpOutput = finiteNumber(record.outputTokens);
-  if (acpOutput !== undefined) {
-    return Math.round(acpOutput + (finiteNumber(record.thoughtTokens) ?? 0));
+  const completionOutput = finiteNumber(record.outputTokens);
+  if (completionOutput !== undefined) {
+    return Math.round(completionOutput + (finiteNumber(record.thoughtTokens) ?? 0));
   }
   const anthropicOutput = finiteNumber(record.output_tokens);
   return anthropicOutput === undefined ? undefined : Math.round(anthropicOutput);

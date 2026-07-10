@@ -17,8 +17,15 @@ const mockSubscribeThread = vi.fn();
 const mockThreadUnsubscribe = vi.fn();
 const mockCreateEnvironmentConnection = vi.fn();
 const mockCreateWsRpcClient = vi.fn();
+const mockWaitForSavedEnvironmentRegistryHydration = vi.fn();
+const mockListSavedEnvironmentRecords = vi.fn();
+const mockGetSavedEnvironmentRecord = vi.fn();
+const mockReadSavedEnvironmentBearerToken = vi.fn();
+const mockSavedEnvironmentRegistrySubscribe = vi.fn();
 const mockGetPrimaryKnownEnvironment = vi.hoisted(() => vi.fn());
+const mockFetchRemoteSessionState = vi.fn();
 const mockConnectionReconnects: Array<ReturnType<typeof vi.fn>> = [];
+let savedEnvironmentRegistryListener: (() => void) | null = null;
 
 function MockWsTransport() {
   return undefined;
@@ -26,6 +33,41 @@ function MockWsTransport() {
 
 vi.mock("../primary", () => ({
   getPrimaryKnownEnvironment: mockGetPrimaryKnownEnvironment,
+}));
+
+vi.mock("../remote/api", () => ({
+  bootstrapRemoteBearerSession: vi.fn(),
+  fetchRemoteEnvironmentDescriptor: vi.fn(),
+  fetchRemoteSessionState: mockFetchRemoteSessionState,
+  isRemoteEnvironmentAuthHttpError: vi.fn(() => false),
+  resolveRemoteWebSocketConnectionUrl: vi.fn(async () => "ws://remote.example.test/ws"),
+}));
+
+vi.mock("./catalog", () => ({
+  getSavedEnvironmentRecord: mockGetSavedEnvironmentRecord,
+  hasSavedEnvironmentRegistryHydrated: vi.fn(() => true),
+  listSavedEnvironmentRecords: mockListSavedEnvironmentRecords,
+  persistSavedEnvironmentRecord: vi.fn(),
+  readSavedEnvironmentBearerToken: mockReadSavedEnvironmentBearerToken,
+  removeSavedEnvironmentBearerToken: vi.fn(),
+  useSavedEnvironmentRegistryStore: {
+    subscribe: mockSavedEnvironmentRegistrySubscribe,
+    getState: () => ({
+      upsert: vi.fn(),
+      remove: vi.fn(),
+      markConnected: vi.fn(),
+      rename: vi.fn(),
+    }),
+  },
+  useSavedEnvironmentRuntimeStore: {
+    getState: () => ({
+      ensure: vi.fn(),
+      patch: vi.fn(),
+      clear: vi.fn(),
+    }),
+  },
+  waitForSavedEnvironmentRegistryHydration: mockWaitForSavedEnvironmentRegistryHydration,
+  writeSavedEnvironmentBearerToken: vi.fn(),
 }));
 
 vi.mock("./connection", () => ({
@@ -252,6 +294,23 @@ describe("retainThreadDetailSubscription", () => {
         dispose: vi.fn(async () => undefined),
       };
     });
+    savedEnvironmentRegistryListener = null;
+    mockSavedEnvironmentRegistrySubscribe.mockImplementation((listener: () => void) => {
+      savedEnvironmentRegistryListener = listener;
+      return () => {
+        if (savedEnvironmentRegistryListener === listener) {
+          savedEnvironmentRegistryListener = null;
+        }
+      };
+    });
+    mockWaitForSavedEnvironmentRegistryHydration.mockResolvedValue(undefined);
+    mockListSavedEnvironmentRecords.mockReturnValue([]);
+    mockGetSavedEnvironmentRecord.mockReturnValue(null);
+    mockReadSavedEnvironmentBearerToken.mockResolvedValue(null);
+    mockFetchRemoteSessionState.mockResolvedValue({
+      authenticated: true,
+      role: "client",
+    });
     mockConnectionReconnects.length = 0;
   });
 
@@ -418,6 +477,63 @@ describe("retainThreadDetailSubscription", () => {
     await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
     expect(mockThreadUnsubscribe).toHaveBeenCalledTimes(1);
 
+    stop();
+    await resetEnvironmentServiceForTests();
+  });
+
+  it("reattaches retained thread detail subscriptions after a saved environment reconnect replaces the client", async () => {
+    const environmentId = EnvironmentId.make("env-remote");
+    const threadId = ThreadId.make("thread-reconnect");
+    const record = {
+      environmentId,
+      label: "Remote env",
+      httpBaseUrl: "http://remote.example.test",
+      wsBaseUrl: "ws://remote.example.test",
+      createdAt: "2026-05-01T00:00:00.000Z",
+      lastConnectedAt: "2026-05-01T00:00:00.000Z",
+    };
+    mockListSavedEnvironmentRecords.mockReturnValue([record]);
+    mockGetSavedEnvironmentRecord.mockReturnValue(record);
+    mockReadSavedEnvironmentBearerToken.mockResolvedValue("bearer-token");
+
+    const {
+      disconnectSavedEnvironment,
+      listEnvironmentConnections,
+      reconnectSavedEnvironment,
+      retainThreadDetailSubscription,
+      startEnvironmentConnectionService,
+      resetEnvironmentServiceForTests,
+    } = await import("./service");
+
+    const stop = startEnvironmentConnectionService(new QueryClient());
+    savedEnvironmentRegistryListener?.();
+    await vi.waitFor(() => {
+      expect(mockCreateEnvironmentConnection).toHaveBeenCalledTimes(2);
+      expect(
+        listEnvironmentConnections().some(
+          (connection) => connection.environmentId === environmentId,
+        ),
+      ).toBe(true);
+    });
+
+    const release = retainThreadDetailSubscription(environmentId, threadId);
+    expect(mockSubscribeThread).toHaveBeenCalledTimes(1);
+
+    await disconnectSavedEnvironment(environmentId);
+    expect(mockThreadUnsubscribe).toHaveBeenCalledTimes(1);
+    expect(
+      listEnvironmentConnections().some((connection) => connection.environmentId === environmentId),
+    ).toBe(false);
+
+    const reconnectPromise = reconnectSavedEnvironment(environmentId);
+    await vi.advanceTimersByTimeAsync(200);
+    await reconnectPromise;
+    await vi.waitFor(() => {
+      expect(mockCreateEnvironmentConnection).toHaveBeenCalledTimes(3);
+      expect(mockSubscribeThread).toHaveBeenCalledTimes(2);
+    });
+
+    release();
     stop();
     await resetEnvironmentServiceForTests();
   });

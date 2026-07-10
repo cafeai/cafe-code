@@ -23,7 +23,9 @@ import {
 } from "@cafecode/contracts";
 import { createModelSelection } from "@cafecode/shared/model";
 import { it, assert, vi } from "@effect/vitest";
+import { beforeEach } from "vitest";
 
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -57,6 +59,7 @@ import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventL
 import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ProviderSessionRuntimeRepositoryLive } from "../../persistence/Layers/ProviderSessionRuntime.ts";
+import type { ProviderSessionRuntimeRepositoryError } from "../../persistence/Errors.ts";
 import { ProviderSessionRuntimeRepository } from "../../persistence/Services/ProviderSessionRuntime.ts";
 import {
   makeSqlitePersistenceLive,
@@ -321,27 +324,57 @@ function makeProviderServiceLayer() {
   );
   const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
 
-  const layer = it.layer(
-    Layer.mergeAll(
-      makeProviderServiceLive().pipe(
-        Layer.provide(providerAdapterLayer),
-        Layer.provide(directoryLayer),
-        Layer.provide(defaultServerSettingsLayer),
-        Layer.provideMerge(AnalyticsService.layerTest),
-        Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
-      ),
-      directoryLayer,
+  let resetRepository:
+    | (() => Effect.Effect<void, ProviderSessionRuntimeRepositoryError>)
+    | undefined;
+  const testLayer = Layer.mergeAll(
+    makeProviderServiceLive().pipe(
+      Layer.provide(providerAdapterLayer),
+      Layer.provide(directoryLayer),
+      Layer.provide(defaultServerSettingsLayer),
+      Layer.provideMerge(AnalyticsService.layerTest),
+      Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+    ),
+    directoryLayer,
 
-      runtimeRepositoryLayer,
-      NodeServices.layer,
+    runtimeRepositoryLayer,
+    NodeServices.layer,
+  ).pipe(
+    Layer.tap((context) =>
+      Effect.sync(() => {
+        const repository = Context.get(context, ProviderSessionRuntimeRepository);
+        resetRepository = () =>
+          repository
+            .list()
+            .pipe(
+              Effect.flatMap((entries) =>
+                Effect.forEach(
+                  entries,
+                  (entry) => repository.deleteByThreadId({ threadId: entry.threadId }),
+                  { discard: true },
+                ),
+              ),
+            );
+      }),
     ),
   );
+  const layer = it.layer(testLayer);
+  const reset = async () => {
+    await Effect.runPromise(
+      Effect.all([codex.stopAll(), claude.stopAll(), testDriver.stopAll()], { discard: true }),
+    );
+    if (resetRepository) {
+      await Effect.runPromise(resetRepository());
+    }
+    vi.clearAllMocks();
+  };
 
   return {
     codex,
     claude,
     testDriver,
     layer,
+    reset,
   };
 }
 
@@ -465,6 +498,8 @@ it.effect("ProviderServiceLive persists stopped runtime state before adapter sto
 
 const restart = makeProviderServiceLayer();
 restart.layer("ProviderServiceLive runtime restart", (it) => {
+  beforeEach(restart.reset);
+
   it.effect("stops only the targeted provider instance", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
@@ -948,6 +983,8 @@ it.effect(
 );
 
 routing.layer("ProviderServiceLive routing", (it) => {
+  beforeEach(routing.reset);
+
   it.effect("routes provider operations and rollback conversation", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
@@ -1962,6 +1999,8 @@ routing.layer("ProviderServiceLive routing", (it) => {
 
 const fanout = makeProviderServiceLayer();
 fanout.layer("ProviderServiceLive fanout", (it) => {
+  beforeEach(fanout.reset);
+
   it.effect("persists stopped runtime state when an adapter session exits", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
@@ -2388,6 +2427,8 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
 
 const validation = makeProviderServiceLayer();
 validation.layer("ProviderServiceLive validation", (it) => {
+  beforeEach(validation.reset);
+
   it.effect("rejects session starts without an explicit provider instance id", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;

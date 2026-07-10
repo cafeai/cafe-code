@@ -14,7 +14,11 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { ServerConfig } from "./config.ts";
-import { ServerSettingsLive, ServerSettingsService } from "./serverSettings.ts";
+import {
+  redactServerSettingsForClient,
+  ServerSettingsLive,
+  ServerSettingsService,
+} from "./serverSettings.ts";
 
 const makeServerSettingsLayer = () =>
   ServerSettingsLive.pipe(
@@ -511,5 +515,92 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         "sk-or-secret",
       );
     }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("redacts OpenCode server passwords from client settings", () =>
+    Effect.sync(() => {
+      const instanceId = ProviderInstanceId.make("opencode_remote");
+      const redacted = redactServerSettingsForClient({
+        ...DEFAULT_SERVER_SETTINGS,
+        providers: {
+          ...DEFAULT_SERVER_SETTINGS.providers,
+          opencode: {
+            ...DEFAULT_SERVER_SETTINGS.providers.opencode,
+            serverPassword: "legacy-secret",
+          },
+        },
+        providerInstances: {
+          ...DEFAULT_SERVER_SETTINGS.providerInstances,
+          [instanceId]: {
+            driver: ProviderDriverKind.make("opencode"),
+            enabled: true,
+            config: {
+              serverUrl: "https://opencode.example",
+              serverPassword: "instance-secret",
+            },
+          },
+        },
+      });
+
+      assert.deepInclude(redacted.providers.opencode, {
+        serverPassword: "",
+        serverPasswordRedacted: true,
+      });
+      assert.deepInclude(redacted.providerInstances[instanceId]?.config, {
+        serverPassword: "",
+        serverPasswordRedacted: true,
+      });
+    }),
+  );
+
+  it.effect(
+    "stores OpenCode server passwords outside settings.json and removes stale secrets",
+    () =>
+      Effect.gen(function* () {
+        const serverSettings = yield* ServerSettingsService;
+        const serverConfig = yield* ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const instanceId = ProviderInstanceId.make("opencode_remote");
+
+        const saved = yield* serverSettings.updateSettings({
+          providerInstances: {
+            [instanceId]: {
+              driver: ProviderDriverKind.make("opencode"),
+              enabled: true,
+              config: {
+                serverUrl: "https://opencode.example",
+                serverPassword: "instance-secret",
+              },
+            },
+          },
+        });
+
+        assert.deepInclude(saved.providerInstances[instanceId]?.config, {
+          serverPassword: "instance-secret",
+          serverPasswordRedacted: true,
+        });
+        const persisted = yield* fileSystem.readFileString(serverConfig.settingsPath);
+        assert.notInclude(persisted, "instance-secret");
+        assert.include(persisted, '"serverPasswordRedacted": true');
+
+        yield* serverSettings.updateSettings({ providerInstances: {} });
+        const restored = yield* serverSettings.updateSettings({
+          providerInstances: {
+            [instanceId]: {
+              driver: ProviderDriverKind.make("opencode"),
+              enabled: true,
+              config: {
+                serverUrl: "https://opencode.example",
+                serverPassword: "",
+                serverPasswordRedacted: true,
+              },
+            },
+          },
+        });
+        assert.deepInclude(restored.providerInstances[instanceId]?.config, {
+          serverPassword: "",
+          serverPasswordRedacted: false,
+        });
+      }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 });

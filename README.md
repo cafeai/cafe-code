@@ -123,6 +123,17 @@ If Cafe Code prints a different port, or you run with `CAFE_CODE_PORT`,
 `CAFE_CODE_HTTPS_PORT`, `CAFE_CODE_DEV_INSTANCE`, or
 `CAFE_CODE_PORT_OFFSET`, allow the printed port instead.
 
+### Saved Remote Servers
+
+The Connections settings can save direct connections to other reachable Cafe
+Code servers using a pairing URL or a host plus pairing code. Cafe Code scopes
+projects, threads, providers, and live subscriptions to the selected server.
+
+Cafe Code does not create SSH or Tailscale tunnels. Configure the network,
+certificate, firewall, or reverse proxy separately, then use the server's
+pairing details. Desktop credentials are encrypted with Electron safe storage;
+browser credentials are retained only for the current browser session.
+
 If you want Codex or Claude to do it for you, paste this into the CLI:
 
 ```text
@@ -142,8 +153,9 @@ authenticated:
 
 - Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
 - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
+- OpenCode: install [OpenCode](https://opencode.ai/docs/) and configure at least one upstream provider, or configure Cafe Code with an existing OpenCode server URL
 
-Cafe Code currently ships Codex and Claude provider integrations.
+Cafe Code currently ships Codex, Claude, and OpenCode provider integrations.
 
 ## Local Development
 

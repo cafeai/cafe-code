@@ -36,6 +36,7 @@ import {
 import { ProviderAccountRateLimitsReactorLive } from "./provider/Layers/ProviderAccountRateLimitsReactor.ts";
 import { ProviderServiceLive } from "./provider/Layers/ProviderService.ts";
 import { ProviderSessionReaperLive } from "./provider/Layers/ProviderSessionReaper.ts";
+import { OpenCodeRuntimeLive } from "./provider/opencodeRuntime.ts";
 import { CheckpointStoreLive } from "./checkpointing/Layers/CheckpointStore.ts";
 import * as AzureDevOpsCli from "./sourceControl/AzureDevOpsCli.ts";
 import * as BitbucketApi from "./sourceControl/BitbucketApi.ts";
@@ -310,6 +311,9 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // Provided once at the runtime level so every consumer sees the same
   // logger instances.
   Layer.provideMerge(ProviderEventLoggersLive),
+  // OpenCode drivers share one runtime service for CLI process ownership and
+  // authenticated SDK client construction across registry and adapter layers.
+  Layer.provideMerge(OpenCodeRuntimeLive),
   Layer.provideMerge(ServerSettingsLive),
   Layer.provideMerge(BrandingImageStoreLive),
   Layer.provideMerge(ServerClientSettingsLayerLive),

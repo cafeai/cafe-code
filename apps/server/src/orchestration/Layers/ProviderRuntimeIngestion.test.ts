@@ -2,6 +2,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
+import { setImmediate as waitForEventLoopTurn } from "node:timers/promises";
 
 import {
   OrchestrationReadModel,
@@ -22,7 +24,6 @@ import {
   ThreadId,
   TurnId,
 } from "@cafecode/contracts";
-import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -178,20 +179,20 @@ async function waitForThread(
   timeoutMs = 2000,
   threadId: ThreadId = asThreadId("thread-1"),
 ) {
-  const deadline = (await Effect.runPromise(Clock.currentTimeMillis)) + timeoutMs;
-  const poll = async (): Promise<ProviderRuntimeTestThread> => {
+  const deadline = performance.now() + timeoutMs;
+  while (true) {
     const snapshot = await readModel();
     const thread = snapshot.threads.find((entry) => entry.id === threadId);
     if (thread && predicate(thread)) {
       return thread;
     }
-    if ((await Effect.runPromise(Clock.currentTimeMillis)) >= deadline) {
+    if (performance.now() >= deadline) {
       throw new Error("Timed out waiting for thread state");
     }
-    await Effect.runPromise(Effect.yieldNow);
-    return poll();
-  };
-  return poll();
+    // Projection work may cross a Node I/O boundary. Yield one macrotask without recursively
+    // spinning Effect fibers, while retaining the timeout only as a failure guard.
+    await waitForEventLoopTurn();
+  }
 }
 
 describe("ProviderRuntimeIngestion", () => {

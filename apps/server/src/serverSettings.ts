@@ -80,6 +80,44 @@ function providerEnvironmentSecretName(input: {
   return `provider-env-${Buffer.from(input.instanceId, "utf8").toString("base64url")}-${Buffer.from(input.name, "utf8").toString("base64url")}`;
 }
 
+const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
+const OPENCODE_SERVER_PASSWORD_FIELD = "serverPassword";
+const OPENCODE_SERVER_PASSWORD_REDACTED_FIELD = "serverPasswordRedacted";
+
+function providerConfigSecretName(input: {
+  readonly instanceId: string;
+  readonly field: string;
+}): string {
+  return `provider-config-${Buffer.from(input.instanceId, "utf8").toString("base64url")}-${Buffer.from(input.field, "utf8").toString("base64url")}`;
+}
+
+function legacyProviderConfigSecretName(input: {
+  readonly driver: string;
+  readonly field: string;
+}): string {
+  return `legacy-provider-config-${Buffer.from(input.driver, "utf8").toString("base64url")}-${Buffer.from(input.field, "utf8").toString("base64url")}`;
+}
+
+function asConfigRecord(config: unknown): Record<string, unknown> {
+  return config !== null && typeof config === "object"
+    ? { ...(config as Record<string, unknown>) }
+    : {};
+}
+
+function redactOpenCodeConfig(config: unknown): unknown {
+  const record = asConfigRecord(config);
+  const password = record[OPENCODE_SERVER_PASSWORD_FIELD];
+  const alreadyRedacted = record[OPENCODE_SERVER_PASSWORD_REDACTED_FIELD] === true;
+  if ((typeof password !== "string" || password.length === 0) && !alreadyRedacted) {
+    return config;
+  }
+  return {
+    ...record,
+    [OPENCODE_SERVER_PASSWORD_FIELD]: "",
+    [OPENCODE_SERVER_PASSWORD_REDACTED_FIELD]: true,
+  };
+}
+
 function redactProviderEnvironmentVariable(
   variable: ProviderInstanceEnvironmentVariable,
 ): ProviderInstanceEnvironmentVariable {
@@ -98,15 +136,27 @@ export function redactServerSettingsForClient(settings: ServerSettings): ServerS
   const providerInstances = Object.fromEntries(
     Object.entries(settings.providerInstances).map(([instanceId, instance]) => [
       instanceId,
-      instance.environment
-        ? {
-            ...instance,
-            environment: instance.environment.map(redactProviderEnvironmentVariable),
-          }
-        : instance,
+      {
+        ...instance,
+        ...(instance.environment
+          ? { environment: instance.environment.map(redactProviderEnvironmentVariable) }
+          : {}),
+        ...(instance.driver === OPENCODE_DRIVER_KIND
+          ? { config: redactOpenCodeConfig(instance.config) }
+          : {}),
+      },
     ]),
   );
-  return { ...settings, providerInstances };
+  return {
+    ...settings,
+    providers: {
+      ...settings.providers,
+      opencode: redactOpenCodeConfig(
+        settings.providers.opencode,
+      ) as ServerSettings["providers"]["opencode"],
+    },
+    providerInstances,
+  };
 }
 
 export interface ServerSettingsShape {
@@ -346,6 +396,170 @@ const makeServerSettings = Effect.gen(function* () {
       cause,
     });
 
+  const readSecret = (secretName: string, detail: string) =>
+    secretStore.get(secretName).pipe(Effect.mapError((cause) => toSettingsError(detail, cause)));
+
+  const writeSecret = (secretName: string, value: string, detail: string) =>
+    secretStore
+      .set(secretName, textEncoder.encode(value))
+      .pipe(Effect.mapError((cause) => toSettingsError(detail, cause)));
+
+  const removeSecret = (secretName: string, detail: string) =>
+    secretStore.remove(secretName).pipe(Effect.mapError((cause) => toSettingsError(detail, cause)));
+
+  const materializeOpenCodeConfig = (
+    config: unknown,
+    secretName: string,
+  ): Effect.Effect<unknown, ServerSettingsError> =>
+    Effect.gen(function* () {
+      const record = asConfigRecord(config);
+      if (record[OPENCODE_SERVER_PASSWORD_REDACTED_FIELD] !== true) {
+        return config;
+      }
+      const secret = yield* readSecret(secretName, "failed to read the OpenCode server password");
+      return {
+        ...record,
+        [OPENCODE_SERVER_PASSWORD_FIELD]: secret ? textDecoder.decode(secret) : "",
+        [OPENCODE_SERVER_PASSWORD_REDACTED_FIELD]: secret !== null,
+      };
+    });
+
+  const materializeOpenCodeServerPasswords = (
+    settings: ServerSettings,
+  ): Effect.Effect<ServerSettings, ServerSettingsError> =>
+    Effect.gen(function* () {
+      const providerInstances: Record<string, ProviderInstanceConfig> = {
+        ...settings.providerInstances,
+      };
+      for (const [instanceId, instance] of Object.entries(settings.providerInstances)) {
+        if (instance.driver !== OPENCODE_DRIVER_KIND) continue;
+        providerInstances[instanceId] = {
+          ...instance,
+          config: yield* materializeOpenCodeConfig(
+            instance.config,
+            providerConfigSecretName({
+              instanceId,
+              field: OPENCODE_SERVER_PASSWORD_FIELD,
+            }),
+          ),
+        };
+      }
+
+      return {
+        ...settings,
+        providers: {
+          ...settings.providers,
+          opencode: (yield* materializeOpenCodeConfig(
+            settings.providers.opencode,
+            legacyProviderConfigSecretName({
+              driver: OPENCODE_DRIVER_KIND,
+              field: OPENCODE_SERVER_PASSWORD_FIELD,
+            }),
+          )) as ServerSettings["providers"]["opencode"],
+        },
+        providerInstances: providerInstances as ServerSettings["providerInstances"],
+      };
+    });
+
+  const persistOpenCodeConfig = (
+    config: unknown,
+    secretName: string,
+  ): Effect.Effect<unknown, ServerSettingsError> =>
+    Effect.gen(function* () {
+      const record = asConfigRecord(config);
+      const password = record[OPENCODE_SERVER_PASSWORD_FIELD];
+      const passwordValue = typeof password === "string" ? password : "";
+      const wasRedacted = record[OPENCODE_SERVER_PASSWORD_REDACTED_FIELD] === true;
+
+      if (passwordValue.length > 0) {
+        yield* writeSecret(
+          secretName,
+          passwordValue,
+          "failed to persist the OpenCode server password",
+        );
+        return {
+          ...record,
+          [OPENCODE_SERVER_PASSWORD_FIELD]: "",
+          [OPENCODE_SERVER_PASSWORD_REDACTED_FIELD]: true,
+        };
+      }
+
+      if (wasRedacted) {
+        const existing = yield* readSecret(
+          secretName,
+          "failed to read the OpenCode server password",
+        );
+        return {
+          ...record,
+          [OPENCODE_SERVER_PASSWORD_FIELD]: "",
+          [OPENCODE_SERVER_PASSWORD_REDACTED_FIELD]: existing !== null,
+        };
+      }
+
+      yield* removeSecret(secretName, "failed to remove the OpenCode server password");
+      const {
+        [OPENCODE_SERVER_PASSWORD_FIELD]: _password,
+        [OPENCODE_SERVER_PASSWORD_REDACTED_FIELD]: _redacted,
+        ...rest
+      } = record;
+      return rest;
+    });
+
+  const persistOpenCodeServerPasswords = (
+    current: ServerSettings,
+    next: ServerSettings,
+  ): Effect.Effect<ServerSettings, ServerSettingsError> =>
+    Effect.gen(function* () {
+      const providerInstances: Record<string, ProviderInstanceConfig> = {
+        ...next.providerInstances,
+      };
+      for (const [instanceId, instance] of Object.entries(next.providerInstances)) {
+        if (instance.driver !== OPENCODE_DRIVER_KIND) continue;
+        providerInstances[instanceId] = {
+          ...instance,
+          config: yield* persistOpenCodeConfig(
+            instance.config,
+            providerConfigSecretName({
+              instanceId,
+              field: OPENCODE_SERVER_PASSWORD_FIELD,
+            }),
+          ),
+        };
+      }
+
+      for (const [instanceId, instance] of Object.entries(current.providerInstances)) {
+        if (
+          instance.driver !== OPENCODE_DRIVER_KIND ||
+          next.providerInstances[ProviderInstanceId.make(instanceId)]?.driver ===
+            OPENCODE_DRIVER_KIND
+        ) {
+          continue;
+        }
+        yield* removeSecret(
+          providerConfigSecretName({
+            instanceId,
+            field: OPENCODE_SERVER_PASSWORD_FIELD,
+          }),
+          "failed to remove a stale OpenCode server password",
+        );
+      }
+
+      return {
+        ...next,
+        providers: {
+          ...next.providers,
+          opencode: (yield* persistOpenCodeConfig(
+            next.providers.opencode,
+            legacyProviderConfigSecretName({
+              driver: OPENCODE_DRIVER_KIND,
+              field: OPENCODE_SERVER_PASSWORD_FIELD,
+            }),
+          )) as ServerSettings["providers"]["opencode"],
+        },
+        providerInstances: providerInstances as ServerSettings["providerInstances"],
+      };
+    });
+
   const materializeProviderEnvironmentSecrets = (
     settings: ServerSettings,
   ): Effect.Effect<ServerSettings, ServerSettingsError> =>
@@ -381,10 +595,10 @@ const makeServerSettings = Effect.gen(function* () {
           environment,
         } satisfies ProviderInstanceConfig;
       }
-      return {
+      return yield* materializeOpenCodeServerPasswords({
         ...settings,
         providerInstances: providerInstances as ServerSettings["providerInstances"],
-      };
+      });
     });
 
   const persistProviderEnvironmentSecrets = (
@@ -549,9 +763,16 @@ const makeServerSettings = Effect.gen(function* () {
     }
 
     const startup = Effect.gen(function* () {
-      yield* startWatcher;
       yield* Cache.invalidate(settingsCache, cacheKey);
-      yield* getSettingsFromCache;
+      const loaded = yield* getSettingsFromCache;
+      const secured = yield* persistOpenCodeServerPasswords(loaded, loaded).pipe(
+        Effect.flatMap(normalizeServerSettings),
+      );
+      if (!Equal.equals(loaded, secured)) {
+        yield* writeSettingsAtomically(secured);
+        yield* Cache.set(settingsCache, cacheKey, secured);
+      }
+      yield* startWatcher;
     });
 
     const startupExit = yield* Effect.exit(startup);
@@ -574,9 +795,13 @@ const makeServerSettings = Effect.gen(function* () {
       writeSemaphore.withPermits(1)(
         Effect.gen(function* () {
           const current = yield* getSettingsFromCache;
-          const nextPersisted = yield* persistProviderEnvironmentSecrets(
+          const nextWithProviderSecrets = yield* persistOpenCodeServerPasswords(
             current,
             stripRetiredProviderInstances(applyServerSettingsPatch(current, patch)),
+          );
+          const nextPersisted = yield* persistProviderEnvironmentSecrets(
+            current,
+            nextWithProviderSecrets,
           );
           const next = yield* normalizeServerSettings(nextPersisted);
           yield* writeSettingsAtomically(next);

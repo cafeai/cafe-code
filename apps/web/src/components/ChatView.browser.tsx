@@ -1521,6 +1521,11 @@ function createDesktopBridgeForChatViewTests(
     getClientSettings: async () => null,
     setClientSettings: async () => undefined,
     setPowerSaveBlockerState: async () => undefined,
+    getSavedEnvironmentRegistry: async () => [],
+    setSavedEnvironmentRegistry: async () => undefined,
+    getSavedEnvironmentSecret: async () => null,
+    setSavedEnvironmentSecret: async () => true,
+    removeSavedEnvironmentSecret: async () => undefined,
     getServerExposureState: async () => ({
       mode: "local-only",
       httpsEnabled: true,

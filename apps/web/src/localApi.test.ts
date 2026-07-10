@@ -118,6 +118,8 @@ vi.mock("./environments/runtime", () => ({
     dispose: async () => undefined,
   }),
   resetEnvironmentServiceForTests: vi.fn(),
+  resetSavedEnvironmentRegistryStoreForTests: vi.fn(),
+  resetSavedEnvironmentRuntimeStoreForTests: vi.fn(),
 }));
 
 vi.mock("./contextMenuFallback", () => ({
@@ -169,6 +171,11 @@ function makeDesktopBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridg
     getClientSettings: async () => null,
     setClientSettings: async () => undefined,
     setPowerSaveBlockerState: async () => undefined,
+    getSavedEnvironmentRegistry: async () => [],
+    setSavedEnvironmentRegistry: async () => undefined,
+    getSavedEnvironmentSecret: async () => null,
+    setSavedEnvironmentSecret: async () => true,
+    removeSavedEnvironmentSecret: async () => undefined,
     getServerExposureState: async () => ({
       mode: "local-only",
       httpsEnabled: true,
@@ -713,9 +720,19 @@ describe("wsApi", () => {
       ...clientSettings,
     });
     const setClientSettings = vi.fn().mockResolvedValue(undefined);
+    const getSavedEnvironmentRegistry = vi.fn().mockResolvedValue([]);
+    const setSavedEnvironmentRegistry = vi.fn().mockResolvedValue(undefined);
+    const getSavedEnvironmentSecret = vi.fn().mockResolvedValue("bearer-token");
+    const setSavedEnvironmentSecret = vi.fn().mockResolvedValue(true);
+    const removeSavedEnvironmentSecret = vi.fn().mockResolvedValue(undefined);
     getWindowForTest().desktopBridge = makeDesktopBridge({
       getClientSettings,
       setClientSettings,
+      getSavedEnvironmentRegistry,
+      setSavedEnvironmentRegistry,
+      getSavedEnvironmentSecret,
+      setSavedEnvironmentSecret,
+      removeSavedEnvironmentSecret,
     });
 
     const { createLocalApi } = await import("./localApi");
@@ -723,12 +740,25 @@ describe("wsApi", () => {
 
     await api.persistence.getClientSettings();
     await api.persistence.setClientSettings(clientSettings);
+    await api.persistence.getSavedEnvironmentRegistry();
+    await api.persistence.setSavedEnvironmentRegistry([]);
+    await api.persistence.getSavedEnvironmentSecret(EnvironmentId.make("environment-local"));
+    await api.persistence.setSavedEnvironmentSecret(
+      EnvironmentId.make("environment-local"),
+      "bearer-token",
+    );
+    await api.persistence.removeSavedEnvironmentSecret(EnvironmentId.make("environment-local"));
 
     expect(getClientSettings).toHaveBeenCalledWith();
     expect(setClientSettings).toHaveBeenCalledWith(clientSettings);
+    expect(getSavedEnvironmentRegistry).toHaveBeenCalledWith();
+    expect(setSavedEnvironmentRegistry).toHaveBeenCalledWith([]);
+    expect(getSavedEnvironmentSecret).toHaveBeenCalledWith("environment-local");
+    expect(setSavedEnvironmentSecret).toHaveBeenCalledWith("environment-local", "bearer-token");
+    expect(removeSavedEnvironmentSecret).toHaveBeenCalledWith("environment-local");
   });
 
-  it("falls back to browser client settings and removes legacy saved environments", async () => {
+  it("falls back to browser storage for persistence when the desktop bridge is missing", async () => {
     const { createLocalApi } = await import("./localApi");
     const api = createLocalApi(rpcClientMock as never);
     const clientSettings = {
@@ -757,27 +787,57 @@ describe("wsApi", () => {
       timestampFormat: "24-hour" as const,
     };
 
-    getWindowForTest().localStorage.setItem(
-      "cafe-code:saved-environment-registry:v1",
-      JSON.stringify({ records: [{ environmentId: "environment-local" }] }),
-    );
-    getWindowForTest().sessionStorage.setItem(
-      "cafe-code:saved-environment-session-secrets:v1",
-      JSON.stringify({ secrets: { "environment-local": "bearer-token" } }),
+    await api.persistence.setClientSettings(clientSettings);
+    await api.persistence.setSavedEnvironmentRegistry([
+      {
+        environmentId: EnvironmentId.make("environment-local"),
+        label: "Primary",
+        httpBaseUrl: "http://localhost:3000",
+        wsBaseUrl: "ws://localhost:3000",
+        createdAt: "2026-04-09T00:00:00.000Z",
+        lastConnectedAt: null,
+      },
+    ]);
+    await api.persistence.setSavedEnvironmentSecret(
+      EnvironmentId.make("environment-local"),
+      "bearer-token",
     );
 
-    await api.persistence.setClientSettings(clientSettings);
+    const persistedRegistry = JSON.parse(
+      getWindowForTest().localStorage.getItem("cafe-code:saved-environment-registry:v1") ?? "{}",
+    );
+    expect(persistedRegistry.records?.[0]).not.toHaveProperty("bearerToken");
+    const sessionSecrets = JSON.parse(
+      getWindowForTest().sessionStorage.getItem("cafe-code:saved-environment-session-secrets:v1") ??
+        "{}",
+    );
+    expect(sessionSecrets.secrets).toEqual({
+      "environment-local": "bearer-token",
+    });
 
     await expect(api.persistence.getClientSettings()).resolves.toEqual(clientSettings);
-    expect(getWindowForTest().localStorage.getItem("cafe-code:saved-environment-registry:v1")).toBe(
-      null,
-    );
-    expect(
-      getWindowForTest().sessionStorage.getItem("cafe-code:saved-environment-session-secrets:v1"),
-    ).toBe(null);
+    await expect(api.persistence.getSavedEnvironmentRegistry()).resolves.toEqual([
+      {
+        environmentId: EnvironmentId.make("environment-local"),
+        label: "Primary",
+        httpBaseUrl: "http://localhost:3000",
+        wsBaseUrl: "ws://localhost:3000",
+        createdAt: "2026-04-09T00:00:00.000Z",
+        lastConnectedAt: null,
+      },
+    ]);
+    await expect(
+      api.persistence.getSavedEnvironmentSecret(EnvironmentId.make("environment-local")),
+    ).resolves.toBe("bearer-token");
+
+    await api.persistence.removeSavedEnvironmentSecret(EnvironmentId.make("environment-local"));
+
+    await expect(
+      api.persistence.getSavedEnvironmentSecret(EnvironmentId.make("environment-local")),
+    ).resolves.toBeNull();
   });
 
-  it("removes legacy browser-persisted saved environment bearer tokens", async () => {
+  it("scrubs legacy browser-persisted saved environment bearer tokens", async () => {
     getWindowForTest().localStorage.setItem(
       "cafecode:saved-environment-registry:v1",
       JSON.stringify({
@@ -799,13 +859,26 @@ describe("wsApi", () => {
     const { createLocalApi } = await import("./localApi");
     const api = createLocalApi(rpcClientMock as never);
 
-    await api.persistence.getClientSettings();
+    await expect(api.persistence.getSavedEnvironmentRegistry()).resolves.toEqual([
+      {
+        environmentId: EnvironmentId.make("environment-legacy"),
+        label: "Legacy",
+        httpBaseUrl: "http://localhost:3000",
+        wsBaseUrl: "ws://localhost:3000",
+        createdAt: "2026-04-09T00:00:00.000Z",
+        lastConnectedAt: null,
+      },
+    ]);
+    await expect(
+      api.persistence.getSavedEnvironmentSecret(EnvironmentId.make("environment-legacy")),
+    ).resolves.toBeNull();
 
     expect(getWindowForTest().localStorage.getItem("cafecode:saved-environment-registry:v1")).toBe(
       null,
     );
-    expect(getWindowForTest().localStorage.getItem("cafe-code:saved-environment-registry:v1")).toBe(
-      null,
+    const migratedRegistry = JSON.parse(
+      getWindowForTest().localStorage.getItem("cafe-code:saved-environment-registry:v1") ?? "{}",
     );
+    expect(migratedRegistry.records?.[0]).not.toHaveProperty("bearerToken");
   });
 });

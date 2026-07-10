@@ -4,8 +4,8 @@ import * as Stream from "effect/Stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  __enableInMemoryClientTracingForTests,
   __resetClientTracingForTests,
-  configureClientTracing,
 } from "../observability/clientTracing";
 import {
   getSlowRpcAckRequests,
@@ -284,25 +284,29 @@ describe("WsTransport", () => {
       });
     });
 
+    // The retry policy intentionally waits one second in production. Drive the
+    // Effect clock's host timer explicitly so this unit test does not spend a
+    // real second proving the configured reconnect transition.
+    vi.useFakeTimers();
     socket.close(1012, "service restart");
+    await vi.advanceTimersByTimeAsync(1_000);
 
-    await waitFor(() => {
-      expect(onClose).toHaveBeenCalledWith(
-        {
-          code: 1012,
-          reason: "service restart",
-        },
-        {
-          intentional: false,
-        },
-      );
-      expect(getWsConnectionStatus()).toMatchObject({
-        attemptCount: 2,
-        closeReason: "service restart",
-        phase: "connecting",
-      });
-    }, 2_000);
+    expect(onClose).toHaveBeenCalledWith(
+      {
+        code: 1012,
+        reason: "service restart",
+      },
+      {
+        intentional: false,
+      },
+    );
+    expect(getWsConnectionStatus()).toMatchObject({
+      attemptCount: 2,
+      closeReason: "service restart",
+      phase: "connecting",
+    });
 
+    vi.useRealTimers();
     await transport.dispose();
   });
 
@@ -1205,9 +1209,7 @@ describe("WsTransport", () => {
   });
 
   it("propagates OTLP trace ids for ws transport requests when client tracing is enabled", async () => {
-    await configureClientTracing({
-      exportIntervalMs: 10,
-    });
+    await __enableInMemoryClientTracingForTests();
 
     const transport = createTransport("ws://localhost:3020");
     const requestPromise = transport.request((client) => client[WS_METHODS.serverGetSettings]({}));

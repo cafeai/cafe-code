@@ -1,6 +1,6 @@
 import { defineConfig } from "tsdown";
 
-const internalPackagePrefixes = ["@cafecode/", "effect-acp", "effect-codex-app-server"];
+const internalPackagePrefixes = ["@cafecode/", "effect-codex-app-server"];
 
 export default defineConfig({
   entry: ["src/bin.ts", "src/launcher.ts"],

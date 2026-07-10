@@ -41,7 +41,8 @@
     "prepublishOnly": "node scripts/cli.ts assert-publish-prepared",
     "start": "node dist/bin.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node scripts/test-files.ts"
+    "test": "vitest run",
+    "test:e2e:provider-daemon": "vitest run --config vitest.e2e.config.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.207",
@@ -50,6 +51,7 @@
     "@effect/platform-node": "catalog:",
     "@effect/platform-node-shared": "catalog:",
     "@effect/sql-sqlite-bun": "catalog:",
+    "@opencode-ai/sdk": "^1.17.18",
     "@pierre/diffs": "catalog:",
     "@types/web-push": "^3.6.4",
     "effect": "catalog:",
@@ -66,7 +68,6 @@
     "@effect/vitest": "catalog:",
     "@types/bun": "catalog:",
     "@types/node": "catalog:",
-    "effect-acp": "workspace:*",
     "effect-codex-app-server": "workspace:*",
     "tsdown": "catalog:",
     "typescript": "catalog:",

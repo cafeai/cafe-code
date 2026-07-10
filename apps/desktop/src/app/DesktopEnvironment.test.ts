@@ -70,6 +70,10 @@ describe("DesktopEnvironment", () => {
         path.join(environment.stateDir, "client-settings.json"),
       );
       assert.equal(
+        environment.savedEnvironmentRegistryPath,
+        path.join(environment.stateDir, "saved-environments.json"),
+      );
+      assert.equal(
         environment.serverSettingsPath,
         path.join(environment.stateDir, "settings.json"),
       );
