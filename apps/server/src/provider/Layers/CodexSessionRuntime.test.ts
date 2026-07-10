@@ -26,6 +26,8 @@ import {
   openCodexThread,
   readCodexExpectedActiveTurnMismatchActualTurnId,
   readCodexSteerExpectedTurnMismatchActualTurnId,
+  rememberCodexChildConversationTurns,
+  resolveCodexChildConversationNotification,
   selectCodexActiveSnapshotTurn,
   summarizeCodexAppServerChildProcesses,
   updateCodexActiveContextCompactions,
@@ -81,6 +83,93 @@ describe("codex elapsed watchdog scheduling", () => {
       }),
       0,
     );
+  });
+});
+
+describe("Codex child conversation routing", () => {
+  it("routes multi-agent-v2 child output to the parent without forwarding child lifecycle", () => {
+    const parentTurnId = TurnId.make("turn-parent");
+    const routes = new Map<string, TurnId>();
+
+    rememberCodexChildConversationTurns(
+      routes,
+      {
+        method: "item/completed",
+        params: {
+          threadId: "thread-parent",
+          turnId: "turn-parent",
+          item: {
+            type: "subAgentActivity",
+            id: "subagent-activity-1",
+            kind: "started",
+            agentThreadId: "thread-child",
+            agentPath: "workers/audit",
+          },
+        },
+      },
+      parentTurnId,
+    );
+
+    assert.equal(routes.get("thread-child"), parentTurnId);
+    assert.deepStrictEqual(
+      resolveCodexChildConversationNotification(routes, {
+        method: "turn/started",
+        params: {
+          threadId: "thread-child",
+          turn: {
+            id: "turn-child",
+            status: "inProgress",
+          },
+        },
+      }),
+      {
+        parentTurnId,
+        suppressLifecycle: true,
+      },
+    );
+    assert.deepStrictEqual(
+      resolveCodexChildConversationNotification(routes, {
+        method: "item/agentMessage/delta",
+        params: {
+          threadId: "thread-child",
+          turnId: "turn-child",
+          itemId: "message-child",
+          delta: "progress",
+        },
+      }),
+      {
+        parentTurnId,
+        suppressLifecycle: false,
+      },
+    );
+  });
+
+  it("keeps nested subagent output on the original visible parent turn", () => {
+    const parentTurnId = TurnId.make("turn-parent");
+    const routes = new Map<string, TurnId>([["thread-child", parentTurnId]]);
+    const nestedActivity = {
+      method: "item/completed",
+      params: {
+        threadId: "thread-child",
+        turnId: "turn-child",
+        item: {
+          type: "subAgentActivity",
+          id: "subagent-activity-2",
+          kind: "started",
+          agentThreadId: "thread-grandchild",
+          agentPath: "workers/nested-audit",
+        },
+      },
+    };
+    const childRoute = resolveCodexChildConversationNotification(routes, nestedActivity);
+
+    rememberCodexChildConversationTurns(
+      routes,
+      nestedActivity,
+      childRoute?.parentTurnId ?? TurnId.make("turn-child"),
+    );
+
+    assert.equal(routes.get("thread-grandchild"), parentTurnId);
   });
 });
 

@@ -562,7 +562,8 @@ function toCanonicalItemType(raw: string | undefined | null): CanonicalItemType 
     return "file_change";
   if (type.includes("mcp")) return "mcp_tool_call";
   if (type.includes("dynamic tool")) return "dynamic_tool_call";
-  if (type.includes("collab")) return "collab_agent_tool_call";
+  if (type.includes("collab") || type.includes("sub agent activity"))
+    return "collab_agent_tool_call";
   if (type.includes("web search")) return "web_search";
   if (type.includes("image")) return "image_view";
   if (type.includes("review entered")) return "review_entered";
@@ -590,6 +591,8 @@ function itemTitle(itemType: CanonicalItemType): string | undefined {
       return "MCP tool call";
     case "dynamic_tool_call":
       return "Tool call";
+    case "collab_agent_tool_call":
+      return "Subagent task";
     case "web_search":
       return "Web search";
     case "image_view":
@@ -604,6 +607,17 @@ function itemTitle(itemType: CanonicalItemType): string | undefined {
 }
 
 function itemDetail(item: CodexLifecycleItem): string | undefined {
+  if (item.type === "subAgentActivity") {
+    const action =
+      item.kind === "started"
+        ? "Started"
+        : item.kind === "interacted"
+          ? "Interacted with"
+          : "Interrupted";
+    const agentPath = trimText(item.agentPath);
+    return agentPath ? `${action} ${agentPath}` : action;
+  }
+
   const candidates = [
     "command" in item ? item.command : undefined,
     "title" in item ? item.title : undefined,

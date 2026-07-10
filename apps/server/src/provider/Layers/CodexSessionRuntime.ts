@@ -1431,8 +1431,8 @@ function readRouteFields(notification: CodexServerNotification): {
   }
 }
 
-function rememberCollabReceiverTurns(
-  collabReceiverTurns: Map<string, TurnId>,
+export function rememberCodexChildConversationTurns(
+  childConversationTurns: Map<string, TurnId>,
   notification: CodexServerNotification,
   parentTurnId: TurnId | undefined,
 ): void {
@@ -1446,16 +1446,29 @@ function rememberCollabReceiverTurns(
 
   const params = readRecord(notification.params);
   const item = params ? readRecord(params.item) : undefined;
-  if (item?.type !== "collabAgentToolCall") {
+  if (!item) {
     return;
   }
 
-  const receiverThreadIds = Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds : [];
-  for (const receiverThreadId of receiverThreadIds) {
-    if (typeof receiverThreadId !== "string") {
+  // Upstream Codex TUI 0.144.1 records both multi-agent protocol shapes in
+  // `AgentNavigationState`: legacy collab tool calls identify receivers through
+  // `receiverThreadIds`, while multi_agents_v2 emits a completed
+  // `subAgentActivity` item with the new child's `agentThreadId` immediately
+  // before that child emits `turn/started`. Cafe presents one aggregate thread
+  // instead of separate TUI channels, so retain the same relationship here and
+  // route descendant output back to the initiating Cafe turn.
+  const childThreadIds =
+    item.type === "subAgentActivity"
+      ? [item.agentThreadId]
+      : item.type === "collabAgentToolCall" && Array.isArray(item.receiverThreadIds)
+        ? item.receiverThreadIds
+        : [];
+
+  for (const childThreadId of childThreadIds) {
+    if (typeof childThreadId !== "string" || childThreadId.length === 0) {
       continue;
     }
-    collabReceiverTurns.set(receiverThreadId, parentTurnId);
+    childConversationTurns.set(childThreadId, parentTurnId);
   }
 }
 
@@ -1474,6 +1487,27 @@ function shouldSuppressChildConversationNotification(method: string): boolean {
     method === "turn/plan/updated" ||
     method === "item/plan/delta"
   );
+}
+
+export function resolveCodexChildConversationNotification(
+  childConversationTurns: ReadonlyMap<string, TurnId>,
+  notification: CodexServerNotification,
+):
+  | {
+      readonly parentTurnId: TurnId;
+      readonly suppressLifecycle: boolean;
+    }
+  | undefined {
+  const providerConversationId = readNotificationThreadId(notification);
+  const parentTurnId = providerConversationId
+    ? childConversationTurns.get(providerConversationId)
+    : undefined;
+  return parentTurnId
+    ? {
+        parentTurnId,
+        suppressLifecycle: shouldSuppressChildConversationNotification(notification.method),
+      }
+    : undefined;
 }
 
 export function readCodexExpectedActiveTurnMismatchActualTurnId(
@@ -3068,24 +3102,27 @@ export const makeCodexSessionRuntime = (
 
         const payload = notification.params;
         const route = readRouteFields(notification);
-        yield* markTurnStartNotification(notification, route.turnId);
         const collabReceiverTurns = yield* Ref.get(collabReceiverTurnsRef);
-        const childParentTurnId = (() => {
-          const providerConversationId = readNotificationThreadId(notification);
-          return providerConversationId
-            ? collabReceiverTurns.get(providerConversationId)
-            : undefined;
-        })();
+        const childRoute = resolveCodexChildConversationNotification(
+          collabReceiverTurns,
+          notification,
+        );
+        const routedTurnId = childRoute?.parentTurnId ?? route.turnId;
 
-        rememberCollabReceiverTurns(collabReceiverTurns, notification, route.turnId);
-        if (childParentTurnId && shouldSuppressChildConversationNotification(notification.method)) {
+        // Use the already-routed parent turn when a subagent creates another
+        // subagent. This keeps arbitrary-depth multi-agent output attached to
+        // the original visible Cafe turn instead of manufacturing child turns
+        // that can terminalize the primary conversation.
+        rememberCodexChildConversationTurns(collabReceiverTurns, notification, routedTurnId);
+        if (childRoute?.suppressLifecycle) {
           yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
           return;
         }
+        yield* markTurnStartNotification(notification, routedTurnId);
 
         let requestId: ApprovalRequestId | undefined;
         let requestKind: ProviderRequestKind | undefined;
-        let turnId = childParentTurnId ?? route.turnId;
+        let turnId = routedTurnId;
         let itemId = route.itemId;
 
         if (notification.method === "serverRequest/resolved") {

@@ -538,6 +538,50 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("maps Codex multi-agent-v2 activity into the parent work log", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-subagent-activity"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/completed",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-parent"),
+        itemId: asItemId("subagent-activity-1"),
+        payload: {
+          completedAtMs: 1_778_000_000_000,
+          threadId: "provider-thread-1",
+          turnId: "turn-parent",
+          item: {
+            type: "subAgentActivity",
+            id: "subagent-activity-1",
+            kind: "started",
+            agentThreadId: "provider-thread-child",
+            agentPath: "workers/audit",
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      assert.equal(firstEvent.value.type, "item.completed");
+      if (firstEvent.value.type !== "item.completed") {
+        return;
+      }
+      assert.equal(firstEvent.value.turnId, "turn-parent");
+      assert.equal(firstEvent.value.payload.itemType, "collab_agent_tool_call");
+      assert.equal(firstEvent.value.payload.title, "Subagent task");
+      assert.equal(firstEvent.value.payload.detail, "Started workers/audit");
+    }),
+  );
+
   it.effect("bounds large turn diff updates before they enter the canonical runtime stream", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
