@@ -103,40 +103,49 @@ describe("Codex child conversation routing", () => {
             id: "subagent-activity-1",
             kind: "started",
             agentThreadId: "thread-child",
-            agentPath: "workers/audit",
+            agentPath: "/root/workers/audit",
           },
         },
       },
       parentTurnId,
+      "thread-parent",
     );
 
     assert.equal(routes.get("thread-child"), parentTurnId);
     assert.deepStrictEqual(
-      resolveCodexChildConversationNotification(routes, {
-        method: "turn/started",
-        params: {
-          threadId: "thread-child",
-          turn: {
-            id: "turn-child",
-            status: "inProgress",
+      resolveCodexChildConversationNotification(
+        routes,
+        {
+          method: "turn/started",
+          params: {
+            threadId: "thread-child",
+            turn: {
+              id: "turn-child",
+              status: "inProgress",
+            },
           },
         },
-      }),
+        "thread-parent",
+      ),
       {
         parentTurnId,
         suppressLifecycle: true,
       },
     );
     assert.deepStrictEqual(
-      resolveCodexChildConversationNotification(routes, {
-        method: "item/agentMessage/delta",
-        params: {
-          threadId: "thread-child",
-          turnId: "turn-child",
-          itemId: "message-child",
-          delta: "progress",
+      resolveCodexChildConversationNotification(
+        routes,
+        {
+          method: "item/agentMessage/delta",
+          params: {
+            threadId: "thread-child",
+            turnId: "turn-child",
+            itemId: "message-child",
+            delta: "progress",
+          },
         },
-      }),
+        "thread-parent",
+      ),
       {
         parentTurnId,
         suppressLifecycle: false,
@@ -157,7 +166,7 @@ describe("Codex child conversation routing", () => {
           id: "subagent-activity-2",
           kind: "started",
           agentThreadId: "thread-grandchild",
-          agentPath: "workers/nested-audit",
+          agentPath: "/root/workers/nested-audit",
         },
       },
     };
@@ -167,9 +176,59 @@ describe("Codex child conversation routing", () => {
       routes,
       nestedActivity,
       childRoute?.parentTurnId ?? TurnId.make("turn-child"),
+      "thread-parent",
     );
 
     assert.equal(routes.get("thread-grandchild"), parentTurnId);
+  });
+
+  it("does not reverse-route the primary thread when a child interacts with root", () => {
+    const parentTurnId = TurnId.make("turn-parent");
+    const routes = new Map<string, TurnId>([
+      ["thread-child", parentTurnId],
+      // Reproduce the poisoned state created by the older implementation so
+      // the regression also proves that processing later activity heals it.
+      ["thread-parent", TurnId.make("turn-stale")],
+    ]);
+
+    rememberCodexChildConversationTurns(
+      routes,
+      {
+        method: "item/completed",
+        params: {
+          threadId: "thread-child",
+          turnId: "turn-child",
+          item: {
+            type: "subAgentActivity",
+            id: "subagent-activity-to-root",
+            kind: "interacted",
+            agentThreadId: "thread-parent",
+            agentPath: "/root",
+          },
+        },
+      },
+      parentTurnId,
+      "thread-parent",
+    );
+
+    assert.equal(routes.has("thread-parent"), false);
+    assert.equal(routes.get("thread-child"), parentTurnId);
+    assert.equal(
+      resolveCodexChildConversationNotification(
+        routes,
+        {
+          method: "item/agentMessage/delta",
+          params: {
+            threadId: "thread-parent",
+            turnId: "turn-current",
+            itemId: "message-root",
+            delta: "root output",
+          },
+        },
+        "thread-parent",
+      ),
+      undefined,
+    );
   });
 });
 

@@ -915,6 +915,150 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  it("keeps interleaved Codex root and subagent assistant streams isolated", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-multi-agent-interleaved");
+    const rootItemId = asItemId("item-root-message");
+    const childItemId = asItemId("item-child-message");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-multi-agent-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      createdAt: now,
+      turnId,
+    });
+
+    const emitDelta = (input: {
+      readonly eventId: string;
+      readonly providerThreadId: string;
+      readonly itemId: ReturnType<typeof asItemId>;
+      readonly delta: string;
+    }) => {
+      harness.emit({
+        type: "content.delta",
+        eventId: asEventId(input.eventId),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        createdAt: now,
+        turnId,
+        itemId: input.itemId,
+        providerRefs: {
+          providerTurnId: "provider-parent-turn",
+          providerItemId: input.itemId,
+        },
+        raw: {
+          source: "codex.app-server.notification",
+          method: "item/agentMessage/delta",
+          payload: {
+            threadId: input.providerThreadId,
+            turnId: "provider-parent-turn",
+            itemId: input.itemId,
+            delta: input.delta,
+          },
+        },
+        payload: {
+          streamKind: "assistant_text",
+          delta: input.delta,
+        },
+      });
+    };
+
+    emitDelta({
+      eventId: "evt-root-delta-1",
+      providerThreadId: "provider-root-thread",
+      itemId: rootItemId,
+      delta: "Under",
+    });
+    emitDelta({
+      eventId: "evt-child-delta-1",
+      providerThreadId: "provider-child-thread",
+      itemId: childItemId,
+      delta: "Child",
+    });
+    emitDelta({
+      eventId: "evt-root-delta-2",
+      providerThreadId: "provider-root-thread",
+      itemId: rootItemId,
+      delta: "stood",
+    });
+    emitDelta({
+      eventId: "evt-child-delta-2",
+      providerThreadId: "provider-child-thread",
+      itemId: childItemId,
+      delta: " progress",
+    });
+
+    for (const completion of [
+      {
+        eventId: "evt-root-completed",
+        providerThreadId: "provider-root-thread",
+        itemId: rootItemId,
+        text: "Understood",
+      },
+      {
+        eventId: "evt-child-completed",
+        providerThreadId: "provider-child-thread",
+        itemId: childItemId,
+        text: "Child progress",
+      },
+    ]) {
+      harness.emit({
+        type: "item.completed",
+        eventId: asEventId(completion.eventId),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        createdAt: now,
+        turnId,
+        itemId: completion.itemId,
+        providerRefs: {
+          providerTurnId: "provider-parent-turn",
+          providerItemId: completion.itemId,
+        },
+        raw: {
+          source: "codex.app-server.notification",
+          method: "item/completed",
+          payload: {
+            threadId: completion.providerThreadId,
+            turnId: "provider-parent-turn",
+            item: {
+              type: "agentMessage",
+              id: completion.itemId,
+              text: completion.text,
+            },
+          },
+        },
+        payload: {
+          itemType: "assistant_message",
+          status: "completed",
+          detail: completion.text,
+        },
+      });
+    }
+
+    const thread = await waitForThread(harness.readModel, (entry) => {
+      const root = entry.messages.find(
+        (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-root-message",
+      );
+      const child = entry.messages.find(
+        (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-child-message",
+      );
+      return root?.streaming === false && child?.streaming === false;
+    });
+    const root = thread.messages.find(
+      (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-root-message",
+    );
+    const child = thread.messages.find(
+      (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-child-message",
+    );
+
+    expect(root?.text).toBe("Understood");
+    expect(child?.text).toBe("Child progress");
+  });
+
   it("deduplicates replayed streaming provider runtime events", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

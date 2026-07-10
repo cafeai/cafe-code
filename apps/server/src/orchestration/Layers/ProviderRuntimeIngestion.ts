@@ -77,6 +77,10 @@ interface AssistantSegmentState {
   activeMessageId: MessageId | null;
 }
 
+interface AssistantTurnSegmentState {
+  readonly channels: ReadonlyMap<string, AssistantSegmentState>;
+}
+
 const TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY = 10_000;
 const TURN_MESSAGE_IDS_BY_TURN_TTL = Duration.minutes(120);
 const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_CACHE_CAPACITY = 20_000;
@@ -277,6 +281,24 @@ function assistantSegmentBaseKeyFromEvent(event: ProviderRuntimeEvent): string {
 
 function assistantSegmentHasStableItemKey(event: ProviderRuntimeEvent): boolean {
   return event.itemId !== undefined;
+}
+
+function assistantSegmentChannelKeyFromEvent(event: ProviderRuntimeEvent): string {
+  const rawPayload = event.raw?.payload;
+  if (typeof rawPayload === "object" && rawPayload !== null && !Array.isArray(rawPayload)) {
+    const providerThreadId = Reflect.get(rawPayload, "threadId");
+    // Native provider conversation ids are small opaque identifiers. Bound the
+    // value before using it as a cache key so a malformed or adversarial
+    // provider event cannot retain an unbounded string in hot ingestion state.
+    if (
+      typeof providerThreadId === "string" &&
+      providerThreadId.length > 0 &&
+      providerThreadId.length <= 256
+    ) {
+      return `${event.provider}:${providerThreadId}`;
+    }
+  }
+  return `${event.provider}:primary`;
 }
 
 function assistantSegmentMessageId(baseKey: string, segmentIndex: number): MessageId {
@@ -840,7 +862,7 @@ const make = Effect.gen(function* () {
     lookup: () => Effect.succeed(true),
   });
 
-  const assistantSegmentStateByTurnKey = yield* Cache.make<string, AssistantSegmentState>({
+  const assistantSegmentStateByTurnKey = yield* Cache.make<string, AssistantTurnSegmentState>({
     capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
     timeToLive: TURN_MESSAGE_IDS_BY_TURN_TTL,
     lookup: () =>
@@ -917,20 +939,88 @@ const make = Effect.gen(function* () {
   const clearAssistantMessageIdsForTurn = (threadId: ThreadId, turnId: TurnId) =>
     Cache.invalidate(turnMessageIdsByTurnKey, providerTurnKey(threadId, turnId));
 
-  const getAssistantSegmentStateForTurn = (threadId: ThreadId, turnId: TurnId) =>
+  const getAssistantTurnSegmentState = (threadId: ThreadId, turnId: TurnId) =>
     Cache.getOption(assistantSegmentStateByTurnKey, providerTurnKey(threadId, turnId));
 
-  const setAssistantSegmentStateForTurn = (
+  const getAssistantSegmentStateForEvent = (
     threadId: ThreadId,
     turnId: TurnId,
+    event: ProviderRuntimeEvent,
+  ) =>
+    getAssistantTurnSegmentState(threadId, turnId).pipe(
+      Effect.map((turnState) =>
+        Option.flatMap(turnState, (entry) => {
+          const state = entry.channels.get(assistantSegmentChannelKeyFromEvent(event));
+          return state === undefined ? Option.none<AssistantSegmentState>() : Option.some(state);
+        }),
+      ),
+    );
+
+  const getActiveAssistantSegmentsForTurn = (threadId: ThreadId, turnId: TurnId) =>
+    getAssistantTurnSegmentState(threadId, turnId).pipe(
+      Effect.map((turnState) =>
+        Option.match(turnState, {
+          onNone: () => [] as ReadonlyArray<readonly [string, AssistantSegmentState]>,
+          onSome: (entry) =>
+            Array.from(entry.channels.entries()).filter(
+              (candidate): candidate is [string, AssistantSegmentState] =>
+                candidate[1].activeMessageId !== null,
+            ),
+        }),
+      ),
+    );
+
+  const setAssistantSegmentStateForEvent = (
+    threadId: ThreadId,
+    turnId: TurnId,
+    event: ProviderRuntimeEvent,
     state: AssistantSegmentState,
-  ) => Cache.set(assistantSegmentStateByTurnKey, providerTurnKey(threadId, turnId), state);
+  ) =>
+    getAssistantTurnSegmentState(threadId, turnId).pipe(
+      Effect.flatMap((existingState) => {
+        const channels = new Map(
+          Option.match(existingState, {
+            onNone: () => [] as ReadonlyArray<readonly [string, AssistantSegmentState]>,
+            onSome: (entry) => entry.channels,
+          }),
+        );
+        channels.set(assistantSegmentChannelKeyFromEvent(event), state);
+        return Cache.set(assistantSegmentStateByTurnKey, providerTurnKey(threadId, turnId), {
+          channels,
+        });
+      }),
+    );
+
+  const setAssistantSegmentStateForChannel = (
+    threadId: ThreadId,
+    turnId: TurnId,
+    channelKey: string,
+    state: AssistantSegmentState,
+  ) =>
+    getAssistantTurnSegmentState(threadId, turnId).pipe(
+      Effect.flatMap((existingState) => {
+        const channels = new Map(
+          Option.match(existingState, {
+            onNone: () => [] as ReadonlyArray<readonly [string, AssistantSegmentState]>,
+            onSome: (entry) => entry.channels,
+          }),
+        );
+        channels.set(channelKey, state);
+        return Cache.set(assistantSegmentStateByTurnKey, providerTurnKey(threadId, turnId), {
+          channels,
+        });
+      }),
+    );
 
   const clearAssistantSegmentStateForTurn = (threadId: ThreadId, turnId: TurnId) =>
     Cache.invalidate(assistantSegmentStateByTurnKey, providerTurnKey(threadId, turnId));
 
-  const getActiveAssistantMessageIdForTurn = (threadId: ThreadId, turnId: TurnId) =>
-    getAssistantSegmentStateForTurn(threadId, turnId).pipe(
+  const getActiveAssistantMessageIdForEvent = (
+    threadId: ThreadId,
+    turnId: TurnId,
+    event: ProviderRuntimeEvent,
+  ) =>
+    getAssistantSegmentStateForEvent(threadId, turnId, event).pipe(
       Effect.map((state) =>
         Option.flatMap(state, (entry) =>
           entry.activeMessageId ? Option.some(entry.activeMessageId) : Option.none(),
@@ -943,7 +1033,7 @@ const make = Effect.gen(function* () {
     turnId: TurnId,
     event: ProviderRuntimeEvent,
   ) =>
-    getAssistantSegmentStateForTurn(threadId, turnId).pipe(
+    getAssistantSegmentStateForEvent(threadId, turnId, event).pipe(
       Effect.map((state) =>
         Option.flatMap(state, (entry) => {
           if (!entry.activeMessageId) {
@@ -965,8 +1055,9 @@ const make = Effect.gen(function* () {
     threadId: ThreadId;
     turnId: TurnId;
     baseKey: string;
+    event: ProviderRuntimeEvent;
   }) =>
-    getAssistantSegmentStateForTurn(input.threadId, input.turnId).pipe(
+    getAssistantSegmentStateForEvent(input.threadId, input.turnId, input.event).pipe(
       Effect.flatMap((existingState) =>
         Effect.gen(function* () {
           const nextState = Option.match(existingState, {
@@ -985,7 +1076,12 @@ const make = Effect.gen(function* () {
               } satisfies AssistantSegmentState;
             },
           });
-          yield* setAssistantSegmentStateForTurn(input.threadId, input.turnId, nextState);
+          yield* setAssistantSegmentStateForEvent(
+            input.threadId,
+            input.turnId,
+            input.event,
+            nextState,
+          );
           return nextState.activeMessageId!;
         }),
       ),
@@ -1001,12 +1097,17 @@ const make = Effect.gen(function* () {
         return assistantSegmentMessageId(assistantSegmentBaseKeyFromEvent(input.event), 0);
       }
 
-      const activeMessageId = yield* getActiveAssistantMessageIdForTurn(
+      const activeMessageId = yield* getActiveAssistantMessageIdForEvent(
         input.threadId,
         input.turnId,
+        input.event,
       );
       if (Option.isSome(activeMessageId)) {
-        const state = yield* getAssistantSegmentStateForTurn(input.threadId, input.turnId);
+        const state = yield* getAssistantSegmentStateForEvent(
+          input.threadId,
+          input.turnId,
+          input.event,
+        );
         const incomingBaseKey = assistantSegmentBaseKeyFromEvent(input.event);
         if (
           Option.isSome(state) &&
@@ -1021,6 +1122,7 @@ const make = Effect.gen(function* () {
         threadId: input.threadId,
         turnId: input.turnId,
         baseKey: assistantSegmentBaseKeyFromEvent(input.event),
+        event: input.event,
       });
     });
 
@@ -1238,35 +1340,36 @@ const make = Effect.gen(function* () {
     flushedMessageIds?: ReadonlySet<MessageId>;
   }) =>
     Effect.gen(function* () {
-      const activeMessageId = yield* getActiveAssistantMessageIdForTurn(
-        input.threadId,
-        input.turnId,
+      const activeSegments = yield* getActiveAssistantSegmentsForTurn(input.threadId, input.turnId);
+      yield* Effect.forEach(
+        activeSegments,
+        ([channelKey, state]) => {
+          const activeMessageId = state.activeMessageId;
+          if (!activeMessageId) {
+            return Effect.void;
+          }
+          return Effect.gen(function* () {
+            yield* finalizeAssistantMessage({
+              event: input.event,
+              threadId: input.threadId,
+              messageId: activeMessageId,
+              turnId: input.turnId,
+              createdAt: input.createdAt,
+              commandTag: input.commandTag,
+              finalDeltaCommandTag: input.finalDeltaCommandTag,
+              hasProjectedMessage:
+                input.hasProjectedMessage ||
+                (input.flushedMessageIds?.has(activeMessageId) ?? false),
+            });
+            yield* forgetAssistantMessageId(input.threadId, input.turnId, activeMessageId);
+            yield* setAssistantSegmentStateForChannel(input.threadId, input.turnId, channelKey, {
+              ...state,
+              activeMessageId: null,
+            });
+          });
+        },
+        { concurrency: 1, discard: true },
       );
-      if (Option.isNone(activeMessageId)) {
-        return;
-      }
-
-      yield* finalizeAssistantMessage({
-        event: input.event,
-        threadId: input.threadId,
-        messageId: activeMessageId.value,
-        turnId: input.turnId,
-        createdAt: input.createdAt,
-        commandTag: input.commandTag,
-        finalDeltaCommandTag: input.finalDeltaCommandTag,
-        hasProjectedMessage:
-          input.hasProjectedMessage ||
-          (input.flushedMessageIds?.has(activeMessageId.value) ?? false),
-      });
-      yield* forgetAssistantMessageId(input.threadId, input.turnId, activeMessageId.value);
-
-      const state = yield* getAssistantSegmentStateForTurn(input.threadId, input.turnId);
-      if (Option.isSome(state)) {
-        yield* setAssistantSegmentStateForTurn(input.threadId, input.turnId, {
-          ...state.value,
-          activeMessageId: null,
-        });
-      }
     });
 
   const finalizeActiveAssistantSegmentBeforeItemSwitch = (input: {
@@ -1280,7 +1383,11 @@ const make = Effect.gen(function* () {
         return;
       }
 
-      const state = yield* getAssistantSegmentStateForTurn(input.threadId, input.turnId);
+      const state = yield* getAssistantSegmentStateForEvent(
+        input.threadId,
+        input.turnId,
+        input.event,
+      );
       if (
         Option.isNone(state) ||
         !state.value.activeMessageId ||
@@ -1958,12 +2065,12 @@ const make = Effect.gen(function* () {
         }
 
         if (turnId) {
-          const state = yield* getAssistantSegmentStateForTurn(thread.id, turnId);
+          const state = yield* getAssistantSegmentStateForEvent(thread.id, turnId, event);
           if (
             Option.isSome(state) &&
             state.value.baseKey === assistantSegmentBaseKeyFromEvent(event)
           ) {
-            yield* setAssistantSegmentStateForTurn(thread.id, turnId, {
+            yield* setAssistantSegmentStateForEvent(thread.id, turnId, event, {
               ...state.value,
               activeMessageId: null,
             });

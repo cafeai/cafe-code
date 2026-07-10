@@ -1435,7 +1435,17 @@ export function rememberCodexChildConversationTurns(
   childConversationTurns: Map<string, TurnId>,
   notification: CodexServerNotification,
   parentTurnId: TurnId | undefined,
+  rootProviderThreadId?: string,
 ): void {
+  // A child can send input back to `/root`. In multi_agents_v2 that produces a
+  // `subAgentActivity` whose `agentThreadId` is the primary thread, not a new
+  // child. Never let that reverse edge poison the child routing table. Remove
+  // an inherited bad entry as well so a live runtime can self-heal if an older
+  // event shape was interpreted incorrectly.
+  if (rootProviderThreadId) {
+    childConversationTurns.delete(rootProviderThreadId);
+  }
+
   if (!parentTurnId) {
     return;
   }
@@ -1457,8 +1467,10 @@ export function rememberCodexChildConversationTurns(
   // before that child emits `turn/started`. Cafe presents one aggregate thread
   // instead of separate TUI channels, so retain the same relationship here and
   // route descendant output back to the initiating Cafe turn.
+  const normalizedAgentPath =
+    typeof item.agentPath === "string" ? item.agentPath.trim().replace(/\/+$/, "") : undefined;
   const childThreadIds =
-    item.type === "subAgentActivity"
+    item.type === "subAgentActivity" && normalizedAgentPath !== "/root"
       ? [item.agentThreadId]
       : item.type === "collabAgentToolCall" && Array.isArray(item.receiverThreadIds)
         ? item.receiverThreadIds
@@ -1466,6 +1478,9 @@ export function rememberCodexChildConversationTurns(
 
   for (const childThreadId of childThreadIds) {
     if (typeof childThreadId !== "string" || childThreadId.length === 0) {
+      continue;
+    }
+    if (rootProviderThreadId && childThreadId === rootProviderThreadId) {
       continue;
     }
     childConversationTurns.set(childThreadId, parentTurnId);
@@ -1492,6 +1507,7 @@ function shouldSuppressChildConversationNotification(method: string): boolean {
 export function resolveCodexChildConversationNotification(
   childConversationTurns: ReadonlyMap<string, TurnId>,
   notification: CodexServerNotification,
+  rootProviderThreadId?: string,
 ):
   | {
       readonly parentTurnId: TurnId;
@@ -1499,6 +1515,9 @@ export function resolveCodexChildConversationNotification(
     }
   | undefined {
   const providerConversationId = readNotificationThreadId(notification);
+  if (providerConversationId && providerConversationId === rootProviderThreadId) {
+    return undefined;
+  }
   const parentTurnId = providerConversationId
     ? childConversationTurns.get(providerConversationId)
     : undefined;
@@ -3102,10 +3121,12 @@ export const makeCodexSessionRuntime = (
 
         const payload = notification.params;
         const route = readRouteFields(notification);
+        const rootProviderThreadId = yield* currentSessionProviderThreadId;
         const collabReceiverTurns = yield* Ref.get(collabReceiverTurnsRef);
         const childRoute = resolveCodexChildConversationNotification(
           collabReceiverTurns,
           notification,
+          rootProviderThreadId,
         );
         const routedTurnId = childRoute?.parentTurnId ?? route.turnId;
 
@@ -3113,7 +3134,12 @@ export const makeCodexSessionRuntime = (
         // subagent. This keeps arbitrary-depth multi-agent output attached to
         // the original visible Cafe turn instead of manufacturing child turns
         // that can terminalize the primary conversation.
-        rememberCodexChildConversationTurns(collabReceiverTurns, notification, routedTurnId);
+        rememberCodexChildConversationTurns(
+          collabReceiverTurns,
+          notification,
+          routedTurnId,
+          rootProviderThreadId,
+        );
         if (childRoute?.suppressLifecycle) {
           yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
           return;
