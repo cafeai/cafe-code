@@ -141,6 +141,27 @@ describe("DesktopShellEnvironment", () => {
     }),
   );
 
+  it.effect("does not import Linux desktop data directories on macOS", () =>
+    Effect.gen(function* () {
+      const env: NodeJS.ProcessEnv = {
+        SHELL: "/bin/zsh",
+        PATH: "/usr/bin",
+      };
+
+      yield* runShellEnvironment({
+        env,
+        platform: "darwin",
+        handler: () =>
+          envOutput({
+            PATH: "/opt/homebrew/bin:/usr/bin",
+            XDG_DATA_DIRS: "/linux-only/applications:/usr/share",
+          }),
+      });
+
+      assert.isUndefined(env.XDG_DATA_DIRS);
+    }),
+  );
+
   it.effect("hydrates PATH and missing POSIX values from the login shell on linux", () =>
     Effect.gen(function* () {
       const env: NodeJS.ProcessEnv = {
@@ -156,12 +177,18 @@ describe("DesktopShellEnvironment", () => {
             PATH: "/home/linuxbrew/.linuxbrew/bin:/usr/bin",
             SSH_AUTH_SOCK: "/tmp/secretive.sock",
             TERMINAL: "alacritty",
+            XDG_DATA_DIRS:
+              "/home/test/.local/share/flatpak/exports/share:/var/lib/flatpak/exports/share:/usr/share",
           }),
       });
 
       assert.equal(env.PATH, "/home/linuxbrew/.linuxbrew/bin:/usr/bin");
       assert.equal(env.SSH_AUTH_SOCK, "/tmp/secretive.sock");
       assert.equal(env.TERMINAL, "alacritty");
+      assert.equal(
+        env.XDG_DATA_DIRS,
+        "/home/test/.local/share/flatpak/exports/share:/var/lib/flatpak/exports/share:/usr/share",
+      );
     }),
   );
 

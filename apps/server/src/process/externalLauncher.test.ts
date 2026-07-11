@@ -630,6 +630,24 @@ it("resolveBrowserLaunch maps default browser launchers by platform", () => {
   });
 });
 
+it("removes the Cafe AppImage runtime from Linux browser launches", () => {
+  const appDir = "/tmp/.mount_cafe-code";
+  const launch = resolveBrowserLaunch("https://example.com", "linux", {
+    APPDIR: appDir,
+    APPIMAGE: "/opt/cafe-code/cafe-code.AppImage",
+    ELECTRON_RUN_AS_NODE: "1",
+    PATH: `${appDir}:${appDir}/usr/sbin:/usr/bin`,
+    LD_LIBRARY_PATH: `${appDir}/usr/lib`,
+    XDG_DATA_DIRS: `${appDir}/usr/share/:/usr/share`,
+  });
+
+  assert.deepEqual(launch.options.env, {
+    PATH: "/usr/bin",
+    XDG_DATA_DIRS: "/usr/share",
+  });
+  assert.equal(launch.options.extendEnv, false);
+});
+
 it("resolveBrowserLaunch opens through Windows from WSL when not remote", () => {
   const launch = resolveBrowserLaunch("https://example.com", "linux", {
     WSL_DISTRO_NAME: "Ubuntu",
@@ -840,11 +858,14 @@ it("resolveEditorProcessLaunch keeps hostile Windows paths as argv data", () => 
 
 it("resolveTerminalProcessLaunch keeps hostile Windows paths as cwd data", () => {
   const hostilePath = String.raw`C:\work\file" & calc.exe & ".ts`;
-  const launch = resolveTerminalProcessLaunch({
-    command: "powershell.exe",
-    args: ["-NoExit"],
-    cwd: hostilePath,
-  });
+  const launch = resolveTerminalProcessLaunch(
+    {
+      command: "powershell.exe",
+      args: ["-NoExit"],
+      cwd: hostilePath,
+    },
+    "win32",
+  );
 
   assert.equal(launch.command, "powershell.exe");
   assert.deepEqual(launch.args, ["-NoExit"]);

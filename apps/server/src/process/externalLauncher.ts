@@ -14,7 +14,11 @@ import {
   type LaunchTerminalInput,
   type TerminalAvailability,
 } from "@cafecode/contracts";
-import { isCommandAvailable, type CommandAvailabilityOptions } from "@cafecode/shared/shell";
+import {
+  hostDesktopLaunchEnvironment,
+  isCommandAvailable,
+  type CommandAvailabilityOptions,
+} from "@cafecode/shared/shell";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Encoding from "effect/Encoding";
@@ -68,6 +72,21 @@ const DETACHED_IGNORE_STDIO_OPTIONS = {
   stdout: "ignore",
   stderr: "ignore",
 } as const satisfies ChildProcess.CommandOptions;
+
+function detachedDesktopProcessOptions(
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+): ChildProcess.CommandOptions {
+  return {
+    ...DETACHED_IGNORE_STDIO_OPTIONS,
+    ...(platform === "linux"
+      ? {
+          env: hostDesktopLaunchEnvironment(env, platform),
+          extendEnv: false,
+        }
+      : {}),
+  };
+}
 
 function parseTargetPathAndPosition(target: string): Option.Option<TargetPathAndPosition> {
   const match = TARGET_WITH_POSITION_PATTERN.exec(target);
@@ -262,7 +281,7 @@ export function resolveBrowserLaunch(
   return {
     command: "xdg-open",
     args: [target],
-    options: DETACHED_IGNORE_STDIO_OPTIONS,
+    options: detachedDesktopProcessOptions(platform, env),
   };
 }
 
@@ -390,17 +409,15 @@ export const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
 
 export function resolveEditorProcessLaunch(
   launch: EditorLaunch,
-  _platform: NodeJS.Platform = process.platform,
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
 ): ProcessLaunch {
   return {
     command: launch.command,
     args: [...launch.args],
     options: {
-      detached: true,
+      ...detachedDesktopProcessOptions(platform, env),
       shell: false,
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
     },
   };
 }
@@ -442,17 +459,18 @@ export const resolveTerminalLaunch = Effect.fn("resolveTerminalLaunch")(function
   });
 });
 
-export function resolveTerminalProcessLaunch(launch: TerminalLaunch): ProcessLaunch {
+export function resolveTerminalProcessLaunch(
+  launch: TerminalLaunch,
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): ProcessLaunch {
   return {
     command: launch.command,
     args: [...launch.args],
     options: {
       cwd: launch.cwd,
-      detached: true,
+      ...detachedDesktopProcessOptions(platform, env),
       shell: false,
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
     },
   };
 }

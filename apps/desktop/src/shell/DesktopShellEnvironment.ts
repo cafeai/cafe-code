@@ -36,6 +36,7 @@ const LOGIN_SHELL_ENV_NAMES = [
   "HOMEBREW_REPOSITORY",
   "XDG_CONFIG_HOME",
   "XDG_DATA_HOME",
+  "XDG_DATA_DIRS",
   "TERMINAL",
 ] as const;
 const WINDOWS_PROFILE_ENV_NAMES = ["PATH", "FNM_DIR", "FNM_MULTISHELL_PATH"] as const;
@@ -336,8 +337,13 @@ const installPosixEnvironment = Effect.fn("desktop.shellEnvironment.installPosix
       "HOMEBREW_REPOSITORY",
       "XDG_CONFIG_HOME",
       "XDG_DATA_HOME",
+      "XDG_DATA_DIRS",
       "TERMINAL",
     ] as const) {
+      // XDG_DATA_DIRS controls Linux desktop application discovery. Avoid
+      // importing it into macOS launches even if a cross-platform shell setup
+      // happens to define it there.
+      if (name === "XDG_DATA_DIRS" && config.platform !== "linux") continue;
       if (!config.env[name] && shellEnvironment[name]) {
         config.env[name] = shellEnvironment[name];
       }

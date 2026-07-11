@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 
 import * as Electron from "electron";
-import { isCommandAvailable } from "@cafecode/shared/shell";
+import { hostDesktopLaunchEnvironment, isCommandAvailable } from "@cafecode/shared/shell";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 
@@ -97,6 +97,17 @@ function isProbablyAbsolutePath(rawPath: string): boolean {
   return rawPath.startsWith("/") || /^[A-Za-z]:[\\/]/u.test(rawPath) || rawPath.startsWith("\\\\");
 }
 
+function isKdeDesktop(env: NodeJS.ProcessEnv): boolean {
+  if (env.KDE_FULL_SESSION === "true") return true;
+
+  return [env.XDG_CURRENT_DESKTOP, env.XDG_SESSION_DESKTOP, env.DESKTOP_SESSION]
+    .flatMap((value) => value?.split(":") ?? [])
+    .some((value) => {
+      const normalized = value.trim().toLowerCase();
+      return normalized === "kde" || normalized === "plasma";
+    });
+}
+
 function listXdgDataDirectories(env: NodeJS.ProcessEnv = process.env): readonly string[] {
   const homeDataDirectory = env.XDG_DATA_HOME?.trim() || `${homedir()}/.local/share`;
   const sharedDataDirectories = (env.XDG_DATA_DIRS?.trim() || "/usr/local/share:/usr/share")
@@ -123,6 +134,7 @@ function commandOutput(
   spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
   command: string,
   args: readonly string[],
+  env: NodeJS.ProcessEnv,
 ): Effect.Effect<Option.Option<string>> {
   return spawner
     .string(
@@ -133,6 +145,8 @@ function commandOutput(
         stderr: "ignore",
         killSignal: "SIGTERM",
         forceKillAfter: EXTERNAL_LAUNCH_KILL_GRACE,
+        env,
+        extendEnv: false,
       }),
     )
     .pipe(
@@ -154,6 +168,7 @@ function commandExitZero(
   spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
   command: string,
   args: readonly string[],
+  env: NodeJS.ProcessEnv,
 ): Effect.Effect<boolean> {
   return spawner
     .exitCode(
@@ -164,6 +179,8 @@ function commandExitZero(
         stderr: "ignore",
         killSignal: "SIGTERM",
         forceKillAfter: EXTERNAL_LAUNCH_KILL_GRACE,
+        env,
+        extendEnv: false,
       }),
     )
     .pipe(
@@ -178,23 +195,29 @@ function commandExitZero(
 function openWithLinuxDefaultBrowserDesktopEntry(
   spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
   externalUrl: string,
+  env: NodeJS.ProcessEnv,
 ): Effect.Effect<boolean> {
   return Effect.gen(function* () {
-    if (!isCommandAvailable("xdg-settings") || !isCommandAvailable("gio")) {
+    if (
+      !isCommandAvailable("xdg-settings", { platform: "linux", env }) ||
+      !isCommandAvailable("gio", { platform: "linux", env })
+    ) {
       return false;
     }
 
-    const desktopEntryId = yield* commandOutput(spawner, "xdg-settings", [
-      "get",
-      "default-web-browser",
-    ]);
+    const desktopEntryId = yield* commandOutput(
+      spawner,
+      "xdg-settings",
+      ["get", "default-web-browser"],
+      env,
+    );
     if (Option.isNone(desktopEntryId)) {
       return false;
     }
 
-    const candidates = listDesktopEntryCandidates(desktopEntryId.value);
+    const candidates = listDesktopEntryCandidates(desktopEntryId.value, env);
     for (const candidate of candidates) {
-      if (yield* commandExitZero(spawner, "gio", ["launch", candidate, externalUrl])) {
+      if (yield* commandExitZero(spawner, "gio", ["launch", candidate, externalUrl], env)) {
         yield* logInfo("default browser desktop entry launched", {
           desktopEntryId: desktopEntryId.value,
         });
@@ -208,6 +231,36 @@ function openWithLinuxDefaultBrowserDesktopEntry(
     });
     return false;
   });
+}
+
+function openWithLinuxDesktopCommand(
+  spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
+  command: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+): Effect.Effect<boolean> {
+  if (!isCommandAvailable(command, { platform: "linux", env })) {
+    return Effect.succeed(false);
+  }
+
+  return spawner
+    .spawn(
+      ChildProcess.make(command, args, {
+        detached: true,
+        shell: false,
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+        env,
+        extendEnv: false,
+      }),
+    )
+    .pipe(
+      Effect.flatMap((handle) => handle.unref),
+      Effect.as(true),
+      Effect.scoped,
+      Effect.catch(() => Effect.succeed(false)),
+    );
 }
 
 function openWithElectronShell(externalUrl: string): Effect.Effect<boolean> {
@@ -230,7 +283,11 @@ export class ElectronShell extends Context.Service<ElectronShell, ElectronShellS
   "cafecode/desktop/electron/Shell",
 ) {}
 
-const make = (spawner: ChildProcessSpawner.ChildProcessSpawner["Service"]) =>
+const make = (
+  spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
+  platform: NodeJS.Platform,
+  processEnvironment: NodeJS.ProcessEnv,
+) =>
   ElectronShell.of({
     openExternal: (rawUrl) =>
       Option.match(parseSafeExternalUrl(rawUrl), {
@@ -241,14 +298,23 @@ const make = (spawner: ChildProcessSpawner.ChildProcessSpawner["Service"]) =>
         onSome: (externalUrl) =>
           Effect.gen(function* () {
             const metadata = externalUrlLogMetadata(externalUrl);
-            if (process.platform === "linux" && isLoopbackHttpUrl(externalUrl)) {
-              yield* logInfo("opening loopback URL via default browser desktop entry", metadata);
-              const launched = yield* openWithLinuxDefaultBrowserDesktopEntry(spawner, externalUrl);
-              if (launched) {
-                yield* logInfo("loopback URL open completed", metadata);
-                return true;
+            if (platform === "linux") {
+              const env = hostDesktopLaunchEnvironment(processEnvironment, platform);
+              yield* logInfo("opening URL via Linux desktop entry", metadata);
+              const launchedViaDesktopEntry = yield* openWithLinuxDefaultBrowserDesktopEntry(
+                spawner,
+                externalUrl,
+                env,
+              );
+              const opened = launchedViaDesktopEntry
+                ? true
+                : yield* openWithLinuxDesktopCommand(spawner, "xdg-open", [externalUrl], env);
+              if (opened) {
+                yield* logInfo("external URL open completed", metadata);
+              } else {
+                yield* logWarning("external URL open failed", metadata);
               }
-              yield* logWarning("loopback URL direct launch unavailable; falling back", metadata);
+              return opened;
             }
 
             yield* logInfo("opening external URL via Electron shell", metadata);
@@ -269,6 +335,18 @@ const make = (spawner: ChildProcessSpawner.ChildProcessSpawner["Service"]) =>
         }
 
         const metadata = pathLogMetadata(rawPath);
+        if (platform === "linux") {
+          const env = hostDesktopLaunchEnvironment(processEnvironment, platform);
+          yield* logInfo("opening path via Linux desktop service", metadata);
+          const opened = yield* openWithLinuxDesktopCommand(spawner, "xdg-open", [rawPath], env);
+          if (opened) {
+            yield* logInfo("path open completed", metadata);
+          } else {
+            yield* logWarning("path open failed", metadata);
+          }
+          return opened;
+        }
+
         yield* logInfo("opening path via Electron shell", metadata);
         const opened = yield* Effect.promise(() =>
           Electron.shell.openPath(rawPath).then(
@@ -291,6 +369,25 @@ const make = (spawner: ChildProcessSpawner.ChildProcessSpawner["Service"]) =>
         }
 
         const metadata = pathLogMetadata(rawPath);
+        if (platform === "linux") {
+          const env = hostDesktopLaunchEnvironment(processEnvironment, platform);
+          if (isKdeDesktop(env) && isCommandAvailable("dolphin", { platform: "linux", env })) {
+            yield* logInfo("revealing path via Dolphin", metadata);
+            const revealed = yield* openWithLinuxDesktopCommand(
+              spawner,
+              "dolphin",
+              ["--select", rawPath],
+              env,
+            );
+            if (revealed) {
+              yield* logInfo("path reveal completed", metadata);
+            } else {
+              yield* logWarning("path reveal failed", metadata);
+            }
+            return revealed;
+          }
+        }
+
         yield* logInfo("revealing path via Electron shell", metadata);
         const revealed = yield* Effect.sync(() => {
           try {
@@ -313,10 +410,16 @@ const make = (spawner: ChildProcessSpawner.ChildProcessSpawner["Service"]) =>
       }),
   });
 
-export const layer = Layer.effect(
-  ElectronShell,
-  Effect.gen(function* () {
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    return make(spawner);
-  }),
-);
+export const layerForPlatform = (
+  platform: NodeJS.Platform,
+  processEnvironment: NodeJS.ProcessEnv = process.env,
+) =>
+  Layer.effect(
+    ElectronShell,
+    Effect.gen(function* () {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      return make(spawner, platform, processEnvironment);
+    }),
+  );
+
+export const layer = layerForPlatform(process.platform);

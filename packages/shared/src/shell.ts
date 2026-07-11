@@ -13,6 +13,9 @@ const WINDOWS_SHELL_CANDIDATES = ["pwsh.exe", "powershell.exe"] as const;
 
 export const CAFE_CODE_SHELL_ENV_HYDRATED = "CAFE_CODE_SHELL_ENV_HYDRATED";
 
+const APPIMAGE_RUNTIME_ENV_NAMES = ["APPDIR", "APPIMAGE", "ARGV0", "OWD"] as const;
+const DESKTOP_CHILD_RUNTIME_ENV_NAMES = ["CHROME_DESKTOP", "ELECTRON_RUN_AS_NODE"] as const;
+
 type ExecFileSyncLike = (
   file: string,
   args: ReadonlyArray<string>,
@@ -31,6 +34,72 @@ export interface WindowsEnvironmentProbeOptions {
 function trimNonEmpty(value: string | null | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
+function stripEnvironmentPathEntries(
+  value: string | undefined,
+  entriesToRemove: ReadonlySet<string>,
+): string | undefined {
+  if (value === undefined) return undefined;
+
+  const entries = value
+    .split(":")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0 && !entriesToRemove.has(entry.replace(/\/+$/u, "")));
+  return entries.length > 0 ? entries.join(":") : undefined;
+}
+
+/**
+ * Builds the environment passed from Cafe's Linux runtime to a host desktop
+ * application. electron-builder's AppRun prepends private AppImage paths to
+ * loader, executable, XDG, and GSettings variables. Those paths are required
+ * by Cafe and its Electron helpers, but allowing an opened browser, editor, or
+ * file manager to inherit them can make the host application load Cafe's
+ * bundled libraries and desktop metadata. A file manager would then pass the
+ * contaminated environment to every application it opens.
+ */
+export function hostDesktopLaunchEnvironment(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  const output = { ...env };
+  if (platform !== "linux") return output;
+
+  for (const name of DESKTOP_CHILD_RUNTIME_ENV_NAMES) {
+    delete output[name];
+  }
+
+  const appDir = trimNonEmpty(env.APPDIR)?.replace(/\/+$/u, "");
+  if (appDir === undefined) return output;
+
+  const appImagePaths = new Set([appDir, `${appDir}/usr/sbin`]);
+  const appImageDataDirs = new Set([`${appDir}/usr/share`]);
+  const appImageLibraryDirs = new Set([`${appDir}/usr/lib`]);
+  const appImageSchemaDirs = new Set([`${appDir}/usr/share/glib-2.0/schemas`]);
+
+  output.PATH = stripEnvironmentPathEntries(output.PATH, appImagePaths);
+  output.XDG_DATA_DIRS = stripEnvironmentPathEntries(output.XDG_DATA_DIRS, appImageDataDirs);
+  output.LD_LIBRARY_PATH = stripEnvironmentPathEntries(output.LD_LIBRARY_PATH, appImageLibraryDirs);
+  output.GSETTINGS_SCHEMA_DIR = stripEnvironmentPathEntries(
+    output.GSETTINGS_SCHEMA_DIR,
+    appImageSchemaDirs,
+  );
+
+  for (const name of APPIMAGE_RUNTIME_ENV_NAMES) {
+    delete output[name];
+  }
+  for (const name of [
+    "PATH",
+    "XDG_DATA_DIRS",
+    "LD_LIBRARY_PATH",
+    "GSETTINGS_SCHEMA_DIR",
+  ] as const) {
+    if (output[name] === undefined) {
+      delete output[name];
+    }
+  }
+
+  return output;
 }
 
 function readUserLoginShell(): string | undefined {

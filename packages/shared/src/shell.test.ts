@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   extractPathFromShellOutput,
+  hostDesktopLaunchEnvironment,
   isCommandAvailable,
   listLoginShellCandidates,
   mergePathEntries,
@@ -19,6 +20,52 @@ import {
   resolveKnownWindowsCliDirs,
   resolveWindowsEnvironment,
 } from "./shell.ts";
+
+describe("hostDesktopLaunchEnvironment", () => {
+  it("removes AppImage and Electron runtime state from Linux desktop children", () => {
+    const appDir = "/tmp/.mount_cafe-code";
+    const source = {
+      APPDIR: appDir,
+      APPIMAGE: "/opt/cafe-code/cafe-code.AppImage",
+      ARGV0: "/opt/cafe-code/cafe-code.AppImage",
+      OWD: "/home/test",
+      CHROME_DESKTOP: "cafecode.desktop",
+      ELECTRON_RUN_AS_NODE: "1",
+      PATH: `${appDir}:${appDir}/usr/sbin:/home/test/.local/bin:/usr/bin`,
+      XDG_DATA_DIRS: `${appDir}/usr/share/:/home/test/.local/share/flatpak/exports/share:/usr/share`,
+      LD_LIBRARY_PATH: `${appDir}/usr/lib:/opt/host/lib`,
+      GSETTINGS_SCHEMA_DIR: `${appDir}/usr/share/glib-2.0/schemas:/opt/host/schemas`,
+      DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+    } satisfies NodeJS.ProcessEnv;
+
+    expect(hostDesktopLaunchEnvironment(source, "linux")).toEqual({
+      PATH: "/home/test/.local/bin:/usr/bin",
+      XDG_DATA_DIRS: "/home/test/.local/share/flatpak/exports/share:/usr/share",
+      LD_LIBRARY_PATH: "/opt/host/lib",
+      GSETTINGS_SCHEMA_DIR: "/opt/host/schemas",
+      DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+    });
+    expect(source.APPDIR).toBe(appDir);
+  });
+
+  it("only removes Electron child-mode markers outside an AppImage", () => {
+    expect(
+      hostDesktopLaunchEnvironment(
+        {
+          PATH: "/usr/bin",
+          CHROME_DESKTOP: "cafecode-dev.desktop",
+          ELECTRON_RUN_AS_NODE: "1",
+        },
+        "linux",
+      ),
+    ).toEqual({ PATH: "/usr/bin" });
+  });
+
+  it("does not alter non-Linux environments", () => {
+    const source = { APPDIR: "/tmp/app", ELECTRON_RUN_AS_NODE: "1" };
+    expect(hostDesktopLaunchEnvironment(source, "darwin")).toEqual(source);
+  });
+});
 
 describe("extractPathFromShellOutput", () => {
   it("extracts the path between capture markers", () => {
