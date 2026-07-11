@@ -8,6 +8,7 @@ import type {
   Options as ClaudeQueryOptions,
   PermissionMode,
   PermissionResult,
+  SDKControlInterruptResponse,
   SDKMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -56,9 +57,12 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   private failure: unknown | undefined;
 
   public readonly interruptCalls: Array<void> = [];
+  public readonly cancelAsyncMessageCalls: Array<string> = [];
   public readonly setModelCalls: Array<string | undefined> = [];
   public readonly setPermissionModeCalls: Array<string> = [];
   public readonly setMaxThinkingTokensCalls: Array<number | null> = [];
+  public interruptResponse: SDKControlInterruptResponse | undefined;
+  public cancelAsyncMessageResult = true;
   public closeCalls = 0;
 
   emit(message: SDKMessage): void {
@@ -95,9 +99,15 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
     }
   }
 
-  readonly interrupt = async (): Promise<void> => {
+  readonly interrupt = async (): Promise<SDKControlInterruptResponse | undefined> => {
     this.interruptCalls.push(undefined);
+    return this.interruptResponse;
   };
+
+  async cancelAsyncMessage(messageUuid: string): Promise<boolean> {
+    this.cancelAsyncMessageCalls.push(messageUuid);
+    return this.cancelAsyncMessageResult;
+  }
 
   readonly setModel = async (model?: string): Promise<void> => {
     this.setModelCalls.push(model);
@@ -884,6 +894,74 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  it.effect(
+    "tracks Claude command lifecycle and cancels only Cafe-owned interrupt survivors",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+
+        const turn = yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "first prompt",
+          attachments: [],
+        });
+        yield* adapter.steerTurn({
+          threadId: session.threadId,
+          expectedTurnId: turn.turnId,
+          input: "queued steer",
+          attachments: [],
+        });
+
+        const messages = yield* Effect.promise(() =>
+          readPromptMessages(harness.getLastCreateQueryInput(), 2),
+        );
+        const firstMessageUuid = messages[0]?.uuid;
+        const steerMessageUuid = messages[1]?.uuid;
+        assert.isString(firstMessageUuid);
+        assert.isString(steerMessageUuid);
+        assert.notEqual(firstMessageUuid, steerMessageUuid);
+        if (firstMessageUuid === undefined || steerMessageUuid === undefined) {
+          throw new Error("Expected Cafe to UUID-stamp both Claude prompt messages.");
+        }
+
+        harness.query.emit({
+          type: "command_lifecycle",
+          command_uuid: firstMessageUuid,
+          state: "started",
+          uuid: "command-lifecycle-started",
+          session_id: "claude-session-lifecycle",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "command_lifecycle",
+          command_uuid: steerMessageUuid,
+          state: "queued",
+          uuid: "command-lifecycle-queued",
+          session_id: "claude-session-lifecycle",
+        } as unknown as SDKMessage);
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+
+        harness.query.interruptResponse = {
+          still_queued: [steerMessageUuid, "claude-internal-command"],
+        };
+        yield* adapter.interruptTurn(session.threadId, turn.turnId);
+
+        assert.equal(harness.query.interruptCalls.length, 1);
+        assert.deepEqual(harness.query.cancelAsyncMessageCalls, [steerMessageUuid]);
+        assert.equal(harness.query.closeCalls, 0);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
 
   it.effect("rejects Claude steer input for a stale active turn id", () => {
     const harness = makeHarness();

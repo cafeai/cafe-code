@@ -9,6 +9,7 @@
 import {
   type CanUseTool,
   query,
+  type SDKControlInterruptResponse,
   type Options as ClaudeQueryOptions,
   type PermissionMode,
   type PermissionResult,
@@ -98,6 +99,8 @@ type ClaudeToolResultStreamKind = Extract<
 >;
 type ClaudeSdkEffort = NonNullable<ClaudeQueryOptions["effort"]>;
 type ClaudeSdkThinkingDisplay = "summarized" | "omitted" | null;
+type ClaudeCommandLifecycleState = "queued" | "started" | "completed" | "cancelled" | "discarded";
+type ClaudePromptLifecycleState = "submitted" | ClaudeCommandLifecycleState;
 type ClaudePromptInput = Pick<ProviderSendTurnInput, "input" | "attachments"> &
   Partial<Pick<ProviderSendTurnInput, "modelSelection">>;
 // The bundled Claude Code binary can emit newer system subtypes before the
@@ -153,6 +156,17 @@ type ClaudeForwardCompatibleSystemMessage =
 type ClaudeSdkMessageWithForwardCompatibleSystem =
   | SDKMessage
   | ClaudeForwardCompatibleSystemMessage;
+
+// Claude Code 2.1.206 advertises `msg_lifecycle_v1` and emits this top-level
+// frame, but Agent SDK 0.3.207 still omits it from the public SDKMessage union.
+// Keep the runtime decoder local and narrow until Anthropic publishes the type.
+interface ClaudeCommandLifecycleMessage extends Record<string, unknown> {
+  readonly type: "command_lifecycle";
+  readonly command_uuid: string;
+  readonly state: ClaudeCommandLifecycleState;
+  readonly uuid?: string;
+  readonly session_id?: string;
+}
 
 function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
   const result = encodeUnknownJsonStringExit(input);
@@ -253,6 +267,8 @@ interface ClaudeSessionContext {
   }>;
   readonly inFlightTools: Map<number, ToolInFlight>;
   readonly backgroundTaskIds: Set<string>;
+  readonly promptLifecycleByUuid: Map<string, ClaudePromptLifecycleState>;
+  readonly capabilities: Set<string>;
   turnState: ClaudeTurnState | undefined;
   lastKnownContextWindow: number | undefined;
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
@@ -264,7 +280,10 @@ interface ClaudeSessionContext {
 }
 
 interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
-  readonly interrupt: () => Promise<void>;
+  readonly interrupt: () => Promise<SDKControlInterruptResponse | undefined>;
+  // The 0.3.207 runtime implements this control request, but its public Query
+  // interface has not exposed the method yet. Keep it optional for older SDKs.
+  readonly cancelAsyncMessage?: (messageUuid: string) => Promise<boolean>;
   readonly setModel: (model?: string) => Promise<void>;
   readonly setPermissionMode: (mode: PermissionMode) => Promise<void>;
   readonly setMaxThinkingTokens: (
@@ -331,6 +350,35 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
 
 function trimmedStringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function isClaudeCommandLifecycleState(value: unknown): value is ClaudeCommandLifecycleState {
+  return (
+    value === "queued" ||
+    value === "started" ||
+    value === "completed" ||
+    value === "cancelled" ||
+    value === "discarded"
+  );
+}
+
+function readClaudeCommandLifecycleMessage(
+  value: unknown,
+): ClaudeCommandLifecycleMessage | undefined {
+  const record = recordValue(value);
+  if (
+    record?.type !== "command_lifecycle" ||
+    trimmedStringValue(record.command_uuid) === undefined ||
+    !isClaudeCommandLifecycleState(record.state)
+  ) {
+    return undefined;
+  }
+
+  return record as ClaudeCommandLifecycleMessage;
+}
+
+function isTerminalClaudeCommandLifecycleState(state: ClaudeCommandLifecycleState): boolean {
+  return state === "completed" || state === "cancelled" || state === "discarded";
 }
 
 function claudeTaskTerminalStatus(value: unknown): "completed" | "failed" | "stopped" | undefined {
@@ -1302,11 +1350,13 @@ function buildPromptText(input: ClaudePromptInput, boundInstanceId: ProviderInst
 
 function buildUserMessage(input: {
   readonly sdkContent: Array<Record<string, unknown>>;
+  readonly messageUuid: string;
 }): SDKUserMessage {
   return {
     type: "user",
     session_id: "",
     parent_tool_use_id: null,
+    uuid: input.messageUuid,
     message: {
       role: "user",
       content: input.sdkContent as unknown as SDKUserMessage["message"]["content"],
@@ -1335,6 +1385,7 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
     readonly attachmentsDir: string;
     readonly boundInstanceId: ProviderInstanceId;
     readonly method: "turn/start" | "turn/steer";
+    readonly messageUuid: string;
   },
 ) {
   const text = buildPromptText(input, dependencies.boundInstanceId);
@@ -1389,7 +1440,7 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
     );
   }
 
-  return buildUserMessage({ sdkContent });
+  return buildUserMessage({ sdkContent, messageUuid: dependencies.messageUuid });
 });
 
 function turnStatusFromResult(result: SDKResultMessage): ProviderRuntimeTurnStatus {
@@ -2814,6 +2865,40 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
+  const handleCommandLifecycleMessage = Effect.fn("handleCommandLifecycleMessage")(function* (
+    context: ClaudeSessionContext,
+    message: ClaudeCommandLifecycleMessage,
+  ) {
+    const previousState = context.promptLifecycleByUuid.get(message.command_uuid);
+    if (previousState === undefined) {
+      // Claude can report lifecycle for internally queued commands. Upstream's
+      // interrupt contract explicitly requires clients to ignore unknown UUIDs.
+      return;
+    }
+
+    if (isTerminalClaudeCommandLifecycleState(message.state)) {
+      context.promptLifecycleByUuid.delete(message.command_uuid);
+    } else {
+      context.promptLifecycleByUuid.set(message.command_uuid, message.state);
+    }
+
+    if (message.state === "discarded") {
+      yield* Effect.logWarning("claude.commandLifecycle.discarded", {
+        threadId: context.session.threadId,
+        providerInstanceId: boundInstanceId,
+        previousState,
+      });
+      yield* emitRuntimeWarning(
+        context,
+        "Claude exited before a tracked queued input reached a terminal lifecycle state.",
+        {
+          previousState,
+          state: message.state,
+        },
+      );
+    }
+  });
+
   const handleAssistantMessage = Effect.fn("handleAssistantMessage")(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
@@ -3098,6 +3183,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
         return;
       case "init":
+        context.capabilities.clear();
+        for (const capability of message.capabilities ?? []) {
+          if (typeof capability === "string" && capability.length > 0) {
+            context.capabilities.add(capability);
+          }
+        }
         yield* offerRuntimeEvent({
           ...base,
           type: "session.configured",
@@ -3630,6 +3721,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* recordTurnSdkMessage(context, message);
 
     const rawMessageType = sdkMessageType(message);
+    if (rawMessageType === "command_lifecycle") {
+      const lifecycleMessage = readClaudeCommandLifecycleMessage(message);
+      if (lifecycleMessage) {
+        yield* handleCommandLifecycleMessage(context, lifecycleMessage);
+      } else {
+        yield* emitRuntimeWarning(
+          context,
+          "Claude emitted a malformed command_lifecycle frame.",
+          message,
+        );
+      }
+      return;
+    }
     if (
       rawMessageType === "control_request_progress" ||
       rawMessageType === "conversation_reset" ||
@@ -3746,6 +3850,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
     context.pendingApprovals.clear();
+    context.promptLifecycleByUuid.clear();
 
     if (context.turnState) {
       yield* completeTurn(context, "interrupted", "Session stopped.");
@@ -4446,6 +4551,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         turns: [],
         inFlightTools,
         backgroundTaskIds: new Set(),
+        promptLifecycleByUuid: new Map(),
+        capabilities: new Set(),
         turnState: undefined,
         lastKnownContextWindow: selectedContextWindowTokens,
         lastKnownTokenUsage: undefined,
@@ -4596,14 +4703,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       context.currentPermissionMode = desiredPermissionMode;
     }
 
+    const turnId = TurnId.make(yield* Random.nextUUIDv4);
     const message = yield* buildUserMessageEffect(input, {
       fileSystem,
       attachmentsDir: serverConfig.attachmentsDir,
       boundInstanceId,
       method: "turn/start",
+      messageUuid: turnId,
     });
 
-    const turnId = TurnId.make(yield* Random.nextUUIDv4);
     const turnState = makeClaudeTurnState({
       turnId,
       startedAt: yield* nowIso,
@@ -4632,11 +4740,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       providerRefs: {},
     });
 
+    context.promptLifecycleByUuid.set(turnId, "submitted");
     yield* Queue.offer(context.promptQueue, {
       type: "message",
       message,
     }).pipe(
       Effect.mapError((cause) => toRequestError(input.threadId, "turn/start", cause)),
+      Effect.tapError(() =>
+        Effect.sync(() => {
+          context.promptLifecycleByUuid.delete(turnId);
+        }),
+      ),
       Effect.tapError((error) =>
         completeTurn(context, "failed", toMessage(error, "Failed to queue Claude turn.")),
       ),
@@ -4657,9 +4771,80 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
     function* (threadId, _turnId) {
       const context = yield* requireSession(threadId);
-      yield* Effect.tryPromise({
+      const receipt = yield* Effect.tryPromise({
         try: () => context.query.interrupt(),
         catch: (cause) => toRequestError(threadId, "turn/interrupt", cause),
+      });
+
+      // Claude Code 2.1.205+ returns UUIDs for queued inputs that survive an
+      // interrupt. Cancel only UUIDs Cafe submitted: the receipt can include
+      // internal cron/auto-resume commands, and upstream explicitly requires
+      // clients to ignore unknown identifiers. Include locally submitted or
+      // lifecycle-confirmed queued messages in case the SDK input writer has
+      // not yet made them visible to the worker's receipt snapshot.
+      const cancellationCandidates = new Set<string>();
+      for (const [messageUuid, state] of context.promptLifecycleByUuid) {
+        if (state === "submitted" || state === "queued") {
+          cancellationCandidates.add(messageUuid);
+        }
+      }
+      for (const messageUuid of receipt?.still_queued ?? []) {
+        if (context.promptLifecycleByUuid.has(messageUuid)) {
+          cancellationCandidates.add(messageUuid);
+        }
+      }
+
+      if (cancellationCandidates.size === 0) {
+        return;
+      }
+
+      let confirmedCancellationCount = 0;
+      let unconfirmedCancellationCount = 0;
+      const cancelAsyncMessage = context.query.cancelAsyncMessage;
+      if (cancelAsyncMessage) {
+        for (const messageUuid of cancellationCandidates) {
+          const cancellation = yield* Effect.tryPromise({
+            try: () => cancelAsyncMessage.call(context.query, messageUuid),
+            catch: (cause) => toRequestError(threadId, "turn/cancelAsyncMessage", cause),
+          }).pipe(Effect.exit);
+          if (Exit.isSuccess(cancellation) && cancellation.value === true) {
+            confirmedCancellationCount += 1;
+            context.promptLifecycleByUuid.delete(messageUuid);
+          } else {
+            unconfirmedCancellationCount += 1;
+          }
+        }
+      } else {
+        unconfirmedCancellationCount = cancellationCandidates.size;
+      }
+
+      if (unconfirmedCancellationCount === 0) {
+        yield* Effect.logInfo("claude.turnInterrupt.queuedInputsCancelled", {
+          threadId,
+          providerInstanceId: boundInstanceId,
+          confirmedCancellationCount,
+          receiptCount: receipt?.still_queued.length ?? 0,
+        });
+        return;
+      }
+
+      // A false cancel result is ambiguous once Claude has dequeued a coalesced
+      // batch. Retire the process instead of allowing an unconfirmed duplicate
+      // to run after Cafe replays durable input through a fresh session.
+      yield* emitRuntimeWarning(
+        context,
+        "Claude could not confirm cancellation of every queued input after interrupt; Cafe retired the provider session before accepting more input.",
+        {
+          candidateCount: cancellationCandidates.size,
+          confirmedCancellationCount,
+          unconfirmedCancellationCount,
+          receiptCount: receipt?.still_queued.length ?? 0,
+          interruptReceiptAdvertised: context.capabilities.has("interrupt_receipt_v1"),
+          messageLifecycleAdvertised: context.capabilities.has("msg_lifecycle_v1"),
+        },
+      );
+      yield* stopSessionInternal(context, {
+        emitExitEvent: true,
       });
     },
   );
@@ -4755,11 +4940,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
+    const messageUuid = yield* Random.nextUUIDv4;
     const message = yield* buildUserMessageEffect(input, {
       fileSystem,
       attachmentsDir: serverConfig.attachmentsDir,
       boundInstanceId,
       method: "turn/steer",
+      messageUuid,
     });
 
     // Official Claude Agent SDK streaming input mode is the long-lived,
@@ -4769,10 +4956,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // Claude does not expose a Codex-style expected-turn RPC, so Cafe binds the
     // steer to its own active turn id before queueing exactly one SDK user
     // message into the already-running prompt stream.
+    context.promptLifecycleByUuid.set(messageUuid, "submitted");
     yield* Queue.offer(context.promptQueue, {
       type: "message",
       message,
-    }).pipe(Effect.mapError((cause) => toRequestError(input.threadId, "turn/steer", cause)));
+    }).pipe(
+      Effect.mapError((cause) => toRequestError(input.threadId, "turn/steer", cause)),
+      Effect.tapError(() =>
+        Effect.sync(() => {
+          context.promptLifecycleByUuid.delete(messageUuid);
+        }),
+      ),
+    );
 
     context.hasSubmittedUserPrompt = true;
     context.turnState.promptTextBytes =

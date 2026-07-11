@@ -18,6 +18,7 @@ import {
   buildCodexThreadSnapshotBackfillEvents,
   buildTurnStartParams,
   buildTurnSteerParams,
+  claimCodexSnapshotBackfillWatcher,
   codexAggregateNotificationMethod,
   codexElapsedDelayMilliseconds,
   codexElapsedDelayRemainingMilliseconds,
@@ -84,6 +85,20 @@ describe("codex elapsed watchdog scheduling", () => {
       }),
       0,
     );
+  });
+
+  it("allows only one snapshot backfill watcher per active turn", () => {
+    const turnId = TurnId.make("turn-backfill");
+    const [firstClaimed, afterFirstClaim] = claimCodexSnapshotBackfillWatcher(new Set(), turnId);
+    const [duplicateClaimed, afterDuplicateClaim] = claimCodexSnapshotBackfillWatcher(
+      afterFirstClaim,
+      turnId,
+    );
+
+    assert.equal(firstClaimed, true);
+    assert.equal(duplicateClaimed, false);
+    assert.equal(afterDuplicateClaim, afterFirstClaim);
+    assert.deepEqual([...afterDuplicateClaim], [String(turnId)]);
   });
 });
 

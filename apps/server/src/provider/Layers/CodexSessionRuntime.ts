@@ -1642,6 +1642,20 @@ function turnObservationKey(turnId: TurnId): string {
   return String(turnId);
 }
 
+export function claimCodexSnapshotBackfillWatcher(
+  currentTurnIds: ReadonlySet<string>,
+  turnId: TurnId,
+): readonly [claimed: boolean, nextTurnIds: ReadonlySet<string>] {
+  const key = turnObservationKey(turnId);
+  if (currentTurnIds.has(key)) {
+    return [false, currentTurnIds];
+  }
+
+  const nextTurnIds = new Set(currentTurnIds);
+  nextTurnIds.add(key);
+  return [true, nextTurnIds];
+}
+
 function readRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -2077,6 +2091,7 @@ export const makeCodexSessionRuntime = (
     const closedRef = yield* Ref.make(false);
     const snapshotBackfillEventIdsRef = yield* Ref.make(new Set<string>());
     const turnStartObservationsRef = yield* Ref.make(new Map<string, CodexTurnStartObservation>());
+    const snapshotBackfillWatcherTurnIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
     const activeContextCompactionsRef = yield* Ref.make(
       new Map<string, CodexActiveContextCompaction>(),
     );
@@ -2893,65 +2908,99 @@ export const makeCodexSessionRuntime = (
       readonly reason: CodexSnapshotBackfillReason;
     }) =>
       Effect.gen(function* () {
-        const scheduledAtMs = yield* Clock.currentTimeMillis;
-        for (const delay of CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS) {
-          const sleepMs = codexElapsedDelayRemainingMilliseconds({
-            startedAtMs: scheduledAtMs,
-            nowMs: yield* Clock.currentTimeMillis,
-            delay,
-          });
-          if (sleepMs > 0) {
-            yield* Effect.sleep(Duration.millis(sleepMs));
-          }
-          if (yield* Ref.get(closedRef)) {
-            return;
-          }
-
-          const session = yield* Ref.get(sessionRef);
-          if (session.activeTurnId !== input.turnId || session.status !== "running") {
-            return;
-          }
-
-          const observation = yield* readTurnStartObservation(input.turnId);
-          if (!observation?.firstTurnEventAt) {
-            yield* emitTurnStartNoRuntimeEventWarning({
-              providerThreadId: input.providerThreadId,
-              turnId: input.turnId,
-              delay,
-            });
-          }
-          yield* markTurnStartBackfillAttempt(input.turnId);
-          const snapshot = yield* readAndBackfillSnapshot({
+        const claimed = yield* Ref.modify(snapshotBackfillWatcherTurnIdsRef, (currentTurnIds) =>
+          claimCodexSnapshotBackfillWatcher(currentTurnIds, input.turnId),
+        );
+        if (!claimed) {
+          yield* Effect.logDebug("codex.snapshot.backfill.watcher-deduplicated", {
+            threadId: options.threadId,
+            providerInstanceId: options.providerInstanceId ?? PROVIDER,
             providerThreadId: input.providerThreadId,
-            focusTurnId: input.turnId,
+            turnId: input.turnId,
             reason: input.reason,
           });
-          const turn = snapshot?.turn ?? null;
-          if (turn && turn.status !== "inProgress") {
-            yield* reconcileTerminalActiveTurnSnapshot({
-              providerThreadId: input.providerThreadId,
-              turnId: input.turnId,
-              reason: input.reason,
-              threadStatusType: snapshot?.threadStatusType ?? null,
-              turn,
-            });
-            return;
-          }
-          if (
-            turn?.status === "inProgress" &&
-            CODEX_SEND_TURN_STILL_IN_PROGRESS_WARNING_DELAYS.has(delay)
-          ) {
-            yield* emitTurnSnapshotStillInProgressWarning({
-              providerThreadId: input.providerThreadId,
-              turnId: input.turnId,
-              reason: input.reason,
-              elapsedDelay: delay,
-              threadStatusType: snapshot?.threadStatusType,
-              turn,
-            });
-          }
+          return;
         }
-      }).pipe(Effect.forkIn(runtimeScope), Effect.asVoid);
+
+        // A steer belongs to the existing active turn. Reusing that turn's one
+        // watchdog preserves Cafe's missed-event recovery without multiplying
+        // full `thread/read(includeTurns)` calls for every steer in a long run.
+        // Upstream turn/completed and authoritative thread/read status remain
+        // the only terminal signals; deduplication changes polling load only.
+        const watcher = Effect.gen(function* () {
+          const scheduledAtMs = yield* Clock.currentTimeMillis;
+          for (const delay of CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS) {
+            const sleepMs = codexElapsedDelayRemainingMilliseconds({
+              startedAtMs: scheduledAtMs,
+              nowMs: yield* Clock.currentTimeMillis,
+              delay,
+            });
+            if (sleepMs > 0) {
+              yield* Effect.sleep(Duration.millis(sleepMs));
+            }
+            if (yield* Ref.get(closedRef)) {
+              return;
+            }
+
+            const session = yield* Ref.get(sessionRef);
+            if (session.activeTurnId !== input.turnId || session.status !== "running") {
+              return;
+            }
+
+            const observation = yield* readTurnStartObservation(input.turnId);
+            if (!observation?.firstTurnEventAt) {
+              yield* emitTurnStartNoRuntimeEventWarning({
+                providerThreadId: input.providerThreadId,
+                turnId: input.turnId,
+                delay,
+              });
+            }
+            yield* markTurnStartBackfillAttempt(input.turnId);
+            const snapshot = yield* readAndBackfillSnapshot({
+              providerThreadId: input.providerThreadId,
+              focusTurnId: input.turnId,
+              reason: input.reason,
+            });
+            const turn = snapshot?.turn ?? null;
+            if (turn && turn.status !== "inProgress") {
+              yield* reconcileTerminalActiveTurnSnapshot({
+                providerThreadId: input.providerThreadId,
+                turnId: input.turnId,
+                reason: input.reason,
+                threadStatusType: snapshot?.threadStatusType ?? null,
+                turn,
+              });
+              return;
+            }
+            if (
+              turn?.status === "inProgress" &&
+              CODEX_SEND_TURN_STILL_IN_PROGRESS_WARNING_DELAYS.has(delay)
+            ) {
+              yield* emitTurnSnapshotStillInProgressWarning({
+                providerThreadId: input.providerThreadId,
+                turnId: input.turnId,
+                reason: input.reason,
+                elapsedDelay: delay,
+                threadStatusType: snapshot?.threadStatusType,
+                turn,
+              });
+            }
+          }
+        }).pipe(
+          Effect.ensuring(
+            Ref.update(snapshotBackfillWatcherTurnIdsRef, (currentTurnIds) => {
+              const key = turnObservationKey(input.turnId);
+              if (!currentTurnIds.has(key)) {
+                return currentTurnIds;
+              }
+              const nextTurnIds = new Set(currentTurnIds);
+              nextTurnIds.delete(key);
+              return nextTurnIds;
+            }),
+          ),
+        );
+        yield* watcher.pipe(Effect.forkIn(runtimeScope));
+      }).pipe(Effect.asVoid);
 
     const settlePendingApprovals = (decision: ProviderApprovalDecision) =>
       Ref.get(pendingApprovalsRef).pipe(
@@ -3993,7 +4042,7 @@ export const makeCodexSessionRuntime = (
             });
 
           yield* requestInterrupt(effectiveTurnId).pipe(
-            Effect.catchIf(isCodexNoActiveTurnToInterruptError, (error) =>
+            Effect.catchIf(isCodexNoActiveTurnToInterruptError, () =>
               Effect.gen(function* () {
                 const observedAt = yield* nowIso;
                 yield* updateSession(sessionRef, {
@@ -4022,7 +4071,11 @@ export const makeCodexSessionRuntime = (
                       "Codex app-server is authoritative for active turn ownership. A no-active interrupt means Cafe's cached active turn was stale and must not gate future input.",
                   },
                 });
-                return yield* error;
+                // Interrupt is idempotent from the user's perspective. Once
+                // app-server authoritatively reports no active turn and Cafe
+                // clears the stale pointer, propagating the response would only
+                // turn an already-satisfied stop into a failed command/toast.
+                return;
               }),
             ),
             Effect.catchIf(isCodexSteerExpectedTurnMismatch, (error) =>
