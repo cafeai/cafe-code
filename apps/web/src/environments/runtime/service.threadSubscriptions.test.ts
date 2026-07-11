@@ -284,6 +284,11 @@ describe("retainThreadDetailSubscription", () => {
     mockCreateEnvironmentConnection.mockImplementation((input) => {
       const reconnect = vi.fn(async () => undefined);
       mockConnectionReconnects.push(reconnect);
+      if (input.kind === "saved") {
+        queueMicrotask(async () => {
+          input.onConfigSnapshot?.(await input.client.server.getConfig());
+        });
+      }
       return {
         kind: input.kind,
         environmentId: input.knownEnvironment.environmentId,
@@ -526,12 +531,9 @@ describe("retainThreadDetailSubscription", () => {
     ).toBe(false);
 
     const reconnectPromise = reconnectSavedEnvironment(environmentId);
-    await vi.advanceTimersByTimeAsync(200);
     await reconnectPromise;
-    await vi.waitFor(() => {
-      expect(mockCreateEnvironmentConnection).toHaveBeenCalledTimes(3);
-      expect(mockSubscribeThread).toHaveBeenCalledTimes(2);
-    });
+    expect(mockCreateEnvironmentConnection).toHaveBeenCalledTimes(3);
+    expect(mockSubscribeThread).toHaveBeenCalledTimes(2);
 
     release();
     stop();

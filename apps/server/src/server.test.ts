@@ -35,8 +35,8 @@ import {
 } from "@cafecode/contracts";
 import { assert, it } from "@effect/vitest";
 import { assertFailure, assertInclude, assertTrue } from "@effect/vitest/utils";
-import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -3874,6 +3874,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
   it.effect("completes websocket rpc git.pull before background git status refresh finishes", () =>
     Effect.gen(function* () {
+      const remoteRefreshGate = yield* Deferred.make<{
+        hasUpstream: boolean;
+        aheadCount: number;
+        behindCount: number;
+        pr: null;
+      }>();
       yield* buildAppUnderTest({
         layers: {
           gitVcsDriver: {
@@ -3896,28 +3902,24 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 hasWorkingTreeChanges: false,
                 workingTree: { files: [], insertions: 0, deletions: 0 },
               }),
-            remoteStatus: () =>
-              Effect.sleep(Duration.seconds(2)).pipe(
-                Effect.as({
-                  hasUpstream: true,
-                  aheadCount: 0,
-                  behindCount: 0,
-                  pr: null,
-                }),
-              ),
+            remoteStatus: () => Deferred.await(remoteRefreshGate),
           },
         },
       });
 
       const wsUrl = yield* getWsServerUrl("/ws");
-      const startedAt = yield* Clock.currentTimeMillis;
       const result = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) => client[WS_METHODS.vcsPull]({ cwd: "/tmp/repo" })),
       );
-      const elapsedMs = (yield* Clock.currentTimeMillis) - startedAt;
 
       assert.equal(result.status, "pulled");
-      assertTrue(elapsedMs < 1_000);
+      assert.equal(yield* Deferred.isDone(remoteRefreshGate), false);
+      yield* Deferred.succeed(remoteRefreshGate, {
+        hasUpstream: true,
+        aheadCount: 0,
+        behindCount: 0,
+        pr: null,
+      });
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

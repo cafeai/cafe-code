@@ -1,12 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { cafeCodeEnvName, readCafeCodeEnv, writeCafeCodeEnv } from "./compatEnv.ts";
+import { readCafeCodeEnv, writeCafeCodeEnv } from "./compatEnv.ts";
 
 describe("compatEnv", () => {
-  it("accepts Cafe Code env names", () => {
-    expect(cafeCodeEnvName("CAFE_CODE_HOME")).toBe("CAFE_CODE_HOME");
-  });
-
   it("reads Cafe Code env values only", () => {
     expect(
       readCafeCodeEnv(
@@ -25,5 +21,14 @@ describe("compatEnv", () => {
     expect(env).toEqual({
       CAFE_CODE_PORT: "3773",
     });
+  });
+
+  it("rejects names outside the Cafe Code namespace", () => {
+    expect(() => readCafeCodeEnv({ HOME: "/tmp" }, "HOME")).toThrow(
+      "Expected Cafe Code env var to start with CAFE_CODE_",
+    );
+    expect(() => writeCafeCodeEnv({}, "PORT", "3773")).toThrow(
+      "Expected Cafe Code env var to start with CAFE_CODE_",
+    );
   });
 });

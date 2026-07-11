@@ -130,15 +130,15 @@ describe("ProviderRuntimeEvent", () => {
     expect(parsed.payload.answers.sandbox_mode).toBe("workspace-write");
   });
 
-  it("rejects legacy message.delta type", () => {
+  it("rejects unsupported runtime event types", () => {
     expect(() =>
       decodeRuntimeEvent({
-        type: "message.delta",
+        type: "unsupported.event",
         eventId: "event-4",
         provider: "codex",
         sessionId: "runtime-session-3",
         createdAt: "2026-02-28T00:00:03.000Z",
-        payload: { delta: "legacy" },
+        payload: {},
       }),
     ).toThrow();
   });

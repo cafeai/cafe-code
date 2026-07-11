@@ -197,7 +197,7 @@ describe("decider project scripts", () => {
     });
   });
 
-  it("emits thread.runtime-mode-set from thread.runtime-mode.set", async () => {
+  it("emits mode-set events for thread mode commands", async () => {
     const now = "2026-01-01T00:00:00.000Z";
     const initial = createEmptyReadModel(now);
     const withProject = await Effect.runPromise(
@@ -253,7 +253,7 @@ describe("decider project scripts", () => {
       }),
     );
 
-    const result = await Effect.runPromise(
+    const runtimeModeResult = await Effect.runPromise(
       decideOrchestrationCommand({
         command: {
           type: "thread.runtime-mode.set",
@@ -266,76 +266,19 @@ describe("decider project scripts", () => {
       }),
     );
 
-    const singleResult = Array.isArray(result) ? null : result;
-    if (singleResult === null) {
+    const runtimeModeEvent = Array.isArray(runtimeModeResult) ? null : runtimeModeResult;
+    if (runtimeModeEvent === null) {
       throw new Error("Expected a single runtime-mode-set event.");
     }
-    expect(singleResult).toMatchObject({
+    expect(runtimeModeEvent).toMatchObject({
       type: "thread.runtime-mode-set",
       payload: {
         threadId: ThreadId.make("thread-1"),
         runtimeMode: "approval-required",
       },
     });
-  });
 
-  it("emits thread.interaction-mode-set from thread.interaction-mode.set", async () => {
-    const now = "2026-01-01T00:00:00.000Z";
-    const initial = createEmptyReadModel(now);
-    const withProject = await Effect.runPromise(
-      projectEvent(initial, {
-        sequence: 1,
-        eventId: asEventId("evt-project-create"),
-        aggregateKind: "project",
-        aggregateId: asProjectId("project-1"),
-        type: "project.created",
-        occurredAt: now,
-        commandId: CommandId.make("cmd-project-create"),
-        causationEventId: null,
-        correlationId: CommandId.make("cmd-project-create"),
-        metadata: {},
-        payload: {
-          projectId: asProjectId("project-1"),
-          title: "Project",
-          workspaceRoot: "/tmp/project",
-          defaultModelSelection: null,
-          scripts: [],
-          createdAt: now,
-          updatedAt: now,
-        },
-      }),
-    );
-    const readModel = await Effect.runPromise(
-      projectEvent(withProject, {
-        sequence: 2,
-        eventId: asEventId("evt-thread-create"),
-        aggregateKind: "thread",
-        aggregateId: ThreadId.make("thread-1"),
-        type: "thread.created",
-        occurredAt: now,
-        commandId: CommandId.make("cmd-thread-create"),
-        causationEventId: null,
-        correlationId: CommandId.make("cmd-thread-create"),
-        metadata: {},
-        payload: {
-          threadId: ThreadId.make("thread-1"),
-          projectId: asProjectId("project-1"),
-          title: "Thread",
-          modelSelection: {
-            instanceId: ProviderInstanceId.make("codex"),
-            model: "gpt-5-codex",
-          },
-          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "approval-required",
-          branch: null,
-          worktreePath: null,
-          createdAt: now,
-          updatedAt: now,
-        },
-      }),
-    );
-
-    const result = await Effect.runPromise(
+    const interactionModeResult = await Effect.runPromise(
       decideOrchestrationCommand({
         command: {
           type: "thread.interaction-mode.set",
@@ -348,11 +291,13 @@ describe("decider project scripts", () => {
       }),
     );
 
-    const singleResult = Array.isArray(result) ? null : result;
-    if (singleResult === null) {
+    const interactionModeEvent = Array.isArray(interactionModeResult)
+      ? null
+      : interactionModeResult;
+    if (interactionModeEvent === null) {
       throw new Error("Expected a single interaction-mode-set event.");
     }
-    expect(singleResult).toMatchObject({
+    expect(interactionModeEvent).toMatchObject({
       type: "thread.interaction-mode-set",
       payload: {
         threadId: ThreadId.make("thread-1"),

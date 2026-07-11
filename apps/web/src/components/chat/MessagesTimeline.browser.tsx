@@ -725,33 +725,7 @@ describe("MessagesTimeline", () => {
     }
   });
 
-  it("starts long user messages collapsed by default", async () => {
-    const screen = await render(
-      <MessagesTimeline
-        {...buildProps()}
-        timelineEntries={[buildUserTimelineEntry(buildLongUserMessageText())]}
-      />,
-    );
-
-    try {
-      const toggle = page.getByRole("button", { name: "Show full message" });
-      await expect.element(toggle).toBeVisible();
-      await expect.element(toggle).toHaveAttribute("aria-expanded", "false");
-
-      const messageBody = document.querySelector(
-        "[data-user-message-body='true']",
-      ) as HTMLDivElement | null;
-      expect(messageBody?.getAttribute("data-user-message-collapsed")).toBe("true");
-      expect(messageBody?.className).toContain("max-h-44");
-      expect(messageBody?.className).toContain("overflow-hidden");
-      expect(messageBody?.getAttribute("data-user-message-fade")).toBe("true");
-      expect(messageBody?.style.maskImage).toContain("linear-gradient");
-    } finally {
-      await screen.unmount();
-    }
-  });
-
-  it("expands and re-collapses long user messages from the toggle", async () => {
+  it("collapses the newest long user message and lets the user expand and re-collapse it", async () => {
     const screen = await render(
       <MessagesTimeline
         {...buildProps()}
@@ -762,8 +736,12 @@ describe("MessagesTimeline", () => {
     try {
       const expandButton = page.getByRole("button", { name: "Show full message" });
       await expect.element(expandButton).toBeVisible();
-
-      expect(document.body.textContent ?? "").toContain("deep hidden detail only after expand");
+      await expect.element(expandButton).toHaveAttribute("aria-expanded", "false");
+      const messageBody = document.querySelector<HTMLElement>("[data-user-message-body='true']");
+      expect(messageBody).not.toBeNull();
+      const collapsedHeight = messageBody!.getBoundingClientRect().height;
+      expect(collapsedHeight).toBeGreaterThan(0);
+      expect(messageBody!.scrollHeight).toBeGreaterThan(messageBody!.clientHeight);
 
       await expandButton.click();
 
@@ -771,38 +749,19 @@ describe("MessagesTimeline", () => {
       await expect.element(collapseButton).toBeVisible();
       await expect.element(collapseButton).toHaveAttribute("aria-expanded", "true");
 
-      let messageBody = document.querySelector("[data-user-message-body='true']");
-      expect(messageBody?.getAttribute("data-user-message-collapsed")).toBe("false");
-      expect(messageBody?.className).not.toContain("max-h-44");
-      expect(messageBody?.getAttribute("data-user-message-fade")).toBe("false");
-      expect((messageBody as HTMLDivElement | null)?.style.maskImage ?? "").toBe("");
+      await vi.waitFor(() => {
+        expect(messageBody!.getBoundingClientRect().height).toBeGreaterThan(collapsedHeight);
+        expect(messageBody!.clientHeight).toBe(messageBody!.scrollHeight);
+      });
+      const expandedHeight = messageBody!.getBoundingClientRect().height;
 
       await collapseButton.click();
 
-      await expect.element(page.getByRole("button", { name: "Show full message" })).toBeVisible();
-      messageBody = document.querySelector("[data-user-message-body='true']");
-      expect(messageBody?.getAttribute("data-user-message-collapsed")).toBe("true");
-      expect(messageBody?.className).toContain("max-h-44");
-      expect(messageBody?.getAttribute("data-user-message-fade")).toBe("true");
-      expect((messageBody as HTMLDivElement | null)?.style.maskImage).toContain("linear-gradient");
-    } finally {
-      await screen.unmount();
-    }
-  });
-
-  it("starts the newest long user prompt collapsed", async () => {
-    const screen = await render(
-      <MessagesTimeline
-        {...buildProps()}
-        timelineEntries={[buildUserTimelineEntry(buildLongUserMessageText("latest long prompt"))]}
-      />,
-    );
-
-    try {
-      await expect.element(page.getByRole("button", { name: "Show full message" })).toBeVisible();
-
-      const messageBody = document.querySelector("[data-user-message-body='true']");
-      expect(messageBody?.getAttribute("data-user-message-collapsed")).toBe("true");
+      const collapsedAgainButton = page.getByRole("button", { name: "Show full message" });
+      await expect.element(collapsedAgainButton).toHaveAttribute("aria-expanded", "false");
+      await vi.waitFor(() => {
+        expect(messageBody!.getBoundingClientRect().height).toBeLessThan(expandedHeight);
+      });
     } finally {
       await screen.unmount();
     }

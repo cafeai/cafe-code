@@ -150,12 +150,15 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
   });
 
 it.layer(NodeServices.layer)("bin cli parsing", (it) => {
-  it.effect("accepts the built-in lowercase log-level flag values", () =>
-    runCliWithRuntime(["--log-level", "debug", "--version"]),
-  );
-
-  it.effect("accepts canonical --no-<flag> boolean negation", () =>
-    runCliWithRuntime(["--no-log-websocket-events", "--version"]),
+  it.effect("accepts canonical built-in flag values", () =>
+    Effect.forEach(
+      [
+        ["--log-level", "debug", "--version"],
+        ["--no-log-websocket-events", "--version"],
+      ],
+      runCliWithRuntime,
+      { discard: true },
+    ),
   );
 
   it.effect("rejects invalid log-level casing before launching the server", () =>

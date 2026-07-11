@@ -1764,7 +1764,11 @@ describe("SourceControlSettingsPanel discovery states", () => {
   }
 
   it("shows skeleton sections while the first source control scan is pending", async () => {
-    setSourceControlDiscoveryStub(() => new Promise(() => {}));
+    let finishDiscovery!: (result: SourceControlDiscoveryResult) => void;
+    const pendingDiscovery = new Promise<SourceControlDiscoveryResult>((resolve) => {
+      finishDiscovery = resolve;
+    });
+    setSourceControlDiscoveryStub(() => pendingDiscovery);
 
     mounted = await render(
       <AppAtomRegistryProvider>
@@ -1778,6 +1782,9 @@ describe("SourceControlSettingsPanel discovery states", () => {
       .element(page.getByRole("button", { name: "Rescan server environment" }))
       .toBeDisabled();
     await expect.element(page.getByText("Nothing detected yet")).not.toBeInTheDocument();
+
+    finishDiscovery({ versionControlSystems: [], sourceControlProviders: [] });
+    await expect.element(page.getByText("Nothing detected yet")).toBeInTheDocument();
   });
 
   it("uses the shared empty state when discovery completes without tools", async () => {

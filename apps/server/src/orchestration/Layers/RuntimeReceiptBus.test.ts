@@ -7,10 +7,9 @@ import {
 } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as ManagedRuntime from "effect/ManagedRuntime";
-import * as Option from "effect/Option";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { RuntimeReceiptBusLive } from "./RuntimeReceiptBus.ts";
+import { makeRuntimeReceiptBusTest, retainRecentIngestionReceipt } from "./RuntimeReceiptBus.ts";
 import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
 
 describe("RuntimeReceiptBus", () => {
@@ -23,8 +22,8 @@ describe("RuntimeReceiptBus", () => {
     }
   });
 
-  async function createBus() {
-    runtime = ManagedRuntime.make(RuntimeReceiptBusLive);
+  async function createBus(maxObservedReceipts = 16) {
+    runtime = ManagedRuntime.make(makeRuntimeReceiptBusTest(maxObservedReceipts));
     return runtime.runPromise(Effect.service(RuntimeReceiptBus));
   }
 
@@ -73,37 +72,29 @@ describe("RuntimeReceiptBus", () => {
     await expect(waiting).resolves.toMatchObject({ sourceEventId: receipt.sourceEventId });
   });
 
-  it("does not retain provider ingestion receipts without a bound", async () => {
-    const bus = await createBus();
+  it("retains only the newest provider ingestion receipts", () => {
     const evictedReceipt = makeReceipt("turn-evicted");
-    await runtime!.runPromise(bus.publish(evictedReceipt));
-
-    for (let index = 0; index < 2_048; index += 1) {
-      await runtime!.runPromise(bus.publish(makeReceipt(`turn-retained-${index}`)));
-    }
-
-    const evicted = await runtime!.runPromise(
-      bus
-        .awaitTurnIngestionQuiesced({
-          threadId: evictedReceipt.threadId,
-          turnId: evictedReceipt.turnId,
-          provider: evictedReceipt.provider,
-          providerInstanceId: evictedReceipt.providerInstanceId,
-        })
-        .pipe(Effect.timeoutOption("10 millis")),
+    const retainedReceipt = makeReceipt("turn-retained");
+    const newestReceipt = makeReceipt("turn-newest");
+    const first = retainRecentIngestionReceipt(new Map(), [], "evicted", evictedReceipt, 2);
+    const second = retainRecentIngestionReceipt(
+      first.observedIngestionReceipts,
+      first.observedIngestionReceiptKeys,
+      "retained",
+      retainedReceipt,
+      2,
     );
-    const newest = await runtime!.runPromise(
-      bus
-        .awaitTurnIngestionQuiesced({
-          threadId: ThreadId.make("thread-1"),
-          turnId: TurnId.make("turn-retained-2047"),
-          provider: ProviderDriverKind.make("codex"),
-          providerInstanceId: ProviderInstanceId.make("codex"),
-        })
-        .pipe(Effect.timeoutOption("10 millis")),
+    const third = retainRecentIngestionReceipt(
+      second.observedIngestionReceipts,
+      second.observedIngestionReceiptKeys,
+      "newest",
+      newestReceipt,
+      2,
     );
 
-    expect(Option.isNone(evicted)).toBe(true);
-    expect(Option.isSome(newest)).toBe(true);
+    expect(third.observedIngestionReceiptKeys).toEqual(["retained", "newest"]);
+    expect(third.observedIngestionReceipts.has("evicted")).toBe(false);
+    expect(third.observedIngestionReceipts.get("retained")).toBe(retainedReceipt);
+    expect(third.observedIngestionReceipts.get("newest")).toBe(newestReceipt);
   });
 });

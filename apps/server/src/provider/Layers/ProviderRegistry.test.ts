@@ -38,7 +38,12 @@ import {
   checkCodexProviderStatus,
   type CodexAppServerProviderSnapshot,
 } from "./CodexProvider.ts";
-import { checkClaudeProviderStatus } from "./ClaudeProvider.ts";
+import {
+  checkClaudeProviderStatus,
+  formatClaudeModelUpgradeMessage,
+  formatClaudeSubscriptionAuthLabel,
+  getBuiltInClaudeModelsForVersion,
+} from "./ClaudeProvider.ts";
 import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import {
@@ -1072,14 +1077,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         }),
       );
 
-      // This test intentionally avoids `mockCommandSpawnerLayer` so the real
-      // Codex driver status path runs through the production spawner.
-      // We point `binaryPath` at a name that cannot exist on any machine so
-      // the real `ChildProcessSpawner` deterministically returns ENOENT.
       // If the aggregator's `syncLiveSources` breaks — the
       // `codex_personal`-never-probes bug we are guarding against — that
       // snapshot never lands in `getProviders` and the assertions below fail.
-      it.effect("propagates real Codex probe failures to the aggregator at boot", () =>
+      it.effect("propagates Codex probe failures to the aggregator at boot", () =>
         Effect.gen(function* () {
           const missingBinary = `t3code_codex_missing_`;
           const serverSettings = yield* makeMutableServerSettingsService(
@@ -1129,11 +1130,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             Layer.provideMerge(TestHttpClientLive),
             Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
             Layer.provideMerge(OpenCodeRuntimeLive),
-            // NO spawner mock — `ChildProcessSpawner` is supplied by the
-            // outer `NodeServices.layer` on `it.layer(...)` and will
-            // genuinely spawn a subprocess. The missing-binary ENOENT is
-            // what exercises the same failure mode as a misconfigured
-            // production `binaryPath`.
+            Layer.provideMerge(failingSpawnerLayer("spawn codex ENOENT")),
           );
           const runtimeServices = yield* Layer.build(providerRegistryLayer).pipe(
             Scope.provide(scope),
@@ -1155,7 +1152,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             assert.strictEqual(
               codexPersonal?.status,
               "error",
-              "Real Codex probe against a missing binary should surface as 'error' in the aggregator",
+              "A Codex probe failure should surface as 'error' in the aggregator",
             );
             assert.strictEqual(codexPersonal?.installed, false);
             assert.strictEqual(
@@ -1768,296 +1765,101 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         ),
       );
 
-      it.effect(
-        "includes Claude Opus 4.7 with xhigh as the default effort on supported versions",
-        () =>
-          Effect.gen(function* () {
-            const status = yield* checkClaudeProviderStatus(
-              defaultClaudeSettings,
-              claudeCapabilities(),
-            );
-            const opus47 = status.models.find((model) => model.slug === "claude-opus-4-7");
-            if (!opus47) {
-              assert.fail("Expected Claude Opus 4.7 to be present for Claude Code v2.1.111.");
-            }
-            if (!opus47.capabilities) {
-              assert.fail(
-                "Expected Claude Opus 4.7 capabilities to be present for Claude Code v2.1.111.",
-              );
-            }
-            const effortDescriptor = opus47.capabilities.optionDescriptors?.find(
-              (descriptor) => descriptor.type === "select" && descriptor.id === "effort",
-            );
-            assert.deepStrictEqual(
-              effortDescriptor?.type === "select"
-                ? effortDescriptor.options.find((option) => option.isDefault)
-                : undefined,
-              { id: "xhigh", label: "Extra High", isDefault: true },
-            );
-          }).pipe(
-            Effect.provide(
-              mockSpawnerLayer((args) => {
-                const joined = args.join(" ");
-                if (joined === "--version") return { stdout: "2.1.111\n", stderr: "", code: 0 };
-                if (joined === "auth status")
-                  return {
-                    stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
-                    stderr: "",
-                    code: 0,
-                  };
-                throw new Error(`Unexpected args: ${joined}`);
-              }),
-            ),
-          ),
-      );
+      it("maps Claude models across version gates without provider probes", () => {
+        const cases = [
+          {
+            version: "2.1.110",
+            slugs: [] as Array<string>,
+            upgrade:
+              "Claude Code v2.1.110 is too old for Claude Fable 5. Upgrade to v2.1.170 or newer to access it.",
+          },
+          { version: "2.1.111", slugs: ["claude-opus-4-7"] },
+          { version: "2.1.154", slugs: ["claude-opus-4-7", "claude-opus-4-8"] },
+          { version: "2.1.170", slugs: ["claude-opus-4-7", "claude-opus-4-8", "claude-fable-5"] },
+          {
+            version: "2.1.197",
+            slugs: ["claude-opus-4-7", "claude-opus-4-8", "claude-fable-5", "claude-sonnet-5"],
+          },
+        ];
+        const gatedSlugs = [
+          "claude-opus-4-7",
+          "claude-opus-4-8",
+          "claude-fable-5",
+          "claude-sonnet-5",
+        ];
 
-      it.effect(
-        "includes Claude Opus 4.8 with xhigh as the default effort on supported versions",
-        () =>
-          Effect.gen(function* () {
-            const status = yield* checkClaudeProviderStatus(
-              defaultClaudeSettings,
-              claudeCapabilities(),
+        for (const testCase of cases) {
+          const models = getBuiltInClaudeModelsForVersion(testCase.version);
+          for (const slug of gatedSlugs) {
+            assert.strictEqual(
+              models.some((model) => model.slug === slug),
+              testCase.slugs.includes(slug),
+              `${testCase.version}: ${slug}`,
             );
-            const opus48 = status.models.find((model) => model.slug === "claude-opus-4-8");
-            if (!opus48) {
-              assert.fail("Expected Claude Opus 4.8 to be present for Claude Code v2.1.154.");
-            }
-            if (!opus48.capabilities) {
-              assert.fail(
-                "Expected Claude Opus 4.8 capabilities to be present for Claude Code v2.1.154.",
-              );
-            }
-            const effortDescriptor = opus48.capabilities.optionDescriptors?.find(
-              (descriptor) => descriptor.type === "select" && descriptor.id === "effort",
-            );
-            assert.deepStrictEqual(
-              effortDescriptor?.type === "select"
-                ? effortDescriptor.options.find((option) => option.isDefault)
-                : undefined,
-              { id: "xhigh", label: "Extra High", isDefault: true },
-            );
-          }).pipe(
-            Effect.provide(
-              mockSpawnerLayer((args) => {
-                const joined = args.join(" ");
-                if (joined === "--version") return { stdout: "2.1.154\n", stderr: "", code: 0 };
-                if (joined === "auth status")
-                  return {
-                    stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
-                    stderr: "",
-                    code: 0,
-                  };
-                throw new Error(`Unexpected args: ${joined}`);
-              }),
-            ),
-          ),
-      );
+          }
+          if (testCase.upgrade) {
+            assert.strictEqual(formatClaudeModelUpgradeMessage(testCase.version), testCase.upgrade);
+          }
+        }
 
-      it.effect(
-        "includes Claude Fable 5 with xhigh and 1M context settings on supported versions",
-        () =>
-          Effect.gen(function* () {
-            const status = yield* checkClaudeProviderStatus(
-              defaultClaudeSettings,
-              claudeCapabilities(),
-            );
-            const fable5 = status.models.find((model) => model.slug === "claude-fable-5");
-            if (!fable5) {
-              assert.fail("Expected Claude Fable 5 to be present for Claude Code v2.1.170.");
-            }
-            if (!fable5.capabilities) {
-              assert.fail(
-                "Expected Claude Fable 5 capabilities to be present for Claude Code v2.1.170.",
-              );
-            }
-            const effortDescriptor = fable5.capabilities.optionDescriptors?.find(
-              (descriptor) => descriptor.type === "select" && descriptor.id === "effort",
-            );
-            assert.deepStrictEqual(
-              effortDescriptor?.type === "select"
-                ? effortDescriptor.options.find((option) => option.isDefault)
-                : undefined,
-              { id: "xhigh", label: "Extra High", isDefault: true },
-            );
-            const contextDescriptor = fable5.capabilities.optionDescriptors?.find(
-              (descriptor) => descriptor.type === "select" && descriptor.id === "contextWindow",
-            );
-            assert.deepStrictEqual(
-              contextDescriptor?.type === "select"
-                ? contextDescriptor.options.map((option) => option.id)
-                : undefined,
-              ["200k", "1m"],
-            );
-          }).pipe(
-            Effect.provide(
-              mockSpawnerLayer((args) => {
-                const joined = args.join(" ");
-                if (joined === "--version") return { stdout: "2.1.170\n", stderr: "", code: 0 };
-                if (joined === "auth status")
-                  return {
-                    stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
-                    stderr: "",
-                    code: 0,
-                  };
-                throw new Error(`Unexpected args: ${joined}`);
-              }),
-            ),
-          ),
-      );
+        const opus47 = getBuiltInClaudeModelsForVersion("2.1.111").find(
+          (model) => model.slug === "claude-opus-4-7",
+        );
+        const opus47Effort = opus47?.capabilities?.optionDescriptors?.find(
+          (descriptor) => descriptor.type === "select" && descriptor.id === "effort",
+        );
+        assert.deepStrictEqual(
+          opus47Effort?.type === "select"
+            ? opus47Effort.options.find((option) => option.isDefault)
+            : undefined,
+          { id: "xhigh", label: "Extra High", isDefault: true },
+        );
 
-      it.effect(
-        "includes Claude Sonnet 5 when Claude Code reports the upstream sonnet alias version",
-        () =>
-          Effect.gen(function* () {
-            const status = yield* checkClaudeProviderStatus(
-              defaultClaudeSettings,
-              claudeCapabilities(),
-            );
-            const sonnet5 = status.models.find((model) => model.slug === "claude-sonnet-5");
-            if (!sonnet5) {
-              assert.fail("Expected Claude Sonnet 5 to be present for Claude Code v2.1.197.");
-            }
-            if (!sonnet5.capabilities) {
-              assert.fail(
-                "Expected Claude Sonnet 5 capabilities to be present for Claude Code v2.1.197.",
-              );
-            }
-            const effortDescriptor = sonnet5.capabilities.optionDescriptors?.find(
-              (descriptor) => descriptor.type === "select" && descriptor.id === "effort",
-            );
-            assert.deepStrictEqual(
-              effortDescriptor?.type === "select"
-                ? effortDescriptor.options.map((option) => option.id)
-                : undefined,
-              ["low", "medium", "high", "xhigh", "max", "ultrathink"],
-            );
-          }).pipe(
-            Effect.provide(
-              mockSpawnerLayer((args) => {
-                const joined = args.join(" ");
-                if (joined === "--version") return { stdout: "2.1.197\n", stderr: "", code: 0 };
-                if (joined === "auth status")
-                  return {
-                    stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
-                    stderr: "",
-                    code: 0,
-                  };
-                throw new Error(`Unexpected args: ${joined}`);
-              }),
-            ),
-          ),
-      );
+        const fable5 = getBuiltInClaudeModelsForVersion("2.1.170").find(
+          (model) => model.slug === "claude-fable-5",
+        );
+        const fableContext = fable5?.capabilities?.optionDescriptors?.find(
+          (descriptor) => descriptor.type === "select" && descriptor.id === "contextWindow",
+        );
+        assert.deepStrictEqual(
+          fableContext?.type === "select"
+            ? fableContext.options.map((option) => option.id)
+            : undefined,
+          ["200k", "1m"],
+        );
 
-      it.effect("hides version-gated Claude models on older Claude Code versions", () =>
-        Effect.gen(function* () {
-          const status = yield* checkClaudeProviderStatus(
-            defaultClaudeSettings,
-            claudeCapabilities(),
-          );
+        const sonnet5 = getBuiltInClaudeModelsForVersion("2.1.197").find(
+          (model) => model.slug === "claude-sonnet-5",
+        );
+        const sonnetEffort = sonnet5?.capabilities?.optionDescriptors?.find(
+          (descriptor) => descriptor.type === "select" && descriptor.id === "effort",
+        );
+        assert.deepStrictEqual(
+          sonnetEffort?.type === "select"
+            ? sonnetEffort.options.map((option) => option.id)
+            : undefined,
+          ["low", "medium", "high", "xhigh", "max", "ultrathink"],
+        );
+      });
+
+      it("formats Claude subscription labels without probing the provider", () => {
+        const cases = [
+          { subscriptionType: "maxplan", expected: "Claude Max Subscription" },
+          {
+            subscriptionType: "Claude Max Subscription",
+            expected: "Claude Max Subscription",
+          },
+          { subscriptionType: "Claude Max", expected: "Claude Max Subscription" },
+        ];
+
+        for (const testCase of cases) {
           assert.strictEqual(
-            status.models.some((model) => model.slug === "claude-fable-5"),
-            false,
+            formatClaudeSubscriptionAuthLabel(testCase.subscriptionType),
+            testCase.expected,
+            testCase.subscriptionType,
           );
-          assert.strictEqual(
-            status.models.some((model) => model.slug === "claude-opus-4-8"),
-            false,
-          );
-          assert.strictEqual(
-            status.models.some((model) => model.slug === "claude-opus-4-7"),
-            false,
-          );
-          assert.strictEqual(
-            status.message,
-            "Claude Code v2.1.110 is too old for Claude Fable 5. Upgrade to v2.1.170 or newer to access it.",
-          );
-        }).pipe(
-          Effect.provide(
-            mockSpawnerLayer((args) => {
-              const joined = args.join(" ");
-              if (joined === "--version") return { stdout: "2.1.110\n", stderr: "", code: 0 };
-              if (joined === "auth status")
-                return {
-                  stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
-                  stderr: "",
-                  code: 0,
-                };
-              throw new Error(`Unexpected args: ${joined}`);
-            }),
-          ),
-        ),
-      );
-
-      it.effect("returns a display label for claude subscription types", () =>
-        Effect.gen(function* () {
-          const status = yield* checkClaudeProviderStatus(
-            defaultClaudeSettings,
-            claudeCapabilities({ subscriptionType: "maxplan" }),
-          );
-          assert.strictEqual(status.status, "ready");
-          assert.strictEqual(status.auth.status, "authenticated");
-          assert.strictEqual(status.auth.type, "maxplan");
-          assert.strictEqual(status.auth.label, "Claude Max Subscription");
-        }).pipe(
-          Effect.provide(
-            mockSpawnerLayer((args) => {
-              const joined = args.join(" ");
-              if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
-              if (joined === "auth status")
-                return {
-                  stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
-                  stderr: "",
-                  code: 0,
-                };
-              throw new Error(`Unexpected args: ${joined}`);
-            }),
-          ),
-        ),
-      );
-
-      it.effect("does not duplicate Claude in full subscription labels", () =>
-        Effect.gen(function* () {
-          const status = yield* checkClaudeProviderStatus(
-            defaultClaudeSettings,
-            claudeCapabilities({
-              subscriptionType: "Claude Max Subscription",
-            }),
-          );
-          assert.strictEqual(status.auth.status, "authenticated");
-          assert.strictEqual(status.auth.type, "Claude Max Subscription");
-          assert.strictEqual(status.auth.label, "Claude Max Subscription");
-        }).pipe(
-          Effect.provide(
-            mockSpawnerLayer((args) => {
-              const joined = args.join(" ");
-              if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
-              throw new Error(`Unexpected args: ${joined}`);
-            }),
-          ),
-        ),
-      );
-
-      it.effect("does not duplicate Claude in provider-prefixed subscription names", () =>
-        Effect.gen(function* () {
-          const status = yield* checkClaudeProviderStatus(
-            defaultClaudeSettings,
-            claudeCapabilities({
-              subscriptionType: "Claude Max",
-            }),
-          );
-          assert.strictEqual(status.auth.status, "authenticated");
-          assert.strictEqual(status.auth.type, "Claude Max");
-          assert.strictEqual(status.auth.label, "Claude Max Subscription");
-        }).pipe(
-          Effect.provide(
-            mockSpawnerLayer((args) => {
-              const joined = args.join(" ");
-              if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
-              throw new Error(`Unexpected args: ${joined}`);
-            }),
-          ),
-        ),
-      );
+        }
+      });
 
       it.effect("returns claude auth email from initialization result", () =>
         Effect.gen(function* () {

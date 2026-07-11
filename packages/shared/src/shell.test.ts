@@ -412,25 +412,15 @@ describe("resolveKnownWindowsCliDirs", () => {
   });
 });
 
-describe("isCommandAvailable", () => {
-  it("returns false when PATH is empty", () => {
-    expect(
-      isCommandAvailable("definitely-not-installed", {
-        platform: "win32",
-        env: { PATH: "", PATHEXT: ".COM;.EXE;.BAT;.CMD" },
-      }),
-    ).toBe(false);
-  });
-});
+describe("command resolution", () => {
+  it("reports an unavailable command consistently when PATH is empty", () => {
+    const options = {
+      platform: "win32" as const,
+      env: { PATH: "", PATHEXT: ".COM;.EXE;.BAT;.CMD" },
+    };
 
-describe("resolveCommandPath", () => {
-  it("returns the first executable resolved from PATH", () => {
-    expect(
-      resolveCommandPath("definitely-not-installed", {
-        platform: "win32",
-        env: { PATH: "", PATHEXT: ".COM;.EXE;.BAT;.CMD" },
-      }),
-    ).toBeNull();
+    expect(isCommandAvailable("definitely-not-installed", options)).toBe(false);
+    expect(resolveCommandPath("definitely-not-installed", options)).toBeNull();
   });
 });
 

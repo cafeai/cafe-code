@@ -1,5 +1,4 @@
 // @effect-diagnostics globalDate:off
-// @effect-diagnostics globalTimers:off
 import { assert, describe, it } from "@effect/vitest";
 
 import { __desktopDebugServerTestApi as debugServer } from "./DesktopDebugServer.ts";
@@ -263,6 +262,7 @@ describe("DesktopDebugServer compact snapshots", () => {
   it("uses cached provider daemon snapshots for ordinary debug reads", async () => {
     debugServer.reset();
     debugServer.publishProviderDaemonSnapshot(makeLargeProviderDaemonSnapshot());
+    debugServer.setProviderDaemonSnapshotUpdatedAt("9999-01-01T00:00:00.000Z");
     let refreshCount = 0;
     debugServer.setProviderDaemonSnapshotRefresher(async () => {
       refreshCount += 1;
@@ -273,14 +273,23 @@ describe("DesktopDebugServer compact snapshots", () => {
     assert.equal(refreshCount, 0);
     assert.equal(debugServer.getProviderDaemonRefreshAttemptCount(), 0);
 
-    debugServer.setProviderDaemonSnapshotUpdatedAt(new Date(Date.now() - 60_000).toISOString());
-    await debugServer.prepareProviderDaemonSnapshotForDebugRequest(false);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
+    await debugServer.prepareProviderDaemonSnapshotForDebugRequest(true);
     assert.equal(refreshCount, 1);
     assert.equal(debugServer.getProviderDaemonRefreshAttemptCount(), 1);
 
-    await debugServer.prepareProviderDaemonSnapshotForDebugRequest(true);
+    let resolveBackgroundRefresh!: () => void;
+    const backgroundRefreshCompleted = new Promise<void>((resolve) => {
+      resolveBackgroundRefresh = resolve;
+    });
+    debugServer.setProviderDaemonSnapshotRefresher(async () => {
+      refreshCount += 1;
+      debugServer.publishProviderDaemonSnapshot(makeLargeProviderDaemonSnapshot());
+      resolveBackgroundRefresh();
+    });
+    debugServer.setProviderDaemonSnapshotUpdatedAt("1970-01-01T00:00:00.000Z");
+    await debugServer.prepareProviderDaemonSnapshotForDebugRequest(false);
+    await backgroundRefreshCompleted;
+
     assert.equal(refreshCount, 2);
     assert.equal(debugServer.getProviderDaemonRefreshAttemptCount(), 2);
   });

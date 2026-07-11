@@ -204,45 +204,36 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
 });
 
 it.layer(testLayer)("checkOpenCodeProviderStatus with configured server URL", (it) => {
-  it.effect("surfaces a friendly auth error for configured servers", () =>
+  it.effect("maps configured server failures to friendly errors", () =>
     Effect.gen(function* () {
-      runtimeMock.state.inventoryError = new Error("401 Unauthorized");
-      const snapshot = yield* checkOpenCodeProviderStatus(
-        makeOpenCodeSettings({
-          serverUrl: "http://127.0.0.1:9999",
-          serverPassword: "secret-password",
-        }),
-        process.cwd(),
-      );
+      const cases = [
+        {
+          name: "authentication failure",
+          error: new Error("401 Unauthorized"),
+          message: "OpenCode server rejected authentication. Check the server URL and password.",
+        },
+        {
+          name: "connection failure",
+          error: new Error("fetch failed: connect ECONNREFUSED 127.0.0.1:9999"),
+          message:
+            "Couldn't reach the configured OpenCode server at http://127.0.0.1:9999. Check that the server is running and the URL is correct.",
+        },
+      ];
 
-      assert.equal(snapshot.status, "error");
-      assert.equal(snapshot.installed, true);
-      assert.equal(
-        snapshot.message,
-        "OpenCode server rejected authentication. Check the server URL and password.",
-      );
-    }),
-  );
+      for (const testCase of cases) {
+        runtimeMock.state.inventoryError = testCase.error;
+        const snapshot = yield* checkOpenCodeProviderStatus(
+          makeOpenCodeSettings({
+            serverUrl: "http://127.0.0.1:9999",
+            serverPassword: "secret-password",
+          }),
+          process.cwd(),
+        );
 
-  it.effect("surfaces a friendly connection error for configured servers", () =>
-    Effect.gen(function* () {
-      runtimeMock.state.inventoryError = new Error(
-        "fetch failed: connect ECONNREFUSED 127.0.0.1:9999",
-      );
-      const snapshot = yield* checkOpenCodeProviderStatus(
-        makeOpenCodeSettings({
-          serverUrl: "http://127.0.0.1:9999",
-          serverPassword: "secret-password",
-        }),
-        process.cwd(),
-      );
-
-      assert.equal(snapshot.status, "error");
-      assert.equal(snapshot.installed, true);
-      assert.equal(
-        snapshot.message,
-        "Couldn't reach the configured OpenCode server at http://127.0.0.1:9999. Check that the server is running and the URL is correct.",
-      );
+        assert.equal(snapshot.status, "error", testCase.name);
+        assert.equal(snapshot.installed, true, testCase.name);
+        assert.equal(snapshot.message, testCase.message, testCase.name);
+      }
     }),
   );
 });

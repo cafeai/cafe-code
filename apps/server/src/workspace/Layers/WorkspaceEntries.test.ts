@@ -228,8 +228,12 @@ it.layer(TestLayer)("WorkspaceEntriesLive", (it) => {
 
         let rootReadCount = 0;
         let releaseRootRead: (() => void) | undefined;
+        let signalRootReadStarted: (() => void) | undefined;
         const rootReadGate = new Promise<void>((resolve) => {
           releaseRootRead = resolve;
+        });
+        const rootReadStarted = new Promise<void>((resolve) => {
+          signalRootReadStarted = resolve;
         });
         const originalReaddir = fsPromises.readdir.bind(fsPromises);
         vi.spyOn(fsPromises, "readdir").mockImplementation((async (
@@ -237,6 +241,7 @@ it.layer(TestLayer)("WorkspaceEntriesLive", (it) => {
         ) => {
           if (args[0] === cwd) {
             rootReadCount += 1;
+            signalRootReadStarted?.();
             await rootReadGate;
           }
           return originalReaddir(...args);
@@ -250,12 +255,7 @@ it.layer(TestLayer)("WorkspaceEntriesLive", (it) => {
           ],
           { concurrency: "unbounded" },
         ).pipe(Effect.forkScoped);
-        for (let attempt = 0; attempt < 50; attempt += 1) {
-          if (rootReadCount > 0) {
-            break;
-          }
-          yield* Effect.yieldNow;
-        }
+        yield* Effect.promise(() => rootReadStarted);
         releaseRootRead?.();
         yield* Fiber.join(searches);
 
@@ -275,8 +275,12 @@ it.layer(TestLayer)("WorkspaceEntriesLive", (it) => {
         let activeReads = 0;
         let peakReads = 0;
         let releaseReads: (() => void) | undefined;
+        let signalFirstReadStarted: (() => void) | undefined;
         const readsGate = new Promise<void>((resolve) => {
           releaseReads = resolve;
+        });
+        const firstReadStarted = new Promise<void>((resolve) => {
+          signalFirstReadStarted = resolve;
         });
         const originalReaddir = fsPromises.readdir.bind(fsPromises);
         vi.spyOn(fsPromises, "readdir").mockImplementation((async (
@@ -286,6 +290,7 @@ it.layer(TestLayer)("WorkspaceEntriesLive", (it) => {
           if (typeof target === "string" && target.startsWith(cwd)) {
             activeReads += 1;
             peakReads = Math.max(peakReads, activeReads);
+            signalFirstReadStarted?.();
             await readsGate;
             try {
               return await originalReaddir(...args);
@@ -299,12 +304,7 @@ it.layer(TestLayer)("WorkspaceEntriesLive", (it) => {
         const search = yield* searchWorkspaceEntries({ cwd, query: "", limit: 200 }).pipe(
           Effect.forkScoped,
         );
-        for (let attempt = 0; attempt < 50; attempt += 1) {
-          if (activeReads > 0) {
-            break;
-          }
-          yield* Effect.yieldNow;
-        }
+        yield* Effect.promise(() => firstReadStarted);
         releaseReads?.();
         yield* Fiber.join(search);
 

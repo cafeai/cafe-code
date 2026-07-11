@@ -6,9 +6,6 @@ import {
   ClientSettingsSchema,
   CodexSettings,
   ClaudeSettings,
-  CLIENT_SETTINGS_CAPABILITY_DEPENDENT_KEYS,
-  CLIENT_SETTINGS_EXCLUDED_SECRET_STORES,
-  CLIENT_SETTINGS_KEYS,
   DEFAULT_APP_ACCENT_COLOR,
   DEFAULT_BRAND_WORDMARK_PREFIX,
   DEFAULT_CHAT_COPY_FORMAT,
@@ -29,8 +26,6 @@ import {
   MAX_SIDEBAR_STAR_SPEED,
   MIN_SIDEBAR_STAR_SPEED,
   ServerSettingsPatch,
-  isCapabilityDependentClientSettingsKey,
-  isClientSettingsKey,
 } from "./settings.ts";
 
 const decodeClientSettings = Schema.decodeSync(ClientSettingsSchema);
@@ -69,29 +64,6 @@ describe("client settings", () => {
       (key) => !patchKeys.has(key) && !NON_PATCHABLE_KEYS.has(key),
     );
     expect(missing).toEqual([]);
-  });
-
-  it("classifies synced client settings without including secret stores", () => {
-    expect(CLIENT_SETTINGS_KEYS).toContain("sidebarBrandImageDataUrl");
-    expect(CLIENT_SETTINGS_KEYS).toContain("sidebarBrandImage");
-    expect(CLIENT_SETTINGS_KEYS).toContain("defaultEditor");
-    expect(CLIENT_SETTINGS_KEYS).toContain("powerSaveBlockerMode");
-    expect(isClientSettingsKey("sidebarBrandImageDataUrl")).toBe(true);
-    expect(isClientSettingsKey("sidebarBrandImage")).toBe(true);
-    expect(isClientSettingsKey("providerCredentials")).toBe(false);
-    expect(CLIENT_SETTINGS_EXCLUDED_SECRET_STORES).toContain("provider-api-keys");
-    expect(CLIENT_SETTINGS_EXCLUDED_SECRET_STORES).toContain("tls-private-keys");
-  });
-
-  it("marks capability-dependent preferences without excluding them from sync", () => {
-    expect(CLIENT_SETTINGS_CAPABILITY_DEPENDENT_KEYS).toEqual([
-      "defaultEditor",
-      "powerSaveBlockerMode",
-    ]);
-    expect(isCapabilityDependentClientSettingsKey("defaultEditor")).toBe(true);
-    expect(isCapabilityDependentClientSettingsKey("powerSaveBlockerMode")).toBe(true);
-    expect(CLIENT_SETTINGS_KEYS).toContain("defaultEditor");
-    expect(CLIENT_SETTINGS_KEYS).toContain("powerSaveBlockerMode");
   });
 
   it("defaults appearance preferences", () => {

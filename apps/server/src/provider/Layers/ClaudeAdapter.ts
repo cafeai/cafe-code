@@ -27,6 +27,7 @@ import {
   type CanonicalRequestType,
   type ClaudeSettings,
   EventId,
+  type ModelSelection,
   type ProviderApprovalDecision,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -543,6 +544,42 @@ function normalizeClaudeStreamMessages(
 function getEffectiveClaudeAgentEffort(effort: string | null | undefined): ClaudeSdkEffort | null {
   const normalized = normalizeClaudeCliEffort(effort);
   return normalized ? (normalized as ClaudeSdkEffort) : null;
+}
+
+export function resolveClaudeModelSessionOptions(modelSelection: ModelSelection | undefined): {
+  readonly apiModelId: string | undefined;
+  readonly selectedContextWindowTokens: number | undefined;
+  readonly effectiveEffort: ClaudeSdkEffort | null;
+  readonly settings: {
+    readonly alwaysThinkingEnabled?: boolean;
+    readonly fastMode?: true;
+  };
+} {
+  const caps = getClaudeModelCapabilities(modelSelection?.model);
+  const descriptors = getProviderOptionDescriptors({ caps });
+  const rawEffort = getModelSelectionStringOptionValue(modelSelection, "effort");
+  const effort = resolveClaudeSessionEffort(caps, rawEffort) ?? null;
+  const fastModeSupported = descriptors.some(
+    (descriptor) => descriptor.type === "boolean" && descriptor.id === "fastMode",
+  );
+  const thinkingSupported = descriptors.some(
+    (descriptor) => descriptor.type === "boolean" && descriptor.id === "thinking",
+  );
+  const fastMode =
+    getModelSelectionBooleanOptionValue(modelSelection, "fastMode") === true && fastModeSupported;
+  const thinking = thinkingSupported
+    ? getModelSelectionBooleanOptionValue(modelSelection, "thinking")
+    : undefined;
+
+  return {
+    apiModelId: modelSelection ? resolveClaudeApiModelId(modelSelection) : undefined,
+    selectedContextWindowTokens: resolveClaudeSelectedContextWindowTokens(modelSelection),
+    effectiveEffort: getEffectiveClaudeAgentEffort(effort),
+    settings: {
+      ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
+      ...(fastMode ? { fastMode: true as const } : {}),
+    },
+  };
 }
 
 function isClaudeInterruptedMessage(message: string): boolean {
@@ -4283,35 +4320,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const extraArgs = parseCliArgs(claudeSettings.launchArgs).flags;
       const modelSelection =
         input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
-      const caps = getClaudeModelCapabilities(modelSelection?.model);
-      const descriptors = getProviderOptionDescriptors({ caps });
-      const apiModelId = modelSelection ? resolveClaudeApiModelId(modelSelection) : undefined;
-      const selectedContextWindowTokens = resolveClaudeSelectedContextWindowTokens(modelSelection);
-      const rawEffort = getModelSelectionStringOptionValue(modelSelection, "effort");
-      const effort = resolveClaudeSessionEffort(caps, rawEffort) ?? null;
-      const fastModeSupported = descriptors.some(
-        (descriptor) => descriptor.type === "boolean" && descriptor.id === "fastMode",
-      );
-      const thinkingSupported = descriptors.some(
-        (descriptor) => descriptor.type === "boolean" && descriptor.id === "thinking",
-      );
-      const fastMode =
-        getModelSelectionBooleanOptionValue(modelSelection, "fastMode") === true &&
-        fastModeSupported;
-      const thinking = thinkingSupported
-        ? getModelSelectionBooleanOptionValue(modelSelection, "thinking")
-        : undefined;
-      const effectiveEffort = getEffectiveClaudeAgentEffort(effort);
+      const { apiModelId, selectedContextWindowTokens, effectiveEffort, settings } =
+        resolveClaudeModelSessionOptions(modelSelection);
+      const fastMode = settings.fastMode === true;
       const runtimeModeToPermission: Record<string, PermissionMode> = {
         "auto-accept-edits": "acceptEdits",
         "full-access": "bypassPermissions",
       };
       const permissionMode = runtimeModeToPermission[input.runtimeMode];
       const initialPermissionMode = input.interactionMode === "plan" ? "plan" : permissionMode;
-      const settings = {
-        ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
-        ...(fastMode ? { fastMode: true } : {}),
-      };
       const claudeAdditionalDirectories = [
         ...(input.cwd ? [input.cwd] : []),
         ...(input.additionalDirectories ?? []),

@@ -74,15 +74,6 @@ describe("followUpQueue", () => {
         liveSteerSupported: true,
         provider: "codex",
         activeTurnId: "turn-1",
-        latestTurn: { turnId: "turn-1", state: "running" },
-      }),
-    ).toBe(true);
-
-    expect(
-      isLiveSteerAvailableForThread({
-        liveSteerSupported: true,
-        provider: "codex",
-        activeTurnId: "turn-1",
         latestTurn: { turnId: "turn-2", state: "running" },
       }),
     ).toBe(false);

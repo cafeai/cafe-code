@@ -101,9 +101,12 @@ describe("FollowUpQueueShelf", () => {
 
       await page.getByText("Send").click();
       expect(onAction).toHaveBeenCalledWith("queued-short");
-
-      const steerButton = document.querySelector(".cafe-followup-steer-button");
-      expect(steerButton).not.toBeNull();
+      await expect
+        .element(page.getByRole("button", { name: "Send" }))
+        .toHaveAttribute(
+          "title",
+          "Cafe Code will send this follow-up as soon as the active turn can accept it.",
+        );
     } finally {
       await screen.unmount();
       host.remove();

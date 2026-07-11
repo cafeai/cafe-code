@@ -1781,7 +1781,7 @@ const make = Effect.gen(function* () {
               retryableFollowUp: true,
               retryAfter: "active-turn",
               ...(codexNonSteerableTurnKind !== undefined ? { codexNonSteerableTurnKind } : {}),
-            });
+            }).pipe(Effect.asVoid);
           }
           return recoverTurnStartFailure(steerCause);
         }),

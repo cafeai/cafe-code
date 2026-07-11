@@ -67,18 +67,6 @@ describe("uiStateStore pure functions", () => {
     expect(next.projectOrder).toEqual([project2, project3, project1]);
   });
 
-  it("reorderProjects is a no-op when dragged key is not in projectOrder", () => {
-    const project1 = ProjectId.make("project-1");
-    const project2 = ProjectId.make("project-2");
-    const initialState = makeUiState({
-      projectOrder: [project1, project2],
-    });
-
-    const next = reorderProjects(initialState, [ProjectId.make("missing")], [project2]);
-
-    expect(next).toBe(initialState);
-  });
-
   it("setDefaultAdvertisedEndpointKey stores endpoint preference by stable key", () => {
     const initialState = makeUiState();
 
@@ -187,14 +175,28 @@ describe("uiStateStore pure functions", () => {
     expect(next).toBe(initialState);
   });
 
-  it("reorderProjects is a no-op when dragged keys are not in projectOrder", () => {
-    const initialState = makeUiState({
-      projectOrder: ["env-local:proj-a", "env-local:proj-b"],
-    });
+  it("reorderProjects is a no-op for missing branded and grouped drag keys", () => {
+    const cases: ReadonlyArray<{
+      projectOrder: ReadonlyArray<string>;
+      draggedKeys: ReadonlyArray<string>;
+      targetKeys: ReadonlyArray<string>;
+    }> = [
+      {
+        projectOrder: [ProjectId.make("project-1"), ProjectId.make("project-2")],
+        draggedKeys: [ProjectId.make("missing")],
+        targetKeys: [ProjectId.make("project-2")],
+      },
+      {
+        projectOrder: ["env-local:proj-a", "env-local:proj-b"],
+        draggedKeys: ["env-local:missing"],
+        targetKeys: ["env-local:proj-b"],
+      },
+    ];
 
-    const next = reorderProjects(initialState, ["env-local:missing"], ["env-local:proj-b"]);
-
-    expect(next).toBe(initialState);
+    for (const { projectOrder, draggedKeys, targetKeys } of cases) {
+      const initialState = makeUiState({ projectOrder: [...projectOrder] });
+      expect(reorderProjects(initialState, draggedKeys, targetKeys)).toBe(initialState);
+    }
   });
 
   it("syncProjects preserves current project order during snapshot recovery", () => {

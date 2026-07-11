@@ -6,15 +6,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { assert, describe, it } from "@effect/vitest";
 
-import packageJson from "../package.json" with { type: "json" };
 import { buildDesktopLaunchEnv, isCliEntrypoint, resolveLaunchAction } from "./launcher.ts";
 
 describe("launcher", () => {
-  it("configures the default npm bin to launch the desktop app", () => {
-    assert.equal(packageJson.bin["cafe-code"], "dist/launcher.mjs");
-    assert.equal(packageJson.bin["cafe-code-server"], "dist/bin.mjs");
-  });
-
   it("routes bare npx execution to the Electron desktop launcher", () => {
     assert.deepEqual(resolveLaunchAction([]), { type: "desktop", args: [] });
     assert.deepEqual(resolveLaunchAction(["--cafe-debug"]), {

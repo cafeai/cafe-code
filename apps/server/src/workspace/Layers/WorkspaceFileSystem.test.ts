@@ -1,4 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { symlinkSync } from "node:fs";
 import { it, describe, expect } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -13,6 +15,23 @@ import { WorkspaceFileSystem } from "../Services/WorkspaceFileSystem.ts";
 import { WorkspaceEntriesLive } from "./WorkspaceEntries.ts";
 import { WorkspaceFileSystemLive } from "./WorkspaceFileSystem.ts";
 import { WorkspacePathsLive } from "./WorkspacePaths.ts";
+
+function createSymlinkOrSkipOnWindowsPrivilegeError(target: string, linkPath: string): boolean {
+  try {
+    symlinkSync(target, linkPath);
+    return true;
+  } catch (error) {
+    if (
+      process.platform === "win32" &&
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "EPERM"
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
 
 const ProjectLayer = WorkspaceFileSystemLive.pipe(
   Layer.provide(WorkspacePathsLive),
@@ -145,7 +164,9 @@ it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
         const path = yield* Path.Path;
         const fileSystem = yield* FileSystem.FileSystem;
 
-        yield* fileSystem.symlink(outside, path.join(cwd, "linked"));
+        if (!createSymlinkOrSkipOnWindowsPrivilegeError(outside, path.join(cwd, "linked"))) {
+          return;
+        }
 
         const error = yield* workspaceFileSystem
           .writeFile({
@@ -180,7 +201,9 @@ it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
         const outsideFile = path.join(outside, "escape.md");
 
         yield* fileSystem.writeFileString(outsideFile, "original\n");
-        yield* fileSystem.symlink(outsideFile, path.join(cwd, "escape.md"));
+        if (!createSymlinkOrSkipOnWindowsPrivilegeError(outsideFile, path.join(cwd, "escape.md"))) {
+          return;
+        }
 
         const error = yield* workspaceFileSystem
           .writeFile({

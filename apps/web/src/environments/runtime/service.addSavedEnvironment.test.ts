@@ -168,15 +168,24 @@ describe("direct saved environments", () => {
     mockReadSavedEnvironmentBearerToken.mockResolvedValue(null);
     mockRemoveSavedEnvironmentBearerToken.mockResolvedValue(undefined);
     mockCreateEnvironmentConnection.mockImplementation(
-      (input: { knownEnvironment: { environmentId: EnvironmentId }; client: unknown }) => ({
-        kind: "saved" as const,
-        environmentId: input.knownEnvironment.environmentId,
-        knownEnvironment: input.knownEnvironment,
-        client: input.client,
-        ensureBootstrapped: async () => undefined,
-        reconnect: async () => undefined,
-        dispose: async () => undefined,
-      }),
+      (input: {
+        knownEnvironment: { environmentId: EnvironmentId };
+        client: unknown;
+        onConfigSnapshot?: (config: Awaited<ReturnType<typeof mockClientGetConfig>>) => void;
+      }) => {
+        queueMicrotask(async () => {
+          input.onConfigSnapshot?.(await mockClientGetConfig());
+        });
+        return {
+          kind: "saved" as const,
+          environmentId: input.knownEnvironment.environmentId,
+          knownEnvironment: input.knownEnvironment,
+          client: input.client,
+          ensureBootstrapped: async () => undefined,
+          reconnect: async () => undefined,
+          dispose: async () => undefined,
+        };
+      },
     );
     mockClientGetConfig.mockResolvedValue({
       environment: {
@@ -284,27 +293,42 @@ describe("direct saved environments", () => {
     mockReadSavedEnvironmentBearerToken.mockResolvedValue("bearer-token");
     const dispose = vi.fn(async () => undefined);
     mockCreateEnvironmentConnection.mockImplementation(
-      (input: { knownEnvironment: { environmentId: EnvironmentId }; client: unknown }) => ({
-        kind: "saved" as const,
-        environmentId: input.knownEnvironment.environmentId,
-        knownEnvironment: input.knownEnvironment,
-        client: input.client,
-        ensureBootstrapped: async () => undefined,
-        reconnect: async () => undefined,
-        dispose,
-      }),
+      (input: {
+        knownEnvironment: { environmentId: EnvironmentId };
+        client: unknown;
+        onConfigSnapshot?: (config: Awaited<ReturnType<typeof mockClientGetConfig>>) => void;
+      }) => {
+        queueMicrotask(async () => {
+          input.onConfigSnapshot?.(await mockClientGetConfig());
+        });
+        return {
+          kind: "saved" as const,
+          environmentId: input.knownEnvironment.environmentId,
+          knownEnvironment: input.knownEnvironment,
+          client: input.client,
+          ensureBootstrapped: async () => undefined,
+          reconnect: async () => undefined,
+          dispose,
+        };
+      },
     );
     let resolveSessionState!: (value: { authenticated: true; role: "owner" }) => void;
-    mockFetchRemoteSessionState.mockReturnValue(
-      new Promise((resolve) => {
+    let signalSessionStateStarted!: () => void;
+    const sessionStateStarted = new Promise<void>((resolve) => {
+      signalSessionStateStarted = resolve;
+    });
+    mockFetchRemoteSessionState.mockImplementation(() => {
+      signalSessionStateStarted();
+      return new Promise((resolve) => {
         resolveSessionState = resolve;
-      }),
-    );
+      });
+    });
     const { disconnectSavedEnvironment, listEnvironmentConnections, reconnectSavedEnvironment } =
       await import("./service");
 
     const reconnectPromise = reconnectSavedEnvironment(EnvironmentId.make("environment-1"));
-    await vi.waitFor(() => expect(mockFetchRemoteSessionState).toHaveBeenCalledOnce());
+    await sessionStateStarted;
+    expect(mockFetchRemoteSessionState).toHaveBeenCalledOnce();
     await disconnectSavedEnvironment(EnvironmentId.make("environment-1"));
     resolveSessionState({ authenticated: true, role: "owner" });
     await expect(reconnectPromise).resolves.toBeUndefined();

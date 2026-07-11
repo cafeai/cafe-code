@@ -6,29 +6,20 @@ import { describe, expect, it } from "vitest";
 import { expandHomePath } from "./pathExpansion.ts";
 
 describe("expandHomePath", () => {
-  it("returns an empty string unchanged", () => {
-    expect(expandHomePath("")).toBe("");
-  });
+  it("expands only supported home-relative path forms", () => {
+    const cases = [
+      ["empty", "", ""],
+      ["absolute", "/absolute/path", "/absolute/path"],
+      ["relative", "relative/path", "relative/path"],
+      ["embedded tilde", "some~weird~path", "some~weird~path"],
+      ["home", "~", homedir()],
+      ["POSIX home subpath", "~/.codex-work", join(homedir(), ".codex-work")],
+      ["Windows home subpath", "~\\.codex", join(homedir(), ".codex")],
+      ["named user", "~alice/foo", "~alice/foo"],
+    ] as const;
 
-  it("returns paths without a leading tilde unchanged", () => {
-    expect(expandHomePath("/absolute/path")).toBe("/absolute/path");
-    expect(expandHomePath("relative/path")).toBe("relative/path");
-    expect(expandHomePath("some~weird~path")).toBe("some~weird~path");
-  });
-
-  it("expands a lone tilde to the home directory", () => {
-    expect(expandHomePath("~")).toBe(homedir());
-  });
-
-  it("expands ~/ to a subpath of the home directory", () => {
-    expect(expandHomePath("~/.codex-work")).toBe(join(homedir(), ".codex-work"));
-  });
-
-  it("expands a Windows-style ~\\ prefix", () => {
-    expect(expandHomePath("~\\.codex")).toBe(join(homedir(), ".codex"));
-  });
-
-  it("does not expand ~user paths", () => {
-    expect(expandHomePath("~alice/foo")).toBe("~alice/foo");
+    for (const [name, input, expected] of cases) {
+      expect(expandHomePath(input), name).toBe(expected);
+    }
   });
 });

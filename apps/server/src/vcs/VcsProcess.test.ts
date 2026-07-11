@@ -1,12 +1,16 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
-import { TestClock } from "effect/testing";
+import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { VcsProcessExitError, VcsProcessTimeoutError } from "@cafecode/contracts";
+import {
+  ProcessRunner,
+  ProcessTimeoutError,
+  type ProcessRunnerShape,
+  type ProcessRunOutput,
+} from "../processRunner.ts";
 import * as VcsProcess from "./VcsProcess.ts";
 
 const run = (input: VcsProcess.VcsProcessInput) =>
@@ -20,27 +24,32 @@ const liveLayer = VcsProcess.layer.pipe(Layer.provide(NodeServices.layer));
 const provideLive = <A, E, R>(effect: Effect.Effect<A, E, R | VcsProcess.VcsProcess>) =>
   effect.pipe(Effect.provide(liveLayer));
 
+const successfulProcessOutput = (overrides: Partial<ProcessRunOutput> = {}): ProcessRunOutput => ({
+  stdout: "",
+  stderr: "",
+  code: ChildProcessSpawner.ExitCode(0),
+  timedOut: false,
+  stdoutTruncated: false,
+  stderrTruncated: false,
+  ...overrides,
+});
+
+const provideProcessRunner =
+  (runner: ProcessRunnerShape) =>
+  <A, E, R>(effect: Effect.Effect<A, E, R | VcsProcess.VcsProcess>) =>
+    effect.pipe(
+      Effect.provide(
+        Layer.effect(VcsProcess.VcsProcess, VcsProcess.make()).pipe(
+          Layer.provide(Layer.succeed(ProcessRunner, runner)),
+        ),
+      ),
+    );
+
 describe("VcsProcess.run", () => {
-  it.effect("collects stdout", () =>
+  it.effect("wires stdin and stdout through one live subprocess", () =>
     Effect.gen(function* () {
       const result = yield* run({
         operation: "test.stdout",
-        command: "node",
-        args: ["-e", "process.stdout.write('hello')"],
-        cwd: process.cwd(),
-      });
-
-      expect(result.stdout).toBe("hello");
-      expect(result.stderr).toBe("");
-      expect(result.stdoutTruncated).toBe(false);
-      expect(result.stderrTruncated).toBe(false);
-    }).pipe(provideLive),
-  );
-
-  it.effect("writes stdin before waiting for exit", () =>
-    Effect.gen(function* () {
-      const result = yield* run({
-        operation: "test.stdin",
         command: "node",
         args: [
           "-e",
@@ -48,14 +57,19 @@ describe("VcsProcess.run", () => {
             "process.stdin.setEncoding('utf8');",
             "let data='';",
             "process.stdin.on('data', chunk => { data += chunk; });",
-            "process.stdin.on('end', () => { process.stdout.write(data); });",
+            "process.stdin.on('end', () => { process.stdout.write(`hello:${data}`); });",
           ].join(""),
         ],
         cwd: process.cwd(),
         stdin: "stdin payload",
       });
 
-      expect(result.stdout).toBe("stdin payload");
+      expect(result).toMatchObject({
+        stdout: "hello:stdin payload",
+        stderr: "",
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      });
     }).pipe(provideLive),
   );
 
@@ -69,7 +83,17 @@ describe("VcsProcess.run", () => {
       }).pipe(Effect.flip);
 
       expect(error).toBeInstanceOf(VcsProcessExitError);
-    }).pipe(provideLive),
+    }).pipe(
+      provideProcessRunner({
+        run: () =>
+          Effect.succeed(
+            successfulProcessOutput({
+              code: ChildProcessSpawner.ExitCode(2),
+              stderr: "boom",
+            }),
+          ),
+      }),
+    ),
   );
 
   it.effect("returns output when non-zero exits are allowed", () =>
@@ -84,7 +108,17 @@ describe("VcsProcess.run", () => {
 
       expect(result.exitCode).toBe(2);
       expect(result.stderr).toBe("boom");
-    }).pipe(provideLive),
+    }).pipe(
+      provideProcessRunner({
+        run: () =>
+          Effect.succeed(
+            successfulProcessOutput({
+              code: ChildProcessSpawner.ExitCode(2),
+              stderr: "boom",
+            }),
+          ),
+      }),
+    ),
   );
 
   it.effect("truncates output and appends the marker when requested", () =>
@@ -101,7 +135,19 @@ describe("VcsProcess.run", () => {
       expect(result.stdoutTruncated).toBe(true);
       expect(result.stdout).toContain("[truncated]");
       expect(result.stderrTruncated).toBe(false);
-    }).pipe(provideLive),
+    }).pipe(
+      provideProcessRunner({
+        run: (input) =>
+          Effect.sync(() => {
+            expect(input.maxOutputBytes).toBe(128);
+            expect(input.truncatedMarker).toBe("\n\n[truncated]");
+            return successfulProcessOutput({
+              stdout: `${"x".repeat(128)}\n\n[truncated]`,
+              stdoutTruncated: true,
+            });
+          }),
+      }),
+    ),
   );
 
   it.effect("truncates without the marker when truncation markers are disabled", () =>
@@ -116,23 +162,44 @@ describe("VcsProcess.run", () => {
 
       expect(result.stdoutTruncated).toBe(true);
       expect(result.stdout).not.toContain("[truncated]");
-    }).pipe(provideLive),
+    }).pipe(
+      provideProcessRunner({
+        run: (input) =>
+          Effect.sync(() => {
+            expect(input.maxOutputBytes).toBe(128);
+            expect(input.truncatedMarker).toBe("");
+            return successfulProcessOutput({
+              stdout: "x".repeat(128),
+              stdoutTruncated: true,
+            });
+          }),
+      }),
+    ),
   );
 
   it.effect("fails with VcsProcessTimeoutError on timeout", () =>
     Effect.gen(function* () {
-      const errorFiber = yield* run({
+      const error = yield* run({
         operation: "test.timeout",
         command: "node",
         args: ["-e", "setTimeout(() => {}, 5000)"],
         cwd: process.cwd(),
         timeoutMs: 50,
-      }).pipe(Effect.flip, Effect.forkScoped);
-      yield* Effect.yieldNow;
-      yield* TestClock.adjust(Duration.millis(50));
-      const error = yield* Fiber.join(errorFiber);
+      }).pipe(Effect.flip);
 
       expect(error).toBeInstanceOf(VcsProcessTimeoutError);
-    }).pipe(provideLive),
+    }).pipe(
+      provideProcessRunner({
+        run: (input) =>
+          Effect.fail(
+            new ProcessTimeoutError({
+              command: input.command,
+              args: input.args,
+              cwd: input.cwd,
+              timeoutMs: 50,
+            }),
+          ),
+      }),
+    ),
   );
 });

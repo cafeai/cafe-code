@@ -109,8 +109,12 @@ function hasWindowsCommandNotFoundMessage(output: string): boolean {
   return WINDOWS_COMMAND_NOT_FOUND_PATTERNS.some((pattern) => pattern.test(output));
 }
 
-export function isWindowsCommandNotFound(code: number | null, stderr: string): boolean {
-  if (process.platform !== "win32") return false;
+export function isWindowsCommandNotFound(
+  code: number | null,
+  stderr: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (platform !== "win32") return false;
   if (code === 9009) return true;
   return hasWindowsCommandNotFoundMessage(stderr);
 }

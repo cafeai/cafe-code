@@ -1,6 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off
-import * as net from "node:net";
-
 import {
   EventId,
   ProviderDaemonHealth,
@@ -15,7 +12,6 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import { assert, describe, it } from "@effect/vitest";
-import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
@@ -33,6 +29,7 @@ import { ProviderSupervisorRegistryLive } from "../providerSupervisor/ProviderSu
 import {
   captureProviderDaemonProcessDiagnostic,
   runProviderDaemonServer,
+  type ProviderDaemonServerOptions,
 } from "./ProviderDaemonServer.ts";
 import { ProviderRuntimeInventoryLocalLive } from "./ProviderRuntimeInventory.ts";
 
@@ -51,36 +48,17 @@ const encodeProviderDaemonRpcRequestJson = Schema.encodeSync(
 
 const asEventId = (value: string): EventId => EventId.make(value);
 
-class AvailablePortError extends Data.TaggedError("AvailablePortError")<{
-  readonly cause: unknown;
-}> {
-  override get message() {
-    return this.cause instanceof Error ? this.cause.message : String(this.cause);
-  }
-}
-
-const getAvailablePort: Effect.Effect<number, AvailablePortError> = Effect.tryPromise({
-  try: () =>
-    new Promise<number>((resolve, reject) => {
-      const server = net.createServer();
-      server.once("error", reject);
-      server.listen(0, "127.0.0.1", () => {
-        const address = server.address();
-        server.close(() => {
-          if (typeof address === "object" && address !== null) {
-            resolve(address.port);
-          } else {
-            reject(
-              new AvailablePortError({
-                cause: "test port server did not bind to TCP",
-              }),
-            );
-          }
-        });
-      });
+const startProviderDaemonServerOnEphemeralPort = (
+  options: Omit<ProviderDaemonServerOptions, "port">,
+) =>
+  runProviderDaemonServer({ ...options, port: 0 }).pipe(
+    Effect.map((snapshot) => {
+      if (snapshot.port === null) {
+        throw new Error("Expected provider daemon test server to bind a TCP port.");
+      }
+      return snapshot.port;
     }),
-  catch: (cause) => new AvailablePortError({ cause }),
-});
+  );
 
 const mockProviderService = {
   startSession: () => Effect.die("unexpected startSession"),
@@ -133,10 +111,8 @@ const providerDaemonServerTestLayer = Layer.mergeAll(
 describe("ProviderDaemonServer", () => {
   it.effect("rejects unauthenticated health requests and serves authorized health", () =>
     Effect.gen(function* () {
-      const port = yield* getAvailablePort;
-      yield* runProviderDaemonServer({
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
         host: "127.0.0.1",
-        port,
         token: TEST_TOKEN,
         version: "0.0.0-test",
         protocolVersion: 1,
@@ -185,11 +161,9 @@ describe("ProviderDaemonServer", () => {
 
   it.effect("serves role-aware provider supervisor health", () =>
     Effect.gen(function* () {
-      const port = yield* getAvailablePort;
-      yield* runProviderDaemonServer({
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
         mode: "provider-supervisor",
         host: "127.0.0.1",
-        port,
         token: TEST_TOKEN,
         version: "0.0.0-test",
         protocolVersion: 1,
@@ -215,10 +189,8 @@ describe("ProviderDaemonServer", () => {
 
   it.effect("denies RPC access to health-only lease tokens", () =>
     Effect.gen(function* () {
-      const port = yield* getAvailablePort;
-      yield* runProviderDaemonServer({
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
         host: "127.0.0.1",
-        port,
         token: TEST_TOKEN,
         version: "0.0.0-test",
       });
@@ -271,10 +243,8 @@ describe("ProviderDaemonServer", () => {
 
   it.effect("records RPC and command failure diagnostics in health", () =>
     Effect.gen(function* () {
-      const port = yield* getAvailablePort;
-      yield* runProviderDaemonServer({
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
         host: "127.0.0.1",
-        port,
         token: TEST_TOKEN,
         version: "0.0.0-test",
       });
@@ -338,10 +308,8 @@ describe("ProviderDaemonServer", () => {
     ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
 
     return Effect.gen(function* () {
-      const port = yield* getAvailablePort;
-      yield* runProviderDaemonServer({
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
         host: "127.0.0.1",
-        port,
         token: TEST_TOKEN,
         version: "0.0.0-test",
       });
@@ -399,10 +367,8 @@ describe("ProviderDaemonServer", () => {
 
   it.effect("exposes recent process diagnostics with stack traces in health", () =>
     Effect.gen(function* () {
-      const port = yield* getAvailablePort;
-      yield* runProviderDaemonServer({
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
         host: "127.0.0.1",
-        port,
         token: TEST_TOKEN,
         version: "0.0.0-test",
       });
@@ -431,10 +397,16 @@ describe("ProviderDaemonServer", () => {
 
   it.effect("exposes provider turn timing diagnostics in health", () =>
     Effect.gen(function* () {
-      const events = yield* PubSub.unbounded<ProviderRuntimeEvent>();
+      let releaseRuntimeEvents!: (events: ReadonlyArray<ProviderRuntimeEvent>) => void;
+      const runtimeEvents = new Promise<ReadonlyArray<ProviderRuntimeEvent>>((resolve) => {
+        releaseRuntimeEvents = resolve;
+      });
       const streamingProviderServiceLayer = Layer.succeed(ProviderService, {
         ...mockProviderService,
-        streamEvents: Stream.fromPubSub(events),
+        streamEvents: Stream.fromEffect(Effect.promise(() => runtimeEvents)).pipe(
+          Stream.flatMap(Stream.fromIterable),
+          Stream.concat(Stream.never),
+        ),
       } satisfies ProviderServiceShape);
       const layer = Layer.mergeAll(
         streamingProviderServiceLayer,
@@ -442,16 +414,22 @@ describe("ProviderDaemonServer", () => {
         mockServerSettingsLayer,
         ProviderSupervisorRegistryLive,
       ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+      let signalCompletedEventJournaled!: () => void;
+      const completedEventJournaled = new Promise<void>((resolve) => {
+        signalCompletedEventJournaled = resolve;
+      });
 
       yield* Effect.gen(function* () {
-        const port = yield* getAvailablePort;
-        yield* runProviderDaemonServer({
+        const port = yield* startProviderDaemonServerOnEphemeralPort({
           host: "127.0.0.1",
-          port,
           token: TEST_TOKEN,
           version: "0.0.0-test",
+          onRuntimeEventJournaled: (event) => {
+            if (event.eventId === asEventId("evt-timing-completed")) {
+              signalCompletedEventJournaled();
+            }
+          },
         });
-        yield* Effect.yieldNow;
 
         const threadId = ThreadId.make("thread-timing");
         const turnId = TurnId.make("turn-timing");
@@ -461,7 +439,7 @@ describe("ProviderDaemonServer", () => {
           turnId,
         } as const;
 
-        yield* PubSub.publishAll(events, [
+        releaseRuntimeEvents([
           {
             ...base,
             eventId: asEventId("evt-timing-accepted"),
@@ -575,7 +553,7 @@ describe("ProviderDaemonServer", () => {
             },
           },
         ] satisfies ReadonlyArray<ProviderRuntimeEvent>);
-        yield* Effect.yieldNow;
+        yield* Effect.promise(() => completedEventJournaled);
 
         const healthResponse = yield* Effect.promise(() =>
           fetch(`http://127.0.0.1:${port}/api/provider-daemon/health`, {
@@ -613,10 +591,16 @@ describe("ProviderDaemonServer", () => {
 
   it.effect("keeps journaling runtime events after one malformed event", () =>
     Effect.gen(function* () {
-      const events = yield* PubSub.unbounded<ProviderRuntimeEvent>();
+      let releaseRuntimeEvents!: (events: ReadonlyArray<ProviderRuntimeEvent>) => void;
+      const runtimeEvents = new Promise<ReadonlyArray<ProviderRuntimeEvent>>((resolve) => {
+        releaseRuntimeEvents = resolve;
+      });
       const streamingProviderServiceLayer = Layer.succeed(ProviderService, {
         ...mockProviderService,
-        streamEvents: Stream.fromPubSub(events),
+        streamEvents: Stream.fromEffect(Effect.promise(() => runtimeEvents)).pipe(
+          Stream.flatMap(Stream.fromIterable),
+          Stream.concat(Stream.never),
+        ),
       } satisfies ProviderServiceShape);
       const layer = Layer.mergeAll(
         streamingProviderServiceLayer,
@@ -624,27 +608,33 @@ describe("ProviderDaemonServer", () => {
         mockServerSettingsLayer,
         ProviderSupervisorRegistryLive,
       ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+      let signalValidEventJournaled!: () => void;
+      const validEventJournaled = new Promise<void>((resolve) => {
+        signalValidEventJournaled = resolve;
+      });
 
       yield* Effect.gen(function* () {
-        const port = yield* getAvailablePort;
-        yield* runProviderDaemonServer({
+        const port = yield* startProviderDaemonServerOnEphemeralPort({
           host: "127.0.0.1",
-          port,
           token: TEST_TOKEN,
           version: "0.0.0-test",
+          onRuntimeEventJournaled: (event) => {
+            if (event.eventId === asEventId("evt-journal-after-malformed")) {
+              signalValidEventJournaled();
+            }
+          },
         });
-        yield* Effect.yieldNow;
 
         // This intentionally invalid object models a provider protocol or
         // serialization edge case at the journal boundary. The daemon must log
         // and discard it without killing the long-lived event bridge; otherwise
         // later valid provider output never reaches the backend/UI projections.
-        yield* PubSub.publish(events, {
+        const malformedEvent = {
           type: "turn.completed",
           provider: ProviderDriverKind.make("codex"),
           threadId: ThreadId.make("thread-journal-resilience"),
           createdAt: "2026-01-01T00:00:00.000Z",
-        } as unknown as ProviderRuntimeEvent);
+        } as unknown as ProviderRuntimeEvent;
 
         const validEvent: ProviderRuntimeEvent = {
           type: "turn.completed",
@@ -657,8 +647,8 @@ describe("ProviderDaemonServer", () => {
             state: "completed",
           },
         };
-        yield* PubSub.publish(events, validEvent);
-        yield* Effect.yieldNow;
+        releaseRuntimeEvents([malformedEvent, validEvent]);
+        yield* Effect.promise(() => validEventJournaled);
 
         const healthResponse = yield* Effect.promise(() =>
           fetch(`http://127.0.0.1:${port}/api/provider-daemon/health`, {

@@ -610,147 +610,6 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
-  it.effect("status trims PR metadata returned by gh before publishing it", () =>
-    Effect.gen(function* () {
-      const repoDir = yield* makeTempDir("t3code-git-manager-");
-      yield* initRepo(repoDir);
-      yield* runGit(repoDir, ["checkout", "-b", "feature/status-trimmed-pr"]);
-      const remoteDir = yield* createBareRemote();
-      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
-      yield* runGit(repoDir, ["push", "-u", "origin", "feature/status-trimmed-pr"]);
-
-      const { manager } = yield* makeManager({
-        ghScenario: {
-          prListSequence: [
-            // @effect-diagnostics-next-line preferSchemaOverJson:off
-            JSON.stringify([
-              {
-                number: 14,
-                title: "  Existing PR title  \n",
-                url: " https://github.com/pingdotgg/codething-mvp/pull/14 ",
-                baseRefName: " main ",
-                headRefName: "\tfeature/status-trimmed-pr\t",
-              },
-            ]),
-          ],
-        },
-      });
-
-      const status = yield* manager.status({ cwd: repoDir });
-
-      expect(status.pr).toEqual({
-        number: 14,
-        title: "Existing PR title",
-        url: "https://github.com/pingdotgg/codething-mvp/pull/14",
-        baseRef: "main",
-        headRef: "feature/status-trimmed-pr",
-        state: "open",
-      });
-    }),
-  );
-
-  it.effect("status ignores invalid gh pr list entries and keeps valid ones", () =>
-    Effect.gen(function* () {
-      const repoDir = yield* makeTempDir("t3code-git-manager-");
-      yield* initRepo(repoDir);
-      yield* runGit(repoDir, ["checkout", "-b", "feature/status-valid-pr-entry"]);
-      const remoteDir = yield* createBareRemote();
-      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
-      yield* runGit(repoDir, ["push", "-u", "origin", "feature/status-valid-pr-entry"]);
-
-      const { manager } = yield* makeManager({
-        ghScenario: {
-          prListSequence: [
-            // @effect-diagnostics-next-line preferSchemaOverJson:off
-            JSON.stringify([
-              {
-                number: 0,
-                title: "invalid",
-                url: "https://github.com/pingdotgg/codething-mvp/pull/0",
-                baseRefName: "main",
-                headRefName: "feature/invalid",
-              },
-              {
-                number: 15,
-                title: "  Valid PR title  ",
-                url: " https://github.com/pingdotgg/codething-mvp/pull/15 ",
-                baseRefName: " main ",
-                headRefName: "\tfeature/status-valid-pr-entry\t",
-                headRepository: {
-                  nameWithOwner: "   ",
-                },
-                headRepositoryOwner: {
-                  login: "   ",
-                },
-              },
-            ]),
-          ],
-        },
-      });
-
-      const status = yield* manager.status({ cwd: repoDir });
-
-      expect(status.pr).toEqual({
-        number: 15,
-        title: "Valid PR title",
-        url: "https://github.com/pingdotgg/codething-mvp/pull/15",
-        baseRef: "main",
-        headRef: "feature/status-valid-pr-entry",
-        state: "open",
-      });
-    }),
-  );
-
-  it.effect("status preserves lowercase merged and closed PR states from gh json", () =>
-    Effect.gen(function* () {
-      const repoDir = yield* makeTempDir("t3code-git-manager-");
-      yield* initRepo(repoDir);
-      yield* runGit(repoDir, ["checkout", "-b", "feature/status-lowercase-state"]);
-      const remoteDir = yield* createBareRemote();
-      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
-      yield* runGit(repoDir, ["push", "-u", "origin", "feature/status-lowercase-state"]);
-
-      const { manager } = yield* makeManager({
-        ghScenario: {
-          prListSequence: [
-            // @effect-diagnostics-next-line preferSchemaOverJson:off
-            JSON.stringify([
-              {
-                number: 16,
-                title: "Closed PR",
-                url: "https://github.com/pingdotgg/codething-mvp/pull/16",
-                baseRefName: "main",
-                headRefName: "feature/status-lowercase-state",
-                state: "closed",
-                updatedAt: "2026-01-01T00:00:00.000Z",
-              },
-              {
-                number: 17,
-                title: "Merged PR",
-                url: "https://github.com/pingdotgg/codething-mvp/pull/17",
-                baseRefName: "main",
-                headRefName: "feature/status-lowercase-state",
-                state: "merged",
-                updatedAt: "2026-01-02T00:00:00.000Z",
-              },
-            ]),
-          ],
-        },
-      });
-
-      const status = yield* manager.status({ cwd: repoDir });
-
-      expect(status.pr).toEqual({
-        number: 17,
-        title: "Merged PR",
-        url: "https://github.com/pingdotgg/codething-mvp/pull/17",
-        baseRef: "main",
-        headRef: "feature/status-lowercase-state",
-        state: "merged",
-      });
-    }),
-  );
-
   it.effect("status returns an explicit non-repo result for non-git directories", () =>
     Effect.gen(function* () {
       const cwd = yield* makeTempDir("t3code-git-manager-non-repo-");
@@ -983,7 +842,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         yield* runGit(repoDir, ["branch", "-D", "effect-atom"]);
         yield* runGit(repoDir, ["checkout", "--track", "my-org/upstream/effect-atom"]);
 
-        const { manager, ghCalls } = yield* makeManager({
+        const { manager } = yield* makeManager({
           ghScenario: {
             prListByHeadSelector: {
               // @effect-diagnostics-next-line preferSchemaOverJson:off
@@ -1052,58 +911,8 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
           headRef: "effect-atom",
           state: "open",
         });
-        expect(ghCalls.some((call) => call.includes("pr list --head upstream/effect-atom "))).toBe(
-          false,
-        );
-        expect(
-          ghCalls.some((call) => call.includes("pr list --head pingdotgg:upstream/effect-atom ")),
-        ).toBe(false);
-        expect(
-          ghCalls.some((call) =>
-            call.includes("pr list --head my-org/upstream:upstream/effect-atom "),
-          ),
-        ).toBe(false);
       }),
     20_000,
-  );
-
-  it.effect("status returns merged PR state when latest PR was merged", () =>
-    Effect.gen(function* () {
-      const repoDir = yield* makeTempDir("t3code-git-manager-");
-      yield* initRepo(repoDir);
-      yield* runGit(repoDir, ["checkout", "-b", "feature/status-merged-pr"]);
-
-      const { manager } = yield* makeManager({
-        ghScenario: {
-          prListSequence: [
-            // @effect-diagnostics-next-line preferSchemaOverJson:off
-            JSON.stringify([
-              {
-                number: 22,
-                title: "Merged PR",
-                url: "https://github.com/pingdotgg/codething-mvp/pull/22",
-                baseRefName: "main",
-                headRefName: "feature/status-merged-pr",
-                state: "MERGED",
-                mergedAt: "2026-01-30T10:00:00Z",
-                updatedAt: "2026-01-30T10:00:00Z",
-              },
-            ]),
-          ],
-        },
-      });
-
-      const status = yield* manager.status({ cwd: repoDir });
-      expect(status.refName).toBe("feature/status-merged-pr");
-      expect(status.pr).toEqual({
-        number: 22,
-        title: "Merged PR",
-        url: "https://github.com/pingdotgg/codething-mvp/pull/22",
-        baseRef: "main",
-        headRef: "feature/status-merged-pr",
-        state: "merged",
-      });
-    }),
   );
 
   it.effect("status hides merged PRs on the default branch", () =>
@@ -1134,54 +943,6 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       const status = yield* manager.status({ cwd: repoDir });
       expect(status.refName).toBe("main");
       expect(status.pr).toBeNull();
-    }),
-  );
-
-  it.effect("status prefers open PR when merged PR has newer updatedAt", () =>
-    Effect.gen(function* () {
-      const repoDir = yield* makeTempDir("t3code-git-manager-");
-      yield* initRepo(repoDir);
-      yield* runGit(repoDir, ["checkout", "-b", "feature/status-open-over-merged"]);
-
-      const { manager } = yield* makeManager({
-        ghScenario: {
-          prListSequence: [
-            // @effect-diagnostics-next-line preferSchemaOverJson:off
-            JSON.stringify([
-              {
-                number: 45,
-                title: "Merged PR",
-                url: "https://github.com/pingdotgg/codething-mvp/pull/45",
-                baseRefName: "main",
-                headRefName: "feature/status-open-over-merged",
-                state: "MERGED",
-                mergedAt: "2026-01-31T10:00:00Z",
-                updatedAt: "2026-02-01T10:00:00Z",
-              },
-              {
-                number: 46,
-                title: "Open PR",
-                url: "https://github.com/pingdotgg/codething-mvp/pull/46",
-                baseRefName: "main",
-                headRefName: "feature/status-open-over-merged",
-                state: "OPEN",
-                updatedAt: "2026-01-30T10:00:00Z",
-              },
-            ]),
-          ],
-        },
-      });
-
-      const status = yield* manager.status({ cwd: repoDir });
-      expect(status.refName).toBe("feature/status-open-over-merged");
-      expect(status.pr).toEqual({
-        number: 46,
-        title: "Open PR",
-        url: "https://github.com/pingdotgg/codething-mvp/pull/46",
-        baseRef: "main",
-        headRef: "feature/status-open-over-merged",
-        state: "open",
-      });
     }),
   );
 

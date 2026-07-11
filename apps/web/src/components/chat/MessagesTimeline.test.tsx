@@ -319,10 +319,9 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("t3code/apps/web/src/session-logic.ts");
     expect(markup).not.toContain("C:/Users/mike/dev-stuff/t3code/apps/web/src/session-logic.ts");
     expect(markup).toContain('data-work-log-path-pill="changed-file"');
-    expect(markup).toContain("text-left");
   });
 
-  it("left-aligns openable path pills from runtime warning details", async () => {
+  it("renders openable path pills from runtime warning details", async () => {
     const { MessagesTimeline } = readMessagesTimelineModule();
     const markup = renderToStaticMarkup(
       <MessagesTimeline
@@ -347,7 +346,6 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain("Runtime warning");
     expect(markup).toContain('data-work-log-path-pill="command-token"');
-    expect(markup).toContain("text-left");
   });
 
   it("does not add native title tooltips to tool-call summary text", async () => {

@@ -15,9 +15,8 @@ import { describe, expect, it } from "vitest";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import {
   createProviderDaemonEventJournal,
-  type ProviderDaemonPersistentEventJournal,
-  type ProviderDaemonEventJournalSnapshot,
   makePersistentProviderDaemonEventJournal,
+  TURN_DIFF_JOURNAL_COMPACT_THRESHOLD_CHARS,
 } from "./EventJournal.ts";
 
 const encodeProviderRuntimeEventJsonForTest = Schema.encodeSync(
@@ -61,60 +60,6 @@ function makeTurnDiffEvent(id: string, diff: string): ProviderRuntimeEvent {
     },
   };
 }
-
-const waitForPersistentJournalCount = (
-  journal: ProviderDaemonPersistentEventJournal,
-  expectedCount: number,
-): Effect.Effect<ProviderDaemonEventJournalSnapshot> =>
-  Effect.gen(function* () {
-    let snapshot = yield* journal.snapshot;
-    for (
-      let attempt = 0;
-      attempt < 50 && snapshot.retainedEventCount !== expectedCount;
-      attempt += 1
-    ) {
-      yield* Effect.sleep("10 millis");
-      snapshot = yield* journal.snapshot;
-    }
-    return snapshot;
-  });
-
-const waitForPersistentEventIdIndex = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient;
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    const rows = yield* sql<{ readonly exists: number }>`
-      SELECT 1 AS "exists"
-      FROM sqlite_master
-      WHERE type = 'index'
-        AND name = 'idx_provider_daemon_events_owner_event_id'
-      LIMIT 1
-    `;
-    if (rows.length > 0) {
-      return;
-    }
-    yield* Effect.sleep("10 millis");
-  }
-  return yield* Effect.die(new Error("provider daemon event id index was not created"));
-});
-
-const waitForCompactedTurnDiffReplay = (
-  journal: ProviderDaemonPersistentEventJournal,
-): Effect.Effect<ProviderRuntimeEvent> =>
-  Effect.gen(function* () {
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      const replayed = yield* journal.replayAfter(0);
-      const event = replayed[0]?.event;
-      if (
-        event?.type === "turn.diff.updated" &&
-        event.payload.unifiedDiff.length === 4_096 &&
-        ((event.raw?.payload as Record<string, unknown> | undefined)?.diff as unknown) === undefined
-      ) {
-        return event;
-      }
-      yield* Effect.sleep("10 millis");
-    }
-    return yield* Effect.die(new Error("turn diff event was not compacted"));
-  });
 
 describe("ProviderDaemonEventJournal", () => {
   it("assigns monotonic cursors and replays events after a cursor", () => {
@@ -228,7 +173,7 @@ describe("ProviderDaemonEventJournal", () => {
           ownerKey: "provider-daemon",
           startupPruneDelayMs: 0,
         });
-        yield* waitForPersistentEventIdIndex;
+        yield* journal.startupMaintenance;
         const first = yield* journal.publish(makeRuntimeEvent("event-replayed"));
         const duplicate = yield* journal.publish(makeRuntimeEvent("event-replayed"));
         const replayed = yield* journal.replayAfter(0);
@@ -250,7 +195,7 @@ describe("ProviderDaemonEventJournal", () => {
           capacity: 10,
           ownerKey: "provider-daemon",
         });
-        const largeDiff = `diff --git a/file.txt b/file.txt\n${"+".repeat(300_000)}`;
+        const largeDiff = "+".repeat(TURN_DIFF_JOURNAL_COMPACT_THRESHOLD_CHARS + 1);
 
         yield* journal.publish(makeTurnDiffEvent("event-large-diff", largeDiff));
         const replayed = yield* journal.replayAfter(0);
@@ -276,7 +221,7 @@ describe("ProviderDaemonEventJournal", () => {
     await Effect.runPromise(
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
-        const largeDiff = `diff --git a/file.txt b/file.txt\n${"+".repeat(300_000)}`;
+        const largeDiff = "+".repeat(TURN_DIFF_JOURNAL_COMPACT_THRESHOLD_CHARS + 1);
         const event = makeTurnDiffEvent("event-inherited-large-diff", largeDiff);
         yield* sql`
           INSERT INTO provider_daemon_events (
@@ -296,10 +241,11 @@ describe("ProviderDaemonEventJournal", () => {
           ownerKey: "provider-daemon",
           startupPruneDelayMs: 0,
         });
-        const compacted = yield* waitForCompactedTurnDiffReplay(journal);
+        yield* journal.startupMaintenance;
+        const compacted = (yield* journal.replayAfter(0))[0]?.event;
 
-        expect(compacted.type).toBe("turn.diff.updated");
-        if (compacted.type !== "turn.diff.updated") {
+        expect(compacted?.type).toBe("turn.diff.updated");
+        if (compacted?.type !== "turn.diff.updated") {
           return;
         }
         const rawPayload = compacted.raw?.payload as Record<string, unknown> | undefined;
@@ -380,7 +326,8 @@ describe("ProviderDaemonEventJournal", () => {
           ownerKey: "provider-daemon",
           startupPruneDelayMs: 0,
         });
-        const snapshot = yield* waitForPersistentJournalCount(adoptedJournal, 1);
+        yield* adoptedJournal.startupMaintenance;
+        const snapshot = yield* adoptedJournal.snapshot;
         const replayed = yield* adoptedJournal.replayAfter(0);
 
         expect(replayed.map((record) => record.event.eventId)).toEqual([

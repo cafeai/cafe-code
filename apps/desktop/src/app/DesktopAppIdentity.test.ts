@@ -102,7 +102,6 @@ const withIdentity = <A, E, R>(
   input: {
     readonly calls?: ElectronAppCalls;
     readonly environment?: TestEnvironmentInput;
-    readonly legacyPathExists?: boolean;
     readonly packageJson?: string;
     readonly pngIconPath?: Option.Option<string>;
   } = {},
@@ -118,8 +117,7 @@ const withIdentity = <A, E, R>(
       DesktopAppIdentity.layer.pipe(
         Layer.provideMerge(
           FileSystem.layerNoop({
-            exists: (path) =>
-              Effect.succeed(input.legacyPathExists === true && path.includes("Cafe Code (Alpha)")),
+            exists: () => Effect.succeed(false),
             readFileString: () =>
               Effect.succeed(input.packageJson ?? '{"cafeCodeCommitHash":"abcdef1234567890"}'),
           }),
@@ -142,7 +140,6 @@ describe("DesktopAppIdentity", () => {
 
         assert.equal(userDataPath, environment.path.join("/Users/alice", ".cafe-code", "userdata"));
       }),
-      { legacyPathExists: true },
     ),
   );
 

@@ -9,15 +9,11 @@ import {
 import { type FormEvent, useMemo, useState } from "react";
 
 import {
-  addSavedEnvironment,
-  disconnectSavedEnvironment,
-  reconnectSavedEnvironment,
-  removeSavedEnvironment,
   type SavedEnvironmentRecord,
   type SavedEnvironmentRuntimeState,
   useSavedEnvironmentRegistryStore,
   useSavedEnvironmentRuntimeStore,
-} from "~/environments/runtime";
+} from "~/environments/runtime/catalog";
 import { resolveServerConfigVersionMismatch } from "~/versionSkew";
 import {
   AlertDialog,
@@ -45,6 +41,23 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
 const ITEM_ROW_CLASSNAME = "border-t border-border/60 px-4 py-4 first:border-t-0 sm:px-5";
+
+export interface SavedEnvironmentActions {
+  readonly add: typeof import("~/environments/runtime/service").addSavedEnvironment;
+  readonly disconnect: typeof import("~/environments/runtime/service").disconnectSavedEnvironment;
+  readonly reconnect: typeof import("~/environments/runtime/service").reconnectSavedEnvironment;
+  readonly remove: typeof import("~/environments/runtime/service").removeSavedEnvironment;
+}
+
+const DEFAULT_SAVED_ENVIRONMENT_ACTIONS: SavedEnvironmentActions = {
+  add: async (input) => (await import("~/environments/runtime/service")).addSavedEnvironment(input),
+  disconnect: async (environmentId) =>
+    (await import("~/environments/runtime/service")).disconnectSavedEnvironment(environmentId),
+  reconnect: async (environmentId) =>
+    (await import("~/environments/runtime/service")).reconnectSavedEnvironment(environmentId),
+  remove: async (environmentId) =>
+    (await import("~/environments/runtime/service")).removeSavedEnvironment(environmentId),
+};
 
 function safeSavedEnvironmentHost(httpBaseUrl: string): string {
   try {
@@ -92,9 +105,11 @@ function SavedEnvironmentStatus({
 function SavedEnvironmentRow({
   record,
   runtime,
+  actions,
 }: {
   record: SavedEnvironmentRecord;
   runtime: SavedEnvironmentRuntimeState | undefined;
+  actions: SavedEnvironmentActions;
 }) {
   const [pendingAction, setPendingAction] = useState<"reconnect" | "disconnect" | "remove" | null>(
     null,
@@ -133,11 +148,11 @@ function SavedEnvironmentRow({
     setActionError(null);
     try {
       if (action === "reconnect") {
-        await reconnectSavedEnvironment(record.environmentId);
+        await actions.reconnect(record.environmentId);
       } else if (action === "disconnect") {
-        await disconnectSavedEnvironment(record.environmentId);
+        await actions.disconnect(record.environmentId);
       } else {
-        await removeSavedEnvironment(record.environmentId);
+        await actions.remove(record.environmentId);
         setIsRemoveDialogOpen(false);
       }
     } catch {
@@ -272,7 +287,7 @@ function SavedEnvironmentRow({
   );
 }
 
-function AddSavedEnvironmentDialog() {
+function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActions }) {
   const [isOpen, setIsOpen] = useState(false);
   const [tab, setTab] = useState<"url" | "code">("url");
   const [label, setLabel] = useState("");
@@ -313,9 +328,9 @@ function AddSavedEnvironmentDialog() {
     setPairingCode("");
     try {
       if (submittedTab === "url") {
-        await addSavedEnvironment({ label: submittedLabel, pairingUrl: submittedUrl });
+        await actions.add({ label: submittedLabel, pairingUrl: submittedUrl });
       } else {
-        await addSavedEnvironment({
+        await actions.add({
           label: submittedLabel,
           host: submittedHost,
           pairingCode: submittedCode,
@@ -474,7 +489,11 @@ function AddSavedEnvironmentDialog() {
   );
 }
 
-export function SavedEnvironmentsSettings() {
+export function SavedEnvironmentsSettings({
+  actions = DEFAULT_SAVED_ENVIRONMENT_ACTIONS,
+}: {
+  actions?: SavedEnvironmentActions;
+} = {}) {
   const registryById = useSavedEnvironmentRegistryStore((state) => state.byId);
   const runtimeById = useSavedEnvironmentRuntimeStore((state) => state.byId);
   const records = useMemo(
@@ -483,7 +502,10 @@ export function SavedEnvironmentsSettings() {
   );
 
   return (
-    <SettingsSection title="Saved environments" headerAction={<AddSavedEnvironmentDialog />}>
+    <SettingsSection
+      title="Saved environments"
+      headerAction={<AddSavedEnvironmentDialog actions={actions} />}
+    >
       {records.length === 0 ? (
         <SettingsRow title="No remote servers paired" description={null} />
       ) : (
@@ -492,6 +514,7 @@ export function SavedEnvironmentsSettings() {
             key={record.environmentId}
             record={record}
             runtime={runtimeById[record.environmentId]}
+            actions={actions}
           />
         ))
       )}

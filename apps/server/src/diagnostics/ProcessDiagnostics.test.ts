@@ -304,9 +304,6 @@ describe("ProcessDiagnostics", () => {
           "-NonInteractive",
           "-Command",
         ]);
-        expect(commands[0]?.args[3]).toContain("ForEach-Object");
-        expect(commands[0]?.args[3]).toContain("$perfByPid");
-        expect(commands[0]?.args[3]).not.toContain('-Filter "IDProcess = $(');
         expect(commands[0]?.options?.shell).toBe(false);
       } else {
         expect(commands).toEqual([
@@ -320,7 +317,7 @@ describe("ProcessDiagnostics", () => {
     }),
   );
 
-  it.effect("queries Windows process rows with PowerShell directly", () =>
+  it.effect("queries all Windows process CPU metrics in one direct PowerShell spawn", () =>
     Effect.gen(function* () {
       const commands: Array<{
         readonly command: string;
@@ -349,7 +346,16 @@ describe("ProcessDiagnostics", () => {
                   Name: "node.exe",
                   CommandLine: "node dist/bin.mjs",
                   WorkingSetSize: 1024,
-                  PercentProcessorTime: 0,
+                  PercentProcessorTime: 2.5,
+                  Status: "Running",
+                },
+                {
+                  ProcessId: 101,
+                  ParentProcessId: 100,
+                  Name: "agent.exe",
+                  CommandLine: "agent run",
+                  WorkingSetSize: 2048,
+                  PercentProcessorTime: 7.25,
                   Status: "Running",
                 },
               ]),
@@ -362,12 +368,13 @@ describe("ProcessDiagnostics", () => {
         Effect.provide(spawnerLayer),
       );
 
-      expect(rows.map((row) => row.pid)).toEqual([100]);
+      expect(rows.map(({ pid, cpuPercent }) => ({ pid, cpuPercent }))).toEqual([
+        { pid: 100, cpuPercent: 2.5 },
+        { pid: 101, cpuPercent: 7.25 },
+      ]);
+      expect(commands).toHaveLength(1);
       expect(commands[0]?.command).toBe("powershell.exe");
       expect(commands[0]?.args.slice(0, 3)).toEqual(["-NoProfile", "-NonInteractive", "-Command"]);
-      expect(commands[0]?.args[3]).toContain("ForEach-Object");
-      expect(commands[0]?.args[3]).toContain("$perfByPid");
-      expect(commands[0]?.args[3]).not.toContain('-Filter "IDProcess = $(');
       expect(commands[0]?.options?.shell).toBe(false);
     }),
   );

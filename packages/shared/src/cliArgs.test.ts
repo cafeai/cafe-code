@@ -3,16 +3,10 @@ import { describe, expect, it } from "vitest";
 import { parseCliArgs } from "./cliArgs.ts";
 
 describe("parseCliArgs", () => {
-  it("returns empty result for empty string", () => {
-    expect(parseCliArgs("")).toEqual({ flags: {}, positionals: [] });
-  });
-
-  it("returns empty result for whitespace-only string", () => {
-    expect(parseCliArgs("   ")).toEqual({ flags: {}, positionals: [] });
-  });
-
-  it("returns empty result for empty array", () => {
-    expect(parseCliArgs([])).toEqual({ flags: {}, positionals: [] });
+  it("returns an empty result for every empty input shape", () => {
+    for (const input of ["", "   ", []] as const) {
+      expect(parseCliArgs(input)).toEqual({ flags: {}, positionals: [] });
+    }
   });
 
   it("parses --chrome boolean flag", () => {

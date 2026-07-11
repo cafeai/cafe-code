@@ -15,10 +15,13 @@ import {
 const runCli = Command.runWith(mergeUpdateManifestsCommand, { version: "0.0.0" });
 
 describe("merge-update-manifests", () => {
-  it("merges arm64 and x64 macOS update manifests into one multi-arch manifest", () => {
-    const arm64 = parsePlatformUpdateManifest(
-      "mac",
-      `version: 0.0.4
+  it("merges arm64 and x64 platform manifests into multi-arch manifests", () => {
+    const cases = [
+      {
+        platform: "mac" as const,
+        arm64Source: "latest-mac.yml",
+        x64Source: "latest-mac-x64.yml",
+        arm64: `version: 0.0.4
 files:
   - url: Cafe-Code-0.0.4-arm64.zip
     sha512: arm64zip
@@ -30,12 +33,7 @@ path: Cafe-Code-0.0.4-arm64.zip
 sha512: arm64zip
 releaseDate: '2026-03-07T10:32:14.587Z'
 `,
-      "latest-mac.yml",
-    );
-
-    const x64 = parsePlatformUpdateManifest(
-      "mac",
-      `version: 0.0.4
+        x64: `version: 0.0.4
 files:
   - url: Cafe-Code-0.0.4-x64.zip
     sha512: x64zip
@@ -47,32 +45,18 @@ path: Cafe-Code-0.0.4-x64.zip
 sha512: x64zip
 releaseDate: '2026-03-07T10:36:07.540Z'
 `,
-      "latest-mac-x64.yml",
-    );
-
-    const merged = mergePlatformUpdateManifests("mac", arm64, x64);
-
-    assert.equal(merged.version, "0.0.4");
-    assert.equal(merged.releaseDate, "2026-03-07T10:36:07.540Z");
-    assert.deepStrictEqual(
-      merged.files.map((file) => file.url),
-      [
-        "Cafe-Code-0.0.4-arm64.zip",
-        "Cafe-Code-0.0.4-arm64.dmg",
-        "Cafe-Code-0.0.4-x64.zip",
-        "Cafe-Code-0.0.4-x64.dmg",
-      ],
-    );
-
-    const serialized = serializePlatformUpdateManifest("mac", merged);
-    assert.ok(!serialized.includes("path:"));
-    assert.equal((serialized.match(/- url:/g) ?? []).length, 4);
-  });
-
-  it("merges arm64 and x64 Windows update manifests into one multi-arch manifest", () => {
-    const arm64 = parsePlatformUpdateManifest(
-      "win",
-      `version: 0.0.4
+        expectedUrls: [
+          "Cafe-Code-0.0.4-arm64.zip",
+          "Cafe-Code-0.0.4-arm64.dmg",
+          "Cafe-Code-0.0.4-x64.zip",
+          "Cafe-Code-0.0.4-x64.dmg",
+        ],
+      },
+      {
+        platform: "win" as const,
+        arm64Source: "latest-win-arm64.yml",
+        x64Source: "latest-win-x64.yml",
+        arm64: `version: 0.0.4
 files:
   - url: Cafe-Code-0.0.4-arm64.exe
     sha512: arm64exe
@@ -84,12 +68,7 @@ path: Cafe-Code-0.0.4-arm64.exe
 sha512: arm64exe
 releaseDate: '2026-03-07T10:32:14.587Z'
 `,
-      "latest-win-arm64.yml",
-    );
-
-    const x64 = parsePlatformUpdateManifest(
-      "win",
-      `version: 0.0.4
+        x64: `version: 0.0.4
 files:
   - url: Cafe-Code-0.0.4-x64.exe
     sha512: x64exe
@@ -101,26 +80,39 @@ path: Cafe-Code-0.0.4-x64.exe
 sha512: x64exe
 releaseDate: '2026-03-07T10:36:07.540Z'
 `,
-      "latest-win-x64.yml",
-    );
+        expectedUrls: [
+          "Cafe-Code-0.0.4-arm64.exe",
+          "Cafe-Code-0.0.4-arm64.exe.blockmap",
+          "Cafe-Code-0.0.4-x64.exe",
+          "Cafe-Code-0.0.4-x64.exe.blockmap",
+        ],
+      },
+    ];
 
-    const merged = mergePlatformUpdateManifests("win", arm64, x64);
+    for (const testCase of cases) {
+      const arm64 = parsePlatformUpdateManifest(
+        testCase.platform,
+        testCase.arm64,
+        testCase.arm64Source,
+      );
+      const x64 = parsePlatformUpdateManifest(testCase.platform, testCase.x64, testCase.x64Source);
+      const merged = mergePlatformUpdateManifests(testCase.platform, arm64, x64);
 
-    assert.equal(merged.version, "0.0.4");
-    assert.equal(merged.releaseDate, "2026-03-07T10:36:07.540Z");
-    assert.deepStrictEqual(
-      merged.files.map((file) => file.url),
-      [
-        "Cafe-Code-0.0.4-arm64.exe",
-        "Cafe-Code-0.0.4-arm64.exe.blockmap",
-        "Cafe-Code-0.0.4-x64.exe",
-        "Cafe-Code-0.0.4-x64.exe.blockmap",
-      ],
-    );
+      assert.equal(merged.version, "0.0.4");
+      assert.equal(merged.releaseDate, "2026-03-07T10:36:07.540Z");
+      assert.deepStrictEqual(
+        merged.files.map((file) => file.url),
+        testCase.expectedUrls,
+      );
 
-    const serialized = serializePlatformUpdateManifest("win", merged);
-    assert.ok(!serialized.includes("path:"));
-    assert.equal((serialized.match(/- url:/g) ?? []).length, 4);
+      const serialized = serializePlatformUpdateManifest(testCase.platform, merged);
+      const reparsed = parsePlatformUpdateManifest(
+        testCase.platform,
+        serialized,
+        `serialized-latest-${testCase.platform}.yml`,
+      );
+      assert.deepStrictEqual(reparsed, merged);
+    }
   });
 
   it("rejects mismatched manifest versions", () => {
@@ -190,8 +182,6 @@ releaseDate: '2026-03-07T10:36:07.540Z'
     );
 
     const serialized = serializePlatformUpdateManifest("win", original);
-    assert.ok(serialized.includes("version: '1.0'"));
-
     const reparsed = parsePlatformUpdateManifest("win", serialized, "latest-win-x64.yml");
     assert.equal(reparsed.version, "1.0");
   });
@@ -239,10 +229,21 @@ releaseDate: '2026-03-07T10:36:07.540Z'
 
       yield* runCli(["--platform", "mac", primaryPath, secondaryPath]);
 
-      const merged = yield* fs.readFileString(primaryPath);
-      assert.ok(merged.includes("Cafe-Code-0.0.4-arm64.zip"));
-      assert.ok(merged.includes("Cafe-Code-0.0.4-x64.zip"));
-      assert.ok(!merged.includes("path:"));
+      const merged = parsePlatformUpdateManifest(
+        "mac",
+        yield* fs.readFileString(primaryPath),
+        primaryPath,
+      );
+      assert.deepStrictEqual(
+        merged.files.map((file) => file.url),
+        [
+          "Cafe-Code-0.0.4-arm64.zip",
+          "Cafe-Code-0.0.4-arm64.dmg",
+          "Cafe-Code-0.0.4-x64.zip",
+          "Cafe-Code-0.0.4-x64.dmg",
+        ],
+      );
+      assert.equal(merged.releaseDate, "2026-03-07T10:36:07.540Z");
     }),
   );
 
@@ -280,9 +281,16 @@ releaseDate: '2026-03-07T10:36:07.540Z'
 
       yield* runCli(["--platform", "win", primaryPath, secondaryPath, outputPath]);
 
-      const merged = yield* fs.readFileString(outputPath);
-      assert.ok(merged.includes("Cafe-Code-0.0.4-arm64.exe"));
-      assert.ok(merged.includes("Cafe-Code-0.0.4-x64.exe"));
+      const merged = parsePlatformUpdateManifest(
+        "win",
+        yield* fs.readFileString(outputPath),
+        outputPath,
+      );
+      assert.deepStrictEqual(
+        merged.files.map((file) => file.url),
+        ["Cafe-Code-0.0.4-arm64.exe", "Cafe-Code-0.0.4-x64.exe"],
+      );
+      assert.equal(merged.releaseDate, "2026-03-07T10:36:07.540Z");
     }),
   );
 

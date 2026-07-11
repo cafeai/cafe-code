@@ -1006,62 +1006,6 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
-  it.effect("drops low-value Codex plugin and skill metadata stderr warnings", () =>
-    Effect.gen(function* () {
-      const { adapter, runtime } = yield* startLifecycleRuntime();
-      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
-
-      const baseEvent = {
-        kind: "notification",
-        provider: ProviderDriverKind.make("codex"),
-        threadId: asThreadId("thread-1"),
-        createdAt: "2026-01-01T00:00:00.000Z",
-        method: "process/stderr",
-        turnId: asTurnId("turn-1"),
-      } as const;
-
-      yield* runtime.emit({
-        ...baseEvent,
-        id: asEventId("evt-plugin-default-prompt"),
-        message:
-          "2026-06-10T00:00:00.000000Z  WARN codex_core_plugins::manifest: ignoring interface.defaultPrompt[0]: prompt must be at most 128 characters path=/tmp/plugin.json",
-      } satisfies ProviderEvent);
-      yield* runtime.emit({
-        ...baseEvent,
-        id: asEventId("evt-skill-icon-small"),
-        message:
-          "codex_core_skills::loader: ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/",
-      } satisfies ProviderEvent);
-      yield* runtime.emit({
-        ...baseEvent,
-        id: asEventId("evt-skill-icon-large"),
-        message:
-          "codex_core_skills::loader: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/",
-      } satisfies ProviderEvent);
-      yield* runtime.emit({
-        ...baseEvent,
-        id: asEventId("evt-real-stderr-warning"),
-        message: "The filename or extension is too long. (os error 206)",
-      } satisfies ProviderEvent);
-
-      const firstEvent = yield* Fiber.join(firstEventFiber);
-
-      assert.equal(firstEvent._tag, "Some");
-      if (firstEvent._tag !== "Some") {
-        return;
-      }
-      assert.equal(firstEvent.value.eventId, "evt-real-stderr-warning");
-      assert.equal(firstEvent.value.type, "runtime.warning");
-      if (firstEvent.value.type !== "runtime.warning") {
-        return;
-      }
-      assert.equal(
-        firstEvent.value.payload.message,
-        "The filename or extension is too long. (os error 206)",
-      );
-    }),
-  );
-
   it.effect("maps Codex turn-start event starvation diagnostics to runtime.warning", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
@@ -1864,29 +1808,63 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
-  it.effect("drops transient Codex safety buffering notifications", () =>
+  it.effect("drops ignored Codex notifications and still delivers the next visible event", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
       const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
 
-      yield* runtime.emit({
-        id: asEventId("evt-codex-model-safety-buffering"),
-        kind: "notification",
-        provider: ProviderDriverKind.make("codex"),
-        threadId: asThreadId("thread-1"),
-        turnId: asTurnId("turn-1"),
-        createdAt: "2026-01-01T00:00:00.000Z",
-        method: "model/safetyBuffering/updated",
-        payload: {
-          threadId: "provider-thread-1",
-          turnId: "turn-1",
-          model: "gpt-5.5-codex",
-          useCases: ["cyber"],
-          reasons: ["user_risk"],
-          showBufferingUi: true,
-          fasterModel: "gpt-5.3-codex",
+      const ignoredEvents = [
+        {
+          id: asEventId("evt-codex-model-safety-buffering"),
+          kind: "notification" as const,
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "model/safetyBuffering/updated",
+          payload: {
+            threadId: "provider-thread-1",
+            turnId: "turn-1",
+            model: "gpt-5.5-codex",
+            useCases: ["cyber"],
+            reasons: ["user_risk"],
+            showBufferingUi: true,
+            fasterModel: "gpt-5.3-codex",
+          },
         },
-      } satisfies ProviderEvent);
+        {
+          id: asEventId("evt-codex-turn-moderation-metadata"),
+          kind: "notification" as const,
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "turn/moderationMetadata",
+          payload: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            metadata: { moderation: "provider-private" },
+          },
+        },
+        ...[
+          "codex_core_plugins::manifest: ignoring interface.defaultPrompt[0]: prompt must be at most 128 characters path=/tmp/plugin.json",
+          "codex_core_skills::loader: ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/",
+          "codex_core_skills::loader: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/",
+        ].map((message, index) => ({
+          id: asEventId(`evt-codex-ignored-metadata-${index}`),
+          kind: "notification" as const,
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "process/stderr",
+          message,
+        })),
+      ] satisfies ReadonlyArray<ProviderEvent>;
+
+      for (const event of ignoredEvents) {
+        yield* runtime.emit(event);
+      }
       yield* runtime.emit({
         id: asEventId("evt-warning-after-safety-buffering"),
         kind: "notification",
@@ -1902,51 +1880,6 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
 
       const firstEvent = yield* Fiber.join(firstEventFiber);
 
-      assert.equal(firstEvent._tag, "Some");
-      if (firstEvent._tag !== "Some") {
-        return;
-      }
-      assert.equal(firstEvent.value.type, "runtime.warning");
-      if (firstEvent.value.type !== "runtime.warning") {
-        return;
-      }
-      assert.equal(firstEvent.value.payload.message, "visible warning");
-    }),
-  );
-
-  it.effect("drops experimental Codex moderation metadata notifications", () =>
-    Effect.gen(function* () {
-      const { adapter, runtime } = yield* startLifecycleRuntime();
-      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
-
-      yield* runtime.emit({
-        id: asEventId("evt-codex-turn-moderation-metadata"),
-        kind: "notification",
-        provider: ProviderDriverKind.make("codex"),
-        threadId: asThreadId("thread-1"),
-        turnId: asTurnId("turn-1"),
-        createdAt: "2026-01-01T00:00:00.000Z",
-        method: "turn/moderationMetadata",
-        payload: {
-          threadId: "thread-1",
-          turnId: "turn-1",
-          metadata: { moderation: "provider-private" },
-        },
-      } satisfies ProviderEvent);
-      yield* runtime.emit({
-        id: asEventId("evt-warning-after-moderation-metadata"),
-        kind: "notification",
-        provider: ProviderDriverKind.make("codex"),
-        threadId: asThreadId("thread-1"),
-        turnId: asTurnId("turn-1"),
-        createdAt: "2026-01-01T00:00:00.001Z",
-        method: "warning",
-        payload: {
-          message: "visible warning",
-        },
-      } satisfies ProviderEvent);
-
-      const firstEvent = yield* Fiber.join(firstEventFiber);
       assert.equal(firstEvent._tag, "Some");
       if (firstEvent._tag !== "Some") {
         return;

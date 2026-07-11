@@ -23,23 +23,32 @@ describe("provider slug validation (shared by driver + instance ids)", () => {
 
   for (const { schemaName, decode } of cases) {
     describe(schemaName, () => {
-      it.each(["codex", "codex_personal", "codex-work", "claudeAgent", "x", "abc123", "ollama"])(
-        "accepts %s",
-        (id) => {
+      it("accepts every supported slug shape", () => {
+        for (const id of [
+          "codex",
+          "codex_personal",
+          "codex-work",
+          "claudeAgent",
+          "x",
+          "abc123",
+          "ollama",
+        ]) {
           expect(decode(id)).toBe(id);
-        },
-      );
+        }
+      });
 
-      it.each([
-        ["empty string", ""],
-        ["leading digit", "1codex"],
-        ["leading dash", "-codex"],
-        ["leading underscore", "_codex"],
-        ["whitespace inside", "codex personal"],
-        ["dot inside", "codex.personal"],
-        ["slash inside", "codex/personal"],
-      ])("rejects %s", (_label, value) => {
-        expect(() => decode(value)).toThrow();
+      it("rejects every unsupported slug shape", () => {
+        for (const [label, value] of [
+          ["empty string", ""],
+          ["leading digit", "1codex"],
+          ["leading dash", "-codex"],
+          ["leading underscore", "_codex"],
+          ["whitespace inside", "codex personal"],
+          ["dot inside", "codex.personal"],
+          ["slash inside", "codex/personal"],
+        ] as const) {
+          expect(() => decode(value), label).toThrow();
+        }
       });
 
       it("trims surrounding whitespace before validating", () => {

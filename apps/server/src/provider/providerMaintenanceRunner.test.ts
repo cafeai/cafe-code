@@ -475,11 +475,25 @@ describe("providerMaintenanceRunner", () => {
     const releaseFirst = new Promise<void>((resolve) => {
       releaseFirstLatch.resolve = resolve;
     });
+    const secondQueuedLatch: { resolve: () => void } = { resolve: () => {} };
+    const secondQueued = new Promise<void>((resolve) => {
+      secondQueuedLatch.resolve = resolve;
+    });
     const calls: Array<string> = [];
     return Effect.gen(function* () {
       const { registry } = yield* makeRegistry([baseProvider, baseClaudeProvider]);
       const updater = yield* makeTestRunner({
         ...registry,
+        setProviderMaintenanceActionState: (input) =>
+          registry.setProviderMaintenanceActionState(input).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                if (input.instanceId === CLAUDE_INSTANCE_ID && input.state?.status === "queued") {
+                  secondQueuedLatch.resolve();
+                }
+              }),
+            ),
+          ),
         getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
           Effect.succeed(
             makeProviderMaintenanceCapabilities({
@@ -500,17 +514,8 @@ describe("providerMaintenanceRunner", () => {
       yield* Effect.promise(() => firstStarted);
 
       const second = yield* updater.updateProvider(CLAUDE_DRIVER).pipe(Effect.forkScoped);
-      let providersWhileQueued: ReadonlyArray<ServerProvider> = [];
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        providersWhileQueued = yield* registry.getProviders;
-        const queuedStatus = providersWhileQueued.find(
-          (provider) => provider.instanceId === CLAUDE_INSTANCE_ID,
-        )?.updateState?.status;
-        if (queuedStatus === "queued") {
-          break;
-        }
-        yield* Effect.yieldNow;
-      }
+      yield* Effect.promise(() => secondQueued);
+      const providersWhileQueued = yield* registry.getProviders;
       assert.deepStrictEqual(calls, ["install -g @openai/codex@latest"]);
       assert.strictEqual(
         providersWhileQueued.find((provider) => provider.instanceId === CLAUDE_INSTANCE_ID)

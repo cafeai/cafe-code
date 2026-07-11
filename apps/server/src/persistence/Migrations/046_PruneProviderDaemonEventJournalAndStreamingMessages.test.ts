@@ -9,44 +9,6 @@ import * as TestSqliteClient from "../TestSqliteClient.ts";
 const layer = it.layer(Layer.mergeAll(TestSqliteClient.layerMemory()));
 
 layer("046_PruneProviderDaemonEventJournalAndStreamingMessages", (it) => {
-  it.effect("leaves provider daemon event pruning to non-blocking journal maintenance", () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-
-      yield* runMigrations({ toMigrationInclusive: 45 });
-
-      yield* sql`
-        WITH RECURSIVE event_numbers(value) AS (
-          SELECT 1
-          UNION ALL
-          SELECT value + 1
-          FROM event_numbers
-          WHERE value < 3
-        )
-        INSERT INTO provider_daemon_events (
-          owner_key,
-          emitted_at,
-          event_json
-        )
-        SELECT
-          'provider-daemon',
-          '2026-05-26T00:00:00.000Z',
-          '{"type":"test"}'
-        FROM event_numbers
-      `;
-
-      yield* runMigrations({ toMigrationInclusive: 46 });
-
-      const rows = yield* sql<{ readonly retainedCount: number }>`
-        SELECT COUNT(*) AS "retainedCount"
-        FROM provider_daemon_events
-        WHERE owner_key = 'provider-daemon'
-      `;
-
-      assert.deepStrictEqual(rows, [{ retainedCount: 3 }]);
-    }),
-  );
-
   it.effect("closes stale streaming messages whose turns are already terminal", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

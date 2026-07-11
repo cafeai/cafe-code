@@ -76,6 +76,7 @@ export class BrowserWsRpcHarness {
 
   connect(client: BrowserWsClient): void {
     if (this.scope) {
+      this.client = null;
       void Effect.runPromise(Scope.close(this.scope, Exit.void)).catch(() => undefined);
     }
     if (this.streamPubSubs.size === 0) {
@@ -91,6 +92,12 @@ export class BrowserWsRpcHarness {
   }
 
   async disconnect(): Promise<void> {
+    // Closing a running Effect RPC stream emits its terminal cause. The browser
+    // clients are already disconnecting at this point, so detach them first;
+    // otherwise a stale scope can deliver its terminal frame to a replacement
+    // client and trigger a non-transport retry loop.
+    this.client = null;
+    this.serverReady = null;
     if (this.scope) {
       await Effect.runPromise(Scope.close(this.scope, Exit.void)).catch(() => undefined);
       this.scope = null;
@@ -99,8 +106,6 @@ export class BrowserWsRpcHarness {
       Effect.runSync(PubSub.shutdown(pubsub));
     }
     this.streamPubSubs.clear();
-    this.serverReady = null;
-    this.client = null;
   }
 
   private initializeStreamPubSubs(): void {

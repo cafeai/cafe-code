@@ -9,11 +9,11 @@ import { resetWsConnectionStateForTests } from "./rpc/wsConnectionState";
 import {
   resetSavedEnvironmentRegistryStoreForTests,
   resetSavedEnvironmentRuntimeStoreForTests,
-} from "./environments/runtime";
+} from "./environments/runtime/catalog";
 import {
   getPrimaryEnvironmentConnection,
   resetEnvironmentServiceForTests,
-} from "./environments/runtime";
+} from "./environments/runtime/service";
 import { getPrimaryKnownEnvironment } from "./environments/primary";
 import { type WsRpcClient } from "./rpc/wsRpcClient";
 import { showContextMenuFallback } from "./contextMenuFallback";

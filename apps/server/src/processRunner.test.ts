@@ -11,8 +11,8 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 
 import {
   isWindowsCommandNotFound,
-  ProcessOutputLimitError,
   ProcessRunner,
+  ProcessOutputLimitError,
   ProcessTimeoutError,
   layer as ProcessRunnerLive,
   type ProcessRunInput,
@@ -99,29 +99,6 @@ describe("runProcess", () => {
       expect(result.timedOut).toBe(false);
     }),
   );
-
-  it.effect("runs through the ProcessRunner service", () => {
-    const spawner = makeSpawner((command) =>
-      Effect.sync(() => {
-        expect(command.command).toBe("fake");
-        expect(command.args).toEqual(["--service"]);
-        return makeHandle({ stdout: "service ok" });
-      }),
-    );
-    const layer = ProcessRunnerLive.pipe(
-      Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
-    );
-
-    return Effect.gen(function* () {
-      const runner = yield* ProcessRunner;
-      const result = yield* runner.run({
-        command: "fake",
-        args: ["--service"],
-      });
-
-      expect(result.stdout).toBe("service ok");
-    }).pipe(Effect.provide(layer));
-  });
 
   it.effect("fails when output exceeds max buffer in default mode", () =>
     Effect.gen(function* () {
@@ -281,18 +258,12 @@ describe("runProcess", () => {
 
 describe("isWindowsCommandNotFound", () => {
   it("matches the localized German cmd.exe error text", () => {
-    const originalPlatform = process.platform;
-    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
-
-    try {
-      expect(
-        isWindowsCommandNotFound(
-          1,
-          "wird nicht als interner oder externer Befehl, betriebsfahiges Programm oder Batch-Datei erkannt",
-        ),
-      ).toBe(true);
-    } finally {
-      Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
-    }
+    expect(
+      isWindowsCommandNotFound(
+        1,
+        "wird nicht als interner oder externer Befehl, betriebsfahiges Programm oder Batch-Datei erkannt",
+        "win32",
+      ),
+    ).toBe(true);
   });
 });

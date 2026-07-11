@@ -1,4 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { writeFileSync } from "node:fs";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -6,6 +8,9 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
+import { ChildProcessSpawner } from "effect/unstable/process";
 import { createModelSelection } from "@cafecode/shared/model";
 import { expect } from "vitest";
 
@@ -155,7 +160,7 @@ function makeFakeCodexBinary(
   });
 }
 
-function withFakeCodexEnv<A, E, R>(
+function withFakeCodexCli<A, E, R>(
   input: {
     output: string;
     exitCode?: number;
@@ -179,9 +184,105 @@ function withFakeCodexEnv<A, E, R>(
   }).pipe(Effect.scoped);
 }
 
+type CapturedCodexCommand = {
+  readonly command: string;
+  readonly args: ReadonlyArray<string>;
+  readonly options: {
+    readonly stdin?: { readonly stream: Stream.Stream<Uint8Array> };
+  };
+};
+
+function makeCodexHandle(input: { stderr?: string; exitCode?: number }) {
+  const encoder = new TextEncoder();
+  return ChildProcessSpawner.makeHandle({
+    pid: ChildProcessSpawner.ProcessId(1),
+    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(input.exitCode ?? 0)),
+    isRunning: Effect.succeed(false),
+    kill: () => Effect.void,
+    unref: Effect.succeed(Effect.void),
+    stdin: Sink.drain,
+    stdout: Stream.empty,
+    stderr: Stream.make(encoder.encode(input.stderr ?? "")),
+    all: Stream.empty,
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
+  });
+}
+
+function withFakeCodexSpawner<A, E, R>(
+  input: {
+    output: string;
+    exitCode?: number;
+    stderr?: string;
+    requireImage?: boolean;
+    requireFastServiceTier?: boolean;
+    requireReasoningEffort?: string;
+    forbidReasoningEffort?: boolean;
+    stdinMustContain?: string;
+    stdinMustNotContain?: string;
+  },
+  effectFn: (textGeneration: TextGenerationShape) => Effect.Effect<A, E, R>,
+) {
+  return Effect.gen(function* () {
+    const config = decodeCodexSettings({ binaryPath: "fake-codex" });
+    const spawner = ChildProcessSpawner.make((unknownCommand) =>
+      Effect.gen(function* () {
+        const command = unknownCommand as unknown as CapturedCodexCommand;
+        const prompt = command.options.stdin?.stream
+          ? yield* command.options.stdin.stream.pipe(
+              Stream.decodeText(),
+              Stream.runFold(
+                () => "",
+                (text, chunk) => text + chunk,
+              ),
+            )
+          : "";
+        const outputPathIndex = command.args.indexOf("--output-last-message");
+        const outputPath = command.args[outputPathIndex + 1];
+        const configValues = command.args.flatMap((arg, index) =>
+          command.args[index - 1] === "--config" ? [arg] : [],
+        );
+
+        expect(command.command).toBe("fake-codex");
+        expect(outputPath).toBeTypeOf("string");
+        if (outputPath !== undefined) {
+          writeFileSync(outputPath, input.output);
+        }
+        const missingRequiredImage = input.requireImage && !command.args.includes("--image");
+        if (input.requireFastServiceTier) {
+          expect(configValues).toContain('service_tier="fast"');
+        }
+        if (input.requireReasoningEffort !== undefined) {
+          expect(configValues).toContain(
+            `model_reasoning_effort="${input.requireReasoningEffort}"`,
+          );
+        }
+        if (input.forbidReasoningEffort) {
+          expect(configValues.some((value) => value.startsWith("model_reasoning_effort="))).toBe(
+            false,
+          );
+        }
+        if (input.stdinMustContain !== undefined) {
+          expect(prompt).toContain(input.stdinMustContain);
+        }
+        if (input.stdinMustNotContain !== undefined) {
+          expect(prompt).not.toContain(input.stdinMustNotContain);
+        }
+        return makeCodexHandle(
+          missingRequiredImage ? { exitCode: 2, stderr: "missing --image input" } : input,
+        );
+      }),
+    );
+    const textGeneration = yield* makeCodexTextGeneration(config).pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+    );
+    return yield* effectFn(textGeneration);
+  }).pipe(Effect.scoped);
+}
+
 it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
   it.effect("generates and sanitizes commit messages without branch by default", () =>
-    withFakeCodexEnv(
+    withFakeCodexCli(
       {
         output: JSON.stringify({
           subject:
@@ -211,7 +312,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
   it.effect(
     "forwards codex fast mode and non-default reasoning effort into codex exec config",
     () =>
-      withFakeCodexEnv(
+      withFakeCodexSpawner(
         {
           output: JSON.stringify({
             subject: "Add important change",
@@ -236,7 +337,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
   );
 
   it.effect("defaults git text generation codex effort to low", () =>
-    withFakeCodexEnv(
+    withFakeCodexSpawner(
       {
         output: JSON.stringify({
           subject: "Add important change",
@@ -256,7 +357,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
   );
 
   it.effect("generates commit message with branch when includeBranch is true", () =>
-    withFakeCodexEnv(
+    withFakeCodexSpawner(
       {
         output: JSON.stringify({
           subject: "Add important change",
@@ -283,7 +384,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
   );
 
   it.effect("generates PR content and trims markdown body", () =>
-    withFakeCodexEnv(
+    withFakeCodexSpawner(
       {
         output: JSON.stringify({
           title: "  Improve orchestration flow\nwith ignored suffix",
@@ -310,7 +411,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
   );
 
   it.effect("generates branch names and normalizes branch fragments", () =>
-    withFakeCodexEnv(
+    withFakeCodexSpawner(
       {
         output: JSON.stringify({
           branch: "  Feat/Session  ",
@@ -331,7 +432,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
   );
 
   it.effect("generates thread titles and trims them for sidebar use", () =>
-    withFakeCodexEnv(
+    withFakeCodexSpawner(
       {
         output: JSON.stringify({
           title:
@@ -352,7 +453,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
   );
 
   it.effect("falls back when thread title normalization becomes whitespace-only", () =>
-    withFakeCodexEnv(
+    withFakeCodexSpawner(
       {
         output: JSON.stringify({
           title: '  """   """  ',
@@ -372,7 +473,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
   );
 
   it.effect("trims whitespace exposed after quote removal in thread titles", () =>
-    withFakeCodexEnv(
+    withFakeCodexSpawner(
       {
         output: JSON.stringify({
           title: `  "' hello world '"  `,
@@ -392,7 +493,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
   );
 
   it.effect("omits attachment metadata section when no attachments are provided", () =>
-    withFakeCodexEnv(
+    withFakeCodexSpawner(
       {
         output: JSON.stringify({
           branch: "fix/session-timeout",
@@ -413,7 +514,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
   );
 
   it.effect("passes image attachments through as codex image inputs", () =>
-    withFakeCodexEnv(
+    withFakeCodexSpawner(
       {
         output: JSON.stringify({
           branch: "fix/ui-regression",
@@ -452,7 +553,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
   );
 
   it.effect("resolves persisted attachment ids to files for codex image inputs", () =>
-    withFakeCodexEnv(
+    withFakeCodexSpawner(
       {
         output: JSON.stringify({
           branch: "fix/ui-regression",
@@ -501,7 +602,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
   );
 
   it.effect("ignores missing attachment ids for codex image inputs", () =>
-    withFakeCodexEnv(
+    withFakeCodexSpawner(
       {
         output: JSON.stringify({
           branch: "fix/ui-regression",
@@ -546,7 +647,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
   it.effect(
     "fails with typed TextGenerationError when codex returns wrong branch payload shape",
     () =>
-      withFakeCodexEnv(
+      withFakeCodexSpawner(
         {
           output: JSON.stringify({
             title: "This is not a branch payload",
@@ -572,7 +673,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
   );
 
   it.effect("returns typed TextGenerationError when codex exits non-zero", () =>
-    withFakeCodexEnv(
+    withFakeCodexSpawner(
       {
         output: JSON.stringify({ subject: "ignored", body: "" }),
         exitCode: 1,

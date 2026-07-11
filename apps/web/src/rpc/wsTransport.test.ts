@@ -96,19 +96,31 @@ function getSocket(): MockWebSocket {
   return socket;
 }
 
-async function waitFor(assertion: () => void, timeoutMs = 1_000): Promise<void> {
-  const startedAt = Date.now();
-  for (;;) {
+async function waitFor(assertion: () => void): Promise<void> {
+  let lastError: unknown;
+  for (let turn = 0; turn < 20; turn += 1) {
     try {
       assertion();
       return;
     } catch (error) {
-      if (Date.now() - startedAt >= timeoutMs) {
-        throw error;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      lastError = error;
+      await new Promise<void>((resolve) => {
+        const channel = new MessageChannel();
+        channel.port1.addEventListener(
+          "message",
+          () => {
+            channel.port1.close();
+            channel.port2.close();
+            resolve();
+          },
+          { once: true },
+        );
+        channel.port1.start();
+        channel.port2.postMessage(undefined);
+      });
     }
   }
+  throw lastError;
 }
 
 function createTransport(...args: ConstructorParameters<typeof WsTransport>): WsTransport {
@@ -542,6 +554,13 @@ describe("WsTransport", () => {
     setSlowRpcAckThresholdMsForTests(slowAckThresholdMs);
     const transport = createTransport("ws://localhost:3020");
 
+    await waitFor(() => {
+      expect(sockets).toHaveLength(1);
+    });
+
+    const socket = getSocket();
+    socket.open();
+    vi.useFakeTimers();
     const requestPromise = transport.request((client) =>
       client[WS_METHODS.serverUpsertKeybinding]({
         command: "commandPalette.toggle",
@@ -550,25 +569,17 @@ describe("WsTransport", () => {
     );
 
     await waitFor(() => {
-      expect(sockets).toHaveLength(1);
-    });
-
-    const socket = getSocket();
-    socket.open();
-
-    await waitFor(() => {
       expect(socket.sent).toHaveLength(1);
     });
 
     const requestMessage = JSON.parse(socket.sent[0] ?? "{}") as { id: string };
-    await waitFor(() => {
-      expect(getSlowRpcAckRequests()).toMatchObject([
-        {
-          requestId: requestMessage.id,
-          tag: WS_METHODS.serverUpsertKeybinding,
-        },
-      ]);
-    }, 1_000);
+    await vi.advanceTimersByTimeAsync(slowAckThresholdMs);
+    expect(getSlowRpcAckRequests()).toMatchObject([
+      {
+        requestId: requestMessage.id,
+        tag: WS_METHODS.serverUpsertKeybinding,
+      },
+    ]);
 
     socket.serverMessage(
       JSON.stringify({
@@ -598,6 +609,13 @@ describe("WsTransport", () => {
     setSlowRpcAckThresholdMsForTests(slowAckThresholdMs);
     const transport = createTransport("ws://localhost:3020");
 
+    await waitFor(() => {
+      expect(sockets).toHaveLength(1);
+    });
+
+    const firstSocket = getSocket();
+    firstSocket.open();
+    vi.useFakeTimers();
     const requestPromise = transport.request((client) =>
       client[WS_METHODS.serverUpsertKeybinding]({
         command: "commandPalette.toggle",
@@ -606,29 +624,22 @@ describe("WsTransport", () => {
     );
 
     await waitFor(() => {
-      expect(sockets).toHaveLength(1);
-    });
-
-    const firstSocket = getSocket();
-    firstSocket.open();
-
-    await waitFor(() => {
       expect(firstSocket.sent).toHaveLength(1);
     });
 
     const firstRequest = JSON.parse(firstSocket.sent[0] ?? "{}") as { id: string };
 
-    await waitFor(() => {
-      expect(getSlowRpcAckRequests()).toMatchObject([
-        {
-          requestId: firstRequest.id,
-          tag: WS_METHODS.serverUpsertKeybinding,
-        },
-      ]);
-    }, 1_000);
+    await vi.advanceTimersByTimeAsync(slowAckThresholdMs);
+    expect(getSlowRpcAckRequests()).toMatchObject([
+      {
+        requestId: firstRequest.id,
+        tag: WS_METHODS.serverUpsertKeybinding,
+      },
+    ]);
 
     void requestPromise.catch(() => undefined);
 
+    vi.useRealTimers();
     await transport.reconnect();
 
     expect(getSlowRpcAckRequests()).toEqual([]);
@@ -1044,7 +1055,7 @@ describe("WsTransport", () => {
     await waitFor(() => {
       expect(attempts).toBe(1);
     });
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await Promise.resolve();
 
     expect(attempts).toBe(1);
     expect(warnSpy).toHaveBeenCalledWith("WebSocket RPC subscription failed", {
@@ -1072,7 +1083,7 @@ describe("WsTransport", () => {
           return Stream.fail(new Error("Server stream projection failed"));
         }),
       vi.fn(),
-      { retryDelay: 10, retryNonTransportErrors: true },
+      { retryDelay: 0, retryNonTransportErrors: true },
     );
 
     await waitFor(() => {
@@ -1105,7 +1116,7 @@ describe("WsTransport", () => {
           return Stream.fail(new Error("SocketCloseError: WebSocket closed"));
         }),
       vi.fn(),
-      { retryDelay: 10 },
+      { retryDelay: 0 },
     );
 
     await waitFor(() => {

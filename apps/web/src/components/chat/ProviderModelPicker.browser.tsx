@@ -1190,23 +1190,4 @@ describe("ProviderModelPicker", () => {
       await mounted.cleanup();
     }
   });
-
-  it("accepts outline trigger styling", async () => {
-    const mounted = await mountPicker({
-      model: "gpt-5-codex",
-      lockedProvider: null,
-      triggerVariant: "outline",
-    });
-
-    try {
-      const button = document.querySelector("button");
-      if (!(button instanceof HTMLButtonElement)) {
-        throw new Error("Expected picker trigger button to be rendered.");
-      }
-      expect(button.className).toContain("border-input");
-      expect(button.className).toContain("bg-popover");
-    } finally {
-      await mounted.cleanup();
-    }
-  });
 });

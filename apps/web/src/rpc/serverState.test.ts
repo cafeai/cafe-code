@@ -119,21 +119,6 @@ function emitServerConfigEvent(event: ServerConfigStreamEvent) {
   }
 }
 
-async function waitFor(assertion: () => void, timeoutMs = 1_000): Promise<void> {
-  const startedAt = Date.now();
-  for (;;) {
-    try {
-      assertion();
-      return;
-    } catch (error) {
-      if (Date.now() - startedAt >= timeoutMs) {
-        throw error;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-  }
-}
-
 beforeEach(() => {
   vi.clearAllMocks();
   lifecycleListeners.clear();
@@ -158,9 +143,8 @@ describe("serverState", () => {
     const stop = startServerStateSync(serverApi);
     const unsubscribe = onServerConfigUpdated(configListener);
 
-    await waitFor(() => {
-      expect(getServerConfig()).toEqual(baseServerConfig);
-    });
+    await Promise.resolve();
+    expect(getServerConfig()).toEqual(baseServerConfig);
 
     expect(serverApi.subscribeConfig).toHaveBeenCalledOnce();
     expect(serverApi.subscribeLifecycle).toHaveBeenCalledOnce();
@@ -208,12 +192,10 @@ describe("serverState", () => {
       config: streamedConfig,
     });
 
-    await waitFor(() => {
-      expect(getServerConfig()).toEqual(streamedConfig);
-    });
+    expect(getServerConfig()).toEqual(streamedConfig);
 
     deferred.resolve(baseServerConfig);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await Promise.resolve();
 
     expect(getServerConfig()).toEqual(streamedConfig);
     stop();
@@ -270,9 +252,8 @@ describe("serverState", () => {
     const unsubscribeConfig = onServerConfigUpdated(configListener);
     const unsubscribeProviders = onProvidersUpdated(providersListener);
 
-    await waitFor(() => {
-      expect(getServerConfig()).toEqual(baseServerConfig);
-    });
+    await Promise.resolve();
+    expect(getServerConfig()).toEqual(baseServerConfig);
 
     const nextProviders: ReadonlyArray<ServerProvider> = [
       {
@@ -333,21 +314,19 @@ describe("serverState", () => {
       },
     });
 
-    await waitFor(() => {
-      expect(getServerConfig()).toEqual({
-        ...baseServerConfig,
-        keybindings: nextKeybindings,
-        issues: [{ kind: "keybindings.malformed-config", message: "bad json" }],
-        providers: nextProviders,
-        settings: {
-          ...DEFAULT_SERVER_SETTINGS,
-          enableAssistantStreaming: true,
-        },
-        clientSettings: {
-          ...DEFAULT_CLIENT_SETTINGS,
-          brandWordmarkPrefix: "Synced",
-        },
-      });
+    expect(getServerConfig()).toEqual({
+      ...baseServerConfig,
+      keybindings: nextKeybindings,
+      issues: [{ kind: "keybindings.malformed-config", message: "bad json" }],
+      providers: nextProviders,
+      settings: {
+        ...DEFAULT_SERVER_SETTINGS,
+        enableAssistantStreaming: true,
+      },
+      clientSettings: {
+        ...DEFAULT_CLIENT_SETTINGS,
+        brandWordmarkPrefix: "Synced",
+      },
     });
 
     expect(providersListener).toHaveBeenLastCalledWith({ providers: nextProviders });

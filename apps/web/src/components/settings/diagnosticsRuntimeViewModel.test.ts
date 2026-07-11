@@ -3,7 +3,6 @@ import type { ServerRuntimeLayerDiagnosticsResult } from "@cafecode/contracts";
 
 import {
   formatRuntimeLayerRole,
-  runtimeLayerStatusClasses,
   runtimeLayerStatusTone,
   sortRuntimeLayers,
   summarizeRuntimeCpu,
@@ -18,8 +17,6 @@ describe("diagnosticsRuntimeViewModel", () => {
     expect(runtimeLayerStatusTone("degraded")).toBe("warning");
     expect(runtimeLayerStatusTone("unknown")).toBe("warning");
     expect(runtimeLayerStatusTone("offline")).toBe("danger");
-    expect(runtimeLayerStatusClasses("online")).toContain("emerald");
-    expect(runtimeLayerStatusClasses("offline")).toContain("destructive");
   });
 
   it("sorts primary layers before detached child roles", () => {

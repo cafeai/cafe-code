@@ -219,14 +219,28 @@ function createClient() {
 }
 
 describe("saved environment startup", () => {
+  let savedConnectionCreated: Promise<void>;
+  let signalSavedConnectionCreated: () => void;
+  let remoteSessionStateRequested: Promise<void>;
+  let signalRemoteSessionStateRequested: () => void;
+
   beforeEach(() => {
-    vi.useFakeTimers();
     vi.resetModules();
     vi.clearAllMocks();
 
-    mockFetchRemoteSessionState.mockResolvedValue({
-      authenticated: true,
-      role: "owner",
+    savedConnectionCreated = new Promise<void>((resolve) => {
+      signalSavedConnectionCreated = resolve;
+    });
+    remoteSessionStateRequested = new Promise<void>((resolve) => {
+      signalRemoteSessionStateRequested = resolve;
+    });
+
+    mockFetchRemoteSessionState.mockImplementation(async () => {
+      signalRemoteSessionStateRequested();
+      return {
+        authenticated: true,
+        role: "owner",
+      };
     });
     mockGetSavedEnvironmentRecord.mockImplementation((environmentId: EnvironmentId) =>
       environmentId === savedRecord.environmentId ? savedRecord : null,
@@ -241,6 +255,7 @@ describe("saved environment startup", () => {
         queueMicrotask(() => {
           input.onConfigSnapshot?.(configSnapshot);
         });
+        signalSavedConnectionCreated();
       }
 
       return {
@@ -258,7 +273,6 @@ describe("saved environment startup", () => {
   afterEach(async () => {
     const { resetEnvironmentServiceForTests } = await import("./service");
     await resetEnvironmentServiceForTests();
-    vi.useRealTimers();
   });
 
   it("uses the initial config snapshot instead of issuing an extra getConfig call", async () => {
@@ -266,7 +280,8 @@ describe("saved environment startup", () => {
       await import("./service");
 
     const stop = startEnvironmentConnectionService(new QueryClient());
-    await vi.runAllTimersAsync();
+    await savedConnectionCreated;
+    await remoteSessionStateRequested;
 
     const savedConnectionCall = mockCreateEnvironmentConnection.mock.calls.find(
       ([input]) => input.kind === "saved",
@@ -284,6 +299,10 @@ describe("saved environment startup", () => {
   it("coalesces hydration and registry sync so the initial saved connection only starts once", async () => {
     let finishHydration!: () => void;
     let finishTokenRead!: (token: string) => void;
+    let signalTokenReadStarted!: () => void;
+    const tokenReadStarted = new Promise<void>((resolve) => {
+      signalTokenReadStarted = resolve;
+    });
 
     mockWaitForSavedEnvironmentRegistryHydration.mockImplementation(
       () =>
@@ -295,6 +314,7 @@ describe("saved environment startup", () => {
       () =>
         new Promise<string>((resolve) => {
           finishTokenRead = resolve;
+          signalTokenReadStarted();
         }),
     );
 
@@ -307,12 +327,12 @@ describe("saved environment startup", () => {
 
     registryListener?.();
     finishHydration();
-    await vi.waitFor(() => {
-      expect(mockReadSavedEnvironmentBearerToken).toHaveBeenCalledTimes(1);
-    });
+    await tokenReadStarted;
+    expect(mockReadSavedEnvironmentBearerToken).toHaveBeenCalledTimes(1);
 
     finishTokenRead("saved-bearer-token");
-    await vi.runAllTimersAsync();
+    await savedConnectionCreated;
+    await remoteSessionStateRequested;
 
     const savedConnectionCalls = mockCreateEnvironmentConnection.mock.calls.filter(
       ([input]) => input.kind === "saved",

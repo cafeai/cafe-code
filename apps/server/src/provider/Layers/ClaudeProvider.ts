@@ -92,7 +92,7 @@ function isClaudeModelSupportedByVersion(
     : true;
 }
 
-function getBuiltInClaudeModelsForVersion(
+export function getBuiltInClaudeModelsForVersion(
   version: string | null | undefined,
 ): ReadonlyArray<ServerProviderModel> {
   return VERSIONED_BUILT_IN_MODELS.filter((model) =>
@@ -100,7 +100,7 @@ function getBuiltInClaudeModelsForVersion(
   ).map(({ minimumClaudeCodeVersion: _minimumClaudeCodeVersion, ...model }) => model);
 }
 
-function formatClaudeModelUpgradeMessage(version: string | null): string | undefined {
+export function formatClaudeModelUpgradeMessage(version: string | null): string | undefined {
   const unavailableModel = VERSIONED_BUILT_IN_MODELS.find(
     (model) => !isClaudeModelSupportedByVersion(model, version),
   );
@@ -281,7 +281,7 @@ function normalizeClaudeAuthMethod(authMethod: string | undefined): string | und
   return undefined;
 }
 
-function formatClaudeSubscriptionAuthLabel(subscriptionType: string): string {
+export function formatClaudeSubscriptionAuthLabel(subscriptionType: string): string {
   const subscriptionLabel =
     claudeSubscriptionLabel(subscriptionType) ?? toTitleCaseWords(subscriptionType);
   const normalized = subscriptionLabel.toLowerCase().replace(/[\s_-]+/g, "");

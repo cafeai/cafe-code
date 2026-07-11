@@ -34,9 +34,16 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
 
     it.effect("hashes non-numeric instance values", () =>
       Effect.sync(() => {
-        const result = resolveOffset({ portOffset: undefined, devInstance: "feature-branch" });
-        assert.ok(result.offset >= 1);
-        assert.ok(result.offset <= 3000);
+        const first = resolveOffset({ portOffset: undefined, devInstance: "feature-branch" });
+        const second = resolveOffset({ portOffset: undefined, devInstance: "feature-branch" });
+
+        assert.deepStrictEqual(first, second);
+        assert.deepStrictEqual(first, {
+          offset: first.offset,
+          source: "hashed CAFE_CODE_DEV_INSTANCE=feature-branch",
+        });
+        assert.ok(first.offset >= 1);
+        assert.ok(first.offset <= 3000);
       }),
     );
 

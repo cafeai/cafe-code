@@ -2,22 +2,23 @@ import * as Schema from "effect/Schema";
 import * as Record from "effect/Record";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-const isomorphicLocalStorage: Storage =
-  typeof window !== "undefined"
-    ? window.localStorage
-    : (function () {
-        const store = new Map<string, string>();
-        return {
-          clear: () => store.clear(),
-          getItem: (_) => store.get(_) ?? null,
-          key: (_) => Record.keys(store).at(_) ?? null,
-          get length() {
-            return store.size;
-          },
-          removeItem: (_) => store.delete(_),
-          setItem: (_, value) => store.set(_, value),
-        };
-      })();
+const serverLocalStorage: Storage = (function () {
+  const store = new Map<string, string>();
+  return {
+    clear: () => store.clear(),
+    getItem: (_) => store.get(_) ?? null,
+    key: (_) => Record.keys(store).at(_) ?? null,
+    get length() {
+      return store.size;
+    },
+    removeItem: (_) => store.delete(_),
+    setItem: (_, value) => store.set(_, value),
+  };
+})();
+
+function getIsomorphicLocalStorage(): Storage {
+  return typeof window !== "undefined" ? window.localStorage : serverLocalStorage;
+}
 
 const decode = <T, E>(schema: Schema.Codec<T, E>, value: string) => {
   const decodeJson = Schema.decodeSync(Schema.fromJsonString(schema));
@@ -30,7 +31,7 @@ const encode = <T, E>(schema: Schema.Codec<T, E>, value: T) => {
 };
 
 export const getLocalStorageItem = <T, E>(key: string, schema: Schema.Codec<T, E>): T | null => {
-  const item = isomorphicLocalStorage.getItem(key);
+  const item = getIsomorphicLocalStorage().getItem(key);
   return item ? decode(schema, item) : null;
 };
 
@@ -45,14 +46,15 @@ export const getLocalStorageItemWithLegacy = <T, E>(
   }
 
   for (const legacyKey of legacyKeys) {
-    const item = isomorphicLocalStorage.getItem(legacyKey);
+    const storage = getIsomorphicLocalStorage();
+    const item = storage.getItem(legacyKey);
     if (!item) {
       continue;
     }
     try {
       const parsed = decode(schema, item);
-      isomorphicLocalStorage.setItem(key, encode(schema, parsed));
-      isomorphicLocalStorage.removeItem(legacyKey);
+      storage.setItem(key, encode(schema, parsed));
+      storage.removeItem(legacyKey);
       return parsed;
     } catch {
       // Ignore malformed legacy values so a stale key cannot block newer storage.
@@ -63,7 +65,7 @@ export const getLocalStorageItemWithLegacy = <T, E>(
 
 export const setLocalStorageItem = <T, E>(key: string, value: T, schema: Schema.Codec<T, E>) => {
   const valueToSet = encode(schema, value);
-  isomorphicLocalStorage.setItem(key, valueToSet);
+  getIsomorphicLocalStorage().setItem(key, valueToSet);
 };
 
 export const setLocalStorageItemWithLegacy = <T, E>(
@@ -74,12 +76,12 @@ export const setLocalStorageItemWithLegacy = <T, E>(
 ) => {
   setLocalStorageItem(key, value, schema);
   for (const legacyKey of legacyKeys) {
-    isomorphicLocalStorage.removeItem(legacyKey);
+    getIsomorphicLocalStorage().removeItem(legacyKey);
   }
 };
 
 export const removeLocalStorageItem = (key: string) => {
-  isomorphicLocalStorage.removeItem(key);
+  getIsomorphicLocalStorage().removeItem(key);
 };
 
 export const removeLocalStorageItemWithLegacy = (key: string, legacyKeys: readonly string[]) => {

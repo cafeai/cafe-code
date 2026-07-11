@@ -20,6 +20,7 @@ import {
   type ProviderDaemonRpcRequest as ProviderDaemonRpcRequestValue,
   type ProviderDaemonSupervisorProcess,
   type ProviderDaemonTransport,
+  type ProviderRuntimeEvent as ProviderRuntimeEventValue,
   type ProviderRuntimeProcessMode,
 } from "@cafecode/contracts";
 import * as Data from "effect/Data";
@@ -82,6 +83,8 @@ export interface ProviderDaemonServerOptions {
   readonly runtimeBuildId?: string;
   readonly protocolVersion?: number;
   readonly supervisorProcess?: ProviderDaemonSupervisorProcess;
+  /** Optional in-process observability hook used after an event is durably journaled. */
+  readonly onRuntimeEventJournaled?: ((event: ProviderRuntimeEventValue) => void) | undefined;
 }
 
 export interface ProviderDaemonServerSnapshot {
@@ -957,6 +960,9 @@ export const runProviderDaemonServer = (
                 ? Effect.void
                 : persistSupervisorBridgeCursor(supervisorCursor);
             }),
+            Effect.tap(() =>
+              Effect.sync(() => options.onRuntimeEventJournaled?.(event)).pipe(Effect.ignoreCause),
+            ),
             Effect.catchCause((cause) => {
               if (Cause.hasInterruptsOnly(cause)) {
                 return Effect.failCause(cause);
@@ -1316,12 +1322,17 @@ export const runProviderDaemonServer = (
       ),
     );
     const journalSnapshot = yield* journal.snapshot;
+    const listeningAddress = server.address();
+    const listeningPort =
+      transport === "tcp" && typeof listeningAddress === "object" && listeningAddress !== null
+        ? listeningAddress.port
+        : port;
 
     return {
       mode,
       transport,
       host: transport === "tcp" ? host : null,
-      port: transport === "tcp" ? port : null,
+      port: transport === "tcp" ? listeningPort : null,
       socketPath: transport === "ipc" ? (options.socketPath ?? null) : null,
       startedAt,
       pid: process.pid,

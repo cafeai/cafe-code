@@ -188,6 +188,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
       });
 
     return {
+      runSweepOnce: sweep,
       start,
     } satisfies ProviderSessionReaperShape;
   });

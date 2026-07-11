@@ -7,6 +7,7 @@ import {
   type ProviderRuntimeEvent as ProviderRuntimeEventValue,
 } from "@cafecode/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -39,6 +40,8 @@ export interface ProviderDaemonPersistentEventJournal {
   readonly replayAfter: (cursor: number) => Effect.Effect<ReadonlyArray<ProviderDaemonEventRecord>>;
   readonly subscribe: (listener: (record: ProviderDaemonEventRecord) => void) => () => void;
   readonly snapshot: Effect.Effect<ProviderDaemonEventJournalSnapshot>;
+  /** Resolves after the bounded post-startup prune, compaction, and index work completes. */
+  readonly startupMaintenance: Effect.Effect<void>;
 }
 
 export function createProviderDaemonEventJournal(options?: {
@@ -104,7 +107,7 @@ const PERSISTENT_JOURNAL_PRUNE_BATCH_PAUSE_MS = 25;
 const PERSISTENT_JOURNAL_STARTUP_PRUNE_DELAY_MS = 5_000;
 const PROVIDER_DAEMON_EVENT_ID_INDEX_NAME = "idx_provider_daemon_events_owner_event_id";
 const TURN_DIFF_JOURNAL_PREVIEW_CHARS = 4_096;
-const TURN_DIFF_JOURNAL_COMPACT_THRESHOLD_CHARS = 256 * 1024;
+export const TURN_DIFF_JOURNAL_COMPACT_THRESHOLD_CHARS = 256 * 1024;
 const TURN_DIFF_JOURNAL_COMPACT_BATCH_SIZE = 1;
 
 interface PersistedEventRow {
@@ -217,6 +220,7 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
     );
     const ownerKey = normalizeOwnerKey(options?.ownerKey);
     const listeners = new Set<(record: ProviderDaemonEventRecord) => void>();
+    const startupMaintenanceReady = yield* Deferred.make<void>();
     let eventsSincePrune = 0;
     let eventIdIndexReady = false;
 
@@ -350,6 +354,7 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
       Effect.andThen(compactLargeTurnDiffRows()),
       Effect.andThen(ensureEventIdIndex()),
       Effect.ignoreCause({ log: true }),
+      Effect.ensuring(Deferred.succeed(startupMaintenanceReady, undefined)),
       Effect.forkScoped,
       Effect.asVoid,
     );
@@ -467,5 +472,6 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
       replayAfter,
       subscribe,
       snapshot,
+      startupMaintenance: Deferred.await(startupMaintenanceReady),
     };
   }).pipe(Effect.orDie);

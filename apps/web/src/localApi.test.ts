@@ -16,6 +16,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ContextMenuItem } from "@cafecode/contracts";
 
+import { createEnvironmentApi } from "./environmentApi";
+import { createLocalApi } from "./localApi";
+
 const showContextMenuFallbackMock =
   vi.fn<
     <T extends string>(
@@ -123,7 +126,8 @@ vi.mock("./environments/runtime", () => ({
 }));
 
 vi.mock("./contextMenuFallback", () => ({
-  showContextMenuFallback: showContextMenuFallbackMock,
+  showContextMenuFallback: (...args: Parameters<typeof showContextMenuFallbackMock>) =>
+    showContextMenuFallbackMock(...args),
 }));
 
 function emitEvent<T>(listeners: Set<(event: T) => void>, event: T) {
@@ -316,7 +320,6 @@ const baseGitStatus: VcsStatusResult = {
 };
 
 beforeEach(() => {
-  vi.resetModules();
   vi.clearAllMocks();
   showContextMenuFallbackMock.mockReset();
   shellStreamListeners.clear();
@@ -340,7 +343,6 @@ afterEach(() => {
 describe("wsApi", () => {
   it("forwards server config fetches directly to the RPC client", async () => {
     rpcClientMock.server.getConfig.mockResolvedValue(baseServerConfig);
-    const { createLocalApi } = await import("./localApi");
 
     const api = createLocalApi(rpcClientMock as never);
 
@@ -356,7 +358,6 @@ describe("wsApi", () => {
       ...DEFAULT_CLIENT_SETTINGS,
       brandWordmarkPrefix: "Synced",
     });
-    const { createLocalApi } = await import("./localApi");
 
     const api = createLocalApi(rpcClientMock as never);
 
@@ -374,8 +375,6 @@ describe("wsApi", () => {
   });
 
   it("forwards shell stream events", async () => {
-    const { createEnvironmentApi } = await import("./environmentApi");
-
     const api = createEnvironmentApi(rpcClientMock as never);
     const onShellEvent = vi.fn();
 
@@ -406,7 +405,6 @@ describe("wsApi", () => {
   it("forwards terminal launch requests directly to the RPC client", async () => {
     rpcClientMock.shell.openTerminal.mockResolvedValue(undefined);
     getWindowForTest().desktopBridge = makeDesktopBridge();
-    const { createLocalApi } = await import("./localApi");
     const api = createLocalApi(rpcClientMock as never);
 
     await expect(api.shell.openTerminal("/tmp/project")).resolves.toBeUndefined();
@@ -416,7 +414,6 @@ describe("wsApi", () => {
   it("does not proxy browser terminal launches to the backend host", async () => {
     rpcClientMock.shell.openTerminal.mockResolvedValue(undefined);
     Reflect.deleteProperty(getWindowForTest(), "desktopBridge");
-    const { createLocalApi } = await import("./localApi");
     const api = createLocalApi(rpcClientMock as never);
 
     await expect(api.shell.openTerminal("/tmp/project")).rejects.toThrow(
@@ -426,8 +423,6 @@ describe("wsApi", () => {
   });
 
   it("forwards git status stream events", async () => {
-    const { createEnvironmentApi } = await import("./environmentApi");
-
     const api = createEnvironmentApi(rpcClientMock as never);
     const onStatus = vi.fn();
 
@@ -442,7 +437,6 @@ describe("wsApi", () => {
 
   it("forwards git status refreshes directly to the RPC client", async () => {
     rpcClientMock.vcs.refreshStatus.mockResolvedValue(baseGitStatus);
-    const { createEnvironmentApi } = await import("./environmentApi");
 
     const api = createEnvironmentApi(rpcClientMock as never);
 
@@ -452,8 +446,6 @@ describe("wsApi", () => {
   });
 
   it("forwards shell stream subscription options to the RPC client", async () => {
-    const { createEnvironmentApi } = await import("./environmentApi");
-
     const api = createEnvironmentApi(rpcClientMock as never);
     const onShellEvent = vi.fn();
     const onResubscribe = vi.fn();
@@ -467,7 +459,6 @@ describe("wsApi", () => {
 
   it("sends orchestration dispatch commands as the direct RPC payload", async () => {
     rpcClientMock.orchestration.dispatchCommand.mockResolvedValue({ sequence: 1 });
-    const { createEnvironmentApi } = await import("./environmentApi");
 
     const api = createEnvironmentApi(rpcClientMock as never);
     const command = {
@@ -489,7 +480,6 @@ describe("wsApi", () => {
 
   it("forwards workspace file writes to the project RPC", async () => {
     rpcClientMock.projects.writeFile.mockResolvedValue({ relativePath: "plan.md" });
-    const { createEnvironmentApi } = await import("./environmentApi");
 
     const api = createEnvironmentApi(rpcClientMock as never);
     await api.projects.writeFile({
@@ -510,7 +500,6 @@ describe("wsApi", () => {
       parentPath: "/tmp/project/",
       entries: [],
     });
-    const { createEnvironmentApi } = await import("./environmentApi");
 
     const api = createEnvironmentApi(rpcClientMock as never);
     await api.filesystem.browse({
@@ -532,7 +521,6 @@ describe("wsApi", () => {
       },
     ];
     rpcClientMock.server.refreshProviders.mockResolvedValue({ providers: nextProviders });
-    const { createLocalApi } = await import("./localApi");
 
     const api = createLocalApi(rpcClientMock as never);
 
@@ -554,7 +542,6 @@ describe("wsApi", () => {
       },
     ];
     rpcClientMock.server.updateProvider.mockResolvedValue({ providers: nextProviders });
-    const { createLocalApi } = await import("./localApi");
 
     const api = createLocalApi(rpcClientMock as never);
 
@@ -576,7 +563,6 @@ describe("wsApi", () => {
       message: "Opened codex login in PowerShell.",
     };
     rpcClientMock.server.loginProvider.mockResolvedValue(loginResult);
-    const { createLocalApi } = await import("./localApi");
 
     const api = createLocalApi(rpcClientMock as never);
 
@@ -602,7 +588,6 @@ describe("wsApi", () => {
       stoppedSessionCount: 2,
     };
     rpcClientMock.server.restartProviderRuntime.mockResolvedValue(restartResult);
-    const { createLocalApi } = await import("./localApi");
 
     const api = createLocalApi(rpcClientMock as never);
 
@@ -617,7 +602,6 @@ describe("wsApi", () => {
   it("forwards system prompt file open requests directly to the RPC client", async () => {
     const result = { path: "/tmp/workspace/.config/system-prompt.md" };
     rpcClientMock.server.openSystemPromptFile.mockResolvedValue(result);
-    const { createLocalApi } = await import("./localApi");
 
     const api = createLocalApi(rpcClientMock as never);
 
@@ -631,7 +615,6 @@ describe("wsApi", () => {
       enableAssistantStreaming: true,
     };
     rpcClientMock.server.updateSettings.mockResolvedValue(nextSettings);
-    const { createLocalApi } = await import("./localApi");
 
     const api = createLocalApi(rpcClientMock as never);
 
@@ -646,8 +629,6 @@ describe("wsApi", () => {
   it("forwards context menu metadata to the desktop bridge", async () => {
     const showContextMenu = vi.fn().mockResolvedValue("delete");
     getWindowForTest().desktopBridge = makeDesktopBridge({ showContextMenu });
-
-    const { createLocalApi } = await import("./localApi");
     const api = createLocalApi(rpcClientMock as never);
     const items = [{ id: "delete", label: "Delete" }] as const;
 
@@ -658,8 +639,6 @@ describe("wsApi", () => {
   it("forwards reveal path requests to the desktop bridge", async () => {
     const revealPath = vi.fn().mockResolvedValue(true);
     getWindowForTest().desktopBridge = makeDesktopBridge({ revealPath });
-
-    const { createLocalApi } = await import("./localApi");
     const api = createLocalApi(rpcClientMock as never);
 
     await expect(api.shell.revealPath("/tmp/project/artifact.zip")).resolves.toBeUndefined();
@@ -669,8 +648,6 @@ describe("wsApi", () => {
   it("forwards folder picker options to the desktop bridge", async () => {
     const pickFolder = vi.fn().mockResolvedValue("/tmp/project");
     getWindowForTest().desktopBridge = makeDesktopBridge({ pickFolder });
-
-    const { createLocalApi } = await import("./localApi");
     const api = createLocalApi(rpcClientMock as never);
 
     await expect(api.dialogs.pickFolder({ initialPath: "/tmp/workspace" })).resolves.toBe(
@@ -681,7 +658,6 @@ describe("wsApi", () => {
 
   it("falls back to the browser context menu helper when the desktop bridge is missing", async () => {
     showContextMenuFallbackMock.mockResolvedValue("rename");
-    const { createLocalApi } = await import("./localApi");
 
     const api = createLocalApi(rpcClientMock as never);
     const items = [{ id: "rename", label: "Rename" }] as const;
@@ -734,8 +710,6 @@ describe("wsApi", () => {
       setSavedEnvironmentSecret,
       removeSavedEnvironmentSecret,
     });
-
-    const { createLocalApi } = await import("./localApi");
     const api = createLocalApi(rpcClientMock as never);
 
     await api.persistence.getClientSettings();
@@ -759,7 +733,6 @@ describe("wsApi", () => {
   });
 
   it("falls back to browser storage for persistence when the desktop bridge is missing", async () => {
-    const { createLocalApi } = await import("./localApi");
     const api = createLocalApi(rpcClientMock as never);
     const clientSettings = {
       ...DEFAULT_CLIENT_SETTINGS,
@@ -855,8 +828,6 @@ describe("wsApi", () => {
         ],
       }),
     );
-
-    const { createLocalApi } = await import("./localApi");
     const api = createLocalApi(rpcClientMock as never);
 
     await expect(api.persistence.getSavedEnvironmentRegistry()).resolves.toEqual([

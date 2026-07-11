@@ -1,5 +1,19 @@
 import { EnvironmentId, type PersistedSavedEnvironmentRecord } from "@cafecode/contracts";
+import { DEFAULT_CLIENT_SETTINGS } from "@cafecode/contracts/settings";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+import {
+  CLIENT_SETTINGS_STORAGE_KEY,
+  LEGACY_CLIENT_SETTINGS_STORAGE_KEY,
+  LEGACY_SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
+  SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
+  SAVED_ENVIRONMENT_SESSION_SECRETS_STORAGE_KEY,
+  readBrowserClientSettings,
+  readBrowserSavedEnvironmentRegistry,
+  readBrowserSavedEnvironmentSecret,
+  writeBrowserSavedEnvironmentRegistry,
+  writeBrowserSavedEnvironmentSecret,
+} from "./clientPersistenceStorage";
 
 const testEnvironmentId = EnvironmentId.make("environment-1");
 
@@ -57,20 +71,13 @@ function getTestWindow(): Window & typeof globalThis {
 }
 
 afterEach(() => {
-  vi.resetModules();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
 describe("clientPersistenceStorage", () => {
-  it("migrates legacy browser client settings into the Cafe Code key", async () => {
+  it("migrates legacy browser client settings into the Cafe Code key", () => {
     const testWindow = getTestWindow();
-    const { DEFAULT_CLIENT_SETTINGS } = await import("@cafecode/contracts/settings");
-    const {
-      CLIENT_SETTINGS_STORAGE_KEY,
-      LEGACY_CLIENT_SETTINGS_STORAGE_KEY,
-      readBrowserClientSettings,
-    } = await import("./clientPersistenceStorage");
     testWindow.localStorage.setItem(
       LEGACY_CLIENT_SETTINGS_STORAGE_KEY,
       JSON.stringify(DEFAULT_CLIENT_SETTINGS),
@@ -81,13 +88,8 @@ describe("clientPersistenceStorage", () => {
     expect(testWindow.localStorage.getItem(LEGACY_CLIENT_SETTINGS_STORAGE_KEY)).toBeNull();
   });
 
-  it("migrates legacy saved environments into the Cafe Code key", async () => {
+  it("migrates legacy saved environments into the Cafe Code key", () => {
     const testWindow = getTestWindow();
-    const {
-      LEGACY_SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
-      SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
-      readBrowserSavedEnvironmentRegistry,
-    } = await import("./clientPersistenceStorage");
     testWindow.localStorage.setItem(
       LEGACY_SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
       JSON.stringify({ version: 1, records: [legacySavedRegistryRecord] }),
@@ -106,16 +108,8 @@ describe("clientPersistenceStorage", () => {
     ).toBeNull();
   });
 
-  it("stores browser secrets in sessionStorage without writing bearer material to localStorage", async () => {
+  it("stores browser secrets in sessionStorage without writing bearer material to localStorage", () => {
     const testWindow = getTestWindow();
-    const {
-      SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
-      SAVED_ENVIRONMENT_SESSION_SECRETS_STORAGE_KEY,
-      readBrowserSavedEnvironmentRegistry,
-      readBrowserSavedEnvironmentSecret,
-      writeBrowserSavedEnvironmentRegistry,
-      writeBrowserSavedEnvironmentSecret,
-    } = await import("./clientPersistenceStorage");
 
     writeBrowserSavedEnvironmentRegistry([savedRegistryRecord]);
     expect(writeBrowserSavedEnvironmentSecret(testEnvironmentId, "bearer-token")).toBe(true);

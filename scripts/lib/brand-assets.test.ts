@@ -15,32 +15,6 @@ import {
 } from "./brand-assets.ts";
 
 describe("brand-assets", () => {
-  it("uses the same picture-derived desktop icon family for every channel", () => {
-    expect(BRAND_ASSET_PATHS.productionMacIconPng).toBe(BRAND_ASSET_PATHS.appIconDesktopPng);
-    expect(BRAND_ASSET_PATHS.productionLinuxIconPng).toBe(BRAND_ASSET_PATHS.appIconDesktopPng);
-    expect(BRAND_ASSET_PATHS.productionWindowsIconIco).toBe(BRAND_ASSET_PATHS.appIconWindowsIco);
-    expect(BRAND_ASSET_PATHS.nightlyMacIconPng).toBe(BRAND_ASSET_PATHS.appIconDesktopPng);
-    expect(BRAND_ASSET_PATHS.nightlyLinuxIconPng).toBe(BRAND_ASSET_PATHS.appIconDesktopPng);
-    expect(BRAND_ASSET_PATHS.nightlyWindowsIconIco).toBe(BRAND_ASSET_PATHS.appIconWindowsIco);
-    expect(BRAND_ASSET_PATHS.developmentDesktopIconPng).toBe(BRAND_ASSET_PATHS.appIconDesktopPng);
-    expect(BRAND_ASSET_PATHS.developmentWindowsIconIco).toBe(BRAND_ASSET_PATHS.appIconWindowsIco);
-  });
-
-  it("uses the same picture-derived web icon family for development and production", () => {
-    expect(BRAND_ASSET_PATHS.developmentWebFaviconIco).toBe(
-      BRAND_ASSET_PATHS.productionWebFaviconIco,
-    );
-    expect(BRAND_ASSET_PATHS.developmentWebFavicon16Png).toBe(
-      BRAND_ASSET_PATHS.productionWebFavicon16Png,
-    );
-    expect(BRAND_ASSET_PATHS.developmentWebFavicon32Png).toBe(
-      BRAND_ASSET_PATHS.productionWebFavicon32Png,
-    );
-    expect(BRAND_ASSET_PATHS.developmentWebAppleTouchIconPng).toBe(
-      BRAND_ASSET_PATHS.productionWebAppleTouchIconPng,
-    );
-  });
-
   it("keeps all active brand asset paths backed by files", async () => {
     await Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

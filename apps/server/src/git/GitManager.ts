@@ -1,14 +1,10 @@
-import * as Arr from "effect/Array";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
-import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
-import * as Order from "effect/Order";
 import {
   GitCommandError,
   GitPreparePullRequestThreadInput,
@@ -35,6 +31,12 @@ import type { GitManagerServiceError } from "@cafecode/contracts";
 import { GitVcsDriver, type GitStatusDetails } from "../vcs/GitVcsDriver.ts";
 import { SourceControlProviderRegistry } from "../sourceControl/SourceControlProviderRegistry.ts";
 import type { ChangeRequest } from "@cafecode/contracts";
+import {
+  parseRepositoryNameFromPullRequestUrl,
+  parseRepositoryOwnerLogin,
+  selectLatestPullRequest,
+  type PullRequestHeadContext,
+} from "./GitPullRequestSelection.ts";
 
 export interface GitManagerShape {
   readonly status: (
@@ -68,24 +70,6 @@ function isNotGitRepositoryError(error: GitCommandError): boolean {
   return error.message.toLowerCase().includes("not a git repository");
 }
 
-interface OpenPrInfo {
-  number: number;
-  title: string;
-  url: string;
-  baseRefName: string;
-  headRefName: string;
-}
-
-interface PullRequestInfo extends OpenPrInfo, PullRequestHeadRemoteInfo {
-  state: "open" | "closed" | "merged";
-  updatedAt: Option.Option<DateTime.Utc>;
-}
-
-const pullRequestUpdatedAtDescOrder: Order.Order<PullRequestInfo> = Order.mapInput(
-  Order.flip(Option.makeOrder(DateTime.Order)),
-  (pullRequest) => pullRequest.updatedAt,
-);
-
 interface ResolvedPullRequest {
   number: number;
   title: string;
@@ -101,7 +85,7 @@ interface PullRequestHeadRemoteInfo {
   headRepositoryOwnerLogin?: string | null | undefined;
 }
 
-interface BranchHeadContext {
+interface BranchHeadContext extends PullRequestHeadContext {
   localBranch: string;
   headBranch: string;
   headSelectors: ReadonlyArray<string>;
@@ -110,13 +94,6 @@ interface BranchHeadContext {
   headRepositoryNameWithOwner: string | null;
   headRepositoryOwnerLogin: string | null;
   isCrossRepository: boolean;
-}
-
-function parseRepositoryNameFromPullRequestUrl(url: string): string | null {
-  const trimmed = url.trim();
-  const match = /^https:\/\/github\.com\/[^/]+\/([^/]+)\/pull\/\d+(?:\/.*)?$/i.exec(trimmed);
-  const repositoryName = match?.[1]?.trim() ?? "";
-  return repositoryName.length > 0 ? repositoryName : null;
 }
 
 function resolveHeadRepositoryNameWithOwner(
@@ -166,125 +143,6 @@ function parseGitHubRepositoryNameWithOwnerFromRemoteUrl(url: string | null): st
   return repositoryNameWithOwner.length > 0 ? repositoryNameWithOwner : null;
 }
 
-function parseRepositoryOwnerLogin(nameWithOwner: string | null): string | null {
-  const trimmed = nameWithOwner?.trim() ?? "";
-  if (trimmed.length === 0) {
-    return null;
-  }
-  const [ownerLogin] = trimmed.split("/");
-  const normalizedOwnerLogin = ownerLogin?.trim() ?? "";
-  return normalizedOwnerLogin.length > 0 ? normalizedOwnerLogin : null;
-}
-
-function normalizeOptionalString(value: string | null | undefined): string | null {
-  const trimmed = value?.trim() ?? "";
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function normalizeOptionalRepositoryNameWithOwner(value: string | null | undefined): string | null {
-  const normalized = normalizeOptionalString(value);
-  return normalized ? normalized.toLowerCase() : null;
-}
-
-function normalizeOptionalOwnerLogin(value: string | null | undefined): string | null {
-  const normalized = normalizeOptionalString(value);
-  return normalized ? normalized.toLowerCase() : null;
-}
-
-function resolvePullRequestHeadRepositoryNameWithOwner(
-  pr: PullRequestHeadRemoteInfo & { url: string },
-) {
-  const explicitRepository = normalizeOptionalString(pr.headRepositoryNameWithOwner);
-  if (explicitRepository) {
-    return explicitRepository;
-  }
-
-  if (!pr.isCrossRepository) {
-    return null;
-  }
-
-  const ownerLogin = normalizeOptionalString(pr.headRepositoryOwnerLogin);
-  const repositoryName = parseRepositoryNameFromPullRequestUrl(pr.url);
-  if (!ownerLogin || !repositoryName) {
-    return null;
-  }
-
-  return `${ownerLogin}/${repositoryName}`;
-}
-
-function matchesBranchHeadContext(
-  pr: PullRequestInfo,
-  headContext: Pick<
-    BranchHeadContext,
-    "headBranch" | "headRepositoryNameWithOwner" | "headRepositoryOwnerLogin" | "isCrossRepository"
-  >,
-): boolean {
-  if (pr.headRefName !== headContext.headBranch) {
-    return false;
-  }
-
-  const expectedHeadRepository = normalizeOptionalRepositoryNameWithOwner(
-    headContext.headRepositoryNameWithOwner,
-  );
-  const expectedHeadOwner =
-    normalizeOptionalOwnerLogin(headContext.headRepositoryOwnerLogin) ??
-    parseRepositoryOwnerLogin(expectedHeadRepository);
-  const prHeadRepository = normalizeOptionalRepositoryNameWithOwner(
-    resolvePullRequestHeadRepositoryNameWithOwner(pr),
-  );
-  const prHeadOwner =
-    normalizeOptionalOwnerLogin(pr.headRepositoryOwnerLogin) ??
-    parseRepositoryOwnerLogin(prHeadRepository);
-
-  if (headContext.isCrossRepository) {
-    if (pr.isCrossRepository === false) {
-      return false;
-    }
-    if ((expectedHeadRepository || expectedHeadOwner) && !prHeadRepository && !prHeadOwner) {
-      return false;
-    }
-    if (expectedHeadRepository && prHeadRepository && expectedHeadRepository !== prHeadRepository) {
-      return false;
-    }
-    if (expectedHeadOwner && prHeadOwner && expectedHeadOwner !== prHeadOwner) {
-      return false;
-    }
-    return true;
-  }
-
-  if (pr.isCrossRepository === true) {
-    return false;
-  }
-  if (expectedHeadRepository && prHeadRepository && expectedHeadRepository !== prHeadRepository) {
-    return false;
-  }
-  if (expectedHeadOwner && prHeadOwner && expectedHeadOwner !== prHeadOwner) {
-    return false;
-  }
-  return true;
-}
-
-function toPullRequestInfo(summary: ChangeRequest): PullRequestInfo {
-  return {
-    number: summary.number,
-    title: summary.title,
-    url: summary.url,
-    baseRefName: summary.baseRefName,
-    headRefName: summary.headRefName,
-    state: summary.state ?? "open",
-    updatedAt: summary.updatedAt,
-    ...(summary.isCrossRepository !== undefined
-      ? { isCrossRepository: summary.isCrossRepository }
-      : {}),
-    ...(summary.headRepositoryNameWithOwner !== undefined
-      ? { headRepositoryNameWithOwner: summary.headRepositoryNameWithOwner }
-      : {}),
-    ...(summary.headRepositoryOwnerLogin !== undefined
-      ? { headRepositoryOwnerLogin: summary.headRepositoryOwnerLogin }
-      : {}),
-  };
-}
-
 function gitManagerError(operation: string, detail: string, cause?: unknown): GitManagerError {
   return new GitManagerError({
     operation,
@@ -301,7 +159,7 @@ function appendUnique(values: string[], next: string | null | undefined): void {
   values.push(trimmed);
 }
 
-function toStatusPr(pr: PullRequestInfo): {
+function toStatusPr(pr: ChangeRequest): {
   number: number;
   title: string;
   url: string;
@@ -705,31 +563,19 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     details: { branch: string; upstreamRef: string | null },
   ) {
     const headContext = yield* resolveBranchHeadContext(cwd, details);
-    const parsedByNumber = new Map<number, PullRequestInfo>();
+    const pullRequests: ChangeRequest[] = [];
 
     for (const headSelector of headContext.headSelectors) {
-      const pullRequests = yield* (yield* sourceControlProvider(cwd)).listChangeRequests({
+      const matchingPullRequests = yield* (yield* sourceControlProvider(cwd)).listChangeRequests({
         cwd,
         headSelector,
         state: "all",
         limit: 20,
       });
 
-      for (const pr of pullRequests.map(toPullRequestInfo)) {
-        if (!matchesBranchHeadContext(pr, headContext)) {
-          continue;
-        }
-        parsedByNumber.set(pr.number, pr);
-      }
+      pullRequests.push(...matchingPullRequests);
     }
-
-    const parsed = Arr.sort(parsedByNumber.values(), pullRequestUpdatedAtDescOrder);
-
-    const latestOpenPr = parsed.find((pr) => pr.state === "open");
-    if (latestOpenPr) {
-      return latestOpenPr;
-    }
-    return parsed[0] ?? null;
+    return selectLatestPullRequest(pullRequests, headContext);
   });
 
   const localStatus: GitManagerShape["localStatus"] = Effect.fn("localStatus")(function* (input) {

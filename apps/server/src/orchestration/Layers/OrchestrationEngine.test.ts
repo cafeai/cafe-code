@@ -11,11 +11,11 @@ import {
 } from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
-import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import { describe, expect, it } from "vitest";
 
@@ -747,16 +747,13 @@ describe("OrchestrationEngine", () => {
       }),
     );
 
-    const eventTypes: string[] = [];
-    await system.run(
+    const eventTypes = await system.run(
       Effect.gen(function* () {
-        const eventQueue = yield* Queue.unbounded<OrchestrationEvent>();
-        yield* Effect.forkScoped(
-          Stream.take(engine.streamDomainEvents, 2).pipe(
-            Stream.runForEach((event) => Queue.offer(eventQueue, event).pipe(Effect.asVoid)),
-          ),
-        );
-        yield* Effect.sleep("10 millis");
+        const pull = yield* Stream.toPull(engine.streamDomainEvents);
+        const firstPull = yield* Effect.forkChild(pull);
+        // The pull fiber acquires the hot PubSub subscription during this deterministic
+        // scheduler handoff, before either command can publish its event.
+        yield* Effect.yieldNow;
         yield* engine.dispatch({
           type: "thread.create",
           commandId: CommandId.make("cmd-stream-thread-create"),
@@ -779,12 +776,15 @@ describe("OrchestrationEngine", () => {
           threadId: ThreadId.make("thread-stream"),
           title: "domain-stream-updated",
         });
-        eventTypes.push((yield* Queue.take(eventQueue)).type);
-        eventTypes.push((yield* Queue.take(eventQueue)).type);
+        const eventTypes = Array.from(yield* Fiber.join(firstPull), (event) => event.type);
+        while (eventTypes.length < 2) {
+          eventTypes.push(...Array.from(yield* pull, (event) => event.type));
+        }
+        return eventTypes;
       }).pipe(Effect.scoped),
     );
 
-    expect(eventTypes).toEqual(["thread.created", "thread.meta-updated"]);
+    expect(Array.from(eventTypes)).toEqual(["thread.created", "thread.meta-updated"]);
     await system.dispose();
   });
 

@@ -215,12 +215,19 @@ describe("ProviderCommandReactor", () => {
       runtimeSessions.push(session);
       return Effect.succeed(session);
     });
-    const sendTurn = vi.fn((_: unknown) =>
-      Effect.succeed({
-        threadId: ThreadId.make("thread-1"),
+    const sendTurn = vi.fn((input: unknown) => {
+      const threadId =
+        typeof input === "object" &&
+        input !== null &&
+        "threadId" in input &&
+        typeof input.threadId === "string"
+          ? ThreadId.make(input.threadId)
+          : ThreadId.make("thread-1");
+      return Effect.succeed({
+        threadId,
         turnId: asTurnId("turn-1"),
-      }),
-    );
+      });
+    });
     const steerTurn = vi.fn<ProviderServiceShape["steerTurn"]>((_) =>
       Effect.succeed({
         threadId: ThreadId.make("thread-1"),
@@ -962,146 +969,85 @@ describe("ProviderCommandReactor", () => {
     expect(harness.refreshStatus.mock.calls[0]?.[0]).toBe("/tmp/provider-project-worktree");
   });
 
-  it("forwards codex model options through session start and turn send", async () => {
+  it("forwards provider model options through session start and turn send", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-fast"),
+    const scenarios = [
+      {
+        name: "Codex reasoning and fast mode",
         threadId: ThreadId.make("thread-1"),
-        message: {
-          messageId: asMessageId("user-message-fast"),
-          role: "user",
-          text: "hello fast mode",
-          attachments: [],
-        },
         modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.3-codex", [
           { id: "reasoningEffort", value: "high" },
           { id: "fastMode", value: true },
         ]),
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        createdAt: now,
-      }),
-    );
-
-    await waitFor(() => harness.startSession.mock.calls.length === 1);
-    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
-      modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.3-codex", [
-        { id: "reasoningEffort", value: "high" },
-        { id: "fastMode", value: true },
-      ]),
-    });
-    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
-      threadId: ThreadId.make("thread-1"),
-      modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.3-codex", [
-        { id: "reasoningEffort", value: "high" },
-        { id: "fastMode", value: true },
-      ]),
-    });
-  });
-
-  it("forwards claude effort options through session start and turn send", async () => {
-    const harness = await createHarness({
-      threadModelSelection: {
-        instanceId: ProviderInstanceId.make("claudeAgent"),
-        model: "claude-sonnet-4-6",
       },
-    });
-    const now = "2026-01-01T00:00:00.000Z";
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-claude-effort"),
-        threadId: ThreadId.make("thread-1"),
-        message: {
-          messageId: asMessageId("user-message-claude-effort"),
-          role: "user",
-          text: "hello with effort",
-          attachments: [],
-        },
+      {
+        name: "Claude effort",
+        threadId: ThreadId.make("thread-options-claude-effort"),
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
           "claude-sonnet-4-6",
           [{ id: "effort", value: "max" }],
         ),
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        createdAt: now,
-      }),
-    );
-
-    await waitFor(() => harness.startSession.mock.calls.length === 1);
-    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
-      modelSelection: createModelSelection(
-        ProviderInstanceId.make("claudeAgent"),
-        "claude-sonnet-4-6",
-        [{ id: "effort", value: "max" }],
-      ),
-    });
-    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
-      threadId: ThreadId.make("thread-1"),
-      modelSelection: createModelSelection(
-        ProviderInstanceId.make("claudeAgent"),
-        "claude-sonnet-4-6",
-        [{ id: "effort", value: "max" }],
-      ),
-    });
-  });
-
-  it("forwards claude fast mode options through session start and turn send", async () => {
-    const harness = await createHarness({
-      threadModelSelection: {
-        instanceId: ProviderInstanceId.make("claudeAgent"),
-        model: "claude-opus-4-6",
       },
-    });
-    const now = "2026-01-01T00:00:00.000Z";
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-claude-fast-mode"),
-        threadId: ThreadId.make("thread-1"),
-        message: {
-          messageId: asMessageId("user-message-claude-fast-mode"),
-          role: "user",
-          text: "hello with fast mode",
-          attachments: [],
-        },
+      {
+        name: "Claude fast mode",
+        threadId: ThreadId.make("thread-options-claude-fast"),
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
           "claude-opus-4-6",
           [{ id: "fastMode", value: true }],
         ),
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        createdAt: now,
-      }),
-    );
+      },
+    ] as const;
 
-    await waitFor(() => harness.startSession.mock.calls.length === 1);
-    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
-      modelSelection: createModelSelection(
-        ProviderInstanceId.make("claudeAgent"),
-        "claude-opus-4-6",
-        [{ id: "fastMode", value: true }],
-      ),
-    });
-    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
-      threadId: ThreadId.make("thread-1"),
-      modelSelection: createModelSelection(
-        ProviderInstanceId.make("claudeAgent"),
-        "claude-opus-4-6",
-        [{ id: "fastMode", value: true }],
-      ),
-    });
+    for (const [index, scenario] of scenarios.entries()) {
+      if (scenario.threadId !== ThreadId.make("thread-1")) {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make(`cmd-create-${scenario.threadId}`),
+            threadId: scenario.threadId,
+            projectId: asProjectId("project-1"),
+            title: scenario.name,
+            modelSelection: scenario.modelSelection,
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+          }),
+        );
+      }
+
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`cmd-turn-options-${index}`),
+          threadId: scenario.threadId,
+          message: {
+            messageId: asMessageId(`user-message-options-${index}`),
+            role: "user",
+            text: scenario.name,
+            attachments: [],
+          },
+          modelSelection: scenario.modelSelection,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
+
+      await waitFor(() => harness.startSession.mock.calls.length === index + 1);
+      await waitFor(() => harness.sendTurn.mock.calls.length === index + 1);
+      expect(harness.startSession.mock.calls[index]?.[1], scenario.name).toMatchObject({
+        modelSelection: scenario.modelSelection,
+      });
+      expect(harness.sendTurn.mock.calls[index]?.[0], scenario.name).toMatchObject({
+        threadId: scenario.threadId,
+        modelSelection: scenario.modelSelection,
+      });
+    }
   });
 
   it("forwards plan interaction mode to the provider turn request", async () => {
@@ -2391,107 +2337,93 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
-  it("treats a stale steer command on a ready session as the next turn", async () => {
+  it("treats stale steer commands on inactive sessions as the next turn", async () => {
     const harness = await createHarness({ liveSteer: "supported" });
     const now = "2026-01-01T00:00:00.000Z";
-    const threadId = ThreadId.make("thread-1");
-
+    const stoppedThreadId = ThreadId.make("thread-stopped-stale-steer");
     await Effect.runPromise(
       harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-session-set-ready-for-stale-steer"),
-        threadId,
-        session: {
-          threadId,
-          status: "ready",
-          providerName: "codex",
-          providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
-          activeTurnId: null,
-          lastError: null,
-          updatedAt: now,
+        type: "thread.create",
+        commandId: CommandId.make("cmd-create-stopped-stale-steer-thread"),
+        threadId: stoppedThreadId,
+        projectId: asProjectId("project-1"),
+        title: "Stopped stale steer",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
         },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
         createdAt: now,
       }),
     );
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.steer",
-        commandId: CommandId.make("cmd-turn-steer-ready-session"),
-        threadId,
-        message: {
-          messageId: asMessageId("user-message-ready-steer"),
-          role: "user",
-          text: "this should become the next turn",
-          attachments: [],
-        },
-        createdAt: now,
-      }),
-    );
+    const scenarios = [
+      {
+        name: "ready session",
+        threadId: ThreadId.make("thread-1"),
+        status: "ready" as const,
+        input: "this should become the next turn",
+      },
+      {
+        name: "stopped session after restart",
+        threadId: stoppedThreadId,
+        status: "stopped" as const,
+        input: "restart this conversation after app recovery",
+      },
+    ];
 
-    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    for (const [index, scenario] of scenarios.entries()) {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`cmd-session-set-${scenario.status}-for-stale-steer`),
+          threadId: scenario.threadId,
+          session: {
+            threadId: scenario.threadId,
+            status: scenario.status,
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.steer",
+          commandId: CommandId.make(`cmd-turn-steer-${scenario.status}-session`),
+          threadId: scenario.threadId,
+          message: {
+            messageId: asMessageId(`user-message-${scenario.status}-steer`),
+            role: "user",
+            text: scenario.input,
+            attachments: [],
+          },
+          createdAt: now,
+        }),
+      );
+
+      await waitFor(() => harness.sendTurn.mock.calls.length === index + 1);
+      expect(harness.sendTurn.mock.calls[index]?.[0], scenario.name).toMatchObject({
+        threadId: scenario.threadId,
+        input: scenario.input,
+      });
+      const thread = (await harness.readModel()).threads.find(
+        (entry) => entry.id === scenario.threadId,
+      );
+      expect(
+        thread?.activities.some((activity) => activity.kind === "provider.turn.steer.failed"),
+        scenario.name,
+      ).toBe(false);
+    }
     expect(harness.steerTurn.mock.calls.length).toBe(0);
-    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
-      threadId,
-      input: "this should become the next turn",
-    });
-    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
-    expect(
-      thread?.activities.some((activity) => activity.kind === "provider.turn.steer.failed"),
-    ).toBe(false);
-  });
-
-  it("treats a post-restart stale steer on a stopped session as the next turn", async () => {
-    const harness = await createHarness({ liveSteer: "supported" });
-    const now = "2026-01-01T00:00:00.000Z";
-    const threadId = ThreadId.make("thread-1");
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-session-set-stopped-for-stale-steer"),
-        threadId,
-        session: {
-          threadId,
-          status: "stopped",
-          providerName: "codex",
-          providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
-          activeTurnId: null,
-          lastError: null,
-          updatedAt: now,
-        },
-        createdAt: now,
-      }),
-    );
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.steer",
-        commandId: CommandId.make("cmd-turn-steer-stopped-session"),
-        threadId,
-        message: {
-          messageId: asMessageId("user-message-stopped-steer"),
-          role: "user",
-          text: "restart this conversation after app recovery",
-          attachments: [],
-        },
-        createdAt: now,
-      }),
-    );
-
-    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-    expect(harness.steerTurn.mock.calls.length).toBe(0);
-    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
-      threadId,
-      input: "restart this conversation after app recovery",
-    });
-
-    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
-    expect(
-      thread?.activities.some((activity) => activity.kind === "provider.turn.steer.failed"),
-    ).toBe(false);
   });
 
   it("spells out Codex review steer rejection as a retryable queued follow-up", async () => {

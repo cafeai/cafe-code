@@ -1,5 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off
 import { assert, it, describe } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { symlinkSync } from "node:fs";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -18,6 +20,23 @@ import type {
 } from "@cafecode/contracts";
 
 import * as VcsStatusBroadcaster from "./VcsStatusBroadcaster.ts";
+
+function createSymlinkOrSkipOnWindowsPrivilegeError(target: string, linkPath: string): boolean {
+  try {
+    symlinkSync(target, linkPath);
+    return true;
+  } catch (error) {
+    if (
+      process.platform === "win32" &&
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "EPERM"
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 
 const baseLocalStatus: VcsStatusLocalResult = {
@@ -232,7 +251,9 @@ describe("VcsStatusBroadcaster", () => {
         prefix: "t3-vcs-status-link-",
       });
       const linkDir = path.join(linkParent, "repo-link");
-      yield* fileSystem.symlink(realDir, linkDir);
+      if (!createSymlinkOrSkipOnWindowsPrivilegeError(realDir, linkDir)) {
+        return;
+      }
       const realPath = yield* fileSystem.realPath(realDir);
 
       const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;

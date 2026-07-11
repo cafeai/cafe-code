@@ -14,20 +14,34 @@ import {
 } from "../../environments/runtime/catalog";
 import { SavedEnvironmentsSettings } from "./SavedEnvironmentsSettings";
 
-const runtimeMocks = vi.hoisted(() => ({
+const runtimeMocks = {
   addSavedEnvironment: vi.fn(),
   reconnectSavedEnvironment: vi.fn(),
   disconnectSavedEnvironment: vi.fn(),
   removeSavedEnvironment: vi.fn(),
-}));
+};
 
-vi.mock("../../environments/runtime", async () => {
-  const catalog = await import("../../environments/runtime/catalog");
-  return {
-    ...catalog,
-    ...runtimeMocks,
-  };
-});
+const actions = {
+  add: runtimeMocks.addSavedEnvironment,
+  reconnect: runtimeMocks.reconnectSavedEnvironment,
+  disconnect: runtimeMocks.disconnectSavedEnvironment,
+  remove: runtimeMocks.removeSavedEnvironment,
+};
+
+function getDialogButton(role: "dialog" | "alertdialog", name: string): HTMLButtonElement {
+  const dialog = document.querySelector<HTMLElement>(`[role="${role}"]`);
+  const button = Array.from(dialog?.querySelectorAll("button") ?? []).find(
+    (candidate) => candidate.textContent?.trim() === name,
+  );
+  if (!button) {
+    throw new Error(`Unable to find ${name} button in ${role}.`);
+  }
+  return button;
+}
+
+function clickDialogButton(role: "dialog" | "alertdialog", name: string): void {
+  getDialogButton(role, name).click();
+}
 
 describe("SavedEnvironmentsSettings", () => {
   let mounted:
@@ -54,7 +68,7 @@ describe("SavedEnvironmentsSettings", () => {
   });
 
   it("opens the add dialog and switches pairing methods", async () => {
-    mounted = await render(<SavedEnvironmentsSettings />);
+    mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
 
     await page.getByRole("button", { name: "Add environment" }).click();
     await expect.element(page.getByRole("dialog")).toBeVisible();
@@ -72,19 +86,26 @@ describe("SavedEnvironmentsSettings", () => {
         resolveAdd = resolve;
       }),
     );
-    mounted = await render(<SavedEnvironmentsSettings />);
+    mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
 
     await page.getByRole("button", { name: "Add environment" }).click();
-    await page.getByLabelText("Label (optional)").fill("My test environment");
-    await page
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabelText("Label (optional)").fill("My test environment");
+    await dialog
       .getByLabelText("Pairing URL")
       .fill("https://test.local/pair#token=secret-pairing-token");
-    await page.getByRole("button", { name: "Add environment", exact: true }).click();
+    const nativeDialog = document.querySelector<HTMLElement>('[role="dialog"]');
+    const nativePairingInput = Array.from(nativeDialog?.querySelectorAll("input") ?? []).find(
+      (input) => input.value.includes("secret-pairing-token"),
+    );
+    const submitButton = getDialogButton("dialog", "Add environment");
+    submitButton.click();
 
-    await expect.element(page.getByLabelText("Pairing URL")).toHaveValue("");
-    await expect
-      .element(page.getByRole("button", { name: "Add environment", exact: true }))
-      .toBeDisabled();
+    await vi.waitFor(() => {
+      expect(nativePairingInput?.value).toBe("");
+      expect(submitButton.disabled).toBe(true);
+      expect(submitButton.textContent).toContain("Adding");
+    });
 
     resolveAdd({
       environmentId: EnvironmentId.make("env-123"),
@@ -94,7 +115,9 @@ describe("SavedEnvironmentsSettings", () => {
       createdAt: new Date().toISOString(),
       lastConnectedAt: null,
     });
-    await expect.element(page.getByRole("dialog")).not.toBeVisible();
+    await vi.waitFor(() => {
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+    });
     expect(runtimeMocks.addSavedEnvironment).toHaveBeenCalledWith({
       label: "My test environment",
       pairingUrl: "https://test.local/pair#token=secret-pairing-token",
@@ -105,13 +128,14 @@ describe("SavedEnvironmentsSettings", () => {
     runtimeMocks.addSavedEnvironment.mockRejectedValueOnce(
       new Error("Rejected secret-pairing-token from https://test.local/pair"),
     );
-    mounted = await render(<SavedEnvironmentsSettings />);
+    mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
 
     await page.getByRole("button", { name: "Add environment" }).click();
-    await page
+    const dialog = page.getByRole("dialog");
+    await dialog
       .getByLabelText("Pairing URL")
       .fill("https://test.local/pair#token=secret-pairing-token");
-    await page.getByRole("button", { name: "Add environment", exact: true }).click();
+    clickDialogButton("dialog", "Add environment");
 
     await expect
       .element(
@@ -137,7 +161,7 @@ describe("SavedEnvironmentsSettings", () => {
         },
       },
     });
-    mounted = await render(<SavedEnvironmentsSettings />);
+    mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
 
     await expect.element(page.getByText("My Remote Box")).toBeVisible();
     await expect.element(page.getByText("remote.local")).toBeVisible();
@@ -146,9 +170,9 @@ describe("SavedEnvironmentsSettings", () => {
 
     await page.getByRole("button", { name: "Remove My Remote Box" }).click();
     await expect.element(page.getByRole("alertdialog")).toBeVisible();
-    await page.getByRole("button", { name: "Remove", exact: true }).click();
+    clickDialogButton("alertdialog", "Remove");
     expect(runtimeMocks.removeSavedEnvironment).toHaveBeenCalledWith(environmentId);
-    await expect.element(page.getByRole("alertdialog")).not.toBeVisible();
+    await expect.element(page.getByRole("alertdialog")).not.toBeInTheDocument();
   });
 
   it("offers disconnect for a connected environment", async () => {
@@ -169,7 +193,7 @@ describe("SavedEnvironmentsSettings", () => {
       connectionState: "connected",
       authState: "authenticated",
     });
-    mounted = await render(<SavedEnvironmentsSettings />);
+    mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
 
     await page.getByRole("button", { name: "Disconnect Connected server" }).click();
     expect(runtimeMocks.disconnectSavedEnvironment).toHaveBeenCalledWith(environmentId);

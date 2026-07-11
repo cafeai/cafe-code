@@ -59,17 +59,19 @@ const emptyState: RuntimeReceiptState = {
   ingestionWaiters: new Map(),
 };
 
-const rememberIngestionReceipt = (
-  state: RuntimeReceiptState,
+export const retainRecentIngestionReceipt = (
+  observedIngestionReceipts: ReadonlyMap<string, ProviderTurnIngestionQuiescedReceipt>,
+  observedIngestionReceiptKeys: ReadonlyArray<string>,
   key: string,
   receipt: ProviderTurnIngestionQuiescedReceipt,
-): RuntimeReceiptState => {
-  const observed = new Map(state.observedIngestionReceipts);
-  const keysWithoutCurrent = state.observedIngestionReceiptKeys.filter((entry) => entry !== key);
+  maxObservedReceipts: number,
+): Pick<RuntimeReceiptState, "observedIngestionReceipts" | "observedIngestionReceiptKeys"> => {
+  const observed = new Map(observedIngestionReceipts);
+  const keysWithoutCurrent = observedIngestionReceiptKeys.filter((entry) => entry !== key);
   observed.set(key, receipt);
   const keys = [...keysWithoutCurrent, key];
 
-  while (keys.length > MAX_OBSERVED_PROVIDER_INGESTION_RECEIPTS) {
+  while (keys.length > maxObservedReceipts) {
     const oldest = keys.shift();
     if (oldest !== undefined) {
       observed.delete(oldest);
@@ -77,96 +79,106 @@ const rememberIngestionReceipt = (
   }
 
   return {
-    ...state,
     observedIngestionReceipts: observed,
     observedIngestionReceiptKeys: keys,
   };
 };
 
-const makeRuntimeReceiptBus = Effect.gen(function* () {
-  const pubSub = yield* PubSub.unbounded<OrchestrationRuntimeReceipt>();
-  const stateRef = yield* Ref.make<RuntimeReceiptState>(emptyState);
-  const removeIngestionWaiter = (key: string, waiter: IngestionWaiter) =>
-    Ref.update(stateRef, (state) => {
-      const matchingWaiters = state.ingestionWaiters.get(key);
-      if (!matchingWaiters) {
-        return state;
-      }
-
-      const remainingWaiters = matchingWaiters.filter((entry) => entry !== waiter);
-      const waiters = new Map(state.ingestionWaiters);
-      if (remainingWaiters.length === 0) {
-        waiters.delete(key);
-      } else {
-        waiters.set(key, remainingWaiters);
-      }
-      return {
-        ...state,
-        ingestionWaiters: waiters,
-      };
-    });
-
-  return {
-    publish: (receipt) =>
-      Effect.gen(function* () {
-        if (receipt.type === "provider.turn.ingestion-quiesced") {
-          const key = receiptKey(receipt);
-          const waiters = yield* Ref.modify(stateRef, (state) => {
-            const nextWaiters = new Map(state.ingestionWaiters);
-            const matchingWaiters = nextWaiters.get(key) ?? [];
-            nextWaiters.delete(key);
-            return [
-              matchingWaiters,
-              {
-                ...rememberIngestionReceipt(state, key, receipt),
-                ingestionWaiters: nextWaiters,
-              },
-            ];
-          });
-          yield* Effect.forEach(waiters, (waiter) => Deferred.succeed(waiter, receipt), {
-            discard: true,
-          });
+const makeRuntimeReceiptBus = (maxObservedReceipts: number) =>
+  Effect.gen(function* () {
+    const pubSub = yield* PubSub.unbounded<OrchestrationRuntimeReceipt>();
+    const stateRef = yield* Ref.make<RuntimeReceiptState>(emptyState);
+    const removeIngestionWaiter = (key: string, waiter: IngestionWaiter) =>
+      Ref.update(stateRef, (state) => {
+        const matchingWaiters = state.ingestionWaiters.get(key);
+        if (!matchingWaiters) {
+          return state;
         }
-        yield* PubSub.publish(pubSub, receipt).pipe(Effect.asVoid);
-      }),
-    awaitTurnIngestionQuiesced: (input) =>
-      Effect.gen(function* () {
-        const key = providerTurnIngestionKey(input);
-        const waiter = yield* Deferred.make<ProviderTurnIngestionQuiescedReceipt, never>();
-        const result = yield* Ref.modify(
-          stateRef,
-          (state): readonly [AwaitIngestionReceiptRegistration, RuntimeReceiptState] => {
-            const observed = state.observedIngestionReceipts.get(key);
-            if (observed !== undefined) {
-              return [{ type: "observed" as const, receipt: observed }, state];
-            }
 
-            const waiters = new Map(state.ingestionWaiters);
-            waiters.set(key, [...(waiters.get(key) ?? []), waiter]);
-            return [
-              { type: "waiting" as const },
-              {
-                ...state,
-                ingestionWaiters: waiters,
-              },
-            ];
-          },
-        );
-
-        if (result.type === "observed") {
-          return result.receipt;
+        const remainingWaiters = matchingWaiters.filter((entry) => entry !== waiter);
+        const waiters = new Map(state.ingestionWaiters);
+        if (remainingWaiters.length === 0) {
+          waiters.delete(key);
+        } else {
+          waiters.set(key, remainingWaiters);
         }
-        return yield* Deferred.await(waiter).pipe(
-          Effect.ensuring(removeIngestionWaiter(key, waiter)),
-        );
-      }),
-    get streamEventsForTest() {
-      return Stream.fromPubSub(pubSub);
-    },
-  } satisfies RuntimeReceiptBusShape;
-});
+        return {
+          ...state,
+          ingestionWaiters: waiters,
+        };
+      });
 
-const makeRuntimeReceiptBusTest = makeRuntimeReceiptBus;
+    return {
+      publish: (receipt) =>
+        Effect.gen(function* () {
+          if (receipt.type === "provider.turn.ingestion-quiesced") {
+            const key = receiptKey(receipt);
+            const waiters = yield* Ref.modify(stateRef, (state) => {
+              const nextWaiters = new Map(state.ingestionWaiters);
+              const matchingWaiters = nextWaiters.get(key) ?? [];
+              nextWaiters.delete(key);
+              return [
+                matchingWaiters,
+                {
+                  ...retainRecentIngestionReceipt(
+                    state.observedIngestionReceipts,
+                    state.observedIngestionReceiptKeys,
+                    key,
+                    receipt,
+                    maxObservedReceipts,
+                  ),
+                  ingestionWaiters: nextWaiters,
+                },
+              ];
+            });
+            yield* Effect.forEach(waiters, (waiter) => Deferred.succeed(waiter, receipt), {
+              discard: true,
+            });
+          }
+          yield* PubSub.publish(pubSub, receipt).pipe(Effect.asVoid);
+        }),
+      awaitTurnIngestionQuiesced: (input) =>
+        Effect.gen(function* () {
+          const key = providerTurnIngestionKey(input);
+          const waiter = yield* Deferred.make<ProviderTurnIngestionQuiescedReceipt, never>();
+          const result = yield* Ref.modify(
+            stateRef,
+            (state): readonly [AwaitIngestionReceiptRegistration, RuntimeReceiptState] => {
+              const observed = state.observedIngestionReceipts.get(key);
+              if (observed !== undefined) {
+                return [{ type: "observed" as const, receipt: observed }, state];
+              }
 
-export const RuntimeReceiptBusLive = Layer.effect(RuntimeReceiptBus, makeRuntimeReceiptBus);
-export const RuntimeReceiptBusTest = Layer.effect(RuntimeReceiptBus, makeRuntimeReceiptBusTest);
+              const waiters = new Map(state.ingestionWaiters);
+              waiters.set(key, [...(waiters.get(key) ?? []), waiter]);
+              return [
+                { type: "waiting" as const },
+                {
+                  ...state,
+                  ingestionWaiters: waiters,
+                },
+              ];
+            },
+          );
+
+          if (result.type === "observed") {
+            return result.receipt;
+          }
+          return yield* Deferred.await(waiter).pipe(
+            Effect.ensuring(removeIngestionWaiter(key, waiter)),
+          );
+        }),
+      get streamEventsForTest() {
+        return Stream.fromPubSub(pubSub);
+      },
+    } satisfies RuntimeReceiptBusShape;
+  });
+
+export const makeRuntimeReceiptBusTest = (maxObservedReceipts = 16) =>
+  Layer.effect(RuntimeReceiptBus, makeRuntimeReceiptBus(Math.max(1, maxObservedReceipts)));
+
+export const RuntimeReceiptBusLive = Layer.effect(
+  RuntimeReceiptBus,
+  makeRuntimeReceiptBus(MAX_OBSERVED_PROVIDER_INGESTION_RECEIPTS),
+);
+export const RuntimeReceiptBusTest = makeRuntimeReceiptBusTest();

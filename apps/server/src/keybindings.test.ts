@@ -8,6 +8,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import { ServerConfig } from "./config.ts";
 
@@ -29,8 +30,8 @@ const encodeResolvedKeybindingFromConfig = Schema.encodeEffect(ResolvedKeybindin
 const decodeResolvedKeybindingFromConfigExit = Schema.decodeUnknownExit(
   ResolvedKeybindingFromConfig,
 );
-const makeKeybindingsLayer = () => {
-  return KeybindingsLive.pipe(
+const makeKeybindingsLayer = (fileSystem?: FileSystem.FileSystem) => {
+  const layer = KeybindingsLive.pipe(
     Layer.provideMerge(
       Layer.fresh(
         ServerConfig.layerTest(process.cwd(), {
@@ -39,6 +40,9 @@ const makeKeybindingsLayer = () => {
       ),
     ),
   );
+  return fileSystem
+    ? layer.pipe(Layer.provide(Layer.succeed(FileSystem.FileSystem, fileSystem)))
+    : layer;
 };
 
 const toDetailResult = <A, R>(effect: Effect.Effect<A, KeybindingsConfigError, R>) =>
@@ -491,31 +495,44 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
     }).pipe(Effect.provide(makeKeybindingsLayer())),
   );
 
-  it.effect("fails when config directory is not writable", () =>
+  it.effect("preserves the existing config when the atomic write fails", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const { keybindingsConfigPath } = yield* ServerConfig;
-      const { dirname } = yield* Path.Path;
-      yield* writeKeybindingsConfig(keybindingsConfigPath, [
-        { key: "mod+j", command: "commandPalette.toggle" },
-      ]);
-      yield* fs.chmod(dirname(keybindingsConfigPath), 0o500);
+      const failingFileSystem = {
+        ...fs,
+        writeFileString: () =>
+          Effect.fail(
+            PlatformError.systemError({
+              _tag: "PermissionDenied",
+              module: "FileSystem",
+              method: "writeFileString",
+              description: "simulated atomic write failure",
+            }),
+          ),
+      };
 
-      const result = yield* Effect.gen(function* () {
+      yield* Effect.gen(function* () {
+        const { keybindingsConfigPath } = yield* ServerConfig;
+        yield* writeKeybindingsConfig(keybindingsConfigPath, [
+          { key: "mod+j", command: "commandPalette.toggle" },
+        ]).pipe(Effect.provideService(FileSystem.FileSystem, fs));
+
         const keybindings = yield* Keybindings;
-        return yield* keybindings.upsertKeybindingRule({
-          key: "mod+shift+r",
-          command: "script.run-tests.run",
-        });
-      }).pipe(toDetailResult);
-      assertFailure(result, "failed to write keybindings config");
+        const result = yield* keybindings
+          .upsertKeybindingRule({
+            key: "mod+shift+r",
+            command: "script.run-tests.run",
+          })
+          .pipe(toDetailResult);
+        assertFailure(result, "failed to write keybindings config");
 
-      yield* fs.chmod(dirname(keybindingsConfigPath), 0o700);
-
-      const persisted = yield* readKeybindingsConfig(keybindingsConfigPath);
-      const persistedView = persisted.map(({ key, command }) => ({ key, command }));
-      assert.deepEqual(persistedView, [{ key: "mod+j", command: "commandPalette.toggle" }]);
-    }).pipe(Effect.provide(makeKeybindingsLayer())),
+        const persisted = yield* readKeybindingsConfig(keybindingsConfigPath).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+        );
+        const persistedView = persisted.map(({ key, command }) => ({ key, command }));
+        assert.deepEqual(persistedView, [{ key: "mod+j", command: "commandPalette.toggle" }]);
+      }).pipe(Effect.provide(makeKeybindingsLayer(failingFileSystem)));
+    }),
   );
 
   it.effect("caches loaded resolved config across repeated reads", () =>
@@ -528,12 +545,16 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
       const [first, second] = yield* Effect.gen(function* () {
         const keybindings = yield* Keybindings;
         const firstLoad = (yield* keybindings.loadConfigState).keybindings;
+        yield* writeKeybindingsConfig(keybindingsConfigPath, [
+          { key: "mod+k", command: "script.cache-mutated.run" },
+        ]);
         const secondLoad = (yield* keybindings.loadConfigState).keybindings;
         return [firstLoad, secondLoad] as const;
       });
 
       assert.deepEqual(first, second);
       assert.isTrue(second.some((entry) => entry.command === "commandPalette.toggle"));
+      assert.isFalse(second.some((entry) => entry.command === "script.cache-mutated.run"));
     }).pipe(Effect.provide(makeKeybindingsLayer())),
   );
 

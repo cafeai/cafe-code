@@ -6,6 +6,9 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
+import { ChildProcessSpawner } from "effect/unstable/process";
 import { createModelSelection } from "@cafecode/shared/model";
 import { expect } from "vitest";
 
@@ -19,7 +22,7 @@ const ClaudeTextGenerationTestLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3code-claude-text-generation-test-",
 }).pipe(Layer.provideMerge(NodeServices.layer));
 
-function makeFakeClaudeBinary(dir: string) {
+function makeFakeClaudeBinary(dir: string, output: string) {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -31,40 +34,41 @@ function makeFakeClaudeBinary(dir: string) {
       claudePath,
       [
         "#!/bin/sh",
-        'args="$*"',
-        'stdin_content="$(cat)"',
-        'if [ -n "$T3_FAKE_CLAUDE_ARGS_MUST_CONTAIN" ]; then',
-        '  printf "%s" "$args" | grep -F -- "$T3_FAKE_CLAUDE_ARGS_MUST_CONTAIN" >/dev/null || {',
-        '    printf "%s\\n" "args missing expected content" >&2',
-        "    exit 2",
-        "  }",
-        "fi",
-        'if [ -n "$T3_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN" ]; then',
-        '  if printf "%s" "$args" | grep -F -- "$T3_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN" >/dev/null; then',
-        '    printf "%s\\n" "args contained forbidden content" >&2',
-        "    exit 3",
-        "  fi",
-        "fi",
-        'if [ -n "$T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN" ]; then',
-        '  printf "%s" "$stdin_content" | grep -F -- "$T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN" >/dev/null || {',
-        '    printf "%s\\n" "stdin missing expected content" >&2',
-        "    exit 4",
-        "  }",
-        "fi",
-        'if [ -n "$T3_FAKE_CLAUDE_HOME_MUST_BE" ] && [ "$HOME" != "$T3_FAKE_CLAUDE_HOME_MUST_BE" ]; then',
-        '  printf "%s\\n" "HOME was $HOME" >&2',
-        "  exit 5",
-        "fi",
-        'if [ -n "$T3_FAKE_CLAUDE_STDERR" ]; then',
-        '  printf "%s\\n" "$T3_FAKE_CLAUDE_STDERR" >&2',
-        "fi",
-        'printf "%s" "$T3_FAKE_CLAUDE_OUTPUT"',
-        'exit "${T3_FAKE_CLAUDE_EXIT_CODE:-0}"',
+        "cat >/dev/null",
+        "cat <<'__CAFE_CODE_FAKE_CLAUDE_OUTPUT__'",
+        output,
+        "__CAFE_CODE_FAKE_CLAUDE_OUTPUT__",
         "",
       ].join("\n"),
     );
     yield* fs.chmod(claudePath, 0o755);
-    return binDir;
+    return claudePath;
+  });
+}
+
+type CapturedClaudeCommand = {
+  readonly command: string;
+  readonly args: ReadonlyArray<string>;
+  readonly options: {
+    readonly env?: NodeJS.ProcessEnv;
+    readonly stdin?: { readonly stream: Stream.Stream<Uint8Array> };
+  };
+};
+
+function makeClaudeHandle(input: { output: string; stderr?: string; exitCode?: number }) {
+  const encoder = new TextEncoder();
+  return ChildProcessSpawner.makeHandle({
+    pid: ChildProcessSpawner.ProcessId(1),
+    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(input.exitCode ?? 0)),
+    isRunning: Effect.succeed(false),
+    kill: () => Effect.void,
+    unref: Effect.succeed(Effect.void),
+    stdin: Sink.drain,
+    stdout: Stream.make(encoder.encode(input.output)),
+    stderr: Stream.make(encoder.encode(input.stderr ?? "")),
+    all: Stream.empty,
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
   });
 }
 
@@ -82,111 +86,43 @@ function withFakeClaudeEnv<A, E, R>(
   effectFn: (textGeneration: TextGenerationShape) => Effect.Effect<A, E, R>,
 ) {
   return Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-claude-text-" });
-    const binDir = yield* makeFakeClaudeBinary(tempDir);
-    const previousPath = process.env.PATH;
-    const previousOutput = process.env.T3_FAKE_CLAUDE_OUTPUT;
-    const previousExitCode = process.env.T3_FAKE_CLAUDE_EXIT_CODE;
-    const previousStderr = process.env.T3_FAKE_CLAUDE_STDERR;
-    const previousArgsMustContain = process.env.T3_FAKE_CLAUDE_ARGS_MUST_CONTAIN;
-    const previousArgsMustNotContain = process.env.T3_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN;
-    const previousStdinMustContain = process.env.T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN;
-    const previousHomeMustBe = process.env.T3_FAKE_CLAUDE_HOME_MUST_BE;
-
-    yield* Effect.acquireRelease(
-      Effect.sync(() => {
-        process.env.PATH = `${binDir}:${previousPath ?? ""}`;
-        process.env.T3_FAKE_CLAUDE_OUTPUT = input.output;
-
-        if (input.exitCode !== undefined) {
-          process.env.T3_FAKE_CLAUDE_EXIT_CODE = String(input.exitCode);
-        } else {
-          delete process.env.T3_FAKE_CLAUDE_EXIT_CODE;
-        }
-
-        if (input.stderr !== undefined) {
-          process.env.T3_FAKE_CLAUDE_STDERR = input.stderr;
-        } else {
-          delete process.env.T3_FAKE_CLAUDE_STDERR;
-        }
-
-        if (input.argsMustContain !== undefined) {
-          process.env.T3_FAKE_CLAUDE_ARGS_MUST_CONTAIN = input.argsMustContain;
-        } else {
-          delete process.env.T3_FAKE_CLAUDE_ARGS_MUST_CONTAIN;
-        }
-
-        if (input.argsMustNotContain !== undefined) {
-          process.env.T3_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN = input.argsMustNotContain;
-        } else {
-          delete process.env.T3_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN;
-        }
-
-        if (input.stdinMustContain !== undefined) {
-          process.env.T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN = input.stdinMustContain;
-        } else {
-          delete process.env.T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN;
-        }
-
-        if (input.homeMustBe !== undefined) {
-          process.env.T3_FAKE_CLAUDE_HOME_MUST_BE = input.homeMustBe;
-        } else {
-          delete process.env.T3_FAKE_CLAUDE_HOME_MUST_BE;
-        }
-      }),
-      () =>
-        Effect.sync(() => {
-          process.env.PATH = previousPath;
-
-          if (previousOutput === undefined) {
-            delete process.env.T3_FAKE_CLAUDE_OUTPUT;
-          } else {
-            process.env.T3_FAKE_CLAUDE_OUTPUT = previousOutput;
-          }
-
-          if (previousExitCode === undefined) {
-            delete process.env.T3_FAKE_CLAUDE_EXIT_CODE;
-          } else {
-            process.env.T3_FAKE_CLAUDE_EXIT_CODE = previousExitCode;
-          }
-
-          if (previousStderr === undefined) {
-            delete process.env.T3_FAKE_CLAUDE_STDERR;
-          } else {
-            process.env.T3_FAKE_CLAUDE_STDERR = previousStderr;
-          }
-
-          if (previousArgsMustContain === undefined) {
-            delete process.env.T3_FAKE_CLAUDE_ARGS_MUST_CONTAIN;
-          } else {
-            process.env.T3_FAKE_CLAUDE_ARGS_MUST_CONTAIN = previousArgsMustContain;
-          }
-
-          if (previousArgsMustNotContain === undefined) {
-            delete process.env.T3_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN;
-          } else {
-            process.env.T3_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN = previousArgsMustNotContain;
-          }
-
-          if (previousStdinMustContain === undefined) {
-            delete process.env.T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN;
-          } else {
-            process.env.T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN = previousStdinMustContain;
-          }
-
-          if (previousHomeMustBe === undefined) {
-            delete process.env.T3_FAKE_CLAUDE_HOME_MUST_BE;
-          } else {
-            process.env.T3_FAKE_CLAUDE_HOME_MUST_BE = previousHomeMustBe;
-          }
-        }),
-    );
-
     const config = decodeClaudeSettings(input.claudeConfig ?? {});
-    const textGeneration = yield* makeClaudeTextGeneration(config);
+    const spawner = ChildProcessSpawner.make((unknownCommand) =>
+      Effect.gen(function* () {
+        const command = unknownCommand as unknown as CapturedClaudeCommand;
+        const args = command.args.join(" ");
+        const prompt = command.options.stdin?.stream
+          ? yield* command.options.stdin.stream.pipe(
+              Stream.decodeText(),
+              Stream.runFold(
+                () => "",
+                (text, chunk) => text + chunk,
+              ),
+            )
+          : "";
+
+        expect(command.command).toBe(config.binaryPath || "claude");
+        if (input.argsMustContain !== undefined) {
+          expect(args).toContain(input.argsMustContain);
+        }
+        if (input.argsMustNotContain !== undefined) {
+          expect(args).not.toContain(input.argsMustNotContain);
+        }
+        if (input.stdinMustContain !== undefined) {
+          expect(prompt).toContain(input.stdinMustContain);
+        }
+        if (input.homeMustBe !== undefined) {
+          expect(command.options.env?.HOME).toBe(input.homeMustBe);
+        }
+        return makeClaudeHandle(input);
+      }),
+    );
+    const textGeneration = yield* makeClaudeTextGeneration(config, {
+      PATH: "/test/bin",
+      HOME: "/test/home",
+    }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
     return yield* effectFn(textGeneration);
-  }).pipe(Effect.scoped);
+  });
 }
 
 it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
@@ -341,5 +277,30 @@ it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
           expect(generated.title).toBe("New thread");
         }),
     ),
+  );
+
+  it.effect("wires prompt stdin and structured stdout through a real Claude CLI process", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-claude-cli-smoke-" });
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      const output = JSON.stringify({ structured_output: { title: "CLI smoke title" } });
+      const binaryPath = yield* makeFakeClaudeBinary(tempDir, output);
+      const textGeneration = yield* makeClaudeTextGeneration(
+        decodeClaudeSettings({ binaryPath }),
+        process.env,
+      );
+
+      const generated = yield* textGeneration.generateThreadTitle({
+        cwd: process.cwd(),
+        message: "Exercise the real child process wiring.",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-sonnet-4-6",
+        },
+      });
+
+      expect(generated.title).toBe("CLI smoke title");
+    }).pipe(Effect.scoped),
   );
 });

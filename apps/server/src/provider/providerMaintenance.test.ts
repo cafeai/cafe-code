@@ -17,6 +17,23 @@ import {
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "./providerMaintenance.ts";
 
+function createSymlinkOrSkipOnWindowsPrivilegeError(target: string, linkPath: string): boolean {
+  try {
+    symlinkSync(target, linkPath);
+    return true;
+  } catch (error) {
+    if (
+      process.platform === "win32" &&
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "EPERM"
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
 const driver = (value: string) => ProviderDriverKind.make(value);
 const makeTempDir = Effect.fn("makeTempDir")(function* (name: string) {
   const id = yield* Random.nextUUIDv4;
@@ -421,7 +438,9 @@ describe("providerMaintenance", () => {
       const symlinkPath = path.join(binDir, "package-tool");
       writeFileSync(packageBinPath, "#!/usr/bin/env node\n");
       chmodSync(packageBinPath, 0o755);
-      symlinkSync(packageBinPath, symlinkPath);
+      if (!createSymlinkOrSkipOnWindowsPrivilegeError(packageBinPath, symlinkPath)) {
+        return;
+      }
 
       const capabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(packageToolUpdate, {
         binaryPath: symlinkPath,
@@ -469,7 +488,9 @@ describe("providerMaintenance", () => {
       const symlinkPath = path.join(binDir, "package-tool");
       writeFileSync(packageBinPath, "#!/usr/bin/env node\n");
       chmodSync(packageBinPath, 0o755);
-      symlinkSync(packageBinPath, symlinkPath);
+      if (!createSymlinkOrSkipOnWindowsPrivilegeError(packageBinPath, symlinkPath)) {
+        return;
+      }
 
       const capabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(packageToolUpdate, {
         binaryPath: symlinkPath,

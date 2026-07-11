@@ -685,136 +685,118 @@ it("resolveTerminalAvailability only enables Linux terminals when TERMINAL is se
 });
 
 it.layer(NodeServices.layer)("resolveTerminalLaunch", (it) => {
-  it.effect("uses Linux TERMINAL without fallback probing", () =>
+  it.effect("maps terminal launches across supported platforms", () =>
     Effect.gen(function* () {
-      const launch = yield* resolveTerminalLaunch({ cwd: "/tmp/workspace" }, "linux", {
-        TERMINAL: "wezterm start",
-      });
+      const cases = [
+        {
+          name: "Linux TERMINAL",
+          cwd: "/tmp/workspace",
+          platform: "linux" as const,
+          env: { TERMINAL: "wezterm start" },
+          expected: { command: "wezterm", args: ["start"], cwd: "/tmp/workspace" },
+        },
+        {
+          name: "Windows PowerShell",
+          cwd: "C:\\workspace",
+          platform: "win32" as const,
+          env: { SYSTEMROOT: "C:\\Windows" },
+          expected: {
+            command: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            args: ["-NoExit"],
+            cwd: "C:\\workspace",
+          },
+        },
+        {
+          name: "macOS Terminal.app",
+          cwd: '/tmp/work "space"',
+          platform: "darwin" as const,
+          env: {},
+          expected: {
+            command: "osascript",
+            args: [
+              "-e",
+              'tell application "Terminal" to do script "cd \\"/tmp/work \\"space\\"\\""',
+            ],
+            cwd: '/tmp/work "space"',
+          },
+        },
+      ];
 
-      assert.deepEqual(launch, {
-        command: "wezterm",
-        args: ["start"],
-        cwd: "/tmp/workspace",
-      });
-    }),
-  );
-
-  it.effect("rejects Linux terminal launch when TERMINAL is unset", () =>
-    Effect.gen(function* () {
-      const result = yield* resolveTerminalLaunch({ cwd: "/tmp/workspace" }, "linux", {}).pipe(
-        Effect.result,
-      );
-      assert.equal(result._tag, "Failure");
-      if (result._tag === "Failure") {
-        assert.equal(result.failure.message, "$TERMINAL needs to be set.");
+      for (const testCase of cases) {
+        const launch = yield* resolveTerminalLaunch(
+          { cwd: testCase.cwd },
+          testCase.platform,
+          testCase.env,
+        );
+        assert.deepEqual(launch, testCase.expected, testCase.name);
       }
-    }),
-  );
 
-  it.effect("uses PowerShell on Windows", () =>
-    Effect.gen(function* () {
-      const launch = yield* resolveTerminalLaunch({ cwd: "C:\\workspace" }, "win32", {
-        SYSTEMROOT: "C:\\Windows",
-      });
-
-      assert.deepEqual(launch, {
-        command: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-        args: ["-NoExit"],
-        cwd: "C:\\workspace",
-      });
-    }),
-  );
-
-  it.effect("uses Terminal.app on macOS", () =>
-    Effect.gen(function* () {
-      const launch = yield* resolveTerminalLaunch({ cwd: '/tmp/work "space"' }, "darwin", {});
-
-      assert.deepEqual(launch, {
-        command: "osascript",
-        args: ["-e", 'tell application "Terminal" to do script "cd \\"/tmp/work \\"space\\"\\""'],
-        cwd: '/tmp/work "space"',
-      });
+      const missingLinuxTerminal = yield* resolveTerminalLaunch(
+        { cwd: "/tmp/workspace" },
+        "linux",
+        {},
+      ).pipe(Effect.result);
+      assert.equal(missingLinuxTerminal._tag, "Failure");
+      if (missingLinuxTerminal._tag === "Failure") {
+        assert.equal(missingLinuxTerminal.failure.message, "$TERMINAL needs to be set.");
+      }
     }),
   );
 });
 
-it.layer(NodeServices.layer)("launchBrowser", (it) => {
-  it.effect("spawns through the ChildProcessSpawner service and unrefs the handle", () =>
+it.layer(NodeServices.layer)("detached process launchers", (it) => {
+  it.effect("spawn the resolved command and unref the handle", () =>
     Effect.gen(function* () {
-      let spawnedCommand: ChildProcess.StandardCommand | undefined;
-      let didUnref = false;
+      const editorLaunch = { command: process.execPath, args: ["-e", "process.exit(0)"] };
+      const terminalLaunch = { ...editorLaunch, cwd: "/tmp/workspace" };
+      const cases = [
+        {
+          name: "browser",
+          launch: launchBrowser("https://example.com"),
+          expected: resolveBrowserLaunch("https://example.com"),
+        },
+        {
+          name: "editor",
+          launch: launchEditorProcess(editorLaunch),
+          expected: resolveEditorProcessLaunch(editorLaunch),
+        },
+        {
+          name: "terminal",
+          launch: launchTerminalProcess(terminalLaunch),
+          expected: resolveTerminalProcessLaunch(terminalLaunch),
+        },
+      ];
 
-      const spawnerLayer = Layer.mock(ChildProcessSpawner.ChildProcessSpawner, {
-        spawn: (command) =>
-          Effect.sync(() => {
-            assert.equal(ChildProcess.isStandardCommand(command), true);
-            if (!ChildProcess.isStandardCommand(command)) {
-              throw new Error("Expected a standard command");
-            }
-            spawnedCommand = command;
-            return makeMockDetachedHandle(() => {
-              didUnref = true;
-            });
-          }),
-      });
+      for (const testCase of cases) {
+        let spawnedCommand: ChildProcess.StandardCommand | undefined;
+        let didUnref = false;
+        const spawnerLayer = Layer.mock(ChildProcessSpawner.ChildProcessSpawner, {
+          spawn: (command) =>
+            Effect.sync(() => {
+              assert.equal(ChildProcess.isStandardCommand(command), true, testCase.name);
+              if (!ChildProcess.isStandardCommand(command)) {
+                throw new Error("Expected a standard command");
+              }
+              spawnedCommand = command;
+              return makeMockDetachedHandle(() => {
+                didUnref = true;
+              });
+            }),
+        });
 
-      const result = yield* launchBrowser("https://example.com").pipe(
-        Effect.provide(spawnerLayer),
-        Effect.result,
-      );
-
-      assertSuccess(result, undefined);
-      assert.ok(spawnedCommand);
-      const expectedLaunch = resolveBrowserLaunch("https://example.com");
-      assert.equal(spawnedCommand.command, expectedLaunch.command);
-      assert.deepEqual(spawnedCommand.args, expectedLaunch.args);
-      assert.deepEqual(spawnedCommand.options, expectedLaunch.options);
-      assert.equal(didUnref, true);
+        const result = yield* testCase.launch.pipe(Effect.provide(spawnerLayer), Effect.result);
+        assertSuccess(result, undefined);
+        assert.ok(spawnedCommand, testCase.name);
+        assert.equal(spawnedCommand.command, testCase.expected.command, testCase.name);
+        assert.deepEqual(spawnedCommand.args, testCase.expected.args, testCase.name);
+        assert.deepEqual(spawnedCommand.options, testCase.expected.options, testCase.name);
+        assert.equal(didUnref, true, testCase.name);
+      }
     }),
   );
 });
 
 it.layer(NodeServices.layer)("launchEditorProcess", (it) => {
-  it.effect("spawns through the ChildProcessSpawner service and unrefs the handle", () =>
-    Effect.gen(function* () {
-      let spawnedCommand: ChildProcess.StandardCommand | undefined;
-      let didUnref = false;
-      const expectedArgs = ["-e", "process.exit(0)"];
-
-      const spawnerLayer = Layer.mock(ChildProcessSpawner.ChildProcessSpawner, {
-        spawn: (command) =>
-          Effect.sync(() => {
-            assert.equal(ChildProcess.isStandardCommand(command), true);
-            if (!ChildProcess.isStandardCommand(command)) {
-              throw new Error("Expected a standard command");
-            }
-            spawnedCommand = command;
-            return makeMockDetachedHandle(() => {
-              didUnref = true;
-            });
-          }),
-      });
-
-      const result = yield* launchEditorProcess({
-        command: process.execPath,
-        args: expectedArgs,
-      }).pipe(Effect.provide(spawnerLayer), Effect.result);
-
-      assertSuccess(result, undefined);
-      assert.ok(spawnedCommand);
-      assert.equal(spawnedCommand.command, process.execPath);
-      assert.deepEqual(spawnedCommand.args, expectedArgs);
-      assert.deepEqual(spawnedCommand.options, {
-        detached: true,
-        shell: false,
-        stdin: "ignore",
-        stdout: "ignore",
-        stderr: "ignore",
-      });
-      assert.equal(didUnref, true);
-    }),
-  );
-
   it.effect("rejects when command does not exist", () =>
     Effect.gen(function* () {
       const spawnerLayer = Layer.mock(ChildProcessSpawner.ChildProcessSpawner, {});
@@ -879,98 +861,44 @@ it("resolveTerminalProcessLaunch keeps hostile Windows paths as cwd data", () =>
   });
 });
 
-it.layer(NodeServices.layer)("launchTerminalProcess", (it) => {
-  it.effect("spawns through the ChildProcessSpawner service and unrefs the handle", () =>
-    Effect.gen(function* () {
-      let spawnedCommand: ChildProcess.StandardCommand | undefined;
-      let didUnref = false;
-      const expectedArgs = ["-e", "process.exit(0)"];
-
-      const spawnerLayer = Layer.mock(ChildProcessSpawner.ChildProcessSpawner, {
-        spawn: (command) =>
-          Effect.sync(() => {
-            assert.equal(ChildProcess.isStandardCommand(command), true);
-            if (!ChildProcess.isStandardCommand(command)) {
-              throw new Error("Expected a standard command");
-            }
-            spawnedCommand = command;
-            return makeMockDetachedHandle(() => {
-              didUnref = true;
-            });
-          }),
-      });
-
-      const result = yield* launchTerminalProcess({
-        command: process.execPath,
-        args: expectedArgs,
-        cwd: "/tmp/workspace",
-      }).pipe(Effect.provide(spawnerLayer), Effect.result);
-
-      assertSuccess(result, undefined);
-      assert.ok(spawnedCommand);
-      assert.equal(spawnedCommand.command, process.execPath);
-      assert.deepEqual(spawnedCommand.args, expectedArgs);
-      assert.deepEqual(spawnedCommand.options, {
-        cwd: "/tmp/workspace",
-        detached: true,
-        shell: false,
-        stdin: "ignore",
-        stdout: "ignore",
-        stderr: "ignore",
-      });
-      assert.equal(didUnref, true);
-    }),
-  );
-});
-
 it.layer(NodeServices.layer)("isCommandAvailable", (it) => {
-  it.effect("resolves win32 commands with PATHEXT", () =>
+  it.effect("resolves Windows PATH and PATHEXT cases", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-external-launcher-test-" });
       yield* fs.writeFileString(path.join(dir, "code.CMD"), "@echo off\r\n");
-      const env = {
-        PATH: dir,
-        PATHEXT: ".COM;.EXE;.BAT;.CMD",
-      } satisfies NodeJS.ProcessEnv;
-      assert.equal(isCommandAvailable("code", { platform: "win32", env }), true);
-    }),
-  );
-
-  it("returns false when a command is not on PATH", () => {
-    const env = {
-      PATH: "",
-      PATHEXT: ".COM;.EXE;.BAT;.CMD",
-    } satisfies NodeJS.ProcessEnv;
-    assert.equal(isCommandAvailable("definitely-not-installed", { platform: "win32", env }), false);
-  });
-
-  it.effect("does not treat bare files without executable extension as available on win32", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-external-launcher-test-" });
       yield* fs.writeFileString(path.join(dir, "npm"), "echo nope\r\n");
-      const env = {
-        PATH: dir,
-        PATHEXT: ".COM;.EXE;.BAT;.CMD",
-      } satisfies NodeJS.ProcessEnv;
-      assert.equal(isCommandAvailable("npm", { platform: "win32", env }), false);
-    }),
-  );
-
-  it.effect("appends PATHEXT for commands with non-executable extensions on win32", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-external-launcher-test-" });
       yield* fs.writeFileString(path.join(dir, "my.tool.CMD"), "@echo off\r\n");
-      const env = {
+      const populatedEnv = {
         PATH: dir,
         PATHEXT: ".COM;.EXE;.BAT;.CMD",
       } satisfies NodeJS.ProcessEnv;
-      assert.equal(isCommandAvailable("my.tool", { platform: "win32", env }), true);
+
+      const cases = [
+        { name: "PATHEXT command", command: "code", env: populatedEnv, expected: true },
+        { name: "bare non-executable file", command: "npm", env: populatedEnv, expected: false },
+        {
+          name: "non-executable suffix gets PATHEXT appended",
+          command: "my.tool",
+          env: populatedEnv,
+          expected: true,
+        },
+        {
+          name: "missing command",
+          command: "definitely-not-installed",
+          env: { PATH: "", PATHEXT: ".COM;.EXE;.BAT;.CMD" },
+          expected: false,
+        },
+      ];
+
+      for (const testCase of cases) {
+        assert.equal(
+          isCommandAvailable(testCase.command, { platform: "win32", env: testCase.env }),
+          testCase.expected,
+          testCase.name,
+        );
+      }
     }),
   );
 

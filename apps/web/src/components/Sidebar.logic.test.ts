@@ -17,7 +17,6 @@ import {
   resolveProjectStatusIndicator,
   resolveSidebarNewThreadSeedContext,
   resolveSidebarNewThreadEnvMode,
-  resolveThreadRowClassName,
   resolveThreadStatusPill,
   shouldClearThreadSelectionOnMouseDown,
   sortProjectsForSidebar,
@@ -624,30 +623,6 @@ describe("resolveThreadStatusPill", () => {
   });
 });
 
-describe("resolveThreadRowClassName", () => {
-  it("uses the darker selected palette when a thread is both selected and active", () => {
-    const className = resolveThreadRowClassName({ isActive: true, isSelected: true });
-    expect(className).toContain("bg-primary/22");
-    expect(className).toContain("hover:bg-primary/26");
-    expect(className).toContain("dark:bg-primary/30");
-    expect(className).not.toContain("bg-accent/85");
-  });
-
-  it("uses selected hover colors for selected threads", () => {
-    const className = resolveThreadRowClassName({ isActive: false, isSelected: true });
-    expect(className).toContain("bg-primary/15");
-    expect(className).toContain("hover:bg-primary/19");
-    expect(className).toContain("dark:bg-primary/22");
-    expect(className).not.toContain("hover:bg-accent");
-  });
-
-  it("keeps the accent palette for active-only threads", () => {
-    const className = resolveThreadRowClassName({ isActive: true, isSelected: false });
-    expect(className).toContain("bg-accent/85");
-    expect(className).toContain("hover:bg-accent");
-  });
-});
-
 describe("resolveProjectStatusIndicator", () => {
   it("returns null when no threads have a notable status", () => {
     expect(resolveProjectStatusIndicator([null, null])).toBeNull();
@@ -1003,7 +978,7 @@ describe("sortProjectsForSidebar", () => {
     ]);
   });
 
-  it("ignores archived threads when sorting projects", () => {
+  it("lets an active thread timestamp outrank the project fallback timestamp", () => {
     const sorted = sortProjectsForSidebar(
       [
         makeProject({
@@ -1013,7 +988,7 @@ describe("sortProjectsForSidebar", () => {
         }),
         makeProject({
           id: ProjectId.make("project-2"),
-          name: "Archived-only project",
+          name: "Newer project fallback",
           updatedAt: "2026-03-09T10:00:00.000Z",
         }),
       ],
@@ -1024,13 +999,7 @@ describe("sortProjectsForSidebar", () => {
           updatedAt: "2026-03-09T10:02:00.000Z",
           archivedAt: null,
         }),
-        makeThread({
-          id: ThreadId.make("thread-archived"),
-          projectId: ProjectId.make("project-2"),
-          updatedAt: "2026-03-09T10:10:00.000Z",
-          archivedAt: "2026-03-09T10:11:00.000Z",
-        }),
-      ].filter((thread) => thread.archivedAt === null),
+      ],
       "updated_at",
     );
 

@@ -129,20 +129,13 @@ describe("KeybindingsSettings.logic", () => {
     expect(commandLabel("script.setup-db.run")).toBe("Run Script: Setup Db");
   });
 
-  it("builds known when variable options from defaults without frontend labels", () => {
+  it("builds known when variable options from defaults", () => {
     const options = buildWhenVariableOptions();
 
-    expect(options).toEqual(
-      expect.arrayContaining([
-        "modelPickerOpen",
-        "composerFocused",
-        "commandPaletteOpen",
-        "modelPickerOpen",
-        "true",
-        "false",
-      ]),
+    expect(new Set(options)).toEqual(
+      new Set(["modelPickerOpen", "composerFocused", "commandPaletteOpen", "true", "false"]),
     );
-    expect(options).not.toContain("customModeActive");
+    expect(options).toHaveLength(new Set(options).size);
   });
 
   it("builds command options from defaults and resolved project bindings", () => {

@@ -394,29 +394,23 @@ async function waitForServerConfigSnapshot(): Promise<void> {
 
 async function waitForServerConfigStreamReady(): Promise<void> {
   const previousNotificationId = getServerConfigUpdatedNotification()?.id ?? 0;
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    rpcHarness.emitStreamValue(WS_METHODS.subscribeServerConfig, {
-      version: 1,
-      type: "settingsUpdated",
-      payload: { settings: encodeServerSettings(fixture.serverConfig.settings) },
-    });
-
-    try {
-      await vi.waitFor(
-        () => {
-          const notification = getServerConfigUpdatedNotification();
-          expect(notification?.id).toBeGreaterThan(previousNotificationId);
-          expect(notification?.source).toBe("settingsUpdated");
-        },
-        { timeout: 200, interval: 16 },
-      );
-      return;
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
-
-  throw new Error("Timed out waiting for the server config stream to deliver updates.");
+  // The initial snapshot is observed before this helper runs. Yield once so
+  // the RPC stream can advance from its finite snapshot prefix to the live
+  // PubSub subscription, then publish the update exactly once.
+  await Promise.resolve();
+  rpcHarness.emitStreamValue(WS_METHODS.subscribeServerConfig, {
+    version: 1,
+    type: "settingsUpdated",
+    payload: { settings: encodeServerSettings(fixture.serverConfig.settings) },
+  });
+  await vi.waitFor(
+    () => {
+      const notification = getServerConfigUpdatedNotification();
+      expect(notification?.id).toBeGreaterThan(previousNotificationId);
+      expect(notification?.source).toBe("settingsUpdated");
+    },
+    { timeout: 4_000, interval: 16 },
+  );
 }
 
 async function mountApp(): Promise<{ cleanup: () => Promise<void> }> {
@@ -545,8 +539,11 @@ describe("Keybindings update toast", () => {
 
       // A single edit can produce several reload notifications as the direct update and
       // filesystem watcher settle, so avoid stacking identical success toasts.
+      const previousNotificationId = getServerConfigUpdatedNotification()?.id ?? 0;
       sendServerConfigUpdatedPush([]);
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      await vi.waitFor(() => {
+        expect(getServerConfigUpdatedNotification()?.id).toBeGreaterThan(previousNotificationId);
+      });
 
       const titles = queryToastTitles();
       expect(titles.filter((title) => title === "Keybindings updated")).toHaveLength(1);
@@ -580,9 +577,6 @@ describe("Keybindings update toast", () => {
       // synchronously on subscribe. This should NOT produce a toast.
       await mounted.cleanup();
       const remounted = await mountApp();
-
-      // Give it a moment to process the replayed value
-      await new Promise((resolve) => setTimeout(resolve, 500));
 
       const titles = queryToastTitles();
       expect(
