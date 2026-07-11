@@ -1504,6 +1504,18 @@ function shouldSuppressChildConversationNotification(method: string): boolean {
   );
 }
 
+export function codexAggregateNotificationMethod(
+  method: string,
+  isChildConversation: boolean,
+): string {
+  // The upstream TUI routes child threads through separate channels. A
+  // terminal error on one child is therefore status for the parent to observe,
+  // not proof that the primary turn failed. Preserve it as a distinct method
+  // so CodexAdapter can project a work-log warning without mutating primary
+  // session error state.
+  return isChildConversation && method === "error" ? "codex.subagent/error" : method;
+}
+
 export function resolveCodexChildConversationNotification(
   childConversationTurns: ReadonlyMap<string, TurnId>,
   notification: CodexServerNotification,
@@ -3129,6 +3141,10 @@ export const makeCodexSessionRuntime = (
           rootProviderThreadId,
         );
         const routedTurnId = childRoute?.parentTurnId ?? route.turnId;
+        const emittedMethod = codexAggregateNotificationMethod(
+          notification.method,
+          childRoute !== undefined,
+        );
 
         // Use the already-routed parent turn when a subagent creates another
         // subagent. This keeps arbitrary-depth multi-agent output attached to
@@ -3180,7 +3196,7 @@ export const makeCodexSessionRuntime = (
         yield* emitEvent({
           kind: "notification",
           threadId: options.threadId,
-          method: notification.method,
+          method: emittedMethod,
           ...(turnId ? { turnId } : {}),
           ...(itemId ? { itemId } : {}),
           ...(requestId ? { requestId } : {}),

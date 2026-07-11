@@ -1709,17 +1709,18 @@ function mapToRuntimeEvents(
     ];
   }
 
-  if (event.method === "error") {
+  if (event.method === "error" || event.method === "codex.subagent/error") {
     const payload = readPayload(EffectCodexSchema.V2ErrorNotification, event.payload);
     const message = payload?.error.message ?? event.message ?? "Provider runtime error";
     const willRetry = payload?.willRetry === true;
+    const isSubagentError = event.method === "codex.subagent/error";
     return [
       {
-        type: willRetry ? "runtime.warning" : "runtime.error",
+        type: willRetry || isSubagentError ? "runtime.warning" : "runtime.error",
         ...runtimeEventBase(event, canonicalThreadId),
         payload: {
           message,
-          ...(!willRetry ? { class: "provider_error" as const } : {}),
+          ...(!willRetry && !isSubagentError ? { class: "provider_error" as const } : {}),
           ...(event.payload !== undefined ? { detail: event.payload } : {}),
         },
       },

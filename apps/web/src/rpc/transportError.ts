@@ -30,6 +30,11 @@ const RECOVERABLE_PROVIDER_ERROR_PATTERNS = [
   /\bProvider adapter process error \(claudeAgent\)[\s\S]*No conversation found with session ID\b/i,
   /\bProvider adapter request failed \(claudeAgent\)[\s\S]*No conversation found with session ID\b/i,
   /\bClaude Code returned an error result: No message found with message\.uuid\b/i,
+  // Codex can emit serverOverloaded for a child or an older turn while the
+  // primary thread continues. Keep the durable runtime activity in the work
+  // log, but do not let snapshot/replay repeatedly recreate a dismissible
+  // thread-level banner from this non-actionable historical diagnostic.
+  /\bSelected model is at capacity\b/i,
 ] as const;
 
 export function isTransportConnectionErrorMessage(message: string | null | undefined): boolean {

@@ -894,6 +894,48 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("maps terminal Codex subagent errors to work-log warnings", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-subagent-capacity-error"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "codex.subagent/error",
+        turnId: asTurnId("turn-parent"),
+        payload: {
+          threadId: "provider-child-thread",
+          turnId: "provider-child-turn",
+          error: {
+            message: "Selected model is at capacity. Please try a different model.",
+            codexErrorInfo: "serverOverloaded",
+            additionalDetails: null,
+          },
+          willRetry: false,
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      assert.equal(firstEvent.value.type, "runtime.warning");
+      if (firstEvent.value.type !== "runtime.warning") {
+        return;
+      }
+      assert.equal(firstEvent.value.turnId, "turn-parent");
+      assert.equal(
+        firstEvent.value.payload.message,
+        "Selected model is at capacity. Please try a different model.",
+      );
+    }),
+  );
+
   it.effect("maps Codex warning notifications to runtime.warning", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

@@ -57,6 +57,12 @@ describe("transportError", () => {
     ).toBeNull();
   });
 
+  it("keeps replayed Codex capacity diagnostics in the work log only", () => {
+    expect(
+      sanitizeThreadErrorMessage("Selected model is at capacity. Please try a different model."),
+    ).toBeNull();
+  });
+
   describe("describeSendFailureMessage", () => {
     const CONNECTION_MESSAGE =
       "Couldn't reach the server — the connection dropped. Check your connection and try again.";

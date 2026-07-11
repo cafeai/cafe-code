@@ -18,6 +18,7 @@ import {
   buildCodexThreadSnapshotBackfillEvents,
   buildTurnStartParams,
   buildTurnSteerParams,
+  codexAggregateNotificationMethod,
   codexElapsedDelayMilliseconds,
   codexElapsedDelayRemainingMilliseconds,
   isRecoverableThreadResumeError,
@@ -87,6 +88,12 @@ describe("codex elapsed watchdog scheduling", () => {
 });
 
 describe("Codex child conversation routing", () => {
+  it("keeps child errors out of primary runtime error state", () => {
+    assert.equal(codexAggregateNotificationMethod("error", true), "codex.subagent/error");
+    assert.equal(codexAggregateNotificationMethod("error", false), "error");
+    assert.equal(codexAggregateNotificationMethod("item/completed", true), "item/completed");
+  });
+
   it("routes multi-agent-v2 child output to the parent without forwarding child lifecycle", () => {
     const parentTurnId = TurnId.make("turn-parent");
     const routes = new Map<string, TurnId>();
