@@ -38,6 +38,59 @@ const baseRemoteStatus: VcsStatusRemoteResult = {
 };
 
 describe("wsRpcClient", () => {
+  it("retries an interrupted durable command with the same command id", async () => {
+    const rpcMethod = vi.fn(() => Effect.succeed({ sequence: 99 }));
+    let requestAttempt = 0;
+    const requestMock = vi.fn(
+      async <TSuccess>(
+        execute: (client: WsRpcProtocolClient) => Effect.Effect<TSuccess, Error, never>,
+      ) => {
+        const result = await Effect.runPromise(
+          execute({
+            [ORCHESTRATION_WS_METHODS.dispatchCommand]: rpcMethod,
+          } as unknown as WsRpcProtocolClient),
+        );
+        requestAttempt += 1;
+        if (requestAttempt === 1) {
+          // The server result exists, but reconnect closes the old request
+          // scope before that result reaches the renderer.
+          throw new Error("All fibers interrupted without error");
+        }
+        return result;
+      },
+    );
+    const transport = {
+      dispose: vi.fn(async () => undefined),
+      reconnect: vi.fn(async () => undefined),
+      request: requestMock as unknown as WsTransport["request"],
+      requestStream: vi.fn(),
+      subscribe: vi.fn(() => () => undefined),
+    } satisfies Pick<
+      WsTransport,
+      "dispose" | "reconnect" | "request" | "requestStream" | "subscribe"
+    >;
+    const command = {
+      type: "thread.turn.steer" as const,
+      commandId: "command-steer-1" as never,
+      threadId: "thread-1" as never,
+      message: {
+        messageId: "message-1" as never,
+        role: "user" as const,
+        text: "steer once",
+        attachments: [],
+      },
+      createdAt: "2026-07-11T07:32:35.000Z" as never,
+    };
+
+    const client = createWsRpcClient(transport as unknown as WsTransport);
+    await expect(client.orchestration.dispatchCommand(command)).resolves.toEqual({ sequence: 99 });
+
+    expect(requestMock).toHaveBeenCalledTimes(2);
+    expect(rpcMethod).toHaveBeenCalledTimes(2);
+    expect(rpcMethod).toHaveBeenNthCalledWith(1, command);
+    expect(rpcMethod).toHaveBeenNthCalledWith(2, command);
+  });
+
   it("routes provider journal repair requests through the orchestration RPC method", async () => {
     const rpcMethod = vi.fn(() =>
       Effect.succeed({

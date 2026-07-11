@@ -77,6 +77,18 @@ function isConnectionInterruptedMessage(message: string): boolean {
 }
 
 /**
+ * Returns true when a request may have reached the server but its response was
+ * lost while the WebSocket session was being replaced. Callers must not infer
+ * failure from this result. Only operations with a durable idempotency key may
+ * retry automatically after this classification.
+ */
+export function isIndeterminateTransportError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const normalized = message.trim();
+  return normalized.length > 0 && isConnectionInterruptedMessage(normalized);
+}
+
+/**
  * Turn a send/dispatch failure into a user-facing thread error. Connection
  * drops (including the interrupted-fiber messages Effect emits when the socket
  * closes mid-upload) become a clear, actionable message instead of leaking an
@@ -86,7 +98,7 @@ function isConnectionInterruptedMessage(message: string): boolean {
 export function describeSendFailureMessage(error: unknown, fallback: string): string {
   const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
   const normalized = message.trim();
-  if (normalized.length > 0 && isConnectionInterruptedMessage(normalized)) {
+  if (isIndeterminateTransportError(error)) {
     return CONNECTION_SEND_FAILURE_MESSAGE;
   }
   return normalized.length > 0 ? normalized : fallback;

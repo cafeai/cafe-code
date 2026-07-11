@@ -778,6 +778,60 @@ describe("Codex steer processing diagnostics", () => {
     assert.equal(next.get("steer-2")?.processedAt, undefined);
   });
 
+  it("binds a user message lifecycle pair to only one pending steer", () => {
+    const turnId = TurnId.make("turn-active");
+    const first = {
+      steerId: "steer-1",
+      providerThreadId: "provider-thread-1",
+      turnId,
+      requestedAt: "2026-05-26T00:00:00.000Z",
+      acknowledgedAt: "2026-05-26T00:00:00.100Z",
+      acknowledgedAtMs: 100,
+      ackLatencyMs: 100,
+      promptByteLength: 10,
+      attachmentCount: 0,
+      warningCount: 0,
+    };
+    const second = {
+      ...first,
+      steerId: "steer-2",
+      requestedAt: "2026-05-26T00:00:02.000Z",
+      acknowledgedAt: "2026-05-26T00:00:02.100Z",
+      acknowledgedAtMs: 2_100,
+    };
+    const itemId = ProviderItemId.make("user-message-1");
+    const started = updateCodexPendingSteerProcessingFromNotification(
+      new Map([
+        [first.steerId, first],
+        [second.steerId, second],
+      ]),
+      {
+        method: "item/started",
+        providerThreadId: "provider-thread-1",
+        turnId,
+        itemId,
+        itemType: "userMessage",
+        observedAt: "2026-05-26T00:00:03.000Z",
+        observedAtMs: 3_000,
+      },
+    );
+
+    const completed = updateCodexPendingSteerProcessingFromNotification(started.next, {
+      method: "item/completed",
+      providerThreadId: "provider-thread-1",
+      turnId,
+      itemId,
+      itemType: "userMessage",
+      observedAt: "2026-05-26T00:00:03.100Z",
+      observedAtMs: 3_100,
+    });
+
+    assert.equal(started.pending?.steerId, "steer-1");
+    assert.equal(completed.pending, undefined);
+    assert.equal(completed.next.get("steer-1")?.providerUserMessageMethod, "item/started");
+    assert.equal(completed.next.get("steer-2")?.processedAt, undefined);
+  });
+
   it("ignores non-user-message notifications when tracking steer processing", () => {
     const turnId = TurnId.make("turn-active");
     const pendingSteer = {

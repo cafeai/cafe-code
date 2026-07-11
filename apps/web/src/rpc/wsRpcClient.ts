@@ -11,6 +11,7 @@ import { applyGitStatusStreamEvent } from "@cafecode/shared/git";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 
+import { dispatchIdempotentCommandWithTransportRetry } from "./idempotentDispatch";
 import { type WsRpcProtocolClient } from "./protocol";
 import { resetWsReconnectBackoff } from "./wsConnectionState";
 import { WsTransport } from "./wsTransport";
@@ -296,7 +297,13 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
     },
     orchestration: {
       dispatchCommand: (input) =>
-        transport.request((client) => client[ORCHESTRATION_WS_METHODS.dispatchCommand](input)),
+        // A WebSocket close can interrupt the response after the server has
+        // committed this command. Retrying this exact object preserves its
+        // commandId, allowing the durable server receipt to collapse the retry
+        // instead of producing a duplicate message/steer.
+        dispatchIdempotentCommandWithTransportRetry(() =>
+          transport.request((client) => client[ORCHESTRATION_WS_METHODS.dispatchCommand](input)),
+        ),
       getArchivedShellSnapshot: () =>
         transport.request((client) =>
           client[ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot]({}),

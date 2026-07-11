@@ -4933,7 +4933,7 @@ export default function ChatView(props: ChatViewProps) {
       } else if (promptRef.current.length === 0 && composerImagesRef.current.length === 0) {
         restoreComposerSnapshotForRetry(snapshot);
       }
-      setThreadError(activeThread.id, err instanceof Error ? err.message : "Failed to steer turn.");
+      setThreadError(activeThread.id, describeSendFailureMessage(err, "Failed to steer turn."));
     } finally {
       setSendInFlight(false);
     }

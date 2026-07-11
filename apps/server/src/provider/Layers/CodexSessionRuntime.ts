@@ -877,6 +877,18 @@ export function updateCodexPendingSteerProcessingFromNotification(
     return { pending: undefined, next: unchanged() };
   }
 
+  if (
+    input.itemId !== undefined &&
+    Array.from(current.values()).some((entry) => entry.providerUserMessageItemId === input.itemId)
+  ) {
+    // App-server normally emits both item/started and item/completed for the
+    // same injected userMessage. That lifecycle pair is one proof of one steer,
+    // not proof that two queued steers were processed. Preserve the original
+    // binding so a later notification for the same provider item cannot consume
+    // the next pending steer.
+    return { pending: undefined, next: unchanged() };
+  }
+
   const pending = Array.from(current.values())
     .filter(
       (entry) =>

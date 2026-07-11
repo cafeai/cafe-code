@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   describeSendFailureMessage,
+  isIndeterminateTransportError,
   isTransportConnectionErrorMessage,
   sanitizeThreadErrorMessage,
 } from "./transportError";
@@ -24,6 +25,14 @@ describe("transportError", () => {
 
   it("drops transport failures from thread surfaces", () => {
     expect(sanitizeThreadErrorMessage("SocketCloseError: 1006")).toBeNull();
+  });
+
+  it("classifies interrupted request acknowledgements as indeterminate", () => {
+    expect(isIndeterminateTransportError(new Error("All fibers interrupted without error"))).toBe(
+      true,
+    );
+    expect(isIndeterminateTransportError("SocketCloseError: 1006")).toBe(true);
+    expect(isIndeterminateTransportError(new Error("Provider rejected the command"))).toBe(false);
   });
 
   it("drops recoverable Claude resume failures from thread surfaces", () => {
