@@ -45,4 +45,17 @@ describe("provider assistant completion text helpers", () => {
       }),
     ).toBe(" world from item.completed");
   });
+
+  it("does not duplicate streamed text when the durable projection still has only the first chunk", () => {
+    const completedText = "First streamed paragraph. A second sentence follows.";
+
+    expect(
+      completedAssistantTextDelta({
+        projectedText: "First",
+        bufferedText: "",
+        fallbackText: completedText,
+        streamObserved: true,
+      }),
+    ).toBe("");
+  });
 });

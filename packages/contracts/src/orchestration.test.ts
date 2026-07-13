@@ -101,6 +101,25 @@ it.effect("decodes project.create with createWorkspaceRootIfMissing enabled", ()
   }),
 );
 
+it.effect("decodes canonical text on internal assistant completion commands", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeOrchestrationCommand({
+      type: "thread.message.assistant.complete",
+      commandId: "cmd-assistant-complete",
+      threadId: "thread-1",
+      messageId: "assistant-message-1",
+      turnId: "turn-1",
+      finalText: "Canonical completed assistant text.",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    assert.strictEqual(parsed.type, "thread.message.assistant.complete");
+    if (parsed.type === "thread.message.assistant.complete") {
+      assert.strictEqual(parsed.finalText, "Canonical completed assistant text.");
+    }
+  }),
+);
+
 it.effect("decodes thread.duplicate client commands and duplicated payloads", () =>
   Effect.gen(function* () {
     const command = yield* decodeClientOrchestrationCommand({

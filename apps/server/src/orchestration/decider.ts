@@ -883,7 +883,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           messageId: command.messageId,
           role: "assistant",
-          text: "",
+          // A non-empty terminal payload is replacement text in every
+          // projection/renderer reducer. Provider ingestion supplies it only
+          // after binding the completed item to all observed stream deltas.
+          text: command.finalText ?? "",
           turnId: command.turnId ?? null,
           streaming: false,
           createdAt: command.createdAt,

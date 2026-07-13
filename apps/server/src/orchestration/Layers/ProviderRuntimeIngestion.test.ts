@@ -1221,6 +1221,91 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  it("consolidates a completed assistant stream without appending it twice", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
+    const now = "2026-01-01T00:00:00.000Z";
+    const turnId = asTurnId("turn-completion-stream-consolidation");
+    const itemId = asItemId("item-completion-stream-consolidation");
+    const firstChunk = "First";
+    const remainingText =
+      " streamed paragraph is complete. Another sentence verifies terminal replacement.";
+    const finalText = `${firstChunk}${remainingText}`;
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-completion-stream-consolidation-first"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId,
+      payload: {
+        streamKind: "assistant_text",
+        delta: firstChunk,
+      },
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-completion-stream-consolidation-rest"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId,
+      payload: {
+        streamKind: "assistant_text",
+        delta: remainingText,
+      },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-completion-stream-consolidation-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId,
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+        detail: finalText,
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-completion-stream-consolidation" && !message.streaming,
+      ),
+    );
+    const message = thread.messages.find(
+      (entry: ProviderRuntimeTestMessage) =>
+        entry.id === "assistant:item-completion-stream-consolidation",
+    );
+    expect(message?.text).toBe(finalText);
+
+    const events = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    const messageEvents = events.filter(
+      (event): event is Extract<(typeof events)[number], { type: "thread.message-sent" }> =>
+        event.type === "thread.message-sent" &&
+        event.payload.messageId === "assistant:item-completion-stream-consolidation",
+    );
+    expect(
+      messageEvents
+        .filter((event) => event.payload.streaming)
+        .map((event) => event.payload.text)
+        .join(""),
+    ).toBe(finalText);
+    expect(messageEvents.at(-1)?.payload).toMatchObject({
+      streaming: false,
+      text: finalText,
+    });
+  });
+
   it("appends missing suffix from assistant item completion detail after streamed prefix and buffered tail", async () => {
     const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
     const now = "2026-01-01T00:00:00.000Z";
@@ -1293,6 +1378,62 @@ describe("ProviderRuntimeIngestion", () => {
 
     expect(message?.text).toBe(finalText);
     expect(message?.streaming).toBe(false);
+  });
+
+  it("does not replace streamed output with a divergent completed item", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
+    const now = "2026-01-01T00:00:00.000Z";
+    const turnId = asTurnId("turn-divergent-completion");
+    const itemId = asItemId("item-divergent-completion");
+    const streamedText = "Streamed provider text.";
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-divergent-completion-delta"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId,
+      payload: {
+        streamKind: "assistant_text",
+        delta: streamedText,
+      },
+    });
+    await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-divergent-completion" && message.streaming,
+      ),
+    );
+
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-divergent-completion-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId,
+      itemId,
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+        detail: "Different completed provider text.",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-divergent-completion" && !message.streaming,
+      ),
+    );
+    expect(
+      thread.messages.find(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-divergent-completion",
+      )?.text,
+    ).toBe(streamedText);
   });
 
   it("ignores Codex snapshot backfill assistant completions that duplicate live assistant output", async () => {

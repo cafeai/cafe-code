@@ -8,7 +8,18 @@ export function completedAssistantTextDelta(input: {
   readonly projectedText: string | undefined;
   readonly bufferedText: string;
   readonly fallbackText: string | undefined;
+  readonly streamObserved?: boolean;
 }): string {
+  // Upstream Codex TUI 0.144.3 treats a completed assistant item as redundant
+  // once its stream controller has observed deltas. Cafe follows that rule for
+  // append events: flush only the coalesced tail, then let the separate terminal
+  // message event consolidate to cryptographically verified canonical text.
+  // Consulting a lagging SQL projection here can append the entire stream a
+  // second time when that projection still contains only the first token.
+  if (input.streamObserved === true) {
+    return input.bufferedText;
+  }
+
   const fallbackText = input.fallbackText;
   if (!hasRenderableAssistantText(fallbackText)) {
     return input.bufferedText;

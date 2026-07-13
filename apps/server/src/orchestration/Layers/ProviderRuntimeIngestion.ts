@@ -50,6 +50,7 @@ import {
   completedAssistantTextDelta,
   hasRenderableAssistantText,
 } from "../providerAssistantCompletionText.ts";
+import { AssistantStreamTextCommitment } from "../providerAssistantStreamCommitment.ts";
 import { sanitizeProviderToolData } from "@cafecode/shared/activityPayloadSanitizer";
 import { ServerSettingsService } from "../../serverSettings.ts";
 
@@ -93,6 +94,8 @@ const PROVIDER_DAEMON_RUNTIME_CURSOR_PERSIST_INTERVAL = 1_000;
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const STREAMED_MESSAGE_IDS_CACHE_CAPACITY = 20_000;
 const STREAMED_MESSAGE_IDS_TTL = Duration.minutes(120);
+const ASSISTANT_STREAM_COMMITMENT_CACHE_CAPACITY = 20_000;
+const ASSISTANT_STREAM_COMMITMENT_TTL = Duration.minutes(120);
 // When the user enables assistant streaming, keep the durable projection close
 // to the provider's live stream. We still coalesce a small amount to avoid
 // rewriting SQLite rows for every tiny token, but this threshold must stay low
@@ -929,6 +932,14 @@ const make = Effect.gen(function* () {
     timeToLive: STREAMED_MESSAGE_IDS_TTL,
     lookup: () => Effect.succeed(true),
   });
+  const assistantStreamCommitmentsByMessageId = yield* Cache.make<
+    MessageId,
+    AssistantStreamTextCommitment
+  >({
+    capacity: ASSISTANT_STREAM_COMMITMENT_CACHE_CAPACITY,
+    timeToLive: ASSISTANT_STREAM_COMMITMENT_TTL,
+    lookup: () => Effect.succeed(new AssistantStreamTextCommitment()),
+  });
 
   const assistantSegmentStateByTurnKey = yield* Cache.make<string, AssistantTurnSegmentState>({
     capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
@@ -1259,6 +1270,26 @@ const make = Effect.gen(function* () {
   const clearBufferedAssistantText = (messageId: MessageId) =>
     Cache.invalidate(bufferedAssistantTextByMessageId, messageId);
 
+  const recordAssistantStreamText = (messageId: MessageId, delta: string) =>
+    Cache.getOption(assistantStreamCommitmentsByMessageId, messageId).pipe(
+      Effect.flatMap((existingCommitment) =>
+        Effect.sync(() => {
+          const commitment = Option.getOrElse(
+            existingCommitment,
+            () => new AssistantStreamTextCommitment(),
+          );
+          // ProviderRuntimeIngestion's drainable worker processes canonical
+          // events serially, so this mutable hash update preserves native delta
+          // order without retaining another full copy of long assistant text.
+          commitment.append(delta);
+          return commitment;
+        }),
+      ),
+      Effect.flatMap((commitment) =>
+        Cache.set(assistantStreamCommitmentsByMessageId, messageId, commitment),
+      ),
+    );
+
   const appendBufferedProposedPlan = (planId: string, delta: string, createdAt: string) =>
     Cache.getOption(bufferedProposedPlanById, planId).pipe(
       Effect.flatMap((existingEntry) => {
@@ -1288,6 +1319,7 @@ const make = Effect.gen(function* () {
       [
         clearBufferedAssistantText(messageId),
         Cache.invalidate(streamedAssistantMessageIds, messageId),
+        Cache.invalidate(assistantStreamCommitmentsByMessageId, messageId),
       ],
       { discard: true },
     );
@@ -1365,12 +1397,25 @@ const make = Effect.gen(function* () {
   }) =>
     Effect.gen(function* () {
       const bufferedText = yield* takeBufferedAssistantText(input.messageId);
+      const streamCommitment = yield* Cache.getOption(
+        assistantStreamCommitmentsByMessageId,
+        input.messageId,
+      );
+      const streamObserved = Option.isSome(streamCommitment);
+      const canonicalFinalText = streamObserved
+        ? hasRenderableAssistantText(input.fallbackText) &&
+          streamCommitment.value.matchesPrefixOf(input.fallbackText!)
+          ? input.fallbackText
+          : undefined
+        : input.fallbackText;
       const text = completedAssistantTextDelta({
         bufferedText,
         fallbackText: input.fallbackText,
         projectedText: input.projectedText,
+        streamObserved,
       });
       const hasRenderableText = hasRenderableAssistantText(text);
+      const hasCanonicalFinalText = hasRenderableAssistantText(canonicalFinalText);
 
       if (hasRenderableText) {
         yield* orchestrationEngine.dispatch({
@@ -1384,12 +1429,13 @@ const make = Effect.gen(function* () {
         });
       }
 
-      if (input.hasProjectedMessage || hasRenderableText) {
+      if (input.hasProjectedMessage || hasRenderableText || hasCanonicalFinalText) {
         yield* orchestrationEngine.dispatch({
           type: "thread.message.assistant.complete",
           commandId: providerCommandId(input.event, input.commandTag, input.messageId),
           threadId: input.threadId,
           messageId: input.messageId,
+          ...(canonicalFinalText !== undefined ? { finalText: canonicalFinalText } : {}),
           ...(input.turnId ? { turnId: input.turnId } : {}),
           createdAt: input.createdAt,
         });
@@ -2014,6 +2060,10 @@ const make = Effect.gen(function* () {
             });
           }
         }
+        // Record the provider stream only after its buffer/update dispatch has
+        // succeeded. Completion can then consolidate against what this worker
+        // actually accepted, independent of SQL projection lag.
+        yield* recordAssistantStreamText(assistantMessageId, assistantDelta);
       }
 
       const pauseForUserTurnId =
