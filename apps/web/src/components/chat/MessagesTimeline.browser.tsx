@@ -38,11 +38,17 @@ vi.mock("@legendapp/list/react", async () => {
     ListHeaderComponent?: React.ReactNode;
     ListFooterComponent?: React.ReactNode;
     onWheel?: React.WheelEventHandler<HTMLDivElement>;
+    onTouchStart?: React.TouchEventHandler<HTMLDivElement>;
     onTouchMove?: React.TouchEventHandler<HTMLDivElement>;
+    onTouchEnd?: React.TouchEventHandler<HTMLDivElement>;
+    onTouchCancel?: React.TouchEventHandler<HTMLDivElement>;
     onPointerDown?: React.PointerEventHandler<HTMLDivElement>;
+    onPointerUp?: React.PointerEventHandler<HTMLDivElement>;
+    onPointerCancel?: React.PointerEventHandler<HTMLDivElement>;
     onKeyDown?: React.KeyboardEventHandler<HTMLDivElement>;
     onScroll?: React.UIEventHandler<HTMLDivElement>;
     maintainScrollAtEnd?: boolean;
+    maintainScrollAtEndThreshold?: number;
     maintainVisibleContentPosition?: unknown;
     ref?: React.Ref<LegendListRef>;
   }) {
@@ -61,9 +67,14 @@ vi.mock("@legendapp/list/react", async () => {
       <div
         data-testid="legend-list"
         onKeyDown={props.onKeyDown}
+        onPointerCancel={props.onPointerCancel}
         onPointerDown={props.onPointerDown}
+        onPointerUp={props.onPointerUp}
         onScroll={props.onScroll}
+        onTouchCancel={props.onTouchCancel}
+        onTouchEnd={props.onTouchEnd}
         onTouchMove={props.onTouchMove}
+        onTouchStart={props.onTouchStart}
         onWheel={props.onWheel}
       >
         {props.ListHeaderComponent}
@@ -374,9 +385,10 @@ describe("MessagesTimeline", () => {
 
     try {
       const firstProps = legendListPropsSpy.mock.calls.at(-1)?.[0] as
-        | { maintainScrollAtEnd?: boolean }
+        | { maintainScrollAtEnd?: boolean; maintainScrollAtEndThreshold?: number }
         | undefined;
       expect(firstProps?.maintainScrollAtEnd).toBe(false);
+      expect(firstProps?.maintainScrollAtEndThreshold).toBe(0.01);
 
       await screen.rerender(
         <MessagesTimeline
@@ -706,7 +718,7 @@ describe("MessagesTimeline", () => {
     }
   });
 
-  it("reports explicit wheel scrolling as user scroll intent", async () => {
+  it("reports only upward wheel scrolling as review intent", async () => {
     const props = buildProps();
     const screen = await render(
       <MessagesTimeline
@@ -717,9 +729,72 @@ describe("MessagesTimeline", () => {
 
     try {
       const list = document.querySelector("[data-testid='legend-list']");
-      list?.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
+      list?.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: 120 }));
+      expect(props.onUserScrollIntent).not.toHaveBeenCalled();
+
+      list?.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -120 }));
 
       expect(props.onUserScrollIntent).toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("cancels delayed submit pinning when the user starts reviewing output", async () => {
+    let nextFrameId = 1;
+    const pendingFrames = new Map<number, FrameRequestCallback>();
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      const frameId = nextFrameId++;
+      pendingFrames.set(frameId, callback);
+      return frameId;
+    });
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation((frameId) => {
+      pendingFrames.delete(frameId);
+    });
+    const flushFrames = () => {
+      while (pendingFrames.size > 0) {
+        const frames = [...pendingFrames.entries()];
+        pendingFrames.clear();
+        for (const [, callback] of frames) {
+          callback(0);
+        }
+      }
+    };
+
+    const props = buildProps();
+    const firstEntry = buildUserTimelineEntry("existing conversation tail");
+    const screen = await render(
+      <MessagesTimeline {...props} timelineEntries={[firstEntry]} stickToEndRevision={0} />,
+    );
+
+    try {
+      flushFrames();
+      const submittedEntry = {
+        ...buildUserTimelineEntry("new prompt whose output is starting"),
+        id: "entry-2",
+        message: {
+          ...buildUserTimelineEntry("new prompt whose output is starting").message,
+          id: "message-2" as never,
+        },
+      };
+      await screen.rerender(
+        <MessagesTimeline
+          {...props}
+          timelineEntries={[firstEntry, submittedEntry]}
+          stickToEndRevision={1}
+        />,
+      );
+
+      scrollToEndSpy.mockClear();
+      scrollToIndexSpy.mockClear();
+      document
+        .querySelector("[data-testid='legend-list']")
+        ?.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -120 }));
+      flushFrames();
+
+      expect(props.onUserScrollIntent).toHaveBeenCalled();
+      expect(scrollToEndSpy).not.toHaveBeenCalled();
+      expect(scrollToIndexSpy).not.toHaveBeenCalled();
     } finally {
       await screen.unmount();
     }

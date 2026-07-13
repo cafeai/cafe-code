@@ -21,6 +21,8 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  type TouchEvent as ReactTouchEvent,
+  type WheelEvent as ReactWheelEvent,
 } from "react";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { deriveTimelineEntries, deriveWorkLogEntries, formatElapsed } from "../../session-logic";
@@ -127,7 +129,11 @@ const TimelineRowActivityCtx = createContext<TimelineRowActivityState>(null!);
 const TIMELINE_LIST_HEADER = <div className="h-3 sm:h-4" />;
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
-const TIMELINE_MAINTAIN_SCROLL_AT_END_THRESHOLD = 0.9;
+// LegendList expresses this as a fraction of the viewport height. A value near
+// one treats almost a full screen of review scrolling as still being at the
+// tail, so the next streaming layout update can pull the user back down. Keep
+// only a small sub-line allowance for measurement jitter.
+const TIMELINE_MAINTAIN_SCROLL_AT_END_THRESHOLD = 0.01;
 const TIMELINE_SUBMIT_STICK_TO_END_WINDOW_MS = 1_500;
 const TIMELINE_SUBMIT_STICK_TO_END_FRAME_ATTEMPTS = 8;
 const TIMELINE_SUBMIT_STICK_TO_END_SETTLE_TIMEOUTS_MS = [80, 180, 360, 720] as const;
@@ -238,6 +244,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const rows = useStableRows(rawRows);
   const stickToEndDeadlineMsRef = useRef(0);
   const submitStickScrollEventRepinFrameRef = useRef<number | null>(null);
+  const forcedScrollGenerationRef = useRef(0);
+  const touchStartYRef = useRef<number | null>(null);
+  const touchReviewIntentReportedRef = useRef(false);
+  const scrollbarPointerActiveRef = useRef(false);
+  const scrollbarReviewIntentReportedRef = useRef(false);
+  const scrollbarPointerReleaseFrameRef = useRef<number | null>(null);
   const assistantMarkdownCopyTextByMessageId = useMemo(() => {
     const values = new Map<string, string>();
     for (const row of rows) {
@@ -383,6 +395,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [emitScrollDebugEvent, listRef, onDebugScrollEvent, rows.length],
   );
   const cancelSubmitStickToEnd = useCallback(() => {
+    // Invalidate every already-scheduled initial/submit hard-scroll callback.
+    // Clearing only the deadline is insufficient because the animation-frame
+    // loop historically did not consult it before issuing scrollToEnd.
+    forcedScrollGenerationRef.current += 1;
     stickToEndDeadlineMsRef.current = 0;
     if (submitStickScrollEventRepinFrameRef.current !== null) {
       window.cancelAnimationFrame(submitStickScrollEventRepinFrameRef.current);
@@ -406,8 +422,26 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         window.cancelAnimationFrame(submitStickScrollEventRepinFrameRef.current);
         submitStickScrollEventRepinFrameRef.current = null;
       }
+      if (scrollbarPointerReleaseFrameRef.current !== null) {
+        window.cancelAnimationFrame(scrollbarPointerReleaseFrameRef.current);
+        scrollbarPointerReleaseFrameRef.current = null;
+      }
     },
     [],
+  );
+
+  const handleUserScrollIntent = useCallback(
+    (event?: { readonly type?: string }) => {
+      emitScrollDebugEvent("user-scroll-intent", {
+        state: onDebugScrollEvent ? (listRef.current?.getState?.() ?? null) : null,
+        details: {
+          eventType: event?.type ?? "unknown",
+        },
+      });
+      cancelSubmitStickToEnd();
+      onUserScrollIntent();
+    },
+    [cancelSubmitStickToEnd, emitScrollDebugEvent, listRef, onDebugScrollEvent, onUserScrollIntent],
   );
 
   const handleScroll = useCallback(() => {
@@ -431,6 +465,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const state = listRef.current?.getState?.();
     if (state) {
       const resolvedIsAtEnd = isTimelineScrolledToEnd(state);
+      if (
+        !resolvedIsAtEnd &&
+        scrollbarPointerActiveRef.current &&
+        !scrollbarReviewIntentReportedRef.current
+      ) {
+        scrollbarReviewIntentReportedRef.current = true;
+        handleUserScrollIntent({ type: "scrollbar" });
+      }
       emitScrollDebugEvent("scroll-event", {
         state,
         details: {
@@ -445,60 +487,81 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         },
       });
     }
-  }, [emitScrollDebugEvent, listRef, onIsAtEndChange, scheduleSubmitStickScrollEventRepin]);
-  const handleUserScrollIntent = useCallback(
-    (event?: { readonly type?: string }) => {
-      emitScrollDebugEvent("user-scroll-intent", {
-        state: onDebugScrollEvent ? (listRef.current?.getState?.() ?? null) : null,
-        details: {
-          eventType: event?.type ?? "unknown",
-        },
-      });
-      cancelSubmitStickToEnd();
-      onUserScrollIntent();
-    },
-    [cancelSubmitStickToEnd, emitScrollDebugEvent, listRef, onDebugScrollEvent, onUserScrollIntent],
-  );
-  const handleScrollbarScrollIntent = useCallback(() => {
-    emitScrollDebugEvent("user-scroll-intent", {
-      state: onDebugScrollEvent ? (listRef.current?.getState?.() ?? null) : null,
-      details: {
-        eventType: "pointerdown",
-        target: "scrollbar-zone",
-      },
-    });
-    cancelSubmitStickToEnd();
-    onUserScrollIntent();
   }, [
-    cancelSubmitStickToEnd,
     emitScrollDebugEvent,
+    handleUserScrollIntent,
     listRef,
-    onDebugScrollEvent,
-    onUserScrollIntent,
+    onIsAtEndChange,
+    scheduleSubmitStickScrollEventRepin,
   ]);
+  const handleWheel = useCallback(
+    (event: ReactWheelEvent<HTMLElement>) => {
+      if (event.deltaY < 0) {
+        handleUserScrollIntent(event);
+      }
+    },
+    [handleUserScrollIntent],
+  );
+  const handleTouchStart = useCallback((event: ReactTouchEvent<HTMLElement>) => {
+    touchStartYRef.current = event.touches.item(0)?.clientY ?? null;
+    touchReviewIntentReportedRef.current = false;
+  }, []);
+  const handleTouchMove = useCallback(
+    (event: ReactTouchEvent<HTMLElement>) => {
+      const startY = touchStartYRef.current;
+      const currentY = event.touches.item(0)?.clientY;
+      if (
+        startY !== null &&
+        currentY !== undefined &&
+        currentY - startY > 4 &&
+        !touchReviewIntentReportedRef.current
+      ) {
+        touchReviewIntentReportedRef.current = true;
+        handleUserScrollIntent(event);
+      }
+    },
+    [handleUserScrollIntent],
+  );
+  const handleTouchEnd = useCallback(() => {
+    touchStartYRef.current = null;
+    touchReviewIntentReportedRef.current = false;
+  }, []);
   const handlePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLElement>) => {
       const bounds = event.currentTarget.getBoundingClientRect();
       const scrollbarIntentPx = 24;
-      if (
-        event.clientX >= bounds.right - scrollbarIntentPx ||
-        event.clientY >= bounds.bottom - scrollbarIntentPx
-      ) {
-        handleScrollbarScrollIntent();
+      if (scrollbarPointerReleaseFrameRef.current !== null) {
+        window.cancelAnimationFrame(scrollbarPointerReleaseFrameRef.current);
+        scrollbarPointerReleaseFrameRef.current = null;
+      }
+      const scrollbarPointerActive = event.clientX >= bounds.right - scrollbarIntentPx;
+      scrollbarPointerActiveRef.current = scrollbarPointerActive;
+      scrollbarReviewIntentReportedRef.current = scrollbarPointerActive;
+      if (scrollbarPointerActive) {
+        handleUserScrollIntent({ type: "scrollbar-pointerdown" });
       }
     },
-    [handleScrollbarScrollIntent],
+    [handleUserScrollIntent],
   );
+  const handlePointerEnd = useCallback(() => {
+    if (scrollbarPointerReleaseFrameRef.current !== null) {
+      window.cancelAnimationFrame(scrollbarPointerReleaseFrameRef.current);
+    }
+    // Native scrollbar track clicks can dispatch their scroll event after the
+    // pointer event. Keep the attribution alive for one frame, then clear it.
+    scrollbarPointerReleaseFrameRef.current = window.requestAnimationFrame(() => {
+      scrollbarPointerReleaseFrameRef.current = null;
+      scrollbarPointerActiveRef.current = false;
+      scrollbarReviewIntentReportedRef.current = false;
+    });
+  }, []);
   const handleKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLElement>) => {
       if (
         event.key === "ArrowUp" ||
-        event.key === "ArrowDown" ||
         event.key === "PageUp" ||
-        event.key === "PageDown" ||
         event.key === "Home" ||
-        event.key === "End" ||
-        event.key === " "
+        (event.key === " " && event.shiftKey)
       ) {
         emitScrollDebugEvent("user-scroll-intent", {
           state: onDebugScrollEvent ? (listRef.current?.getState?.() ?? null) : null,
@@ -527,9 +590,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     let cancelled = false;
     let attempts = 0;
     const frameIds: number[] = [];
+    const forcedScrollGeneration = forcedScrollGenerationRef.current;
     const scheduleScroll = () => {
       const frameId = window.requestAnimationFrame(() => {
-        if (cancelled) return;
+        if (cancelled || forcedScrollGeneration !== forcedScrollGenerationRef.current) return;
         attempts += 1;
         forceScrollToEnd(rows.length, "initial-rows-scroll-to-end");
         if (attempts < 3) {
@@ -574,9 +638,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     let attempts = 0;
     const frameIds: number[] = [];
     const timeoutIds: number[] = [];
+    const forcedScrollGeneration = forcedScrollGenerationRef.current;
     const scheduleScroll = () => {
       const frameId = window.requestAnimationFrame(() => {
-        if (cancelled) return;
+        if (
+          cancelled ||
+          forcedScrollGeneration !== forcedScrollGenerationRef.current ||
+          Date.now() > stickToEndDeadlineMsRef.current
+        ) {
+          return;
+        }
         attempts += 1;
         forceScrollToEnd(rows.length, "submit-stick-animation-frame");
         if (attempts < TIMELINE_SUBMIT_STICK_TO_END_FRAME_ATTEMPTS) {
@@ -703,9 +774,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           maintainScrollAtEndThreshold={TIMELINE_MAINTAIN_SCROLL_AT_END_THRESHOLD}
           maintainVisibleContentPosition={TIMELINE_MAINTAIN_VISIBLE_CONTENT_POSITION}
           onScroll={handleScroll}
-          onWheel={handleUserScrollIntent}
-          onTouchMove={handleUserScrollIntent}
+          onWheel={handleWheel}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+          onTouchCancel={handleTouchEnd}
           onPointerDown={handlePointerDown}
+          onPointerUp={handlePointerEnd}
+          onPointerCancel={handlePointerEnd}
           onKeyDown={handleKeyDown}
           className="h-full overflow-x-hidden overscroll-y-contain px-3 sm:px-5"
           ListHeaderComponent={TIMELINE_LIST_HEADER}

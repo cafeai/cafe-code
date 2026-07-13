@@ -1,7 +1,23 @@
 import type { EditorId } from "@cafecode/contracts";
 import type { DefaultEditorSelection } from "@cafecode/contracts/settings";
 
-const TIMELINE_AT_END_TOLERANCE_PX = 720;
+// Tail following must stop as soon as the user moves far enough to review an
+// earlier line. A viewport-sized tolerance makes ordinary review scrolling
+// indistinguishable from being pinned to the tail.
+const TIMELINE_AT_END_TOLERANCE_PX = 8;
+
+export function shouldPreserveTimelineScrollReviewIntent(input: {
+  readonly lastKnownAtEnd: boolean;
+  readonly userScrollIntentSinceReset: boolean;
+  readonly userScrollIntentSettleUntilMs: number;
+  readonly nowMs: number;
+}): boolean {
+  return (
+    input.lastKnownAtEnd &&
+    input.userScrollIntentSinceReset &&
+    input.nowMs <= input.userScrollIntentSettleUntilMs
+  );
+}
 
 export function isTimelineScrolledToEnd(state: {
   readonly isAtEnd: boolean;

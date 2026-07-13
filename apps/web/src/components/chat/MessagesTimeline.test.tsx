@@ -148,7 +148,7 @@ function buildAssistantTimelineEntry(text: string, options?: { streaming?: boole
 
 describe("MessagesTimeline file open helpers", () => {
   it(
-    "treats near-bottom scroll positions as already at the end",
+    "uses only a small layout-jitter tolerance when resolving the timeline tail",
     async () => {
       const { isTimelineScrolledToEnd } = await import("./MessagesTimeline.helpers");
 
@@ -157,7 +157,7 @@ describe("MessagesTimeline file open helpers", () => {
         isTimelineScrolledToEnd({
           isAtEnd: false,
           contentLength: 2_000,
-          scroll: 820,
+          scroll: 1_494,
           scrollLength: 500,
         }),
       ).toBe(true);
@@ -165,7 +165,7 @@ describe("MessagesTimeline file open helpers", () => {
         isTimelineScrolledToEnd({
           isAtEnd: false,
           contentLength: 2_000,
-          scroll: 720,
+          scroll: 1_490,
           scrollLength: 500,
         }),
       ).toBe(false);
@@ -173,6 +173,27 @@ describe("MessagesTimeline file open helpers", () => {
     },
     DYNAMIC_IMPORT_TEST_TIMEOUT_MS,
   );
+
+  it("preserves an upward review gesture while stale at-bottom reports settle", async () => {
+    const { shouldPreserveTimelineScrollReviewIntent } = await import("./MessagesTimeline.helpers");
+
+    expect(
+      shouldPreserveTimelineScrollReviewIntent({
+        lastKnownAtEnd: true,
+        userScrollIntentSinceReset: true,
+        userScrollIntentSettleUntilMs: 1_250,
+        nowMs: 1_100,
+      }),
+    ).toBe(true);
+    expect(
+      shouldPreserveTimelineScrollReviewIntent({
+        lastKnownAtEnd: true,
+        userScrollIntentSinceReset: true,
+        userScrollIntentSettleUntilMs: 1_250,
+        nowMs: 1_251,
+      }),
+    ).toBe(false);
+  });
 
   it("uses the configured editor only when that editor is available", async () => {
     const { resolveFileOpenEditor } = await import("./MessagesTimeline.helpers");
