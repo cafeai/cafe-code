@@ -509,7 +509,9 @@ export function deriveWorkLogEntries(
   const entries = ordered
     .filter((activity) => (latestTurnId ? activity.turnId === latestTurnId : true))
     .filter((activity) => activity.kind !== "tool.started" || isContextCompactionActivity(activity))
-    .filter((activity) => activity.kind !== "task.started")
+    .filter(
+      (activity) => activity.kind !== "task.started" || isUserVisibleTaskStartedActivity(activity),
+    )
     .filter((activity) => activity.kind !== "context-window.updated")
     .filter((activity) => activity.summary !== "Checkpoint captured")
     .filter((activity) => !isPlanBoundaryToolActivity(activity))
@@ -607,6 +609,18 @@ function isContextCompactionActivity(activity: OrchestrationThreadActivity): boo
       ? (activity.payload as Record<string, unknown>)
       : null;
   return payload?.itemType === "context_compaction" || activity.kind === "context-compaction";
+}
+
+function isUserVisibleTaskStartedActivity(activity: OrchestrationThreadActivity): boolean {
+  const payload =
+    activity.payload && typeof activity.payload === "object"
+      ? (activity.payload as Record<string, unknown>)
+      : null;
+  // The Codex TUI gives an in-progress guardian review visible status while
+  // keeping ordinary internal task starts out of conversation history. Cafe's
+  // work log follows the same distinction instead of hiding the review until
+  // its terminal notification arrives.
+  return payload?.taskType === "approval-review";
 }
 
 function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWorkLogEntry {

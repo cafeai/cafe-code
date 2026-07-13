@@ -86,6 +86,7 @@ const CODEX_TRANSPORT_POLICY_FILENAME = "codex-transport-policy.json";
 const CODEX_TRANSPORT_POLICY_PERSISTENCE_ENV = "CAFE_CODE_PERSIST_CODEX_HTTP_FALLBACK";
 const CODEX_WEBSOCKET_FALLBACK_REASON = "responses_websocket_stream_disconnected";
 const CODEX_TURN_DIFF_PREVIEW_CHARS = 4_096;
+const CODEX_HOOK_OUTPUT_PREVIEW_CHARS = 4_096;
 
 class CodexTransportPolicyFileError extends Data.TaggedError("CodexTransportPolicyFileError")<{
   readonly cause: unknown;
@@ -565,6 +566,7 @@ function toCanonicalItemType(raw: string | undefined | null): CanonicalItemType 
   if (type.includes("collab") || type.includes("sub agent activity"))
     return "collab_agent_tool_call";
   if (type.includes("web search")) return "web_search";
+  if (type.includes("image generation")) return "image_generation";
   if (type.includes("image")) return "image_view";
   if (type.includes("review entered")) return "review_entered";
   if (type.includes("review exited")) return "review_exited";
@@ -597,6 +599,8 @@ function itemTitle(itemType: CanonicalItemType): string | undefined {
       return "Web search";
     case "image_view":
       return "Image view";
+    case "image_generation":
+      return "Image generation";
     case "context_compaction":
       return "Context compaction";
     case "error":
@@ -625,6 +629,8 @@ function itemDetail(item: CodexLifecycleItem): string | undefined {
     "text" in item ? item.text : undefined,
     "path" in item ? item.path : undefined,
     "prompt" in item ? item.prompt : undefined,
+    "revisedPrompt" in item ? item.revisedPrompt : undefined,
+    "savedPath" in item ? item.savedPath : undefined,
   ];
   for (const candidate of candidates) {
     const trimmed = typeof candidate === "string" ? trimText(candidate) : undefined;
@@ -632,6 +638,80 @@ function itemDetail(item: CodexLifecycleItem): string | undefined {
     return trimmed;
   }
   return undefined;
+}
+
+type CodexHookRun =
+  | EffectCodexSchema.V2HookStartedNotification["run"]
+  | EffectCodexSchema.V2HookCompletedNotification["run"];
+
+function codexHookName(run: CodexHookRun): string {
+  return `${run.handlerType} hook`;
+}
+
+function codexHookOutput(run: CodexHookRun): string | undefined {
+  // Hook output can contain arbitrary command output. Match the TUI's visible
+  // lifecycle without allowing one noisy hook to inflate Cafe's durable work
+  // log or renderer projection indefinitely.
+  const output = [
+    trimText(run.statusMessage),
+    ...run.entries.map((entry) => {
+      const text = trimText(entry.text);
+      return text ? `${entry.kind}: ${text}` : undefined;
+    }),
+  ]
+    .filter((entry): entry is string => entry !== undefined)
+    .join("\n");
+  if (!output) {
+    return undefined;
+  }
+  return output.length > CODEX_HOOK_OUTPUT_PREVIEW_CHARS
+    ? `${output.slice(0, CODEX_HOOK_OUTPUT_PREVIEW_CHARS - 3)}...`
+    : output;
+}
+
+function codexHookOutcome(
+  status: EffectCodexSchema.V2HookCompletedNotification["run"]["status"],
+): "success" | "error" | "cancelled" {
+  switch (status) {
+    case "completed":
+      return "success";
+    case "failed":
+    case "blocked":
+      return "error";
+    case "running":
+    case "stopped":
+      return "cancelled";
+  }
+}
+
+function codexApprovalReviewTaskId(reviewId: string): RuntimeTaskId {
+  return RuntimeTaskId.make(`codex-auto-approval-review:${reviewId}`);
+}
+
+function codexApprovalReviewCompletionStatus(
+  status: EffectCodexSchema.V2ItemGuardianApprovalReviewCompletedNotification["review"]["status"],
+): "completed" | "failed" | "stopped" {
+  switch (status) {
+    case "approved":
+      return "completed";
+    case "denied":
+    case "timedOut":
+      return "failed";
+    case "aborted":
+    case "inProgress":
+      return "stopped";
+  }
+}
+
+function codexApprovalReviewSummary(
+  review: EffectCodexSchema.V2ItemGuardianApprovalReviewCompletedNotification["review"],
+): string {
+  const rationale = trimText(review.rationale);
+  if (rationale) {
+    return rationale;
+  }
+  const status = review.status.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+  return `Automatic approval review ${status}`;
 }
 
 function toRequestTypeFromMethod(method: string): CanonicalRequestType {
@@ -1142,6 +1222,85 @@ function mapToRuntimeEvents(
         turnId,
         type: "turn.started",
         payload: {},
+      },
+    ];
+  }
+
+  if (event.method === "hook/started") {
+    const payload = readPayload(EffectCodexSchema.V2HookStartedNotification, event.payload);
+    if (!payload) {
+      return [];
+    }
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "hook.started",
+        payload: {
+          hookId: payload.run.id,
+          hookName: codexHookName(payload.run),
+          hookEvent: payload.run.eventName,
+        },
+      },
+    ];
+  }
+
+  if (event.method === "hook/completed") {
+    const payload = readPayload(EffectCodexSchema.V2HookCompletedNotification, event.payload);
+    if (!payload) {
+      return [];
+    }
+    const output = codexHookOutput(payload.run);
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "hook.completed",
+        payload: {
+          hookId: payload.run.id,
+          outcome: codexHookOutcome(payload.run.status),
+          ...(output ? { output } : {}),
+        },
+      },
+    ];
+  }
+
+  if (event.method === "item/autoApprovalReview/started") {
+    const payload = readPayload(
+      EffectCodexSchema.V2ItemGuardianApprovalReviewStartedNotification,
+      event.payload,
+    );
+    if (!payload) {
+      return [];
+    }
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "task.started",
+        payload: {
+          taskId: codexApprovalReviewTaskId(payload.reviewId),
+          taskType: "approval-review",
+          description: "Automatic approval review started",
+        },
+      },
+    ];
+  }
+
+  if (event.method === "item/autoApprovalReview/completed") {
+    const payload = readPayload(
+      EffectCodexSchema.V2ItemGuardianApprovalReviewCompletedNotification,
+      event.payload,
+    );
+    if (!payload) {
+      return [];
+    }
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "task.completed",
+        payload: {
+          taskId: codexApprovalReviewTaskId(payload.reviewId),
+          status: codexApprovalReviewCompletionStatus(payload.review.status),
+          summary: codexApprovalReviewSummary(payload.review),
+        },
       },
     ];
   }
@@ -1824,8 +1983,13 @@ function mapToRuntimeEvents(
     ];
   }
 
-  if (event.method === "warning") {
-    const message = readPayloadMessage(event) ?? "Codex runtime warning";
+  if (event.method === "warning" || event.method === "guardianWarning") {
+    const guardianPayload =
+      event.method === "guardianWarning"
+        ? readPayload(EffectCodexSchema.V2GuardianWarningNotification, event.payload)
+        : undefined;
+    const message =
+      guardianPayload?.message ?? readPayloadMessage(event) ?? "Codex runtime warning";
     return [
       {
         type: "runtime.warning",

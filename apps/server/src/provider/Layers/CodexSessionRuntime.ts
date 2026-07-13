@@ -438,7 +438,7 @@ export interface CodexPendingSteerProcessing {
   readonly ackToProviderItemMs?: number;
 }
 
-type CodexServerNotification = {
+export type CodexServerNotification = {
   readonly method: string;
   readonly params: unknown;
 };
@@ -1342,9 +1342,13 @@ function readNotificationThreadId(notification: CodexServerNotification): string
     case "error":
     case "thread/status/changed":
     case "thread/archived":
+    case "thread/deleted":
     case "thread/unarchived":
     case "thread/closed":
     case "thread/name/updated":
+    case "thread/goal/updated":
+    case "thread/goal/cleared":
+    case "thread/settings/updated":
     case "thread/tokenUsage/updated":
     case "turn/started":
     case "hook/started":
@@ -1370,6 +1374,10 @@ function readNotificationThreadId(notification: CodexServerNotification): string
     case "item/reasoning/summaryPartAdded":
     case "item/reasoning/textDelta":
     case "thread/compacted":
+    case "model/rerouted":
+    case "model/verification":
+    case "model/safetyBuffering/updated":
+    case "turn/moderationMetadata":
     case "thread/realtime/started":
     case "thread/realtime/itemAdded":
     case "thread/realtime/transcript/delta":
@@ -1378,13 +1386,19 @@ function readNotificationThreadId(notification: CodexServerNotification): string
     case "thread/realtime/sdp":
     case "thread/realtime/error":
     case "thread/realtime/closed":
+    case "guardianWarning":
+      return readNotificationParamString(notification, "threadId");
+    case "warning":
+      // Warning notifications are global when `threadId` is absent. This
+      // mirrors the TUI's target resolver so a process-level diagnostic is
+      // never mistaken for output from a registered child conversation.
       return readNotificationParamString(notification, "threadId");
     default:
       return undefined;
   }
 }
 
-function readRouteFields(notification: CodexServerNotification): {
+export function readCodexNotificationRouteFields(notification: CodexServerNotification): {
   readonly turnId: TurnId | undefined;
   readonly itemId: ProviderItemId | undefined;
 } {
@@ -1396,9 +1410,35 @@ function readRouteFields(notification: CodexServerNotification): {
       };
     case "turn/started":
     case "turn/completed":
+    case "model/rerouted":
+    case "model/verification":
+    case "model/safetyBuffering/updated":
+    case "turn/moderationMetadata":
       return {
         turnId: readNotificationTurnId(notification),
         itemId: undefined,
+      };
+    case "hook/started":
+    case "hook/completed": {
+      const hookId = readNotificationNestedString(notification, "run", "id");
+      return {
+        turnId: readNotificationTurnId(notification),
+        itemId: providerItemIdFromString(hookId),
+      };
+    }
+    case "item/autoApprovalReview/started":
+    case "item/autoApprovalReview/completed": {
+      const reviewId = readNotificationParamString(notification, "reviewId");
+      return {
+        turnId: readNotificationTurnId(notification),
+        itemId: providerItemIdFromString(reviewId),
+      };
+    }
+    case "rawResponseItem/completed":
+    case "item/mcpToolCall/progress":
+      return {
+        turnId: readNotificationTurnId(notification),
+        itemId: readNotificationItemId(notification),
       };
     case "error":
       return {
@@ -1443,6 +1483,10 @@ function readRouteFields(notification: CodexServerNotification): {
   }
 }
 
+function providerItemIdFromString(value: string | undefined): ProviderItemId | undefined {
+  return value ? ProviderItemId.make(value) : undefined;
+}
+
 export function rememberCodexChildConversationTurns(
   childConversationTurns: Map<string, TurnId>,
   notification: CodexServerNotification,
@@ -1472,7 +1516,7 @@ export function rememberCodexChildConversationTurns(
     return;
   }
 
-  // Upstream Codex TUI 0.144.1 records both multi-agent protocol shapes in
+  // Upstream Codex TUI 0.144.2 records both multi-agent protocol shapes in
   // `AgentNavigationState`: legacy collab tool calls identify receivers through
   // `receiverThreadIds`, while multi_agents_v2 emits a completed
   // `subAgentActivity` item with the new child's `agentThreadId` immediately
@@ -3193,7 +3237,7 @@ export const makeCodexSessionRuntime = (
         );
 
         const payload = notification.params;
-        const route = readRouteFields(notification);
+        const route = readCodexNotificationRouteFields(notification);
         const rootProviderThreadId = yield* currentSessionProviderThreadId;
         const collabReceiverTurns = yield* Ref.get(collabReceiverTurnsRef);
         const childRoute = resolveCodexChildConversationNotification(

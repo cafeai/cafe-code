@@ -538,6 +538,180 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("maps image generation items without conflating them with image views", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-image-generation-complete"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/completed",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("image-generation-1"),
+        payload: {
+          completedAtMs: 1_778_000_000_000,
+          threadId: "provider-thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "imageGeneration",
+            id: "image-generation-1",
+            status: "completed",
+            result: "base64-result-is-not-used-as-the-visible-detail",
+            revisedPrompt: "A precise technical diagram",
+            savedPath: "/tmp/image-generation-1.png",
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "item.completed") {
+        return;
+      }
+      assert.equal(firstEvent.value.payload.itemType, "image_generation");
+      assert.equal(firstEvent.value.payload.title, "Image generation");
+      assert.equal(firstEvent.value.payload.detail, "A precise technical diagram");
+    }),
+  );
+
+  it.effect("maps Codex hook lifecycle into canonical hook events", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-hook-complete"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "hook/completed",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("hook-1"),
+        payload: {
+          threadId: "provider-thread-1",
+          turnId: "turn-1",
+          run: {
+            id: "hook-1",
+            eventName: "postToolUse",
+            scope: "turn",
+            source: "project",
+            sourcePath: "/tmp/hooks.json",
+            handlerType: "command",
+            executionMode: "sync",
+            status: "failed",
+            statusMessage: "Hook rejected the output",
+            startedAt: 1_778_000_000,
+            completedAt: 1_778_000_001,
+            durationMs: 1_000,
+            displayOrder: 0,
+            entries: [{ kind: "error", text: "Validation failed" }],
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "hook.completed") {
+        return;
+      }
+      assert.equal(firstEvent.value.turnId, "turn-1");
+      assert.equal(firstEvent.value.payload.hookId, "hook-1");
+      assert.equal(firstEvent.value.payload.outcome, "error");
+      assert.equal(
+        firstEvent.value.payload.output,
+        "Hook rejected the output\nerror: Validation failed",
+      );
+    }),
+  );
+
+  it.effect("maps automatic approval review lifecycle into canonical task activity", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-approval-review-complete"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/autoApprovalReview/completed",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("review-1"),
+        payload: {
+          threadId: "provider-thread-1",
+          turnId: "turn-1",
+          reviewId: "review-1",
+          targetItemId: "command-1",
+          startedAtMs: 1_778_000_000_000,
+          completedAtMs: 1_778_000_001_000,
+          decisionSource: "agent",
+          review: {
+            status: "denied",
+            riskLevel: "high",
+            userAuthorization: "low",
+            rationale: "The command exceeds the current authorization level.",
+          },
+          action: {
+            type: "command",
+            source: "shell",
+            command: "dangerous-command",
+            cwd: "/tmp",
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "task.completed") {
+        return;
+      }
+      assert.equal(firstEvent.value.turnId, "turn-1");
+      assert.equal(firstEvent.value.payload.taskId, "codex-auto-approval-review:review-1");
+      assert.equal(firstEvent.value.payload.status, "failed");
+      assert.equal(
+        firstEvent.value.payload.summary,
+        "The command exceeds the current authorization level.",
+      );
+    }),
+  );
+
+  it.effect("keeps Codex guardian warnings visible as recoverable work-log warnings", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-guardian-warning"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "guardianWarning",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        payload: {
+          threadId: "provider-thread-1",
+          message: "Automatic approval review denied the requested action.",
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "runtime.warning") {
+        return;
+      }
+      assert.equal(
+        firstEvent.value.payload.message,
+        "Automatic approval review denied the requested action.",
+      );
+    }),
+  );
+
   it.effect("maps Codex multi-agent-v2 activity into the parent work log", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

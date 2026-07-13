@@ -658,7 +658,7 @@ describe("deriveWorkLogEntries", () => {
     expect(entries.map((entry) => entry.id)).toEqual(["tool-complete"]);
   });
 
-  it("omits task.started but shows task.progress and task.completed", () => {
+  it("omits ordinary task.started but shows task.progress and task.completed", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
         id: "task-start",
@@ -685,6 +685,27 @@ describe("deriveWorkLogEntries", () => {
 
     const entries = deriveWorkLogEntries(activities, undefined);
     expect(entries.map((entry) => entry.id)).toEqual(["task-progress", "task-complete"]);
+  });
+
+  it("shows Codex guardian approval review starts", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "guardian-review-start",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "task.started",
+        summary: "Approval review started",
+        tone: "info",
+        payload: {
+          taskId: "codex-auto-approval-review:review-1",
+          taskType: "approval-review",
+          detail: "Automatic approval review started",
+        },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities, undefined);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.label).toBe("Approval review started");
   });
 
   it("uses payload summary as label for task entries when available", () => {

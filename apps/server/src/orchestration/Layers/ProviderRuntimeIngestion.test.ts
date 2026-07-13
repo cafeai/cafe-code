@@ -4160,6 +4160,63 @@ describe("ProviderRuntimeIngestion", () => {
     ).toBe("# Plan title");
   });
 
+  it("projects provider hook lifecycle into bounded work-log activities", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "hook.started",
+      eventId: asEventId("evt-hook-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-hook-1"),
+      payload: {
+        hookId: "hook-1",
+        hookName: "command hook",
+        hookEvent: "postToolUse",
+      },
+    });
+
+    harness.emit({
+      type: "hook.completed",
+      eventId: asEventId("evt-hook-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-hook-1"),
+      payload: {
+        hookId: "hook-1",
+        outcome: "error",
+        output: "Hook rejected the output because validation failed.",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-hook-completed",
+      ),
+    );
+    const started = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.id === "evt-hook-started",
+    );
+    const completed = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.id === "evt-hook-completed",
+    );
+    const completedPayload =
+      completed?.payload && typeof completed.payload === "object"
+        ? (completed.payload as Record<string, unknown>)
+        : undefined;
+
+    expect(started?.kind).toBe("hook.started");
+    expect(started?.summary).toBe("command hook started");
+    expect(started?.turnId).toBe("turn-hook-1");
+    expect(completed?.kind).toBe("hook.completed");
+    expect(completed?.tone).toBe("error");
+    expect(completed?.summary).toBe("Hook failed");
+    expect(completedPayload?.detail).toBe("Hook rejected the output because validation failed.");
+  });
+
   it("projects structured user input request and resolution as thread activities", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

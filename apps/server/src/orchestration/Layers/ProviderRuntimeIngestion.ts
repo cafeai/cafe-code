@@ -404,6 +404,8 @@ function runtimeEventCarriesActiveTurnWork(event: ProviderRuntimeEvent): boolean
     case "item.updated":
     case "task.started":
     case "task.progress":
+    case "hook.started":
+    case "hook.progress":
       return true;
     default:
       return false;
@@ -601,9 +603,11 @@ function runtimeEventToActivities(
           summary:
             event.payload.taskType === "plan"
               ? "Plan task started"
-              : event.payload.taskType
-                ? `${event.payload.taskType} task started`
-                : "Task started",
+              : event.payload.taskType === "approval-review"
+                ? "Approval review started"
+                : event.payload.taskType
+                  ? `${event.payload.taskType} task started`
+                  : "Task started",
           payload: {
             taskId: event.payload.taskId,
             ...(event.payload.taskType ? { taskType: event.payload.taskType } : {}),
@@ -656,6 +660,70 @@ function runtimeEventToActivities(
             status: event.payload.status,
             ...(event.payload.summary ? { detail: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
+    case "hook.started": {
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "tool",
+          kind: "hook.started",
+          summary: `${event.payload.hookName} started`,
+          payload: {
+            hookId: event.payload.hookId,
+            hookName: event.payload.hookName,
+            hookEvent: event.payload.hookEvent,
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
+    case "hook.progress": {
+      const output = event.payload.output ?? event.payload.stdout ?? event.payload.stderr;
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "tool",
+          kind: "hook.progress",
+          summary: "Hook progress",
+          payload: {
+            hookId: event.payload.hookId,
+            ...(output ? { detail: truncateDetail(output) } : {}),
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
+    case "hook.completed": {
+      const output = event.payload.output ?? event.payload.stdout ?? event.payload.stderr;
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: event.payload.outcome === "error" ? "error" : "tool",
+          kind: "hook.completed",
+          summary:
+            event.payload.outcome === "error"
+              ? "Hook failed"
+              : event.payload.outcome === "cancelled"
+                ? "Hook stopped"
+                : "Hook completed",
+          payload: {
+            hookId: event.payload.hookId,
+            outcome: event.payload.outcome,
+            ...(output ? { detail: truncateDetail(output) } : {}),
+            ...(event.payload.exitCode !== undefined ? { exitCode: event.payload.exitCode } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,

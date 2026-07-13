@@ -27,6 +27,7 @@ import {
   isCodexUserMessageItemType,
   openCodexThread,
   readCodexExpectedActiveTurnMismatchActualTurnId,
+  readCodexNotificationRouteFields,
   readCodexSteerExpectedTurnMismatchActualTurnId,
   rememberCodexChildConversationTurns,
   resolveCodexChildConversationNotification,
@@ -173,6 +174,23 @@ describe("Codex child conversation routing", () => {
         suppressLifecycle: false,
       },
     );
+    assert.deepStrictEqual(
+      resolveCodexChildConversationNotification(
+        routes,
+        {
+          method: "guardianWarning",
+          params: {
+            threadId: "thread-child",
+            message: "Automatic approval review denied the requested action.",
+          },
+        },
+        "thread-parent",
+      ),
+      {
+        parentTurnId,
+        suppressLifecycle: false,
+      },
+    );
   });
 
   it("keeps nested subagent output on the original visible parent turn", () => {
@@ -250,6 +268,69 @@ describe("Codex child conversation routing", () => {
         "thread-parent",
       ),
       undefined,
+    );
+  });
+});
+
+describe("Codex notification route fields", () => {
+  it("retains turn and native item identities for hook and approval review lifecycle", () => {
+    assert.deepStrictEqual(
+      readCodexNotificationRouteFields({
+        method: "hook/started",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          run: { id: "hook-1" },
+        },
+      }),
+      {
+        turnId: TurnId.make("turn-1"),
+        itemId: ProviderItemId.make("hook-1"),
+      },
+    );
+    assert.deepStrictEqual(
+      readCodexNotificationRouteFields({
+        method: "item/autoApprovalReview/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          reviewId: "review-1",
+        },
+      }),
+      {
+        turnId: TurnId.make("turn-1"),
+        itemId: ProviderItemId.make("review-1"),
+      },
+    );
+  });
+
+  it("retains turn and item identities for progress and model lifecycle notifications", () => {
+    assert.deepStrictEqual(
+      readCodexNotificationRouteFields({
+        method: "item/mcpToolCall/progress",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "mcp-1",
+        },
+      }),
+      {
+        turnId: TurnId.make("turn-1"),
+        itemId: ProviderItemId.make("mcp-1"),
+      },
+    );
+    assert.deepStrictEqual(
+      readCodexNotificationRouteFields({
+        method: "model/rerouted",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+        },
+      }),
+      {
+        turnId: TurnId.make("turn-1"),
+        itemId: undefined,
+      },
     );
   });
 });
