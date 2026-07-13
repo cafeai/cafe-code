@@ -510,6 +510,19 @@ function normalizeCodexModelSlug(
   return normalized;
 }
 
+export function resolveCodexThreadSettingsSessionModel(input: {
+  readonly currentProviderThreadId: string | undefined;
+  readonly notification: EffectCodexSchema.V2ThreadSettingsUpdatedNotification;
+}): string | undefined {
+  if (
+    input.currentProviderThreadId &&
+    input.notification.threadId !== input.currentProviderThreadId
+  ) {
+    return undefined;
+  }
+  return normalizeCodexModelSlug(input.notification.threadSettings.model);
+}
+
 function readResumeCursorThreadId(
   resumeCursor: ProviderSession["resumeCursor"],
 ): string | undefined {
@@ -1516,7 +1529,7 @@ export function rememberCodexChildConversationTurns(
     return;
   }
 
-  // Upstream Codex TUI 0.144.2 records both multi-agent protocol shapes in
+  // Upstream Codex TUI 0.144.3 records both multi-agent protocol shapes in
   // `AgentNavigationState`: legacy collab tool calls identify receivers through
   // `receiverThreadIds`, while multi_agents_v2 emits a completed
   // `subAgentActivity` item with the new child's `agentThreadId` immediately
@@ -3322,6 +3335,27 @@ export const makeCodexSessionRuntime = (
           return updateSession(sessionRef, {
             resumeCursor: { threadId: payload.thread.id },
           });
+        }),
+      ),
+    );
+
+    yield* client.handleServerNotification("thread/settings/updated", (payload) =>
+      currentSessionProviderThreadId.pipe(
+        Effect.flatMap((providerThreadId) => {
+          const model = resolveCodexThreadSettingsSessionModel({
+            currentProviderThreadId: providerThreadId,
+            notification: payload,
+          });
+          if (!model) {
+            return Effect.void;
+          }
+
+          // Codex 0.144.3 persists effective model/effort settings in thread
+          // metadata and restores them when resume has no explicit override.
+          // Keep Cafe's live session model aligned with the app-server's
+          // authoritative notification so later turns cannot fall back to a
+          // stale pre-resume or pre-override model.
+          return updateSession(sessionRef, { model });
         }),
       ),
     );

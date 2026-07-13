@@ -495,6 +495,81 @@ function startLifecycleRuntime() {
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect("maps effective Codex thread settings without persisting sensitive fields", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-thread-settings-updated"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "thread/settings/updated",
+        threadId: asThreadId("thread-1"),
+        payload: {
+          threadId: "provider-thread-1",
+          threadSettings: {
+            activePermissionProfile: { id: ":workspace", extends: null },
+            approvalPolicy: "on-request",
+            approvalsReviewer: "user",
+            collaborationMode: {
+              mode: "default",
+              settings: {
+                model: "gpt-5.4",
+                reasoning_effort: "ultra",
+                developer_instructions: "private instructions must not enter debug logs",
+              },
+            },
+            cwd: "/private/workspace",
+            effort: "ultra",
+            model: "gpt-5.4",
+            modelProvider: "openai",
+            personality: "pragmatic",
+            sandboxPolicy: {
+              type: "workspaceWrite",
+              networkAccess: true,
+              writableRoots: ["/private/workspace", "/private/secondary-root"],
+            },
+            serviceTier: "fast",
+            summary: "detailed",
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "session.configured") {
+        return;
+      }
+
+      assert.deepStrictEqual(firstEvent.value.payload.config, {
+        model: "gpt-5.4",
+        modelProvider: "openai",
+        effort: "ultra",
+        serviceTier: "fast",
+        personality: "pragmatic",
+        summary: "detailed",
+        approvalPolicy: "on-request",
+        approvalsReviewer: "user",
+        activePermissionProfile: { id: ":workspace", extends: null },
+        sandboxPolicy: { type: "workspaceWrite", networkAccess: true },
+        collaborationMode: {
+          mode: "default",
+          settings: { model: "gpt-5.4", reasoningEffort: "ultra" },
+        },
+      });
+      const rawPayload = firstEvent.value.raw?.payload as Record<string, unknown>;
+      const rawSettings = rawPayload.threadSettings as Record<string, unknown>;
+      const rawSandbox = rawSettings.sandboxPolicy as Record<string, unknown>;
+      const rawCollaboration = rawSettings.collaborationMode as Record<string, unknown>;
+      const rawCollaborationSettings = rawCollaboration.settings as Record<string, unknown>;
+      assert.equal(Object.hasOwn(rawSettings, "cwd"), false);
+      assert.equal(Object.hasOwn(rawSandbox, "writableRoots"), false);
+      assert.equal(Object.hasOwn(rawCollaborationSettings, "developer_instructions"), false);
+    }),
+  );
+
   it.effect("maps completed agent message items to canonical item.completed events", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
@@ -2448,8 +2523,34 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
         provider: ProviderDriverKind.make("codex"),
         threadId: asThreadId("thread-logger"),
         createdAt: "2026-01-01T00:00:00.000Z",
-        method: "process/stderr",
-        message: "native flush test",
+        method: "thread/settings/updated",
+        payload: {
+          threadId: "provider-thread-logger",
+          threadSettings: {
+            activePermissionProfile: null,
+            approvalPolicy: "never",
+            approvalsReviewer: "user",
+            collaborationMode: {
+              mode: "default",
+              settings: {
+                model: "gpt-5.4",
+                reasoning_effort: "high",
+                developer_instructions: "native-log-secret-instructions",
+              },
+            },
+            cwd: "/native-log-secret-cwd",
+            effort: "high",
+            model: "gpt-5.4",
+            modelProvider: "openai",
+            personality: null,
+            sandboxPolicy: {
+              type: "workspaceWrite",
+              writableRoots: ["/native-log-secret-root"],
+            },
+            serviceTier: null,
+            summary: "auto",
+          },
+        },
       } satisfies ProviderEvent);
       yield* Fiber.join(firstEventFiber);
 
@@ -2459,7 +2560,8 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
       const threadLogPath = path.join(tempDir, "thread-logger.log");
       assert.equal(fs.existsSync(threadLogPath), true);
       const contents = fs.readFileSync(threadLogPath, "utf8");
-      assert.match(contents, /NTIVE: .*"message":"native flush test"/);
+      assert.match(contents, /NTIVE: .*"model":"gpt-5\.4"/);
+      assert.doesNotMatch(contents, /native-log-secret/);
     } finally {
       if (!scopeClosed) {
         yield* Scope.close(scope, Exit.void);

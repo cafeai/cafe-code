@@ -865,7 +865,87 @@ function summarizeCodexTurnDiffPayload(payload: {
   };
 }
 
+function summarizeCodexThreadSettingsPayload(
+  payload: EffectCodexSchema.V2ThreadSettingsUpdatedNotification,
+): {
+  readonly threadId: string;
+  readonly threadSettings: Record<string, unknown>;
+} {
+  const settings = payload.threadSettings;
+  const collaborationSettings = settings.collaborationMode.settings;
+  const sandboxPolicy = settings.sandboxPolicy;
+  const sandboxNetworkAccess =
+    "networkAccess" in sandboxPolicy ? sandboxPolicy.networkAccess : undefined;
+
+  return {
+    threadId: payload.threadId,
+    threadSettings: {
+      model: settings.model,
+      modelProvider: settings.modelProvider,
+      effort: settings.effort ?? null,
+      serviceTier: settings.serviceTier ?? null,
+      personality: settings.personality ?? null,
+      summary: settings.summary ?? null,
+      approvalPolicy: settings.approvalPolicy,
+      approvalsReviewer: settings.approvalsReviewer,
+      activePermissionProfile: settings.activePermissionProfile ?? null,
+      sandboxPolicy: {
+        type: sandboxPolicy.type,
+        ...(sandboxNetworkAccess !== undefined ? { networkAccess: sandboxNetworkAccess } : {}),
+      },
+      collaborationMode: {
+        mode: settings.collaborationMode.mode,
+        settings: {
+          model: collaborationSettings.model,
+          reasoningEffort: collaborationSettings.reasoning_effort ?? null,
+        },
+      },
+    },
+  };
+}
+
+function replaceSensitiveNativeEventPayload(
+  event: ProviderEvent,
+  payload: Record<string, unknown>,
+): ProviderEvent {
+  // Rebuild from identity/correlation metadata instead of spreading the raw
+  // event. A malformed future notification must not smuggle sensitive content
+  // through optional message or text-delta fields after payload redaction.
+  return {
+    id: event.id,
+    kind: event.kind,
+    provider: event.provider,
+    ...(event.providerInstanceId ? { providerInstanceId: event.providerInstanceId } : {}),
+    threadId: event.threadId,
+    createdAt: event.createdAt,
+    method: event.method,
+    ...(event.turnId ? { turnId: event.turnId } : {}),
+    ...(event.itemId ? { itemId: event.itemId } : {}),
+    ...(event.requestId ? { requestId: event.requestId } : {}),
+    ...(event.requestKind ? { requestKind: event.requestKind } : {}),
+    payload,
+  };
+}
+
 function sanitizeNativeProviderEventForLog(event: ProviderEvent): ProviderEvent {
+  if (event.method === "thread/settings/updated") {
+    const payload = readPayload(
+      EffectCodexSchema.V2ThreadSettingsUpdatedNotification,
+      event.payload,
+    );
+    if (!payload) {
+      return replaceSensitiveNativeEventPayload(event, {
+        redacted: true,
+        reason: "invalid-thread-settings-payload",
+      });
+    }
+
+    // Upstream includes cwd, writable roots, and collaboration developer
+    // instructions in this notification. Those values are operationally useful
+    // to app-server, but they do not belong in Cafe's durable native/debug log.
+    return replaceSensitiveNativeEventPayload(event, summarizeCodexThreadSettingsPayload(payload));
+  }
+
   if (event.method !== "turn/diff/updated") {
     return event;
   }
@@ -1186,6 +1266,33 @@ function mapToRuntimeEvents(
                 },
               }
             : {}),
+        },
+      },
+    ];
+  }
+
+  if (event.method === "thread/settings/updated") {
+    const payload = readPayload(
+      EffectCodexSchema.V2ThreadSettingsUpdatedNotification,
+      event.payload,
+    );
+    if (!payload) {
+      return [];
+    }
+    const sanitizedPayload = summarizeCodexThreadSettingsPayload(payload);
+    const config = sanitizedPayload.threadSettings;
+
+    return [
+      {
+        type: "session.configured",
+        ...runtimeEventBase(event, canonicalThreadId, {
+          rawPayload: sanitizedPayload,
+        }),
+        payload: {
+          // Codex 0.144.3 makes app-server's effective thread settings the
+          // resume authority. Preserve that state quietly for diagnostics,
+          // without creating transcript/work-log noise like the upstream TUI.
+          config,
         },
       },
     ];

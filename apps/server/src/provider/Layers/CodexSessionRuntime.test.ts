@@ -7,6 +7,7 @@ import { ProviderInstanceId, ProviderItemId, ThreadId, TurnId } from "@cafecode/
 import { CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT } from "@cafecode/shared/codexCompaction";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
+import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import {
   CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
@@ -30,6 +31,7 @@ import {
   readCodexNotificationRouteFields,
   readCodexSteerExpectedTurnMismatchActualTurnId,
   rememberCodexChildConversationTurns,
+  resolveCodexThreadSettingsSessionModel,
   resolveCodexChildConversationNotification,
   selectCodexActiveSnapshotTurn,
   summarizeCodexAppServerChildProcesses,
@@ -64,6 +66,45 @@ describe("buildCodexAppServerArgs", () => {
       "-c",
       "model_providers.cafecode-openai-http.supports_websockets=false",
     ]);
+  });
+});
+
+describe("Codex thread settings reconciliation", () => {
+  const notification = {
+    threadId: "provider-thread-1",
+    threadSettings: {
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+      collaborationMode: {
+        mode: "default",
+        settings: {
+          model: "gpt-5.4",
+          reasoning_effort: "ultra",
+        },
+      },
+      cwd: "/workspace",
+      effort: "ultra",
+      model: "gpt-5.4",
+      modelProvider: "openai",
+      sandboxPolicy: { type: "workspaceWrite" },
+    },
+  } satisfies EffectCodexSchema.V2ThreadSettingsUpdatedNotification;
+
+  it("accepts the authoritative model only for the current provider thread", () => {
+    assert.equal(
+      resolveCodexThreadSettingsSessionModel({
+        currentProviderThreadId: "provider-thread-1",
+        notification,
+      }),
+      "gpt-5.4",
+    );
+    assert.equal(
+      resolveCodexThreadSettingsSessionModel({
+        currentProviderThreadId: "provider-thread-child",
+        notification,
+      }),
+      undefined,
+    );
   });
 });
 
