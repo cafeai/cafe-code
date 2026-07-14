@@ -74,6 +74,10 @@ const BENIGN_ERROR_LOG_SNIPPETS = [
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
 const CODEX_REMOTE_COMPACTION_V2_FEATURE_CONFIG_KEY = "features.remote_compaction_v2";
 const CODEX_LOCAL_ENVIRONMENT_ID = "local";
+// App-server and Cafe share the host clock. A small future allowance tolerates
+// clock adjustment without allowing a malformed provider timestamp to push
+// durable events arbitrarily far into the future.
+const CODEX_NOTIFICATION_MAX_FUTURE_SKEW_MS = 5 * 60_000;
 const CODEX_SNAPSHOT_BACKFILL_TURN_LIMIT = 1;
 const CODEX_SEND_TURN_SNAPSHOT_BACKFILL_DELAYS = [
   "2 seconds",
@@ -136,6 +140,7 @@ const CodexLocalTurnEnvironments = Schema.Array(
   Schema.Struct({
     environmentId: Schema.String,
     cwd: Schema.String,
+    runtimeWorkspaceRoots: Schema.optionalKey(CodexRuntimeWorkspaceRoots),
   }),
 );
 const CodexThreadStartParamsWithRuntimeWorkspaceRoots = EffectCodexSchema.V2ThreadStartParams.pipe(
@@ -170,7 +175,11 @@ const decodeV2ThreadResumeResponse = Schema.decodeUnknownEffect(
 type CodexThreadStartParamsWithRuntimeWorkspaceRoots =
   typeof CodexThreadStartParamsWithRuntimeWorkspaceRoots.Type;
 type CodexThreadResumeParamsWithRuntimeWorkspaceRoots = EffectCodexSchema.V2ThreadResumeParams & {
-  readonly environments?: ReadonlyArray<{ readonly environmentId: string; readonly cwd: string }>;
+  readonly environments?: ReadonlyArray<{
+    readonly environmentId: string;
+    readonly cwd: string;
+    readonly runtimeWorkspaceRoots?: ReadonlyArray<string>;
+  }>;
   readonly runtimeWorkspaceRoots?: ReadonlyArray<string>;
 };
 export type CodexTurnStartParamsWithExperimentalFields =
@@ -465,6 +474,7 @@ interface CodexAggregateRootCompletion {
 export type CodexServerNotification = {
   readonly method: string;
   readonly params: unknown;
+  readonly emittedAtMs?: number;
 };
 
 interface CodexSnapshotReadResult {
@@ -516,8 +526,36 @@ export type CodexAppServerChildProcessDiagnostics =
       readonly error: string;
     };
 
-function makeCodexServerNotification(method: string, params: unknown): CodexServerNotification {
-  return { method, params };
+function makeCodexServerNotification(
+  method: string,
+  params: unknown,
+  emittedAtMs?: number,
+): CodexServerNotification {
+  return {
+    method,
+    params,
+    ...(emittedAtMs !== undefined ? { emittedAtMs } : {}),
+  };
+}
+
+export function readCodexNotificationEmittedAtIso(
+  notification: CodexServerNotification,
+  receivedAtMs: number,
+): string | undefined {
+  const emittedAtMs = notification.emittedAtMs;
+  if (
+    emittedAtMs === undefined ||
+    !Number.isSafeInteger(emittedAtMs) ||
+    emittedAtMs < 0 ||
+    emittedAtMs > receivedAtMs + CODEX_NOTIFICATION_MAX_FUTURE_SKEW_MS
+  ) {
+    return undefined;
+  }
+
+  return Option.match(DateTime.make(emittedAtMs), {
+    onNone: () => undefined,
+    onSome: DateTime.formatIso,
+  });
 }
 
 function normalizeCodexModelSlug(
@@ -602,18 +640,25 @@ function buildRuntimeWorkspaceRoots(input: {
   return roots;
 }
 
-function buildLocalCodexTurnEnvironments(
-  cwd: string,
-): ReadonlyArray<{ readonly environmentId: string; readonly cwd: string }> {
+function buildLocalCodexTurnEnvironments(input: {
+  readonly cwd: string;
+  readonly runtimeWorkspaceRoots: ReadonlyArray<string>;
+}): ReadonlyArray<{
+  readonly environmentId: string;
+  readonly cwd: string;
+  readonly runtimeWorkspaceRoots: ReadonlyArray<string>;
+}> {
   // Codex 0.142 promotes execution environments to the app-server request
-  // layer. The TUI's default local environment selection pairs the fallback
-  // cwd with the local environment id, while additional write roots remain
-  // separate workspace/sandbox policy. Keep this explicit so app-server does
-  // not have to infer the environment from its own process cwd.
+  // layer. Codex 0.145 scopes runtime workspace roots to each selected
+  // environment because remote environments can have unrelated filesystems.
+  // Keep sending the top-level compatibility field as well, but make the local
+  // selection authoritative so new app-server builds never infer a narrower
+  // root set from cwd alone.
   return [
     {
       environmentId: CODEX_LOCAL_ENVIRONMENT_ID,
-      cwd,
+      cwd: input.cwd,
+      runtimeWorkspaceRoots: input.runtimeWorkspaceRoots,
     },
   ];
 }
@@ -626,6 +671,10 @@ function buildThreadStartParams(input: {
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
 }): CodexThreadStartParamsWithRuntimeWorkspaceRoots {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
+  const runtimeWorkspaceRoots = buildRuntimeWorkspaceRoots({
+    cwd: input.cwd,
+    additionalDirectories: input.additionalDirectories,
+  });
   // Upstream Codex 0.143.0 only auto-compacts when the resolved model info or
   // request config supplies `model_auto_compact_token_limit`. Current Codex
   // model metadata can advertise a large context window while leaving that
@@ -651,11 +700,11 @@ function buildThreadStartParams(input: {
   }
   return {
     cwd: input.cwd,
-    environments: buildLocalCodexTurnEnvironments(input.cwd),
-    runtimeWorkspaceRoots: buildRuntimeWorkspaceRoots({
+    environments: buildLocalCodexTurnEnvironments({
       cwd: input.cwd,
-      additionalDirectories: input.additionalDirectories,
+      runtimeWorkspaceRoots,
     }),
+    runtimeWorkspaceRoots,
     approvalPolicy: config.approvalPolicy,
     sandbox: config.sandbox,
     config: threadConfig,
@@ -743,17 +792,23 @@ export function buildTurnStartParams(input: {
     ...(input.model ? { model: input.model } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
   });
+  const runtimeWorkspaceRoots = input.cwd
+    ? buildRuntimeWorkspaceRoots({
+        cwd: input.cwd,
+        additionalDirectories: input.additionalDirectories,
+      })
+    : undefined;
 
   return decodeCodexTurnStartParamsWithExperimentalFields({
     threadId: input.threadId,
     ...(input.cwd ? { cwd: input.cwd } : {}),
     ...(input.cwd
       ? {
-          environments: buildLocalCodexTurnEnvironments(input.cwd),
-          runtimeWorkspaceRoots: buildRuntimeWorkspaceRoots({
+          environments: buildLocalCodexTurnEnvironments({
             cwd: input.cwd,
-            additionalDirectories: input.additionalDirectories,
+            runtimeWorkspaceRoots: runtimeWorkspaceRoots ?? [],
           }),
+          runtimeWorkspaceRoots,
         }
       : {}),
     input: turnInput,
@@ -1398,6 +1453,7 @@ function readNotificationThreadId(notification: CodexServerNotification): string
     case "item/autoApprovalReview/completed":
     case "item/completed":
     case "rawResponseItem/completed":
+    case "rawResponse/completed":
     case "item/agentMessage/delta":
     case "item/plan/delta":
     case "item/commandExecution/outputDelta":
@@ -1476,6 +1532,15 @@ export function readCodexNotificationRouteFields(notification: CodexServerNotifi
       return {
         turnId: readNotificationTurnId(notification),
         itemId: readNotificationItemId(notification),
+      };
+    case "rawResponse/completed":
+      // Codex 0.145 alpha emits this only when `experimentalRawEvents` is
+      // enabled. Cafe intentionally leaves that stream disabled, but retain
+      // its native turn route if a future stable target enables it so exact
+      // response-usage telemetry can never leak across aggregate threads.
+      return {
+        turnId: readNotificationTurnId(notification),
+        itemId: undefined,
       };
     case "error":
       return {
@@ -2386,6 +2451,21 @@ export const makeCodexSessionRuntime = (
     );
     const serverNotifications = yield* Queue.unbounded<CodexServerNotification>();
     const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+    const observeNotification = (notification: CodexServerNotification) =>
+      Clock.currentTimeMillis.pipe(
+        Effect.map((receivedAtMs) => {
+          const providerEmittedAt = readCodexNotificationEmittedAtIso(notification, receivedAtMs);
+          return providerEmittedAt
+            ? {
+                observedAt: providerEmittedAt,
+                observedAtMs: Date.parse(providerEmittedAt),
+              }
+            : {
+                observedAt: DateTime.formatIso(DateTime.makeUnsafe(receivedAtMs)),
+                observedAtMs: receivedAtMs,
+              };
+        }),
+      );
 
     const sessionCreatedAt = yield* nowIso;
     const initialSession = {
@@ -2406,14 +2486,17 @@ export const makeCodexSessionRuntime = (
     const sessionRef = yield* Ref.make<ProviderSession>(initialSession);
     const offerEvent = (event: ProviderEvent) => Queue.offer(events, event).pipe(Effect.asVoid);
 
-    const emitEvent = (event: Omit<ProviderEvent, "id" | "provider" | "createdAt">) =>
+    const emitEvent = (
+      event: Omit<ProviderEvent, "id" | "provider" | "createdAt">,
+      providerCreatedAt?: string,
+    ) =>
       Effect.gen(function* () {
         const id = yield* Random.nextUUIDv4;
         return yield* offerEvent({
           id: EventId.make(id),
           provider: PROVIDER,
           ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
-          createdAt: yield* nowIso,
+          createdAt: providerCreatedAt ?? (yield* nowIso),
           ...event,
         });
       });
@@ -2525,6 +2608,7 @@ export const makeCodexSessionRuntime = (
     const markTurnStartNotification = (
       notification: CodexServerNotification,
       routeTurnId: TurnId | undefined,
+      observedAt: string,
     ) =>
       Effect.gen(function* () {
         const session = yield* Ref.get(sessionRef);
@@ -2533,7 +2617,6 @@ export const makeCodexSessionRuntime = (
           return;
         }
 
-        const observedAt = yield* nowIso;
         const method = notification.method;
         const isTurnEvent =
           routeTurnId !== undefined ||
@@ -2733,14 +2816,15 @@ export const makeCodexSessionRuntime = (
         }
       }).pipe(Effect.forkIn(runtimeScope), Effect.asVoid);
 
-    const markPendingSteerProcessingFromNotification = (notification: CodexServerNotification) =>
+    const markPendingSteerProcessingFromNotification = (
+      notification: CodexServerNotification,
+      observation: { readonly observedAt: string; readonly observedAtMs: number },
+    ) =>
       Effect.gen(function* () {
         if (!(yield* notificationBelongsToCurrentSession(notification))) {
           return;
         }
 
-        const observedAt = yield* nowIso;
-        const observedAtMs = yield* Clock.currentTimeMillis;
         const processed = yield* Ref.modify(pendingSteerProcessingRef, (current) => {
           const result = updateCodexPendingSteerProcessingFromNotification(current, {
             method: notification.method,
@@ -2748,8 +2832,8 @@ export const makeCodexSessionRuntime = (
             turnId: readNotificationTurnId(notification),
             itemId: readNotificationItemId(notification),
             itemType: readNotificationItemType(notification),
-            observedAt,
-            observedAtMs,
+            observedAt: observation.observedAt,
+            observedAtMs: observation.observedAtMs,
           });
           return [result.pending, result.next] as const;
         });
@@ -3488,11 +3572,13 @@ export const makeCodexSessionRuntime = (
         yield* watcher.pipe(Effect.forkIn(runtimeScope));
       }).pipe(Effect.asVoid);
 
-    const handleAggregateRootCompletion = (notification: CodexServerNotification) =>
+    const handleAggregateRootCompletion = (
+      notification: CodexServerNotification,
+      observedAt: string,
+    ) =>
       Effect.gen(function* () {
         const turnId = readNotificationTurnId(notification);
         if (!turnId) return false;
-        const observedAt = yield* nowIso;
         const turnStatus = readNotificationTurnStatus(notification);
         const errorMessage =
           turnStatus === "failed" ? readNotificationErrorMessage(notification) : undefined;
@@ -3743,13 +3829,13 @@ export const makeCodexSessionRuntime = (
 
     const updateActiveContextCompactionsFromNotification = (
       notification: CodexServerNotification,
+      observedAt: string,
     ) =>
       Effect.gen(function* () {
         if (!(yield* notificationBelongsToCurrentSession(notification))) {
           return;
         }
 
-        const observedAt = yield* nowIso;
         yield* Ref.update(activeContextCompactionsRef, (current) =>
           updateCodexActiveContextCompactions(current, {
             method: notification.method,
@@ -3764,7 +3850,11 @@ export const makeCodexSessionRuntime = (
 
     const handleRawNotification = (notification: CodexServerNotification) =>
       Effect.gen(function* () {
-        yield* updateActiveContextCompactionsFromNotification(notification).pipe(
+        const observation = yield* observeNotification(notification);
+        yield* updateActiveContextCompactionsFromNotification(
+          notification,
+          observation.observedAt,
+        ).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("codex.raw.notification.context-compaction-tracking.failed", {
               threadId: options.threadId,
@@ -3774,7 +3864,7 @@ export const makeCodexSessionRuntime = (
             }),
           ),
         );
-        yield* markPendingSteerProcessingFromNotification(notification).pipe(
+        yield* markPendingSteerProcessingFromNotification(notification, observation).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("codex.raw.notification.steer-processing-tracking.failed", {
               threadId: options.threadId,
@@ -3811,7 +3901,7 @@ export const makeCodexSessionRuntime = (
           rootProviderThreadId,
         );
 
-        const observedAt = yield* nowIso;
+        const observedAt = observation.observedAt;
         yield* aggregateLifecycleSemaphore.withPermits(1)(
           Effect.gen(function* () {
             yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
@@ -3828,10 +3918,10 @@ export const makeCodexSessionRuntime = (
 
         const aggregateCompletionDeferred =
           childRoute === undefined && notification.method === "turn/completed"
-            ? yield* handleAggregateRootCompletion(notification)
+            ? yield* handleAggregateRootCompletion(notification, observedAt)
             : false;
         if (aggregateCompletionDeferred) {
-          yield* markTurnStartNotification(notification, routedTurnId);
+          yield* markTurnStartNotification(notification, routedTurnId, observedAt);
           return;
         }
 
@@ -3853,7 +3943,7 @@ export const makeCodexSessionRuntime = (
         if (childRoute?.suppressLifecycle) {
           return;
         }
-        yield* markTurnStartNotification(notification, routedTurnId);
+        yield* markTurnStartNotification(notification, routedTurnId, observedAt);
 
         let requestId: ApprovalRequestId | undefined;
         let requestKind: ProviderRequestKind | undefined;
@@ -3884,19 +3974,22 @@ export const makeCodexSessionRuntime = (
             });
           }
         }
-        yield* emitEvent({
-          kind: "notification",
-          threadId: options.threadId,
-          method: emittedMethod,
-          ...(turnId ? { turnId } : {}),
-          ...(itemId ? { itemId } : {}),
-          ...(requestId ? { requestId } : {}),
-          ...(requestKind ? { requestKind } : {}),
-          ...(notification.method === "item/agentMessage/delta"
-            ? { textDelta: readNotificationParamString(notification, "delta") ?? "" }
-            : {}),
-          ...(payload !== undefined ? { payload } : {}),
-        });
+        yield* emitEvent(
+          {
+            kind: "notification",
+            threadId: options.threadId,
+            method: emittedMethod,
+            ...(turnId ? { turnId } : {}),
+            ...(itemId ? { itemId } : {}),
+            ...(requestId ? { requestId } : {}),
+            ...(requestKind ? { requestKind } : {}),
+            ...(notification.method === "item/agentMessage/delta"
+              ? { textDelta: readNotificationParamString(notification, "delta") ?? "" }
+              : {}),
+            ...(payload !== undefined ? { payload } : {}),
+          },
+          observedAt,
+        );
       });
 
     yield* client.handleServerNotification("thread/started", (payload) =>
@@ -4134,7 +4227,11 @@ export const makeCodexSessionRuntime = (
       Stream.runForEach((notification) =>
         Queue.offer(
           serverNotifications,
-          makeCodexServerNotification(notification.method, notification.params),
+          makeCodexServerNotification(
+            notification.method,
+            notification.params,
+            notification.emittedAtMs,
+          ),
         ).pipe(Effect.asVoid),
       ),
       Effect.catchCause((cause) =>

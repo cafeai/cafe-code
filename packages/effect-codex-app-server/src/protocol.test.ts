@@ -75,6 +75,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
         yield* Queue.offer(
           input,
           encodeJsonl({
+            emittedAtMs: 1_721_234_567_890,
             method: "item/agentMessage/delta",
             params: {
               delta: "Hello from the mock peer.",
@@ -124,6 +125,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
         });
         assert.deepEqual(yield* Deferred.await(notificationDeferred), [
           {
+            emittedAtMs: 1_721_234_567_890,
             method: "item/agentMessage/delta",
             params: {
               delta: "Hello from the mock peer.",

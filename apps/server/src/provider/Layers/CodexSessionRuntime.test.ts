@@ -32,6 +32,7 @@ import {
   isTerminalCodexChildThreadReadError,
   openCodexThread,
   readCodexExpectedActiveTurnMismatchActualTurnId,
+  readCodexNotificationEmittedAtIso,
   readCodexNotificationRouteFields,
   readCodexSteerExpectedTurnMismatchActualTurnId,
   rememberCodexChildConversationTurns,
@@ -44,6 +45,45 @@ import {
   updateCodexPendingSteerProcessingFromNotification,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+
+describe("Codex notification emission timestamps", () => {
+  it("accepts valid provider emission time and rejects malformed or future values", () => {
+    const receivedAtMs = Date.parse("2026-07-14T08:00:00.000Z");
+    assert.equal(
+      readCodexNotificationEmittedAtIso(
+        {
+          method: "turn/started",
+          params: {},
+          emittedAtMs: Date.parse("2026-07-14T07:59:58.000Z"),
+        },
+        receivedAtMs,
+      ),
+      "2026-07-14T07:59:58.000Z",
+    );
+    assert.equal(
+      readCodexNotificationEmittedAtIso(
+        {
+          method: "turn/started",
+          params: {},
+          emittedAtMs: Number.NaN,
+        },
+        receivedAtMs,
+      ),
+      undefined,
+    );
+    assert.equal(
+      readCodexNotificationEmittedAtIso(
+        {
+          method: "turn/started",
+          params: {},
+          emittedAtMs: receivedAtMs + 5 * 60_000 + 1,
+        },
+        receivedAtMs,
+      ),
+      undefined,
+    );
+  });
+});
 
 describe("buildCodexAppServerArgs", () => {
   it("uses plain app-server args until a transport fallback policy is active", () => {
@@ -488,6 +528,21 @@ describe("Codex notification route fields", () => {
     );
     assert.deepStrictEqual(
       readCodexNotificationRouteFields({
+        method: "rawResponse/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          responseId: "response-1",
+          usage: null,
+        },
+      }),
+      {
+        turnId: TurnId.make("turn-1"),
+        itemId: undefined,
+      },
+    );
+    assert.deepStrictEqual(
+      readCodexNotificationRouteFields({
         method: "model/rerouted",
         params: {
           threadId: "thread-1",
@@ -654,6 +709,7 @@ describe("buildTurnStartParams", () => {
       {
         environmentId: "local",
         cwd: "/tmp/project",
+        runtimeWorkspaceRoots: ["/tmp/project", "/tmp/docs", "/tmp/tools"],
       },
     ]);
     assert.deepStrictEqual(params.runtimeWorkspaceRoots, [
@@ -1497,6 +1553,7 @@ describe("openCodexThread", () => {
         readonly environments?: ReadonlyArray<{
           readonly environmentId: string;
           readonly cwd: string;
+          readonly runtimeWorkspaceRoots?: ReadonlyArray<string>;
         }>;
         readonly runtimeWorkspaceRoots?: ReadonlyArray<string>;
       };
@@ -1509,6 +1566,7 @@ describe("openCodexThread", () => {
         {
           environmentId: "local",
           cwd: "/tmp/project",
+          runtimeWorkspaceRoots: ["/tmp/project"],
         },
       ]);
       assert.deepStrictEqual(payload.runtimeWorkspaceRoots, ["/tmp/project"]);
@@ -1544,6 +1602,7 @@ describe("openCodexThread", () => {
       readonly environments?: ReadonlyArray<{
         readonly environmentId: string;
         readonly cwd: string;
+        readonly runtimeWorkspaceRoots?: ReadonlyArray<string>;
       }>;
       readonly runtimeWorkspaceRoots?: ReadonlyArray<string>;
     };
@@ -1559,6 +1618,7 @@ describe("openCodexThread", () => {
       {
         environmentId: "local",
         cwd: "/tmp/project",
+        runtimeWorkspaceRoots: ["/tmp/project", "/tmp/extra"],
       },
     ]);
     assert.deepStrictEqual(payload.runtimeWorkspaceRoots, ["/tmp/project", "/tmp/extra"]);
