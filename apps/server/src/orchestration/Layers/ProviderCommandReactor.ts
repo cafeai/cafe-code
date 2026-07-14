@@ -1131,9 +1131,18 @@ const make = Effect.gen(function* () {
     "recoverPostTerminalStaleSteerMessagesOnStartup",
   )(function* () {
     // Match Codex CLI/TUI stale-steer recovery without bootstrapping every
-    // historical message and work-log row. The shell snapshot identifies the
-    // small set of candidate Codex threads; only those candidates are hydrated
-    // through the bounded thread-detail query below.
+    // historical message and work-log row. A terminal Codex thread is not by
+    // itself a recovery candidate: mature workspaces can have dozens of those,
+    // including multi-gigabyte transcripts. SQL first proves that the latest
+    // turn contains a user message recorded after completion; only those exact
+    // thread ids may cross the bounded thread-detail boundary below.
+    const staleSteerCandidateThreadIds = new Set(
+      yield* projectionSnapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(),
+    );
+    if (staleSteerCandidateThreadIds.size === 0) {
+      return;
+    }
+
     const shellSnapshot = yield* projectionSnapshotQuery.getShellSnapshot();
     const activeProviderSessions = yield* providerService.listSessions();
     const runningProviderThreadIds = new Set(
@@ -1148,6 +1157,7 @@ const make = Effect.gen(function* () {
     const candidateThreads = shellSnapshot.threads.filter((thread) => {
       const latestTurn = thread.latestTurn;
       return (
+        staleSteerCandidateThreadIds.has(thread.id) &&
         latestTurn !== null &&
         latestTurn.completedAt !== null &&
         terminalStates.has(latestTurn.state) &&

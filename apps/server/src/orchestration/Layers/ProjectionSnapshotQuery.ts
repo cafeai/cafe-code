@@ -987,6 +987,37 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  const listPostTerminalStaleSteerCandidateThreadRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionThreadIdLookupRowSchema,
+    execute: () =>
+      sql`
+        SELECT
+          threads.thread_id AS "threadId"
+        FROM projection_threads AS threads
+        INNER JOIN projection_turns AS turns
+          ON turns.thread_id = threads.thread_id
+          AND turns.turn_id = threads.latest_turn_id
+        INNER JOIN projection_thread_sessions AS sessions
+          ON sessions.thread_id = threads.thread_id
+        WHERE threads.deleted_at IS NULL
+          AND threads.archived_at IS NULL
+          AND turns.completed_at IS NOT NULL
+          AND turns.state IN ('completed', 'error', 'interrupted')
+          AND sessions.provider_name = 'codex'
+          AND EXISTS (
+            SELECT 1
+            FROM projection_thread_messages AS messages
+            WHERE messages.thread_id = threads.thread_id
+              AND messages.turn_id = turns.turn_id
+              AND messages.role = 'user'
+              AND messages.created_at > turns.completed_at
+            LIMIT 1
+          )
+        ORDER BY turns.completed_at ASC, threads.thread_id ASC
+      `,
+  });
+
   const listThreadMessageRowsByThread = SqlSchema.findAll({
     Request: ThreadIdLookupInput,
     Result: ProjectionThreadMessageDbRowSchema,
@@ -2308,6 +2339,18 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       } satisfies OrchestrationThreadShell);
     });
 
+  const getPostTerminalStaleSteerCandidateThreadIds: ProjectionSnapshotQueryShape["getPostTerminalStaleSteerCandidateThreadIds"] =
+    () =>
+      listPostTerminalStaleSteerCandidateThreadRows(undefined).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.getPostTerminalStaleSteerCandidateThreadIds:query",
+            "ProjectionSnapshotQuery.getPostTerminalStaleSteerCandidateThreadIds:decodeRows",
+          ),
+        ),
+        Effect.map((rows) => rows.map((row) => row.threadId)),
+      );
+
   const getThreadTurnActivityPage: ProjectionSnapshotQueryShape["getThreadTurnActivityPage"] = (
     input,
   ) =>
@@ -2535,6 +2578,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getFirstActiveThreadIdByProjectId,
     getThreadCheckpointContext,
     getThreadShellById,
+    getPostTerminalStaleSteerCandidateThreadIds,
     getThreadTurnActivityPage,
     getThreadDetailById,
     getThreadDetailSnapshotById,

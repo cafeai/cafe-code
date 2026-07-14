@@ -159,7 +159,7 @@ type ClaudeSdkMessageWithForwardCompatibleSystem =
   | ClaudeForwardCompatibleSystemMessage;
 
 // Claude Code 2.1.206 advertises `msg_lifecycle_v1` and emits this top-level
-// frame, but Agent SDK 0.3.207 still omits it from the public SDKMessage union.
+// frame, but Agent SDK 0.3.209 still omits it from the public SDKMessage union.
 // Keep the runtime decoder local and narrow until Anthropic publishes the type.
 interface ClaudeCommandLifecycleMessage extends Record<string, unknown> {
   readonly type: "command_lifecycle";
@@ -282,7 +282,7 @@ interface ClaudeSessionContext {
 
 interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
   readonly interrupt: () => Promise<SDKControlInterruptResponse | undefined>;
-  // The 0.3.207 runtime implements this control request, but its public Query
+  // The 0.3.209 runtime implements this control request, but its public Query
   // interface has not exposed the method yet. Keep it optional for older SDKs.
   readonly cancelAsyncMessage?: (messageUuid: string) => Promise<boolean>;
   readonly setModel: (model?: string) => Promise<void>;

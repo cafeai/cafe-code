@@ -99,6 +99,27 @@ type DesktopLogFileWriterError =
 
 const sanitizeLogValue = (value: string): string => value.replace(/\s+/g, " ").trim();
 
+/**
+ * Redact credentials from child-process output before it crosses the durable log boundary.
+ *
+ * The backend intentionally prints pairing URLs to its interactive console, but their `token`
+ * parameter is an authentication capability and must not be copied into rotating log files. Child
+ * output can also contain conventional bearer or provider API tokens in failure text. Keep the
+ * surrounding diagnostic text intact while replacing only credential values. Development console
+ * output remains unchanged so an operator who launched Cafe interactively can still use a freshly
+ * printed pairing URL.
+ */
+const redactPersistedChildOutput = (value: string): string =>
+  value
+    .replace(
+      /([?&](?:token|access_token|id_token|api[_-]?key|secret)=)[^&\s"'<>}\]]+/gi,
+      "$1[redacted]",
+    )
+    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s"',}\]]+/gi, "$1[redacted]")
+    .replace(/(bearer\s+)[A-Za-z0-9._~+/=-]{16,}/gi, "$1[redacted]")
+    .replace(/\b(?:sk|npm)_[A-Za-z0-9_-]{16,}\b/g, "[redacted-token]")
+    .replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, "[redacted-token]");
+
 const DesktopBackendChildLogRecord = Schema.Struct({
   message: Schema.String,
   level: Schema.Literals(["INFO", "ERROR"]),
@@ -334,7 +355,7 @@ const backendOutputLogLayer = Layer.effect(
                   component: "desktop-backend-child",
                   runId,
                   stream: streamName,
-                  text: textDecoder.decode(chunk),
+                  text: redactPersistedChildOutput(textDecoder.decode(chunk)),
                 },
               });
             },

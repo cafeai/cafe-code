@@ -887,6 +887,7 @@ const buildAppUnderTest = (options?: {
           getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
           getProjectShellById: () => Effect.succeed(Option.none()),
           getThreadShellById: () => Effect.succeed(Option.none()),
+          getPostTerminalStaleSteerCandidateThreadIds: () => Effect.succeed([]),
           getThreadTurnActivityPage: () => Effect.die("unused"),
           getThreadDetailById: () => Effect.succeed(Option.none()),
           getThreadDetailSnapshotById: () => Effect.succeed(Option.none()),

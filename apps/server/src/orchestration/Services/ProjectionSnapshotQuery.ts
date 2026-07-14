@@ -146,6 +146,21 @@ export interface ProjectionSnapshotQueryShape {
   ) => Effect.Effect<Option.Option<OrchestrationThreadShell>, ProjectionRepositoryError>;
 
   /**
+   * Find active Codex threads whose latest terminal turn has at least one user
+   * message recorded after completion.
+   *
+   * This deliberately returns identifiers only. Startup recovery can decide
+   * which bounded thread details genuinely need to be hydrated instead of
+   * reading every completed Codex transcript. The query is complete rather
+   * than arbitrarily capped; its rows are tiny and the predicate describes a
+   * rare persisted inconsistency that startup must not silently leave behind.
+   */
+  readonly getPostTerminalStaleSteerCandidateThreadIds: () => Effect.Effect<
+    ReadonlyArray<ThreadId>,
+    ProjectionRepositoryError
+  >;
+
+  /**
    * Read a single active thread detail snapshot by id.
    */
   readonly getThreadDetailById: (

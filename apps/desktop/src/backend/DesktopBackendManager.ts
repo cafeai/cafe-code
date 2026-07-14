@@ -430,7 +430,21 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     .pipe(Effect.mapError((cause) => new BackendProcessSpawnError({ cause })));
 
   const terminate = handle.kill().pipe(Effect.ignore);
-  const healthFailureExit = yield* Deferred.make<BackendProcessExit>();
+  const terminalFailureExit = yield* Deferred.make<BackendProcessExit>();
+  const terminateFailedRun = Effect.fn("desktop.backendManager.terminateFailedRun")(function* (
+    reason: string,
+  ) {
+    // ChildProcessHandle.kill normally waits for process termination. A wedged Node child can
+    // acknowledge SIGTERM while keeping inherited handles alive indefinitely, so waiting for that
+    // effect before publishing terminal state would reproduce the same manager deadlock this path
+    // exists to recover from. Start termination independently, then let the manager finalize this
+    // run immediately. Before the replacement binds, start() performs a narrowly scoped backend
+    // process reap that excludes provider daemons and supervisors.
+    yield* handle.kill().pipe(Effect.ignore, Effect.forkDetach);
+    yield* Deferred.succeed(terminalFailureExit, describeSyntheticProcessExit(reason)).pipe(
+      Effect.ignore,
+    );
+  });
   yield* options.onStarted?.(handle.pid, terminate) ?? Effect.void;
   if (options.captureOutput) {
     yield* drainBackendOutput("stdout", handle.stdout, onOutput).pipe(Effect.forkScoped);
@@ -457,35 +471,38 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
         (error) =>
           Effect.gen(function* () {
             yield* (options.onHealthFailure?.(error) ?? Effect.void).pipe(Effect.ignore);
-            yield* handle.kill().pipe(Effect.ignore);
             // A backend can lose its HTTP listener while process-level liveness remains true. In
             // that split-brain state the renderer cannot reconnect, and waiting only for exitCode can
             // wedge the desktop manager forever if the child ignores SIGTERM or has lingering fibers.
             // Treat the health failure itself as a terminal run signal so the manager clears active
             // state and starts a fresh backend; the next spawn reaps the stale child before binding.
-            yield* Deferred.succeed(
-              healthFailureExit,
-              describeSyntheticProcessExit(error.message),
-            ).pipe(Effect.ignore);
+            yield* terminateFailedRun(error.message);
           }),
       ).pipe(Effect.forkIn(processScope)),
     ),
     Effect.catch((error) =>
-      (options.onReadinessFailure?.(error) ?? Effect.void).pipe(
-        Effect.andThen(handle.kill().pipe(Effect.ignore)),
-      ),
+      Effect.gen(function* () {
+        yield* (options.onReadinessFailure?.(error) ?? Effect.void).pipe(Effect.ignore);
+        // Readiness timeout is terminal for this run even when the spawned child remains alive.
+        // Otherwise the outer race waits forever on exitCode and the scheduled restart never runs.
+        yield* terminateFailedRun(error.message);
+      }),
     ),
     Effect.catchCause((cause) =>
-      Effect.logWarning("desktop.backend.readiness-monitor.failed", {
-        cause: Cause.pretty(cause),
-      }).pipe(Effect.andThen(handle.kill().pipe(Effect.ignore))),
+      Effect.gen(function* () {
+        const reason = Cause.pretty(cause);
+        yield* Effect.logWarning("desktop.backend.readiness-monitor.failed", {
+          cause: reason,
+        });
+        yield* terminateFailedRun(reason);
+      }),
     ),
     Effect.forkIn(processScope),
   );
 
   return yield* Effect.race(
     Effect.result(handle.exitCode).pipe(Effect.map(describeProcessExit)),
-    Deferred.await(healthFailureExit),
+    Deferred.await(terminalFailureExit),
   );
 });
 

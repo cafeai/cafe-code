@@ -131,7 +131,12 @@ describe("DesktopObservability", () => {
           phase: "START",
           details: "pid=123 port=3773 cwd=/repo",
         });
-        yield* outputLog.writeOutputChunk("stdout", new TextEncoder().encode("hello server\n"));
+        yield* outputLog.writeOutputChunk(
+          "stdout",
+          new TextEncoder().encode(
+            "pairingUrl: https://localhost:3774/pair?token=secret-pairing-token\n",
+          ),
+        );
       }).pipe(
         Effect.annotateLogs({ runId: "test-run" }),
         Effect.provide(DesktopObservability.layer.pipe(Layer.provideMerge(environmentLayer))),
@@ -154,7 +159,11 @@ describe("DesktopObservability", () => {
       assert.equal(output.annotations.component, "desktop-backend-child");
       assert.equal(output.annotations.runId, "test-run");
       assert.equal(output.annotations.stream, "stdout");
-      assert.equal(output.annotations.text, "hello server\n");
+      assert.equal(
+        output.annotations.text,
+        "pairingUrl: https://localhost:3774/pair?token=[redacted]\n",
+      );
+      assert.isFalse(log.includes("secret-pairing-token"));
     }).pipe(
       Effect.scoped,
       Effect.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer)),

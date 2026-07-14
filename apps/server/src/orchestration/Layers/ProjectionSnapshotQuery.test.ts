@@ -1507,6 +1507,157 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("prefilters only terminal Codex threads with post-completion user messages", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_thread_messages`;
+      yield* sql`DELETE FROM projection_thread_sessions`;
+      yield* sql`DELETE FROM projection_turns`;
+      yield* sql`DELETE FROM projection_threads`;
+
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id,
+          project_id,
+          title,
+          model_selection_json,
+          runtime_mode,
+          interaction_mode,
+          branch,
+          worktree_path,
+          latest_turn_id,
+          latest_user_message_at,
+          pending_approval_count,
+          pending_user_input_count,
+          has_actionable_proposed_plan,
+          created_at,
+          updated_at,
+          archived_at,
+          deleted_at
+        )
+        VALUES
+          (
+            'thread-stale-steer-candidate', 'project-stale-steer', 'Candidate',
+            '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+            NULL, NULL, 'turn-stale-steer-candidate', '2026-07-14T00:00:11.000Z',
+            0, 0, 0, '2026-07-14T00:00:00.000Z', '2026-07-14T00:00:11.000Z', NULL, NULL
+          ),
+          (
+            'thread-message-before-completion', 'project-stale-steer', 'Before completion',
+            '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+            NULL, NULL, 'turn-message-before-completion', '2026-07-14T00:00:09.000Z',
+            0, 0, 0, '2026-07-14T00:00:00.000Z', '2026-07-14T00:00:10.000Z', NULL, NULL
+          ),
+          (
+            'thread-claude-post-completion', 'project-stale-steer', 'Claude',
+            '{"provider":"claudeAgent","model":"claude-sonnet-5"}', 'full-access', 'default',
+            NULL, NULL, 'turn-claude-post-completion', '2026-07-14T00:00:11.000Z',
+            0, 0, 0, '2026-07-14T00:00:00.000Z', '2026-07-14T00:00:11.000Z', NULL, NULL
+          ),
+          (
+            'thread-running-post-message', 'project-stale-steer', 'Running',
+            '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+            NULL, NULL, 'turn-running-post-message', '2026-07-14T00:00:11.000Z',
+            0, 0, 0, '2026-07-14T00:00:00.000Z', '2026-07-14T00:00:11.000Z', NULL, NULL
+          ),
+          (
+            'thread-archived-post-completion', 'project-stale-steer', 'Archived',
+            '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+            NULL, NULL, 'turn-archived-post-completion', '2026-07-14T00:00:11.000Z',
+            0, 0, 0, '2026-07-14T00:00:00.000Z', '2026-07-14T00:00:11.000Z',
+            '2026-07-14T00:00:12.000Z', NULL
+          )
+      `;
+
+      yield* sql`
+        INSERT INTO projection_turns (
+          thread_id,
+          turn_id,
+          pending_message_id,
+          assistant_message_id,
+          state,
+          requested_at,
+          started_at,
+          completed_at,
+          checkpoint_turn_count,
+          checkpoint_ref,
+          checkpoint_status,
+          checkpoint_files_json
+        )
+        VALUES
+          (
+            'thread-stale-steer-candidate', 'turn-stale-steer-candidate', NULL, NULL,
+            'completed', '2026-07-14T00:00:01.000Z', '2026-07-14T00:00:02.000Z',
+            '2026-07-14T00:00:10.000Z', NULL, NULL, NULL, '[]'
+          ),
+          (
+            'thread-message-before-completion', 'turn-message-before-completion', NULL, NULL,
+            'completed', '2026-07-14T00:00:01.000Z', '2026-07-14T00:00:02.000Z',
+            '2026-07-14T00:00:10.000Z', NULL, NULL, NULL, '[]'
+          ),
+          (
+            'thread-claude-post-completion', 'turn-claude-post-completion', NULL, NULL,
+            'completed', '2026-07-14T00:00:01.000Z', '2026-07-14T00:00:02.000Z',
+            '2026-07-14T00:00:10.000Z', NULL, NULL, NULL, '[]'
+          ),
+          (
+            'thread-running-post-message', 'turn-running-post-message', NULL, NULL,
+            'running', '2026-07-14T00:00:01.000Z', '2026-07-14T00:00:02.000Z',
+            NULL, NULL, NULL, NULL, '[]'
+          ),
+          (
+            'thread-archived-post-completion', 'turn-archived-post-completion', NULL, NULL,
+            'completed', '2026-07-14T00:00:01.000Z', '2026-07-14T00:00:02.000Z',
+            '2026-07-14T00:00:10.000Z', NULL, NULL, NULL, '[]'
+          )
+      `;
+
+      yield* sql`
+        INSERT INTO projection_thread_sessions (
+          thread_id,
+          status,
+          provider_name,
+          provider_instance_id,
+          runtime_mode,
+          active_turn_id,
+          last_error,
+          updated_at
+        )
+        VALUES
+          ('thread-stale-steer-candidate', 'ready', 'codex', 'codex', 'full-access', NULL, NULL, '2026-07-14T00:00:10.000Z'),
+          ('thread-message-before-completion', 'ready', 'codex', 'codex', 'full-access', NULL, NULL, '2026-07-14T00:00:10.000Z'),
+          ('thread-claude-post-completion', 'ready', 'claudeAgent', 'claude', 'full-access', NULL, NULL, '2026-07-14T00:00:10.000Z'),
+          ('thread-running-post-message', 'running', 'codex', 'codex', 'full-access', 'turn-running-post-message', NULL, '2026-07-14T00:00:10.000Z'),
+          ('thread-archived-post-completion', 'ready', 'codex', 'codex', 'full-access', NULL, NULL, '2026-07-14T00:00:10.000Z')
+      `;
+
+      yield* sql`
+        INSERT INTO projection_thread_messages (
+          message_id,
+          thread_id,
+          turn_id,
+          role,
+          text,
+          is_streaming,
+          created_at,
+          updated_at
+        )
+        VALUES
+          ('message-stale-steer-candidate', 'thread-stale-steer-candidate', 'turn-stale-steer-candidate', 'user', 'candidate', 0, '2026-07-14T00:00:11.000Z', '2026-07-14T00:00:11.000Z'),
+          ('message-before-completion', 'thread-message-before-completion', 'turn-message-before-completion', 'user', 'before', 0, '2026-07-14T00:00:09.000Z', '2026-07-14T00:00:09.000Z'),
+          ('message-claude-post-completion', 'thread-claude-post-completion', 'turn-claude-post-completion', 'user', 'claude', 0, '2026-07-14T00:00:11.000Z', '2026-07-14T00:00:11.000Z'),
+          ('message-running-post', 'thread-running-post-message', 'turn-running-post-message', 'user', 'running', 0, '2026-07-14T00:00:11.000Z', '2026-07-14T00:00:11.000Z'),
+          ('message-archived-post-completion', 'thread-archived-post-completion', 'turn-archived-post-completion', 'user', 'archived', 0, '2026-07-14T00:00:11.000Z', '2026-07-14T00:00:11.000Z')
+      `;
+
+      assert.deepStrictEqual(yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(), [
+        ThreadId.make("thread-stale-steer-candidate"),
+      ]);
+    }),
+  );
+
   it.effect("normalizes active-turn session state from the latest turn", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

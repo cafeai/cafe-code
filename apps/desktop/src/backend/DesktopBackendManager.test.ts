@@ -446,7 +446,7 @@ describe("DesktopBackendManager", () => {
     }),
   );
 
-  it.effect("restarts a backend that never becomes ready", () =>
+  it.effect("restarts a backend that never becomes ready or exits after termination", () =>
     Effect.gen(function* () {
       const starts = yield* Queue.unbounded<number>();
       let startCount = 0;
@@ -459,13 +459,12 @@ describe("DesktopBackendManager", () => {
           Effect.gen(function* () {
             startCount += 1;
             yield* Queue.offer(starts, startCount);
-            const killed = yield* Deferred.make<void>();
-            const kill = Effect.sync(() => {
-              killCount += 1;
-            }).pipe(Effect.andThen(Deferred.succeed(killed, void 0)), Effect.asVoid);
             return makeProcess({
-              exitCode: Deferred.await(killed).pipe(Effect.as(ChildProcessSpawner.ExitCode(1))),
-              kill: () => kill,
+              exitCode: Effect.never,
+              kill: () =>
+                Effect.sync(() => {
+                  killCount += 1;
+                }).pipe(Effect.asVoid),
             });
           }),
         ),
