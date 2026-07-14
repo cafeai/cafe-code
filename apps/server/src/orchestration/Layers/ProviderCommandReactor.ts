@@ -257,6 +257,23 @@ function findProviderAdapterRequestError(
   return isProviderAdapterRequestError(failReason?.error) ? failReason.error : undefined;
 }
 
+/**
+ * A provider instance is absent only when the local registry or remote daemon
+ * says so explicitly. Transport errors such as `ECONNREFUSED` are operational
+ * outages and must remain retryable failures instead of being rewritten as a
+ * configuration problem.
+ */
+export function isProviderInstanceMissingError(error: ProviderServiceError): boolean {
+  if (error._tag === "ProviderUnsupportedError" || error._tag === "ProviderInstanceNotFoundError") {
+    return true;
+  }
+  return (
+    error._tag === "ProviderAdapterRequestError" &&
+    (error.remoteErrorTag === "ProviderUnsupportedError" ||
+      error.remoteErrorTag === "ProviderInstanceNotFoundError")
+  );
+}
+
 type CodexNonSteerableTurnKind = "review" | "compact";
 
 function readRecord(value: unknown): Record<string, unknown> | undefined {
@@ -726,15 +743,19 @@ const make = Effect.gen(function* () {
     const desiredModelSelection = requestedModelSelection ?? thread.modelSelection;
     const desiredInstanceId = desiredModelSelection.instanceId;
     const desiredInfo = yield* providerService.getInstanceInfo(desiredInstanceId).pipe(
-      Effect.mapError(
-        () =>
-          new ProviderAdapterRequestError({
-            provider: providerErrorLabelFromInstanceHint({
-              instanceId: String(desiredModelSelection.instanceId),
-            }),
-            method: "thread.turn.start",
-            detail: `Requested provider instance '${desiredInstanceId}' is not configured in this build.`,
-          }),
+      Effect.mapError((error) =>
+        isProviderInstanceMissingError(error)
+          ? new ProviderAdapterRequestError({
+              provider: providerErrorLabelFromInstanceHint({
+                instanceId: String(desiredModelSelection.instanceId),
+              }),
+              method: "thread.turn.start",
+              detail: `Requested provider instance '${desiredInstanceId}' is not configured in this build.`,
+              remoteErrorTag:
+                error._tag === "ProviderAdapterRequestError" ? error.remoteErrorTag : error._tag,
+              cause: error,
+            })
+          : error,
       ),
     );
     const desiredDriverKind = desiredInfo.driverKind;

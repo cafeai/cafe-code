@@ -85,11 +85,31 @@ function providerDaemonUrl(config: ProviderDaemonClientConfig, path: string): UR
   );
 }
 
-function toRemoteRequestError(method: string, cause: unknown): ProviderAdapterRequestError {
+/**
+ * Internal transport error retaining the daemon's structured RPC error tag.
+ *
+ * The public service still exposes `ProviderAdapterRequestError`, but retaining
+ * this tag prevents callers from confusing a refused daemon socket with a
+ * genuine `ProviderUnsupportedError` returned by the remote registry.
+ */
+export class ProviderDaemonRpcResponseError extends Error {
+  readonly remoteErrorTag: string;
+
+  constructor(remoteErrorTag: string, message: string) {
+    super(message);
+    this.name = "ProviderDaemonRpcResponseError";
+    this.remoteErrorTag = remoteErrorTag;
+  }
+}
+
+export function toRemoteRequestError(method: string, cause: unknown): ProviderAdapterRequestError {
   return new ProviderAdapterRequestError({
     provider: "provider-daemon",
     method,
     detail: cause instanceof Error ? cause.message : String(cause),
+    ...(cause instanceof ProviderDaemonRpcResponseError
+      ? { remoteErrorTag: cause.remoteErrorTag }
+      : {}),
     cause,
   });
 }
@@ -134,7 +154,8 @@ const rpc = <M extends ProviderDaemonRpcRequest["method"]>(
         const rootCause = envelope.error.diagnostics?.causeChain.find(
           (entry) => entry.message !== envelope.error.message && entry.message.length > 0,
         );
-        throw new Error(
+        throw new ProviderDaemonRpcResponseError(
+          envelope.error.tag,
           rootCause === undefined
             ? `${envelope.error.tag}: ${envelope.error.message}`
             : `${envelope.error.tag}: ${envelope.error.message}; caused by ${rootCause.message}`,

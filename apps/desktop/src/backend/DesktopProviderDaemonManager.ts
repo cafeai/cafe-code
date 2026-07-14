@@ -27,9 +27,9 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as PlatformError from "effect/PlatformError";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
@@ -105,10 +105,19 @@ export interface DesktopProviderDaemonSnapshot {
   readonly lastHealthRefreshDurationMs: Option.Option<number>;
   readonly healthRefreshCount: number;
   readonly healthRefreshFailureCount: number;
+  readonly recoveryCount: number;
+  readonly lastRecoveryAt: Option.Option<string>;
+  readonly lastRecoveryReason: Option.Option<string>;
 }
 
 export interface DesktopProviderDaemonManagerShape {
   readonly ensureRunning: Effect.Effect<ProviderDaemonClientConfig>;
+  /**
+   * Replace an unhealthy provider daemon and issue a fresh desktop lease.
+   * Callers must restart the backend afterward because its lease capability is
+   * immutable bootstrap data and is intentionally not shared through globals.
+   */
+  readonly recover: (reason: string) => Effect.Effect<ProviderDaemonClientConfig>;
   readonly currentConfig: Effect.Effect<Option.Option<ProviderDaemonClientConfig>>;
   readonly refreshHealth: Effect.Effect<Option.Option<ProviderDaemonHealthValue>>;
   readonly snapshot: Effect.Effect<DesktopProviderDaemonSnapshot>;
@@ -163,6 +172,9 @@ interface ProviderDaemonState {
   readonly lastHealthRefreshDurationMs: Option.Option<number>;
   readonly healthRefreshCount: number;
   readonly healthRefreshFailureCount: number;
+  readonly recoveryCount: number;
+  readonly lastRecoveryAt: Option.Option<string>;
+  readonly lastRecoveryReason: Option.Option<string>;
 }
 
 const initialState: ProviderDaemonState = {
@@ -179,6 +191,9 @@ const initialState: ProviderDaemonState = {
   lastHealthRefreshDurationMs: Option.none(),
   healthRefreshCount: 0,
   healthRefreshFailureCount: 0,
+  recoveryCount: 0,
+  lastRecoveryAt: Option.none(),
+  lastRecoveryReason: Option.none(),
 };
 
 const { logInfo, logWarning } = DesktopObservability.makeComponentLogger(
@@ -431,17 +446,6 @@ const removeProviderDaemonIpcSocket = (
   }).pipe(Effect.ignore);
 };
 
-function drainProviderDaemonOutput(
-  streamName: "stdout" | "stderr",
-  stream: Stream.Stream<Uint8Array, PlatformError.PlatformError>,
-  outputLog: DesktopObservability.DesktopBackendOutputLogShape,
-): Effect.Effect<void> {
-  return stream.pipe(
-    Stream.runForEach((chunk) => outputLog.writeOutputChunk(streamName, chunk)),
-    Effect.ignore,
-  );
-}
-
 const waitForHealth = (
   endpoint: ProviderDaemonClientConfig,
 ): Effect.Effect<ProviderDaemonHealthValue, ProviderDaemonSpawnError> =>
@@ -469,10 +473,10 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   yield* NetService.NetService;
   const safeStorage = yield* ElectronSafeStorage.ElectronSafeStorage;
-  const providerDaemonOutputLog = yield* DesktopObservability.DesktopBackendOutputLog;
   const daemonScope = yield* Scope.make();
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const state = yield* Ref.make(initialState);
+  const lifecycleMutex = yield* Semaphore.make(1);
   const runtimeBuildId = yield* computeProviderDaemonRuntimeBuildId(environment);
 
   const reapStaleProviderRuntimeProcesses = (
@@ -532,6 +536,9 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         lastHealthRefreshDurationMs: Option.getOrNull(current.lastHealthRefreshDurationMs),
         healthRefreshCount: current.healthRefreshCount,
         healthRefreshFailureCount: current.healthRefreshFailureCount,
+        recoveryCount: current.recoveryCount,
+        lastRecoveryAt: Option.getOrNull(current.lastRecoveryAt),
+        lastRecoveryReason: Option.getOrNull(current.lastRecoveryReason),
       },
     });
   });
@@ -554,6 +561,9 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         lastHealthRefreshDurationMs: current.lastHealthRefreshDurationMs,
         healthRefreshCount: current.healthRefreshCount,
         healthRefreshFailureCount: current.healthRefreshFailureCount,
+        recoveryCount: current.recoveryCount,
+        lastRecoveryAt: current.lastRecoveryAt,
+        lastRecoveryReason: current.lastRecoveryReason,
       }),
     ),
   );
@@ -626,6 +636,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         token: lease.value.token,
         leaseId: lease.value.leaseId,
       };
+      const previous = yield* Ref.get(state);
 
       yield* Ref.set(state, {
         status: "running",
@@ -643,6 +654,9 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         lastHealthRefreshDurationMs: Option.none(),
         healthRefreshCount: 0,
         healthRefreshFailureCount: 0,
+        recoveryCount: previous.recoveryCount,
+        lastRecoveryAt: previous.lastRecoveryAt,
+        lastRecoveryReason: previous.lastRecoveryReason,
       });
       yield* publishDebugSnapshot;
       yield* logInfo("adopted existing provider daemon", {
@@ -692,12 +706,13 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         },
         extendEnv: true,
         stdin: "ignore",
-        // Provider daemon bootstrap failures used to be invisible because the
-        // child ran with ignored stdio. Keep the daemon detached from the UI,
-        // but pipe output into the same private rotating child log as the
-        // backend so startup crashes have a local forensic trail.
-        stdout: "pipe",
-        stderr: "pipe",
+        // The daemon is intentionally allowed to outlive Electron. Parent-owned
+        // stdout/stderr pipes close when the desktop restarts and can terminate a
+        // still-healthy detached daemon with EPIPE on its next log write. The
+        // daemon owns durable trace/provider logs, so its inherited stdio must be
+        // detached from the desktop lifetime as well.
+        stdout: "ignore",
+        stderr: "ignore",
         killSignal: "SIGTERM",
         additionalFds: {
           fd3: {
@@ -709,14 +724,6 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
     );
     const handle = yield* spawner.spawn(command).pipe(
       Effect.mapError((cause) => new ProviderDaemonSpawnError({ cause })),
-      Scope.provide(daemonScope),
-    );
-    yield* drainProviderDaemonOutput("stdout", handle.stdout, providerDaemonOutputLog).pipe(
-      Effect.forkScoped,
-      Scope.provide(daemonScope),
-    );
-    yield* drainProviderDaemonOutput("stderr", handle.stderr, providerDaemonOutputLog).pipe(
-      Effect.forkScoped,
       Scope.provide(daemonScope),
     );
     yield* handle.unref.pipe(Effect.ignore);
@@ -742,6 +749,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       runtimeBuildId,
     };
     yield* writeMarker({ markerPath: environment.providerDaemonMarkerPath, marker });
+    const previous = yield* Ref.get(state);
     yield* Ref.set(state, {
       status: "starting",
       pid: Option.some(handle.pid),
@@ -756,6 +764,9 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       lastHealthRefreshDurationMs: Option.none(),
       healthRefreshCount: 0,
       healthRefreshFailureCount: 0,
+      recoveryCount: previous.recoveryCount,
+      lastRecoveryAt: previous.lastRecoveryAt,
+      lastRecoveryReason: previous.lastRecoveryReason,
     });
     yield* publishDebugSnapshot;
 
@@ -814,7 +825,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
     return endpoint;
   });
 
-  const ensureRunning = Effect.gen(function* () {
+  const ensureRunningUnlocked = Effect.gen(function* () {
     const ensureStartedAtMs = performance.now();
     const current = yield* Ref.get(state);
     if (current.status === "running" && Option.isSome(current.endpoint)) {
@@ -869,10 +880,11 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
     yield* publishDebugSnapshot;
     return endpoint;
   });
+  const ensureRunning = lifecycleMutex.withPermits(1)(ensureRunningUnlocked);
 
   const currentConfig = Ref.get(state).pipe(Effect.map((current) => current.endpoint));
 
-  const refreshHealth: Effect.Effect<Option.Option<ProviderDaemonHealthValue>> = Effect.gen(
+  const refreshHealthUnlocked: Effect.Effect<Option.Option<ProviderDaemonHealthValue>> = Effect.gen(
     function* () {
       const current = yield* Ref.get(state);
       const endpoint = Option.getOrUndefined(current.endpoint);
@@ -917,8 +929,9 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       return Option.some(healthResult.success);
     },
   );
+  const refreshHealth = lifecycleMutex.withPermits(1)(refreshHealthUnlocked);
 
-  const stop = Effect.gen(function* () {
+  const stopUnlocked = Effect.gen(function* () {
     const current = yield* Ref.get(state);
     const endpoint = Option.getOrUndefined(current.endpoint);
     const latestHealth =
@@ -944,6 +957,48 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
     yield* Ref.set(state, initialState);
     yield* publishDebugSnapshot;
   });
+  const stop = lifecycleMutex.withPermits(1)(stopUnlocked);
+
+  const recover = (reason: string): Effect.Effect<ProviderDaemonClientConfig> =>
+    lifecycleMutex.withPermits(1)(
+      Effect.gen(function* () {
+        const current = yield* Ref.get(state);
+        const normalizedReason = reason.replace(/\s+/g, " ").trim().slice(0, 256);
+        const recoveryAt = DateTime.formatIso(yield* DateTime.now);
+        const supervisorPid = Option.getOrUndefined(current.lastHealth)?.upstreamSupervisor?.pid;
+
+        // A replacement daemon has a new root token and issues a new lease. Tear
+        // down every stale process and private credential before spawning so a
+        // reused PID, socket file, or credential cannot be mistaken for the new
+        // authenticated runtime.
+        if (supervisorPid !== undefined && supervisorPid !== Option.getOrUndefined(current.pid)) {
+          yield* terminateExternalPid(supervisorPid);
+        }
+        yield* Option.match(current.terminate, {
+          onNone: () => Effect.void,
+          onSome: (terminate) => terminate,
+        });
+        yield* removeMarker(environment.providerDaemonMarkerPath);
+        yield* removeCredential(environment.providerDaemonCredentialPath);
+        yield* removeProviderDaemonIpcSocket(environment);
+        yield* reapStaleProviderRuntimeProcesses([]);
+        yield* Ref.set(state, {
+          ...initialState,
+          recoveryCount: current.recoveryCount + 1,
+          lastRecoveryAt: Option.some(recoveryAt),
+          lastRecoveryReason: Option.some(
+            normalizedReason.length > 0 ? normalizedReason : "provider daemon became unhealthy",
+          ),
+        });
+        yield* publishDebugSnapshot;
+        yield* logWarning("replacing unhealthy provider daemon", {
+          previousPid: Option.getOrNull(current.pid),
+          recoveryCount: current.recoveryCount + 1,
+          reason: normalizedReason,
+        });
+        return yield* ensureRunningUnlocked;
+      }),
+    );
 
   const refreshRuntimeContext = yield* Effect.context<never>();
   const runRefreshHealth = Effect.runPromiseWith(refreshRuntimeContext);
@@ -954,6 +1009,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
 
   return {
     ensureRunning,
+    recover,
     currentConfig,
     refreshHealth,
     snapshot,

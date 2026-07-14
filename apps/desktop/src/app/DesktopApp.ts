@@ -18,6 +18,7 @@ import * as DesktopApplicationMenu from "../window/DesktopApplicationMenu.ts";
 import * as DesktopBackendManager from "../backend/DesktopBackendManager.ts";
 import { isDesktopHttpsSupported } from "../backend/DesktopHttpsPrerequisites.ts";
 import * as DesktopProviderDaemonManager from "../backend/DesktopProviderDaemonManager.ts";
+import { isPidAlive } from "../backend/DesktopProcessReaper.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopLifecycle from "./DesktopLifecycle.ts";
 import * as DesktopObservability from "./DesktopObservability.ts";
@@ -35,6 +36,9 @@ const MAX_TCP_PORT = 65_535;
 const DESKTOP_BACKEND_PORT_PROBE_HOSTS = ["127.0.0.1", "0.0.0.0", "::"] as const;
 const DESKTOP_SHUTDOWN_BACKEND_STOP_TIMEOUT = Duration.seconds(5);
 const PROVIDER_DAEMON_STARTING_ENDPOINT_POLL_INTERVAL = Duration.millis(10);
+const PROVIDER_DAEMON_HEALTH_CHECK_INTERVAL = Duration.seconds(5);
+const PROVIDER_DAEMON_HEALTH_FAILURE_THRESHOLD = 3;
+const PROVIDER_DAEMON_RECOVERY_BACKEND_STOP_TIMEOUT = Duration.seconds(10);
 
 const makeDesktopRunId = Random.nextUUIDv4.pipe(
   Effect.map((value) => value.replaceAll("-", "").slice(0, 12)),
@@ -62,6 +66,9 @@ class DesktopDevelopmentBackendPortRequiredError extends Data.TaggedError(
 
 const { logInfo: logBootstrapInfo, logWarning: logBootstrapWarning } =
   DesktopObservability.makeComponentLogger("desktop-bootstrap");
+
+const { logInfo: logDaemonWatchdogInfo, logWarning: logDaemonWatchdogWarning } =
+  DesktopObservability.makeComponentLogger("desktop-provider-daemon-watchdog");
 
 const {
   logInfo: logStartupInfo,
@@ -208,6 +215,99 @@ const waitForProviderDaemonStartingEndpoint = Effect.fn(
   return yield* Effect.raceFirst(waitForCurrentConfig, Fiber.join(readyFiber));
 });
 
+/**
+ * Keep the provider runtime and backend lease in one coherent generation.
+ *
+ * The provider daemon is intentionally detached so long turns can survive a
+ * renderer/backend restart. If that daemon itself dies, however, a replacement
+ * has a new root credential and issues a new lease capability. The backend must
+ * therefore restart after the daemon replacement; mutating its bootstrap token
+ * in place would weaken the capability boundary and leave event ingestion on a
+ * stale socket.
+ */
+export const runProviderDaemonHealthWatchdog = Effect.fn("desktop.providerDaemonHealthWatchdog")(
+  function* (input: {
+    readonly backendManager: DesktopBackendManager.DesktopBackendManagerShape;
+    readonly providerDaemonManager: DesktopProviderDaemonManager.DesktopProviderDaemonManagerShape;
+    readonly quitting: Ref.Ref<boolean>;
+    readonly checkInterval?: Duration.Duration;
+    readonly failureThreshold?: number;
+  }) {
+    const checkInterval = input.checkInterval ?? PROVIDER_DAEMON_HEALTH_CHECK_INTERVAL;
+    const failureThreshold = Math.max(
+      1,
+      Math.trunc(input.failureThreshold ?? PROVIDER_DAEMON_HEALTH_FAILURE_THRESHOLD),
+    );
+    let consecutiveFailures = 0;
+
+    while (!(yield* Ref.get(input.quitting))) {
+      yield* Effect.sleep(checkInterval);
+      if (yield* Ref.get(input.quitting)) {
+        return;
+      }
+
+      const health = yield* input.providerDaemonManager.refreshHealth.pipe(
+        Effect.catchCause((cause) =>
+          logDaemonWatchdogWarning("provider daemon health probe crashed", {
+            cause: Cause.pretty(cause),
+          }).pipe(Effect.as(Option.none())),
+        ),
+      );
+      if (Option.isSome(health)) {
+        consecutiveFailures = 0;
+        continue;
+      }
+
+      consecutiveFailures += 1;
+      const daemonSnapshot = yield* input.providerDaemonManager.snapshot;
+      const daemonPid = Option.getOrUndefined(daemonSnapshot.pid);
+      const processIsKnownDead = daemonPid !== undefined && !isPidAlive(daemonPid);
+      if (!processIsKnownDead && consecutiveFailures < failureThreshold) {
+        continue;
+      }
+
+      const reason = processIsKnownDead
+        ? `provider daemon process ${daemonPid} exited`
+        : `provider daemon failed ${consecutiveFailures} consecutive health probes`;
+      yield* logDaemonWatchdogWarning("provider daemon recovery starting", {
+        reason,
+        consecutiveFailures,
+        daemonPid: daemonPid ?? null,
+        lastError: Option.getOrNull(daemonSnapshot.lastError),
+      });
+
+      const recovered = yield* Effect.gen(function* () {
+        // Stop first so no in-flight backend RPC can race credential/socket
+        // replacement. `start` resolves configuration again and receives the new
+        // daemon lease through the inherited bootstrap descriptor.
+        yield* input.backendManager.stop({
+          timeout: PROVIDER_DAEMON_RECOVERY_BACKEND_STOP_TIMEOUT,
+        });
+        if (yield* Ref.get(input.quitting)) {
+          return false;
+        }
+        const endpoint = yield* input.providerDaemonManager.recover(reason);
+        if (yield* Ref.get(input.quitting)) {
+          return false;
+        }
+        yield* input.backendManager.start;
+        yield* logDaemonWatchdogInfo("provider daemon recovery completed", {
+          endpoint: endpoint.httpBaseUrl,
+          transport: endpoint.transport ?? "tcp",
+        });
+        return true;
+      }).pipe(
+        Effect.catchCause((cause) =>
+          logDaemonWatchdogWarning("provider daemon recovery failed; retry remains scheduled", {
+            cause: Cause.pretty(cause),
+          }).pipe(Effect.as(false)),
+        ),
+      );
+      consecutiveFailures = recovered ? 0 : failureThreshold;
+    }
+  },
+);
+
 const bootstrap = Effect.gen(function* () {
   const backendManager = yield* DesktopBackendManager.DesktopBackendManager;
   const providerDaemonManager = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
@@ -293,6 +393,11 @@ const bootstrap = Effect.gen(function* () {
   yield* logBootstrapInfo("bootstrap provider daemon ready", {
     endpoint: providerDaemon.httpBaseUrl,
   });
+  yield* runProviderDaemonHealthWatchdog({
+    backendManager,
+    providerDaemonManager,
+    quitting: state.quitting,
+  }).pipe(Effect.forkScoped);
 }).pipe(Effect.withSpan("desktop.bootstrap"));
 
 const startup = Effect.gen(function* () {

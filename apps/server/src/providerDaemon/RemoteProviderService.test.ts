@@ -4,7 +4,9 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   attachCommandIdToMutatingProviderDaemonRequest,
   isVoidProviderDaemonRpcMethod,
+  ProviderDaemonRpcResponseError,
   remoteProviderCursorProjectorForConfig,
+  toRemoteRequestError,
 } from "./RemoteProviderService.ts";
 import {
   PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
@@ -54,5 +56,18 @@ describe("RemoteProviderService", () => {
       remoteProviderCursorProjectorForConfig({ providerSupervisor: {} }),
       PROVIDER_SUPERVISOR_RUNTIME_CURSOR_PROJECTOR,
     );
+  });
+
+  it("retains a typed remote RPC error tag on adapter request errors", () => {
+    const error = toRemoteRequestError(
+      "getInstanceInfo",
+      new ProviderDaemonRpcResponseError(
+        "ProviderUnsupportedError",
+        "ProviderUnsupportedError: provider instance is not configured",
+      ),
+    );
+
+    assert.equal(error.remoteErrorTag, "ProviderUnsupportedError");
+    assert.include(error.detail, "provider instance is not configured");
   });
 });

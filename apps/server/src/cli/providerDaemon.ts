@@ -18,6 +18,7 @@ import {
 import { runProviderDaemonServerForever } from "../providerDaemon/ProviderDaemonServer.ts";
 import { ProviderDaemonRuntimeLive } from "../providerDaemon/ProviderDaemonRuntime.ts";
 import { PROVIDER_SUPERVISOR_PROTOCOL_VERSION } from "../providerDaemon/ProviderSupervisorProcessManager.ts";
+import { ObservabilityLive } from "../observability/Layers/Observability.ts";
 import packageJson from "../../package.json" with { type: "json" };
 import { bootstrapFdFlag } from "./config.ts";
 
@@ -28,6 +29,7 @@ class ProviderDaemonCliError extends Data.TaggedError("ProviderDaemonCliError")<
 const resolveProviderDaemonServerConfig = (input: {
   readonly bootstrap: ProviderDaemonBootstrap;
   readonly logLevel: LogLevel.LogLevel;
+  readonly runtimeRole: "provider-daemon" | "provider-supervisor";
   readonly providerSupervisor?: ServerConfigShape["providerSupervisor"];
 }): Effect.Effect<
   ServerConfigShape,
@@ -36,6 +38,7 @@ const resolveProviderDaemonServerConfig = (input: {
 > =>
   Effect.gen(function* () {
     const baseDir = input.bootstrap.cafeCodeHome;
+    const path = yield* Path.Path;
     const derivedPaths = yield* deriveServerPaths(baseDir, undefined);
     yield* ensureServerDirectories(derivedPaths);
 
@@ -49,7 +52,7 @@ const resolveProviderDaemonServerConfig = (input: {
       otlpTracesUrl: input.bootstrap.otlpTracesUrl,
       otlpMetricsUrl: input.bootstrap.otlpMetricsUrl,
       otlpExportIntervalMs: 10_000,
-      otlpServiceName: "cafe-code-provider-daemon",
+      otlpServiceName: `cafe-code-${input.runtimeRole}`,
       mode: "desktop",
       port: input.bootstrap.port ?? 1,
       httpsEnabled: false,
@@ -57,7 +60,11 @@ const resolveProviderDaemonServerConfig = (input: {
       cwd: process.cwd(),
       baseDir,
       ...derivedPaths,
-      serverTracePath: derivedPaths.serverTracePath,
+      // Detached provider runtimes cannot safely depend on Electron-owned
+      // stdout/stderr pipes. Give each runtime role a child-owned trace file so
+      // diagnostics survive desktop restarts without two processes rotating the
+      // backend's `server.trace.ndjson` concurrently.
+      serverTracePath: path.join(derivedPaths.logsDir, `${input.runtimeRole}.trace.ndjson`),
       host: input.bootstrap.host ?? "127.0.0.1",
       staticDir: undefined,
       devUrl: undefined,
@@ -98,6 +105,7 @@ export const runProviderDaemonCommand = (flags: { readonly bootstrapFd: Option.O
     const baseConfig = yield* resolveProviderDaemonServerConfig({
       bootstrap,
       logLevel,
+      runtimeRole: "provider-daemon",
     });
     yield* Effect.logInfo("provider daemon using local provider runtime", {
       reason:
@@ -118,6 +126,7 @@ export const runProviderDaemonCommand = (flags: { readonly bootstrapFd: Option.O
         : {}),
     }).pipe(
       Effect.provide(ProviderDaemonRuntimeLive),
+      Effect.provide(ObservabilityLive),
       Effect.provideService(ServerConfig, baseConfig),
     );
   });
@@ -151,6 +160,7 @@ export const runProviderSupervisorCommand = (flags: {
     const config = yield* resolveProviderDaemonServerConfig({
       bootstrap,
       logLevel,
+      runtimeRole: "provider-supervisor",
     });
 
     return yield* runProviderDaemonServerForever({
@@ -165,7 +175,11 @@ export const runProviderSupervisorCommand = (flags: {
       ...(bootstrap.runtimeBuildId !== undefined
         ? { runtimeBuildId: bootstrap.runtimeBuildId }
         : {}),
-    }).pipe(Effect.provide(ProviderDaemonRuntimeLive), Effect.provideService(ServerConfig, config));
+    }).pipe(
+      Effect.provide(ProviderDaemonRuntimeLive),
+      Effect.provide(ObservabilityLive),
+      Effect.provideService(ServerConfig, config),
+    );
   });
 
 export const providerDaemonCommand = Command.make("provider-daemon", {

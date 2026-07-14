@@ -60,6 +60,7 @@ const providerDaemonLayer = Layer.succeed(
       httpBaseUrl: "http://127.0.0.1:3774",
       token: "provider-daemon-test-token-000000000000000000000000",
     }),
+    recover: () => Effect.die("unexpected recover"),
     currentConfig: Effect.succeed(Option.none()),
     refreshHealth: Effect.succeed(Option.none()),
     snapshot: Effect.succeed({
@@ -78,6 +79,9 @@ const providerDaemonLayer = Layer.succeed(
       lastHealthRefreshDurationMs: Option.none(),
       healthRefreshCount: 0,
       healthRefreshFailureCount: 0,
+      recoveryCount: 0,
+      lastRecoveryAt: Option.none(),
+      lastRecoveryReason: Option.none(),
     }),
     stop: Effect.void,
   } satisfies DesktopProviderDaemonManager.DesktopProviderDaemonManagerShape,
@@ -373,6 +377,7 @@ describe("DesktopBackendConfiguration", () => {
           DesktopProviderDaemonManager.DesktopProviderDaemonManager,
           {
             ensureRunning: Effect.die("unexpected ensureRunning"),
+            recover: () => Effect.die("unexpected recover"),
             currentConfig: Effect.succeed(
               Option.some({
                 httpBaseUrl: "http://127.0.0.1:3774",

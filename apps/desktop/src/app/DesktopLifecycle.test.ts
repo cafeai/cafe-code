@@ -165,6 +165,7 @@ function makeLifecycleHarness(options?: {
       DesktopProviderDaemonManager.DesktopProviderDaemonManager,
       {
         ensureRunning: Effect.die("unexpected ensureRunning"),
+        recover: () => Effect.die("unexpected recover"),
         currentConfig: Effect.succeed(Option.none()),
         refreshHealth: Effect.succeed(
           Option.some(makeProviderDaemonHealth(options?.activeProviderSessionCount ?? 0)),

@@ -49,6 +49,7 @@ import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import {
+  isProviderInstanceMissingError,
   providerErrorLabel,
   providerErrorLabelFromInstanceHint,
   ProviderCommandReactorLive,
@@ -136,6 +137,27 @@ describe("ProviderCommandReactor", () => {
 
     it("uses the unknown driver kind when the resolved driver is not registered locally", () => {
       expect(providerErrorLabel("third_party_driver")).toBe("third_party_driver");
+    });
+
+    it("preserves provider daemon transport failures as operational errors", () => {
+      const error = new ProviderAdapterRequestError({
+        provider: "provider-daemon",
+        method: "getInstanceInfo",
+        detail: "connect ECONNREFUSED /tmp/provider-daemon.sock",
+      });
+
+      expect(isProviderInstanceMissingError(error)).toBe(false);
+    });
+
+    it("recognizes a typed remote registry miss", () => {
+      const error = new ProviderAdapterRequestError({
+        provider: "provider-daemon",
+        method: "getInstanceInfo",
+        detail: "ProviderUnsupportedError: provider instance is not configured",
+        remoteErrorTag: "ProviderUnsupportedError",
+      });
+
+      expect(isProviderInstanceMissingError(error)).toBe(true);
     });
   });
 

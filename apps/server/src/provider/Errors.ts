@@ -60,6 +60,14 @@ export class ProviderAdapterRequestError extends Schema.TaggedErrorClass<Provide
     provider: Schema.String,
     method: Schema.String,
     detail: Schema.String,
+    /**
+     * The typed error tag returned by an out-of-process provider runtime.
+     *
+     * Keep this separate from `detail`: orchestration must distinguish a real
+     * registry miss from transport failures without parsing human-readable
+     * error strings. The field carries no provider payload or credentials.
+     */
+    remoteErrorTag: Schema.optional(Schema.String),
     cause: Schema.optional(Schema.Defect),
   },
 ) {
