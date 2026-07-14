@@ -533,6 +533,64 @@ describe("ProviderRuntimeIngestion", () => {
     ).toBe(true);
   });
 
+  it("reopens the same terminal turn only for explicit live Codex aggregate continuation", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("turn-live-aggregate-continuation");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-live-aggregate-started"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-07-14T00:00:00.000Z",
+      turnId,
+      payload: {},
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "running" && thread.session.activeTurnId === turnId,
+    );
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-live-aggregate-root-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-07-14T00:00:01.000Z",
+      turnId,
+      payload: { state: "completed" },
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "ready" && thread.latestTurn?.state === "completed",
+    );
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-live-aggregate-reopened"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-07-14T00:00:02.000Z",
+      turnId,
+      raw: {
+        source: "codex.app-server.notification",
+        method: "codex.aggregateTurn/reopened",
+        payload: {},
+      },
+      payload: {},
+    });
+
+    const recovered = await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session.activeTurnId === turnId &&
+        thread.latestTurn?.state === "running" &&
+        thread.latestTurn.completedAt === null,
+    );
+    expect(recovered.latestTurn?.completedAt).toBeNull();
+  });
+
   it("clears active turn state when Codex reports an aborted turn", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

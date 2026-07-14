@@ -101,6 +101,179 @@ describe("orchestration projector", () => {
     ]);
   });
 
+  it("keeps diff placeholders non-terminal and permits only explicit live continuation recovery", async () => {
+    const createdAt = "2026-07-14T00:00:00.000Z";
+    const created = await Effect.runPromise(
+      projectEvent(
+        createEmptyReadModel(createdAt),
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-live-continuation",
+          occurredAt: createdAt,
+          commandId: "cmd-create-live-continuation",
+          payload: {
+            threadId: "thread-live-continuation",
+            projectId: "project-1",
+            title: "Live continuation",
+            modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        }),
+      ),
+    );
+    const running = await Effect.runPromise(
+      projectEvent(
+        created,
+        makeEvent({
+          sequence: 2,
+          type: "thread.session-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-live-continuation",
+          occurredAt: "2026-07-14T00:00:01.000Z",
+          commandId: "cmd-running-live-continuation",
+          payload: {
+            threadId: "thread-live-continuation",
+            session: {
+              threadId: "thread-live-continuation",
+              status: "running",
+              providerName: "codex",
+              providerInstanceId: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: "turn-live-continuation",
+              lastError: null,
+              updatedAt: "2026-07-14T00:00:01.000Z",
+            },
+          },
+        }),
+      ),
+    );
+    const withMissingDiff = await Effect.runPromise(
+      projectEvent(
+        running,
+        makeEvent({
+          sequence: 3,
+          type: "thread.turn-diff-completed",
+          aggregateKind: "thread",
+          aggregateId: "thread-live-continuation",
+          occurredAt: "2026-07-14T00:00:02.000Z",
+          commandId: "cmd-missing-diff-live-continuation",
+          payload: {
+            threadId: "thread-live-continuation",
+            turnId: "turn-live-continuation",
+            checkpointTurnCount: 1,
+            checkpointRef: "provider-diff:event-1",
+            status: "missing",
+            files: [],
+            assistantMessageId: null,
+            completedAt: "2026-07-14T00:00:02.000Z",
+          },
+        }),
+      ),
+    );
+
+    expect(withMissingDiff.threads[0]?.session?.status).toBe("running");
+    expect(withMissingDiff.threads[0]?.latestTurn).toMatchObject({
+      turnId: "turn-live-continuation",
+      state: "running",
+      completedAt: null,
+    });
+
+    const completed = await Effect.runPromise(
+      projectEvent(
+        withMissingDiff,
+        makeEvent({
+          sequence: 4,
+          type: "thread.session-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-live-continuation",
+          occurredAt: "2026-07-14T00:00:03.000Z",
+          commandId: "cmd-complete-live-continuation",
+          payload: {
+            threadId: "thread-live-continuation",
+            session: {
+              threadId: "thread-live-continuation",
+              status: "ready",
+              providerName: "codex",
+              providerInstanceId: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: "2026-07-14T00:00:03.000Z",
+            },
+          },
+        }),
+      ),
+    );
+    const staleReplay = await Effect.runPromise(
+      projectEvent(
+        completed,
+        makeEvent({
+          sequence: 5,
+          type: "thread.session-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-live-continuation",
+          occurredAt: "2026-07-14T00:00:04.000Z",
+          commandId: "cmd-stale-live-continuation",
+          payload: {
+            threadId: "thread-live-continuation",
+            session: {
+              threadId: "thread-live-continuation",
+              status: "running",
+              providerName: "codex",
+              providerInstanceId: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: "turn-live-continuation",
+              lastError: null,
+              updatedAt: "2026-07-14T00:00:04.000Z",
+            },
+          },
+        }),
+      ),
+    );
+    expect(staleReplay.threads[0]?.session?.status).toBe("ready");
+
+    const recovered = await Effect.runPromise(
+      projectEvent(
+        staleReplay,
+        makeEvent({
+          sequence: 6,
+          type: "thread.session-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-live-continuation",
+          occurredAt: "2026-07-14T00:00:05.000Z",
+          commandId: "cmd-recover-live-continuation",
+          payload: {
+            threadId: "thread-live-continuation",
+            session: {
+              threadId: "thread-live-continuation",
+              status: "running",
+              providerName: "codex",
+              providerInstanceId: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: "turn-live-continuation",
+              lastError: null,
+              updatedAt: "2026-07-14T00:00:05.000Z",
+            },
+            terminalTurnRecovery: "live-provider-continuation",
+          },
+        }),
+      ),
+    );
+    expect(recovered.threads[0]?.session?.status).toBe("running");
+    expect(recovered.threads[0]?.latestTurn).toMatchObject({
+      turnId: "turn-live-continuation",
+      state: "running",
+      completedAt: null,
+    });
+  });
+
   it("applies assistant repair suffix events without reopening streaming state", async () => {
     const now = "2026-01-01T00:00:00.000Z";
     const created = await Effect.runPromise(

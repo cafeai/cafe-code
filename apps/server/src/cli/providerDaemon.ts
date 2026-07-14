@@ -3,6 +3,7 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as LogLevel from "effect/LogLevel";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
@@ -112,6 +113,14 @@ export const runProviderDaemonCommand = (flags: { readonly bootstrapFd: Option.O
         "automatic provider-supervisor handoff is disabled until supervisor restart/fallback preserves the provider registry",
     });
 
+    const runtimeLayer = ObservabilityLive.pipe(
+      // ProviderDaemonRuntimeLive retains its scoped FetchHttpClient service;
+      // provide it to observability serially because Layer.mergeAll constructs
+      // siblings in parallel and cannot satisfy that dependency edge.
+      Layer.provideMerge(ProviderDaemonRuntimeLive),
+      Layer.provideMerge(Layer.succeed(ServerConfig, baseConfig)),
+    );
+
     return yield* runProviderDaemonServerForever({
       mode: "provider-daemon",
       transport: bootstrap.transport ?? "tcp",
@@ -124,11 +133,7 @@ export const runProviderDaemonCommand = (flags: { readonly bootstrapFd: Option.O
       ...(bootstrap.runtimeBuildId !== undefined
         ? { runtimeBuildId: bootstrap.runtimeBuildId }
         : {}),
-    }).pipe(
-      Effect.provide(ProviderDaemonRuntimeLive),
-      Effect.provide(ObservabilityLive),
-      Effect.provideService(ServerConfig, baseConfig),
-    );
+    }).pipe(Effect.provide(runtimeLayer));
   });
 
 export const runProviderSupervisorCommand = (flags: {
@@ -163,6 +168,11 @@ export const runProviderSupervisorCommand = (flags: {
       runtimeRole: "provider-supervisor",
     });
 
+    const runtimeLayer = ObservabilityLive.pipe(
+      Layer.provideMerge(ProviderDaemonRuntimeLive),
+      Layer.provideMerge(Layer.succeed(ServerConfig, config)),
+    );
+
     return yield* runProviderDaemonServerForever({
       mode: "provider-supervisor",
       transport: bootstrap.transport ?? "tcp",
@@ -175,11 +185,7 @@ export const runProviderSupervisorCommand = (flags: {
       ...(bootstrap.runtimeBuildId !== undefined
         ? { runtimeBuildId: bootstrap.runtimeBuildId }
         : {}),
-    }).pipe(
-      Effect.provide(ProviderDaemonRuntimeLive),
-      Effect.provide(ObservabilityLive),
-      Effect.provideService(ServerConfig, config),
-    );
+    }).pipe(Effect.provide(runtimeLayer));
   });
 
 export const providerDaemonCommand = Command.make("provider-daemon", {

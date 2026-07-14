@@ -71,6 +71,7 @@ import Migration0055 from "./Migrations/055_ProjectionThreadActivityTurnPageInde
 import Migration0056 from "./Migrations/056_RebuildTruncatedAssistantMessageProjections.ts";
 import Migration0058 from "./Migrations/058_UsageStatsDays.ts";
 import Migration0059 from "./Migrations/059_DropLegacyUsageStatsProjections.ts";
+import Migration0060 from "./Migrations/060_ProjectionTurnCheckpointCompletedAt.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -146,6 +147,7 @@ export const migrationEntries = [
   // those DBs and this table would never be created. Use the next free id.
   [58, "UsageStatsDays", Migration0058],
   [59, "DropLegacyUsageStatsProjections", Migration0059],
+  [60, "ProjectionTurnCheckpointCompletedAt", Migration0060],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

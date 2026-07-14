@@ -36,6 +36,7 @@ import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
 import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SchemaIssue from "effect/SchemaIssue";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
@@ -104,6 +105,12 @@ const CODEX_TURN_STEER_PROCESSING_WARNING_DELAYS = [
   "15 seconds",
   "60 seconds",
   "120 seconds",
+] as const;
+const CODEX_AGGREGATE_CHILD_LIVENESS_POLL_DELAYS = [
+  "2 seconds",
+  "10 seconds",
+  "30 seconds",
+  "60 seconds",
 ] as const;
 const CODEX_APP_SERVER_CHILD_PROCESS_WARNING_LIMIT = 8;
 const CODEX_APP_SERVER_CHILD_PROCESS_COMMAND_PREVIEW_LENGTH = 180;
@@ -436,6 +443,23 @@ export interface CodexPendingSteerProcessing {
   readonly providerUserMessageItemId?: ProviderItemId;
   readonly providerUserMessageMethod?: string;
   readonly ackToProviderItemMs?: number;
+}
+
+export type CodexChildConversationLivenessState = "unknown" | "active" | "inactive";
+
+export interface CodexChildConversationLiveness {
+  readonly parentTurnId: TurnId;
+  readonly state: CodexChildConversationLivenessState;
+  readonly observedAt: string;
+  readonly method: string;
+}
+
+interface CodexAggregateRootCompletion {
+  readonly turnId: TurnId;
+  readonly state: "completed" | "failed" | "interrupted" | "cancelled";
+  readonly errorMessage?: string;
+  readonly providerThreadId?: string;
+  readonly observedAt: string;
 }
 
 export type CodexServerNotification = {
@@ -1561,6 +1585,7 @@ function shouldSuppressChildConversationNotification(method: string): boolean {
     method === "thread/started" ||
     method === "thread/status/changed" ||
     method === "thread/archived" ||
+    method === "thread/deleted" ||
     method === "thread/unarchived" ||
     method === "thread/closed" ||
     method === "thread/compacted" ||
@@ -1608,6 +1633,147 @@ export function resolveCodexChildConversationNotification(
         suppressLifecycle: shouldSuppressChildConversationNotification(notification.method),
       }
     : undefined;
+}
+
+export function codexChildConversationThreadIdsForTurn(
+  childConversationTurns: ReadonlyMap<string, TurnId>,
+  parentTurnId: TurnId,
+): ReadonlyArray<string> {
+  const parentKey = String(parentTurnId);
+  return Array.from(childConversationTurns.entries())
+    .filter(([, candidateParentTurnId]) => String(candidateParentTurnId) === parentKey)
+    .map(([providerThreadId]) => providerThreadId)
+    .toSorted();
+}
+
+export function isCodexChildConversationWorkNotification(
+  notification: CodexServerNotification,
+): boolean {
+  const method = notification.method;
+  if (
+    method === "turn/started" ||
+    method === "turn/completed" ||
+    method === "thread/status/changed" ||
+    method === "thread/archived" ||
+    method === "thread/deleted" ||
+    method === "thread/closed" ||
+    method === "thread/tokenUsage/updated" ||
+    method === "warning" ||
+    method === "guardianWarning"
+  ) {
+    return false;
+  }
+
+  // Keep this forward-compatible with new app-server item/hook notification
+  // variants. A child-scoped notification carrying a turn id is live-channel
+  // evidence in the same sense as the TUI's buffered per-thread event store.
+  return (
+    method.startsWith("item/") ||
+    method.startsWith("hook/") ||
+    method === "rawResponseItem/completed" ||
+    method === "serverRequest/resolved" ||
+    readNotificationTurnId(notification) !== undefined
+  );
+}
+
+export function updateCodexChildConversationLiveness(
+  current: ReadonlyMap<string, CodexChildConversationLiveness>,
+  childConversationTurns: ReadonlyMap<string, TurnId>,
+  notification: CodexServerNotification,
+  observedAt: string,
+): Map<string, CodexChildConversationLiveness> {
+  const next = new Map(current);
+
+  // Child registration is emitted immediately before the child's first live
+  // turn in multi_agents_v2. Seed an unknown state so root completion waits for
+  // either that live event or an authoritative thread/read result.
+  for (const [providerThreadId, parentTurnId] of childConversationTurns) {
+    const existing = next.get(providerThreadId);
+    if (!existing || String(existing.parentTurnId) !== String(parentTurnId)) {
+      next.set(providerThreadId, {
+        parentTurnId,
+        state: "unknown",
+        observedAt,
+        method: "child-registered",
+      });
+    }
+  }
+
+  const providerThreadId = readNotificationThreadId(notification);
+  const parentTurnId = providerThreadId ? childConversationTurns.get(providerThreadId) : undefined;
+  if (!providerThreadId || !parentTurnId) {
+    return next;
+  }
+
+  let state: CodexChildConversationLivenessState | undefined;
+  switch (notification.method) {
+    case "turn/started":
+      state = "active";
+      break;
+    case "turn/completed":
+    case "thread/archived":
+    case "thread/deleted":
+    case "thread/closed":
+      state = "inactive";
+      break;
+    case "thread/status/changed": {
+      const status = readNotificationThreadStatusType(notification);
+      if (status === "active") {
+        state = "active";
+      } else if (status === "idle" || status === "notLoaded" || status === "systemError") {
+        state = "inactive";
+      }
+      break;
+    }
+    case "error": {
+      const willRetry = readNotificationParamBoolean(notification, "willRetry");
+      if (willRetry !== undefined) {
+        state = willRetry ? "active" : "inactive";
+      }
+      break;
+    }
+    default:
+      if (isCodexChildConversationWorkNotification(notification)) {
+        state = "active";
+      }
+      break;
+  }
+
+  if (state !== undefined) {
+    next.set(providerThreadId, {
+      parentTurnId,
+      state,
+      observedAt,
+      method: notification.method,
+    });
+  }
+  return next;
+}
+
+export function codexAggregateTurnHasUnfinishedChildren(
+  childConversationTurns: ReadonlyMap<string, TurnId>,
+  childLiveness: ReadonlyMap<string, CodexChildConversationLiveness>,
+  parentTurnId: TurnId,
+): boolean {
+  const childThreadIds = codexChildConversationThreadIdsForTurn(
+    childConversationTurns,
+    parentTurnId,
+  );
+  return childThreadIds.some((providerThreadId) => {
+    const liveness = childLiveness.get(providerThreadId);
+    return (
+      !liveness ||
+      String(liveness.parentTurnId) !== String(parentTurnId) ||
+      liveness.state !== "inactive"
+    );
+  });
+}
+
+export function isTerminalCodexChildThreadReadError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  // This is the exact terminal classification used by upstream Codex TUI
+  // 0.144.4 in `App::is_terminal_thread_read_error`.
+  return message.includes("thread not loaded:");
 }
 
 export function readCodexExpectedActiveTurnMismatchActualTurnId(
@@ -2145,6 +2311,16 @@ export const makeCodexSessionRuntime = (
     const approvalCorrelationsRef = yield* Ref.make(new Map<string, ApprovalCorrelation>());
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
     const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
+    const childConversationLivenessRef = yield* Ref.make(
+      new Map<string, CodexChildConversationLiveness>(),
+    );
+    const aggregateRootCompletionsRef = yield* Ref.make(
+      new Map<string, CodexAggregateRootCompletion>(),
+    );
+    const pendingAggregateCompletionsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
+    const aggregateManagedTurnIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
+    const aggregateCompletionWatcherTurnIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
+    const aggregateLifecycleSemaphore = yield* Semaphore.make(1);
     const closedRef = yield* Ref.make(false);
     const snapshotBackfillEventIdsRef = yield* Ref.make(new Set<string>());
     const turnStartObservationsRef = yield* Ref.make(new Map<string, CodexTurnStartObservation>());
@@ -2638,8 +2814,17 @@ export const makeCodexSessionRuntime = (
           return;
         }
 
+        const aggregateManagedTurnIds = yield* Ref.get(aggregateManagedTurnIdsRef);
+        const eligibleEvents = builtEvents.filter(
+          (event) =>
+            !(
+              event.method === "turn/completed" &&
+              event.turnId !== undefined &&
+              aggregateManagedTurnIds.has(String(event.turnId))
+            ),
+        );
         const seenIds = yield* Ref.get(snapshotBackfillEventIdsRef);
-        const unseenEvents = builtEvents.filter((event) => !seenIds.has(event.id));
+        const unseenEvents = eligibleEvents.filter((event) => !seenIds.has(event.id));
         if (unseenEvents.length === 0) {
           return;
         }
@@ -2779,6 +2964,14 @@ export const makeCodexSessionRuntime = (
     }) =>
       Effect.gen(function* () {
         if (input.turn.status === "inProgress") {
+          return;
+        }
+
+        if ((yield* Ref.get(pendingAggregateCompletionsRef)).has(String(input.turnId))) {
+          // The root provider thread is terminal, but Cafe's visible turn is an
+          // aggregate of that root plus routed subagent channels. A root-only
+          // thread/read snapshot cannot close the aggregate while child
+          // liveness remains pending.
           return;
         }
 
@@ -3085,6 +3278,359 @@ export const makeCodexSessionRuntime = (
 
     const currentSessionProviderThreadId = Effect.map(Ref.get(sessionRef), currentProviderThreadId);
 
+    const rememberAggregateManagedTurn = (turnId: TurnId) =>
+      Ref.update(aggregateManagedTurnIdsRef, (current) => {
+        const next = new Set(current);
+        next.add(String(turnId));
+        while (next.size > 100) {
+          const oldest = next.values().next().value;
+          if (oldest === undefined) break;
+          next.delete(oldest);
+        }
+        return next;
+      });
+
+    const recordAggregateRootCompletion = (completion: CodexAggregateRootCompletion) =>
+      Ref.update(aggregateRootCompletionsRef, (current) => {
+        const next = new Map(current);
+        next.set(String(completion.turnId), completion);
+        while (next.size > 50) {
+          const oldest = next.keys().next().value;
+          if (oldest === undefined) break;
+          next.delete(oldest);
+        }
+        return next;
+      });
+
+    const finalizeAggregateCompletionIfIdle = (turnId: TurnId) =>
+      aggregateLifecycleSemaphore.withPermits(1)(
+        Effect.gen(function* () {
+          const key = String(turnId);
+          const pending = yield* Ref.get(pendingAggregateCompletionsRef);
+          if (!pending.has(key)) {
+            return false;
+          }
+
+          const childConversationTurns = yield* Ref.get(collabReceiverTurnsRef);
+          const childLiveness = yield* Ref.get(childConversationLivenessRef);
+          if (
+            codexAggregateTurnHasUnfinishedChildren(childConversationTurns, childLiveness, turnId)
+          ) {
+            return false;
+          }
+
+          const completion = (yield* Ref.get(aggregateRootCompletionsRef)).get(key);
+          if (!completion) {
+            // A pending aggregate completion always has a root completion
+            // record. Preserve the running state on invariant violation rather
+            // than silently manufacturing terminal provider truth.
+            yield* Effect.logWarning("codex.aggregateTurn.rootCompletionMissing", {
+              threadId: options.threadId,
+              providerInstanceId: options.providerInstanceId ?? PROVIDER,
+              turnId,
+            });
+            return false;
+          }
+
+          const nextPending = new Set(pending);
+          nextPending.delete(key);
+          yield* Ref.set(pendingAggregateCompletionsRef, nextPending);
+          yield* updateSession(sessionRef, {
+            status: completion.state === "failed" ? "error" : "ready",
+            activeTurnId: undefined,
+            lastError: completion.state === "failed" ? completion.errorMessage : undefined,
+          });
+          yield* emitEvent({
+            kind: "notification",
+            threadId: options.threadId,
+            method: "codex.aggregateTurn/completed",
+            turnId,
+            message: "Codex aggregate turn completed after all routed subagents became inactive.",
+            payload: {
+              state: completion.state,
+              ...(completion.errorMessage ? { errorMessage: completion.errorMessage } : {}),
+              ...(completion.providerThreadId
+                ? { providerThreadId: completion.providerThreadId }
+                : {}),
+              rootCompletedAt: completion.observedAt,
+              aggregateCompletedAt: yield* nowIso,
+              semantics:
+                "Upstream Codex TUI tracks primary and subagent thread liveness separately. Cafe combines those channels, so the visible aggregate turn becomes terminal only after every routed child thread is non-active.",
+            },
+          });
+          return true;
+        }),
+      );
+
+    const refreshAggregateChildLivenessFromThreadRead = (turnId: TurnId) =>
+      Effect.gen(function* () {
+        const childConversationTurns = yield* Ref.get(collabReceiverTurnsRef);
+        const childLiveness = yield* Ref.get(childConversationLivenessRef);
+        const childThreadIds = codexChildConversationThreadIdsForTurn(
+          childConversationTurns,
+          turnId,
+        ).filter((providerThreadId) => {
+          const liveness = childLiveness.get(providerThreadId);
+          return (
+            !liveness ||
+            String(liveness.parentTurnId) !== String(turnId) ||
+            liveness.state !== "inactive"
+          );
+        });
+        const results = yield* Effect.forEach(
+          childThreadIds,
+          (providerThreadId) =>
+            client
+              .request("thread/read", {
+                threadId: providerThreadId,
+                includeTurns: false,
+              })
+              .pipe(
+                Effect.timeoutOption(CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT),
+                Effect.map(
+                  Option.match({
+                    onNone: () => ({ providerThreadId, state: undefined }),
+                    onSome: (response) => {
+                      const status = readCodexSnapshotThreadStatusType(response.thread.status);
+                      return {
+                        providerThreadId,
+                        state:
+                          status === "active"
+                            ? ("active" as const)
+                            : status === undefined
+                              ? undefined
+                              : ("inactive" as const),
+                      };
+                    },
+                  }),
+                ),
+                Effect.catch((error) =>
+                  Effect.logWarning("codex.aggregateTurn.childThreadReadFailed", {
+                    threadId: options.threadId,
+                    providerInstanceId: options.providerInstanceId ?? PROVIDER,
+                    turnId,
+                    providerThreadId,
+                    terminal: isTerminalCodexChildThreadReadError(error),
+                    cause: error.message,
+                  }).pipe(
+                    Effect.as({
+                      providerThreadId,
+                      state: isTerminalCodexChildThreadReadError(error)
+                        ? ("inactive" as const)
+                        : undefined,
+                    }),
+                  ),
+                ),
+              ),
+          { concurrency: 4 },
+        );
+        const observedAt = yield* nowIso;
+
+        yield* aggregateLifecycleSemaphore.withPermits(1)(
+          Effect.gen(function* () {
+            const currentRoutes = yield* Ref.get(collabReceiverTurnsRef);
+            yield* Ref.update(childConversationLivenessRef, (current) => {
+              const next = new Map(current);
+              for (const result of results) {
+                if (result.state === undefined) continue;
+                const parentTurnId = currentRoutes.get(result.providerThreadId);
+                if (!parentTurnId || String(parentTurnId) !== String(turnId)) continue;
+                next.set(result.providerThreadId, {
+                  parentTurnId,
+                  state: result.state,
+                  observedAt,
+                  method: "thread/read",
+                });
+              }
+              return next;
+            });
+          }),
+        );
+      });
+
+    const scheduleAggregateCompletionWatcher = (turnId: TurnId) =>
+      Effect.gen(function* () {
+        const key = String(turnId);
+        const claimed = yield* Ref.modify(aggregateCompletionWatcherTurnIdsRef, (current) => {
+          if (current.has(key)) return [false, current] as const;
+          const next = new Set(current);
+          next.add(key);
+          return [true, next] as const;
+        });
+        if (!claimed) return;
+
+        const watcher = Effect.gen(function* () {
+          let attempt = 0;
+          while (!(yield* Ref.get(closedRef))) {
+            const pending = yield* Ref.get(pendingAggregateCompletionsRef);
+            if (!pending.has(key)) return;
+            const delay =
+              CODEX_AGGREGATE_CHILD_LIVENESS_POLL_DELAYS[
+                Math.min(attempt, CODEX_AGGREGATE_CHILD_LIVENESS_POLL_DELAYS.length - 1)
+              ]!;
+            yield* Effect.sleep(delay);
+            if (yield* Ref.get(closedRef)) return;
+            if (!(yield* Ref.get(pendingAggregateCompletionsRef)).has(key)) return;
+            yield* refreshAggregateChildLivenessFromThreadRead(turnId);
+            if (yield* finalizeAggregateCompletionIfIdle(turnId)) return;
+            attempt += 1;
+          }
+        }).pipe(
+          Effect.ensuring(
+            Ref.update(aggregateCompletionWatcherTurnIdsRef, (current) => {
+              if (!current.has(key)) return current;
+              const next = new Set(current);
+              next.delete(key);
+              return next;
+            }),
+          ),
+        );
+        yield* watcher.pipe(Effect.forkIn(runtimeScope));
+      }).pipe(Effect.asVoid);
+
+    const handleAggregateRootCompletion = (notification: CodexServerNotification) =>
+      Effect.gen(function* () {
+        const turnId = readNotificationTurnId(notification);
+        if (!turnId) return false;
+        const observedAt = yield* nowIso;
+        const turnStatus = readNotificationTurnStatus(notification);
+        const errorMessage =
+          turnStatus === "failed" ? readNotificationErrorMessage(notification) : undefined;
+        const providerThreadId = readNotificationThreadId(notification);
+        const completion = {
+          turnId,
+          state:
+            turnStatus === "failed"
+              ? "failed"
+              : turnStatus === "interrupted"
+                ? "interrupted"
+                : turnStatus === "cancelled"
+                  ? "cancelled"
+                  : "completed",
+          ...(errorMessage !== undefined ? { errorMessage } : {}),
+          ...(providerThreadId !== undefined ? { providerThreadId } : {}),
+          observedAt,
+        } satisfies CodexAggregateRootCompletion;
+
+        const deferred = yield* aggregateLifecycleSemaphore.withPermits(1)(
+          Effect.gen(function* () {
+            const key = String(turnId);
+            if ((yield* Ref.get(aggregateManagedTurnIdsRef)).has(key)) {
+              // The aggregate lifecycle already consumed this root terminal
+              // event. Suppress reconnect/replay duplicates so they cannot
+              // shift the final duration or race a recovered child channel.
+              return true;
+            }
+            yield* recordAggregateRootCompletion(completion);
+            const routes = yield* Ref.get(collabReceiverTurnsRef);
+            const liveness = yield* Ref.get(childConversationLivenessRef);
+            if (!codexAggregateTurnHasUnfinishedChildren(routes, liveness, turnId)) {
+              return false;
+            }
+
+            const pending = yield* Ref.get(pendingAggregateCompletionsRef);
+            const alreadyPending = pending.has(key);
+            if (!alreadyPending) {
+              const nextPending = new Set(pending);
+              nextPending.add(key);
+              yield* Ref.set(pendingAggregateCompletionsRef, nextPending);
+            }
+            yield* rememberAggregateManagedTurn(turnId);
+            yield* updateSession(sessionRef, {
+              status: "running",
+              activeTurnId: turnId,
+              lastError: undefined,
+            });
+            if (!alreadyPending) {
+              const childCount = codexChildConversationThreadIdsForTurn(routes, turnId).length;
+              yield* emitEvent({
+                kind: "notification",
+                threadId: options.threadId,
+                method: "codex.aggregateTurn/completionDeferred",
+                turnId,
+                message: `Codex root turn completed; waiting for ${childCount} routed subagent thread${childCount === 1 ? "" : "s"}.`,
+                payload: {
+                  childThreadCount: childCount,
+                  rootCompletedAt: observedAt,
+                  semantics:
+                    "Cafe combines the TUI's separate agent channels into one transcript, so root completion is deferred while any routed child is active or unresolved.",
+                },
+              });
+            }
+            return true;
+          }),
+        );
+        if (deferred) {
+          yield* scheduleAggregateCompletionWatcher(turnId);
+        }
+        return deferred;
+      });
+
+    const recoverAggregateTurnFromLiveChildWork = (
+      notification: CodexServerNotification,
+      parentTurnId: TurnId,
+    ) =>
+      Effect.gen(function* () {
+        if (
+          notification.method !== "turn/started" &&
+          !isCodexChildConversationWorkNotification(notification)
+        ) {
+          return;
+        }
+        const recovered = yield* aggregateLifecycleSemaphore.withPermits(1)(
+          Effect.gen(function* () {
+            const session = yield* Ref.get(sessionRef);
+            if (
+              session.activeTurnId !== undefined &&
+              String(session.activeTurnId) !== String(parentTurnId)
+            ) {
+              return false;
+            }
+            if (session.status === "running" && session.activeTurnId === parentTurnId) {
+              return false;
+            }
+
+            const key = String(parentTurnId);
+            const rootCompletion = (yield* Ref.get(aggregateRootCompletionsRef)).get(key);
+            if (!rootCompletion) {
+              // Without a root completion observed by this live runtime, this
+              // may be historical replay. Keep content, but do not weaken the
+              // stale-session guard by reopening from ambiguous evidence.
+              return false;
+            }
+
+            const pending = yield* Ref.get(pendingAggregateCompletionsRef);
+            const nextPending = new Set(pending);
+            nextPending.add(key);
+            yield* Ref.set(pendingAggregateCompletionsRef, nextPending);
+            yield* rememberAggregateManagedTurn(parentTurnId);
+            yield* updateSession(sessionRef, {
+              status: "running",
+              activeTurnId: parentTurnId,
+              lastError: undefined,
+            });
+            yield* emitEvent({
+              kind: "notification",
+              threadId: options.threadId,
+              method: "codex.aggregateTurn/reopened",
+              turnId: parentTurnId,
+              message:
+                "Codex emitted live routed subagent work after root completion; Cafe restored the aggregate turn to running.",
+              payload: {
+                rootCompletedAt: rootCompletion.observedAt,
+                recoveredAt: yield* nowIso,
+                semantics:
+                  "This is live child-channel evidence, not a replayed session snapshot. The same Cafe turn is reopened so new input remains queued or steered against authoritative provider work.",
+              },
+            });
+            return true;
+          }),
+        );
+        if (recovered) {
+          yield* scheduleAggregateCompletionWatcher(parentTurnId);
+        }
+      });
+
     const notificationBelongsToCurrentSession = (notification: CodexServerNotification) =>
       currentSessionProviderThreadId.pipe(
         Effect.map((providerThreadId) => {
@@ -3218,16 +3764,6 @@ export const makeCodexSessionRuntime = (
 
     const handleRawNotification = (notification: CodexServerNotification) =>
       Effect.gen(function* () {
-        yield* reconcileRawNotificationSessionState(notification).pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("codex.raw.notification.session-reconcile.failed", {
-              threadId: options.threadId,
-              providerInstanceId: options.providerInstanceId ?? PROVIDER,
-              method: notification.method,
-              cause: Cause.pretty(cause),
-            }),
-          ),
-        );
         yield* updateActiveContextCompactionsFromNotification(notification).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("codex.raw.notification.context-compaction-tracking.failed", {
@@ -3252,7 +3788,7 @@ export const makeCodexSessionRuntime = (
         const payload = notification.params;
         const route = readCodexNotificationRouteFields(notification);
         const rootProviderThreadId = yield* currentSessionProviderThreadId;
-        const collabReceiverTurns = yield* Ref.get(collabReceiverTurnsRef);
+        const collabReceiverTurns = new Map(yield* Ref.get(collabReceiverTurnsRef));
         const childRoute = resolveCodexChildConversationNotification(
           collabReceiverTurns,
           notification,
@@ -3274,8 +3810,47 @@ export const makeCodexSessionRuntime = (
           routedTurnId,
           rootProviderThreadId,
         );
+
+        const observedAt = yield* nowIso;
+        yield* aggregateLifecycleSemaphore.withPermits(1)(
+          Effect.gen(function* () {
+            yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
+            yield* Ref.update(childConversationLivenessRef, (current) =>
+              updateCodexChildConversationLiveness(
+                current,
+                collabReceiverTurns,
+                notification,
+                observedAt,
+              ),
+            );
+          }),
+        );
+
+        const aggregateCompletionDeferred =
+          childRoute === undefined && notification.method === "turn/completed"
+            ? yield* handleAggregateRootCompletion(notification)
+            : false;
+        if (aggregateCompletionDeferred) {
+          yield* markTurnStartNotification(notification, routedTurnId);
+          return;
+        }
+
+        yield* reconcileRawNotificationSessionState(notification).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("codex.raw.notification.session-reconcile.failed", {
+              threadId: options.threadId,
+              providerInstanceId: options.providerInstanceId ?? PROVIDER,
+              method: notification.method,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        );
+
+        if (childRoute) {
+          yield* recoverAggregateTurnFromLiveChildWork(notification, childRoute.parentTurnId);
+          yield* finalizeAggregateCompletionIfIdle(childRoute.parentTurnId);
+        }
         if (childRoute?.suppressLifecycle) {
-          yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
           return;
         }
         yield* markTurnStartNotification(notification, routedTurnId);
@@ -3309,8 +3884,6 @@ export const makeCodexSessionRuntime = (
             });
           }
         }
-
-        yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
         yield* emitEvent({
           kind: "notification",
           threadId: options.threadId,
@@ -3369,25 +3942,6 @@ export const makeCodexSessionRuntime = (
           return updateSession(sessionRef, {
             status: "running",
             activeTurnId: TurnId.make(payload.turn.id),
-          });
-        }),
-      ),
-    );
-
-    yield* client.handleServerNotification("turn/completed", (payload) =>
-      currentSessionProviderThreadId.pipe(
-        Effect.flatMap((providerThreadId) => {
-          if (providerThreadId && payload.threadId !== providerThreadId) {
-            return Effect.void;
-          }
-          const lastError =
-            payload.turn.status === "failed" && "error" in payload.turn && payload.turn.error
-              ? payload.turn.error.message
-              : undefined;
-          return updateSession(sessionRef, {
-            status: payload.turn.status === "failed" ? "error" : "ready",
-            activeTurnId: undefined,
-            ...(lastError ? { lastError } : {}),
           });
         }),
       ),

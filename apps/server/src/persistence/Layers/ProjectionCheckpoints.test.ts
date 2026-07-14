@@ -13,6 +13,126 @@ const layer = it.layer(
 );
 
 layer("ProjectionCheckpointRepository", (it) => {
+  it.effect("creates an orphan missing provider diff as non-terminal checkpoint metadata", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProjectionCheckpointRepository;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-orphan-provider-diff");
+      const turnId = TurnId.make("turn-orphan-provider-diff");
+
+      yield* repository.upsert({
+        threadId,
+        turnId,
+        checkpointTurnCount: 1,
+        checkpointRef: CheckpointRef.make("provider-diff:event-orphan"),
+        status: "missing",
+        files: [],
+        assistantMessageId: null,
+        completedAt: "2026-07-14T00:00:01.000Z",
+      });
+
+      const rows = yield* sql<{
+        readonly state: string;
+        readonly completedAt: string | null;
+        readonly checkpointCompletedAt: string | null;
+      }>`
+        SELECT
+          state,
+          completed_at AS "completedAt",
+          checkpoint_completed_at AS "checkpointCompletedAt"
+        FROM projection_turns
+        WHERE thread_id = ${threadId}
+          AND turn_id = ${turnId}
+      `;
+      assert.deepEqual(rows, [
+        {
+          state: "running",
+          completedAt: null,
+          checkpointCompletedAt: "2026-07-14T00:00:01.000Z",
+        },
+      ]);
+    }),
+  );
+
+  it.effect("does not terminalize an existing running turn for a missing provider diff", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProjectionCheckpointRepository;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-running-provider-diff");
+      const turnId = TurnId.make("turn-running-provider-diff");
+
+      yield* sql`
+        INSERT INTO projection_turns (
+          thread_id,
+          turn_id,
+          pending_message_id,
+          source_proposed_plan_thread_id,
+          source_proposed_plan_id,
+          assistant_message_id,
+          state,
+          requested_at,
+          started_at,
+          completed_at,
+          checkpoint_turn_count,
+          checkpoint_ref,
+          checkpoint_status,
+          checkpoint_files_json
+        )
+        VALUES (
+          ${threadId},
+          ${turnId},
+          NULL,
+          NULL,
+          NULL,
+          'assistant-live',
+          'running',
+          '2026-07-14T00:00:00.000Z',
+          '2026-07-14T00:00:00.000Z',
+          NULL,
+          NULL,
+          NULL,
+          NULL,
+          '[]'
+        )
+      `;
+
+      yield* repository.upsert({
+        threadId,
+        turnId,
+        checkpointTurnCount: 1,
+        checkpointRef: CheckpointRef.make("provider-diff:event-running"),
+        status: "missing",
+        files: [],
+        assistantMessageId: null,
+        completedAt: "2026-07-14T00:00:01.000Z",
+      });
+
+      const rows = yield* sql<{
+        readonly state: string;
+        readonly completedAt: string | null;
+        readonly assistantMessageId: string | null;
+        readonly checkpointStatus: string | null;
+      }>`
+        SELECT
+          state,
+          completed_at AS "completedAt",
+          assistant_message_id AS "assistantMessageId",
+          checkpoint_status AS "checkpointStatus"
+        FROM projection_turns
+        WHERE thread_id = ${threadId}
+          AND turn_id = ${turnId}
+      `;
+      assert.deepEqual(rows, [
+        {
+          state: "running",
+          completedAt: null,
+          assistantMessageId: "assistant-live",
+          checkpointStatus: "missing",
+        },
+      ]);
+    }),
+  );
+
   it.effect("ignores incomplete checkpoint projection rows", () =>
     Effect.gen(function* () {
       const repository = yield* ProjectionCheckpointRepository;

@@ -879,6 +879,49 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect(
+    "maps aggregate child continuation into explicit reopen and terminal lifecycle events",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 3).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+
+        yield* runtime.emit({
+          id: asEventId("evt-aggregate-reopened"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-07-14T00:00:01.000Z",
+          method: "codex.aggregateTurn/reopened",
+          message: "Live child work resumed.",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          payload: { recoveredAt: "2026-07-14T00:00:01.000Z" },
+        } satisfies ProviderEvent);
+        yield* runtime.emit({
+          id: asEventId("evt-aggregate-completed"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-07-14T00:00:02.000Z",
+          method: "codex.aggregateTurn/completed",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          payload: { state: "completed" },
+        } satisfies ProviderEvent);
+
+        const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+        assert.deepStrictEqual(
+          runtimeEvents.map((event) => event.type),
+          ["turn.started", "runtime.warning", "turn.completed"],
+        );
+        assert.notEqual(runtimeEvents[0]?.eventId, runtimeEvents[1]?.eventId);
+        assert.equal(runtimeEvents[0]?.raw?.method, "codex.aggregateTurn/reopened");
+        assert.equal(runtimeEvents[2]?.raw?.method, "codex.aggregateTurn/completed");
+      }),
+  );
+
   it.effect("maps the final Codex notification burst through the canonical bridge", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

@@ -1271,6 +1271,61 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-terminal-sessio
             checkpointStatus: "ready",
           },
         ]);
+
+        yield* appendAndProject({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-terminal-replay-live-continuation"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-24T17:00:05.000Z",
+          commandId: CommandId.make("cmd-terminal-replay-live-continuation"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-terminal-replay-live-continuation"),
+          metadata: {},
+          payload: {
+            threadId,
+            session: {
+              threadId,
+              status: "running",
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeMode: "full-access",
+              activeTurnId: turnId,
+              lastError: null,
+              updatedAt: "2026-05-24T17:00:05.000Z",
+            },
+            terminalTurnRecovery: "live-provider-continuation",
+          },
+        });
+
+        const recoveredRows = yield* sql<{
+          readonly sessionStatus: string;
+          readonly activeTurnId: string | null;
+          readonly turnState: string;
+          readonly completedAt: string | null;
+          readonly checkpointStatus: string | null;
+        }>`
+          SELECT
+            sessions.status AS "sessionStatus",
+            sessions.active_turn_id AS "activeTurnId",
+            turns.state AS "turnState",
+            turns.completed_at AS "completedAt",
+            turns.checkpoint_status AS "checkpointStatus"
+          FROM projection_thread_sessions sessions
+          JOIN projection_turns turns
+            ON turns.thread_id = sessions.thread_id
+           AND turns.turn_id = ${turnId}
+          WHERE sessions.thread_id = ${threadId}
+        `;
+        assert.deepEqual(recoveredRows, [
+          {
+            sessionStatus: "running",
+            activeTurnId: "turn-terminal-session-replay",
+            turnState: "running",
+            completedAt: null,
+            checkpointStatus: "ready",
+          },
+        ]);
       }),
     );
   },

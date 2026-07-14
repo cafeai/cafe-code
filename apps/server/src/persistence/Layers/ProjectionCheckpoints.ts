@@ -42,7 +42,8 @@ const makeProjectionCheckpointRepository = Effect.gen(function* () {
           checkpoint_turn_count = NULL,
           checkpoint_ref = NULL,
           checkpoint_status = NULL,
-          checkpoint_files_json = '[]'
+          checkpoint_files_json = '[]',
+          checkpoint_completed_at = NULL
         WHERE thread_id = ${threadId}
           AND checkpoint_turn_count = ${checkpointTurnCount}
       `,
@@ -64,31 +65,46 @@ const makeProjectionCheckpointRepository = Effect.gen(function* () {
           checkpoint_turn_count,
           checkpoint_ref,
           checkpoint_status,
-          checkpoint_files_json
+          checkpoint_files_json,
+          checkpoint_completed_at
         )
         VALUES (
           ${row.threadId},
           ${row.turnId},
           NULL,
           ${row.assistantMessageId},
-          ${row.status === "error" ? "error" : "completed"},
+          ${row.status === "missing" ? "running" : row.status === "error" ? "error" : "completed"},
           ${row.completedAt},
           ${row.completedAt},
-          ${row.completedAt},
+          ${row.status === "missing" ? null : row.completedAt},
           ${row.checkpointTurnCount},
           ${row.checkpointRef},
           ${row.status},
-          ${row.files}
+          ${row.files},
+          ${row.completedAt}
         )
         ON CONFLICT (thread_id, turn_id)
         DO UPDATE SET
-          assistant_message_id = excluded.assistant_message_id,
-          state = excluded.state,
-          completed_at = excluded.completed_at,
+          assistant_message_id = CASE
+            WHEN excluded.checkpoint_status = 'missing' THEN COALESCE(
+              projection_turns.assistant_message_id,
+              excluded.assistant_message_id
+            )
+            ELSE excluded.assistant_message_id
+          END,
+          state = CASE
+            WHEN excluded.checkpoint_status = 'missing' THEN projection_turns.state
+            ELSE excluded.state
+          END,
+          completed_at = CASE
+            WHEN excluded.checkpoint_status = 'missing' THEN projection_turns.completed_at
+            ELSE excluded.completed_at
+          END,
           checkpoint_turn_count = excluded.checkpoint_turn_count,
           checkpoint_ref = excluded.checkpoint_ref,
           checkpoint_status = excluded.checkpoint_status,
-          checkpoint_files_json = excluded.checkpoint_files_json
+          checkpoint_files_json = excluded.checkpoint_files_json,
+          checkpoint_completed_at = excluded.checkpoint_completed_at
       `,
   });
 
@@ -105,14 +121,14 @@ const makeProjectionCheckpointRepository = Effect.gen(function* () {
           checkpoint_status AS "status",
           checkpoint_files_json AS "files",
           assistant_message_id AS "assistantMessageId",
-          completed_at AS "completedAt"
+          COALESCE(checkpoint_completed_at, completed_at) AS "completedAt"
         FROM projection_turns
         WHERE thread_id = ${threadId}
           AND checkpoint_turn_count IS NOT NULL
           AND checkpoint_ref IS NOT NULL
           AND checkpoint_status IS NOT NULL
           AND checkpoint_files_json IS NOT NULL
-          AND completed_at IS NOT NULL
+          AND COALESCE(checkpoint_completed_at, completed_at) IS NOT NULL
         ORDER BY checkpoint_turn_count ASC
       `,
   });
@@ -130,14 +146,14 @@ const makeProjectionCheckpointRepository = Effect.gen(function* () {
           checkpoint_status AS "status",
           checkpoint_files_json AS "files",
           assistant_message_id AS "assistantMessageId",
-          completed_at AS "completedAt"
+          COALESCE(checkpoint_completed_at, completed_at) AS "completedAt"
         FROM projection_turns
         WHERE thread_id = ${threadId}
           AND checkpoint_turn_count = ${checkpointTurnCount}
           AND checkpoint_ref IS NOT NULL
           AND checkpoint_status IS NOT NULL
           AND checkpoint_files_json IS NOT NULL
-          AND completed_at IS NOT NULL
+          AND COALESCE(checkpoint_completed_at, completed_at) IS NOT NULL
       `,
   });
 
@@ -150,7 +166,8 @@ const makeProjectionCheckpointRepository = Effect.gen(function* () {
           checkpoint_turn_count = NULL,
           checkpoint_ref = NULL,
           checkpoint_status = NULL,
-          checkpoint_files_json = '[]'
+          checkpoint_files_json = '[]',
+          checkpoint_completed_at = NULL
         WHERE thread_id = ${threadId}
           AND checkpoint_turn_count IS NOT NULL
       `,

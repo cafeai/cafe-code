@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { Command } from "effect/unstable/cli";
+import { FetchHttpClient } from "effect/unstable/http";
 
 import * as NetService from "@cafecode/shared/Net";
 import { startStartupCpuProfiler } from "@cafecode/shared/startupProfiler";
@@ -22,7 +23,10 @@ function resolveStartupProfilerRole(argv: readonly string[]): string {
 
 startStartupCpuProfiler({ role: resolveStartupProfilerRole(process.argv.slice(2)) });
 
-const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
+// Project subcommands first probe the live server before falling back to the
+// offline SQLite path. Keep the concrete HTTP implementation at the CLI
+// composition root so every command branch has one explicit, scoped client.
+const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer, FetchHttpClient.layer);
 
 export const cli = Command.make("cafe-code", { ...sharedServerCommandFlags }).pipe(
   Command.withDescription("Run the Cafe Code server."),

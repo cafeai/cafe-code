@@ -15,6 +15,7 @@ import {
   type CanonicalItemType,
   type CanonicalRequestType,
   type CodexSettings,
+  EventId,
   ProviderDriverKind,
   type ProviderEvent,
   ProviderInstanceId,
@@ -1313,6 +1314,80 @@ function mapToRuntimeEvents(
         ...runtimeEventBase(event, canonicalThreadId),
         payload: {
           usage: normalizedUsage,
+        },
+      },
+    ];
+  }
+
+  if (event.method === "codex.aggregateTurn/completionDeferred") {
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "runtime.warning",
+        payload: {
+          message:
+            event.message ?? "Codex root turn completed while routed subagent work remains active.",
+          ...(event.payload !== undefined ? { detail: event.payload } : {}),
+        },
+      },
+    ];
+  }
+
+  if (event.method === "codex.aggregateTurn/reopened") {
+    if (!event.turnId) {
+      return [];
+    }
+    const base = runtimeEventBase(event, canonicalThreadId);
+    return [
+      {
+        ...base,
+        turnId: event.turnId,
+        type: "turn.started",
+        payload: {},
+      },
+      {
+        ...base,
+        // One native provider notification intentionally fans out into a
+        // lifecycle edge and a work-log warning. Provider-daemon replay is
+        // idempotent by canonical eventId, so the warning needs its own stable
+        // identity or the journal will correctly collapse it into the
+        // preceding turn.started event.
+        eventId: EventId.make(`${event.id}:aggregate-reopen-warning`),
+        turnId: event.turnId,
+        type: "runtime.warning",
+        payload: {
+          message:
+            event.message ??
+            "Live routed subagent output resumed after root completion; the aggregate turn is running again.",
+          ...(event.payload !== undefined ? { detail: event.payload } : {}),
+        },
+      },
+    ];
+  }
+
+  if (event.method === "codex.aggregateTurn/completed") {
+    if (!event.turnId) {
+      return [];
+    }
+    const payload = readRecordValue(event.payload);
+    const stateValue = payload?.state;
+    const state =
+      stateValue === "failed" ||
+      stateValue === "interrupted" ||
+      stateValue === "cancelled" ||
+      stateValue === "completed"
+        ? stateValue
+        : "completed";
+    const errorMessage =
+      typeof payload?.errorMessage === "string" ? trimText(payload.errorMessage) : undefined;
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        turnId: event.turnId,
+        type: "turn.completed",
+        payload: {
+          state,
+          ...(errorMessage ? { errorMessage } : {}),
         },
       },
     ];

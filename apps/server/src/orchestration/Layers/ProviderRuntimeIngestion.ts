@@ -1741,6 +1741,12 @@ const make = Effect.gen(function* () {
       const now = event.createdAt;
       const eventTurnId = toTurnId(event.turnId);
       const activeTurnId = thread.session?.activeTurnId ?? null;
+      const terminalTurnRecovery =
+        event.type === "turn.started" &&
+        event.raw?.source === "codex.app-server.notification" &&
+        event.raw.method === "codex.aggregateTurn/reopened"
+          ? ("live-provider-continuation" as const)
+          : undefined;
       let pendingTurnStartForThread: boolean | undefined;
       const hasPendingTurnStartForThread = () =>
         Effect.gen(function* () {
@@ -1842,8 +1848,11 @@ const make = Effect.gen(function* () {
       // Replay/backfill streams can legitimately contain content/tool events
       // for a turn that projections have already closed. Preserve the content
       // later in this function, but do not reopen session lifecycle state from
-      // those post-completion events; otherwise renderer reconnects briefly
-      // regress completed threads back to "running".
+      // those ambiguous events. Codex aggregate child continuation is the one
+      // explicit exception: CodexSessionRuntime emits a synthetic turn.started
+      // carrying `terminalTurnRecovery` only after observing live child-channel
+      // work in the same runtime, so projectors can distinguish it from stale
+      // reconnect snapshots.
       const eventCarriesActiveTurnWork =
         eventTurnId !== undefined &&
         runtimeEventCarriesActiveTurnWork(event) &&
@@ -1991,6 +2000,7 @@ const make = Effect.gen(function* () {
               lastError,
               updatedAt: now,
             },
+            ...(terminalTurnRecovery ? { terminalTurnRecovery } : {}),
             createdAt: now,
           });
         }

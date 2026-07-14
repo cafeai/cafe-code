@@ -685,7 +685,10 @@ export function projectEvent(
         const terminalLatestTurn = isLatestTurnTerminal(thread.latestTurn)
           ? thread.latestTurn
           : null;
+        const permitsTerminalTurnRecovery =
+          payload.terminalTurnRecovery === "live-provider-continuation";
         const staleRunningSession =
+          !permitsTerminalTurnRecovery &&
           session.status === "running" &&
           session.activeTurnId !== null &&
           terminalLatestTurn !== null &&
@@ -905,24 +908,31 @@ export function projectEvent(
           .toSorted((left, right) => left.checkpointTurnCount - right.checkpointTurnCount)
           .slice(-MAX_THREAD_CHECKPOINTS);
 
+        const preservesTurnLifecycle = payload.status === "missing";
+
         return {
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             checkpoints,
-            latestTurn: {
-              turnId: payload.turnId,
-              state: checkpointStatusToLatestTurnState(payload.status),
-              requestedAt:
-                thread.latestTurn?.turnId === payload.turnId
-                  ? thread.latestTurn.requestedAt
-                  : payload.completedAt,
-              startedAt:
-                thread.latestTurn?.turnId === payload.turnId
-                  ? (thread.latestTurn.startedAt ?? payload.completedAt)
-                  : payload.completedAt,
-              completedAt: payload.completedAt,
-              assistantMessageId: payload.assistantMessageId,
-            },
+            // `turn.diff.updated` is a change signal, not a provider lifecycle
+            // event. Its synthetic `missing` checkpoint records diagnostic
+            // metadata only and must never close or manufacture a turn.
+            latestTurn: preservesTurnLifecycle
+              ? thread.latestTurn
+              : {
+                  turnId: payload.turnId,
+                  state: checkpointStatusToLatestTurnState(payload.status),
+                  requestedAt:
+                    thread.latestTurn?.turnId === payload.turnId
+                      ? thread.latestTurn.requestedAt
+                      : payload.completedAt,
+                  startedAt:
+                    thread.latestTurn?.turnId === payload.turnId
+                      ? (thread.latestTurn.startedAt ?? payload.completedAt)
+                      : payload.completedAt,
+                  completedAt: payload.completedAt,
+                  assistantMessageId: payload.assistantMessageId,
+                },
             updatedAt: event.occurredAt,
           }),
         };

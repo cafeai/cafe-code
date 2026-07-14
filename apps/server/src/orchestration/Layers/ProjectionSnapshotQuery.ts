@@ -740,13 +740,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           checkpoint_status AS "status",
           checkpoint_files_json AS "files",
           assistant_message_id AS "assistantMessageId",
-          completed_at AS "completedAt"
+          COALESCE(checkpoint_completed_at, completed_at) AS "completedAt"
         FROM projection_turns
         WHERE checkpoint_turn_count IS NOT NULL
           AND checkpoint_ref IS NOT NULL
           AND checkpoint_status IS NOT NULL
           AND checkpoint_files_json IS NOT NULL
-          AND completed_at IS NOT NULL
+          AND COALESCE(checkpoint_completed_at, completed_at) IS NOT NULL
         ORDER BY thread_id ASC, checkpoint_turn_count ASC
       `,
   });
@@ -1232,14 +1232,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           checkpoint_status AS "status",
           checkpoint_files_json AS "files",
           assistant_message_id AS "assistantMessageId",
-          completed_at AS "completedAt"
+          COALESCE(checkpoint_completed_at, completed_at) AS "completedAt"
         FROM projection_turns
         WHERE thread_id = ${threadId}
           AND checkpoint_turn_count IS NOT NULL
           AND checkpoint_ref IS NOT NULL
           AND checkpoint_status IS NOT NULL
           AND checkpoint_files_json IS NOT NULL
-          AND completed_at IS NOT NULL
+          AND COALESCE(checkpoint_completed_at, completed_at) IS NOT NULL
         ORDER BY checkpoint_turn_count ASC
       `,
   });

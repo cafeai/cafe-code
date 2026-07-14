@@ -21,11 +21,15 @@ import {
   buildTurnSteerParams,
   claimCodexSnapshotBackfillWatcher,
   codexAggregateNotificationMethod,
+  codexAggregateTurnHasUnfinishedChildren,
+  codexChildConversationThreadIdsForTurn,
   codexElapsedDelayMilliseconds,
   codexElapsedDelayRemainingMilliseconds,
   isRecoverableThreadResumeError,
   isCodexContextCompactionItemType,
+  isCodexChildConversationWorkNotification,
   isCodexUserMessageItemType,
+  isTerminalCodexChildThreadReadError,
   openCodexThread,
   readCodexExpectedActiveTurnMismatchActualTurnId,
   readCodexNotificationRouteFields,
@@ -35,6 +39,7 @@ import {
   resolveCodexChildConversationNotification,
   selectCodexActiveSnapshotTurn,
   summarizeCodexAppServerChildProcesses,
+  updateCodexChildConversationLiveness,
   updateCodexActiveContextCompactions,
   updateCodexPendingSteerProcessingFromNotification,
 } from "./CodexSessionRuntime.ts";
@@ -309,6 +314,127 @@ describe("Codex child conversation routing", () => {
         "thread-parent",
       ),
       undefined,
+    );
+  });
+
+  it("tracks aggregate child liveness from the same live-channel events as the TUI", () => {
+    const parentTurnId = TurnId.make("turn-parent");
+    const routes = new Map<string, TurnId>([
+      ["thread-child-b", parentTurnId],
+      ["thread-child-a", parentTurnId],
+    ]);
+    const registered = updateCodexChildConversationLiveness(
+      new Map(),
+      routes,
+      { method: "item/completed", params: { threadId: "thread-parent" } },
+      "2026-07-14T00:00:00.000Z",
+    );
+
+    assert.deepEqual(codexChildConversationThreadIdsForTurn(routes, parentTurnId), [
+      "thread-child-a",
+      "thread-child-b",
+    ]);
+    assert.equal(codexAggregateTurnHasUnfinishedChildren(routes, registered, parentTurnId), true);
+
+    const childAStarted = updateCodexChildConversationLiveness(
+      registered,
+      routes,
+      {
+        method: "turn/started",
+        params: {
+          threadId: "thread-child-a",
+          turn: { id: "turn-child-a", status: "inProgress" },
+        },
+      },
+      "2026-07-14T00:00:01.000Z",
+    );
+    const childACompleted = updateCodexChildConversationLiveness(
+      childAStarted,
+      routes,
+      {
+        method: "turn/completed",
+        params: {
+          threadId: "thread-child-a",
+          turn: { id: "turn-child-a", status: "completed" },
+        },
+      },
+      "2026-07-14T00:00:02.000Z",
+    );
+    const allCompleted = updateCodexChildConversationLiveness(
+      childACompleted,
+      routes,
+      {
+        method: "thread/status/changed",
+        params: { threadId: "thread-child-b", status: { type: "idle" } },
+      },
+      "2026-07-14T00:00:03.000Z",
+    );
+
+    assert.equal(childAStarted.get("thread-child-a")?.state, "active");
+    assert.equal(childACompleted.get("thread-child-a")?.state, "inactive");
+    assert.equal(allCompleted.get("thread-child-b")?.state, "inactive");
+    assert.equal(
+      codexAggregateTurnHasUnfinishedChildren(routes, allCompleted, parentTurnId),
+      false,
+    );
+  });
+
+  it("resets child liveness when Codex reuses a child thread for a later parent turn", () => {
+    const firstParentTurnId = TurnId.make("turn-parent-first");
+    const secondParentTurnId = TurnId.make("turn-parent-second");
+    const firstRoutes = new Map<string, TurnId>([["thread-child", firstParentTurnId]]);
+    const firstTurnCompleted = updateCodexChildConversationLiveness(
+      new Map(),
+      firstRoutes,
+      {
+        method: "turn/completed",
+        params: {
+          threadId: "thread-child",
+          turn: { id: "turn-child-first", status: "completed" },
+        },
+      },
+      "2026-07-14T00:00:00.000Z",
+    );
+    assert.equal(firstTurnCompleted.get("thread-child")?.state, "inactive");
+
+    const secondRoutes = new Map<string, TurnId>([["thread-child", secondParentTurnId]]);
+    const reassigned = updateCodexChildConversationLiveness(
+      firstTurnCompleted,
+      secondRoutes,
+      { method: "item/completed", params: { threadId: "thread-parent" } },
+      "2026-07-14T00:00:01.000Z",
+    );
+
+    assert.equal(reassigned.get("thread-child")?.parentTurnId, secondParentTurnId);
+    assert.equal(reassigned.get("thread-child")?.state, "unknown");
+    assert.equal(
+      codexAggregateTurnHasUnfinishedChildren(secondRoutes, reassigned, secondParentTurnId),
+      true,
+    );
+  });
+
+  it("classifies live child work and terminal thread/read errors conservatively", () => {
+    assert.equal(
+      isCodexChildConversationWorkNotification({
+        method: "item/agentMessage/delta",
+        params: { threadId: "thread-child", turnId: "turn-child", delta: "progress" },
+      }),
+      true,
+    );
+    assert.equal(
+      isCodexChildConversationWorkNotification({
+        method: "thread/tokenUsage/updated",
+        params: { threadId: "thread-child" },
+      }),
+      false,
+    );
+    assert.equal(
+      isTerminalCodexChildThreadReadError(new Error("thread not loaded: child-1")),
+      true,
+    );
+    assert.equal(
+      isTerminalCodexChildThreadReadError(new Error("thread/read transport error: broken pipe")),
+      false,
     );
   });
 });

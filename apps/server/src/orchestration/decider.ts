@@ -834,6 +834,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           session: command.session,
+          ...(command.terminalTurnRecovery !== undefined
+            ? { terminalTurnRecovery: command.terminalTurnRecovery }
+            : {}),
         },
       };
     }

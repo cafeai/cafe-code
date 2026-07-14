@@ -1100,6 +1100,12 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           if (Option.isNone(existingRow)) {
             return;
           }
+          if (event.payload.status === "missing") {
+            // Provider diff notifications create checkpoint metadata, but the
+            // absence of a captured git ref is not evidence that a turn ended.
+            // Keep shell lifecycle selection on the provider-owned turn.
+            return;
+          }
           const currentLatestTurn =
             existingRow.value.latestTurnId === null
               ? Option.none<ProjectionTurnById>()
@@ -1583,7 +1589,13 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               turnId: event.payload.session.activeTurnId,
             })
           : Option.none<ProjectionTurnById>();
-      if (Option.isSome(runningActiveTurn) && isTerminalTurnState(runningActiveTurn.value.state)) {
+      const permitsTerminalTurnRecovery =
+        event.payload.terminalTurnRecovery === "live-provider-continuation";
+      if (
+        !permitsTerminalTurnRecovery &&
+        Option.isSome(runningActiveTurn) &&
+        isTerminalTurnState(runningActiveTurn.value.state)
+      ) {
         const status = terminalSessionStatusForTurnState(runningActiveTurn.value.state);
         yield* projectionThreadSessionRepository.upsert({
           threadId: event.payload.threadId,
@@ -1671,6 +1683,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               })
             : Option.none<ProjectionTurnById>();
         if (
+          !permitsTerminalTurnRecovery &&
           Option.isSome(latestTurn) &&
           latestTurn.value.turnId !== event.payload.session.activeTurnId &&
           !shouldPromoteLatestTurnFromSessionSet({
@@ -1795,7 +1808,13 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             threadId: event.payload.threadId,
             turnId,
           });
-          if (Option.isSome(existingTurn) && isTerminalTurnState(existingTurn.value.state)) {
+          const permitsTerminalTurnRecovery =
+            event.payload.terminalTurnRecovery === "live-provider-continuation";
+          if (
+            !permitsTerminalTurnRecovery &&
+            Option.isSome(existingTurn) &&
+            isTerminalTurnState(existingTurn.value.state)
+          ) {
             // Codex app-server can replay old `running` session snapshots after
             // a checkpoint has already made the same turn terminal, especially
             // during daemon replay/backfill. A provider-owned running turn must
@@ -1810,7 +1829,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           const turnStartedAt = event.payload.session.updatedAt;
           if (Option.isSome(existingTurn)) {
             const nextState =
-              existingTurn.value.state === "error" || existingTurn.value.state === "interrupted"
+              !permitsTerminalTurnRecovery &&
+              (existingTurn.value.state === "error" || existingTurn.value.state === "interrupted")
                 ? existingTurn.value.state
                 : "running";
             yield* projectionTurnRepository.upsertByTurnId({
@@ -1966,27 +1986,32 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           });
 
           if (Option.isSome(existingTurn)) {
-            const keepRunningForMissingProviderDiff =
-              event.payload.status === "missing" &&
-              existingTurn.value.state === "running" &&
-              existingTurn.value.completedAt === null;
-            const completedAt = keepRunningForMissingProviderDiff
-              ? null
+            const preservesTurnLifecycle = event.payload.status === "missing";
+            const completedAt = preservesTurnLifecycle
+              ? existingTurn.value.completedAt
               : maxIso(existingTurn.value.completedAt, event.payload.completedAt);
             yield* projectionTurnRepository.upsertByTurnId({
               ...existingTurn.value,
-              assistantMessageId: event.payload.assistantMessageId,
-              state: keepRunningForMissingProviderDiff ? "running" : nextState,
+              assistantMessageId: preservesTurnLifecycle
+                ? (existingTurn.value.assistantMessageId ?? event.payload.assistantMessageId)
+                : event.payload.assistantMessageId,
+              state: preservesTurnLifecycle ? existingTurn.value.state : nextState,
               checkpointTurnCount: event.payload.checkpointTurnCount,
               checkpointRef: event.payload.checkpointRef,
               checkpointStatus: event.payload.status,
               checkpointFiles: event.payload.files,
-              startedAt: existingTurn.value.startedAt ?? event.payload.completedAt,
-              requestedAt: existingTurn.value.requestedAt ?? event.payload.completedAt,
+              checkpointCompletedAt: event.payload.completedAt,
+              startedAt: preservesTurnLifecycle
+                ? existingTurn.value.startedAt
+                : (existingTurn.value.startedAt ?? event.payload.completedAt),
+              requestedAt: preservesTurnLifecycle
+                ? existingTurn.value.requestedAt
+                : (existingTurn.value.requestedAt ?? event.payload.completedAt),
               completedAt,
             });
             return;
           }
+          const isMissingProviderDiff = event.payload.status === "missing";
           yield* projectionTurnRepository.upsertByTurnId({
             turnId: event.payload.turnId,
             threadId: event.payload.threadId,
@@ -1994,14 +2019,18 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             sourceProposedPlanThreadId: null,
             sourceProposedPlanId: null,
             assistantMessageId: event.payload.assistantMessageId,
-            state: nextState,
+            // This orphan row exists only to retain checkpoint metadata until
+            // the authoritative turn lifecycle arrives. Do not manufacture a
+            // terminal turn from a diff-only notification.
+            state: isMissingProviderDiff ? "running" : nextState,
             requestedAt: event.payload.completedAt,
             startedAt: event.payload.completedAt,
-            completedAt: event.payload.completedAt,
+            completedAt: isMissingProviderDiff ? null : event.payload.completedAt,
             checkpointTurnCount: event.payload.checkpointTurnCount,
             checkpointRef: event.payload.checkpointRef,
             checkpointStatus: event.payload.status,
             checkpointFiles: event.payload.files,
+            checkpointCompletedAt: event.payload.completedAt,
           });
           return;
         }

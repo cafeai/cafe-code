@@ -784,11 +784,15 @@ export const ClientOrchestrationCommand = Schema.Union([
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
+export const TerminalTurnRecoveryReason = Schema.Literal("live-provider-continuation");
+export type TerminalTurnRecoveryReason = typeof TerminalTurnRecoveryReason.Type;
+
 const ThreadSessionSetCommand = Schema.Struct({
   type: Schema.Literal("thread.session.set"),
   commandId: CommandId,
   threadId: ThreadId,
   session: OrchestrationSession,
+  terminalTurnRecovery: Schema.optional(TerminalTurnRecoveryReason),
   createdAt: IsoDateTime,
 });
 
@@ -1100,6 +1104,7 @@ export const ThreadSessionStopRequestedPayload = Schema.Struct({
 export const ThreadSessionSetPayload = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
+  terminalTurnRecovery: Schema.optional(TerminalTurnRecoveryReason),
 });
 
 export const ThreadProposedPlanUpsertedPayload = Schema.Struct({
