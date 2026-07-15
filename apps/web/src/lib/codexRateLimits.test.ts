@@ -59,6 +59,28 @@ describe("codexRateLimits", () => {
     expect(summary?.weeklyReset).toContain("2026");
   });
 
+  it("formats both window durations as exact days, hours, and minutes", () => {
+    const summary = formatCodexRateLimitSummary({
+      checkedAt: "2026-07-15T00:00:00.000Z",
+      rateLimits: {
+        limitId: "codex",
+        primary: {
+          usedPercent: 3,
+          windowDurationMins: 10_080,
+        },
+        secondary: {
+          usedPercent: 25,
+          windowDurationMins: 1_572,
+        },
+      },
+    });
+
+    expect(summary?.primary?.text).toBe("Primary window (7 days): 97% left");
+    expect(summary?.secondary?.text).toBe(
+      "Secondary window (1 day, 2 hours, 12 minutes): 75% left",
+    );
+  });
+
   it("falls back to a generic primary reset label when window duration is unknown", () => {
     const summary = formatCodexRateLimitSummary(
       {

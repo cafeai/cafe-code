@@ -14,10 +14,8 @@ import {
   type OrchestrationEngineShape,
 } from "./orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
-import { AnalyticsService } from "./telemetry/Services/AnalyticsService.ts";
 import {
   getAutoBootstrapDefaultModelSelection,
-  launchStartupHeartbeat,
   makeCommandGate,
   resolveAutoBootstrapWelcomeTargets,
   resolveWelcomeBase,
@@ -71,45 +69,6 @@ it.effect("enqueueCommand fails queued work when readiness fails", () =>
 
       const error = yield* Effect.flip(Fiber.join(queuedCommandFiber));
       assert.equal(error.message, "startup failed");
-    }),
-  ),
-);
-
-it.effect("launchStartupHeartbeat does not block the caller while counts are loading", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const releaseCounts = yield* Deferred.make<void, never>();
-
-      yield* launchStartupHeartbeat.pipe(
-        Effect.provideService(ProjectionSnapshotQuery, {
-          getCommandReadModel: () => Effect.die("unused"),
-          getSnapshot: () => Effect.die("unused"),
-          getShellSnapshot: () => Effect.die("unused"),
-          getArchivedShellSnapshot: () => Effect.die("unused"),
-          getDeletedShellSnapshot: () => Effect.die("unused"),
-          getSnapshotSequence: () => Effect.die("unused"),
-          getCounts: () =>
-            Deferred.await(releaseCounts).pipe(
-              Effect.as({
-                projectCount: 2,
-                threadCount: 3,
-              }),
-            ),
-          getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
-          getProjectShellById: () => Effect.succeed(Option.none()),
-          getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
-          getThreadCheckpointContext: () => Effect.succeed(Option.none()),
-          getThreadShellById: () => Effect.succeed(Option.none()),
-          getPostTerminalStaleSteerCandidateThreadIds: () => Effect.die("unused"),
-          getThreadTurnActivityPage: () => Effect.die("unused"),
-          getThreadDetailById: () => Effect.succeed(Option.none()),
-          getThreadDetailSnapshotById: () => Effect.succeed(Option.none()),
-        }),
-        Effect.provideService(AnalyticsService, {
-          record: () => Effect.void,
-          flush: Effect.void,
-        }),
-      );
     }),
   ),
 );

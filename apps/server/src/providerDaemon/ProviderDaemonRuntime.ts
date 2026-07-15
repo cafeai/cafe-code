@@ -2,7 +2,6 @@ import { FetchHttpClient } from "effect/unstable/http";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
-import { AnalyticsServiceLayerLive } from "../telemetry/Layers/AnalyticsService.ts";
 import { OpenCodeRuntimeLive } from "../provider/opencodeRuntime.ts";
 import { ProviderAdapterRegistryLive } from "../provider/Layers/ProviderAdapterRegistry.ts";
 import { ProviderEventLoggersLive } from "../provider/Layers/ProviderEventLoggers.ts";
@@ -63,6 +62,5 @@ export const ProviderDaemonRuntimeLive = Layer.unwrap(
   Layer.provideMerge(ServerSettingsLive),
   Layer.provideMerge(ProviderEventLoggersLive),
   Layer.provideMerge(OpenCodeRuntimeLive),
-  Layer.provideMerge(AnalyticsServiceLayerLive),
   Layer.provideMerge(FetchHttpClient.layer),
 );

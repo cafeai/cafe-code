@@ -44,7 +44,6 @@ export interface ServerDerivedPaths {
   readonly httpsKeyPath: string;
   readonly providerLogsDir: string;
   readonly providerEventLogPath: string;
-  readonly anonymousIdPath: string;
   readonly environmentIdPath: string;
   readonly serverRuntimeStatePath: string;
   readonly secretsDir: string;
@@ -113,7 +112,6 @@ export const deriveServerPaths = Effect.fn(function* (
     httpsKeyPath: join(secretsDir, "https-server-key.pem"),
     providerLogsDir,
     providerEventLogPath: join(providerLogsDir, "events.log"),
-    anonymousIdPath: join(stateDir, "anonymous-id"),
     environmentIdPath: join(stateDir, "environment-id"),
     serverRuntimeStatePath: join(stateDir, "server-runtime.json"),
     secretsDir,
@@ -136,12 +134,19 @@ export const ensureServerDirectories = Effect.fn(function* (derivedPaths: Server
       fs.makeDirectory(path.dirname(derivedPaths.settingsPath), { recursive: true }),
       fs.makeDirectory(path.dirname(derivedPaths.clientSettingsPath), { recursive: true }),
       fs.makeDirectory(derivedPaths.providerStatusCacheDir, { recursive: true }),
-      fs.makeDirectory(path.dirname(derivedPaths.anonymousIdPath), { recursive: true }),
       fs.makeDirectory(path.dirname(derivedPaths.serverRuntimeStatePath), { recursive: true }),
       fs.makeDirectory(derivedPaths.secretsDir, { recursive: true }),
     ],
     { concurrency: "unbounded" },
   );
+
+  // Older Cafe builds created this stable identifier for outbound product
+  // analytics. It has no runtime purpose now that analytics are removed, so
+  // delete it without reading or logging its contents. Cleanup is best effort:
+  // a stale file must never prevent the server from starting.
+  yield* fs
+    .remove(path.join(derivedPaths.stateDir, "anonymous-id"), { force: true })
+    .pipe(Effect.ignore);
 });
 
 /**

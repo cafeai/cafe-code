@@ -32,24 +32,33 @@ function formatPercentage(value: number): string {
   return Number.isInteger(rounded) ? `${rounded}%` : `${rounded.toFixed(1)}%`;
 }
 
-function formatHours(minutes: number | null | undefined): string | null {
+function formatWindowDuration(minutes: number | null | undefined): string | null {
   if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) {
     return null;
   }
-  const hours = minutes / 60;
-  const rounded = Math.round(hours * 10) / 10;
-  const value = Number.isInteger(rounded) ? `${rounded}` : rounded.toFixed(1);
-  return `${value} ${rounded === 1 ? "hour" : "hours"}`;
-}
 
-function formatDays(minutes: number | null | undefined): string | null {
-  if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) {
+  let remainingMinutes = Math.round(minutes);
+  if (remainingMinutes <= 0) {
     return null;
   }
-  const days = minutes / 1_440;
-  const rounded = Math.round(days * 10) / 10;
-  const value = Number.isInteger(rounded) ? `${rounded}` : rounded.toFixed(1);
-  return `${value} ${rounded === 1 ? "day" : "days"}`;
+
+  const parts: Array<string> = [];
+  const appendPart = (value: number, unit: "day" | "hour" | "minute") => {
+    if (value > 0) {
+      parts.push(`${value} ${unit}${value === 1 ? "" : "s"}`);
+    }
+  };
+
+  const days = Math.floor(remainingMinutes / 1_440);
+  remainingMinutes %= 1_440;
+  const hours = Math.floor(remainingMinutes / 60);
+  const remaining = remainingMinutes % 60;
+
+  appendPart(days, "day");
+  appendPart(hours, "hour");
+  appendPart(remaining, "minute");
+
+  return parts.join(", ");
 }
 
 function formatShortDuration(minutes: number | null | undefined): string | null {
@@ -117,12 +126,12 @@ export function formatCodexRateLimitSummary(
 
   const primary = formatWindowLine({
     label: "Primary window",
-    durationLabel: formatHours(snapshot.primary?.windowDurationMins),
+    durationLabel: formatWindowDuration(snapshot.primary?.windowDurationMins),
     window: snapshot.primary,
   });
   const secondary = formatWindowLine({
     label: "Secondary window",
-    durationLabel: formatDays(snapshot.secondary?.windowDurationMins),
+    durationLabel: formatWindowDuration(snapshot.secondary?.windowDurationMins),
     window: snapshot.secondary,
   });
   const primaryResetAt = snapshot.primary?.resetsAt ?? null;
