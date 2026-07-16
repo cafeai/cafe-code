@@ -21,6 +21,10 @@ import {
   type ServerRuntimeLayerSummary,
 } from "@cafecode/contracts";
 import { requestProviderDaemonJson } from "@cafecode/shared/providerDaemonHttp";
+import {
+  snapshotProviderPipelineDiagnostics,
+  startProviderPipelineEventLoopMonitor,
+} from "@cafecode/shared/providerPipelineDiagnostics";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -621,6 +625,7 @@ function normalizeRecentEventRows(
 }
 
 export const make = Effect.fn("makeRuntimeLayerDiagnostics")(function* () {
+  startProviderPipelineEventLoopMonitor();
   const sql = yield* SqlClient.SqlClient;
   const config = yield* ServerConfig;
   const orchestrationEngine = yield* OrchestrationEngineService;
@@ -903,6 +908,15 @@ export const make = Effect.fn("makeRuntimeLayerDiagnostics")(function* () {
       }
 
       const providerDaemon = mapProviderDaemonHealth(daemonHealth);
+      const localProviderPipeline = snapshotProviderPipelineDiagnostics();
+      const providerPipeline = {
+        ...localProviderPipeline,
+        compaction:
+          daemonHealth.health?.pipelineDiagnostics?.compaction ?? localProviderPipeline.compaction,
+        daemonStream:
+          daemonHealth.health?.pipelineDiagnostics?.daemonStream ??
+          localProviderPipeline.daemonStream,
+      };
       const providerSupervisor = mapProviderSupervisorHealth({
         daemonHealth: daemonHealth.health,
         daemonConfigured: daemonHealth.configured,
@@ -1004,6 +1018,7 @@ export const make = Effect.fn("makeRuntimeLayerDiagnostics")(function* () {
         subprocesses,
         providerDaemon,
         providerSupervisor,
+        providerPipeline,
         resources: {
           sampleIntervalMs: 0,
           retainedSampleCount: subprocesses.filter((process) => process.pid !== null).length,

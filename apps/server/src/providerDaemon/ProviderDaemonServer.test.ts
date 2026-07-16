@@ -17,6 +17,7 @@ import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { EventEmitter } from "node:events";
 
 import { ProviderAdapterRegistry } from "../provider/Services/ProviderAdapterRegistry.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
@@ -29,6 +30,7 @@ import { ProviderSupervisorRegistryLive } from "../providerSupervisor/ProviderSu
 import {
   captureProviderDaemonProcessDiagnostic,
   runProviderDaemonServer,
+  writeProviderDaemonStreamLine,
   type ProviderDaemonServerOptions,
 } from "./ProviderDaemonServer.ts";
 import { ProviderRuntimeInventoryLocalLive } from "./ProviderRuntimeInventory.ts";
@@ -36,6 +38,9 @@ import { ProviderRuntimeInventoryLocalLive } from "./ProviderRuntimeInventory.ts
 const TEST_TOKEN = "provider-daemon-test-token-000000000000000000000000";
 
 const decodeProviderDaemonHealth = Schema.decodeUnknownSync(ProviderDaemonHealth);
+const encodeProviderDaemonHealthJson = Schema.encodeSync(
+  Schema.fromJsonString(ProviderDaemonHealth),
+);
 const encodeProviderDaemonLeaseRequestJson = Schema.encodeSync(
   Schema.fromJsonString(ProviderDaemonLeaseRequest),
 );
@@ -109,6 +114,45 @@ const providerDaemonServerTestLayer = Layer.mergeAll(
 ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
 
 describe("ProviderDaemonServer", () => {
+  it("waits for drain and rejects close for a slow daemon event response", async () => {
+    class FakeSlowResponse extends EventEmitter {
+      writes: string[] = [];
+      write(line: string): boolean {
+        this.writes.push(line);
+        return false;
+      }
+    }
+
+    const draining = new FakeSlowResponse();
+    const drainPromise = writeProviderDaemonStreamLine(
+      draining as unknown as Parameters<typeof writeProviderDaemonStreamLine>[0],
+      "record\n",
+    );
+    let settled = false;
+    void drainPromise.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    assert.isFalse(settled);
+    draining.emit("drain");
+    await drainPromise;
+    assert.deepEqual(draining.writes, ["record\n"]);
+
+    const closing = new FakeSlowResponse();
+    const closePromise = writeProviderDaemonStreamLine(
+      closing as unknown as Parameters<typeof writeProviderDaemonStreamLine>[0],
+      "record\n",
+    );
+    const closeResult = closePromise.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    closing.emit("close");
+    const closeError = await closeResult;
+    assert.instanceOf(closeError, Error);
+    assert.match(closeError.message, /closed before drain/u);
+  });
+
   it.effect("rejects unauthenticated health requests and serves authorized health", () =>
     Effect.gen(function* () {
       const port = yield* startProviderDaemonServerOnEphemeralPort({
@@ -156,6 +200,9 @@ describe("ProviderDaemonServer", () => {
       assert.equal(health.supervisorProcess?.appVersion, "0.0.0-test");
       assert.equal(health.supervisorProcess?.protocolVersion, 1);
       assert.equal(health.supervisorProcess?.leaseId, "lease-000000000000000000000000000");
+      assert.isDefined(health.pipelineDiagnostics);
+      assert.equal(health.pipelineDiagnostics?.daemonStream.activeStreamCount, 0);
+      assert.notInclude(encodeProviderDaemonHealthJson(health), TEST_TOKEN);
     }).pipe(Effect.scoped, Effect.provide(providerDaemonServerTestLayer)),
   );
 

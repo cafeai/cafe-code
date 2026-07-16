@@ -20,6 +20,7 @@ import { EditorId, TerminalAvailability } from "./editor.ts";
 import { ModelCapabilities } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ClientSettingsSchema, ServerSettings } from "./settings.ts";
+import { ProviderPipelineDiagnostics } from "./providerPipelineDiagnostics.ts";
 
 const KeybindingsMalformedConfigIssue = Schema.Struct({
   kind: Schema.Literal("keybindings.malformed-config"),
@@ -723,6 +724,7 @@ export const ServerRuntimeLayerDiagnosticsResult = Schema.Struct({
   subprocesses: Schema.Array(ServerRuntimeLayerProcess),
   providerDaemon: ServerProviderDaemonDiagnostics,
   providerSupervisor: ServerProviderSupervisorDiagnostics,
+  providerPipeline: Schema.optionalKey(ProviderPipelineDiagnostics),
   resources: ServerRuntimeLayerResources,
   errors: Schema.Array(ServerRuntimeLayerDiagnosticsError),
 });

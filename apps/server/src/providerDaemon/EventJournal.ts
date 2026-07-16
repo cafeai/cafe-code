@@ -2,14 +2,25 @@
 import * as Crypto from "node:crypto";
 
 import {
+  EventId,
+  ProviderDriverKind,
   ProviderRuntimeEvent,
+  ThreadId,
   type ProviderDaemonEventRecord,
   type ProviderRuntimeEvent as ProviderRuntimeEventValue,
 } from "@cafecode/contracts";
+import { PROVIDER_PIPELINE_POLICY, utf8ByteLength } from "@cafecode/shared/providerPipelinePolicy";
+import { compactProviderRuntimeEvent } from "@cafecode/shared/providerRuntimeEventCompaction";
+import {
+  recordProviderCompaction,
+  recordProviderQuarantinedRow,
+} from "@cafecode/shared/providerPipelineDiagnostics";
 import * as DateTime from "effect/DateTime";
+import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -20,6 +31,10 @@ const encodeProviderRuntimeEventJson = Schema.encodeSync(
 const decodeProviderRuntimeEventJson = Schema.decodeUnknownSync(
   Schema.fromJsonString(ProviderRuntimeEvent),
 );
+
+class ProviderDaemonEventDecodeError extends Data.TaggedError("ProviderDaemonEventDecodeError")<{
+  readonly cause: unknown;
+}> {}
 
 export interface ProviderDaemonEventJournalSnapshot {
   readonly eventCursor: number;
@@ -38,6 +53,10 @@ export interface ProviderDaemonEventJournal {
 export interface ProviderDaemonPersistentEventJournal {
   readonly publish: (event: ProviderRuntimeEventValue) => Effect.Effect<ProviderDaemonEventRecord>;
   readonly replayAfter: (cursor: number) => Effect.Effect<ReadonlyArray<ProviderDaemonEventRecord>>;
+  readonly replayPageAfter: (
+    cursor: number,
+    limit?: number,
+  ) => Effect.Effect<ReadonlyArray<ProviderDaemonEventRecord>>;
   readonly subscribe: (listener: (record: ProviderDaemonEventRecord) => void) => () => void;
   readonly snapshot: Effect.Effect<ProviderDaemonEventJournalSnapshot>;
   /** Resolves after the bounded post-startup prune, compaction, and index work completes. */
@@ -53,10 +72,11 @@ export function createProviderDaemonEventJournal(options?: {
   let nextCursor = 1;
 
   const publish = (event: ProviderRuntimeEventValue): ProviderDaemonEventRecord => {
+    const compactedEvent = compactEventForJournal(event);
     const record: ProviderDaemonEventRecord = {
       cursor: nextCursor,
       emittedAt: new Date().toISOString(),
-      event,
+      event: compactedEvent,
     };
     nextCursor += 1;
     records.push(record);
@@ -115,6 +135,8 @@ interface PersistedEventRow {
   readonly emittedAt: string;
   readonly eventJson: string;
 }
+
+const PROVIDER_DAEMON_QUARANTINE_THREAD_ID = ThreadId.make("provider-daemon-quarantine");
 
 function normalizeCursor(cursor: number): number {
   return Number.isFinite(cursor) ? Math.max(0, Math.trunc(cursor)) : 0;
@@ -204,6 +226,25 @@ function compactTurnDiffEventForJournal(
   };
 }
 
+function compactEventForJournal(
+  event: ProviderRuntimeEventValue,
+  options?: { readonly historicalRepair?: boolean },
+): ProviderRuntimeEventValue {
+  // Keep the historical Codex diff metadata shape for compatibility with
+  // existing diagnostics, then apply the canonical type-independent boundary
+  // so command output and future provider payloads receive the same protection.
+  const compacted = compactProviderRuntimeEvent(compactTurnDiffEventForJournal(event));
+  recordProviderCompaction({
+    originalBytes: compacted.stats.originalEncodedBytes,
+    canonicalBytes: compacted.stats.compactedEncodedBytes,
+    compacted: compacted.stats.compacted,
+    ...(options?.historicalRepair === undefined
+      ? {}
+      : { historicalRepair: options.historicalRepair }),
+  });
+  return compacted.event;
+}
+
 export const makePersistentProviderDaemonEventJournal = (options?: {
   readonly capacity?: number;
   readonly ownerKey?: string;
@@ -223,6 +264,86 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
     const startupMaintenanceReady = yield* Deferred.make<void>();
     let eventsSincePrune = 0;
     let eventIdIndexReady = false;
+
+    // Quarantine stores metadata only. The malformed body is replaced in place
+    // by a schema-valid cursor tombstone so replay can always advance without
+    // retaining prompts, command output, credentials, paths, or raw errors in a
+    // second forensic table.
+    yield* sql`
+      CREATE TABLE IF NOT EXISTS provider_daemon_event_quarantine (
+        owner_key TEXT NOT NULL,
+        cursor INTEGER NOT NULL,
+        emitted_at TEXT NOT NULL,
+        encoded_bytes INTEGER NOT NULL,
+        sha256 TEXT NOT NULL,
+        category TEXT NOT NULL,
+        quarantined_at TEXT NOT NULL,
+        PRIMARY KEY (owner_key, cursor)
+      )
+    `.pipe(Effect.orDie);
+
+    const quarantinePersistedRow = Effect.fn(
+      "ProviderDaemonPersistentEventJournal.quarantinePersistedRow",
+    )(function* (row: PersistedEventRow, category: "schema-decode-failed") {
+      const cursor = normalizeSqlNumber(row.cursor, 0);
+      const sha256 = hashTextSha256(row.eventJson);
+      const encodedBytes = utf8ByteLength(row.eventJson);
+      const quarantinedAt = DateTime.formatIso(yield* DateTime.now);
+      const tombstone: ProviderRuntimeEventValue = {
+        eventId: EventId.make(`provider-daemon-quarantine-${cursor}-${sha256.slice(0, 16)}`),
+        provider: ProviderDriverKind.make("provider-daemon"),
+        threadId: PROVIDER_DAEMON_QUARANTINE_THREAD_ID,
+        createdAt: row.emittedAt,
+        type: "runtime.warning",
+        payload: {
+          message: "Provider daemon quarantined an incompatible event record",
+          detail: {
+            category: "provider-daemon-quarantine-gap",
+            cursor,
+            encodedBytes,
+            sha256,
+          },
+        },
+      };
+      const tombstoneJson = encodeProviderRuntimeEventJson(tombstone);
+      yield* sql`
+        INSERT INTO provider_daemon_event_quarantine (
+          owner_key,
+          cursor,
+          emitted_at,
+          encoded_bytes,
+          sha256,
+          category,
+          quarantined_at
+        )
+        VALUES (
+          ${ownerKey},
+          ${cursor},
+          ${row.emittedAt},
+          ${encodedBytes},
+          ${sha256},
+          ${category},
+          ${quarantinedAt}
+        )
+        ON CONFLICT(owner_key, cursor) DO UPDATE SET
+          encoded_bytes = excluded.encoded_bytes,
+          sha256 = excluded.sha256,
+          category = excluded.category,
+          quarantined_at = excluded.quarantined_at
+      `.pipe(Effect.orDie);
+      yield* sql`
+        UPDATE provider_daemon_events
+        SET event_json = ${tombstoneJson}
+        WHERE owner_key = ${ownerKey}
+          AND cursor = ${cursor}
+      `.pipe(Effect.orDie);
+      recordProviderQuarantinedRow();
+      return {
+        cursor,
+        emittedAt: row.emittedAt,
+        event: tombstone,
+      } satisfies ProviderDaemonEventRecord;
+    });
 
     const refreshEventIdIndexState = Effect.gen(function* () {
       const rows = (yield* sql`
@@ -292,17 +413,16 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
       },
     );
 
-    const compactLargeTurnDiffRows = Effect.fn(
-      "ProviderDaemonPersistentEventJournal.compactLargeTurnDiffRows",
+    const compactLargeProviderEventRows = Effect.fn(
+      "ProviderDaemonPersistentEventJournal.compactLargeProviderEventRows",
     )(function* (options?: { readonly afterCursor?: number }) {
       // This is intentionally a post-readiness bounded maintenance task, not a
-      // migration. Older Cafe builds persisted repeated full Codex
-      // `turn/diff/updated` bodies into the daemon journal, and a single active
-      // long-running Lean turn can leave many ~30 MB rows near the live replay
-      // cursor. Replaying those rows puts user-message and steer-processing
-      // events behind megabytes of JSON parsing, unlike the Codex CLI/TUI. Keep
-      // retained diff records cryptographically identifiable while removing the
-      // full body from the hot restart/replay path.
+      // migration. Older Cafe builds persisted repeated full Codex diffs and
+      // arbitrarily large provider command payloads into the daemon journal.
+      // Replaying those rows puts user-message and steer-processing events
+      // behind megabytes of synchronous JSON work. Keep retained records
+      // cryptographically identifiable while removing full bodies from the hot
+      // restart/replay path.
       //
       // The batch size is deliberately one row. The inherited bad rows can be
       // roughly 30 MB each, and selecting many of them into JS before compaction
@@ -320,16 +440,27 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
           FROM provider_daemon_events
           WHERE owner_key = ${ownerKey}
             AND cursor > ${afterCursor}
-            AND length(event_json) > ${TURN_DIFF_JOURNAL_COMPACT_THRESHOLD_CHARS}
-            AND json_extract(event_json, '$.type') = 'turn.diff.updated'
+            AND length(event_json) > ${PROVIDER_PIPELINE_POLICY.canonicalEventMaxBytes}
           ORDER BY cursor ASC
           LIMIT ${TURN_DIFF_JOURNAL_COMPACT_BATCH_SIZE}
         `.pipe(Effect.orDie)) as unknown as ReadonlyArray<PersistedEventRow>;
 
         compactedCount = 0;
         for (const row of rows) {
-          const originalEvent = decodeProviderRuntimeEventJson(row.eventJson);
-          const compactedEvent = compactTurnDiffEventForJournal(originalEvent);
+          const originalEvent = yield* Effect.option(
+            Effect.try({
+              try: () => decodeProviderRuntimeEventJson(row.eventJson),
+              catch: (cause) => new ProviderDaemonEventDecodeError({ cause }),
+            }),
+          );
+          if (Option.isNone(originalEvent)) {
+            yield* quarantinePersistedRow(row, "schema-decode-failed");
+            compactedCount += 1;
+            continue;
+          }
+          const compactedEvent = compactEventForJournal(originalEvent.value, {
+            historicalRepair: true,
+          });
           const compactedJson = encodeProviderRuntimeEventJson(compactedEvent);
           if (compactedJson === row.eventJson) {
             continue;
@@ -351,7 +482,7 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
 
     yield* Effect.sleep(Duration.millis(startupPruneDelayMs)).pipe(
       Effect.andThen(pruneToCapacity()),
-      Effect.andThen(compactLargeTurnDiffRows()),
+      Effect.andThen(compactLargeProviderEventRows()),
       Effect.andThen(ensureEventIdIndex()),
       Effect.ignoreCause({ log: true }),
       Effect.ensuring(Deferred.succeed(startupMaintenanceReady, undefined)),
@@ -359,14 +490,31 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
       Effect.asVoid,
     );
 
-    const replayAfter = (cursor: number): Effect.Effect<ReadonlyArray<ProviderDaemonEventRecord>> =>
+    const replayPageAfter = (
+      cursor: number,
+      limit: number = PROVIDER_PIPELINE_POLICY.daemonReplayPageRecords,
+    ): Effect.Effect<ReadonlyArray<ProviderDaemonEventRecord>> =>
       Effect.gen(function* () {
         const normalizedCursor = normalizeCursor(cursor);
+        const normalizedLimit = Math.max(
+          1,
+          Math.min(
+            capacity,
+            Math.trunc(limit),
+            Math.max(
+              1,
+              Math.floor(
+                PROVIDER_PIPELINE_POLICY.daemonReplayPageBytes /
+                  PROVIDER_PIPELINE_POLICY.canonicalEventMaxBytes,
+              ),
+            ),
+          ),
+        );
         // Reconnect replay is on the daemon request hot path. Do not decode
         // inherited giant Codex diff rows here; compact them first in bounded
         // one-row repairs so the replay remains complete without risking a
         // multi-gigabyte JS heap spike.
-        yield* compactLargeTurnDiffRows({ afterCursor: normalizedCursor });
+        yield* compactLargeProviderEventRows({ afterCursor: normalizedCursor });
         const rows = (yield* sql`
           SELECT
             cursor,
@@ -376,10 +524,27 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
           WHERE owner_key = ${ownerKey}
             AND cursor > ${normalizedCursor}
           ORDER BY cursor ASC
-          LIMIT ${capacity}
+          LIMIT ${normalizedLimit}
         `.pipe(Effect.orDie)) as unknown as ReadonlyArray<PersistedEventRow>;
-        return rows.map(rowToRecord);
+        const records: ProviderDaemonEventRecord[] = [];
+        for (const row of rows) {
+          const record = yield* Effect.option(
+            Effect.try({
+              try: () => rowToRecord(row),
+              catch: (cause) => new ProviderDaemonEventDecodeError({ cause }),
+            }),
+          );
+          if (Option.isSome(record)) {
+            records.push(record.value);
+          } else {
+            records.push(yield* quarantinePersistedRow(row, "schema-decode-failed"));
+          }
+        }
+        return records;
       });
+
+    const replayAfter = (cursor: number): Effect.Effect<ReadonlyArray<ProviderDaemonEventRecord>> =>
+      replayPageAfter(cursor, capacity);
 
     const snapshot: Effect.Effect<ProviderDaemonEventJournalSnapshot> = Effect.gen(function* () {
       const rows = (yield* sql`
@@ -407,7 +572,7 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
 
     const publish = (event: ProviderRuntimeEventValue): Effect.Effect<ProviderDaemonEventRecord> =>
       Effect.gen(function* () {
-        const compactedEvent = compactTurnDiffEventForJournal(event);
+        const compactedEvent = compactEventForJournal(event);
         const eventId = runtimeEventId(compactedEvent);
         if (eventIdIndexReady) {
           const existingRows = (yield* sql`
@@ -470,6 +635,7 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
     return {
       publish,
       replayAfter,
+      replayPageAfter,
       subscribe,
       snapshot,
       startupMaintenance: Deferred.await(startupMaintenanceReady),

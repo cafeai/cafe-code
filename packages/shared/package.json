@@ -116,6 +116,18 @@
       "types": "./src/providerDaemonHttp.ts",
       "import": "./src/providerDaemonHttp.ts"
     },
+    "./providerPipelinePolicy": {
+      "types": "./src/providerPipelinePolicy.ts",
+      "import": "./src/providerPipelinePolicy.ts"
+    },
+    "./providerPipelineDiagnostics": {
+      "types": "./src/providerPipelineDiagnostics.ts",
+      "import": "./src/providerPipelineDiagnostics.ts"
+    },
+    "./providerRuntimeEventCompaction": {
+      "types": "./src/providerRuntimeEventCompaction.ts",
+      "import": "./src/providerRuntimeEventCompaction.ts"
+    },
     "./startupProfiler": {
       "types": "./src/startupProfiler.ts",
       "import": "./src/startupProfiler.ts"

@@ -17,6 +17,8 @@ import {
   requestProviderDaemonJson,
   streamProviderDaemonNdjson,
 } from "@cafecode/shared/providerDaemonHttp";
+import { PROVIDER_PIPELINE_POLICY } from "@cafecode/shared/providerPipelinePolicy";
+import { addProviderBackendBridgeDiagnostics } from "@cafecode/shared/providerPipelineDiagnostics";
 import * as crypto from "node:crypto";
 import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
@@ -175,12 +177,12 @@ const rpc = <M extends ProviderDaemonRpcRequest["method"]>(
 async function readEventStream(
   daemonConfig: ProviderDaemonClientConfig,
   afterCursor: number,
-  onRecord: (record: typeof ProviderDaemonEventRecord.Type) => void,
+  onRecord: (record: typeof ProviderDaemonEventRecord.Type) => Promise<void>,
 ): Promise<void> {
   const url = providerDaemonUrl(daemonConfig, PROVIDER_DAEMON_EVENTS_PATH);
   url.searchParams.set("after", String(Math.max(0, Math.trunc(afterCursor))));
   await streamProviderDaemonNdjson(daemonConfig, `${url.pathname}${url.search}`, {
-    onLine: (line) => onRecord(decodeEventRecordJson(line)),
+    onLine: async (line) => onRecord(decodeEventRecordJson(line)),
   });
 }
 
@@ -191,6 +193,17 @@ async function readRemoteHealth(
     method: "GET",
   });
   return decodeHealthJson(response.body);
+}
+
+function isProviderDaemonQuarantineGap(event: ProviderRuntimeEvent): boolean {
+  if (event.type !== "runtime.warning") return false;
+  const detail = event.payload.detail;
+  return (
+    detail !== null &&
+    typeof detail === "object" &&
+    "category" in detail &&
+    detail.category === "provider-daemon-quarantine-gap"
+  );
 }
 
 export function remoteProviderCursorProjectorForConfig(config: {
@@ -211,9 +224,22 @@ const makeRemoteProviderService = Effect.gen(function* () {
   }
   const remoteCursorProjector = remoteProviderCursorProjectorForConfig(config);
 
-  const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
+  // Canonical events are bounded to 256 KiB before this bridge. Capping by the
+  // stricter of count and byte-derived capacity gives the daemon HTTP reader a
+  // real backpressure point without relying on average event size.
+  const bridgeQueueCapacity = Math.max(
+    1,
+    Math.min(
+      PROVIDER_PIPELINE_POLICY.bridgeQueueMaxRecords,
+      Math.floor(
+        PROVIDER_PIPELINE_POLICY.bridgeQueueMaxBytes /
+          PROVIDER_PIPELINE_POLICY.canonicalEventMaxBytes,
+      ),
+    ),
+  );
+  const runtimeEventPubSub = yield* PubSub.bounded<ProviderRuntimeEvent>(bridgeQueueCapacity);
   const publishContext = yield* Effect.context<never>();
-  const publishRuntimeEvent = Effect.runSyncWith(publishContext);
+  const publishRuntimeEvent = Effect.runPromiseWith(publishContext);
   const initialProjectionState = yield* projectionStateRepository
     .getByProjector({ projector: remoteCursorProjector })
     .pipe(
@@ -285,14 +311,36 @@ const makeRemoteProviderService = Effect.gen(function* () {
     while (true) {
       yield* Effect.tryPromise({
         try: () =>
-          readEventStream(daemonConfig, eventCursor, (record) => {
-            eventCursor = Math.max(eventCursor, record.cursor);
-            publishRuntimeEvent(
+          readEventStream(daemonConfig, eventCursor, async (record) => {
+            if (isProviderDaemonQuarantineGap(record.event)) {
+              // The daemon made a durable payload-free forward-progress
+              // decision. Re-read live session inventory before advancing the
+              // bridge cursor so the backend does not infer session truth from
+              // the missing incompatible event.
+              await publishRuntimeEvent(
+                rpc(daemonConfig, { method: "listSessions", payload: {} }).pipe(
+                  Effect.tap((sessions) =>
+                    Effect.logWarning("provider daemon event quarantine gap reconciled", {
+                      cursor: record.cursor,
+                      activeSessionCount: sessions.length,
+                    }),
+                  ),
+                  Effect.catch(() => Effect.void),
+                ),
+              );
+              eventCursor = Math.max(eventCursor, record.cursor);
+              return;
+            }
+            await publishRuntimeEvent(
               PubSub.publish(
                 runtimeEventPubSub,
                 attachProviderDaemonRuntimeEventCursor(record.event, record.cursor),
               ),
             );
+            addProviderBackendBridgeDiagnostics({ acceptedRecordCount: 1 });
+            // A cursor is durable progress only after downstream acceptance.
+            // Advancing first can permanently skip a record after a crash.
+            eventCursor = Math.max(eventCursor, record.cursor);
           }),
         catch: (cause) => toRemoteRequestError("streamEvents", cause),
       }).pipe(

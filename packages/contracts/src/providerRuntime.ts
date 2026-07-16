@@ -39,6 +39,18 @@ export const RuntimeEventRaw = Schema.Struct({
 });
 export type RuntimeEventRaw = typeof RuntimeEventRaw.Type;
 
+export const ProviderRuntimeEventCompaction = Schema.Struct({
+  version: Schema.Literal(1),
+  originalEncodedBytes: NonNegativeInt,
+  compactedEncodedBytes: NonNegativeInt,
+  sha256: TrimmedNonEmptyStringSchema,
+  truncatedStrings: NonNegativeInt,
+  omittedArrayItems: NonNegativeInt,
+  omittedObjectKeys: NonNegativeInt,
+  depthOmissions: NonNegativeInt,
+});
+export type ProviderRuntimeEventCompaction = typeof ProviderRuntimeEventCompaction.Type;
+
 const ProviderRequestId = TrimmedNonEmptyStringSchema;
 export type ProviderRequestId = typeof ProviderRequestId.Type;
 
@@ -259,6 +271,7 @@ const ProviderRuntimeEventBase = Schema.Struct({
   requestId: Schema.optional(RuntimeRequestId),
   providerRefs: Schema.optional(ProviderRefs),
   raw: Schema.optional(RuntimeEventRaw),
+  compaction: Schema.optional(ProviderRuntimeEventCompaction),
 });
 export type ProviderRuntimeEventBase = typeof ProviderRuntimeEventBase.Type;
 

@@ -14,6 +14,7 @@ import {
   ProviderTurnStartResult,
 } from "./provider.ts";
 import { ProviderRuntimeEvent } from "./providerRuntime.ts";
+import { ProviderPipelineDiagnostics } from "./providerPipelineDiagnostics.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ProviderSupervisorHealthSummary } from "./providerSupervisor.ts";
 
@@ -325,6 +326,7 @@ export const ProviderDaemonHealth = Schema.Struct({
   persistence: Schema.optional(ProviderDaemonPersistenceHealth),
   runtimeEvents: Schema.optional(ProviderDaemonRuntimeEventDiagnostics),
   processDiagnostics: Schema.optional(ProviderDaemonProcessDiagnosticsSnapshot),
+  pipelineDiagnostics: Schema.optional(ProviderPipelineDiagnostics),
 });
 export type ProviderDaemonHealth = typeof ProviderDaemonHealth.Type;
 

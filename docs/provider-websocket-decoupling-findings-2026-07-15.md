@@ -1,7 +1,7 @@
 # Provider Runtime / WebSocket Decoupling Findings
 
 Date: 2026-07-15
-Status: Investigation complete; implementation not started
+Status: Investigation complete; bounded in-process mitigation implemented on 2026-07-16
 Scope: Cafe Code desktop backend, provider daemon event bridge, orchestration subscriptions, and renderer WebSocket recovery
 
 ## Purpose
@@ -9,6 +9,18 @@ Scope: Cafe Code desktop backend, provider daemon event bridge, orchestration su
 This document preserves the investigation context needed to continue work on intermittent renderer WebSocket hangs and reconnects that appear during provider activity. It separates evidence observed from a live local Cafe instance from risks inferred through source inspection.
 
 No raw prompts, command output, provider credentials, bearer tokens, or event bodies were copied into this document. Live journal inspection was limited to timestamps, event types, counts, and encoded byte/character lengths.
+
+## Implementation Outcome (2026-07-16)
+
+The mitigation keeps WebSocket handling in the main backend process and removes the five identified amplification/unbounded-work paths:
+
+1. All provider runtime events are compacted under one finite encoded-byte policy before in-memory or persistent journal insertion. Oversized historical rows are repaired one at a time; incompatible rows become payload-free cursor tombstones backed by a metadata-only quarantine record.
+2. Daemon replay is cursor-paged and uses a serialized drain-aware writer with a finite live queue. The backend keeps NDJSON as bytes until complete lines exist, pauses during asynchronous decode/admission, enforces line/pending caps, and yields under record/byte/time budgets.
+3. Shell and thread subscriptions now share one durable orchestration tail and bounded replay ring instead of opening one global SQLite poller per retained subscription. Each subscriber has an isolated count/byte-bounded queue and a default-protected coalescing policy.
+4. Each authenticated WebSocket connection accounts bulk stream frames at Effect RPC's public Ack/pull boundary, reserves capacity for control/unary traffic, and fails only the saturated subscription with a sanitized resnapshot error.
+5. Daemon health and backend runtime diagnostics expose bounded numeric event-loop, compaction, replay, queue, subscription, and WebSocket counters. The diagnostics schema deliberately cannot carry prompts, output, paths, identifiers, tokens, or raw errors.
+
+The original evidence below remains the before-state record. It should not be read as a description of the current source after commit of this mitigation.
 
 ## Executive Conclusion
 

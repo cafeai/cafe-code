@@ -5,6 +5,69 @@ import { ServerProvider, ServerRuntimeLayerDiagnosticsResult } from "./server.ts
 
 const decodeServerProvider = Schema.decodeUnknownSync(ServerProvider);
 const decodeRuntimeLayerDiagnostics = Schema.decodeUnknownSync(ServerRuntimeLayerDiagnosticsResult);
+const PIPELINE_SENTINEL = "SECRET_PROMPT_MUST_NOT_SURVIVE";
+
+function providerPipelineFixture() {
+  return {
+    eventLoop: {
+      sampleIntervalMs: 100,
+      retainedSampleCount: 10,
+      currentLagMs: 1,
+      p50LagMs: 1,
+      p95LagMs: 4,
+      p99LagMs: 8,
+      maxLagMs: 9,
+      prompt: PIPELINE_SENTINEL,
+    },
+    compaction: {
+      compactedEventCount: 3,
+      historicalRepairCount: 1,
+      quarantinedRowCount: 0,
+      originalBytes: 3_000_000,
+      canonicalBytes: 300_000,
+      largestCanonicalBytes: 100_000,
+    },
+    daemonStream: {
+      activeStreamCount: 1,
+      replayPageCount: 2,
+      replayRecordCount: 20,
+      replayBytes: 20_000,
+      drainWaitCount: 1,
+      queuedLiveRecords: 0,
+      queuedLiveBytes: 0,
+      laggingDisconnectCount: 0,
+    },
+    backendBridge: {
+      pendingBytes: 0,
+      largestLineBytes: 10_000,
+      pauseCount: 2,
+      pausedMs: 4,
+      decodedRecordCount: 20,
+      decodeFailureCount: 0,
+      acceptedRecordCount: 20,
+    },
+    subscriptions: {
+      cursor: 20,
+      replayRingEvents: 20,
+      replayRingBytes: 20_000,
+      activeShellSubscribers: 1,
+      activeThreadSubscribers: 2,
+      durableTailReadCount: 3,
+      durableEventCount: 20,
+      catchupReadCount: 0,
+      slowSubscriberCloseCount: 0,
+      coalescedEventCount: 5,
+    },
+    webSocket: {
+      activeBulkFrames: 1,
+      activeBulkBytes: 2_000,
+      largestFrameBytes: 10_000,
+      serializationTimeMs: 5,
+      overloadCloseCount: 0,
+      connectionOpenCount: 1,
+    },
+  };
+}
 
 describe("ServerProvider", () => {
   it("defaults capability arrays when decoding provider snapshots", () => {
@@ -282,6 +345,7 @@ describe("ServerProvider", () => {
         },
         error: "Provider supervisor is unavailable.",
       },
+      providerPipeline: providerPipelineFixture(),
       resources: {
         sampleIntervalMs: 0,
         retainedSampleCount: 1,
@@ -316,6 +380,8 @@ describe("ServerProvider", () => {
     expect(parsed.orchestrator.projectionLag).toBe(2);
     expect(parsed.orchestrator.providerRuntimeIngestion.lag).toBe(1);
     expect(parsed.providerDaemon.reachable).toBe(true);
+    expect(parsed.providerPipeline?.subscriptions.activeThreadSubscribers).toBe(2);
+    expect(JSON.stringify(parsed.providerPipeline)).not.toContain(PIPELINE_SENTINEL);
   });
 
   it("rejects malformed runtime layer diagnostics", () => {

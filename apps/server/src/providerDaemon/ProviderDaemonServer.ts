@@ -9,11 +9,11 @@ import {
   PROVIDER_DAEMON_HEALTH_PATH,
   PROVIDER_DAEMON_LEASES_PATH,
   PROVIDER_DAEMON_RPC_PATH,
+  ProviderDaemonEventRecord,
   ProviderDaemonLeaseRequest,
   type ProviderDaemonProcessDiagnostic,
   ProviderDaemonRpcRequest,
   type ProviderDaemonCapability,
-  type ProviderDaemonEventRecord,
   type ProviderDaemonLeaseResponse,
   type ProviderDaemonRecentRpcFailure,
   type ProviderDaemonRpcEnvelope,
@@ -23,6 +23,13 @@ import {
   type ProviderRuntimeEvent as ProviderRuntimeEventValue,
   type ProviderRuntimeProcessMode,
 } from "@cafecode/contracts";
+import { PROVIDER_PIPELINE_POLICY, utf8ByteLength } from "@cafecode/shared/providerPipelinePolicy";
+import {
+  addProviderDaemonStreamDiagnostics,
+  setProviderDaemonStreamDiagnostics,
+  snapshotProviderPipelineDiagnostics,
+  startProviderPipelineEventLoopMonitor,
+} from "@cafecode/shared/providerPipelineDiagnostics";
 import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Cause from "effect/Cause";
@@ -67,6 +74,7 @@ const PROVIDER_SUPERVISOR_BRIDGE_CURSOR_PERSIST_INTERVAL = 100;
 
 const decodeRpcRequest = Schema.decodeUnknownEffect(ProviderDaemonRpcRequest);
 const decodeLeaseRequest = Schema.decodeUnknownEffect(ProviderDaemonLeaseRequest);
+const encodeEventRecordJson = Schema.encodeSync(Schema.fromJsonString(ProviderDaemonEventRecord));
 
 class ProviderDaemonListenError extends Data.TaggedError("ProviderDaemonListenError")<{
   readonly cause: unknown;
@@ -756,17 +764,54 @@ function parseAfterCursor(raw: string | null): number {
   return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
 
-function writeEventRecord(response: http.ServerResponse, record: unknown): void {
-  response.write(`${JSON.stringify(record)}\n`);
+function waitForResponseDrain(response: http.ServerResponse): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => {
+      response.off("drain", onDrain);
+      response.off("close", onClose);
+      response.off("error", onError);
+    };
+    const onDrain = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onClose = (): void => {
+      cleanup();
+      reject(new Error("provider daemon event response closed before drain"));
+    };
+    const onError = (cause: Error): void => {
+      cleanup();
+      reject(cause);
+    };
+    response.once("drain", onDrain);
+    response.once("close", onClose);
+    response.once("error", onError);
+  });
 }
 
-function handleEventStream(
+/** Public test seam for the serialized daemon writer's Node drain contract. */
+export async function writeProviderDaemonStreamLine(
+  response: http.ServerResponse,
+  line: string,
+): Promise<void> {
+  if (!response.write(line)) {
+    addProviderDaemonStreamDiagnostics({ drainWaitCount: 1 });
+    await waitForResponseDrain(response);
+  }
+}
+
+function yieldProviderStreamTurn(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function handleEventStream(
   request: http.IncomingMessage,
   response: http.ServerResponse,
   journal: ProviderDaemonPersistentEventJournal,
-  records: ReadonlyArray<unknown>,
+  afterCursor: number,
+  runJournalEffect: <A>(effect: Effect.Effect<A>) => Promise<A>,
   onCleanup: () => void,
-): void {
+): Promise<void> {
   response.writeHead(200, {
     "content-type": "application/x-ndjson; charset=utf-8",
     "cache-control": "no-store",
@@ -774,18 +819,147 @@ function handleEventStream(
     connection: "keep-alive",
   });
 
-  for (const record of records) {
-    writeEventRecord(response, record);
-  }
-
-  const unsubscribe = journal.subscribe((record) => writeEventRecord(response, record));
-  const cleanup = () => {
-    unsubscribe();
-    onCleanup();
-    response.end();
+  type QueuedRecord = {
+    readonly record: ProviderDaemonEventRecord;
+    readonly line: string;
+    readonly bytes: number;
   };
-  request.once("close", cleanup);
-  request.once("aborted", cleanup);
+  const liveQueue: QueuedRecord[] = [];
+  let liveQueueBytes = 0;
+  let active = true;
+  let cleaned = false;
+  let wakeWriter: (() => void) | null = null;
+  let unsubscribe: (() => void) | null = null;
+
+  const cleanup = (cause?: unknown): void => {
+    if (cleaned) return;
+    cleaned = true;
+    active = false;
+    unsubscribe?.();
+    setProviderDaemonStreamDiagnostics({ queuedLiveRecords: 0, queuedLiveBytes: 0 });
+    onCleanup();
+    wakeWriter?.();
+    wakeWriter = null;
+    if (cause !== undefined && !response.destroyed) {
+      response.destroy(cause instanceof Error ? cause : new Error(String(cause)));
+    } else if (!response.destroyed && !response.writableEnded) {
+      response.end();
+    }
+  };
+
+  const encodeRecord = (record: ProviderDaemonEventRecord): QueuedRecord => {
+    const line = `${encodeEventRecordJson(record)}\n`;
+    const bytes = utf8ByteLength(line);
+    if (bytes > PROVIDER_PIPELINE_POLICY.ndjsonMaxLineBytes) {
+      throw new RangeError(
+        `provider daemon event record exceeds ${PROVIDER_PIPELINE_POLICY.ndjsonMaxLineBytes} bytes`,
+      );
+    }
+    return { record, line, bytes };
+  };
+
+  const enqueueLive = (record: ProviderDaemonEventRecord): void => {
+    if (!active) return;
+    try {
+      const queued = encodeRecord(record);
+      if (
+        liveQueue.length >= PROVIDER_PIPELINE_POLICY.daemonWriterMaxRecords ||
+        liveQueueBytes + queued.bytes > PROVIDER_PIPELINE_POLICY.daemonWriterMaxBytes
+      ) {
+        addProviderDaemonStreamDiagnostics({ laggingDisconnectCount: 1 });
+        cleanup(new Error("provider daemon event stream live queue exceeded its finite limit"));
+        return;
+      }
+      liveQueue.push(queued);
+      liveQueueBytes += queued.bytes;
+      setProviderDaemonStreamDiagnostics({
+        queuedLiveRecords: liveQueue.length,
+        queuedLiveBytes: liveQueueBytes,
+      });
+      wakeWriter?.();
+      wakeWriter = null;
+    } catch (cause) {
+      cleanup(cause);
+    }
+  };
+
+  const writeQueued = async (queued: QueuedRecord): Promise<void> => {
+    await writeProviderDaemonStreamLine(response, queued.line);
+  };
+
+  const waitForLive = (): Promise<void> => {
+    if (!active || liveQueue.length > 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      wakeWriter = resolve;
+    });
+  };
+
+  request.once("aborted", () => cleanup());
+  response.once("close", () => cleanup());
+  unsubscribe = journal.subscribe(enqueueLive);
+
+  let cursor = Math.max(0, Math.trunc(afterCursor));
+  let turnRecords = 0;
+  let turnBytes = 0;
+  let turnStartedAt = performance.now();
+  const accountWork = async (bytes: number): Promise<void> => {
+    turnRecords += 1;
+    turnBytes += bytes;
+    if (
+      turnRecords >= PROVIDER_PIPELINE_POLICY.workTurnMaxRecords ||
+      turnBytes >= PROVIDER_PIPELINE_POLICY.workTurnMaxBytes ||
+      performance.now() - turnStartedAt >= PROVIDER_PIPELINE_POLICY.workTurnMaxElapsedMs
+    ) {
+      await yieldProviderStreamTurn();
+      turnRecords = 0;
+      turnBytes = 0;
+      turnStartedAt = performance.now();
+    }
+  };
+
+  try {
+    // Subscribe before replay so an event committed between the initial cursor
+    // and the database query cannot be lost. Cursor dedupe removes the overlap.
+    for (;;) {
+      if (!active) break;
+      const page = await runJournalEffect(
+        journal.replayPageAfter(cursor, PROVIDER_PIPELINE_POLICY.daemonReplayPageRecords),
+      );
+      if (page.length === 0) break;
+      addProviderDaemonStreamDiagnostics({ replayPageCount: 1 });
+      for (const record of page) {
+        if (!active) return;
+        if (record.cursor <= cursor) continue;
+        const queued = encodeRecord(record);
+        addProviderDaemonStreamDiagnostics({ replayRecordCount: 1, replayBytes: queued.bytes });
+        await writeQueued(queued);
+        cursor = record.cursor;
+        await accountWork(queued.bytes);
+      }
+    }
+
+    for (;;) {
+      if (!active) break;
+      while (liveQueue.length > 0) {
+        const queued = liveQueue.shift();
+        if (queued === undefined) break;
+        liveQueueBytes = Math.max(0, liveQueueBytes - queued.bytes);
+        setProviderDaemonStreamDiagnostics({
+          queuedLiveRecords: liveQueue.length,
+          queuedLiveBytes: liveQueueBytes,
+        });
+        if (queued.record.cursor <= cursor) continue;
+        await writeQueued(queued);
+        cursor = queued.record.cursor;
+        await accountWork(queued.bytes);
+      }
+      await waitForLive();
+    }
+  } catch (cause) {
+    cleanup(cause);
+  } finally {
+    cleanup();
+  }
 }
 
 const closeHttpServer = (server: http.Server): Effect.Effect<void> =>
@@ -807,6 +981,7 @@ export const runProviderDaemonServer = (
 > =>
   Effect.gen(function* () {
     installProviderDaemonProcessDiagnosticListeners();
+    startProviderPipelineEventLoopMonitor();
 
     const providerService = yield* ProviderService;
     const runtimeInventory = yield* ProviderRuntimeInventory;
@@ -1116,6 +1291,7 @@ export const runProviderDaemonServer = (
                   ? { supervisorProcess: options.supervisorProcess }
                   : {}),
                 processDiagnostics: readProviderDaemonProcessDiagnosticsSnapshot(),
+                pipelineDiagnostics: snapshotProviderPipelineDiagnostics(),
               } as const;
             }),
           );
@@ -1165,13 +1341,19 @@ export const runProviderDaemonServer = (
             writeJson(response, 401, { error: "unauthorized" });
             return;
           }
-          const records = await runProviderEffect(
-            journal.replayAfter(parseAfterCursor(url.searchParams.get("after"))),
-          );
           activeStreamCount += 1;
-          handleEventStream(request, response, journal, records, () => {
-            activeStreamCount = Math.max(0, activeStreamCount - 1);
-          });
+          setProviderDaemonStreamDiagnostics({ activeStreamCount });
+          void handleEventStream(
+            request,
+            response,
+            journal,
+            parseAfterCursor(url.searchParams.get("after")),
+            runProviderEffect,
+            () => {
+              activeStreamCount = Math.max(0, activeStreamCount - 1);
+              setProviderDaemonStreamDiagnostics({ activeStreamCount });
+            },
+          );
           return;
         }
 

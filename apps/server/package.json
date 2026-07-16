@@ -42,6 +42,7 @@
     "start": "node dist/bin.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:e2e:provider-pipeline": "vitest run --config vitest.e2e.config.ts integration/providerPipelineLiveness.e2e.test.ts",
     "test:e2e:provider-daemon": "vitest run --config vitest.e2e.config.ts"
   },
   "dependencies": {

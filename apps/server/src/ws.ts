@@ -37,14 +37,15 @@ import { ServerConfig } from "./config.ts";
 import { Keybindings } from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
-import {
-  OrchestrationEngineService,
-  type OrchestrationEngineShape,
-} from "./orchestration/Services/OrchestrationEngine.ts";
+import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProviderJournalMessageRepairLive } from "./orchestration/Layers/ProviderJournalMessageRepair.ts";
 import { ProviderJournalMessageRepair } from "./orchestration/Services/ProviderJournalMessageRepair.ts";
 import { ThreadDetailSubscriptionRegistry } from "./orchestration/Services/ThreadDetailSubscriptionRegistry.ts";
+import {
+  makeOrchestrationSubscriptionHub,
+  type OrchestrationSubscriptionHubShape,
+} from "./orchestration/Services/OrchestrationSubscriptionHub.ts";
 import {
   observeRpcEffect,
   observeRpcStream,
@@ -95,89 +96,12 @@ import {
 } from "./auth/Services/SessionCredentialService.ts";
 import { respondToAuthError } from "./auth/http.ts";
 import { ensureSystemPromptFile } from "./systemPromptFile.ts";
+import { makeWebSocketConnectionFlowControl } from "./websocket/ConnectionFlowControl.ts";
+import { addProviderWebSocketDiagnostics } from "@cafecode/shared/providerPipelineDiagnostics";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 const isWorkspacePathOutsideRootError = Schema.is(WorkspacePathOutsideRootError);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
-const ORCHESTRATION_SUBSCRIPTION_BACKFILL_POLL_MS = 1_000;
-
-function isThreadDetailEvent(event: OrchestrationEvent): event is Extract<
-  OrchestrationEvent,
-  {
-    type:
-      | "thread.message-sent"
-      | "thread.message.assistant-repair-applied"
-      | "thread.proposed-plan-upserted"
-      | "thread.activity-appended"
-      | "thread.turn-diff-completed"
-      | "thread.reverted"
-      | "thread.session-set";
-  }
-> {
-  return (
-    event.type === "thread.message-sent" ||
-    event.type === "thread.message.assistant-repair-applied" ||
-    event.type === "thread.proposed-plan-upserted" ||
-    event.type === "thread.activity-appended" ||
-    event.type === "thread.turn-diff-completed" ||
-    event.type === "thread.reverted" ||
-    event.type === "thread.session-set"
-  );
-}
-
-function streamReplayableDomainEvents(
-  orchestrationEngine: OrchestrationEngineShape,
-  fromSequenceExclusive: number,
-): Stream.Stream<OrchestrationEvent, OrchestrationGetSnapshotError, never> {
-  return Stream.unwrap(
-    Effect.gen(function* () {
-      const cursorRef = yield* Ref.make(fromSequenceExclusive);
-      const readAndAdvanceCursor = Ref.get(cursorRef).pipe(
-        Effect.flatMap((fromSequence) =>
-          Stream.runCollect(orchestrationEngine.readEvents(fromSequence)).pipe(
-            Effect.map((chunk) => Array.from(chunk)),
-          ),
-        ),
-        Effect.flatMap((events) =>
-          Ref.modify(cursorRef, (currentSequence) => {
-            const freshEvents = events.filter((event) => event.sequence > currentSequence);
-            const nextSequence = freshEvents.at(-1)?.sequence ?? currentSequence;
-            return [freshEvents, nextSequence] as const;
-          }),
-        ),
-        Effect.mapError(
-          (cause) =>
-            new OrchestrationGetSnapshotError({
-              message: "Failed to backfill orchestration subscription events",
-              cause,
-            }),
-        ),
-      );
-      const backfillStream = Stream.concat(
-        Stream.make(undefined),
-        Stream.tick(Duration.millis(ORCHESTRATION_SUBSCRIPTION_BACKFILL_POLL_MS)),
-      ).pipe(Stream.flatMap(() => Stream.fromIterableEffect(readAndAdvanceCursor)));
-      const liveStream = orchestrationEngine.streamDomainEvents.pipe(
-        Stream.mapEffect((event) =>
-          Ref.modify(cursorRef, (currentSequence) => {
-            if (event.sequence <= currentSequence) {
-              return [Option.none<OrchestrationEvent>(), currentSequence] as const;
-            }
-            return [Option.some(event), event.sequence] as const;
-          }),
-        ),
-        Stream.flatMap((event) => (Option.isSome(event) ? Stream.make(event.value) : Stream.empty)),
-      );
-
-      // The PubSub stream gives normal low-latency delivery, while the bounded
-      // event-store poller repairs the classic snapshot/subscribe race and any
-      // transient client stream stall. The shared cursor suppresses duplicates
-      // regardless of whether live or backfill observes an event first.
-      return Stream.merge(backfillStream, liveStream);
-    }),
-  );
-}
-
 function isStreamingAssistantMessageEvent(event: OrchestrationEvent): boolean {
   return (
     event.type === "thread.message-sent" &&
@@ -245,7 +169,10 @@ function toAuthAccessStreamEvent(
   }
 }
 
-const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
+const makeWsRpcLayer = (
+  currentSessionId: AuthSessionId,
+  orchestrationSubscriptionHub: OrchestrationSubscriptionHubShape,
+) =>
   WsRpcGroup.toLayer(
     Effect.gen(function* () {
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
@@ -290,6 +217,8 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const runtimeLayerDiagnostics = yield* RuntimeLayerDiagnostics.RuntimeLayerDiagnostics;
+      addProviderWebSocketDiagnostics({ connectionOpenCount: 1 });
+      const connectionFlowControl = makeWebSocketConnectionFlowControl();
       const serverCommandId = (tag: string) =>
         CommandId.make(`server:${tag}:${crypto.randomUUID()}`);
 
@@ -826,22 +755,26 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
                 ),
               );
 
-              const liveStream = streamReplayableDomainEvents(
-                orchestrationEngine,
-                snapshot.snapshotSequence,
-              ).pipe(
-                Stream.mapEffect(toShellStreamEvent),
-                Stream.flatMap((event) =>
-                  Option.isSome(event) ? Stream.succeed(event.value) : Stream.empty,
-                ),
-              );
+              const liveStream = orchestrationSubscriptionHub
+                .eventsFrom({
+                  fromSequenceExclusive: snapshot.snapshotSequence,
+                  route: { kind: "shell" },
+                })
+                .pipe(
+                  Stream.mapEffect(toShellStreamEvent),
+                  Stream.flatMap((event) =>
+                    Option.isSome(event) ? Stream.succeed(event.value) : Stream.empty,
+                  ),
+                );
 
-              return Stream.concat(
-                Stream.make({
-                  kind: "snapshot" as const,
-                  snapshot,
-                }),
-                liveStream,
+              return connectionFlowControl.wrapBulkStream(
+                Stream.concat(
+                  Stream.make({
+                    kind: "snapshot" as const,
+                    snapshot,
+                  }),
+                  liveStream,
+                ),
               );
             }),
             { "rpc.aggregate": "orchestration" },
@@ -973,28 +906,26 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
                 threadDetailSubscriptionRegistry.release(input.threadId),
               );
 
-              const liveStream = streamReplayableDomainEvents(
-                orchestrationEngine,
-                threadDetailSnapshot.value.snapshotSequence,
-              ).pipe(
-                Stream.filter(
-                  (event) =>
-                    event.aggregateKind === "thread" &&
-                    event.aggregateId === input.threadId &&
-                    isThreadDetailEvent(event),
-                ),
-                Stream.map((event) => ({
-                  kind: "event" as const,
-                  event,
-                })),
-              );
+              const liveStream = orchestrationSubscriptionHub
+                .eventsFrom({
+                  fromSequenceExclusive: threadDetailSnapshot.value.snapshotSequence,
+                  route: { kind: "thread", threadId: input.threadId },
+                })
+                .pipe(
+                  Stream.map((event) => ({
+                    kind: "event" as const,
+                    event,
+                  })),
+                );
 
-              return Stream.concat(
-                Stream.make({
-                  kind: "snapshot" as const,
-                  snapshot: threadDetailSnapshot.value,
-                }),
-                liveStream,
+              return connectionFlowControl.wrapBulkStream(
+                Stream.concat(
+                  Stream.make({
+                    kind: "snapshot" as const,
+                    snapshot: threadDetailSnapshot.value,
+                  }),
+                  liveStream,
+                ),
               );
             }),
             { "rpc.aggregate": "orchestration" },
@@ -1437,8 +1368,15 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
   );
 
 export const websocketRpcRouteLayer = Layer.unwrap(
-  Effect.succeed(
-    HttpRouter.add(
+  Effect.gen(function* () {
+    const orchestrationEngine = yield* OrchestrationEngineService;
+    const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+    const initialSnapshot = yield* projectionSnapshotQuery.getSnapshotSequence().pipe(Effect.orDie);
+    const orchestrationSubscriptionHub = yield* makeOrchestrationSubscriptionHub({
+      orchestrationEngine,
+      initialCursor: initialSnapshot.snapshotSequence,
+    });
+    return HttpRouter.add(
       "GET",
       "/ws",
       Effect.gen(function* () {
@@ -1450,7 +1388,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
           disableTracing: true,
         }).pipe(
           Effect.provide(
-            makeWsRpcLayer(session.sessionId).pipe(
+            makeWsRpcLayer(session.sessionId, orchestrationSubscriptionHub).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(ProviderJournalMessageRepairLive),
               Layer.provide(ProviderMaintenanceRunner.layer),
@@ -1484,6 +1422,6 @@ export const websocketRpcRouteLayer = Layer.unwrap(
           () => sessions.markDisconnected(session.sessionId),
         );
       }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
-    ),
-  ),
+    );
+  }),
 );

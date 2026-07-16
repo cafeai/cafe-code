@@ -7,6 +7,7 @@ import {
   TurnId,
   type ProviderRuntimeEvent,
 } from "@cafecode/contracts";
+import { PROVIDER_PIPELINE_POLICY, utf8ByteLength } from "@cafecode/shared/providerPipelinePolicy";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -22,6 +23,10 @@ import {
 const encodeProviderRuntimeEventJsonForTest = Schema.encodeSync(
   Schema.fromJsonString(ProviderRuntimeEventSchema),
 );
+
+function encodedRuntimeEventBytes(event: ProviderRuntimeEvent | undefined): number {
+  return event === undefined ? 0 : utf8ByteLength(encodeProviderRuntimeEventJsonForTest(event));
+}
 
 function makeRuntimeEvent(id: string): ProviderRuntimeEvent {
   return {
@@ -57,6 +62,30 @@ function makeTurnDiffEvent(id: string, diff: string): ProviderRuntimeEvent {
     },
     payload: {
       unifiedDiff: diff,
+    },
+  };
+}
+
+function makeCommandEvent(id: string, output: string): ProviderRuntimeEvent {
+  return {
+    eventId: EventId.make(id),
+    provider: ProviderDriverKind.make("codex"),
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    threadId: ThreadId.make("thread-1"),
+    turnId: TurnId.make("turn-1"),
+    createdAt: "1970-01-01T00:00:00.000Z",
+    type: "item.completed",
+    payload: {
+      itemType: "command_execution",
+      status: "completed",
+      data: {
+        command: "generate-output",
+        aggregatedOutput: output,
+      },
+    },
+    raw: {
+      source: "codex.app-server.notification",
+      payload: { item: { result: { stdout: output } } },
     },
   };
 }
@@ -105,6 +134,18 @@ describe("ProviderDaemonEventJournal", () => {
     journal.publish(makeRuntimeEvent("event-2"));
 
     expect(received).toEqual([1]);
+  });
+
+  it("compacts oversized command events before they enter the in-memory journal", () => {
+    const journal = createProviderDaemonEventJournal();
+    journal.publish(makeCommandEvent("event-large-memory-command", "x".repeat(2_000_000)));
+
+    const event = journal.replayAfter(0)[0]?.event;
+    expect(event?.eventId).toBe(EventId.make("event-large-memory-command"));
+    expect(event?.compaction?.originalEncodedBytes).toBeGreaterThan(1_000_000);
+    expect(encodedRuntimeEventBytes(event)).toBeLessThanOrEqual(
+      PROVIDER_PIPELINE_POLICY.canonicalEventMaxBytes,
+    );
   });
 
   it("persists events for replay from a fresh journal instance", async () => {
@@ -217,6 +258,27 @@ describe("ProviderDaemonEventJournal", () => {
     );
   });
 
+  it("compacts oversized command events before persistent journal replay", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const journal = yield* makePersistentProviderDaemonEventJournal({
+          capacity: 10,
+          ownerKey: "provider-daemon",
+        });
+        yield* journal.publish(
+          makeCommandEvent("event-large-persistent-command", "x".repeat(2_000_000)),
+        );
+
+        const event = (yield* journal.replayAfter(0))[0]?.event;
+        expect(event?.eventId).toBe(EventId.make("event-large-persistent-command"));
+        expect(event?.compaction?.originalEncodedBytes).toBeGreaterThan(1_000_000);
+        expect(encodedRuntimeEventBytes(event)).toBeLessThanOrEqual(
+          PROVIDER_PIPELINE_POLICY.canonicalEventMaxBytes,
+        );
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
+
   it("compacts inherited large turn diff rows during startup maintenance", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -306,6 +368,87 @@ describe("ProviderDaemonEventJournal", () => {
         expect(rawPayload?.diffCharLength).toBe(largeDiff.length);
         expect(rawPayload?.diffTruncated).toBe(true);
         expect(rawPayload?.compactedForProviderJournal).toBe(true);
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
+
+  it("compacts inherited oversized command rows before replay decodes them", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const event = makeCommandEvent("event-inherited-large-command", "x".repeat(2_000_000));
+        yield* sql`
+          INSERT INTO provider_daemon_events (owner_key, emitted_at, event_json)
+          VALUES (
+            ${"provider-daemon"},
+            ${"1970-01-01T00:00:00.000Z"},
+            ${encodeProviderRuntimeEventJsonForTest(event)}
+          )
+        `;
+
+        const journal = yield* makePersistentProviderDaemonEventJournal({
+          capacity: 10,
+          ownerKey: "provider-daemon",
+          startupPruneDelayMs: 60_000,
+        });
+        const compacted = (yield* journal.replayAfter(0))[0]?.event;
+
+        expect(compacted?.eventId).toBe(EventId.make("event-inherited-large-command"));
+        expect(compacted?.compaction?.originalEncodedBytes).toBeGreaterThan(1_000_000);
+        expect(encodedRuntimeEventBytes(compacted)).toBeLessThanOrEqual(
+          PROVIDER_PIPELINE_POLICY.canonicalEventMaxBytes,
+        );
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+    );
+  });
+
+  it("durably quarantines an incompatible row and advances replay with a safe tombstone", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const malformed = '{"eventId":"broken"';
+        yield* sql`
+          INSERT INTO provider_daemon_events (owner_key, emitted_at, event_json)
+          VALUES (
+            ${"provider-daemon"},
+            ${"1970-01-01T00:00:00.000Z"},
+            ${malformed}
+          )
+        `;
+
+        const journal = yield* makePersistentProviderDaemonEventJournal({
+          capacity: 10,
+          ownerKey: "provider-daemon",
+          startupPruneDelayMs: 60_000,
+        });
+        const replayed = yield* journal.replayAfter(0);
+        const tombstone = replayed[0]?.event;
+        const quarantineRows = (yield* sql`
+          SELECT
+            cursor,
+            encoded_bytes AS "encodedBytes",
+            sha256,
+            category
+          FROM provider_daemon_event_quarantine
+          WHERE owner_key = ${"provider-daemon"}
+        `) as unknown as ReadonlyArray<{
+          readonly cursor: number;
+          readonly encodedBytes: number;
+          readonly sha256: string;
+          readonly category: string;
+        }>;
+
+        expect(replayed).toHaveLength(1);
+        expect(replayed[0]?.cursor).toBe(1);
+        expect(tombstone?.type).toBe("runtime.warning");
+        expect(quarantineRows).toEqual([
+          {
+            cursor: 1,
+            encodedBytes: utf8ByteLength(malformed),
+            sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+            category: "schema-decode-failed",
+          },
+        ]);
       }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
     );
   });

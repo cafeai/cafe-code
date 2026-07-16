@@ -1484,6 +1484,7 @@ export function DiagnosticsSettingsPanel() {
   const runtimeErrors = visibleRuntimeErrors(runtimeData, runtimeError);
   const trackedRuntimeMemory = runtimeData ? summarizeRuntimeMemory(runtimeData.subprocesses) : 0;
   const trackedRuntimeCpu = runtimeData ? summarizeRuntimeCpu(runtimeData.subprocesses) : 0;
+  const providerPipeline = runtimeData?.providerPipeline;
 
   return (
     <SettingsPageContainer>
@@ -1697,6 +1698,115 @@ export function DiagnosticsSettingsPanel() {
           />
         </StatsGrid>
         <ProviderDaemonTables data={runtimeData} loading={isRuntimeInitialLoading} />
+      </SettingsSection>
+
+      <SettingsSection title="Provider Pipeline">
+        <StatsGrid>
+          <StatBlock
+            label="Loop p99"
+            value={providerPipeline ? formatDuration(providerPipeline.eventLoop.p99LagMs) : "..."}
+            tone={
+              providerPipeline && providerPipeline.eventLoop.p99LagMs > 250 ? "warning" : "default"
+            }
+            tooltip="Backend event-loop scheduling lag. Sustained growth can delay both provider ingestion and WebSocket progress."
+          />
+          <StatBlock
+            label="Loop Max"
+            value={providerPipeline ? formatDuration(providerPipeline.eventLoop.maxLagMs) : "..."}
+          />
+          <StatBlock
+            label="Daemon Queue"
+            value={
+              providerPipeline
+                ? formatCount(providerPipeline.daemonStream.queuedLiveRecords)
+                : "..."
+            }
+            tone={
+              providerPipeline && providerPipeline.daemonStream.queuedLiveRecords > 0
+                ? "warning"
+                : "default"
+            }
+          />
+          <StatBlock
+            label="Daemon Bytes"
+            value={
+              providerPipeline ? formatBytes(providerPipeline.daemonStream.queuedLiveBytes) : "..."
+            }
+          />
+        </StatsGrid>
+        <StatsGrid>
+          <StatBlock
+            label="Bridge Pending"
+            value={
+              providerPipeline ? formatBytes(providerPipeline.backendBridge.pendingBytes) : "..."
+            }
+          />
+          <StatBlock
+            label="Bridge Pauses"
+            value={
+              providerPipeline ? formatCount(providerPipeline.backendBridge.pauseCount) : "..."
+            }
+          />
+          <StatBlock
+            label="Subscribers"
+            value={
+              providerPipeline
+                ? formatCount(
+                    providerPipeline.subscriptions.activeShellSubscribers +
+                      providerPipeline.subscriptions.activeThreadSubscribers,
+                  )
+                : "..."
+            }
+          />
+          <StatBlock
+            label="Replay Ring"
+            value={
+              providerPipeline
+                ? `${formatCount(providerPipeline.subscriptions.replayRingEvents)} / ${formatBytes(providerPipeline.subscriptions.replayRingBytes)}`
+                : "..."
+            }
+          />
+        </StatsGrid>
+        <StatsGrid>
+          <StatBlock
+            label="WS Bulk Bytes"
+            value={
+              providerPipeline ? formatBytes(providerPipeline.webSocket.activeBulkBytes) : "..."
+            }
+          />
+          <StatBlock
+            label="WS Overloads"
+            value={
+              providerPipeline ? formatCount(providerPipeline.webSocket.overloadCloseCount) : "..."
+            }
+            tone={
+              providerPipeline && providerPipeline.webSocket.overloadCloseCount > 0
+                ? "warning"
+                : "default"
+            }
+          />
+          <StatBlock
+            label="Compacted"
+            value={
+              providerPipeline
+                ? formatCount(providerPipeline.compaction.compactedEventCount)
+                : "..."
+            }
+          />
+          <StatBlock
+            label="Quarantined"
+            value={
+              providerPipeline
+                ? formatCount(providerPipeline.compaction.quarantinedRowCount)
+                : "..."
+            }
+            tone={
+              providerPipeline && providerPipeline.compaction.quarantinedRowCount > 0
+                ? "warning"
+                : "default"
+            }
+          />
+        </StatsGrid>
       </SettingsSection>
 
       <SettingsSection title="Provider Supervisor">
