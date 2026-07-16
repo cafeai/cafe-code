@@ -1837,7 +1837,7 @@ export function codexAggregateTurnHasUnfinishedChildren(
 export function isTerminalCodexChildThreadReadError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   // This is the exact terminal classification used by upstream Codex TUI
-  // 0.144.4 in `App::is_terminal_thread_read_error`.
+  // 0.144.5 in `App::is_terminal_thread_read_error`.
   return message.includes("thread not loaded:");
 }
 

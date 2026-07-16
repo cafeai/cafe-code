@@ -29,7 +29,7 @@ export interface CodexAppServerIncomingNotification {
   readonly params?: unknown;
   /**
    * Unix timestamp supplied by Codex app-server when it emitted the
-   * notification. Codex added this optional envelope field after 0.144.4 so
+   * notification. Codex added this optional envelope field after stable 0.144.5 so
    * clients can distinguish provider latency from transport/consumer lag.
    * Keeping it optional preserves compatibility with older app-server builds.
    */
