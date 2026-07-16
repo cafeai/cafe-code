@@ -1394,6 +1394,11 @@ function buildUserMessage(input: {
     session_id: "",
     parent_tool_use_id: null,
     uuid: input.messageUuid,
+    // Agent SDK 0.3.211 documents that hosts wrapping keyboard input must
+    // explicitly attest human provenance. Leaving origin absent is not a
+    // neutral legacy value: strict upstream isHuman() gates fail closed and
+    // treat the message as unattributed.
+    origin: { kind: "human" },
     message: {
       role: "user",
       content: input.sdkContent as unknown as SDKUserMessage["message"]["content"],

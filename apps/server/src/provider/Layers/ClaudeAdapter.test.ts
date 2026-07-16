@@ -615,6 +615,32 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("marks streamed Cafe prompts as human-originated Claude input", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Check provider provenance",
+        attachments: [],
+      });
+
+      const message = yield* Effect.promise(() =>
+        readFirstPromptMessage(harness.getLastCreateQueryInput()),
+      );
+      assert.deepEqual(message?.origin, { kind: "human" });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("runs ultrathink at the model's highest effort with the prompt keyword", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
