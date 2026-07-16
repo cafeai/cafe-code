@@ -416,13 +416,19 @@ function summarizeDebugCodexCompaction(
     readDebugNumber(latestContextWindowPayload?.lastInputTokens) ??
     readDebugNumber(latestContextWindowPayload?.inputTokens);
   const latestPayloadLimit = readDebugNumber(latestContextWindowPayload?.autoCompactTokenLimit);
+  // The adapter reports the provider instance's configured
+  // `autoCompactTokenLimit` on every token-usage event. Prefer that observed
+  // value over Cafe's bare default so this debug summary does not claim
+  // 200,000 for an instance configured with a different limit.
+  const effectiveAutoCompactTokenLimit =
+    latestPayloadLimit ?? CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT;
   const latestCompactionActivity = compactionActivities.at(-1) ?? null;
 
   return {
     policy: {
       enabled: true,
       source: CODEX_AUTO_COMPACT_POLICY_SOURCE,
-      autoCompactTokenLimit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
+      autoCompactTokenLimit: effectiveAutoCompactTokenLimit,
       autoCompactTokenLimitScope: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT_SCOPE,
       appliesTo: ["thread/start", "thread/resume"],
       latestTokenUsagePayloadLimit: latestPayloadLimit,
@@ -432,7 +438,7 @@ function summarizeDebugCodexCompaction(
       inputTokens: latestInputTokens,
       maxTokens: readDebugNumber(latestContextWindowPayload?.maxTokens),
       abovePolicyLimit:
-        latestUsedTokens !== null && latestUsedTokens >= CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
+        latestUsedTokens !== null && latestUsedTokens >= effectiveAutoCompactTokenLimit,
     },
     activity: {
       contextCompactionActivityCount: compactionActivities.length,

@@ -51,7 +51,6 @@ import {
   getModelSelectionBooleanOptionValue,
   getModelSelectionStringOptionValue,
 } from "@cafecode/shared/model";
-import { CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT } from "@cafecode/shared/codexCompaction";
 
 import {
   ProviderAdapterRequestError,
@@ -491,6 +490,7 @@ function persistCodexTransportPolicy(
 
 function normalizeCodexTokenUsage(
   usage: EffectCodexSchema.V2ThreadTokenUsageUpdatedNotification["tokenUsage"],
+  autoCompactTokenLimit: number,
 ): ThreadTokenUsageSnapshot | undefined {
   const totalProcessedTokens = usage.total.totalTokens;
   const usedTokens = usage.last.totalTokens;
@@ -524,7 +524,7 @@ function normalizeCodexTokenUsage(
       ? { lastReasoningOutputTokens: reasoningOutputTokens }
       : {}),
     compactsAutomatically: true,
-    autoCompactTokenLimit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
+    autoCompactTokenLimit,
   };
 }
 
@@ -1037,6 +1037,7 @@ function mapItemLifecycle(
 function mapToRuntimeEvents(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
+  autoCompactTokenLimit: number,
 ): ReadonlyArray<ProviderRuntimeEvent> {
   if (event.kind === "error") {
     if (!event.message) {
@@ -1304,7 +1305,9 @@ function mapToRuntimeEvents(
       EffectCodexSchema.V2ThreadTokenUsageUpdatedNotification,
       event.payload,
     );
-    const normalizedUsage = payload ? normalizeCodexTokenUsage(payload.tokenUsage) : undefined;
+    const normalizedUsage = payload
+      ? normalizeCodexTokenUsage(payload.tokenUsage, autoCompactTokenLimit)
+      : undefined;
     if (!normalizedUsage) {
       return [];
     }
@@ -2500,6 +2503,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? { resumeCursor: input.resumeCursor }
             : {}),
           runtimeMode: input.runtimeMode,
+          autoCompactTokenLimit: codexConfig.autoCompactTokenLimit,
           ...(input.modelSelection?.instanceId === boundInstanceId
             ? { model: input.modelSelection.model }
             : {}),
@@ -2545,7 +2549,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             );
 
             const runtimeEvents = yield* Effect.sync(() =>
-              mapToRuntimeEvents(event, event.threadId),
+              mapToRuntimeEvents(event, event.threadId, codexConfig.autoCompactTokenLimit),
             ).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("codex.runtime.bridge.map-failed", {

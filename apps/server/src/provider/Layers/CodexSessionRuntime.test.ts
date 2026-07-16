@@ -1624,6 +1624,56 @@ describe("openCodexThread", () => {
     assert.deepStrictEqual(payload.runtimeWorkspaceRoots, ["/tmp/project", "/tmp/extra"]);
   });
 
+  it("uses a configured auto-compact token limit for both thread/start and thread/resume", async () => {
+    const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+    const client = {
+      raw: {
+        request: (method: "thread/start" | "thread/resume", payload: unknown) => {
+          calls.push({ method, payload });
+          return Effect.succeed(makeThreadOpenResponse("fresh-thread"));
+        },
+      },
+    };
+
+    await Effect.runPromise(
+      openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: undefined,
+        autoCompactTokenLimit: 150_000,
+      }),
+    );
+    await Effect.runPromise(
+      openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: "existing-thread",
+        autoCompactTokenLimit: 150_000,
+      }),
+    );
+
+    assert.deepStrictEqual(
+      calls.map((call) => call.method),
+      ["thread/start", "thread/resume"],
+    );
+    for (const call of calls) {
+      const payload = call.payload as { readonly config?: Record<string, unknown> };
+      assert.deepStrictEqual(payload.config, {
+        "features.remote_compaction_v2": false,
+        model_auto_compact_token_limit: 150_000,
+        model_auto_compact_token_limit_scope: "total",
+      });
+    }
+  });
+
   it("propagates non-recoverable resume failures", async () => {
     const client = {
       raw: {

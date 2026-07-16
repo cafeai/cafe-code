@@ -29,6 +29,10 @@ export interface ProviderSettingsFieldModel {
   readonly clearWhenEmpty: "omit" | "persist";
   readonly defaultBooleanValue?: boolean | undefined;
   readonly defaultStringValue?: string | undefined;
+  readonly defaultNumberValue?: number | undefined;
+  readonly step?: number | undefined;
+  readonly minimum?: number | undefined;
+  readonly integerOnly?: boolean | undefined;
 }
 
 function titleizeFieldKey(key: string): string {
@@ -82,6 +86,14 @@ function readFieldStringDefault(
   return Option.isSome(decoded) && typeof decoded.value === "string" ? decoded.value : undefined;
 }
 
+function readFieldNumberDefault(
+  fieldSchema: ProviderClientDefinition["settingsSchema"]["fields"][string],
+): number | undefined {
+  const decodeDefault = Schema.decodeUnknownOption(fieldSchema as Schema.Decoder<unknown>);
+  const decoded = decodeDefault(undefined);
+  return Option.isSome(decoded) && typeof decoded.value === "number" ? decoded.value : undefined;
+}
+
 export function deriveProviderSettingsFields(
   definition: ProviderClientDefinition,
 ): ReadonlyArray<ProviderSettingsFieldModel> {
@@ -123,6 +135,18 @@ export function deriveProviderSettingsFields(
           ...(formAnnotation.control === "select"
             ? { defaultStringValue: readFieldStringDefault(fieldSchema) }
             : {}),
+          ...(formAnnotation.control === "number"
+            ? {
+                defaultNumberValue: readFieldNumberDefault(fieldSchema),
+                ...(formAnnotation.step !== undefined ? { step: formAnnotation.step } : {}),
+                ...(formAnnotation.minimum !== undefined
+                  ? { minimum: formAnnotation.minimum }
+                  : {}),
+                ...(formAnnotation.integerOnly !== undefined
+                  ? { integerOnly: formAnnotation.integerOnly }
+                  : {}),
+              }
+            : {}),
         } satisfies ProviderSettingsFieldModel,
       ];
     });
@@ -144,6 +168,16 @@ export function readProviderConfigBoolean(
   return typeof value === "boolean" ? value : defaultValue;
 }
 
+export function readProviderConfigNumber(
+  config: unknown,
+  key: string,
+  defaultValue: number,
+): number {
+  if (config === null || typeof config !== "object") return defaultValue;
+  const value = (config as Record<string, unknown>)[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : defaultValue;
+}
+
 export function nextProviderConfigWithFieldValue(
   config: unknown,
   field: ProviderSettingsFieldModel,
@@ -158,6 +192,36 @@ export function nextProviderConfigWithFieldValue(
       delete base[field.key];
     } else {
       base[field.key] = value;
+    }
+    return Object.keys(base).length > 0 ? base : undefined;
+  }
+
+  if (field.control === "number") {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      if (field.clearWhenEmpty === "omit") {
+        delete base[field.key];
+      }
+      return Object.keys(base).length > 0 ? base : undefined;
+    }
+
+    const parsed = Number(trimmed);
+    const violatesIntegerConstraint = field.integerOnly === true && !Number.isInteger(parsed);
+    const violatesMinimum = field.minimum !== undefined && parsed < field.minimum;
+    if (!Number.isFinite(parsed) || violatesIntegerConstraint || violatesMinimum) {
+      // Reject values that violate this field's schema-derived form
+      // constraints; leave any prior stored value untouched.
+      return Object.keys(base).length > 0 ? base : undefined;
+    }
+
+    if (
+      field.clearWhenEmpty === "omit" &&
+      field.defaultNumberValue !== undefined &&
+      parsed === field.defaultNumberValue
+    ) {
+      delete base[field.key];
+    } else {
+      base[field.key] = parsed;
     }
     return Object.keys(base).length > 0 ? base : undefined;
   }
@@ -277,6 +341,48 @@ function ProviderSettingsFieldRow({
           />
           {description}
         </label>
+      </FieldFrame>
+    );
+  }
+
+  if (field.control === "number") {
+    const currentValue = String(
+      readProviderConfigNumber(value, field.key, field.defaultNumberValue ?? 0),
+    );
+
+    return (
+      <FieldFrame variant={variant}>
+        <div className={cn(variant === "card" && "block")}>
+          <label htmlFor={inputId}>
+            {label}
+            {variant === "card" ? (
+              <DraftInput
+                id={inputId}
+                className="mt-1.5"
+                type="number"
+                step={field.step ?? 1}
+                min={field.minimum}
+                value={currentValue}
+                onCommit={(next) => onChange(nextProviderConfigWithFieldValue(value, field, next))}
+                placeholder={field.placeholder}
+              />
+            ) : (
+              <Input
+                id={inputId}
+                className="bg-background"
+                type="number"
+                step={field.step ?? 1}
+                min={field.minimum}
+                value={currentValue}
+                onChange={(event) =>
+                  onChange(nextProviderConfigWithFieldValue(value, field, event.target.value))
+                }
+                placeholder={field.placeholder}
+              />
+            )}
+          </label>
+          {description}
+        </div>
       </FieldFrame>
     );
   }

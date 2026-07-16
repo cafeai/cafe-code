@@ -1,6 +1,7 @@
 import "../index.css";
 
 import {
+  CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
   DEFAULT_CLIENT_SETTINGS,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
@@ -118,6 +119,7 @@ function createBaseServerConfig(): ServerConfig {
           homePath: "",
           shadowHomePath: "",
           customModels: [],
+          autoCompactTokenLimit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
         },
         claudeAgent: {
           enabled: true,

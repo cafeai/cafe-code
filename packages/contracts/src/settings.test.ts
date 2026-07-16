@@ -6,6 +6,7 @@ import {
   ClientSettingsSchema,
   CodexSettings,
   ClaudeSettings,
+  CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
   DEFAULT_APP_ACCENT_COLOR,
   DEFAULT_BRAND_WORDMARK_PREFIX,
   DEFAULT_CHAT_COPY_FORMAT,
@@ -281,6 +282,49 @@ describe("provider settings", () => {
       decodeServerSettingsPatch({
         providers: {
           codex: { runtimeSource: "global" },
+        },
+      }),
+    ).toThrow();
+  });
+
+  it("defaults the Codex auto-compact token limit to 200,000 tokens", () => {
+    expect(CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT).toBe(200_000);
+    expect(decodeCodexSettings({}).autoCompactTokenLimit).toBe(200_000);
+  });
+
+  it("decodes a configured Codex auto-compact token limit", () => {
+    expect(decodeCodexSettings({ autoCompactTokenLimit: 150_000 }).autoCompactTokenLimit).toBe(
+      150_000,
+    );
+  });
+
+  it("rejects non-positive or non-integer Codex auto-compact token limits", () => {
+    expect(() => decodeCodexSettings({ autoCompactTokenLimit: 0 })).toThrow();
+    expect(() => decodeCodexSettings({ autoCompactTokenLimit: -1 })).toThrow();
+    expect(() => decodeCodexSettings({ autoCompactTokenLimit: 1.5 })).toThrow();
+    expect(() => decodeCodexSettings({ autoCompactTokenLimit: Number.NaN })).toThrow();
+    expect(() =>
+      decodeCodexSettings({ autoCompactTokenLimit: Number.POSITIVE_INFINITY }),
+    ).toThrow();
+  });
+
+  it("saves the Codex auto-compact token limit through legacy and per-instance patches", () => {
+    expect(
+      decodeServerSettingsPatch({
+        providers: {
+          codex: { autoCompactTokenLimit: 150_000 },
+        },
+      }),
+    ).toEqual({
+      providers: {
+        codex: { autoCompactTokenLimit: 150_000 },
+      },
+    });
+
+    expect(() =>
+      decodeServerSettingsPatch({
+        providers: {
+          codex: { autoCompactTokenLimit: 0 },
         },
       }),
     ).toThrow();

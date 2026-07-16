@@ -6,6 +6,7 @@ import {
   deriveProviderSettingsFields,
   nextProviderConfigWithFieldValue,
   readProviderConfigBoolean,
+  readProviderConfigNumber,
   readProviderConfigString,
 } from "./ProviderSettingsForm";
 
@@ -19,6 +20,7 @@ describe("ProviderSettingsForm helpers", () => {
       "binaryPath",
       "homePath",
       "shadowHomePath",
+      "autoCompactTokenLimit",
     ]);
   });
 
@@ -164,5 +166,130 @@ describe("ProviderSettingsForm helpers", () => {
 
   it("reads missing boolean config values from the supplied default", () => {
     expect(readProviderConfigBoolean({}, "experimental", true)).toBe(true);
+  });
+
+  it("sources the Codex auto-compact token limit as a labeled numeric field", () => {
+    const codex = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")];
+    expect(codex).toBeDefined();
+
+    const field = deriveProviderSettingsFields(codex!).find(
+      (candidate) => candidate.key === "autoCompactTokenLimit",
+    );
+
+    expect(field).toMatchObject({
+      label: "Auto-compact token limit",
+      description:
+        "Controls when Codex automatically compacts Cafe-managed threads. Default is 200,000 tokens.",
+      control: "number",
+      defaultNumberValue: 200_000,
+      step: 1_000,
+      minimum: 1,
+      integerOnly: true,
+    });
+  });
+
+  it("stores valid numeric field input as a number", () => {
+    const field = {
+      key: "autoCompactTokenLimit",
+      control: "number",
+      label: "Auto-compact token limit",
+      clearWhenEmpty: "omit",
+      defaultNumberValue: 200_000,
+      minimum: 1,
+      integerOnly: true,
+    } as const;
+
+    expect(nextProviderConfigWithFieldValue({ forkOwned: 1 }, field, "150000")).toEqual({
+      forkOwned: 1,
+      autoCompactTokenLimit: 150_000,
+    });
+  });
+
+  it("omits numeric fields reset to their decoded default", () => {
+    const field = {
+      key: "autoCompactTokenLimit",
+      control: "number",
+      label: "Auto-compact token limit",
+      clearWhenEmpty: "omit",
+      defaultNumberValue: 200_000,
+      minimum: 1,
+      integerOnly: true,
+    } as const;
+
+    expect(
+      nextProviderConfigWithFieldValue(
+        { forkOwned: 1, autoCompactTokenLimit: 150_000 },
+        field,
+        "200000",
+      ),
+    ).toEqual({ forkOwned: 1 });
+  });
+
+  it("clears numeric fields when the input is emptied", () => {
+    const field = {
+      key: "autoCompactTokenLimit",
+      control: "number",
+      label: "Auto-compact token limit",
+      clearWhenEmpty: "omit",
+      defaultNumberValue: 200_000,
+      minimum: 1,
+      integerOnly: true,
+    } as const;
+
+    expect(
+      nextProviderConfigWithFieldValue({ forkOwned: 1, autoCompactTokenLimit: 150_000 }, field, ""),
+    ).toEqual({ forkOwned: 1 });
+  });
+
+  it.each(["NaN", "Infinity", "-Infinity", "1.5", "0", "-5", "abc"])(
+    "rejects invalid numeric field input %s without persisting it",
+    (rawValue) => {
+      const field = {
+        key: "autoCompactTokenLimit",
+        control: "number",
+        label: "Auto-compact token limit",
+        clearWhenEmpty: "omit",
+        defaultNumberValue: 200_000,
+        minimum: 1,
+        integerOnly: true,
+      } as const;
+
+      expect(
+        nextProviderConfigWithFieldValue(
+          { forkOwned: 1, autoCompactTokenLimit: 150_000 },
+          field,
+          rawValue,
+        ),
+      ).toEqual({ forkOwned: 1, autoCompactTokenLimit: 150_000 });
+    },
+  );
+
+  it("allows finite fractional and negative values when a numeric field declares no constraints", () => {
+    const field = {
+      key: "offset",
+      control: "number",
+      label: "Offset",
+      clearWhenEmpty: "omit",
+    } as const;
+
+    expect(nextProviderConfigWithFieldValue({}, field, "-1.5")).toEqual({ offset: -1.5 });
+  });
+
+  it("reads numeric config values with a fallback default", () => {
+    expect(
+      readProviderConfigNumber(
+        { autoCompactTokenLimit: 150_000 },
+        "autoCompactTokenLimit",
+        200_000,
+      ),
+    ).toBe(150_000);
+    expect(readProviderConfigNumber({}, "autoCompactTokenLimit", 200_000)).toBe(200_000);
+    expect(
+      readProviderConfigNumber(
+        { autoCompactTokenLimit: "not-a-number" },
+        "autoCompactTokenLimit",
+        200_000,
+      ),
+    ).toBe(200_000);
   });
 });

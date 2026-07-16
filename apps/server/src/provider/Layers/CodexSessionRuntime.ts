@@ -274,6 +274,9 @@ export interface CodexSessionRuntimeOptions {
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
   readonly resumeCursor?: CodexResumeCursor;
+  // Per-provider-instance override for `model_auto_compact_token_limit`.
+  // Defaults to `CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT` when absent.
+  readonly autoCompactTokenLimit?: number | undefined;
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
@@ -669,6 +672,7 @@ function buildThreadStartParams(input: {
   readonly model: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
+  readonly autoCompactTokenLimit?: number | undefined;
 }): CodexThreadStartParamsWithRuntimeWorkspaceRoots {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
   const runtimeWorkspaceRoots = buildRuntimeWorkspaceRoots({
@@ -680,8 +684,9 @@ function buildThreadStartParams(input: {
   // model metadata can advertise a large context window while leaving that
   // limit null, so Cafe passes the documented request-config override for
   // Cafe-managed threads instead of mutating the user's shared
-  // `~/.codex/config.toml`. The shared constant documents why Cafe currently
-  // chooses 200k instead of the older 100k override.
+  // `~/.codex/config.toml`. The shared constant documents why Cafe defaults to
+  // 200k instead of the older 100k override; the per-instance
+  // `autoCompactTokenLimit` provider setting lets a user override that default.
   const threadConfig: Record<string, unknown> = {
     // Upstream Codex rust-v0.143.0 marks remote_compaction_v2 stable and
     // default-enabled, but its compaction request still builds the normal
@@ -690,7 +695,8 @@ function buildThreadStartParams(input: {
     // image model, so this remains a deliberate Cafe reliability quarantine
     // until a live long-context compaction smoke verifies the v2 path.
     [CODEX_REMOTE_COMPACTION_V2_FEATURE_CONFIG_KEY]: false,
-    model_auto_compact_token_limit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
+    model_auto_compact_token_limit:
+      input.autoCompactTokenLimit ?? CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
     model_auto_compact_token_limit_scope: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT_SCOPE,
   };
   if (input.runtimeMode === "auto-accept-edits" && input.additionalDirectories?.length) {
@@ -1394,6 +1400,7 @@ export const openCodexThread = (input: {
   readonly serviceTier: CodexServiceTier | undefined;
   readonly resumeThreadId: string | undefined;
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
+  readonly autoCompactTokenLimit?: number | undefined;
 }): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
   const startParams = buildThreadStartParams({
@@ -1402,6 +1409,7 @@ export const openCodexThread = (input: {
     model: input.requestedModel,
     serviceTier: input.serviceTier,
     additionalDirectories: input.additionalDirectories,
+    autoCompactTokenLimit: input.autoCompactTokenLimit,
   });
 
   if (resumeThreadId === undefined) {
@@ -4365,6 +4373,7 @@ export const makeCodexSessionRuntime = (
         serviceTier: options.serviceTier,
         additionalDirectories: options.additionalDirectories,
         resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
+        autoCompactTokenLimit: options.autoCompactTokenLimit,
       });
 
       const providerThreadId = opened.thread.id;

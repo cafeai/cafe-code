@@ -19,6 +19,7 @@ import {
   ThreadId,
   TurnId,
 } from "@cafecode/contracts";
+import { CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT } from "@cafecode/shared/codexCompaction";
 import { createModelSelection } from "@cafecode/shared/model";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, vi } from "@effect/vitest";
@@ -301,6 +302,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
         serviceTier: "fast",
         threadId: asThreadId("thread-1"),
         runtimeMode: "full-access",
+        autoCompactTokenLimit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
       });
     }),
   );
@@ -460,6 +462,83 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       });
     }).pipe(Effect.provide(customLayer));
   });
+
+  it.effect(
+    "propagates a configured Codex auto-compact token limit into runtime options and reported usage",
+    () => {
+      const customRuntimeFactory = makeRuntimeFactory();
+      const customLayer = Layer.effect(
+        CodexAdapter,
+        Effect.gen(function* () {
+          const codexConfig = decodeCodexSettings({ autoCompactTokenLimit: 150_000 });
+          return yield* makeCodexAdapter(codexConfig, {
+            makeRuntime: customRuntimeFactory.factory,
+          });
+        }),
+      ).pipe(
+        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+        Layer.provideMerge(ServerSettingsService.layerTest()),
+        Layer.provideMerge(providerSessionDirectoryTestLayer),
+        Layer.provideMerge(NodeServices.layer),
+      );
+
+      return Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("sess-custom-auto-compact"),
+          runtimeMode: "full-access",
+        });
+        const runtime = customRuntimeFactory.lastRuntime;
+        assert.ok(runtime);
+        assert.equal(runtime.options.autoCompactTokenLimit, 150_000);
+
+        const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+        yield* runtime.emit({
+          id: asEventId("evt-codex-thread-token-usage-updated-custom-limit"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("sess-custom-auto-compact"),
+          turnId: asTurnId("turn-1"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "thread/tokenUsage/updated",
+          payload: {
+            threadId: "sess-custom-auto-compact",
+            turnId: "turn-1",
+            tokenUsage: {
+              total: {
+                inputTokens: 100,
+                cachedInputTokens: 0,
+                outputTokens: 6,
+                reasoningOutputTokens: 0,
+                totalTokens: 106,
+              },
+              last: {
+                inputTokens: 100,
+                cachedInputTokens: 0,
+                outputTokens: 6,
+                reasoningOutputTokens: 0,
+                totalTokens: 106,
+              },
+              modelContextWindow: 258_400,
+            },
+          },
+        } satisfies ProviderEvent);
+
+        const firstEvent = yield* Fiber.join(firstEventFiber);
+        assert.equal(firstEvent._tag, "Some");
+        if (firstEvent._tag !== "Some") {
+          return;
+        }
+        assert.equal(firstEvent.value.type, "thread.token-usage.updated");
+        if (firstEvent.value.type !== "thread.token-usage.updated") {
+          return;
+        }
+        assert.equal(firstEvent.value.payload.usage.autoCompactTokenLimit, 150_000);
+      }).pipe(Effect.provide(customLayer));
+    },
+  );
 });
 
 const lifecycleRuntimeFactory = makeRuntimeFactory();

@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
   DEFAULT_SERVER_SETTINGS,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -124,6 +125,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         homePath: "/Users/julius/.codex",
         shadowHomePath: "",
         customModels: [],
+        autoCompactTokenLimit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
       });
       assert.deepEqual(next.providers.claudeAgent, {
         enabled: true,
@@ -362,6 +364,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         homePath: "",
         shadowHomePath: "",
         customModels: [],
+        autoCompactTokenLimit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
       });
       assert.deepEqual(next.providers.claudeAgent, {
         enabled: true,
