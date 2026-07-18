@@ -1,0 +1,100 @@
+# Maintainer: CafeAI <116491182+cafeai at users dot noreply dot github dot com>
+
+pkgname=cafe-code
+pkgver=0.0.51
+pkgrel=1
+pkgdesc='Desktop GUI for coding agents such as Codex, Claude, and OpenCode'
+arch=('x86_64')
+url='https://github.com/cafeai/cafe-code'
+license=('AGPL-3.0-or-later')
+depends=(
+  'alsa-lib'
+  'at-spi2-core'
+  'cairo'
+  'dbus'
+  'expat'
+  'fuse2'
+  'glib2'
+  'glibc'
+  'gtk3'
+  'hicolor-icon-theme'
+  'libcups'
+  'libgcc'
+  'libx11'
+  'libxcb'
+  'libxcomposite'
+  'libxdamage'
+  'libxext'
+  'libxfixes'
+  'libxkbcommon'
+  'libxrandr'
+  'mesa'
+  'nspr'
+  'nss'
+  'openssl'
+  'pango'
+  'systemd-libs'
+  'xdg-utils'
+)
+makedepends=(
+  'bun>=1.3.11'
+  'git'
+)
+provides=('cafe-code')
+conflicts=(
+  'cafe-code-bin'
+  'cafe-code-git'
+)
+options=('!strip')
+
+# No v0.0.51 tag exists yet. Pin the published source commit so this stable
+# package remains reproducible; replace this with the release tag archive when
+# the next Cafe Code release is tagged.
+_commit='375b6839de96f0415556c3630ab8a5c372a9692c'
+source=(
+  "$pkgname-$pkgver.tar.gz::$url/archive/$_commit.tar.gz"
+  'cafe-code.sh'
+  'cafe-code.desktop'
+)
+sha256sums=(
+  '312ad26e2065c89c7aa084d06891a2ebf66ff369fe16c0fb409d4fd64dc4718d'
+  '383949547cd494ebfb6c3b13c964a46958e369e30df1164983f4af7ea8214e80'
+  '5ea69e60ca4afc9abfa298d2464221d22e5f4c211059c04473ede3bd594c80ff'
+)
+
+prepare() {
+  cd "$srcdir/$pkgname-$_commit"
+
+  export HOME="$srcdir/.home"
+  export BUN_INSTALL_CACHE_DIR="$srcdir/.bun-cache"
+  bun install --frozen-lockfile
+}
+
+build() {
+  cd "$srcdir/$pkgname-$_commit"
+
+  export HOME="$srcdir/.home"
+  export BUN_INSTALL_CACHE_DIR="$srcdir/.bun-cache"
+  bun run dist:desktop:artifact -- \
+    --platform linux \
+    --target AppImage \
+    --arch x64 \
+    --build-version "$pkgver" \
+    --output-dir "$srcdir/cafe-code-dist"
+}
+
+package() {
+  cd "$srcdir/$pkgname-$_commit"
+
+  install -Dm755 \
+    "$srcdir/cafe-code-dist/Cafe-Code-$pkgver-x86_64.AppImage" \
+    "$pkgdir/opt/cafe-code/cafe-code.AppImage"
+  install -Dm755 "$srcdir/cafe-code.sh" "$pkgdir/usr/bin/cafe-code"
+  install -Dm644 \
+    "$srcdir/cafe-code.desktop" \
+    "$pkgdir/usr/share/applications/cafe-code.desktop"
+  install -Dm644 \
+    'apps/desktop/resources/icon.png' \
+    "$pkgdir/usr/share/icons/hicolor/1024x1024/apps/cafe-code.png"
+  install -Dm644 'LICENSE' "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

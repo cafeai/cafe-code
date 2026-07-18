@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Cafe Code
+Comment=Desktop GUI for coding agents
+Exec=cafe-code %U
+Icon=cafe-code
+Terminal=false
+Categories=Development;
+StartupWMClass=cafe-code

@@ -235,6 +235,8 @@ interface StagePackageJson {
   readonly private: true;
   readonly description: string;
   readonly author: string;
+  readonly homepage: string;
+  readonly license: string;
   readonly main: string;
   readonly build: Record<string, unknown>;
   readonly dependencies: Record<string, unknown>;
@@ -380,6 +382,10 @@ export function desktopArtifactListSatisfiesTarget(
 ): boolean {
   if (platform === "win" && isWindowsNsisInstallerTarget(target)) {
     return artifactPaths.some((artifactPath) => artifactPath.toLowerCase().endsWith(".exe"));
+  }
+
+  if (platform === "linux" && target.toLowerCase() === "deb") {
+    return artifactPaths.some((artifactPath) => artifactPath.toLowerCase().endsWith(".deb"));
   }
 
   return artifactPaths.length > 0;
@@ -810,6 +816,63 @@ export function resolveDesktopProductName(version: string): string {
     : (desktopPackageJson.productName ?? "Cafe Code");
 }
 
+export function resolveLinuxDesktopBuildConfig(target: string): Record<string, unknown> {
+  const linux = {
+    target: [target],
+    executableName: "cafe-code",
+    icon: "icon.png",
+    category: "Development",
+    synopsis: "Desktop GUI for coding agents",
+    description:
+      "Cafe Code is a desktop GUI for coding agents such as Codex, Claude, and OpenCode.",
+    maintainer: "CafeAI <116491182+cafeai@users.noreply.github.com>",
+    vendor: "CafeAI",
+    desktop: {
+      entry: {
+        StartupWMClass: "cafe-code",
+      },
+    },
+  };
+
+  if (target.toLowerCase() !== "deb") {
+    return { linux };
+  }
+
+  return {
+    linux,
+    deb: {
+      packageName: "cafe-code",
+      packageCategory: "devel",
+      priority: "optional",
+      // electron-builder's Debian defaults omit libraries that Electron links
+      // directly, and Cafe's local HTTPS bootstrap invokes the OpenSSL CLI.
+      // Keep the defaults explicit so a clean install with
+      // --no-install-recommends provides every runtime dependency.
+      depends: [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0",
+        "libgbm1",
+        "openssl",
+        // Prefer the native time64 ALSA package on current distributions;
+        // retain the legacy name for Debian/Ubuntu releases from before the
+        // transition. A bare virtual libasound2 dependency can select an OSS
+        // compatibility shim on Ubuntu 24.04 instead of native ALSA.
+        "libasound2t64 | libasound2",
+      ],
+      // Cafe does not currently expose a Linux tray icon, so do not inherit
+      // electron-builder's libappindicator recommendation for Debian packages.
+      recommends: [],
+    },
+  };
+}
+
 const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   platform: typeof BuildPlatform.Type,
   target: string,
@@ -848,17 +911,7 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   }
 
   if (platform === "linux") {
-    buildConfig.linux = {
-      target: [target],
-      executableName: "cafe-code",
-      icon: "icon.png",
-      category: "Development",
-      desktop: {
-        entry: {
-          StartupWMClass: "cafe-code",
-        },
-      },
-    };
+    Object.assign(buildConfig, resolveLinuxDesktopBuildConfig(target));
   }
 
   if (platform === "win") {
@@ -1052,8 +1105,11 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     buildVersion: appVersion,
     cafeCodeCommitHash: commitHash,
     private: true,
-    description: "Cafe Code desktop build",
+    description:
+      "Cafe Code is a desktop GUI for coding agents such as Codex, Claude, and OpenCode.",
     author: "CafeAI",
+    homepage: "https://github.com/cafeai/cafe-code",
+    license: "AGPL-3.0-or-later",
     main: "apps/desktop/dist-electron/main.cjs",
     build: yield* createBuildConfig(
       options.platform,
@@ -1171,7 +1227,7 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   ),
   target: Flag.string("target").pipe(
     Flag.withDescription(
-      "Artifact target, for example dmg/AppImage/nsis (env: CAFE_CODE_DESKTOP_TARGET).",
+      "Artifact target, for example dmg/AppImage/deb/nsis (env: CAFE_CODE_DESKTOP_TARGET).",
     ),
     Flag.optional,
   ),

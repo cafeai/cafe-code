@@ -12,6 +12,7 @@ import {
   resolveDesktopBuildIconAssets,
   resolveDesktopProductName,
   resolveDesktopUpdateChannel,
+  resolveLinuxDesktopBuildConfig,
   resolveManagedWindowsNodeArchive,
   resolveMockUpdateServerPort,
   resolveMockUpdateServerUrl,
@@ -90,6 +91,61 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       true,
     );
     assert.equal(desktopArtifactListSatisfiesTarget("mac", "dmg", ["release/Cafe.dmg"]), true);
+  });
+
+  it("configures Debian package identity and metadata explicitly", () => {
+    assert.deepStrictEqual(resolveLinuxDesktopBuildConfig("deb"), {
+      linux: {
+        target: ["deb"],
+        executableName: "cafe-code",
+        icon: "icon.png",
+        category: "Development",
+        synopsis: "Desktop GUI for coding agents",
+        description:
+          "Cafe Code is a desktop GUI for coding agents such as Codex, Claude, and OpenCode.",
+        maintainer: "CafeAI <116491182+cafeai@users.noreply.github.com>",
+        vendor: "CafeAI",
+        desktop: {
+          entry: {
+            StartupWMClass: "cafe-code",
+          },
+        },
+      },
+      deb: {
+        packageName: "cafe-code",
+        packageCategory: "devel",
+        priority: "optional",
+        depends: [
+          "libgtk-3-0",
+          "libnotify4",
+          "libnss3",
+          "libxss1",
+          "libxtst6",
+          "xdg-utils",
+          "libatspi2.0-0",
+          "libuuid1",
+          "libsecret-1-0",
+          "libgbm1",
+          "openssl",
+          "libasound2t64 | libasound2",
+        ],
+        recommends: [],
+      },
+    });
+  });
+
+  it("requires a Debian artifact instead of accepting builder metadata alone", () => {
+    assert.equal(
+      desktopArtifactListSatisfiesTarget("linux", "deb", ["release/builder-debug.yml"]),
+      false,
+    );
+    assert.equal(
+      desktopArtifactListSatisfiesTarget("linux", "deb", [
+        "release/builder-debug.yml",
+        "release/Cafe-Code-0.0.51-amd64.deb",
+      ]),
+      true,
+    );
   });
 
   it("pins Windows managed Node archives by version, arch, and hash", () => {

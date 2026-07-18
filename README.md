@@ -207,8 +207,59 @@ To build and install in one step:
 bun run dist:arch:local -- --install
 ```
 
-This is intentionally local packaging only. It does not create AUR metadata or
-publish anything.
+This helper builds a package from the current checkout and does not publish
+anything.
+
+### AUR Source Package
+
+The `cafe-code` AUR target compiles Cafe Code from source and then packages the
+locally built AppImage. On Arch Linux, build it with:
+
+```bash
+bun run dist:aur:cafe-code
+```
+
+The package is written to `packaging/aur/cafe-code/`. Its `PKGBUILD`, generated
+`.SRCINFO`, launcher, desktop entry, and packaging license are kept in that
+directory so it can also be used as the contents of the standalone AUR Git
+repository.
+
+To create the initial AUR listing, first create an AUR account and add your SSH
+public key. Then submit the package metadata:
+
+```bash
+git clone ssh://aur@aur.archlinux.org/cafe-code.git ../aur-cafe-code
+cp -a packaging/aur/cafe-code/. ../aur-cafe-code/
+cd ../aur-cafe-code
+makepkg --printsrcinfo > .SRCINFO
+git add .gitignore .SRCINFO LICENSE PKGBUILD cafe-code.desktop cafe-code.sh
+git commit -m "Initial cafe-code package"
+git push
+```
+
+The current recipe uses the immutable published commit for version `0.0.51`
+because that version has no matching Git tag. For future releases, update
+`pkgver`, reset `pkgrel` to `1`, update the source commit and checksum, and
+regenerate `.SRCINFO` before pushing the AUR repository.
+
+### Debian Package
+
+Build a Debian package for the host architecture:
+
+```bash
+bun install
+bun run dist:desktop:deb
+```
+
+Explicit architecture targets are also available:
+
+```bash
+bun run dist:desktop:deb:x64
+bun run dist:desktop:deb:arm64
+```
+
+The package is written to `release/`. Install the emitted file with your
+graphical package installer or with `sudo apt install ./release/<file>.deb`.
 
 ## 日本語でちゅ
 

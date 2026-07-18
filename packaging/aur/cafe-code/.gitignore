@@ -1,0 +1,7 @@
+*
+!.gitignore
+!.SRCINFO
+!LICENSE
+!PKGBUILD
+!cafe-code.desktop
+!cafe-code.sh
