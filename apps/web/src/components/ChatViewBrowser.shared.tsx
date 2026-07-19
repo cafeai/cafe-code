@@ -2318,6 +2318,131 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       }
     });
 
+    it("dispatches Sol Ultra from the exact custom Codex instance", async () => {
+      setDraftThreadWithoutWorktree();
+      const zkmInstanceId = ProviderInstanceId.make("codex_codex_astrea_zkm");
+      const solModel = {
+        slug: "gpt-5.6-sol",
+        name: "GPT-5.6-Sol",
+        isCustom: false,
+        capabilities: createModelCapabilities({
+          optionDescriptors: [
+            {
+              id: "reasoningEffort",
+              label: "Reasoning",
+              type: "select" as const,
+              currentValue: "low",
+              options: [
+                { id: "low", label: "Low", isDefault: true },
+                { id: "ultra", label: "Ultra" },
+              ],
+            },
+          ],
+        }),
+      };
+
+      // Reproduce the historical failure shape: the default Codex bucket has
+      // Low while the selected custom account explicitly has Ultra. Reading
+      // traits through the driver-kind key would send Low for the ZKM turn.
+      useComposerDraftStore
+        .getState()
+        .setModelSelection(
+          THREAD_REF,
+          createModelSelection(ProviderInstanceId.make("codex"), solModel.slug, [
+            { id: "reasoningEffort", value: "low" },
+          ]),
+        );
+      useComposerDraftStore
+        .getState()
+        .setModelSelection(
+          THREAD_REF,
+          createModelSelection(zkmInstanceId, solModel.slug, [
+            { id: "reasoningEffort", value: "ultra" },
+          ]),
+        );
+
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createDraftOnlySnapshot(),
+        configureFixture: (nextFixture) => {
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            providers: [
+              ...nextFixture.serverConfig.providers,
+              {
+                driver: ProviderDriverKind.make("codex"),
+                instanceId: zkmInstanceId,
+                displayName: "Codex Astrea ZKM",
+                enabled: true,
+                installed: true,
+                version: "0.144.6",
+                status: "ready",
+                auth: { status: "authenticated" },
+                checkedAt: NOW_ISO,
+                models: [solModel],
+                slashCommands: [],
+                skills: [],
+              },
+            ],
+            settings: {
+              ...nextFixture.serverConfig.settings,
+              providerInstances: {
+                ...nextFixture.serverConfig.settings.providerInstances,
+                [zkmInstanceId]: {
+                  driver: ProviderDriverKind.make("codex"),
+                  displayName: "Codex Astrea ZKM",
+                },
+              },
+            },
+          };
+        },
+        resolveRpc: (body) => {
+          if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
+            return {
+              sequence: fixture.snapshot.snapshotSequence + 1,
+            };
+          }
+          return undefined;
+        },
+      });
+
+      try {
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep this turn on Ultra");
+        await waitForLayout();
+
+        const sendButton = await waitForSendButton();
+        expect(sendButton.disabled).toBe(false);
+        sendButton.click();
+
+        await vi.waitFor(
+          () => {
+            const turnStartRequest = wsRequests.find(
+              (request) =>
+                request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                request.type === "thread.turn.start",
+            ) as
+              | {
+                  modelSelection?: {
+                    instanceId?: string;
+                    model?: string;
+                    options?: ReadonlyArray<{ id?: string; value?: string | boolean }>;
+                  };
+                }
+              | undefined;
+
+            expect(turnStartRequest?.modelSelection).toMatchObject({
+              instanceId: zkmInstanceId,
+              model: "gpt-5.6-sol",
+              options: expect.arrayContaining([{ id: "reasoningEffort", value: "ultra" }]),
+            });
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
     it("keeps new-worktree mode on empty server threads and bootstraps the first send", async () => {
       const snapshot = addThreadToSnapshot(createDraftOnlySnapshot(), THREAD_ID);
       const mounted = await mountChatView({

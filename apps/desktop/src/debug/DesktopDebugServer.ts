@@ -838,6 +838,7 @@ function summarizeRendererForCompactDebug(): Record<string, unknown> {
   const queue = readRecord(snapshot.queue);
   const gates = readRecord(snapshot.gates);
   const provider = readRecord(snapshot.provider);
+  const composer = readRecord(snapshot.composer);
   const diagnostics = readRecord(snapshot.diagnostics);
   const timelineScroll = readRecord(snapshot.timelineScroll);
 
@@ -919,6 +920,21 @@ function summarizeRendererForCompactDebug(): Record<string, unknown> {
         : [],
     },
     provider: compactObjectWithoutContentPreviews(provider),
+    composer:
+      composer === null
+        ? null
+        : {
+            activeThreadId: readString(composer.activeThreadId),
+            phase: readString(composer.phase),
+            selectedProvider: readString(composer.selectedProvider),
+            selectedInstanceId: readString(composer.selectedInstanceId),
+            // Model/options are non-secret dispatch metadata. Keep the compact
+            // endpoint deliberately narrower than the full composer snapshot:
+            // never add prompt/editor/selection DOM content here.
+            selectedModelSelection: compactObjectWithoutContentPreviews(
+              composer.selectedModelSelection,
+            ),
+          },
     queue: {
       activeThreadId: readString(queue?.activeThreadId),
       length: readNumber(queue?.length),

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ProviderDriverKind,
+  ProviderInstanceId,
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
   type ServerProviderModel,
@@ -16,6 +17,7 @@ import {
 // vary only the descriptor shape per scenario.
 
 const PROVIDER: ProviderDriverKind = ProviderDriverKind.make("codex");
+const PROVIDER_INSTANCE = ProviderInstanceId.make("codex");
 const MODEL = "test-model";
 
 function selectDescriptor(
@@ -229,6 +231,7 @@ describe("provider traits render guards", () => {
     ]);
     const args = {
       provider: PROVIDER,
+      providerInstanceId: PROVIDER_INSTANCE,
       model: MODEL,
       models,
       modelOptions: undefined,
