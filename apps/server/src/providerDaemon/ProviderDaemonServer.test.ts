@@ -1,8 +1,10 @@
 import {
   EventId,
+  PROVIDER_DAEMON_LIVENESS_PATH,
   ProviderDaemonHealth,
   ProviderDaemonLeaseRequest,
   ProviderDaemonLeaseResponse,
+  ProviderDaemonLiveness,
   ProviderDaemonRpcRequest,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -38,6 +40,7 @@ import { ProviderRuntimeInventoryLocalLive } from "./ProviderRuntimeInventory.ts
 const TEST_TOKEN = "provider-daemon-test-token-000000000000000000000000";
 
 const decodeProviderDaemonHealth = Schema.decodeUnknownSync(ProviderDaemonHealth);
+const decodeProviderDaemonLiveness = Schema.decodeUnknownSync(ProviderDaemonLiveness);
 const encodeProviderDaemonHealthJson = Schema.encodeSync(
   Schema.fromJsonString(ProviderDaemonHealth),
 );
@@ -81,8 +84,6 @@ const mockProviderService = {
   streamEvents: Stream.empty,
 } satisfies ProviderServiceShape;
 
-const mockProviderServiceLayer = Layer.succeed(ProviderService, mockProviderService);
-
 const mockProviderAdapterRegistryLayer = Layer.effect(
   ProviderAdapterRegistry,
   Effect.gen(function* () {
@@ -106,12 +107,15 @@ const mockServerSettingsLayer = Layer.succeed(ServerSettingsService, {
   streamChanges: Stream.empty,
 });
 
-const providerDaemonServerTestLayer = Layer.mergeAll(
-  mockProviderServiceLayer,
-  ProviderRuntimeInventoryLocalLive.pipe(Layer.provide(mockProviderAdapterRegistryLayer)),
-  mockServerSettingsLayer,
-  ProviderSupervisorRegistryLive,
-).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+const makeProviderDaemonServerTestLayer = (providerService: ProviderServiceShape) =>
+  Layer.mergeAll(
+    Layer.succeed(ProviderService, providerService),
+    ProviderRuntimeInventoryLocalLive.pipe(Layer.provide(mockProviderAdapterRegistryLayer)),
+    mockServerSettingsLayer,
+    ProviderSupervisorRegistryLive,
+  ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+
+const providerDaemonServerTestLayer = makeProviderDaemonServerTestLayer(mockProviderService);
 
 describe("ProviderDaemonServer", () => {
   it("waits for drain and rejects close for a slow daemon event response", async () => {
@@ -151,6 +155,50 @@ describe("ProviderDaemonServer", () => {
     const closeError = await closeResult;
     assert.instanceOf(closeError, Error);
     assert.match(closeError.message, /closed before drain/u);
+  });
+
+  it.effect("serves authenticated liveness without reading provider diagnostics", () => {
+    let listSessionsCallCount = 0;
+    const providerService: ProviderServiceShape = {
+      ...mockProviderService,
+      listSessions: () =>
+        Effect.sync(() => {
+          listSessionsCallCount += 1;
+          return [];
+        }),
+    };
+
+    return Effect.gen(function* () {
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
+        host: "127.0.0.1",
+        token: TEST_TOKEN,
+        version: "0.0.0-test",
+        protocolVersion: 1,
+        runtimeBuildId: "runtime-build-test",
+      });
+
+      const unauthenticated = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}${PROVIDER_DAEMON_LIVENESS_PATH}`),
+      );
+      assert.equal(unauthenticated.status, 401);
+
+      const authenticated = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}${PROVIDER_DAEMON_LIVENESS_PATH}`, {
+          headers: {
+            authorization: `Bearer ${TEST_TOKEN}`,
+          },
+        }),
+      );
+      const liveness = decodeProviderDaemonLiveness(
+        yield* Effect.promise(() => authenticated.json()),
+      );
+
+      assert.equal(authenticated.status, 200);
+      assert.equal(liveness.ok, true);
+      assert.equal(liveness.mode, "provider-daemon");
+      assert.equal(liveness.runtimeBuildId, "runtime-build-test");
+      assert.equal(listSessionsCallCount, 0);
+    }).pipe(Effect.scoped, Effect.provide(makeProviderDaemonServerTestLayer(providerService)));
   });
 
   it.effect("rejects unauthenticated health requests and serves authorized health", () =>

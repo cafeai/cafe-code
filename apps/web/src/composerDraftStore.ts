@@ -365,6 +365,15 @@ interface ComposerDraftStoreState {
     provider: ProviderDriverKind,
     nextProviderOptions: ReadonlyArray<ProviderOptionSelection> | null | undefined,
     options?: {
+      /**
+       * Exact configured provider instance whose traits are changing.
+       *
+       * Provider driver kinds remain the fallback for legacy/default slots,
+       * but custom Codex/Claude accounts must never share one driver's trait
+       * bucket: doing so can silently replace an explicit effort with another
+       * instance's model default after a renderer refresh.
+       */
+      instanceId?: ProviderInstanceId;
       model?: string | null | undefined;
       persistSticky?: boolean;
     },
@@ -484,6 +493,30 @@ function modelSelectionByProviderToOptions(
     }
   }
   return Object.keys(result).length > 0 ? result : null;
+}
+
+/**
+ * Merge option layers independently for every configured provider instance.
+ *
+ * A whole-map nullish fallback is incorrect here: a draft can remember traits
+ * for one account while the selected account still needs its persisted thread
+ * traits. Later layers are more specific and replace only the matching
+ * instance, preserving unrelated account state without leaking it across
+ * accounts that use the same driver.
+ */
+function mergeProviderOptionSelectionLayers(
+  ...layers: ReadonlyArray<ProviderOptionSelectionsByProvider | null | undefined>
+): ProviderOptionSelectionsByProvider | null {
+  const merged: ProviderOptionSelectionsByProvider = {};
+  for (const layer of layers) {
+    if (!layer) continue;
+    for (const [instanceId, selections] of Object.entries(layer)) {
+      if (selections && selections.length > 0) {
+        merged[instanceId] = selections;
+      }
+    }
+  }
+  return Object.keys(merged).length > 0 ? merged : null;
 }
 
 function cloneModelSelection(selection: ModelSelection): DeepMutable<ModelSelection> {
@@ -880,12 +913,15 @@ export function deriveEffectiveComposerModelState(input: {
   const instanceSelection = input.selectedInstanceId
     ? input.draft?.modelSelectionByProvider?.[input.selectedInstanceId]
     : undefined;
+  const defaultInstanceId = defaultInstanceIdForDriver(input.selectedProvider);
   const legacySelection =
-    input.draft?.modelSelectionByProvider?.[ProviderInstanceId.make(input.selectedProvider)];
+    !input.selectedInstanceId || input.selectedInstanceId === defaultInstanceId
+      ? input.draft?.modelSelectionByProvider?.[defaultInstanceId]
+      : undefined;
   const activeSelection = instanceSelection ?? legacySelection;
   const activeSelectionInstanceId = instanceSelection
-    ? (input.selectedInstanceId ?? ProviderInstanceId.make(input.selectedProvider))
-    : ProviderInstanceId.make(input.selectedProvider);
+    ? (input.selectedInstanceId ?? defaultInstanceId)
+    : defaultInstanceId;
   const selectedModel = activeSelection?.model
     ? (resolveAppModelSelectionForInstance(
         activeSelectionInstanceId,
@@ -906,12 +942,12 @@ export function deriveEffectiveComposerModelState(input: {
     instanceDefaults.defaultModelOptions.length > 0
       ? { [input.selectedInstanceId]: instanceDefaults.defaultModelOptions }
       : null;
-  const modelOptions =
-    modelSelectionByProviderToOptions(input.draft?.modelSelectionByProvider) ??
-    providerSelectionsFromModelSelection(input.threadModelSelection) ??
-    providerSelectionsFromModelSelection(input.projectModelSelection) ??
-    instanceDefaultOptions ??
-    null;
+  const modelOptions = mergeProviderOptionSelectionLayers(
+    instanceDefaultOptions,
+    providerSelectionsFromModelSelection(input.projectModelSelection),
+    providerSelectionsFromModelSelection(input.threadModelSelection),
+    modelSelectionByProviderToOptions(input.draft?.modelSelectionByProvider),
+  );
 
   return {
     selectedModel,
@@ -2379,7 +2415,10 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           if (normalizedProvider === null) {
             return;
           }
-          const instanceKey = defaultInstanceIdForDriver(normalizedProvider);
+          // The selected configured instance is the state boundary. Falling
+          // back to the default instance keeps legacy callers compatible, but
+          // composer trait controls always provide the exact instance id.
+          const instanceKey = options?.instanceId ?? defaultInstanceIdForDriver(normalizedProvider);
           const fallbackModel =
             normalizeModelSlug(options?.model, normalizedProvider) ??
             DEFAULT_MODEL_BY_PROVIDER[normalizedProvider] ??

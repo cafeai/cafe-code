@@ -23,6 +23,7 @@ import { createModelSelection } from "@cafecode/shared/model";
 const CODEX_INSTANCE = ProviderInstanceId.make("codex");
 const CLAUDE_AGENT_INSTANCE = ProviderInstanceId.make("claudeAgent");
 const EXTERNAL_PROVIDER_INSTANCE = ProviderInstanceId.make("externalDriver");
+const CODEX_ZKM_INSTANCE = ProviderInstanceId.make("codex_codex_astrea_zkm");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_AGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
 const EXTERNAL_PROVIDER_DRIVER = ProviderDriverKind.make("externalDriver");
@@ -58,6 +59,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   COMPOSER_DRAFT_STORAGE_KEY,
+  deriveEffectiveComposerModelState,
   deriveNewChatComposerDefaults,
   finalizePromotedDraftThreadByRef,
   markPromotedDraftThread,
@@ -1324,6 +1326,90 @@ describe("composerDraftStore provider-scoped option updates", () => {
 
   beforeEach(() => {
     resetComposerDraftStore();
+  });
+
+  it("keeps persisted custom-instance effort when another Codex draft bucket exists", () => {
+    const customThreadSelection = createModelSelection(
+      CODEX_ZKM_INSTANCE,
+      "gpt-5.6-sol",
+      toSelections({ reasoningEffort: "ultra" }),
+    );
+    const resolved = deriveEffectiveComposerModelState({
+      draft: {
+        activeProvider: CODEX_ZKM_INSTANCE,
+        modelSelectionByProvider: {
+          [CODEX_INSTANCE]: createModelSelection(
+            CODEX_INSTANCE,
+            "gpt-5.6-sol",
+            toSelections({ reasoningEffort: "low" }),
+          ),
+        },
+      },
+      providers: [],
+      selectedProvider: CODEX_DRIVER,
+      selectedInstanceId: CODEX_ZKM_INSTANCE,
+      threadModelSelection: customThreadSelection,
+      projectModelSelection: null,
+      settings: {
+        ...DEFAULT_UNIFIED_SETTINGS,
+        providerInstances: {
+          [CODEX_ZKM_INSTANCE]: {
+            driver: CODEX_DRIVER,
+            enabled: true,
+          },
+        },
+      },
+    });
+
+    expect(resolved.selectedModel).toBe("gpt-5.6-sol");
+    expect(resolved.modelOptions?.[CODEX_ZKM_INSTANCE]).toEqual(
+      toSelections({ reasoningEffort: "ultra" }),
+    );
+    expect(resolved.modelOptions?.[CODEX_INSTANCE]).toEqual(
+      toSelections({ reasoningEffort: "low" }),
+    );
+  });
+
+  it("writes trait changes to the exact configured provider instance", () => {
+    const store = useComposerDraftStore.getState();
+    store.setModelSelection(
+      threadRef,
+      createModelSelection(
+        CODEX_ZKM_INSTANCE,
+        "gpt-5.6-sol",
+        toSelections({ reasoningEffort: "low" }),
+      ),
+    );
+
+    store.setProviderModelOptions(
+      threadRef,
+      CODEX_DRIVER,
+      toSelections({ reasoningEffort: "ultra" }),
+      {
+        instanceId: CODEX_ZKM_INSTANCE,
+        model: "gpt-5.6-sol",
+        persistSticky: true,
+      },
+    );
+
+    const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
+    expect(draft?.modelSelectionByProvider[CODEX_ZKM_INSTANCE]).toEqual(
+      createModelSelection(
+        CODEX_ZKM_INSTANCE,
+        "gpt-5.6-sol",
+        toSelections({ reasoningEffort: "ultra" }),
+      ),
+    );
+    expect(draft?.modelSelectionByProvider[CODEX_INSTANCE]).toBeUndefined();
+    expect(
+      useComposerDraftStore.getState().stickyModelSelectionByProvider[CODEX_ZKM_INSTANCE],
+    ).toEqual(
+      createModelSelection(
+        CODEX_ZKM_INSTANCE,
+        "gpt-5.6-sol",
+        toSelections({ reasoningEffort: "ultra" }),
+      ),
+    );
   });
 
   it("retains off-provider option memory without changing the active selection", () => {

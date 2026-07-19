@@ -246,14 +246,14 @@ export const runProviderDaemonHealthWatchdog = Effect.fn("desktop.providerDaemon
         return;
       }
 
-      const health = yield* input.providerDaemonManager.refreshHealth.pipe(
+      const liveness = yield* input.providerDaemonManager.probeLiveness.pipe(
         Effect.catchCause((cause) =>
-          logDaemonWatchdogWarning("provider daemon health probe crashed", {
+          logDaemonWatchdogWarning("provider daemon liveness probe crashed", {
             cause: Cause.pretty(cause),
           }).pipe(Effect.as(Option.none())),
         ),
       );
-      if (Option.isSome(health)) {
+      if (Option.isSome(liveness)) {
         consecutiveFailures = 0;
         continue;
       }
@@ -268,7 +268,7 @@ export const runProviderDaemonHealthWatchdog = Effect.fn("desktop.providerDaemon
 
       const reason = processIsKnownDead
         ? `provider daemon process ${daemonPid} exited`
-        : `provider daemon failed ${consecutiveFailures} consecutive health probes`;
+        : `provider daemon failed ${consecutiveFailures} consecutive liveness probes`;
       yield* logDaemonWatchdogWarning("provider daemon recovery starting", {
         reason,
         consecutiveFailures,

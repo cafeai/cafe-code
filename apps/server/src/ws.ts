@@ -97,6 +97,7 @@ import {
 import { respondToAuthError } from "./auth/http.ts";
 import { ensureSystemPromptFile } from "./systemPromptFile.ts";
 import { makeWebSocketConnectionFlowControl } from "./websocket/ConnectionFlowControl.ts";
+import { encodeThreadDetailSnapshotStreamItems } from "./websocket/ThreadDetailSnapshotStream.ts";
 import { addProviderWebSocketDiagnostics } from "@cafecode/shared/providerPipelineDiagnostics";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 const isWorkspacePathOutsideRootError = Schema.is(WorkspacePathOutsideRootError);
@@ -878,6 +879,27 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "orchestration" },
           ),
+        [ORCHESTRATION_WS_METHODS.getThreadTurnWorkLogPresence]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.getThreadTurnWorkLogPresence,
+            projectionSnapshotQuery.getThreadTurnWorkLogPresence(input).pipe(
+              Effect.tapError((cause) =>
+                Effect.logError("orchestration turn work-log presence load failed", {
+                  threadId: input.threadId,
+                  turnCount: input.turnIds.length,
+                  cause,
+                }),
+              ),
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationGetSnapshotError({
+                    message: `Failed to discover historical work logs for thread ${input.threadId}`,
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "orchestration" },
+          ),
         [ORCHESTRATION_WS_METHODS.subscribeThread]: (input) =>
           observeRpcStreamEffect(
             ORCHESTRATION_WS_METHODS.subscribeThread,
@@ -906,6 +928,15 @@ const makeWsRpcLayer = (
                 threadDetailSubscriptionRegistry.release(input.threadId),
               );
 
+              const snapshotItems = yield* Effect.try({
+                try: () => encodeThreadDetailSnapshotStreamItems(threadDetailSnapshot.value),
+                catch: (cause) =>
+                  new OrchestrationGetSnapshotError({
+                    message: `Failed to encode thread ${input.threadId} snapshot`,
+                    cause,
+                  }),
+              });
+
               const liveStream = orchestrationSubscriptionHub
                 .eventsFrom({
                   fromSequenceExclusive: threadDetailSnapshot.value.snapshotSequence,
@@ -919,13 +950,7 @@ const makeWsRpcLayer = (
                 );
 
               return connectionFlowControl.wrapBulkStream(
-                Stream.concat(
-                  Stream.make({
-                    kind: "snapshot" as const,
-                    snapshot: threadDetailSnapshot.value,
-                  }),
-                  liveStream,
-                ),
+                Stream.concat(Stream.fromIterable(snapshotItems), liveStream),
               );
             }),
             { "rpc.aggregate": "orchestration" },

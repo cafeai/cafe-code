@@ -26,6 +26,7 @@ export const ORCHESTRATION_WS_METHODS = {
   replayEvents: "orchestration.replayEvents",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   getDeletedShellSnapshot: "orchestration.getDeletedShellSnapshot",
+  getThreadTurnWorkLogPresence: "orchestration.getThreadTurnWorkLogPresence",
   getThreadTurnActivityPage: "orchestration.getThreadTurnActivityPage",
   hardDeleteThread: "orchestration.hardDeleteThread",
   repairAssistantMessageFromProviderJournal:
@@ -476,6 +477,34 @@ export const OrchestrationThreadDetailSnapshot = Schema.Struct({
 });
 export type OrchestrationThreadDetailSnapshot = typeof OrchestrationThreadDetailSnapshot.Type;
 
+// Large long-running threads cannot safely be serialized as one WebSocket RPC
+// frame. These limits are part of the wire contract: the server emits fixed-size
+// UTF-8 JSON chunks and the renderer rejects declarations that could allocate an
+// unbounded assembly buffer. The total ceiling is intentionally much larger than
+// the per-frame lane while still placing a finite cap on an authenticated remote
+// server's ability to consume renderer memory.
+export const THREAD_DETAIL_SNAPSHOT_CHUNK_RAW_BYTES = 256 * 1024;
+export const THREAD_DETAIL_SNAPSHOT_MAX_BYTES = 256 * 1024 * 1024;
+export const THREAD_DETAIL_SNAPSHOT_MAX_CHUNKS = Math.ceil(
+  THREAD_DETAIL_SNAPSHOT_MAX_BYTES / THREAD_DETAIL_SNAPSHOT_CHUNK_RAW_BYTES,
+);
+export const THREAD_DETAIL_SNAPSHOT_CHUNK_BASE64_MAX_CHARS =
+  Math.ceil(THREAD_DETAIL_SNAPSHOT_CHUNK_RAW_BYTES / 3) * 4;
+
+const ThreadDetailSnapshotSha256 = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/));
+
+export const OrchestrationThreadDetailSnapshotChunk = Schema.Struct({
+  kind: Schema.Literal("snapshot-chunk"),
+  snapshotSequence: NonNegativeInt,
+  sha256: ThreadDetailSnapshotSha256,
+  chunkIndex: NonNegativeInt.check(Schema.isLessThan(THREAD_DETAIL_SNAPSHOT_MAX_CHUNKS)),
+  chunkCount: PositiveInt.check(Schema.isLessThanOrEqualTo(THREAD_DETAIL_SNAPSHOT_MAX_CHUNKS)),
+  encodedBytes: PositiveInt.check(Schema.isLessThanOrEqualTo(THREAD_DETAIL_SNAPSHOT_MAX_BYTES)),
+  data: Schema.String.check(Schema.isMaxLength(THREAD_DETAIL_SNAPSHOT_CHUNK_BASE64_MAX_CHARS)),
+});
+export type OrchestrationThreadDetailSnapshotChunk =
+  typeof OrchestrationThreadDetailSnapshotChunk.Type;
+
 export const THREAD_TURN_ACTIVITY_PAGE_MAX_LIMIT = 1_000;
 
 export const OrchestrationThreadTurnActivityPageInput = Schema.Struct({
@@ -498,6 +527,27 @@ export const OrchestrationThreadTurnActivityPage = Schema.Struct({
   activities: Schema.Array(OrchestrationThreadActivity),
 });
 export type OrchestrationThreadTurnActivityPage = typeof OrchestrationThreadTurnActivityPage.Type;
+
+export const THREAD_TURN_WORK_LOG_PRESENCE_MAX_TURNS = 256;
+
+export const OrchestrationThreadTurnWorkLogPresenceInput = Schema.Struct({
+  threadId: ThreadId,
+  turnIds: Schema.Array(TurnId).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(THREAD_TURN_WORK_LOG_PRESENCE_MAX_TURNS),
+  ),
+});
+export type OrchestrationThreadTurnWorkLogPresenceInput =
+  typeof OrchestrationThreadTurnWorkLogPresenceInput.Type;
+
+export const OrchestrationThreadTurnWorkLogPresenceResult = Schema.Struct({
+  threadId: ThreadId,
+  turnIdsWithWorkLog: Schema.Array(TurnId).check(
+    Schema.isMaxLength(THREAD_TURN_WORK_LOG_PRESENCE_MAX_TURNS),
+  ),
+});
+export type OrchestrationThreadTurnWorkLogPresenceResult =
+  typeof OrchestrationThreadTurnWorkLogPresenceResult.Type;
 
 export const ProjectCreateCommand = Schema.Struct({
   type: Schema.Literal("project.create"),
@@ -1288,6 +1338,7 @@ export const OrchestrationThreadStreamItem = Schema.Union([
     kind: Schema.Literal("snapshot"),
     snapshot: OrchestrationThreadDetailSnapshot,
   }),
+  OrchestrationThreadDetailSnapshotChunk,
   Schema.Struct({
     kind: Schema.Literal("event"),
     event: OrchestrationEvent,
@@ -1455,6 +1506,10 @@ export const OrchestrationRpcSchemas = {
   getThreadTurnActivityPage: {
     input: OrchestrationThreadTurnActivityPageInput,
     output: OrchestrationThreadTurnActivityPage,
+  },
+  getThreadTurnWorkLogPresence: {
+    input: OrchestrationThreadTurnWorkLogPresenceInput,
+    output: OrchestrationThreadTurnWorkLogPresenceResult,
   },
   subscribeThread: {
     input: OrchestrationSubscribeThreadInput,

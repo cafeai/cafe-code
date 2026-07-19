@@ -3944,6 +3944,69 @@ describe("ProviderRuntimeIngestion", () => {
     expect(repaired.activities.some((activity) => activity.turnId === concreteTurnId)).toBe(true);
   });
 
+  it("treats a provider tool heartbeat as provider-owned active work", async () => {
+    const harness = await createHarness();
+    const staleTurnId = asTurnId("turn-stale-tool-heartbeat");
+    const concreteTurnId = asTurnId("turn-provider-tool-heartbeat");
+    const sessionAt = "2026-01-01T00:00:01.000Z";
+    const heartbeatAt = "2026-01-01T00:00:03.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-stale-provider-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      createdAt: sessionAt,
+      threadId: asThreadId("thread-1"),
+      turnId: staleTurnId,
+      payload: {},
+    });
+    await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.status === "running" && entry.session.activeTurnId === staleTurnId,
+    );
+
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId: asThreadId("thread-1"),
+      createdAt: sessionAt,
+      updatedAt: heartbeatAt,
+      activeTurnId: concreteTurnId,
+    });
+
+    harness.emit({
+      type: "tool.progress",
+      eventId: asEventId("evt-provider-tool-heartbeat"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      createdAt: heartbeatAt,
+      threadId: asThreadId("thread-1"),
+      turnId: concreteTurnId,
+      payload: {
+        toolUseId: "tool-heartbeat-1",
+        toolName: "Bash",
+        elapsedSeconds: 30,
+      },
+    });
+
+    const repaired = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "running" &&
+        entry.session.activeTurnId === concreteTurnId &&
+        entry.latestTurn?.turnId === concreteTurnId &&
+        entry.latestTurn.state === "running",
+    );
+
+    expect(repaired.latestTurn?.startedAt).toBe(heartbeatAt);
+    expect(
+      repaired.activities.some((activity) => activity.id === "evt-provider-tool-heartbeat"),
+    ).toBe(false);
+  });
+
   it("maps session/thread lifecycle and item.started into session/activity projections", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

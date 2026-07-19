@@ -23,7 +23,15 @@ const MONTH_LABELS = [
   "Dec",
 ];
 /** GitHub labels alternating weekday rows; row 0 is Sunday. */
-const WEEKDAY_LABELS = ["", "Mon", "", "Wed", "", "Fri", ""];
+const WEEKDAY_LABELS = [
+  { day: "sunday", label: "" },
+  { day: "monday", label: "Mon" },
+  { day: "tuesday", label: "" },
+  { day: "wednesday", label: "Wed" },
+  { day: "thursday", label: "" },
+  { day: "friday", label: "Fri" },
+  { day: "saturday", label: "" },
+] as const;
 
 function dayKeyOf(date: Date): string {
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -196,8 +204,8 @@ export function ActivityHeatmap({
             className="grid w-7 shrink-0 grid-rows-7 gap-[3px] text-[9px] leading-none text-muted-foreground/70"
             aria-hidden
           >
-            {WEEKDAY_LABELS.map((label, weekday) => (
-              <span key={weekday} className="flex items-center">
+            {WEEKDAY_LABELS.map(({ day, label }) => (
+              <span key={day} className="flex items-center">
                 {label}
               </span>
             ))}

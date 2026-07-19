@@ -91,6 +91,7 @@ const rpcClientMock = {
   orchestration: {
     dispatchCommand: vi.fn(),
     getThreadTurnActivityPage: vi.fn(),
+    getThreadTurnWorkLogPresence: vi.fn(),
     hardDeleteThread: vi.fn(),
     repairAssistantMessageFromProviderJournal: vi.fn(),
     repairThreadAssistantMessages: vi.fn(),

@@ -151,6 +151,9 @@ export interface WsRpcClient {
     readonly getThreadTurnActivityPage: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.getThreadTurnActivityPage
     >;
+    readonly getThreadTurnWorkLogPresence: RpcUnaryMethod<
+      typeof ORCHESTRATION_WS_METHODS.getThreadTurnWorkLogPresence
+    >;
     readonly hardDeleteThread: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.hardDeleteThread>;
     readonly repairAssistantMessageFromProviderJournal: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.repairAssistantMessageFromProviderJournal
@@ -313,6 +316,10 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
       getThreadTurnActivityPage: (input) =>
         transport.request((client) =>
           client[ORCHESTRATION_WS_METHODS.getThreadTurnActivityPage](input),
+        ),
+      getThreadTurnWorkLogPresence: (input) =>
+        transport.request((client) =>
+          client[ORCHESTRATION_WS_METHODS.getThreadTurnWorkLogPresence](input),
         ),
       hardDeleteThread: (input) =>
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.hardDeleteThread](input)),

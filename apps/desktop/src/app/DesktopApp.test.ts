@@ -1,4 +1,4 @@
-import type { ProviderDaemonClientConfig, ProviderDaemonHealth } from "@cafecode/contracts";
+import type { ProviderDaemonClientConfig, ProviderDaemonLiveness } from "@cafecode/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -22,7 +22,7 @@ const endpoint: ProviderDaemonClientConfig = {
   leaseId: "provider-daemon-test-lease-00000000000000000000",
 };
 
-const healthyDaemon: ProviderDaemonHealth = {
+const liveDaemon: ProviderDaemonLiveness = {
   ok: true,
   mode: "provider-daemon",
   pid: process.pid,
@@ -31,9 +31,7 @@ const healthyDaemon: ProviderDaemonHealth = {
   protocolVersion: 1,
   runtimeBuildId: "test-runtime-build",
   startedAt: "2026-01-01T00:00:00.000Z",
-  activeSessionCount: 0,
-  configuredInstanceCount: 1,
-  eventCursor: 0,
+  transport: "ipc",
 };
 
 function daemonSnapshot(): DesktopProviderDaemonSnapshot {
@@ -72,16 +70,17 @@ describe("DesktopApp provider daemon watchdog", () => {
           ensureRunning: Effect.succeed(endpoint),
           recover: (reason) =>
             Effect.sync(() => {
-              assert.include(reason, "consecutive health probes");
+              assert.include(reason, "consecutive liveness probes");
               actions.push("recover-daemon");
               recovered = true;
               return endpoint;
             }),
           currentConfig: Effect.succeed(Option.some(endpoint)),
-          refreshHealth: Effect.sync(() => {
+          probeLiveness: Effect.sync(() => {
             probeCount += 1;
-            return recovered ? Option.some(healthyDaemon) : Option.none();
+            return recovered ? Option.some(liveDaemon) : Option.none();
           }),
+          refreshHealth: Effect.succeed(Option.none()),
           snapshot: Effect.sync(daemonSnapshot),
           stop: Effect.die("watchdog must use recover, not stop"),
         };

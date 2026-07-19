@@ -56,6 +56,8 @@ import type {
   OrchestrationShellStreamItem,
   OrchestrationThreadTurnActivityPage,
   OrchestrationThreadTurnActivityPageInput,
+  OrchestrationThreadTurnWorkLogPresenceInput,
+  OrchestrationThreadTurnWorkLogPresenceResult,
   ProviderJournalMessageRepairInput,
   ProviderJournalMessageRepairResult,
   ProviderThreadAssistantMessagesRepairInput,
@@ -512,6 +514,9 @@ export interface EnvironmentApi {
     getThreadTurnActivityPage: (
       input: OrchestrationThreadTurnActivityPageInput,
     ) => Promise<OrchestrationThreadTurnActivityPage>;
+    getThreadTurnWorkLogPresence: (
+      input: OrchestrationThreadTurnWorkLogPresenceInput,
+    ) => Promise<OrchestrationThreadTurnWorkLogPresenceResult>;
     hardDeleteThread: (input: ThreadHardDeleteInput) => Promise<ThreadHardDeleteResult>;
     repairAssistantMessageFromProviderJournal: (
       input: ProviderJournalMessageRepairInput,

@@ -339,6 +339,9 @@ export interface ChatComposerHandle {
   readDebugState: () => {
     activeThreadId: ThreadId | null;
     phase: SessionPhase;
+    selectedProvider: ProviderDriverKind;
+    selectedInstanceId: ProviderInstanceId;
+    selectedModelSelection: ModelSelection;
     composerEditorDisabled: boolean;
     composerFocusRequestRevision: number;
     isComposerFocused: boolean;
@@ -976,6 +979,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     projectModelSelection: activeProjectDefaultModelSelection,
     settings,
   });
+  // Model traits are scoped to the configured provider instance, not merely
+  // the driver kind. Two Codex accounts may intentionally use different Sol
+  // efforts; reading the default `codex` bucket for a custom account can show
+  // Ultra while dispatching that account's default Low effort after a refresh.
+  // Exact lookup keeps display and outbound `ModelSelection` aligned.
+  const selectedComposerModelOptions = composerModelOptions?.[selectedInstanceId];
 
   // Resolve the active instance's snapshot by `instanceId` so a custom
   // instance gets its own slash commands, skills, and model list — not
@@ -1006,9 +1015,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         model: selectedModel,
         models: selectedProviderModels,
         prompt,
-        modelOptions: composerModelOptions?.[selectedProvider],
+        modelOptions: selectedComposerModelOptions,
       }),
-    [composerModelOptions, prompt, selectedModel, selectedProvider, selectedProviderModels],
+    [prompt, selectedComposerModelOptions, selectedModel, selectedProvider, selectedProviderModels],
   );
 
   const selectedPromptEffort = composerProviderState.promptEffort;
@@ -1321,21 +1330,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const providerTraitsMenuContent = renderProviderTraitsMenuContent({
     provider: selectedProvider,
+    providerInstanceId: selectedInstanceId,
     ...(routeKind === "server" ? { threadRef: routeThreadRef } : {}),
     ...(routeKind === "draft" && draftId ? { draftId } : {}),
     model: selectedModel,
     models: selectedProviderModels,
-    modelOptions: composerModelOptions?.[selectedProvider],
+    modelOptions: selectedComposerModelOptions,
     prompt,
     onPromptChange: setPromptFromTraits,
   });
   const providerTraitsPicker = renderProviderTraitsPicker({
     provider: selectedProvider,
+    providerInstanceId: selectedInstanceId,
     ...(routeKind === "server" ? { threadRef: routeThreadRef } : {}),
     ...(routeKind === "draft" && draftId ? { draftId } : {}),
     model: selectedModel,
     models: selectedProviderModels,
-    modelOptions: composerModelOptions?.[selectedProvider],
+    modelOptions: selectedComposerModelOptions,
     prompt,
     onPromptChange: setPromptFromTraits,
   });
@@ -2229,6 +2240,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       readDebugState: () => ({
         activeThreadId,
         phase,
+        selectedProvider,
+        selectedInstanceId,
+        selectedModelSelection,
         composerEditorDisabled,
         composerFocusRequestRevision,
         isComposerFocused,
@@ -2287,6 +2301,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       selectedModel,
       selectedModelOptionsForDispatch,
       selectedModelSelection,
+      selectedInstanceId,
       selectedPromptEffort,
       selectedProvider,
       selectedProviderModels,

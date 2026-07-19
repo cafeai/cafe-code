@@ -50,6 +50,18 @@ const makeLargeRendererSnapshot = (index: number) => ({
       },
     ],
   },
+  composer: {
+    activeThreadId: "thread-1",
+    phase: "running",
+    selectedProvider: "codex",
+    selectedInstanceId: "codex_astrea_zkm",
+    selectedModelSelection: {
+      instanceId: "codex_astrea_zkm",
+      model: "gpt-5.6-sol",
+      options: [{ id: "reasoningEffort", value: "ultra" }],
+    },
+    promptPreview: `composer-prompt-secret-${index}`.repeat(1_000),
+  },
   performance: {
     rendererSnapshotBuildDurationMs: 12,
     activeThread: {
@@ -204,7 +216,10 @@ describe("DesktopDebugServer compact snapshots", () => {
     assert.equal(compactJson.includes("prompt-secret"), false);
     assert.equal(compactJson.includes("assistant-secret"), false);
     assert.equal(compactJson.includes("queued prompt should be omitted"), false);
+    assert.equal(compactJson.includes("composer-prompt-secret"), false);
     assert.equal(compactJson.includes("command-secret"), false);
+    assert.equal(compactJson.includes("gpt-5.6-sol"), true);
+    assert.equal(compactJson.includes("ultra"), true);
     assert.equal(compactJson.includes("provider-running-tool"), true);
     assert.equal(compactJson.includes("debug-pruned"), true);
     assert.ok(Buffer.byteLength(compactJson, "utf8") < 80_000);

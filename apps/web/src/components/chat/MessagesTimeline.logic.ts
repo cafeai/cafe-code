@@ -114,6 +114,43 @@ export interface HistoricalWorkLogDisplayState {
   readonly countIsLowerBound: boolean;
 }
 
+export function filterHistoricalWorkLogSummariesByPresence(input: {
+  summaries: ReadonlyMap<TurnId, HistoricalWorkLogSummary>;
+  presenceByTurnId: ReadonlyMap<TurnId, boolean>;
+}): ReadonlyMap<TurnId, HistoricalWorkLogSummary> {
+  const visible = new Map<TurnId, HistoricalWorkLogSummary>();
+  for (const [turnId, summary] of input.summaries) {
+    // Recent snapshot activity is already authoritative and avoids an RPC.
+    // Older rows remain outside the virtualized list until the bounded server
+    // presence query proves that expanding them can display something.
+    if (
+      summary.snapshotEntryCount > 0 ||
+      summary.previewEntries.length > 0 ||
+      input.presenceByTurnId.get(turnId) === true
+    ) {
+      visible.set(turnId, summary);
+    }
+  }
+  return visible;
+}
+
+export function findHistoricalWorkLogPresenceCandidates(input: {
+  summaries: ReadonlyMap<TurnId, HistoricalWorkLogSummary>;
+  presenceByTurnId: ReadonlyMap<TurnId, boolean>;
+}): TurnId[] {
+  const candidates: TurnId[] = [];
+  for (const [turnId, summary] of input.summaries) {
+    if (
+      summary.snapshotEntryCount === 0 &&
+      summary.previewEntries.length === 0 &&
+      !input.presenceByTurnId.has(turnId)
+    ) {
+      candidates.push(turnId);
+    }
+  }
+  return candidates;
+}
+
 export function deriveHistoricalWorkLogDisplayState(
   input: HistoricalWorkLogDisplayStateInput,
 ): HistoricalWorkLogDisplayState {

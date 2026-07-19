@@ -6,14 +6,17 @@ import * as path from "node:path";
 import {
   PROVIDER_DAEMON_HEALTH_PATH,
   PROVIDER_DAEMON_LEASES_PATH,
+  PROVIDER_DAEMON_LIVENESS_PATH,
   ProviderDaemonBootstrap,
   ProviderDaemonHealth,
   ProviderDaemonLeaseRequest,
   ProviderDaemonLeaseResponse,
+  ProviderDaemonLiveness,
   ProviderDaemonMarker,
   type ProviderDaemonClientConfig,
   type ProviderDaemonHealth as ProviderDaemonHealthValue,
   type ProviderDaemonLeaseResponse as ProviderDaemonLeaseResponseValue,
+  type ProviderDaemonLiveness as ProviderDaemonLivenessValue,
   type ProviderDaemonMarker as ProviderDaemonMarkerValue,
 } from "@cafecode/contracts";
 import { requestProviderDaemonJson } from "@cafecode/shared/providerDaemonHttp";
@@ -88,6 +91,9 @@ const decodeProviderDaemonLeaseResponseJson = Schema.decodeUnknownSync(
 const decodeProviderDaemonHealthJson = Schema.decodeUnknownSync(
   Schema.fromJsonString(ProviderDaemonHealth),
 );
+const decodeProviderDaemonLivenessJson = Schema.decodeUnknownSync(
+  Schema.fromJsonString(ProviderDaemonLiveness),
+);
 
 export interface DesktopProviderDaemonSnapshot {
   readonly status: "idle" | "starting" | "running" | "error";
@@ -119,6 +125,12 @@ export interface DesktopProviderDaemonManagerShape {
    */
   readonly recover: (reason: string) => Effect.Effect<ProviderDaemonClientConfig>;
   readonly currentConfig: Effect.Effect<Option.Option<ProviderDaemonClientConfig>>;
+  /**
+   * Probe only authenticated process liveness. This path is deliberately
+   * independent of provider adapters and SQLite so long-running workload
+   * pressure cannot trigger destructive false-positive daemon recovery.
+   */
+  readonly probeLiveness: Effect.Effect<Option.Option<ProviderDaemonLivenessValue>>;
   readonly refreshHealth: Effect.Effect<Option.Option<ProviderDaemonHealthValue>>;
   readonly snapshot: Effect.Effect<DesktopProviderDaemonSnapshot>;
   readonly stop: Effect.Effect<void>;
@@ -296,6 +308,18 @@ async function fetchProviderDaemonHealth(
     throw new Error(`provider daemon health failed with HTTP ${response.statusCode}`);
   }
   return decodeProviderDaemonHealthJson(response.body);
+}
+
+async function fetchProviderDaemonLiveness(
+  endpoint: ProviderDaemonClientConfig,
+): Promise<ProviderDaemonLivenessValue> {
+  const response = await requestProviderDaemonJson(endpoint, PROVIDER_DAEMON_LIVENESS_PATH, {
+    timeoutMs: 5_000,
+  });
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw new Error(`provider daemon liveness failed with HTTP ${response.statusCode}`);
+  }
+  return decodeProviderDaemonLivenessJson(response.body);
 }
 
 async function issueProviderDaemonLease(
@@ -884,6 +908,60 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
 
   const currentConfig = Ref.get(state).pipe(Effect.map((current) => current.endpoint));
 
+  const probeLivenessUnlocked: Effect.Effect<Option.Option<ProviderDaemonLivenessValue>> =
+    Effect.gen(function* () {
+      const current = yield* Ref.get(state);
+      const endpoint = Option.getOrUndefined(current.endpoint);
+      if (endpoint === undefined) {
+        return Option.none<ProviderDaemonLivenessValue>();
+      }
+
+      const refreshStartedAtMs = performance.now();
+      const livenessResult = yield* Effect.tryPromise({
+        try: async () => {
+          const liveness = await fetchProviderDaemonLiveness(endpoint);
+          const expectedPid = Option.getOrUndefined(current.pid);
+          if (expectedPid !== undefined && liveness.pid !== expectedPid) {
+            throw new Error(
+              `provider daemon liveness PID mismatch: expected ${expectedPid}, received ${liveness.pid}`,
+            );
+          }
+          if (liveness.runtimeBuildId !== undefined && liveness.runtimeBuildId !== runtimeBuildId) {
+            throw new Error("provider daemon liveness runtime build mismatch");
+          }
+          return liveness;
+        },
+        catch: (cause) => new ProviderDaemonHealthError({ cause }),
+      }).pipe(Effect.result);
+
+      const durationMs = Math.round((performance.now() - refreshStartedAtMs) * 100) / 100;
+      if (livenessResult._tag === "Failure") {
+        yield* Ref.update(state, (latest) => ({
+          ...latest,
+          lastError: Option.some(livenessResult.failure.message),
+          lastHealthRefreshDurationMs: Option.some(durationMs),
+          healthRefreshCount: latest.healthRefreshCount + 1,
+          healthRefreshFailureCount: latest.healthRefreshFailureCount + 1,
+        }));
+        yield* publishDebugSnapshot;
+        yield* logWarning("provider daemon liveness probe failed", {
+          error: livenessResult.failure.message,
+        });
+        return Option.none<ProviderDaemonLivenessValue>();
+      }
+
+      yield* Ref.update(state, (latest) => ({
+        ...latest,
+        status: "running" as const,
+        lastError: Option.none(),
+        lastHealthRefreshDurationMs: Option.some(durationMs),
+        healthRefreshCount: latest.healthRefreshCount + 1,
+      }));
+      yield* publishDebugSnapshot;
+      return Option.some(livenessResult.success);
+    });
+  const probeLiveness = lifecycleMutex.withPermits(1)(probeLivenessUnlocked);
+
   const refreshHealthUnlocked: Effect.Effect<Option.Option<ProviderDaemonHealthValue>> = Effect.gen(
     function* () {
       const current = yield* Ref.get(state);
@@ -1011,6 +1089,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
     ensureRunning,
     recover,
     currentConfig,
+    probeLiveness,
     refreshHealth,
     snapshot,
     stop,

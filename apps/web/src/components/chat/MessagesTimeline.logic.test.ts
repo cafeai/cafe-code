@@ -4,6 +4,8 @@ import {
   computeMessageDurationStart,
   deriveHistoricalWorkLogDisplayState,
   deriveMessagesTimelineRows,
+  filterHistoricalWorkLogSummariesByPresence,
+  findHistoricalWorkLogPresenceCandidates,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
 } from "./MessagesTimeline.logic";
@@ -201,6 +203,58 @@ describe("deriveHistoricalWorkLogDisplayState", () => {
       countLabel: " (2+)",
       displayCount: 2,
     });
+  });
+});
+
+describe("historical work-log presence", () => {
+  const snapshotTurnId = "turn-snapshot" as never;
+  const persistedTurnId = "turn-persisted" as never;
+  const emptyTurnId = "turn-empty" as never;
+  const unresolvedTurnId = "turn-unresolved" as never;
+  const summaries = new Map([
+    [
+      snapshotTurnId,
+      {
+        turnId: snapshotTurnId,
+        snapshotEntryCount: 1,
+        previewEntries: [
+          {
+            id: "snapshot-work",
+            turnId: snapshotTurnId,
+            createdAt: "2026-01-01T00:00:00Z",
+            label: "Ran command",
+            tone: "tool" as const,
+          },
+        ],
+      },
+    ],
+    [persistedTurnId, { turnId: persistedTurnId, snapshotEntryCount: 0, previewEntries: [] }],
+    [emptyTurnId, { turnId: emptyTurnId, snapshotEntryCount: 0, previewEntries: [] }],
+    [unresolvedTurnId, { turnId: unresolvedTurnId, snapshotEntryCount: 0, previewEntries: [] }],
+  ]);
+
+  it("keeps snapshot and DB-confirmed rows while omitting empty or unresolved placeholders", () => {
+    const filtered = filterHistoricalWorkLogSummariesByPresence({
+      summaries,
+      presenceByTurnId: new Map([
+        [persistedTurnId, true],
+        [emptyTurnId, false],
+      ]),
+    });
+
+    expect([...filtered.keys()]).toEqual([snapshotTurnId, persistedTurnId]);
+  });
+
+  it("probes only turns not already resolved from snapshots or prior presence results", () => {
+    const candidates = findHistoricalWorkLogPresenceCandidates({
+      summaries,
+      presenceByTurnId: new Map([
+        [persistedTurnId, true],
+        [emptyTurnId, false],
+      ]),
+    });
+
+    expect(candidates).toEqual([unresolvedTurnId]);
   });
 });
 

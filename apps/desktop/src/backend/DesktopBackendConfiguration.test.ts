@@ -62,6 +62,7 @@ const providerDaemonLayer = Layer.succeed(
     }),
     recover: () => Effect.die("unexpected recover"),
     currentConfig: Effect.succeed(Option.none()),
+    probeLiveness: Effect.succeed(Option.none()),
     refreshHealth: Effect.succeed(Option.none()),
     snapshot: Effect.succeed({
       status: "idle",
@@ -384,6 +385,7 @@ describe("DesktopBackendConfiguration", () => {
                 token: "provider-daemon-test-token-000000000000000000000000",
               }),
             ),
+            probeLiveness: Effect.succeed(Option.none()),
             refreshHealth: Effect.succeed(Option.none()),
             snapshot: Effect.die("unexpected snapshot"),
             stop: Effect.void,

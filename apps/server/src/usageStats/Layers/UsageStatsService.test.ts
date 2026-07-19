@@ -1,6 +1,7 @@
 import {
   DEFAULT_SERVER_SETTINGS,
   ProviderDriverKind,
+  ProviderInstanceId,
   ThreadId,
   TurnId,
   type OrchestrationEvent,
@@ -39,7 +40,11 @@ import { UsageStatsServiceLive } from "./UsageStatsService.ts";
 
 const THREAD_1 = ThreadId.make("thread-1");
 const THREAD_2 = ThreadId.make("thread-2");
+const THREAD_3 = ThreadId.make("thread-3");
 const CODEX = ProviderDriverKind.make("codex");
+const CLAUDE = ProviderDriverKind.make("claudeAgent");
+const CODEX_PERSONAL = ProviderInstanceId.make("codex_personal");
+const CODEX_WORK = ProviderInstanceId.make("codex_work");
 
 /** Let forked stream consumers subscribe / drain without advancing the clock. */
 const settle = Effect.forEach(Array.from({ length: 32 }), () => Effect.yieldNow, {
@@ -156,10 +161,14 @@ function userMessageEvent(threadId: ThreadId, messageId: string, role: "user" | 
   };
 }
 
-function providerEventBase(threadId: ThreadId, eventId: string) {
+function providerEventBase(
+  threadId: ThreadId,
+  eventId: string,
+  provider: ProviderDriverKind = CODEX,
+) {
   return {
     eventId,
-    provider: CODEX,
+    provider,
     threadId,
     createdAt: "2026-07-06T00:00:00.000Z",
   };
@@ -169,23 +178,29 @@ function tokenUsageEvent(
   threadId: ThreadId,
   eventId: string,
   usage: { outputTokens?: number; totalOutputTokens?: number },
+  provider: ProviderDriverKind = CODEX,
 ) {
   return {
-    ...providerEventBase(threadId, eventId),
+    ...providerEventBase(threadId, eventId, provider),
     type: "thread.token-usage.updated",
     payload: { usage: { usedTokens: 1000, ...usage } },
   };
 }
 
-function runningSession(threadId: ThreadId): ProviderSession {
+function runningSession(
+  threadId: ThreadId,
+  provider: ProviderDriverKind = CODEX,
+  model?: string,
+): ProviderSession {
   return {
-    provider: CODEX,
+    provider,
     status: "running",
     runtimeMode: "full-access",
     threadId,
     activeTurnId: TurnId.make(`${threadId}-turn`),
     createdAt: "2026-07-06T00:00:00.000Z",
     updatedAt: "2026-07-06T00:00:00.000Z",
+    ...(model !== undefined ? { model } : {}),
   };
 }
 
@@ -279,6 +294,86 @@ describe("UsageStatsService", () => {
 
         const snapshot = yield* harness.service.snapshot;
         assert.equal(snapshot.totals.outputTokens, 120 + 40);
+      }),
+    ),
+  );
+
+  it.effect("persists output tokens by provider driver and effective model", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        yield* harness.setSessions([
+          runningSession(THREAD_1, CODEX, "gpt-5.6-codex"),
+          runningSession(THREAD_2, CLAUDE, "claude-opus-5"),
+        ]);
+
+        // Codex turn-start notifications do not currently include the model,
+        // so attribution resolves it once from the live provider session.
+        yield* harness.emitProvider({
+          ...providerEventBase(THREAD_1, "p0", CODEX),
+          providerInstanceId: CODEX_PERSONAL,
+          type: "turn.started",
+          payload: {},
+        });
+        yield* harness.emitProvider({
+          ...tokenUsageEvent(THREAD_1, "p1", { outputTokens: 100 }, CODEX),
+          providerInstanceId: CODEX_PERSONAL,
+        });
+
+        // A second configured account using the same driver/model aggregates
+        // into the same row; account instance ids are not usage dimensions.
+        yield* harness.emitProvider({
+          ...providerEventBase(THREAD_3, "p-account-0", CODEX),
+          providerInstanceId: CODEX_WORK,
+          type: "turn.started",
+          payload: { model: "gpt-5.6-codex" },
+        });
+        yield* harness.emitProvider({
+          ...tokenUsageEvent(THREAD_3, "p-account-1", { outputTokens: 25 }, CODEX),
+          providerInstanceId: CODEX_WORK,
+        });
+
+        // Claude/OpenCode can provide the selected model directly on turn
+        // start, avoiding the session lookup.
+        yield* harness.emitProvider({
+          ...providerEventBase(THREAD_2, "p2", CLAUDE),
+          type: "turn.started",
+          payload: { model: "claude-opus-5" },
+        });
+        yield* harness.emitProvider(tokenUsageEvent(THREAD_2, "p3", { outputTokens: 70 }, CLAUDE));
+
+        // Subsequent deltas belong to the effective rerouted model.
+        yield* harness.emitProvider({
+          ...providerEventBase(THREAD_1, "p4", CODEX),
+          type: "model.rerouted",
+          payload: {
+            fromModel: "gpt-5.6-codex",
+            toModel: "gpt-5.6-codex-mini",
+            reason: "capacity",
+          },
+        });
+        yield* harness.emitProvider(tokenUsageEvent(THREAD_1, "p5", { outputTokens: 150 }, CODEX));
+
+        yield* harness.service.flush;
+        assert.deepEqual(yield* harness.repository.listTokenBreakdownDays, [
+          {
+            day: "1970-01-01",
+            provider: CLAUDE,
+            model: "claude-opus-5",
+            outputTokens: 70,
+          },
+          {
+            day: "1970-01-01",
+            provider: CODEX,
+            model: "gpt-5.6-codex",
+            outputTokens: 125,
+          },
+          {
+            day: "1970-01-01",
+            provider: CODEX,
+            model: "gpt-5.6-codex-mini",
+            outputTokens: 50,
+          },
+        ]);
       }),
     ),
   );
@@ -403,9 +498,10 @@ describe("UsageStatsService", () => {
   it.effect("hydrates lifetime totals from previously flushed days", () =>
     withHarness((harness) =>
       Effect.gen(function* () {
-        yield* harness.repository.upsertDayDeltas([
-          { day: "2020-01-01", generatingMs: 60_000, outputTokens: 5000, userMessages: 7 },
-        ]);
+        yield* harness.repository.flushDeltas({
+          days: [{ day: "2020-01-01", generatingMs: 60_000, outputTokens: 5000, userMessages: 7 }],
+          tokenBreakdowns: [],
+        });
         const persisted = yield* harness.repository.listDays;
         assert.equal(persisted.length, 1);
         const rebuilt = yield* harness.rebuildService;

@@ -34,9 +34,9 @@ export const PROVIDER_PIPELINE_POLICY = {
   webSocketConnectionMaxEvents: 512,
   webSocketConnectionMaxBytes: 8 * 1024 * 1024,
   webSocketReservedControlBytes: 512 * 1024,
-  // Thread detail snapshots retain up to 2,000 recent messages. A synthetic
-  // 2 KiB/message inventory is about 4 MiB before RPC framing, so admit that
-  // normal recovery shape while staying below the 7.5 MiB bulk connection lane.
+  // Small thread detail snapshots may still use one frame. Larger histories are
+  // emitted as bounded snapshot-chunk items, so this remains a per-frame ceiling
+  // and must never be raised to accommodate an entire long-running thread.
   webSocketMaxFrameBytes: 7 * 1024 * 1024,
 } as const;
 

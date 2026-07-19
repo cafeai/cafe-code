@@ -2,15 +2,21 @@ import { QueryClient } from "@tanstack/react-query";
 import {
   EnvironmentId,
   EventId,
+  MessageId,
+  OrchestrationThreadDetailSnapshot,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  THREAD_DETAIL_SNAPSHOT_CHUNK_RAW_BYTES,
   TurnId,
   type OrchestrationEvent,
   type OrchestrationShellSnapshot,
   type OrchestrationThread,
+  type OrchestrationThreadDetailSnapshot as OrchestrationThreadDetailSnapshotType,
+  type OrchestrationThreadDetailSnapshotChunk,
   type OrchestrationThreadStreamItem,
 } from "@cafecode/contracts";
+import * as Schema from "effect/Schema";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockSubscribeThread = vi.fn();
@@ -26,6 +32,10 @@ const mockGetPrimaryKnownEnvironment = vi.hoisted(() => vi.fn());
 const mockFetchRemoteSessionState = vi.fn();
 const mockConnectionReconnects: Array<ReturnType<typeof vi.fn>> = [];
 let savedEnvironmentRegistryListener: (() => void) | null = null;
+
+const encodeThreadDetailSnapshotJson = Schema.encodeSync(
+  Schema.fromJsonString(OrchestrationThreadDetailSnapshot),
+);
 
 function MockWsTransport() {
   return undefined;
@@ -243,6 +253,36 @@ function makeThreadSessionSetEvent(params: {
   };
 }
 
+function encodeBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return globalThis.btoa(binary);
+}
+
+async function makeThreadDetailSnapshotChunks(
+  snapshot: OrchestrationThreadDetailSnapshotType,
+): Promise<OrchestrationThreadDetailSnapshotChunk[]> {
+  const bytes = new TextEncoder().encode(encodeThreadDetailSnapshotJson(snapshot));
+  const digest = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", bytes));
+  const sha256 = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const chunkCount = Math.ceil(bytes.byteLength / THREAD_DETAIL_SNAPSHOT_CHUNK_RAW_BYTES);
+  return Array.from({ length: chunkCount }, (_, chunkIndex) => {
+    const start = chunkIndex * THREAD_DETAIL_SNAPSHOT_CHUNK_RAW_BYTES;
+    const end = Math.min(start + THREAD_DETAIL_SNAPSHOT_CHUNK_RAW_BYTES, bytes.byteLength);
+    return {
+      kind: "snapshot-chunk" as const,
+      snapshotSequence: snapshot.snapshotSequence,
+      sha256,
+      chunkIndex,
+      chunkCount,
+      encodedBytes: bytes.byteLength,
+      data: encodeBase64(bytes.subarray(start, end)),
+    };
+  });
+}
+
 describe("retainThreadDetailSubscription", () => {
   beforeAll(async () => {
     await import("./service");
@@ -406,6 +446,86 @@ describe("retainThreadDetailSubscription", () => {
     expect(session?.status).toBe("ready");
     expect(session?.activeTurnId).toBeUndefined();
     expect(turnState?.latestTurn?.state).toBe("completed");
+
+    release();
+    stop();
+    await resetEnvironmentServiceForTests();
+  });
+
+  it("hydrates an oversized snapshot in chunks before applying buffered live events", async () => {
+    const {
+      retainThreadDetailSubscription,
+      startEnvironmentConnectionService,
+      resetEnvironmentServiceForTests,
+    } = await import("./service");
+    const { useStore } = await import("../../store");
+
+    const stop = startEnvironmentConnectionService(new QueryClient());
+    const environmentId = EnvironmentId.make("env-1");
+    const threadId = ThreadId.make("thread-chunked-detail");
+    const thread = makeThreadDetail({ threadId, sessionStatus: "running" });
+    const largeText = `prefix🙂${"x".repeat(THREAD_DETAIL_SNAPSHOT_CHUNK_RAW_BYTES + 128)}`;
+    const messageId = MessageId.make("message-chunked-detail");
+    const snapshot: OrchestrationThreadDetailSnapshotType = {
+      snapshotSequence: 20,
+      thread: {
+        ...thread,
+        messages: [
+          {
+            id: messageId,
+            role: "assistant",
+            text: largeText,
+            turnId: TurnId.make("turn-1"),
+            streaming: false,
+            createdAt: "2026-04-13T00:00:00.000Z",
+            updatedAt: "2026-04-13T00:00:00.000Z",
+          },
+        ],
+      },
+    };
+    const chunks = await makeThreadDetailSnapshotChunks(snapshot);
+    expect(chunks.length).toBeGreaterThan(1);
+
+    const release = retainThreadDetailSubscription(environmentId, threadId);
+    const callback = mockSubscribeThread.mock.calls[0]?.[1] as
+      | ((item: OrchestrationThreadStreamItem) => void)
+      | undefined;
+    if (!callback) {
+      throw new Error("Expected thread subscription callback.");
+    }
+
+    callback(chunks[0]!);
+    callback({
+      kind: "event",
+      event: makeThreadSessionSetEvent({
+        threadId,
+        sequence: 21,
+        sessionStatus: "ready",
+      }),
+    });
+    expect(
+      useStore.getState().environmentStateById[environmentId]?.messageIdsByThreadId[threadId],
+    ).toBe(undefined);
+
+    for (const chunk of chunks.slice(1)) {
+      callback(chunk);
+    }
+    await vi.waitFor(() => {
+      expect(
+        useStore.getState().environmentStateById[environmentId]?.messageByThreadId[threadId]?.[
+          messageId
+        ]?.text,
+      ).toBe(largeText);
+    });
+    await vi.runOnlyPendingTimersAsync();
+    expect(
+      useStore.getState().environmentStateById[environmentId]?.threadSessionById[threadId]?.status,
+    ).toBe("ready");
+    expect(
+      useStore.getState().environmentStateById[environmentId]?.messageByThreadId[threadId]?.[
+        messageId
+      ]?.text,
+    ).toBe(largeText);
 
     release();
     stop();

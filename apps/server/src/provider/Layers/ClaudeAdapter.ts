@@ -197,6 +197,7 @@ interface ClaudeTurnState {
   readonly assistantTextBlocks: Map<number, AssistantTextBlockState>;
   readonly assistantTextBlockOrder: Array<AssistantTextBlockState>;
   readonly capturedProposedPlanKeys: Set<string>;
+  readonly reportedSubagentRetryKeys: Set<string>;
   sdkMessageCount: number;
   firstSdkMessageAt?: string;
   firstSdkMessageType?: string;
@@ -1333,6 +1334,7 @@ function makeClaudeTurnState(input: {
     assistantTextBlocks: new Map(),
     assistantTextBlockOrder: [],
     capturedProposedPlanKeys: new Set(),
+    reportedSubagentRetryKeys: new Set(),
     sdkMessageCount: 0,
     watchdogWarningsEmitted: 0,
     nextSyntheticAssistantBlockIndex: -1,
@@ -3042,6 +3044,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     if (context.turnState) {
       context.turnState.items.push(message.message);
+      // Agent SDK 0.3.215 can mark this snapshot `aborted` when interruption
+      // truncates it before stop_reason. The partial text is still user-visible
+      // output worth preserving; only the later result/interrupt event may
+      // terminalize the turn.
       yield* backfillAssistantTextBlocksFromSnapshot(context, message);
     }
 
@@ -3643,6 +3649,41 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...(message.task_id ? { summary: `task:${message.task_id}` } : {}),
         },
       });
+
+      const retry = message.subagent_retry;
+      if (retry) {
+        // Claude 2.1.214 emits periodic heartbeat frames for silent tools and
+        // attaches structured retry data when a subagent is actually being
+        // retried. Heartbeats remain ephemeral liveness signals; only one row
+        // per concrete retry attempt belongs in Cafe's durable work log.
+        const retryKey = `${retry.agent_id}:${retry.attempt}`;
+        const alreadyReported = context.turnState?.reportedSubagentRetryKeys.has(retryKey) ?? false;
+        if (!alreadyReported) {
+          context.turnState?.reportedSubagentRetryKeys.add(retryKey);
+          const subagentType = sanitizeDiagnosticLine(message.subagent_type ?? "").slice(0, 120);
+          const errorCategory = sanitizeDiagnosticLine(retry.error_category).slice(0, 120);
+          const attempt = Math.max(1, Math.trunc(retry.attempt));
+          const maxRetries = Math.max(attempt, Math.trunc(retry.max_retries));
+          const retryDelayMs = Math.max(0, Math.trunc(retry.retry_delay_ms));
+          const retryTarget = subagentType ? `${subagentType} subagent` : "Claude subagent";
+          const retrySummary = `Retrying ${retryTarget}${
+            errorCategory ? ` after ${errorCategory}` : ""
+          } (retry ${attempt}/${maxRetries}${
+            retryDelayMs > 0 ? `, ${retryDelayMs} ms delay` : ""
+          }).`;
+
+          yield* offerRuntimeEvent({
+            ...base,
+            type: "task.progress",
+            payload: {
+              taskId: RuntimeTaskId.make(message.task_id ?? retry.agent_id),
+              description: retrySummary,
+              summary: retrySummary,
+              lastToolName: message.tool_name,
+            },
+          });
+        }
+      }
       return;
     }
 
@@ -4206,7 +4247,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         }
 
         const runtimeMode = input.runtimeMode ?? "full-access";
-        if (runtimeMode === "full-access") {
+        const matchedAskRule = callbackOptions.matchedAskRule !== undefined;
+        // Agent SDK 0.3.215 marks prompts forced by a user-configured
+        // permissions.ask rule. That explicit rule is more specific than
+        // Cafe's broad full-access mode, so it must still reach a human instead
+        // of being silently auto-approved. Do not persist ruleContent here: it
+        // can contain sensitive project policy and is not needed to honor the
+        // upstream decision.
+        if (runtimeMode === "full-access" && !matchedAskRule) {
           return {
             behavior: "allow",
             updatedInput: toolInput,
@@ -4215,7 +4263,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
         const requestId = ApprovalRequestId.make(yield* Random.nextUUIDv4);
         const requestType = classifyRequestType(toolName);
-        const detail = summarizeToolRequest(toolName, toolInput);
+        const toolDetail = summarizeToolRequest(toolName, toolInput);
+        const detail = matchedAskRule
+          ? toolDetail
+            ? `Permission rule requires confirmation. ${toolDetail}`
+            : "Permission rule requires confirmation."
+          : toolDetail;
         const decisionDeferred = yield* Deferred.make<ProviderApprovalDecision>();
         const pendingApproval: PendingApproval = {
           requestType,
@@ -4240,6 +4293,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               toolName,
               input: toolInput,
               ...(callbackOptions.toolUseID ? { toolUseId: callbackOptions.toolUseID } : {}),
+              ...(matchedAskRule ? { matchedAskRule: true } : {}),
             },
           },
           providerRefs: nativeProviderRefs(context, {
@@ -4251,6 +4305,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             payload: {
               toolName,
               input: toolInput,
+              ...(matchedAskRule ? { matchedAskRule: true } : {}),
             },
           },
         });

@@ -22,10 +22,15 @@
  * and accrual cursors always advance, so toggling collection partitions time
  * and tokens cleanly instead of retroactively counting the disabled period.
  */
-import type { ProviderRuntimeEvent, OrchestrationEvent } from "@cafecode/contracts";
+import type {
+  OrchestrationEvent,
+  ProviderDriverKind,
+  ProviderRuntimeEvent,
+} from "@cafecode/contracts";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
@@ -37,6 +42,9 @@ import { selectOutputCounter, tokenDelta } from "../tokenDelta.ts";
 import { UsageStatsService, type UsageStatsServiceShape } from "../Services/UsageStatsService.ts";
 
 const FLUSH_INTERVAL_MS = 5_000;
+const MODEL_RESOLUTION_TIMEOUT_MS = 1_000;
+const MAX_USAGE_MODEL_CHARS = 256;
+const UNKNOWN_USAGE_MODEL = "unknown";
 
 interface MutableDayTotals {
   generatingMs: number;
@@ -56,7 +64,18 @@ interface ThreadTracking {
   sawTokenUsageThisTurn: boolean;
   /** Set while the thread is generating; advanced on every accrual. */
   accrueFromMs: number | undefined;
+  /**
+   * Canonical driver only. `providerInstanceId` deliberately never enters
+   * usage attribution because instances identify configured accounts.
+   */
+  provider: ProviderDriverKind | undefined;
+  /** Selected/effective model for token deltas observed after this point. */
+  model: string | undefined;
+  /** Prevents a missing session model from causing a lookup on every token. */
+  modelResolutionAttempted: boolean;
 }
+
+type PendingTokenBreakdowns = Map<string, Map<ProviderDriverKind, Map<string, number>>>;
 
 /**
  * Best-effort output-token extraction from an opaque `turn.completed` usage
@@ -66,6 +85,27 @@ interface ThreadTracking {
  */
 const finiteNumber = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+
+/**
+ * Model names are provider-controlled strings. Keep valid names verbatim for
+ * future reporting, but reject empty/oversized values before they become
+ * composite SQLite index keys.
+ */
+function normalizeUsageModel(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 && normalized.length <= MAX_USAGE_MODEL_CHARS
+    ? normalized
+    : undefined;
+}
+
+function resetAttribution(tracking: ThreadTracking, provider: ProviderDriverKind): void {
+  tracking.provider = provider;
+  tracking.model = undefined;
+  tracking.modelResolutionAttempted = false;
+}
 
 function turnCompletedOutputTokens(usage: unknown): number | undefined {
   if (usage === null || typeof usage !== "object") {
@@ -90,6 +130,7 @@ const makeUsageStatsService = Effect.gen(function* () {
   // sections of the forked consumers below, so no Ref coordination is needed.
   const days = new Map<string, MutableDayTotals>();
   const pending = new Map<string, MutableDayTotals>();
+  const pendingTokenBreakdowns: PendingTokenBreakdowns = new Map();
   const threads = new Map<string, ThreadTracking>();
   const totals: MutableDayTotals = { generatingMs: 0, outputTokens: 0, userMessages: 0 };
   let enabled = true;
@@ -141,6 +182,35 @@ const makeUsageStatsService = Effect.gen(function* () {
     totals.userMessages += userMessages;
   };
 
+  /**
+   * Record the same output-token observation in the aggregate and attribution
+   * accumulators. The repository later commits both maps atomically.
+   */
+  const addOutputTokenDelta = (
+    day: string,
+    outputTokens: number,
+    provider: ProviderDriverKind,
+    model: string | undefined,
+  ): void => {
+    if (outputTokens <= 0) {
+      return;
+    }
+    addDelta(day, { outputTokens });
+
+    let providers = pendingTokenBreakdowns.get(day);
+    if (providers === undefined) {
+      providers = new Map();
+      pendingTokenBreakdowns.set(day, providers);
+    }
+    let models = providers.get(provider);
+    if (models === undefined) {
+      models = new Map();
+      providers.set(provider, models);
+    }
+    const modelKey = model ?? UNKNOWN_USAGE_MODEL;
+    models.set(modelKey, (models.get(modelKey) ?? 0) + outputTokens);
+  };
+
   const track = (threadId: string): ThreadTracking => {
     let tracking = threads.get(threadId);
     if (tracking === undefined) {
@@ -149,10 +219,55 @@ const makeUsageStatsService = Effect.gen(function* () {
         witnessedSessionStart: false,
         sawTokenUsageThisTurn: false,
         accrueFromMs: undefined,
+        provider: undefined,
+        model: undefined,
+        modelResolutionAttempted: false,
       };
       threads.set(threadId, tracking);
     }
     return tracking;
+  };
+
+  /**
+   * Resolve a model once for a turn, never once per token. Some adapters put
+   * the model directly on `turn.started`; Codex currently does not, so Cafe
+   * consults the already-live provider session with a short timeout. Failure
+   * degrades to the explicit `unknown` bucket and never blocks accounting or
+   * the provider event stream indefinitely.
+   */
+  const resolveTrackingModel = (
+    threadId: string,
+    provider: ProviderDriverKind,
+    tracking: ThreadTracking,
+    explicitModel?: string,
+  ): Effect.Effect<void> => {
+    tracking.provider = provider;
+    const normalizedExplicitModel = normalizeUsageModel(explicitModel);
+    if (normalizedExplicitModel !== undefined) {
+      tracking.model = normalizedExplicitModel;
+      tracking.modelResolutionAttempted = true;
+      return Effect.void;
+    }
+    if (tracking.modelResolutionAttempted) {
+      return Effect.void;
+    }
+
+    // Mark before yielding so concurrent lifecycle events cannot schedule
+    // duplicate all-provider session reads for the same turn.
+    tracking.modelResolutionAttempted = true;
+    return providerService.listSessions().pipe(
+      Effect.timeoutOption(MODEL_RESOLUTION_TIMEOUT_MS),
+      Effect.catchCause(() => Effect.succeed(Option.none())),
+      Effect.map((sessionsOption) => {
+        if (Option.isNone(sessionsOption)) {
+          return;
+        }
+        const session = sessionsOption.value.find(
+          (candidate) => candidate.threadId === threadId && candidate.provider === provider,
+        );
+        tracking.model = normalizeUsageModel(session?.model);
+      }),
+    );
   };
 
   /** Credit generating time up to `nowMs` and advance the accrual cursor. */
@@ -181,22 +296,33 @@ const makeUsageStatsService = Effect.gen(function* () {
     switch (event.type) {
       case "session.started":
       case "thread.started": {
-        track(event.threadId).witnessedSessionStart = true;
+        const tracking = track(event.threadId);
+        tracking.witnessedSessionStart = true;
+        resetAttribution(tracking, event.provider);
         return Effect.void;
       }
 
       case "turn.started": {
-        return Effect.map(Clock.currentTimeMillis, (now) => {
+        return Effect.gen(function* () {
+          const now = yield* Clock.currentTimeMillis;
           const tracking = track(event.threadId);
           tracking.sawTokenUsageThisTurn = false;
           if (tracking.accrueFromMs === undefined) {
             tracking.accrueFromMs = now;
           }
+          resetAttribution(tracking, event.provider);
+          yield* resolveTrackingModel(
+            event.threadId,
+            event.provider,
+            tracking,
+            event.payload.model,
+          );
         });
       }
 
       case "thread.token-usage.updated": {
-        return Effect.map(Clock.currentTimeMillis, (now) => {
+        return Effect.gen(function* () {
+          const now = yield* Clock.currentTimeMillis;
           const tracking = track(event.threadId);
           tracking.sawTokenUsageThisTurn = true;
           const counter = selectOutputCounter(event.payload.usage);
@@ -208,24 +334,41 @@ const makeUsageStatsService = Effect.gen(function* () {
           const result = tokenDelta(tracking.watermark, counter.value, countFirstObservation);
           tracking.watermark = result.watermark;
           if (enabled && result.delta > 0) {
-            addDelta(localDayKey(now), { outputTokens: result.delta });
+            if (tracking.provider !== event.provider) {
+              resetAttribution(tracking, event.provider);
+            }
+            yield* resolveTrackingModel(event.threadId, event.provider, tracking);
+            addOutputTokenDelta(localDayKey(now), result.delta, event.provider, tracking.model);
           }
         });
       }
 
       case "turn.completed": {
-        return Effect.map(Clock.currentTimeMillis, (now) => {
+        return Effect.gen(function* () {
+          const now = yield* Clock.currentTimeMillis;
           const tracking = track(event.threadId);
           accrue(tracking, now);
           tracking.accrueFromMs = undefined;
           if (!tracking.sawTokenUsageThisTurn) {
             const outputTokens = turnCompletedOutputTokens(event.payload.usage);
             if (enabled && outputTokens !== undefined && outputTokens > 0) {
-              addDelta(localDayKey(now), { outputTokens });
+              if (tracking.provider !== event.provider) {
+                resetAttribution(tracking, event.provider);
+              }
+              yield* resolveTrackingModel(event.threadId, event.provider, tracking);
+              addOutputTokenDelta(localDayKey(now), outputTokens, event.provider, tracking.model);
             }
           }
           tracking.sawTokenUsageThisTurn = false;
         });
+      }
+
+      case "model.rerouted": {
+        const tracking = track(event.threadId);
+        tracking.provider = event.provider;
+        tracking.model = normalizeUsageModel(event.payload.toModel);
+        tracking.modelResolutionAttempted = true;
+        return Effect.void;
       }
 
       case "turn.aborted": {
@@ -253,23 +396,35 @@ const makeUsageStatsService = Effect.gen(function* () {
   };
 
   const flush: UsageStatsServiceShape["flush"] = Effect.suspend(() => {
-    if (pending.size === 0) {
+    if (pending.size === 0 && pendingTokenBreakdowns.size === 0) {
       return Effect.void;
     }
-    const batch = Array.from(pending.entries(), ([day, delta]) => ({
+    const dayBatch = Array.from(pending.entries(), ([day, delta]) => ({
       day,
       generatingMs: delta.generatingMs,
       outputTokens: delta.outputTokens,
       userMessages: delta.userMessages,
     }));
+    const tokenBreakdownBatch = Array.from(pendingTokenBreakdowns.entries()).flatMap(
+      ([day, providers]) =>
+        Array.from(providers.entries()).flatMap(([provider, models]) =>
+          Array.from(models.entries(), ([model, outputTokens]) => ({
+            day,
+            provider,
+            model,
+            outputTokens,
+          })),
+        ),
+    );
     pending.clear();
-    return repository.upsertDayDeltas(batch).pipe(
+    pendingTokenBreakdowns.clear();
+    return repository.flushDeltas({ days: dayBatch, tokenBreakdowns: tokenBreakdownBatch }).pipe(
       Effect.catch((error) =>
         Effect.sync(() => {
-          // Merge the batch back so the deltas retry on the next tick; days
-          // and totals already include them. Pending stays day-aggregated, so
-          // repeated failures cannot grow unbounded.
-          for (const row of batch) {
+          // The repository transaction commits both tables or neither. Merge
+          // both snapshots back so retries preserve that same correspondence;
+          // live aggregate totals already include these deltas.
+          for (const row of dayBatch) {
             const entry = pending.get(row.day) ?? {
               generatingMs: 0,
               outputTokens: 0,
@@ -279,6 +434,20 @@ const makeUsageStatsService = Effect.gen(function* () {
             entry.outputTokens += row.outputTokens;
             entry.userMessages += row.userMessages;
             pending.set(row.day, entry);
+          }
+
+          for (const row of tokenBreakdownBatch) {
+            let providers = pendingTokenBreakdowns.get(row.day);
+            if (providers === undefined) {
+              providers = new Map();
+              pendingTokenBreakdowns.set(row.day, providers);
+            }
+            let models = providers.get(row.provider);
+            if (models === undefined) {
+              models = new Map();
+              providers.set(row.provider, models);
+            }
+            models.set(row.model, (models.get(row.model) ?? 0) + row.outputTokens);
           }
         }).pipe(
           Effect.flatMap(() => Effect.logError("usage stats: failed to flush deltas", { error })),

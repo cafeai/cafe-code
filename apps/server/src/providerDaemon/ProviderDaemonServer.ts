@@ -8,6 +8,7 @@ import {
   PROVIDER_DAEMON_EVENTS_PATH,
   PROVIDER_DAEMON_HEALTH_PATH,
   PROVIDER_DAEMON_LEASES_PATH,
+  PROVIDER_DAEMON_LIVENESS_PATH,
   PROVIDER_DAEMON_RPC_PATH,
   ProviderDaemonEventRecord,
   ProviderDaemonLeaseRequest,
@@ -1199,6 +1200,32 @@ export const runProviderDaemonServer = (
       const method = request.method ?? "GET";
       const url = new URL(request.url ?? "/", `http://${host}:${port}`);
       void (async () => {
+        if (url.pathname === PROVIDER_DAEMON_LIVENESS_PATH && method === "GET") {
+          if (!hasCapability(request, "health")) {
+            writeJson(response, 401, { error: "unauthorized" });
+            return;
+          }
+
+          // This route is the desktop watchdog's process-liveness boundary.
+          // Never add adapter, SQLite, journal, supervisor, or projection reads
+          // here: a diagnostics query that stalls under long-running provider
+          // load must not convince the watchdog that a live daemon died.
+          writeJson(response, 200, {
+            ok: true,
+            mode,
+            protocolVersion: options.protocolVersion,
+            pid: process.pid,
+            ppid: process.ppid,
+            version: options.version,
+            ...(options.runtimeBuildId !== undefined
+              ? { runtimeBuildId: options.runtimeBuildId }
+              : {}),
+            startedAt,
+            transport,
+          });
+          return;
+        }
+
         if (url.pathname === PROVIDER_DAEMON_HEALTH_PATH && method === "GET") {
           if (!hasCapability(request, "health")) {
             writeJson(response, 401, { error: "unauthorized" });

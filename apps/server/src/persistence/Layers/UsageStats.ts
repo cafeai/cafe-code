@@ -9,6 +9,7 @@ import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
 import {
   UsageStatsDayRow,
   UsageStatsRepository,
+  UsageStatsTokenBreakdownDayRow,
   type UsageStatsRepositoryShape,
 } from "../Services/UsageStats.ts";
 
@@ -51,6 +52,38 @@ const makeUsageStatsRepository = Effect.gen(function* () {
       `,
   });
 
+  const listUsageStatsTokenBreakdownRows = SqlSchema.findAll({
+    Request: Schema.Struct({}),
+    Result: UsageStatsTokenBreakdownDayRow,
+    execute: () =>
+      sql`
+        SELECT
+          day,
+          provider_driver AS provider,
+          model,
+          output_tokens AS "outputTokens"
+        FROM usage_stats_token_breakdown_days
+        ORDER BY day ASC, provider_driver ASC, model ASC
+      `,
+  });
+
+  const upsertUsageStatsTokenBreakdownDelta = SqlSchema.void({
+    Request: UsageStatsTokenBreakdownDayRow,
+    execute: (row) =>
+      sql`
+        INSERT INTO usage_stats_token_breakdown_days (
+          day,
+          provider_driver,
+          model,
+          output_tokens
+        )
+        VALUES (${row.day}, ${row.provider}, ${row.model}, ${row.outputTokens})
+        ON CONFLICT (day, provider_driver, model)
+        DO UPDATE SET
+          output_tokens = output_tokens + excluded.output_tokens
+      `,
+  });
+
   const listDays: UsageStatsRepositoryShape["listDays"] = listUsageStatsDayRows({}).pipe(
     Effect.mapError(
       toPersistenceSqlOrDecodeError(
@@ -60,22 +93,47 @@ const makeUsageStatsRepository = Effect.gen(function* () {
     ),
   );
 
-  const upsertDayDeltas: UsageStatsRepositoryShape["upsertDayDeltas"] = (rows) =>
-    (rows.length === 1
-      ? upsertUsageStatsDayDelta(rows[0]!)
-      : sql.withTransaction(Effect.forEach(rows, upsertUsageStatsDayDelta, { discard: true }))
-    ).pipe(
+  const listTokenBreakdownDays: UsageStatsRepositoryShape["listTokenBreakdownDays"] =
+    listUsageStatsTokenBreakdownRows({}).pipe(
       Effect.mapError(
         toPersistenceSqlOrDecodeError(
-          "UsageStatsRepository.upsertDayDeltas:query",
-          "UsageStatsRepository.upsertDayDeltas:encodeRequest",
+          "UsageStatsRepository.listTokenBreakdownDays:query",
+          "UsageStatsRepository.listTokenBreakdownDays:decodeRows",
         ),
       ),
     );
 
+  const flushDeltas: UsageStatsRepositoryShape["flushDeltas"] = (deltas) => {
+    if (deltas.days.length === 0 && deltas.tokenBreakdowns.length === 0) {
+      return Effect.void;
+    }
+
+    // Always use one transaction even for one-row batches. Aggregate totals
+    // and provider/model attribution describe the same token observations; a
+    // partial commit followed by retry would permanently skew one side.
+    return sql
+      .withTransaction(
+        Effect.gen(function* () {
+          yield* Effect.forEach(deltas.days, upsertUsageStatsDayDelta, { discard: true });
+          yield* Effect.forEach(deltas.tokenBreakdowns, upsertUsageStatsTokenBreakdownDelta, {
+            discard: true,
+          });
+        }),
+      )
+      .pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "UsageStatsRepository.flushDeltas:query",
+            "UsageStatsRepository.flushDeltas:encodeRequest",
+          ),
+        ),
+      );
+  };
+
   return {
     listDays,
-    upsertDayDeltas,
+    listTokenBreakdownDays,
+    flushDeltas,
   } satisfies UsageStatsRepositoryShape;
 });
 

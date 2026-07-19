@@ -27,11 +27,16 @@ export interface WebSocketConnectionFlowControl {
 }
 
 /**
- * Effect RPC's public stream protocol admits one chunk and waits for Ack before
- * pulling the next. This Cafe-owned adapter uses that public contract as the
- * send-completion seam: the prior frame's budget is released only when the
- * stream is pulled again (or finalized). We intentionally do not patch Effect,
- * copy private RPC internals, or reach through to a private WebSocket object.
+ * Effect RPC's public stream protocol writes one stream chunk, waits for Ack,
+ * and only then invokes the next pull. This Cafe-owned adapter uses that next
+ * pull invocation as the send-completion seam. The release must happen before
+ * waiting for the upstream pull to produce another value: thread subscriptions
+ * are intentionally idle between events, and retaining the previous frame while
+ * awaiting an event would leak one permit per subscribed thread forever.
+ *
+ * Rechunking to one item also makes the accounting unit match Effect RPC's wire
+ * unit (`Chunk.values`). Without it, a source chunk containing many individually
+ * bounded snapshot parts could be serialized into one oversized RPC frame.
  * Unary/control RPCs bypass the bulk budget, which reserves capacity for Ack,
  * interrupt, approval, user-input, heartbeat, and error progress.
  */
@@ -77,13 +82,16 @@ export function makeWebSocketConnectionFlowControl(options?: {
       heldBytes = 0;
     };
 
-    return stream.pipe(
-      Stream.mapEffect((value) =>
+    return Stream.transformPull(Stream.rechunk(stream, 1), (pull) =>
+      Effect.succeed(
         Effect.gen(function* () {
-          // The next pull is the public Ack boundary for the previous frame.
+          // RpcServer starts this pull only after the previous Chunk is Acked.
+          // Release before invoking upstream because that pull can remain
+          // suspended indefinitely while a live subscription is idle.
           release();
+          const values = yield* pull;
           const startedAt = performance.now();
-          const bytes = encodedJsonByteLength(value);
+          const bytes = encodedJsonByteLength(values);
           const serializationElapsedMs = performance.now() - startedAt;
           serializationTimeMs += serializationElapsedMs;
           largestFrameBytes = Math.max(largestFrameBytes, bytes);
@@ -115,11 +123,10 @@ export function makeWebSocketConnectionFlowControl(options?: {
             turnBytes = 0;
             turnStartedAt = performance.now();
           }
-          return value;
+          return values;
         }),
       ),
-      Stream.ensuring(Effect.sync(release)),
-    );
+    ).pipe(Stream.ensuring(Effect.sync(release)));
   };
 
   return {

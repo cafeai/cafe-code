@@ -2110,6 +2110,17 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             '{"detail":"Read src/index.ts"}',
             8,
             '2026-04-06T00:00:08.000Z'
+          ),
+          (
+            'hidden-only-context-window',
+            'thread-turn-visible-page',
+            'turn-hidden-only',
+            'info',
+            'context-window.updated',
+            'Context window updated',
+            '{}',
+            9,
+            '2026-04-06T00:00:09.000Z'
           )
       `;
 
@@ -2125,6 +2136,18 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         page.activities.map((activity) => activity.id),
         ["visible-context-compaction", "visible-tool-completed"],
       );
+
+      const presence = yield* snapshotQuery.getThreadTurnWorkLogPresence({
+        threadId: ThreadId.make("thread-turn-visible-page"),
+        turnIds: [
+          TurnId.make("turn-visible-page"),
+          TurnId.make("turn-hidden-only"),
+          TurnId.make("turn-without-activity"),
+          TurnId.make("turn-visible-page"),
+        ],
+      });
+
+      assert.deepStrictEqual(presence.turnIdsWithWorkLog, [TurnId.make("turn-visible-page")]);
     }),
   );
 

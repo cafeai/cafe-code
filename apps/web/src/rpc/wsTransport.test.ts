@@ -17,7 +17,7 @@ import {
   getWsConnectionUiState,
   resetWsConnectionStateForTests,
 } from "../rpc/wsConnectionState";
-import { WsTransport } from "./wsTransport";
+import { computeNonTransportSubscriptionRetryDelayMs, WsTransport } from "./wsTransport";
 
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 
@@ -168,6 +168,14 @@ afterEach(async () => {
 });
 
 describe("WsTransport", () => {
+  it("backs off repeated recoverable application stream failures", () => {
+    expect(computeNonTransportSubscriptionRetryDelayMs(250, 1)).toBe(250);
+    expect(computeNonTransportSubscriptionRetryDelayMs(250, 2)).toBe(500);
+    expect(computeNonTransportSubscriptionRetryDelayMs(250, 3)).toBe(1_000);
+    expect(computeNonTransportSubscriptionRetryDelayMs(250, 20)).toBe(10_000);
+    expect(computeNonTransportSubscriptionRetryDelayMs(0, 20)).toBe(0);
+  });
+
   it("normalizes root websocket urls to /ws and preserves query params", async () => {
     const transport = createTransport("ws://localhost:3020/?token=secret-token");
 
