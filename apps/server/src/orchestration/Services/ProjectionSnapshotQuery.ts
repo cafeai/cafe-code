@@ -16,6 +16,8 @@ import type {
   OrchestrationThreadDetailSnapshot,
   OrchestrationThreadTurnActivityPage,
   OrchestrationThreadTurnActivityPageInput,
+  OrchestrationThreadTurnWorkLogPresenceInput,
+  OrchestrationThreadTurnWorkLogPresenceResult,
   OrchestrationThreadShell,
   ProjectId,
   ThreadId,
@@ -190,6 +192,17 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadTurnActivityPage: (
     input: OrchestrationThreadTurnActivityPageInput,
   ) => Effect.Effect<OrchestrationThreadTurnActivityPage, ProjectionRepositoryError>;
+
+  /**
+   * Test whether bounded historical turns contain displayable work-log rows.
+   *
+   * This is deliberately an existence query rather than a count/page query so
+   * scrolling through a long conversation does not scan every activity in a
+   * multi-hour turn merely to decide whether a collapsed row should exist.
+   */
+  readonly getThreadTurnWorkLogPresence: (
+    input: OrchestrationThreadTurnWorkLogPresenceInput,
+  ) => Effect.Effect<OrchestrationThreadTurnWorkLogPresenceResult, ProjectionRepositoryError>;
 }
 
 /**

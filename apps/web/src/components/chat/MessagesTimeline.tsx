@@ -91,6 +91,7 @@ import {
   type TimelineScrollDebugEventInput,
   type TimelineScrollDebugListState,
 } from "./timelineScrollDebug";
+import { useHistoricalWorkLogPresence } from "./useHistoricalWorkLogPresence";
 
 export {
   extractOpenablePathTokens,
@@ -115,6 +116,7 @@ interface TimelineRowSharedState {
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   activeThreadId: ThreadId | null;
   activeThreadEnvironmentId: EnvironmentId;
+  onHistoricalWorkLogPresenceResolved: (turnId: TurnId, hasWorkLog: boolean) => void;
   onRevertUserMessage: (messageId: MessageId) => void;
   onImageExpand: (preview: ExpandedImagePreview) => void;
 }
@@ -214,6 +216,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 }: MessagesTimelineProps) {
   const activeThreadId = activeThreadIdProp ?? null;
   const chatCopyFormat = useSettings((settings) => settings.chatCopyFormat);
+  const {
+    summaries: visibleHistoricalWorkLogSummariesByTurnId,
+    recordPresence: recordHistoricalWorkLogPresence,
+  } = useHistoricalWorkLogPresence({
+    environmentId: activeThreadEnvironmentId,
+    threadId: activeThreadId,
+    summaries: historicalWorkLogSummariesByTurnId,
+  });
   const rawRows = useMemo(
     () =>
       deriveMessagesTimelineRows({
@@ -225,8 +235,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         activeTurnId: activeTurnId ?? null,
         activeTurnStartedAt,
         revertTurnCountByUserMessageId,
-        ...(historicalWorkLogSummariesByTurnId !== undefined
-          ? { historicalWorkLogSummariesByTurnId }
+        ...(visibleHistoricalWorkLogSummariesByTurnId !== undefined
+          ? { historicalWorkLogSummariesByTurnId: visibleHistoricalWorkLogSummariesByTurnId }
           : {}),
       }),
     [
@@ -238,7 +248,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeTurnId,
       activeTurnStartedAt,
       revertTurnCountByUserMessageId,
-      historicalWorkLogSummariesByTurnId,
+      visibleHistoricalWorkLogSummariesByTurnId,
     ],
   );
   const rows = useStableRows(rawRows);
@@ -714,6 +724,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       skills,
       activeThreadId,
       activeThreadEnvironmentId,
+      onHistoricalWorkLogPresenceResolved: recordHistoricalWorkLogPresence,
       activeProvider,
       onRevertUserMessage,
       onImageExpand,
@@ -726,6 +737,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       skills,
       activeThreadId,
       activeThreadEnvironmentId,
+      recordHistoricalWorkLogPresence,
       activeProvider,
       onRevertUserMessage,
       onImageExpand,
@@ -1321,7 +1333,7 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
   row: Extract<MessagesTimelineRow, { kind: "historical-work" }>;
 }) {
   const ctx = use(TimelineRowCtx);
-  const { workspaceRoot } = ctx;
+  const { onHistoricalWorkLogPresenceResolved, workspaceRoot } = ctx;
   const [isExpanded, setIsExpanded] = useState(false);
   const [totalCount, setTotalCount] = useState<number | null>(null);
   const [activityRows, setActivityRows] = useState<ReadonlyArray<OrchestrationThreadActivity>>([]);
@@ -1360,6 +1372,7 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
           ).totalCount;
         if (cancelled) return;
         setTotalCount(knownTotal);
+        onHistoricalWorkLogPresenceResolved(row.turnId, knownTotal > 0);
         if (knownTotal <= 0) {
           setActivityRows([]);
           setLoadedOffset(0);
@@ -1399,6 +1412,7 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
     ctx.activeThreadId,
     initialPageLoaded,
     isExpanded,
+    onHistoricalWorkLogPresenceResolved,
     row.turnId,
     totalCount,
   ]);

@@ -119,8 +119,15 @@ const ThreadIdLookupInput = Schema.Struct({
   threadId: ThreadId,
 });
 const ThreadTurnActivityPageLookupInput = OrchestrationThreadTurnActivityPageInput;
+const ThreadTurnLookupInput = Schema.Struct({
+  threadId: ThreadId,
+  turnId: TurnId,
+});
 const CountRowSchema = Schema.Struct({
   count: NonNegativeInt,
+});
+const WorkLogPresenceRowSchema = Schema.Struct({
+  hasWorkLog: NonNegativeInt,
 });
 const ProjectionProjectLookupRowSchema = ProjectionProjectDbRowSchema;
 const ProjectionThreadIdLookupRowSchema = Schema.Struct({
@@ -1126,6 +1133,37 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             kind = 'provider.turn.steer.failed'
             AND json_extract(payload_json, '$.retryableFollowUp') = 1
           )
+      `,
+  });
+
+  const findThreadTurnWorkLogPresence = SqlSchema.findOne({
+    Request: ThreadTurnLookupInput,
+    Result: WorkLogPresenceRowSchema,
+    execute: ({ threadId, turnId }) =>
+      sql`
+        SELECT EXISTS(
+          SELECT 1
+          FROM projection_thread_activities
+          WHERE thread_id = ${threadId}
+            AND turn_id = ${turnId}
+            AND kind != 'context-window.updated'
+            AND kind != 'checkpoint.captured'
+            AND kind != 'task.started'
+            AND summary != 'Checkpoint captured'
+            AND (
+              kind != 'tool.started'
+              OR json_extract(payload_json, '$.itemType') = 'context_compaction'
+            )
+            AND NOT (
+              kind IN ('tool.updated', 'tool.completed')
+              AND COALESCE(json_extract(payload_json, '$.detail'), '') LIKE 'ExitPlanMode:%'
+            )
+            AND NOT (
+              kind = 'provider.turn.steer.failed'
+              AND json_extract(payload_json, '$.retryableFollowUp') = 1
+            )
+          LIMIT 1
+        ) AS "hasWorkLog"
       `,
   });
 
@@ -2388,6 +2426,36 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       };
     });
 
+  const getThreadTurnWorkLogPresence: ProjectionSnapshotQueryShape["getThreadTurnWorkLogPresence"] =
+    (input) =>
+      Effect.gen(function* () {
+        // Preserve request order while eliminating duplicate lookups. Each
+        // EXISTS query is turn-scoped and can stop at the first displayable
+        // row, unlike the full COUNT used only after explicit expansion.
+        const uniqueTurnIds = [...new Set(input.turnIds)];
+        const presenceRows = yield* Effect.forEach(uniqueTurnIds, (turnId) =>
+          findThreadTurnWorkLogPresence({
+            threadId: input.threadId,
+            turnId,
+          }).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getThreadTurnWorkLogPresence:query",
+                "ProjectionSnapshotQuery.getThreadTurnWorkLogPresence:decodeRow",
+              ),
+            ),
+            Effect.map((row) => ({ turnId, hasWorkLog: row.hasWorkLog > 0 })),
+          ),
+        );
+
+        return {
+          threadId: input.threadId,
+          turnIdsWithWorkLog: presenceRows.flatMap(({ turnId, hasWorkLog }) =>
+            hasWorkLog ? [turnId] : [],
+          ),
+        };
+      });
+
   const loadThreadDetailById = (threadId: ThreadId) =>
     Effect.gen(function* () {
       const [
@@ -2580,6 +2648,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getThreadShellById,
     getPostTerminalStaleSteerCandidateThreadIds,
     getThreadTurnActivityPage,
+    getThreadTurnWorkLogPresence,
     getThreadDetailById,
     getThreadDetailSnapshotById,
   } satisfies ProjectionSnapshotQueryShape;

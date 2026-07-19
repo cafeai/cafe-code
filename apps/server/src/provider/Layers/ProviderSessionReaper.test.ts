@@ -206,6 +206,7 @@ describe("ProviderSessionReaper", () => {
             ),
           getPostTerminalStaleSteerCandidateThreadIds: () => Effect.die("unused"),
           getThreadTurnActivityPage: () => Effect.die("unused"),
+          getThreadTurnWorkLogPresence: () => Effect.die("unused"),
           getThreadDetailById: () => Effect.die("unused"),
           getThreadDetailSnapshotById: () => Effect.die("unused"),
         }),

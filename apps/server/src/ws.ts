@@ -879,6 +879,27 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "orchestration" },
           ),
+        [ORCHESTRATION_WS_METHODS.getThreadTurnWorkLogPresence]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.getThreadTurnWorkLogPresence,
+            projectionSnapshotQuery.getThreadTurnWorkLogPresence(input).pipe(
+              Effect.tapError((cause) =>
+                Effect.logError("orchestration turn work-log presence load failed", {
+                  threadId: input.threadId,
+                  turnCount: input.turnIds.length,
+                  cause,
+                }),
+              ),
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationGetSnapshotError({
+                    message: `Failed to discover historical work logs for thread ${input.threadId}`,
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "orchestration" },
+          ),
         [ORCHESTRATION_WS_METHODS.subscribeThread]: (input) =>
           observeRpcStreamEffect(
             ORCHESTRATION_WS_METHODS.subscribeThread,

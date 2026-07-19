@@ -361,15 +361,187 @@ function normalizeStandaloneMathParagraphs(text: string): string {
     .join("");
 }
 
+function isEscapedCharacter(text: string, index: number): boolean {
+  let precedingBackslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === "\\"; cursor -= 1) {
+    precedingBackslashes += 1;
+  }
+  return precedingBackslashes % 2 === 1;
+}
+
+function characterRunLength(text: string, index: number, character: string): number {
+  let cursor = index;
+  while (cursor < text.length && text[cursor] === character) {
+    cursor += 1;
+  }
+  return cursor - index;
+}
+
+function findClosingDelimiter(
+  text: string,
+  start: number,
+  character: string,
+  delimiterLength: number,
+): number | null {
+  for (let cursor = start; cursor < text.length; ) {
+    const delimiterIndex = text.indexOf(character, cursor);
+    if (delimiterIndex < 0) return null;
+
+    const runLength = characterRunLength(text, delimiterIndex, character);
+    if (
+      runLength === delimiterLength &&
+      (character === "`" || !isEscapedCharacter(text, delimiterIndex))
+    ) {
+      return delimiterIndex;
+    }
+
+    cursor = delimiterIndex + runLength;
+  }
+
+  return null;
+}
+
+function findClosingTexBrace(tex: string, openingBraceIndex: number): number | null {
+  let depth = 0;
+
+  for (let cursor = openingBraceIndex; cursor < tex.length; cursor += 1) {
+    const character = tex[cursor];
+    if (isEscapedCharacter(tex, cursor)) continue;
+
+    if (character === "{") {
+      depth += 1;
+      continue;
+    }
+
+    if (character === "}") {
+      depth -= 1;
+      if (depth === 0) return cursor;
+    }
+  }
+
+  return null;
+}
+
+function escapeTextttLiteralUnderscores(tex: string): string {
+  const command = "\\texttt{";
+  const output: string[] = [];
+  let cursor = 0;
+
+  while (cursor < tex.length) {
+    const commandIndex = tex.indexOf(command, cursor);
+    if (commandIndex < 0) {
+      output.push(tex.slice(cursor));
+      break;
+    }
+
+    // An odd preceding backslash count means this is literal `\texttt`, not a
+    // TeX command. Advancing through the command's first slash also guarantees
+    // progress without changing provider-authored text.
+    if (isEscapedCharacter(tex, commandIndex)) {
+      output.push(tex.slice(cursor, commandIndex + 1));
+      cursor = commandIndex + 1;
+      continue;
+    }
+
+    const openingBraceIndex = commandIndex + command.length - 1;
+    const closingBraceIndex = findClosingTexBrace(tex, openingBraceIndex);
+    if (closingBraceIndex === null) {
+      output.push(tex.slice(cursor));
+      break;
+    }
+
+    output.push(tex.slice(cursor, openingBraceIndex + 1));
+    for (let bodyIndex = openingBraceIndex + 1; bodyIndex < closingBraceIndex; bodyIndex += 1) {
+      const character = tex[bodyIndex] ?? "";
+      if (character === "_" && !isEscapedCharacter(tex, bodyIndex)) {
+        output.push("\\_");
+      } else {
+        output.push(character);
+      }
+    }
+    output.push("}");
+    cursor = closingBraceIndex + 1;
+  }
+
+  return output.join("");
+}
+
+function normalizeLiteralTextCommandsInMathChunk(markdown: string): string {
+  const output: string[] = [];
+  let cursor = 0;
+
+  while (cursor < markdown.length) {
+    const character = markdown[cursor] ?? "";
+
+    // Markdown code spans can contain convincing-looking `$...$` examples.
+    // Skip the complete span so render-time repairs never mutate literal code.
+    if (character === "`") {
+      const delimiterLength = characterRunLength(markdown, cursor, "`");
+      const closingIndex = findClosingDelimiter(
+        markdown,
+        cursor + delimiterLength,
+        "`",
+        delimiterLength,
+      );
+      if (closingIndex !== null) {
+        output.push(markdown.slice(cursor, closingIndex + delimiterLength));
+        cursor = closingIndex + delimiterLength;
+        continue;
+      }
+    }
+
+    if (character !== "$" || isEscapedCharacter(markdown, cursor)) {
+      output.push(character);
+      cursor += 1;
+      continue;
+    }
+
+    const delimiterLength = characterRunLength(markdown, cursor, "$");
+    if (delimiterLength !== 1 && delimiterLength !== 2) {
+      output.push(markdown.slice(cursor, cursor + delimiterLength));
+      cursor += delimiterLength;
+      continue;
+    }
+
+    const contentStart = cursor + delimiterLength;
+    const closingIndex = findClosingDelimiter(markdown, contentStart, "$", delimiterLength);
+    if (closingIndex === null) {
+      output.push(markdown.slice(cursor, contentStart));
+      cursor = contentStart;
+      continue;
+    }
+
+    output.push(markdown.slice(cursor, contentStart));
+    output.push(escapeTextttLiteralUnderscores(markdown.slice(contentStart, closingIndex)));
+    output.push(markdown.slice(closingIndex, closingIndex + delimiterLength));
+    cursor = closingIndex + delimiterLength;
+  }
+
+  return output.join("");
+}
+
+function normalizeLiteralTextCommandsInMath(text: string): string {
+  // Provider models occasionally put source identifiers inside `\texttt`
+  // without escaping underscores. KaTeX correctly treats those underscores as
+  // invalid text-mode syntax and emits a visible red parse error. Repair only
+  // normalized math regions, after all supported provider delimiter shapes
+  // have become `$`/`$$`, while retaining raw persisted provider output.
+  return transformOutsideFences(text, normalizeLiteralTextCommandsInMathChunk);
+}
+
 /**
  * Providers do not consistently delimit math. Normalize common chat output
  * shapes before the Markdown AST is built so KaTeX handles them as math, while
  * leaving ordinary non-math code fences untouched.
  */
 export function normalizeChatMarkdownMath(text: string): string {
-  return normalizeStandaloneMathParagraphs(
-    normalizeLatexDelimiters(
-      normalizeDollarDisplayDelimiters(normalizeTableRowMathDelimiters(normalizeMathFences(text))),
+  return normalizeLiteralTextCommandsInMath(
+    normalizeStandaloneMathParagraphs(
+      normalizeLatexDelimiters(
+        normalizeDollarDisplayDelimiters(
+          normalizeTableRowMathDelimiters(normalizeMathFences(text)),
+        ),
+      ),
     ),
   );
 }

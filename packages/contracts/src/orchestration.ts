@@ -26,6 +26,7 @@ export const ORCHESTRATION_WS_METHODS = {
   replayEvents: "orchestration.replayEvents",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   getDeletedShellSnapshot: "orchestration.getDeletedShellSnapshot",
+  getThreadTurnWorkLogPresence: "orchestration.getThreadTurnWorkLogPresence",
   getThreadTurnActivityPage: "orchestration.getThreadTurnActivityPage",
   hardDeleteThread: "orchestration.hardDeleteThread",
   repairAssistantMessageFromProviderJournal:
@@ -526,6 +527,27 @@ export const OrchestrationThreadTurnActivityPage = Schema.Struct({
   activities: Schema.Array(OrchestrationThreadActivity),
 });
 export type OrchestrationThreadTurnActivityPage = typeof OrchestrationThreadTurnActivityPage.Type;
+
+export const THREAD_TURN_WORK_LOG_PRESENCE_MAX_TURNS = 256;
+
+export const OrchestrationThreadTurnWorkLogPresenceInput = Schema.Struct({
+  threadId: ThreadId,
+  turnIds: Schema.Array(TurnId).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(THREAD_TURN_WORK_LOG_PRESENCE_MAX_TURNS),
+  ),
+});
+export type OrchestrationThreadTurnWorkLogPresenceInput =
+  typeof OrchestrationThreadTurnWorkLogPresenceInput.Type;
+
+export const OrchestrationThreadTurnWorkLogPresenceResult = Schema.Struct({
+  threadId: ThreadId,
+  turnIdsWithWorkLog: Schema.Array(TurnId).check(
+    Schema.isMaxLength(THREAD_TURN_WORK_LOG_PRESENCE_MAX_TURNS),
+  ),
+});
+export type OrchestrationThreadTurnWorkLogPresenceResult =
+  typeof OrchestrationThreadTurnWorkLogPresenceResult.Type;
 
 export const ProjectCreateCommand = Schema.Struct({
   type: Schema.Literal("project.create"),
@@ -1484,6 +1506,10 @@ export const OrchestrationRpcSchemas = {
   getThreadTurnActivityPage: {
     input: OrchestrationThreadTurnActivityPageInput,
     output: OrchestrationThreadTurnActivityPage,
+  },
+  getThreadTurnWorkLogPresence: {
+    input: OrchestrationThreadTurnWorkLogPresenceInput,
+    output: OrchestrationThreadTurnWorkLogPresenceResult,
   },
   subscribeThread: {
     input: OrchestrationSubscribeThreadInput,

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import katex from "katex";
 import { normalizeChatMarkdownMath } from "./chatMarkdownMath";
 
 describe("normalizeChatMarkdownMath", () => {
@@ -154,5 +155,77 @@ describe("normalizeChatMarkdownMath", () => {
   it("does not rewrite slash display delimiters inside non-math code fences", () => {
     const markdown = ["```text", "\\[", "x=1", "\\]", "```"].join("\n");
     expect(normalizeChatMarkdownMath(markdown)).toBe(markdown);
+  });
+
+  it("repairs literal provider identifiers inside texttt math commands", () => {
+    const normalized = normalizeChatMarkdownMath(
+      [
+        "\\[",
+        "\\rho^{\\rm structural}_{ij}",
+        " =S^{\\rm structural}_{ij}",
+        "  \\frac{\\eta}{1-\\eta},",
+        "\\qquad",
+        "\\eta=\\texttt{composed_relative_uncertainty}.",
+        "\\]",
+        "",
+        "\\[",
+        "m_-=\\texttt{probability_denominator_lower},",
+        "\\qquad d_-=\\texttt{denominator_lower}.",
+        "\\]",
+      ].join("\n"),
+    );
+
+    expect(normalized).toBe(
+      [
+        "$$",
+        "\\rho^{\\rm structural}_{ij}",
+        " =S^{\\rm structural}_{ij}",
+        "  \\frac{\\eta}{1-\\eta},",
+        "\\qquad",
+        "\\eta=\\texttt{composed\\_relative\\_uncertainty}.",
+        "$$",
+        "",
+        "$$",
+        "m_-=\\texttt{probability\\_denominator\\_lower},",
+        "\\qquad d_-=\\texttt{denominator\\_lower}.",
+        "$$",
+      ].join("\n"),
+    );
+
+    const displayExpressions = normalized
+      .split("$$")
+      .filter((segment) => segment.trim().length > 0)
+      .map((segment) => segment.trim());
+    for (const expression of displayExpressions) {
+      expect(() =>
+        katex.renderToString(expression, { strict: false, throwOnError: true, trust: false }),
+      ).not.toThrow();
+    }
+  });
+
+  it("limits texttt repairs to math and preserves existing escapes", () => {
+    const markdown = [
+      "Literal prose: \\texttt{prose_identifier}.",
+      "Inline code: `$\\texttt{code_identifier}$`.",
+      "",
+      "```text",
+      "$\\texttt{fenced_identifier}$",
+      "```",
+      "",
+      "Math: $\\texttt{new_identifier} + \\texttt{already\\_escaped}$.",
+    ].join("\n");
+
+    expect(normalizeChatMarkdownMath(markdown)).toBe(
+      [
+        "Literal prose: \\texttt{prose_identifier}.",
+        "Inline code: `$\\texttt{code_identifier}$`.",
+        "",
+        "```text",
+        "$\\texttt{fenced_identifier}$",
+        "```",
+        "",
+        "Math: $\\texttt{new\\_identifier} + \\texttt{already\\_escaped}$.",
+      ].join("\n"),
+    );
   });
 });
