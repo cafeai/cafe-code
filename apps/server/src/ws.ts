@@ -97,6 +97,7 @@ import {
 import { respondToAuthError } from "./auth/http.ts";
 import { ensureSystemPromptFile } from "./systemPromptFile.ts";
 import { makeWebSocketConnectionFlowControl } from "./websocket/ConnectionFlowControl.ts";
+import { encodeThreadDetailSnapshotStreamItems } from "./websocket/ThreadDetailSnapshotStream.ts";
 import { addProviderWebSocketDiagnostics } from "@cafecode/shared/providerPipelineDiagnostics";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 const isWorkspacePathOutsideRootError = Schema.is(WorkspacePathOutsideRootError);
@@ -906,6 +907,15 @@ const makeWsRpcLayer = (
                 threadDetailSubscriptionRegistry.release(input.threadId),
               );
 
+              const snapshotItems = yield* Effect.try({
+                try: () => encodeThreadDetailSnapshotStreamItems(threadDetailSnapshot.value),
+                catch: (cause) =>
+                  new OrchestrationGetSnapshotError({
+                    message: `Failed to encode thread ${input.threadId} snapshot`,
+                    cause,
+                  }),
+              });
+
               const liveStream = orchestrationSubscriptionHub
                 .eventsFrom({
                   fromSequenceExclusive: threadDetailSnapshot.value.snapshotSequence,
@@ -919,13 +929,7 @@ const makeWsRpcLayer = (
                 );
 
               return connectionFlowControl.wrapBulkStream(
-                Stream.concat(
-                  Stream.make({
-                    kind: "snapshot" as const,
-                    snapshot: threadDetailSnapshot.value,
-                  }),
-                  liveStream,
-                ),
+                Stream.concat(Stream.fromIterable(snapshotItems), liveStream),
               );
             }),
             { "rpc.aggregate": "orchestration" },

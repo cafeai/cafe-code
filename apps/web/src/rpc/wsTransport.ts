@@ -32,7 +32,18 @@ interface RequestOptions {
 }
 
 const DEFAULT_SUBSCRIPTION_RETRY_DELAY_MS = Duration.millis(250);
+const MAX_NON_TRANSPORT_SUBSCRIPTION_RETRY_DELAY_MS = 10_000;
+const NON_TRANSPORT_SUBSCRIPTION_BACKOFF_RESET_MS = 30_000;
 const NOOP: () => void = () => undefined;
+
+export function computeNonTransportSubscriptionRetryDelayMs(
+  baseDelayMs: number,
+  consecutiveFailures: number,
+): number {
+  const finiteBaseDelayMs = Number.isFinite(baseDelayMs) ? Math.max(0, baseDelayMs) : 0;
+  const exponent = Math.min(6, Math.max(0, Math.trunc(consecutiveFailures) - 1));
+  return Math.min(MAX_NON_TRANSPORT_SUBSCRIPTION_RETRY_DELAY_MS, finiteBaseDelayMs * 2 ** exponent);
+}
 
 interface TransportSession {
   readonly clientPromise: Promise<WsRpcProtocolClient>;
@@ -123,6 +134,8 @@ export class WsTransport {
 
     let active = true;
     let hasReceivedValue = false;
+    let consecutiveNonTransportFailures = 0;
+    let lastNonTransportFailureAt = Number.NEGATIVE_INFINITY;
     const retryDelayMs = Duration.toMillis(
       Duration.fromInputUnsafe(options?.retryDelay ?? DEFAULT_SUBSCRIPTION_RETRY_DELAY_MS),
     );
@@ -182,7 +195,21 @@ export class WsTransport {
             if (options?.retryNonTransportErrors !== true) {
               return;
             }
-            await sleep(retryDelayMs);
+            const failedAt = performance.now();
+            if (
+              failedAt - lastNonTransportFailureAt >
+              NON_TRANSPORT_SUBSCRIPTION_BACKOFF_RESET_MS
+            ) {
+              consecutiveNonTransportFailures = 0;
+            }
+            lastNonTransportFailureAt = failedAt;
+            consecutiveNonTransportFailures += 1;
+            await sleep(
+              computeNonTransportSubscriptionRetryDelayMs(
+                retryDelayMs,
+                consecutiveNonTransportFailures,
+              ),
+            );
             continue;
           }
 

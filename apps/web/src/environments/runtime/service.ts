@@ -5,9 +5,14 @@ import {
   type OrchestrationShellSnapshot,
   type OrchestrationShellStreamEvent,
   type OrchestrationThreadDetailSnapshot,
+  type OrchestrationThreadDetailSnapshotChunk,
   type ServerConfig,
   ThreadId,
 } from "@cafecode/contracts";
+import {
+  encodedJsonByteLength,
+  PROVIDER_PIPELINE_POLICY,
+} from "@cafecode/shared/providerPipelinePolicy";
 import { type QueryClient } from "@tanstack/react-query";
 import { Throttler } from "@tanstack/react-pacer";
 import {
@@ -69,6 +74,11 @@ import {
   derivePhysicalProjectKey,
 } from "../../logicalProject";
 import { getClientSettings } from "~/hooks/useSettings";
+import {
+  appendThreadDetailSnapshotChunk,
+  decodeThreadDetailSnapshotAssembly,
+  type ThreadDetailSnapshotAssembly,
+} from "./threadDetailSnapshotAssembly";
 
 type EnvironmentServiceState = {
   readonly queryClient: QueryClient;
@@ -85,6 +95,12 @@ type ThreadDetailSubscriptionEntry = {
   refCount: number;
   lastAccessedAt: number;
   evictionTimeoutId: ReturnType<typeof setTimeout> | null;
+  snapshotAssembly: ThreadDetailSnapshotAssembly | null;
+  snapshotVerificationInFlight: boolean;
+  snapshotGeneration: number;
+  bufferedSnapshotEvents: OrchestrationEvent[];
+  bufferedSnapshotEventBytes: number;
+  snapshotRecoveryTimeoutId: ReturnType<typeof setTimeout> | null;
 };
 
 const environmentConnections = new Map<EnvironmentId, EnvironmentConnection>();
@@ -139,6 +155,7 @@ let lastBrowserResumeReconnectAt = Number.NEGATIVE_INFINITY;
 const THREAD_DETAIL_SUBSCRIPTION_IDLE_EVICTION_MS = 15 * 60 * 1000;
 const MAX_CACHED_THREAD_DETAIL_SUBSCRIPTIONS = 32;
 const THREAD_DETAIL_UI_EVENT_BATCH_MS = 16;
+const THREAD_DETAIL_SNAPSHOT_RECOVERY_DELAY_MS = 1_000;
 const BROWSER_RESUME_RECONNECT_COOLDOWN_MS = 2_000;
 const INITIAL_SERVER_CONFIG_SNAPSHOT_WAIT_MS = 150;
 const NOOP = () => undefined;
@@ -464,6 +481,154 @@ function applyThreadDetailSnapshot(
   useStore.getState().syncServerThreadDetail(snapshot.thread, entry.environmentId);
   markAppliedThreadDetailSequence(entry.environmentId, entry.threadId, snapshot.snapshotSequence);
 }
+
+function resetThreadDetailSnapshotHydration(entry: ThreadDetailSubscriptionEntry): void {
+  // Invalidate any asynchronous digest/schema verification that was started by
+  // an older subscription generation. This is also called before reconnecting,
+  // so late promises can never apply a stale snapshot over the replacement.
+  entry.snapshotGeneration += 1;
+  entry.snapshotAssembly = null;
+  entry.snapshotVerificationInFlight = false;
+  entry.bufferedSnapshotEvents = [];
+  entry.bufferedSnapshotEventBytes = 0;
+}
+
+function clearThreadDetailSnapshotRecovery(entry: ThreadDetailSubscriptionEntry): void {
+  if (entry.snapshotRecoveryTimeoutId === null) {
+    return;
+  }
+  clearTimeout(entry.snapshotRecoveryTimeoutId);
+  entry.snapshotRecoveryTimeoutId = null;
+}
+
+function scheduleThreadDetailSnapshotRecovery(
+  entry: ThreadDetailSubscriptionEntry,
+  reason: "assembly-invalid" | "buffer-overflow" | "verification-failed",
+): void {
+  if (entry.snapshotRecoveryTimeoutId !== null) {
+    return;
+  }
+
+  // Snapshot transport failures are recoverable projection resyncs, not user
+  // action failures. Keep them out of toast state and avoid logging snapshot
+  // bytes, provider output, or remote error bodies.
+  console.warn("Thread detail snapshot hydration failed; resubscribing", {
+    environmentId: entry.environmentId,
+    threadId: entry.threadId,
+    reason,
+  });
+
+  const unsubscribe = entry.unsubscribe;
+  entry.unsubscribe = NOOP;
+  unsubscribe();
+  resetThreadDetailSnapshotHydration(entry);
+  entry.snapshotRecoveryTimeoutId = setTimeout(() => {
+    entry.snapshotRecoveryTimeoutId = null;
+    const current = threadDetailSubscriptions.get(
+      getThreadDetailSubscriptionKey(entry.environmentId, entry.threadId),
+    );
+    if (current !== entry) {
+      return;
+    }
+    if (!attachThreadDetailSubscription(entry)) {
+      watchThreadDetailSubscriptionConnection(entry);
+    }
+  }, THREAD_DETAIL_SNAPSHOT_RECOVERY_DELAY_MS);
+}
+
+function bufferThreadDetailEventDuringSnapshot(
+  entry: ThreadDetailSubscriptionEntry,
+  event: OrchestrationEvent,
+): boolean {
+  if (entry.snapshotAssembly === null && !entry.snapshotVerificationInFlight) {
+    return false;
+  }
+
+  const eventBytes = encodedJsonByteLength(event);
+  if (
+    entry.bufferedSnapshotEvents.length >= PROVIDER_PIPELINE_POLICY.subscriptionQueueMaxEvents ||
+    entry.bufferedSnapshotEventBytes + eventBytes >
+      PROVIDER_PIPELINE_POLICY.subscriptionQueueMaxBytes
+  ) {
+    scheduleThreadDetailSnapshotRecovery(entry, "buffer-overflow");
+    return true;
+  }
+
+  entry.bufferedSnapshotEvents.push(event);
+  entry.bufferedSnapshotEventBytes += eventBytes;
+  return true;
+}
+
+function beginThreadDetailSnapshotAssembly(entry: ThreadDetailSubscriptionEntry): void {
+  resetThreadDetailSnapshotHydration(entry);
+}
+
+function receiveThreadDetailSnapshotChunk(
+  entry: ThreadDetailSubscriptionEntry,
+  chunk: OrchestrationThreadDetailSnapshotChunk,
+): void {
+  const current = entry.snapshotAssembly;
+  const metadataChanged =
+    current !== null &&
+    (current.snapshotSequence !== chunk.snapshotSequence ||
+      current.sha256 !== chunk.sha256 ||
+      current.chunkCount !== chunk.chunkCount ||
+      current.encodedBytes !== chunk.encodedBytes);
+
+  if (metadataChanged) {
+    if (chunk.chunkIndex !== 0) {
+      scheduleThreadDetailSnapshotRecovery(entry, "assembly-invalid");
+      return;
+    }
+    beginThreadDetailSnapshotAssembly(entry);
+  } else if (current === null) {
+    beginThreadDetailSnapshotAssembly(entry);
+  }
+
+  const generation = entry.snapshotGeneration;
+  const expectedSha256 = chunk.sha256;
+  const expectedSnapshotSequence = chunk.snapshotSequence;
+  try {
+    const result = appendThreadDetailSnapshotChunk(entry.snapshotAssembly, chunk);
+    entry.snapshotAssembly = result.assembly;
+    if (result.completedBytes === null) {
+      return;
+    }
+
+    entry.snapshotVerificationInFlight = true;
+    void decodeThreadDetailSnapshotAssembly({
+      bytes: result.completedBytes,
+      expectedSha256,
+      expectedSnapshotSequence,
+      expectedThreadId: entry.threadId,
+    })
+      .then((snapshot) => {
+        const currentEntry = threadDetailSubscriptions.get(
+          getThreadDetailSubscriptionKey(entry.environmentId, entry.threadId),
+        );
+        if (currentEntry !== entry || entry.snapshotGeneration !== generation) {
+          return;
+        }
+
+        applyThreadDetailSnapshot(entry, snapshot);
+        entry.snapshotVerificationInFlight = false;
+        const bufferedEvents = entry.bufferedSnapshotEvents;
+        entry.bufferedSnapshotEvents = [];
+        entry.bufferedSnapshotEventBytes = 0;
+        for (const event of bufferedEvents) {
+          applyEnvironmentThreadDetailEvent(event, entry.environmentId);
+        }
+      })
+      .catch(() => {
+        if (entry.snapshotGeneration === generation) {
+          scheduleThreadDetailSnapshotRecovery(entry, "verification-failed");
+        }
+      });
+  } catch {
+    scheduleThreadDetailSnapshotRecovery(entry, "assembly-invalid");
+  }
+}
+
 function getThreadDetailSubscriptionKey(environmentId: EnvironmentId, threadId: ThreadId): string {
   return scopedThreadKey(scopeThreadRef(environmentId, threadId));
 }
@@ -528,6 +693,9 @@ function shouldEvictThreadDetailSubscription(entry: ThreadDetailSubscriptionEntr
 }
 
 function attachThreadDetailSubscription(entry: ThreadDetailSubscriptionEntry): boolean {
+  if (entry.snapshotRecoveryTimeoutId !== null) {
+    return false;
+  }
   if (entry.unsubscribeConnectionListener !== null) {
     entry.unsubscribeConnectionListener();
     entry.unsubscribeConnectionListener = null;
@@ -541,11 +709,20 @@ function attachThreadDetailSubscription(entry: ThreadDetailSubscriptionEntry): b
     return false;
   }
 
+  resetThreadDetailSnapshotHydration(entry);
   entry.unsubscribe = connection.client.orchestration.subscribeThread(
     { threadId: entry.threadId },
     (item) => {
       if (item.kind === "snapshot") {
+        resetThreadDetailSnapshotHydration(entry);
         applyThreadDetailSnapshot(entry, item.snapshot);
+        return;
+      }
+      if (item.kind === "snapshot-chunk") {
+        receiveThreadDetailSnapshotChunk(entry, item);
+        return;
+      }
+      if (bufferThreadDetailEventDuringSnapshot(entry, item.event)) {
         return;
       }
       applyEnvironmentThreadDetailEvent(item.event, entry.environmentId);
@@ -580,6 +757,8 @@ function disposeThreadDetailSubscriptionByKey(key: string): boolean {
   }
 
   clearThreadDetailSubscriptionEviction(entry);
+  clearThreadDetailSnapshotRecovery(entry);
+  resetThreadDetailSnapshotHydration(entry);
   entry.unsubscribeConnectionListener?.();
   entry.unsubscribeConnectionListener = null;
   threadDetailSubscriptions.delete(key);
@@ -603,6 +782,7 @@ function detachThreadDetailSubscriptionsForEnvironment(environmentId: Environmen
     }
     entry.unsubscribe();
     entry.unsubscribe = NOOP;
+    resetThreadDetailSnapshotHydration(entry);
     watchThreadDetailSubscriptionConnection(entry);
   }
 }
@@ -740,6 +920,12 @@ export function retainThreadDetailSubscription(
     refCount: 1,
     lastAccessedAt: Date.now(),
     evictionTimeoutId: null,
+    snapshotAssembly: null,
+    snapshotVerificationInFlight: false,
+    snapshotGeneration: 0,
+    bufferedSnapshotEvents: [],
+    bufferedSnapshotEventBytes: 0,
+    snapshotRecoveryTimeoutId: null,
   };
   threadDetailSubscriptions.set(key, entry);
   if (!attachThreadDetailSubscription(entry)) {
