@@ -6,7 +6,7 @@
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
-    "dev": "bun run --parallel dev:bundle dev:electron",
+    "dev": "node scripts/dev.mjs",
     "dev:bundle": "tsdown --watch",
     "dev:electron": "node scripts/dev-electron.mjs",
     "build": "tsdown",
@@ -22,7 +22,8 @@
     "@effect/platform-node": "catalog:",
     "effect": "catalog:",
     "electron": "42.2.0",
-    "electron-updater": "^6.6.2"
+    "electron-updater": "^6.6.2",
+    "node-pty": "^1.1.0"
   },
   "devDependencies": {
     "@effect/language-service": "catalog:",

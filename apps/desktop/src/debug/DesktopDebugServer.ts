@@ -839,6 +839,7 @@ function summarizeRendererForCompactDebug(): Record<string, unknown> {
   const gates = readRecord(snapshot.gates);
   const provider = readRecord(snapshot.provider);
   const diagnostics = readRecord(snapshot.diagnostics);
+  const connection = readRecord(snapshot.connection);
   const timelineScroll = readRecord(snapshot.timelineScroll);
 
   return {
@@ -853,6 +854,12 @@ function summarizeRendererForCompactDebug(): Record<string, unknown> {
       hasFocus: readBoolean(diagnostics?.hasFocus),
       online: readBoolean(diagnostics?.online),
       localApi: compactObjectWithoutContentPreviews(diagnostics?.localApi),
+    },
+    connection: {
+      bootstrapComplete: readBoolean(connection?.bootstrapComplete),
+      phase: readString(connection?.phase),
+      hasConnected: readBoolean(connection?.hasConnected),
+      connected: readBoolean(connection?.connected),
     },
     timelineScroll:
       timelineScroll === null

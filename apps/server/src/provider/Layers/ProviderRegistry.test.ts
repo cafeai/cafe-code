@@ -1505,61 +1505,59 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               globalThis.fetch = originalFetch;
             }),
           );
-          globalThis.fetch = Object.assign(
-            async (_input: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
-              seenHeaders.push(init?.headers as Record<string, string>);
-              return Response.json({
-                plan_type: "pro",
-                rate_limit: {
-                  primary_window: {
-                    used_percent: 25,
-                    limit_window_seconds: 18_000,
-                    reset_at: 1_780_000_000,
-                  },
-                  secondary_window: {
-                    used_percent: 75,
-                    limit_window_seconds: 604_800,
-                    reset_at: 1_780_100_000,
-                  },
+          globalThis.fetch = (async (
+            _input: Parameters<typeof fetch>[0],
+            init: Parameters<typeof fetch>[1],
+          ) => {
+            seenHeaders.push(init?.headers as Record<string, string>);
+            return Response.json({
+              plan_type: "pro",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 25,
+                  limit_window_seconds: 18_000,
+                  reset_at: 1_780_000_000,
                 },
-                credits: {
-                  has_credits: true,
-                  unlimited: false,
-                  balance: "9.99",
+                secondary_window: {
+                  used_percent: 75,
+                  limit_window_seconds: 604_800,
+                  reset_at: 1_780_100_000,
                 },
-                rate_limit_reset_credits: {
-                  available_count: 2,
-                  credits: [
-                    {
-                      id: "credit-1",
-                      reset_type: "codex_rate_limits",
-                      status: "available",
-                      granted_at: 1_780_000_010,
-                      expires_at: 1_780_100_010,
-                      title: "Rate limit reset",
-                      description: "Reset Codex usage windows.",
-                    },
-                  ],
-                },
-                additional_rate_limits: [
+              },
+              credits: {
+                has_credits: true,
+                unlimited: false,
+                balance: "9.99",
+              },
+              rate_limit_reset_credits: {
+                available_count: 2,
+                credits: [
                   {
-                    limit_name: "Spark",
-                    metered_feature: "codex_bengalfox",
-                    rate_limit: {
-                      primary_window: {
-                        used_percent: 10,
-                        limit_window_seconds: 3_600,
-                        reset_at: 1_780_000_100,
-                      },
-                    },
+                    id: "credit-1",
+                    reset_type: "codex_rate_limits",
+                    status: "available",
+                    granted_at: 1_780_000_010,
+                    expires_at: 1_780_100_010,
+                    title: "Rate limit reset",
+                    description: "Reset Codex usage windows.",
                   },
                 ],
-              });
-            },
-            {
-              preconnect: originalFetch.preconnect,
-            },
-          ) as typeof fetch;
+              },
+              additional_rate_limits: [
+                {
+                  limit_name: "Spark",
+                  metered_feature: "codex_bengalfox",
+                  rate_limit: {
+                    primary_window: {
+                      used_percent: 10,
+                      limit_window_seconds: 3_600,
+                      reset_at: 1_780_000_100,
+                    },
+                  },
+                },
+              ],
+            });
+          }) as typeof fetch;
 
           const status = yield* checkCodexCliProviderStatus(decodeCodexSettings({ homePath })).pipe(
             Effect.provide(

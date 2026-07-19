@@ -6,25 +6,54 @@ import { makeWebSocketConnectionFlowControl } from "./ConnectionFlowControl.ts";
 
 describe("WebSocketConnectionFlowControl", () => {
   it("releases encoded-byte permits at the next Ack/pull and on stream finalization", async () => {
+    const control = makeWebSocketConnectionFlowControl({
+      maxConnectionBytes: 1_024,
+      reservedControlBytes: 128,
+      maxFrameBytes: 512,
+    });
+
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = makeWebSocketConnectionFlowControl({
-            maxConnectionBytes: 1_024,
-            reservedControlBytes: 128,
-            maxFrameBytes: 512,
-          });
           const pull = yield* Stream.toPull(
-            control.wrapBulkStream(Stream.make({ value: "a".repeat(128) })),
+            control.wrapBulkStream(
+              Stream.make({ value: "a".repeat(64) }, { value: "b".repeat(192) }).pipe(
+                Stream.rechunk(1),
+              ),
+            ),
           );
 
           const first = yield* pull;
           expect(Array.from(first)).toHaveLength(1);
           expect(control.snapshot().activeBulkFrames).toBe(1);
-          expect(control.snapshot().activeBulkBytes).toBeGreaterThan(128);
+          const firstFrameBytes = control.snapshot().activeBulkBytes;
+          expect(firstFrameBytes).toBeGreaterThan(64);
+
+          const second = yield* pull;
+          expect(Array.from(second)).toHaveLength(1);
+          expect(control.snapshot().activeBulkFrames).toBe(1);
+          expect(control.snapshot().activeBulkBytes).toBeGreaterThan(firstFrameBytes);
+
+          const end = yield* Effect.result(pull);
+          expect(end._tag).toBe("Failure");
+          expect(control.snapshot()).toMatchObject({
+            activeBulkFrames: 0,
+            activeBulkBytes: 0,
+          });
+
+          const abandonedPull = yield* Stream.toPull(
+            control.wrapBulkStream(Stream.make({ value: "held-until-finalization" })),
+          );
+          yield* abandonedPull;
+          expect(control.snapshot().activeBulkFrames).toBe(1);
         }),
       ),
     );
+
+    expect(control.snapshot()).toMatchObject({
+      activeBulkFrames: 0,
+      activeBulkBytes: 0,
+    });
   });
 
   it("fails only an oversized bulk subscription with a sanitized resnapshot error", async () => {

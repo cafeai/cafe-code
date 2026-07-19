@@ -15,6 +15,7 @@ import {
   writePrimaryEnvironmentDescriptor,
 } from "../environments/primary";
 import { AppAtomRegistryProvider } from "../rpc/atomRegistry";
+import { recordWsConnectionOpened, resetWsConnectionStateForTests } from "../rpc/wsConnectionState";
 import { useStore } from "../store";
 import { InitialBackendBootstrapSurface } from "./InitialBackendBootstrapSurface";
 
@@ -81,6 +82,7 @@ function createShellSnapshot(): OrchestrationShellSnapshot {
 
 describe("InitialBackendBootstrapSurface", () => {
   beforeEach(() => {
+    resetWsConnectionStateForTests();
     resetPrimaryEnvironmentDescriptorForTests();
     writePrimaryEnvironmentDescriptor({
       environmentId: TEST_ENVIRONMENT_ID,
@@ -101,6 +103,8 @@ describe("InitialBackendBootstrapSurface", () => {
   });
 
   afterEach(() => {
+    resetWsConnectionStateForTests();
+    Reflect.deleteProperty(window, "desktopBridge");
     resetPrimaryEnvironmentDescriptorForTests();
     document.body.innerHTML = "";
     useStore.setState({
@@ -141,6 +145,49 @@ describe("InitialBackendBootstrapSurface", () => {
         },
         { timeout: 8_000, interval: 16 },
       );
+    } finally {
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("publishes route-independent WebSocket readiness without connection details", async () => {
+    const publishDebugSnapshot = vi.fn().mockResolvedValue(undefined);
+    window.desktopBridge = {
+      getDebugEndpointState: vi.fn().mockResolvedValue({ enabled: true, url: null }),
+      publishDebugSnapshot,
+    } as unknown as NonNullable<typeof window.desktopBridge>;
+    recordWsConnectionOpened();
+    useStore.getState().syncServerShellSnapshot(createShellSnapshot(), TEST_ENVIRONMENT_ID);
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const screen = await render(
+      <AppAtomRegistryProvider>
+        <InitialBackendBootstrapSurface>
+          <div>Workspace loaded</div>
+        </InitialBackendBootstrapSurface>
+      </AppAtomRegistryProvider>,
+      { container: host },
+    );
+
+    try {
+      await vi.waitFor(() => expect(publishDebugSnapshot).toHaveBeenCalled(), {
+        timeout: 8_000,
+        interval: 16,
+      });
+      const snapshot = publishDebugSnapshot.mock.calls.at(-1)?.[0];
+      expect(snapshot).toMatchObject({
+        source: "InitialBackendBootstrapSurface",
+        diagnostics: { localApi: { available: true } },
+        connection: {
+          bootstrapComplete: true,
+          phase: "connected",
+          hasConnected: true,
+          connected: true,
+        },
+      });
+      expect(JSON.stringify(snapshot)).not.toMatch(/socket|url|error|environment/i);
     } finally {
       await screen.unmount();
       host.remove();

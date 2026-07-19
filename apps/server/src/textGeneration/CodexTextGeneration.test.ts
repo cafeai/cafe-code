@@ -388,7 +388,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
       {
         output: JSON.stringify({
           title: "  Improve orchestration flow\nwith ignored suffix",
-          body: "\n## Summary\n- improve flow\n\n## Testing\n- bun test\n\n",
+          body: "\n## Summary\n- improve flow\n\n## Testing\n- yarn test\n\n",
         }),
       },
       (textGeneration) =>

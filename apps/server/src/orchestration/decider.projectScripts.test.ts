@@ -73,7 +73,7 @@ describe("decider project scripts", () => {
       {
         id: "lint",
         name: "Lint",
-        command: "bun run lint",
+        command: "yarn lint",
         icon: "lint",
         runOnWorktreeCreate: false,
       },

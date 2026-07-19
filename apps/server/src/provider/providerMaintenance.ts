@@ -125,18 +125,6 @@ function makeNpmGlobalProviderMaintenanceCapabilities(
   });
 }
 
-function makeBunGlobalProviderMaintenanceCapabilities(
-  definition: PackageManagedProviderMaintenanceDefinition,
-): ProviderMaintenanceCapabilities {
-  return makeProviderMaintenanceCapabilities({
-    provider: definition.provider,
-    packageName: definition.npmPackageName,
-    updateExecutable: "bun",
-    updateArgs: ["i", "-g", `${definition.npmPackageName}@latest`],
-    updateLockKey: "bun-global",
-  });
-}
-
 function makePnpmGlobalProviderMaintenanceCapabilities(
   definition: PackageManagedProviderMaintenanceDefinition,
 ): ProviderMaintenanceCapabilities {
@@ -204,10 +192,6 @@ export function normalizeCommandPath(commandPath: string): string {
   return commandPath.replaceAll("\\", "/").toLowerCase();
 }
 
-function isBunGlobalCommandPath(commandPath: string): boolean {
-  return normalizeCommandPath(commandPath).includes("/.bun/bin/");
-}
-
 function isVitePlusGlobalCommandPath(commandPath: string): boolean {
   return normalizeCommandPath(commandPath).includes("/.vite-plus/bin/");
 }
@@ -223,12 +207,20 @@ function isPnpmGlobalCommandPath(commandPath: string): boolean {
   );
 }
 
-function isNpmGlobalCommandPath(commandPath: string): boolean {
+function isNpmGlobalCommandPath(
+  commandPath: string,
+  options?: ProviderMaintenanceCapabilityResolutionOptions,
+): boolean {
   const normalized = normalizeCommandPath(commandPath);
+  if (normalized.includes("/lib/node_modules/") || normalized.includes("/npm/node_modules/")) {
+    return true;
+  }
+
+  const appData = nonEmptyString(options?.env?.APPDATA);
   return (
-    normalized.includes("/node_modules/.bin/") ||
-    normalized.includes("/lib/node_modules/") ||
-    normalized.includes("/npm/node_modules/")
+    options?.platform === "win32" &&
+    appData !== null &&
+    normalized.startsWith(`${normalizeCommandPath(appData)}/npm/`)
   );
 }
 
@@ -252,7 +244,10 @@ export function resolvePackageManagedProviderMaintenance(
 ): ProviderMaintenanceCapabilities {
   const binaryPath = nonEmptyString(options?.binaryPath);
   if (!binaryPath) {
-    return makeNpmGlobalProviderMaintenanceCapabilities(definition, options);
+    return makeManualOnlyProviderMaintenanceCapabilities({
+      provider: definition.provider,
+      packageName: definition.npmPackageName,
+    });
   }
 
   const resolvedCommandPath =
@@ -280,13 +275,10 @@ export function resolvePackageManagedProviderMaintenance(
     if (commandPaths.some(isVitePlusGlobalCommandPath)) {
       return makeVitePlusGlobalProviderMaintenanceCapabilities(definition);
     }
-    if (commandPaths.some(isBunGlobalCommandPath)) {
-      return makeBunGlobalProviderMaintenanceCapabilities(definition);
-    }
     if (commandPaths.some(isPnpmGlobalCommandPath)) {
       return makePnpmGlobalProviderMaintenanceCapabilities(definition);
     }
-    if (commandPaths.some(isNpmGlobalCommandPath)) {
+    if (commandPaths.some((commandPath) => isNpmGlobalCommandPath(commandPath, options))) {
       return makeNpmGlobalProviderMaintenanceCapabilities(definition, options);
     }
     if (commandPaths.some(isHomebrewCommandPath)) {
@@ -295,7 +287,10 @@ export function resolvePackageManagedProviderMaintenance(
   }
 
   if (!hasPathSeparator(binaryPath)) {
-    return makeNpmGlobalProviderMaintenanceCapabilities(definition, options);
+    return makeManualOnlyProviderMaintenanceCapabilities({
+      provider: definition.provider,
+      packageName: definition.npmPackageName,
+    });
   }
 
   return makeManualOnlyProviderMaintenanceCapabilities({

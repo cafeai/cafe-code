@@ -501,7 +501,7 @@ export function resolveKnownWindowsCliDirs(env: NodeJS.ProcessEnv): ReadonlyArra
     ...resolveOpenAICodexWindowsCliDirs(localAppData),
     ...(localAppData ? [`${localAppData}\\Programs\\nodejs`, `${localAppData}\\Volta\\bin`] : []),
     ...(localAppData ? [`${localAppData}\\pnpm`] : []),
-    ...(userProfile ? [`${userProfile}\\.bun\\bin`, `${userProfile}\\scoop\\shims`] : []),
+    ...(userProfile ? [`${userProfile}\\scoop\\shims`] : []),
   ];
 }
 

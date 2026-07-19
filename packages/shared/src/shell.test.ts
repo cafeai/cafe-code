@@ -370,7 +370,6 @@ describe("resolveKnownWindowsCliDirs", () => {
       "C:\\Users\\testuser\\AppData\\Local\\Programs\\nodejs",
       "C:\\Users\\testuser\\AppData\\Local\\Volta\\bin",
       "C:\\Users\\testuser\\AppData\\Local\\pnpm",
-      "C:\\Users\\testuser\\.bun\\bin",
       "C:\\Users\\testuser\\scoop\\shims",
     ]);
   });
@@ -403,7 +402,6 @@ describe("resolveKnownWindowsCliDirs", () => {
         `${localAppData}\\Programs\\nodejs`,
         `${localAppData}\\Volta\\bin`,
         `${localAppData}\\pnpm`,
-        "C:\\Users\\testuser\\.bun\\bin",
         "C:\\Users\\testuser\\scoop\\shims",
       ]);
     } finally {
@@ -453,7 +451,6 @@ describe("resolveWindowsEnvironment", () => {
         "C:\\Users\\testuser\\AppData\\Local\\Programs\\nodejs",
         "C:\\Users\\testuser\\AppData\\Local\\Volta\\bin",
         "C:\\Users\\testuser\\AppData\\Local\\pnpm",
-        "C:\\Users\\testuser\\.bun\\bin",
         "C:\\Users\\testuser\\scoop\\shims",
         "C:\\Shell\\Bin",
         "C:\\Windows\\System32",
@@ -503,7 +500,6 @@ describe("resolveWindowsEnvironment", () => {
         "C:\\Users\\testuser\\AppData\\Local\\Programs\\nodejs",
         "C:\\Users\\testuser\\AppData\\Local\\Volta\\bin",
         "C:\\Users\\testuser\\AppData\\Local\\pnpm",
-        "C:\\Users\\testuser\\.bun\\bin",
         "C:\\Users\\testuser\\scoop\\shims",
         "C:\\Shell\\Bin",
       ].join(";"),
@@ -539,7 +535,6 @@ describe("resolveWindowsEnvironment", () => {
     ).toEqual({
       PATH: [
         "C:\\Users\\testuser\\AppData\\Roaming\\npm",
-        "C:\\Users\\testuser\\.bun\\bin",
         "C:\\Users\\testuser\\scoop\\shims",
         "C:\\Windows\\System32",
       ].join(";"),

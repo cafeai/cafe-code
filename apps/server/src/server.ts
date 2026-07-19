@@ -1,3 +1,6 @@
+import * as NodeHttp from "node:http";
+
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http";
@@ -120,35 +123,14 @@ import * as NodeHttpServerCompression from "./nodeHttpServerCompression.ts";
 const HttpServerLive = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig;
-    if (typeof Bun !== "undefined") {
-      const BunHttpServer = yield* Effect.promise(
-        () => import("@effect/platform-bun/BunHttpServer"),
-      );
-      return BunHttpServer.layer({
-        port: config.port,
-        ...(config.host ? { hostname: config.host } : {}),
-      });
-    } else {
-      const NodeHttp = yield* Effect.promise(() => import("node:http"));
-      return NodeHttpServerCompression.layer(NodeHttp.createServer, {
-        host: config.host,
-        port: config.port,
-      });
-    }
+    return NodeHttpServerCompression.layer(NodeHttp.createServer, {
+      host: config.host,
+      port: config.port,
+    });
   }),
 );
 
-const PlatformServicesLive = Layer.unwrap(
-  Effect.gen(function* () {
-    if (typeof Bun !== "undefined") {
-      const { layer } = yield* Effect.promise(() => import("@effect/platform-bun/BunServices"));
-      return layer;
-    } else {
-      const { layer } = yield* Effect.promise(() => import("@effect/platform-node/NodeServices"));
-      return layer;
-    }
-  }),
-);
+const PlatformServicesLive = NodeServices.layer;
 
 const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(OrchestrationReactorLive),

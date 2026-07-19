@@ -158,7 +158,7 @@ These are current incorrect, unreachable, contradictory, crash-prone, or non-por
 
 - [ ] **M-07 — Scoped client keys use ambiguous delimiter encoding.** `environmentId:localId` is split at the first colon even though IDs are not constrained against colons. Introduce unambiguous encoding, migrate persisted keys, and test delimiter-containing IDs.
 
-- [ ] **M-13 — Root cleanup and release helpers are not natively portable.** POSIX commands such as `rm -rf` and shell assumptions make native Windows maintenance unreliable. Replace them with Bun/Node APIs and execute the workflows on Windows CI.
+- [ ] **M-13 — Root cleanup and release helpers are not natively portable.** POSIX commands such as `rm -rf` and shell assumptions make native Windows maintenance unreliable. Replace them with Node APIs and execute the workflows on Windows CI.
 
 - [ ] **L-04 — `OpenInPicker` has the wrong accessibility label.** Its action group is announced as “Subscription actions.” Replace it with an accurate label and add an accessibility assertion.
 
@@ -211,13 +211,13 @@ These are additional cleanup observations from otherwise passing verification an
 ## Standard repository gates
 
 ```sh
-bun fmt
-bun lint
-bun typecheck
-bun run test
-bun run --cwd apps/web test:browser
-bun run build:desktop
-bun run release:smoke
+yarn fmt
+yarn lint
+yarn typecheck
+yarn test
+yarn workspace @cafecode/web test:browser
+yarn build:desktop
+yarn release:smoke
 ```
 
-Never substitute `bun test` for `bun run test`. Native installer, update, credential-backed provider, and long-duration E2E commands remain additional release gates.
+Native installer, update, credential-backed provider, and long-duration E2E commands remain additional release gates.

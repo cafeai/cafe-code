@@ -15,7 +15,12 @@ import {
   DEVELOPMENT_ICON_OVERRIDES,
   PUBLISH_ICON_OVERRIDES,
 } from "../../../scripts/lib/brand-assets.ts";
-import { resolveCatalogDependencies } from "../../../scripts/lib/resolve-catalog.ts";
+import {
+  readYarnCatalog,
+  resolveBundledPackageDependencies,
+  resolveCatalogDependencies,
+  resolveNpmOverrides,
+} from "../../../scripts/lib/resolve-catalog.ts";
 import { fromJsonStringPretty } from "@cafecode/shared/schemaJson";
 import rootPackageJson from "../../../package.json" with { type: "json" };
 import desktopPackageJson from "../../desktop/package.json" with { type: "json" };
@@ -83,7 +88,13 @@ interface PreparedPublishPackage {
   readonly backupPath: string;
 }
 
-const disallowedPublishProtocols = ["catalog:", "workspace:"] as const;
+const disallowedPublishProtocols = [
+  "catalog:",
+  "workspace:",
+  "portal:",
+  "link:",
+  "patch:",
+] as const;
 
 function collectDisallowedPublishDependencySpecs(
   packageJson: unknown,
@@ -169,7 +180,10 @@ const restorePublishIconOverrides = Effect.fn("restorePublishIconOverrides")(fun
     if (!(yield* fs.exists(backup.backupPath))) {
       continue;
     }
-    yield* fs.rename(backup.backupPath, backup.targetPath);
+    // Copy over the existing target instead of renaming over it. Renaming over
+    // an existing file is not portable to Windows, while copyFile has the same
+    // restoration semantics on every release host.
+    yield* fs.copyFile(backup.backupPath, backup.targetPath);
   }
 });
 
@@ -200,6 +214,7 @@ const stagePublishedDesktopRuntime = Effect.fn("stagePublishedDesktopRuntime")(f
   repoRoot: string,
   serverDir: string,
   version: string,
+  yarnCatalog: Record<string, string>,
 ) {
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
@@ -221,7 +236,7 @@ const stagePublishedDesktopRuntime = Effect.fn("stagePublishedDesktopRuntime")(f
   for (const requiredPath of requiredPaths) {
     if (!(yield* fs.exists(requiredPath))) {
       return yield* new CliError({
-        message: `Missing desktop npm runtime asset: ${requiredPath}. Run bun run build:desktop first.`,
+        message: `Missing desktop npm runtime asset: ${requiredPath}. Run yarn build:desktop first.`,
       });
     }
   }
@@ -262,7 +277,24 @@ const stagePublishedDesktopRuntime = Effect.fn("stagePublishedDesktopRuntime")(f
   yield* fs.writeFileString(
     path.join(stagedDesktopRoot, "package.json"),
     // @effect-diagnostics-next-line preferSchemaOverJson:off - Package staging writes deterministic package metadata, not untrusted input.
-    `${JSON.stringify({ ...desktopPackageJson, version }, null, 2)}\n`,
+    `${JSON.stringify(
+      {
+        name: desktopPackageJson.name,
+        version,
+        private: true,
+        license: desktopPackageJson.license,
+        type: desktopPackageJson.type,
+        main: desktopPackageJson.main,
+        productName: desktopPackageJson.productName,
+        dependencies: resolveBundledPackageDependencies(
+          desktopPackageJson.dependencies,
+          yarnCatalog,
+          "apps/desktop",
+        ),
+      },
+      null,
+      2,
+    )}\n`,
   );
 
   yield* Effect.log("[cli] Staged Electron desktop runtime for npm");
@@ -372,6 +404,30 @@ const assertPublishPrepared = Effect.fn("assertPublishPrepared")(function* (serv
     }
   }
 
+  for (const relativeManifestPath of [
+    "package.json",
+    "dist/apps/server/package.json",
+    "dist/apps/desktop/package.json",
+  ]) {
+    const manifestPath = path.join(serverDir, relativeManifestPath);
+    const manifest = yield* fs
+      .readFileString(manifestPath)
+      .pipe(Effect.flatMap(Schema.decodeUnknownEffect(PackageJsonPrettyJson)));
+    const invalidSpecs = collectDisallowedPublishDependencySpecs(manifest);
+    if (invalidSpecs.length === 0) {
+      continue;
+    }
+
+    const preview = invalidSpecs
+      .slice(0, 5)
+      .map((entry) => `${entry.section}.${entry.name}=${entry.spec}`)
+      .join(", ");
+    const suffix = invalidSpecs.length > 5 ? ` (+${invalidSpecs.length - 5} more)` : "";
+    return yield* new CliError({
+      message: `Staged manifest '${relativeManifestPath}' is not publishable: ${preview}${suffix}.`,
+    });
+  }
+
   yield* assertLocalServerBundleImportsPresent(
     path.join(serverDir, "dist/apps/server/dist/bin.mjs"),
   );
@@ -384,6 +440,14 @@ const preparePublishPackage = Effect.fn("preparePublishPackage")(function* (
 ) {
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
+  const yarnCatalog = yield* Effect.try({
+    try: () => readYarnCatalog(repoRoot),
+    catch: (cause) =>
+      new CliError({
+        message: "Could not read the root Yarn catalog.",
+        cause,
+      }),
+  });
   const packageJsonPath = path.join(serverDir, "package.json");
   const backupDir = yield* fs.makeTempDirectoryScoped({
     prefix: "cafecode-publish-package-",
@@ -405,14 +469,10 @@ const preparePublishPackage = Effect.fn("preparePublishPackage")(function* (
     publishConfig: serverPackageJson.publishConfig,
     dependencies: resolveCatalogDependencies(
       serverPackageJson.dependencies,
-      rootPackageJson.workspaces.catalog,
+      yarnCatalog,
       "apps/server",
     ),
-    overrides: resolveCatalogDependencies(
-      rootPackageJson.overrides,
-      rootPackageJson.workspaces.catalog,
-      "apps/server",
-    ),
+    overrides: resolveNpmOverrides(rootPackageJson.resolutions, yarnCatalog, "apps/server"),
   };
 
   const original = yield* fs.readFileString(packageJsonPath);
@@ -426,6 +486,7 @@ const preparePublishPackage = Effect.fn("preparePublishPackage")(function* (
     repoRoot,
     serverDir,
     version,
+    yarnCatalog,
   );
   yield* assertPublishPrepared(serverDir);
 
@@ -497,20 +558,11 @@ const buildCmd = Command.make(
       const serverDir = path.join(repoRoot, "apps/server");
 
       yield* Effect.log("[cli] Running tsdown...");
-      const bundleCommand =
-        process.platform === "win32"
-          ? ChildProcess.make("bun", ["run", "build:bundle"], {
-              cwd: serverDir,
-              stdout: config.verbose ? "inherit" : "ignore",
-              stderr: "inherit",
-              // Windows needs shell mode to resolve .cmd shims.
-              shell: true,
-            })
-          : ChildProcess.make(process.execPath, ["--run", "build:bundle"], {
-              cwd: serverDir,
-              stdout: config.verbose ? "inherit" : "ignore",
-              stderr: "inherit",
-            });
+      const bundleCommand = ChildProcess.make(process.execPath, ["--run", "build:bundle"], {
+        cwd: serverDir,
+        stdout: config.verbose ? "inherit" : "ignore",
+        stderr: "inherit",
+      });
       yield* runCommand(bundleCommand);
       yield* assertServerRuntimeBuildAssets(serverDir);
 

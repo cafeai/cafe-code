@@ -90,17 +90,17 @@ const repoRoot = path.resolve(path.dirname(scriptPath), "..");
 const defaultRunId = new Date().toISOString().replace(/[:.]/g, "-");
 
 function printUsage(): void {
-  process.stdout.write(`Usage: bun run profile:desktop-startup [options] [-- command...]
+  process.stdout.write(`Usage: yarn profile:desktop-startup [options] [-- command...]
 
 Options:
   --out-dir <path>       Profile output directory (default: .startup-profiles/<timestamp>)
   --duration-ms <n>      How long to capture startup before stopping (default: 20000)
   --flush-ms <n>         Time to wait for profile files before shutdown (default: 3000)
   --roles <list>         Comma-separated roles to profile (default: *)
-  --skip-build           Do not run bun run build:desktop before profiling
+  --skip-build           Do not run yarn build:desktop before profiling
   --help                 Show this help
 
-The default command is: bun run --cwd apps/desktop start
+The default command is: node apps/desktop/scripts/start-electron.mjs
 `);
 }
 
@@ -118,7 +118,7 @@ function parseArgs(argv: readonly string[]): CliOptions {
   let flushMs = 3_000;
   let build = true;
   let roles = "*";
-  let command: readonly string[] = ["bun", "run", "--cwd", "apps/desktop", "start"];
+  let command: readonly string[] = [process.execPath, "apps/desktop/scripts/start-electron.mjs"];
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -595,7 +595,7 @@ async function runProfile(options: CliOptions): Promise<void> {
 
   if (options.build) {
     process.stdout.write("[profile-startup] building desktop bundles...\n");
-    await runCommand(["bun", "run", "build:desktop"]);
+    await runCommand([process.execPath, "--run", "build:desktop"]);
   }
 
   const env: NodeJS.ProcessEnv = {

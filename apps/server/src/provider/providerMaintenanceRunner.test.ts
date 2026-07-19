@@ -232,7 +232,7 @@ describe("providerMaintenanceRunner", () => {
           status: "behind_latest",
           currentVersion: "2.0.14",
           latestVersion: "2.1.123",
-          updateCommand: "bun i -g @anthropic-ai/claude-code@latest",
+          updateCommand: "pnpm add -g @anthropic-ai/claude-code@latest",
           canUpdate: true,
           checkedAt: "2026-04-30T12:00:00.000Z",
           message: "Update available.",
@@ -245,9 +245,9 @@ describe("providerMaintenanceRunner", () => {
             makeProviderMaintenanceCapabilities({
               provider: CODEX_DRIVER,
               packageName: "@openai/codex",
-              updateExecutable: "bun",
-              updateArgs: ["i", "-g", "@openai/codex@latest"],
-              updateLockKey: "bun-global",
+              updateExecutable: "pnpm",
+              updateArgs: ["add", "-g", "@openai/codex@latest"],
+              updateLockKey: "pnpm-global",
             }),
           ),
       });
@@ -255,8 +255,8 @@ describe("providerMaintenanceRunner", () => {
       yield* updater.updateProvider(CODEX_DRIVER);
       assert.deepStrictEqual(calls, [
         {
-          command: "bun",
-          args: ["i", "-g", "@openai/codex@latest"],
+          command: "pnpm",
+          args: ["add", "-g", "@openai/codex@latest"],
         },
       ]);
     }).pipe(

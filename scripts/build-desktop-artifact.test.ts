@@ -7,11 +7,12 @@ import * as Option from "effect/Option";
 import {
   MANAGED_WINDOWS_NODE_VERSION,
   desktopArtifactListSatisfiesTarget,
-  resolveDesktopRuntimeDependencies,
   resolveBuildOptions,
   resolveDesktopBuildIconAssets,
   resolveDesktopProductName,
+  resolveDesktopRuntimeDependencies,
   resolveDesktopUpdateChannel,
+  resolveGitHubPublishConfig,
   resolveLinuxDesktopBuildConfig,
   resolveManagedWindowsNodeArchive,
   resolveMockUpdateServerPort,
@@ -21,6 +22,22 @@ import {
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 
 it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+  it("always emits deterministic official updater metadata", () => {
+    assert.deepStrictEqual(resolveGitHubPublishConfig("latest"), {
+      provider: "github",
+      owner: "cafeai",
+      repo: "cafe-code",
+      releaseType: "release",
+    });
+    assert.deepStrictEqual(resolveGitHubPublishConfig("nightly"), {
+      provider: "github",
+      owner: "cafeai",
+      repo: "cafe-code",
+      releaseType: "prerelease",
+      channel: "nightly",
+    });
+  });
+
   it("resolves the dedicated nightly updater channel from nightly versions", () => {
     assert.equal(resolveDesktopUpdateChannel("0.0.17-nightly.20260413.42"), "nightly");
     assert.equal(resolveDesktopUpdateChannel("0.0.17"), "latest");
@@ -45,34 +62,33 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     });
   });
 
-  it("omits bundled workspace packages from staged desktop dependencies", () => {
-    assert.deepStrictEqual(
-      resolveDesktopRuntimeDependencies(
-        {
-          "@effect/platform-node": "catalog:",
-          "@cafecode/contracts": "workspace:*",
-          "@cafecode/shared": "workspace:*",
-          effect: "catalog:",
-          electron: "41.5.0",
-        },
-        {
-          "@effect/platform-node": "4.0.0-beta.59",
-          effect: "4.0.0-beta.59",
-        },
-      ),
-      {
-        "@effect/platform-node": "4.0.0-beta.59",
-        effect: "4.0.0-beta.59",
-      },
-    );
-  });
-
   it("stages managed runtimes only for Windows NSIS installers", () => {
     assert.equal(shouldStageWindowsManagedRuntime("win", "nsis"), true);
     assert.equal(shouldStageWindowsManagedRuntime("win", "nsis-web"), true);
     assert.equal(shouldStageWindowsManagedRuntime("win", "portable"), false);
     assert.equal(shouldStageWindowsManagedRuntime("mac", "dmg"), false);
     assert.equal(shouldStageWindowsManagedRuntime("linux", "AppImage"), false);
+  });
+
+  it("materializes catalog protocols before embedding the desktop package manifest", () => {
+    assert.deepStrictEqual(
+      resolveDesktopRuntimeDependencies(
+        {
+          effect: "catalog:",
+          "@effect/platform-node": "catalog:",
+          "node-pty": "^1.1.0",
+        },
+        {
+          effect: "4.0.0-beta.59",
+          "@effect/platform-node": "4.0.0-beta.59",
+        },
+      ),
+      {
+        effect: "4.0.0-beta.59",
+        "@effect/platform-node": "4.0.0-beta.59",
+        "node-pty": "^1.1.0",
+      },
+    );
   });
 
   it("requires a Windows NSIS exe artifact instead of accepting intermediate files", () => {

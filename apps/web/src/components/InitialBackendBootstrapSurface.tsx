@@ -1,8 +1,9 @@
-import { type ReactNode } from "react";
+import { type ReactNode, useEffect } from "react";
 
 import { usePrimaryEnvironmentId } from "../environments/primary";
 import { getWsConnectionUiState, useWsConnectionStatus } from "../rpc/wsConnectionState";
 import { selectBootstrapCompleteForEnvironment, useStore } from "../store";
+import { useDesktopDebugEnabled } from "../lib/desktopDebugState";
 import { Spinner } from "./ui/spinner";
 import { Skeleton } from "./ui/skeleton";
 import { SidebarMenuSkeleton } from "./ui/sidebar";
@@ -85,6 +86,40 @@ export function InitialBackendBootstrapSurface({ children }: { readonly children
   );
   const status = useWsConnectionStatus();
   const uiState = getWsConnectionUiState(status);
+  const desktopDebugEnabled = useDesktopDebugEnabled();
+
+  useEffect(() => {
+    if (!desktopDebugEnabled) {
+      return;
+    }
+    const bridge = window.desktopBridge;
+    if (!bridge?.publishDebugSnapshot) {
+      return;
+    }
+
+    // This publisher deliberately lives above every route. A new profile opens the
+    // onboarding screen, so ChatView cannot prove that the renderer completed its
+    // authenticated WebSocket bootstrap. Keep this snapshot free of connection URLs,
+    // errors, environment identifiers, and user content because it is served by the
+    // local desktop diagnostics endpoint.
+    void bridge
+      .publishDebugSnapshot({
+        debugSnapshotVersion: 1,
+        source: "InitialBackendBootstrapSurface",
+        capturedAt: new Date().toISOString(),
+        diagnostics: {
+          online: navigator.onLine,
+          localApi: { available: true },
+        },
+        connection: {
+          bootstrapComplete,
+          phase: status.phase,
+          hasConnected: status.hasConnected,
+          connected: status.phase === "connected",
+        },
+      })
+      .catch(() => undefined);
+  }, [bootstrapComplete, desktopDebugEnabled, status.hasConnected, status.phase]);
 
   if (bootstrapComplete) {
     return children;

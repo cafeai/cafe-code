@@ -42,6 +42,10 @@ import * as DesktopUpdates from "./updates/DesktopUpdates.ts";
 import * as DesktopSourceUpdates from "./updates/DesktopSourceUpdates.ts";
 import * as DesktopWindow from "./window/DesktopWindow.ts";
 import { resolveLinuxSafeStoragePasswordStore } from "./app/LinuxSafeStorageCommandLine.ts";
+import {
+  isDesktopRuntimeSelfTestEnabled,
+  runDesktopRuntimeSelfTestAndExit,
+} from "./app/DesktopRuntimeSelfTest.ts";
 
 startStartupCpuProfiler({ role: "desktop-main" });
 
@@ -138,4 +142,8 @@ const desktopRuntimeLayer = ElectronProtocol.layerSchemePrivileges.pipe(
   ),
 );
 
-DesktopApp.program.pipe(Effect.provide(desktopRuntimeLayer), NodeRuntime.runMain);
+if (isDesktopRuntimeSelfTestEnabled()) {
+  void runDesktopRuntimeSelfTestAndExit();
+} else {
+  DesktopApp.program.pipe(Effect.provide(desktopRuntimeLayer), NodeRuntime.runMain);
+}

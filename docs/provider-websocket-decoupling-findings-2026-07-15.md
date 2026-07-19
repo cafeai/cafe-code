@@ -438,15 +438,15 @@ Commands used:
 
 ```sh
 cd apps/server
-bun run test -- src/server.test.ts -t "filters thread subscription events already covered by the snapshot"
-bun run test -- src/providerDaemon/ProviderDaemonServer.test.ts -t "keeps journaling runtime events after one malformed event"
-bun run test -- src/providerDaemon/EventJournal.test.ts
+yarn workspace @cafeai/cafe-code test src/server.test.ts -t "filters thread subscription events already covered by the snapshot"
+yarn workspace @cafeai/cafe-code test src/providerDaemon/ProviderDaemonServer.test.ts -t "keeps journaling runtime events after one malformed event"
+yarn workspace @cafeai/cafe-code test src/providerDaemon/EventJournal.test.ts
 
 cd apps/web
-bun run test -- src/rpc/wsTransport.test.ts -t "recycles the websocket session when heartbeat recovery is requested|re-subscribes live stream listeners after an explicit transport reconnect"
+yarn workspace @cafeai/cafe-code test src/rpc/wsTransport.test.ts -t "recycles the websocket session when heartbeat recovery is requested|re-subscribes live stream listeners after an explicit transport reconnect"
 
 cd packages/shared
-bun run test -- src/DrainableWorker.test.ts
+yarn workspace @cafeai/cafe-code test src/DrainableWorker.test.ts
 ```
 
 These tests validate existing recovery and durability mechanisms. They do not cover multi-megabyte command events, NDJSON backpressure, queue bounds, event-loop liveness, or subscription-count-independent polling; those are required additions above.

@@ -1791,11 +1791,11 @@ describe("ProviderRuntimeIngestion", () => {
         itemType: "command_execution",
         status: "completed",
         title: "Ran command",
-        detail: "bun run lint",
+        detail: "yarn lint",
         data: {
           toolCallId: "tool-command-1",
           kind: "execute",
-          command: "bun run lint",
+          command: "yarn lint",
         },
       },
     });
@@ -1814,7 +1814,7 @@ describe("ProviderRuntimeIngestion", () => {
         : undefined;
 
     expect(activity?.summary).toBe("Ran command");
-    expect(payload?.detail).toBe("bun run lint");
+    expect(payload?.detail).toBe("yarn lint");
   });
 
   it("uses structured read-file paths when available", async () => {
@@ -4040,7 +4040,7 @@ describe("ProviderRuntimeIngestion", () => {
         itemType: "command_execution",
         status: "in_progress",
         title: "Run tests",
-        detail: "bun test",
+        detail: "yarn test",
         data: { pid: 123 },
       },
     });

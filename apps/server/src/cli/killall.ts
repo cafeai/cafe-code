@@ -210,8 +210,6 @@ function isNodeLikeExecutable(command: string): boolean {
   return (
     basename === "node" ||
     basename === "node.exe" ||
-    basename === "bun" ||
-    basename === "bun.exe" ||
     basename === "electron" ||
     basename === "electron.exe"
   );

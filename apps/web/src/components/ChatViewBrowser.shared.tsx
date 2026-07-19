@@ -2015,7 +2015,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           {
             id: "setup",
             name: "Setup",
-            command: "bun install",
+            command: "yarn install --immutable",
             icon: "configure",
             runOnWorktreeCreate: true,
           },
@@ -2133,7 +2133,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           {
             id: "setup",
             name: "Setup",
-            command: "bun install",
+            command: "yarn install --immutable",
             icon: "configure",
             runOnWorktreeCreate: true,
           },
@@ -2631,7 +2631,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           {
             id: "setup",
             name: "Setup",
-            command: "bun install",
+            command: "yarn install --immutable",
             icon: "configure",
             runOnWorktreeCreate: true,
           },

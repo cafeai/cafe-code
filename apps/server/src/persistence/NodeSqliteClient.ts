@@ -205,8 +205,16 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
         const effect = runStatement(db.prepare(sql), params ?? [], false);
         return rowTransform ? Effect.map(effect, rowTransform) : effect;
       },
-      executeStream(_sql, _params) {
-        return Stream.die("executeStream not implemented");
+      executeStream(sql, params, rowTransform) {
+        // `node:sqlite` iterators can throw while the Stream is pulling rows,
+        // outside the Effect error channel. Materialize through the same
+        // classified execution path as normal statements so SQLite failures
+        // remain typed `SqlError`s and the connection permit stays scoped to
+        // the stream. Cafe's current persistence queries are bounded; if a
+        // future call site needs cursor-scale streaming, add a pull adapter
+        // that translates iterator failures before changing this contract.
+        const rows = rowTransform ? Effect.map(run(sql, params), rowTransform) : run(sql, params);
+        return Stream.fromIterableEffect(rows);
       },
     });
   });

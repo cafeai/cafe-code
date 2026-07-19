@@ -121,7 +121,12 @@ describe("providerMaintenance", () => {
         driver: driver("nativePackageTool"),
         currentVersion: "2.1.110",
         latestVersion: "2.1.117",
-        maintenanceCapabilities: nativePackageToolUpdate.resolve(),
+        maintenanceCapabilities: nativePackageToolUpdate.resolve({
+          binaryPath:
+            "/usr/local/lib/node_modules/@example/native-package-tool/bin/native-package-tool.js",
+          platform: "linux",
+          env: { PATH: "" },
+        }),
       }),
     ).toMatchObject({
       status: "behind_latest",
@@ -184,46 +189,27 @@ describe("providerMaintenance", () => {
       }),
   );
 
-  it.effect(
-    "switches package-managed providers to bun updates when the resolved binary lives in bun's global bin",
-    () =>
-      Effect.gen(function* () {
-        const tempDir = yield* makeTempDir("t3-bun-capabilities");
-        const bunBinDir = path.join(tempDir, ".bun", "bin");
-        mkdirSync(bunBinDir, { recursive: true });
-        writeFileSync(path.join(bunBinDir, "native-package-tool.exe"), "MZ");
-
-        expect(
-          nativePackageToolUpdate.resolve({
-            binaryPath: "native-package-tool",
-            platform: "win32",
-            env: {
-              PATH: bunBinDir,
-              PATHEXT: ".COM;.EXE;.BAT;.CMD",
-            },
-          }),
-        ).toEqual({
-          provider: driver("nativePackageTool"),
-          packageName: "@example/native-package-tool",
-          update: {
-            command: "bun i -g @example/native-package-tool@latest",
-
-            executable: "bun",
-
-            args: ["i", "-g", "@example/native-package-tool@latest"],
-
-            lockKey: "bun-global",
-          },
-        });
+  it("disables one-click updates for project-local Yarn binaries", () => {
+    expect(
+      nativePackageToolUpdate.resolve({
+        binaryPath: "/workspace/.yarn/unplugged/native-package-tool/bin/native-package-tool.js",
+        platform: "linux",
+        env: { PATH: "" },
       }),
-  );
+    ).toEqual({
+      provider: driver("nativePackageTool"),
+      packageName: "@example/native-package-tool",
+      update: null,
+    });
+  });
 
   it("uses a Windows command shim for npm-managed provider updates on Windows", () => {
     expect(
       packageToolUpdate.resolve({
-        binaryPath: "package-tool",
+        binaryPath: "C:\\Users\\me\\AppData\\Roaming\\npm\\package-tool.cmd",
         platform: "win32",
         env: {
+          APPDATA: "C:\\Users\\me\\AppData\\Roaming",
           PATH: "",
           PATHEXT: ".COM;.EXE;.BAT;.CMD",
         },
@@ -240,6 +226,20 @@ describe("providerMaintenance", () => {
 
         lockKey: "npm-global",
       },
+    });
+  });
+
+  it("does not guess an updater when a package executable cannot be resolved", () => {
+    expect(
+      packageToolUpdate.resolve({
+        binaryPath: "package-tool",
+        platform: "linux",
+        env: { PATH: "" },
+      }),
+    ).toEqual({
+      provider: driver("packageTool"),
+      packageName: "@example/package-tool",
+      update: null,
     });
   });
 

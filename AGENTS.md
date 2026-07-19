@@ -2,9 +2,9 @@
 
 ## Task Completion Requirements
 
-- When code changes are made, all of `bun fmt`, `bun lint`, and `bun typecheck` must pass before considering tasks completed.
-- NEVER run `bun test`. Always use `bun run test` (runs Vitest).
-- When a change touches Electron packaging, backend bootstrap, provider daemon startup, or generated bundle boundaries, also run `bun run build:desktop`.
+- When code changes are made, all of `yarn fmt`, `yarn lint`, and `yarn typecheck` must pass before considering tasks completed.
+- Run tests with `yarn test` (runs Vitest through the Turbo task graph).
+- When a change touches Electron packaging, backend bootstrap, provider daemon startup, or generated bundle boundaries, also run `yarn build:desktop`.
 - Rust takes a while to compile. Do not prematurely kill Rust/cargo builds.
 - Integration tests that require live provider binaries, real provider credentials, process reaping, or detached daemon handoff should be explicit `*.e2e.test.ts` or documented opt-in commands. Do not silently put flaky external-provider assumptions on the default test path.
 
@@ -18,7 +18,7 @@
 
 - All Windows-specific requirements, implementation notes, workarounds, and verification guidance must live in this section. Do not scatter Windows-only rules through unrelated architecture, provider, packaging, or lifecycle sections; add or update bullets here instead.
 - When making changes on Windows, be overly aware of three priorities: record every Windows-specific behavior or workaround in this section, never regress macOS/Linux behavior, and treat Windows as lower priority than macOS/Linux while still making the Windows path correct and maintainable.
-- Keep Windows-only fixes documented in this section before implementation. Scope them so they do not change macOS or Linux behavior unless the task explicitly asks for a cross-platform change. Document how macOS/Linux behavior is preserved, and verify at least `bun run build:desktop` plus the relevant Windows command before considering a Windows fix complete.
+- Keep Windows-only fixes documented in this section before implementation. Scope them so they do not change macOS or Linux behavior unless the task explicitly asks for a cross-platform change. Document how macOS/Linux behavior is preserved, and verify at least `yarn build:desktop` plus the relevant Windows command before considering a Windows fix complete.
 - Windows NSIS packaging uses `electron-builder`, which rejects a staged app if `electron` appears in `dependencies`; Electron must be present only in `devDependencies` for the staged builder package. Because `apps/server/package.json` currently lists `electron` among runtime dependencies, `scripts/build-desktop-artifact.ts` must omit `electron` from staged runtime dependencies while still adding the desktop Electron version to staged `devDependencies`. This is a staged package shape fix, not a runtime dependency or platform-target change. It preserves macOS/Linux behavior by leaving shared build config, platform target selection, icons, signing/publish configuration, and non-Electron staged runtime dependencies unchanged.
 - Unsigned Windows NSIS artifacts should set `win.signExecutable=false`, not `win.signAndEditExecutable=false`. This skips code signing while preserving executable resource editing and prevents NSIS helper/uninstaller signing paths from running during local unsigned builds. Keep signed Azure Trusted Signing builds on the existing `azureSignOptions` path.
 - Windows Codex shadow homes must not require Developer Mode or administrator symlink privileges. Keep macOS/Linux on the existing symlink-based layout, but on Windows use Windows-safe links for shared entries: directory junctions for shared directories, hard links or copies for shared files, and real copied private files for `auth.json`. Verify the Windows path without changing POSIX shadow-home behavior.
@@ -36,7 +36,7 @@
 - Windows `cafe-code killall` process discovery must also spawn `powershell.exe` directly with `shell: false` and consume `Get-CimInstance Win32_Process` JSON. Keep macOS/Linux on targeted `ps -axo pid=,ppid=,command=` discovery, and keep the command's current process plus ancestors protected so `cafe-code killall` does not terminate its own launcher before it finishes reporting results.
 - Windows source checkouts may start Cafe through `Start-CafeCode.ps1`, which checks whether `openssl.exe`/`openssl` is available as an application on `PATH` before launch. The launcher should preserve default local HTTPS when OpenSSL is present, and set `CAFE_CODE_HTTPS_ENABLED=false` only when OpenSSL is missing because source installs do not always have it available. Desktop backend configuration must also propagate `CAFE_CODE_HTTPS_ENABLED=false` whenever `DesktopServerExposure` resolves no HTTPS port, while keeping macOS/Linux behavior unchanged by deriving the child environment from the shared exposure config rather than from a platform branch.
 - Windows packaged desktop startup must also verify that `openssl.exe`/`openssl` can run before allocating an HTTPS sibling port. If OpenSSL is unavailable, keep the user's persisted HTTPS preference unchanged but start the backend HTTP-only for that run so certificate generation cannot crash-loop before the window opens. macOS/Linux behavior remains unchanged because the packaged runtime only applies this OpenSSL prerequisite gate on Windows.
-- Windows desktop artifact builds can execute server scripts through Bun's Node-compatible shim when no standalone `node.exe` is installed. That shim does not handle Node's `--run <script>` exactly like Node on Windows, so the server build must invoke the bundled build script through `bun run build:bundle` on Windows while preserving the existing `process.execPath --run build:bundle` path on macOS/Linux.
+- Windows source and artifact builds require the pinned standalone Node runtime. Server build helpers should invoke TypeScript entrypoints through `process.execPath` and use Corepack only for locked Yarn package operations. Preserve the direct Node path on macOS/Linux and avoid platform-specific package-manager shims.
 
 ## Project Snapshot
 
