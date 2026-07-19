@@ -10,28 +10,28 @@ of your way.
 No terminal drawer. No pretend IDE. No release dashboard. If you want a console,
 use a real console. If you want to inspect code, open it in VS Code.
 
-## Run From Bun For Now
+## Run From Source
 
 The npm package exists, but it may lag behind current work until Cafe Code
-stabilizes. For now, the freshest path is a Bun checkout from GitHub.
+stabilizes. The freshest path is a source checkout from GitHub.
 
 Mostly tested on macOS. Windows seems to work. Linux may need some tweaking.
 
-Install [Bun](https://bun.sh/docs/installation) first if it is not already on
-your machine, then run:
+Install Node.js 24.13.1 and Corepack, then run:
 
 ```bash
 git clone https://github.com/cafeai/cafe-code.git
 cd cafe-code
-bun install
-bun run build:desktop
-bun run --cwd apps/desktop start
+corepack enable
+yarn install --immutable
+yarn build:desktop
+yarn workspace @cafecode/desktop start
 ```
 
 If you want Codex or Claude to install it for you, paste this:
 
 ```text
-Install Cafe Code from source with Bun. Clone https://github.com/cafeai/cafe-code.git, install Bun if it is missing, run bun install, run bun run build:desktop, then start it with bun run --cwd apps/desktop start. Also verify Codex CLI is installed and logged in with codex login, and Claude Code is installed and logged in with claude auth login if I want Claude support.
+Install Cafe Code from source. Clone https://github.com/cafeai/cafe-code.git, install Node.js 24.13.1 and Corepack, run corepack enable, run yarn install --immutable, run yarn build:desktop, then start it with yarn workspace @cafecode/desktop start. Also verify Codex CLI is installed and logged in with codex login, and Claude Code is installed and logged in with claude auth login if I want Claude support.
 ```
 
 ## npm Path

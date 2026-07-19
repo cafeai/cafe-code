@@ -103,7 +103,7 @@ This was performed on Linux. macOS and Windows conclusions based on source and p
 
 ### RB-08 — The test/release gates do not cover the supported product surface
 
-**Evidence:** Root `bun run test` does not run [`apps/web/package.json`](../apps/web/package.json)'s `test:browser` suites. CI runs only Ubuntu. The repository has 13 browser suites, but they are not a CI step. Release smoke is not in CI. The default tests intentionally exclude live provider E2E; the opt-in coverage includes real Codex and supervisor work but no equivalent Claude/OpenCode matrix. Native installers, update flows, signing, first-run bootstrap, OS credential storage, and desktop UI startup are not certified on macOS/Windows/Linux.
+**Evidence:** The root test task at audit time did not run [`apps/web/package.json`](../apps/web/package.json)'s `test:browser` suites. CI ran only Ubuntu. The repository had 13 browser suites, but they were not a CI step. Release smoke was not in CI. The default tests intentionally excluded live provider E2E; the opt-in coverage included real Codex and supervisor work but no equivalent Claude/OpenCode matrix. Native installers, update flows, signing, first-run bootstrap, OS credential storage, and desktop UI startup were not certified on macOS/Windows/Linux.
 
 **Impact:** The exact surfaces most likely to break at release—Electron, browser interactions, installers, updates, provider binaries, and OS process behavior—can regress while required CI remains green.
 
@@ -261,11 +261,11 @@ Add automated dependency-license inventory and include required notices in insta
 
 The root clean script uses `rm -rf`, and release smoke/helpers assume shell behavior more natural on POSIX. They may work under Git Bash or CI shims but are not a reliable native Windows maintainer workflow.
 
-Use cross-platform Bun/Node filesystem APIs for repository scripts and execute them on the Windows CI runner.
+Use cross-platform Node filesystem APIs for repository scripts and execute them on the Windows CI runner.
 
 ### M-14 — Dependency hygiene needs a release cadence
 
-At audit time, `bun audit --production` reported one low-severity transitive `@babel/core` arbitrary-file-read advisory. Several core dependencies had newer releases, including Electron, Electron Updater, Claude Agent SDK, OpenCode SDK, and Effect beta versions.
+At audit time, the then-current production dependency audit reported one low-severity transitive `@babel/core` arbitrary-file-read advisory. Several core dependencies had newer releases, including Electron, Electron Updater, Claude Agent SDK, OpenCode SDK, and Effect beta versions.
 
 Do not blindly upgrade immediately before release. Establish automated update PRs, vulnerability gates, a tested provider/toolchain compatibility cadence, and a release freeze process. Security-support timelines matter more than being on the newest version every day.
 
@@ -346,17 +346,17 @@ Blanket search-and-replace would damage compatibility. Remove only the stale run
 
 The source review was completed before running these commands. Results are filled from the final reviewed worktree:
 
-| Command                               | Result  | Notes                                                                                                                     |
-| ------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `bun run fmt:check`                   | Pass    | All 1,179 checked files passed after formatting this new report; no product source needed formatting                      |
-| `bun run lint`                        | Pass    | Zero errors; one existing React array-index-key warning in `ActivityHeatmap.tsx`                                          |
-| `bun run typecheck`                   | Pass    | 9/9 workspace tasks; uncached; 6m52.791s                                                                                  |
-| `bun run test`                        | Pass    | 9/9 workspace tasks; server alone ran 163 files and 1,249 assertions; 3m54.393s; invoked via the required `bun run test`  |
-| `bun run --cwd apps/web test:browser` | Pass    | 13 files and 171 assertions; emitted one non-fatal `legend-list` zero-height warning; 138.63s                             |
-| `bun run build:desktop`               | Pass    | 3/3 tasks from cache; warned about a 3.53 MB renderer chunk, ineffective dynamic import, and production source-map output |
-| `bun run release:smoke`               | Pass    | Clean staged dependency install and existing artifact checks passed; this is not a signed/native installer launch test    |
-| Native macOS/Windows installer smoke  | Not run | Linux audit host; required in the release matrix                                                                          |
-| Live provider credential E2E          | Not run | Explicit opt-in release canary; no credentials assumed                                                                    |
+| Command                              | Result  | Notes                                                                                                                     |
+| ------------------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Formatter check                      | Pass    | All 1,179 checked files passed after formatting this new report; no product source needed formatting                      |
+| Lint                                 | Pass    | Zero errors; one existing React array-index-key warning in `ActivityHeatmap.tsx`                                          |
+| Typecheck                            | Pass    | 9/9 workspace tasks; uncached; 6m52.791s                                                                                  |
+| Root unit-test task                  | Pass    | 9/9 workspace tasks; server alone ran 163 files and 1,249 assertions; 3m54.393s                                           |
+| Browser test task                    | Pass    | 13 files and 171 assertions; emitted one non-fatal `legend-list` zero-height warning; 138.63s                             |
+| Desktop build task                   | Pass    | 3/3 tasks from cache; warned about a 3.53 MB renderer chunk, ineffective dynamic import, and production source-map output |
+| Release smoke task                   | Pass    | Clean staged dependency install and existing artifact checks passed; this is not a signed/native installer launch test    |
+| Native macOS/Windows installer smoke | Not run | Linux audit host; required in the release matrix                                                                          |
+| Live provider credential E2E         | Not run | Explicit opt-in release canary; no credentials assumed                                                                    |
 
 Passing source gates does not override the release blockers above; most are policy, security-boundary, packaging, native-runtime, and missing-test issues rather than TypeScript compilation errors.
 

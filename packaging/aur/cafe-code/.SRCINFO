@@ -5,8 +5,9 @@ pkgbase = cafe-code
 	url = https://github.com/cafeai/cafe-code
 	arch = x86_64
 	license = AGPL-3.0-or-later
-	makedepends = bun>=1.3.11
+	makedepends = corepack>=0.34.6
 	makedepends = git
+	makedepends = nodejs>=24.13.1
 	depends = alsa-lib
 	depends = at-spi2-core
 	depends = cairo

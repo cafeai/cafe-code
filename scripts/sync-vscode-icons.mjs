@@ -5,9 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
 import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+const require = createRequire(import.meta.url);
 
 const VERSION = process.argv[2] ?? "12.17.0";
 const VERSION_TAG = `v${VERSION}`;
@@ -20,6 +22,7 @@ const ASSOCIATIONS_PATH = path.join(
   REPO_ROOT,
   "apps/web/src/vscode-icons-language-associations.json",
 );
+const SUPPORTED_PROJECT_PACKAGE_MANAGERS = new Set(["yarn"]);
 
 function normalizeExtension(value) {
   return value.trim().toLowerCase().replace(/^\./, "");
@@ -32,6 +35,57 @@ function normalizeFileName(value) {
 function putIfAbsent(target, key, value) {
   if (!(key in target)) {
     target[key] = value;
+  }
+}
+
+function selfNamedPackageManager(fileName, iconId) {
+  const normalized = normalizeFileName(fileName);
+  const lockMatch = /^([a-z][a-z0-9-]*)\.lock(?:b|json|ya?ml)?$/u.exec(normalized);
+  const configMatch = /^\.?([a-z][a-z0-9-]*)fig\.toml$/u.exec(normalized);
+  const manager = lockMatch?.[1] ?? configMatch?.[1];
+  if (!manager) return null;
+
+  const expectedIconIds = new Set([`_f_${manager}`, `_f_${manager}fig`]);
+  return expectedIconIds.has(iconId) ? manager : null;
+}
+
+function filterProjectPackageManagerMetadata(manifest, associations) {
+  function visit(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    for (const [key, child] of Object.entries(value)) {
+      if (
+        (key === "fileNames" || key === "fileExtensions" || key === "languageIds") &&
+        child &&
+        typeof child === "object"
+      ) {
+        for (const [fileName, iconId] of Object.entries(child)) {
+          if (typeof iconId !== "string") continue;
+          const manager = selfNamedPackageManager(fileName, iconId);
+          if (manager && !SUPPORTED_PROJECT_PACKAGE_MANAGERS.has(manager)) {
+            delete child[fileName];
+          }
+        }
+      } else if (key !== "iconDefinitions") {
+        visit(child);
+      }
+    }
+  }
+
+  visit(manifest);
+
+  for (const [extension, languageId] of Object.entries(associations.extensionToLanguageId)) {
+    if (typeof languageId !== "string") continue;
+    const manager = /^([a-z][a-z0-9-]*)\.lockb$/u.exec(languageId)?.[1];
+    if (manager && !SUPPORTED_PROJECT_PACKAGE_MANAGERS.has(manager)) {
+      delete associations.extensionToLanguageId[extension];
+    }
+  }
+
+  const serializedMappings = JSON.stringify({ ...manifest, iconDefinitions: undefined });
+  for (const iconId of Object.keys(manifest.iconDefinitions ?? {})) {
+    if (!serializedMappings.includes(`"${iconId}"`)) {
+      delete manifest.iconDefinitions[iconId];
+    }
   }
 }
 
@@ -116,7 +170,6 @@ function buildLanguageAssociations(manifest, languages) {
   return {
     version: VERSION,
     source: LANGUAGES_URL,
-    generatedAt: new Date().toISOString(),
     extensionToLanguageId,
     fileNameToLanguageId,
   };
@@ -129,9 +182,15 @@ async function main() {
     const manifest = await extractManifestFromVsix(vsixPath);
     const languages = await loadLanguagesCollection();
     const associations = buildLanguageAssociations(manifest, languages);
+    filterProjectPackageManagerMetadata(manifest, associations);
 
     await fs.writeFile(MANIFEST_PATH, `${JSON.stringify(manifest)}\n`, "utf8");
     await fs.writeFile(ASSOCIATIONS_PATH, `${JSON.stringify(associations)}\n`, "utf8");
+    const formatterPackagePath = require.resolve("oxfmt/package.json");
+    const formatterPath = path.join(path.dirname(formatterPackagePath), "bin/oxfmt");
+    await execFileAsync(process.execPath, [formatterPath, MANIFEST_PATH, ASSOCIATIONS_PATH], {
+      cwd: REPO_ROOT,
+    });
 
     process.stdout.write(
       [

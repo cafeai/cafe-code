@@ -37,6 +37,41 @@ type PacmanArch = "x86_64" | "aarch64";
 const repoRoot = realpathSync(new URL("..", import.meta.url));
 const serverPackageJsonPath = join(repoRoot, "apps/server/package.json");
 const desktopIconPath = join(repoRoot, "apps/desktop/resources/icon.png");
+const licensePath = join(repoRoot, "LICENSE");
+
+// Keep this list aligned with packaging/aur/cafe-code/PKGBUILD and .SRCINFO.
+// The local package wraps the same AppImage as the AUR recipe, so declaring a
+// smaller dependency set would make local install smokes pass only on machines
+// that happened to have undeclared Electron runtime libraries already present.
+export const ARCH_RUNTIME_DEPENDENCIES = [
+  "alsa-lib",
+  "at-spi2-core",
+  "cairo",
+  "dbus",
+  "expat",
+  "fuse2",
+  "glib2",
+  "glibc",
+  "gtk3",
+  "hicolor-icon-theme",
+  "libcups",
+  "libgcc",
+  "libx11",
+  "libxcb",
+  "libxcomposite",
+  "libxdamage",
+  "libxext",
+  "libxfixes",
+  "libxkbcommon",
+  "libxrandr",
+  "mesa",
+  "nspr",
+  "nss",
+  "openssl",
+  "pango",
+  "systemd-libs",
+  "xdg-utils",
+] as const;
 
 function writeStdout(message: string) {
   process.stdout.write(`${message}\n`);
@@ -164,7 +199,7 @@ function parseArgs(argv: ReadonlyArray<string>): CliOptions {
       writeStdout(`Build a local Arch Linux pacman package for Cafe Code.
 
 Usage:
-  bun run dist:arch:local [options]
+  yarn dist:arch:local [options]
 
 Options:
   --arch x64|arm64          Desktop artifact architecture. Defaults to host arch.
@@ -264,6 +299,7 @@ function createStage(options: CliOptions, version: string, appImagePath: string)
   const wrapperTarget = join(stageRoot, "usr/bin/cafe-code");
   const desktopTarget = join(stageRoot, "usr/share/applications/cafecode.desktop");
   const iconTarget = join(stageRoot, "usr/share/icons/hicolor/1024x1024/apps/cafecode.png");
+  const licenseTarget = join(stageRoot, "usr/share/licenses/cafe-code/LICENSE");
 
   copyPackageFile(appImagePath, appImageTarget, 0o755);
   writePackageFile(
@@ -288,6 +324,7 @@ StartupWMClass=cafecode
     0o644,
   );
   copyPackageFile(desktopIconPath, iconTarget, 0o644);
+  copyPackageFile(licensePath, licenseTarget, 0o644);
 
   const pkgver = toPacmanPkgver(version);
   const pacmanArch = mapPacmanArch(options.arch);
@@ -297,15 +334,14 @@ StartupWMClass=cafecode
     "pkgbase = cafe-code",
     "xdata = pkgtype=pkg",
     `pkgver = ${pkgver}-1`,
-    "pkgdesc = Minimal desktop GUI for coding agents",
+    "pkgdesc = Desktop GUI for coding agents such as Codex, Claude, and OpenCode",
     "url = https://github.com/cafeai/cafe-code",
     `builddate = ${String(unixNowSeconds())}`,
     "packager = Cafe Code local package builder",
     `size = ${String(packageSize)}`,
     `arch = ${pacmanArch}`,
     "license = AGPL-3.0-or-later",
-    "depend = fuse2",
-    "depend = hicolor-icon-theme",
+    ...ARCH_RUNTIME_DEPENDENCIES.map((dependency) => `depend = ${dependency}`),
     "",
   ].join("\n");
   writePackageFile(join(stageRoot, ".PKGINFO"), pkgInfo, 0o644);
@@ -385,4 +421,6 @@ function main() {
   }
 }
 
-main();
+if (import.meta.main) {
+  main();
+}

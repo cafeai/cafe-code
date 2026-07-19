@@ -13,7 +13,7 @@
 ## 1. Method
 
 - Built web assets are served from `apps/web/dist`. Server started headless on loopback:
-  `CAFE_CODE_NO_BROWSER=true bun apps/server/src/bin.ts serve --host 127.0.0.1 --port 13773 --no-https`
+  `CAFE_CODE_NO_BROWSER=true node apps/server/src/bin.ts serve --host 127.0.0.1 --port 13773 --no-https`
 - Authenticated at `/pair` with the admin password, then drove Chromium via Playwright across:
   - `360×800` (small Android), `390×844` (iPhone), `844×390` (landscape)
   - `768×768` (true 1:1), `820×800` (near-1:1 folding, unfolded)
@@ -164,20 +164,20 @@ Goal: stop wasting the 640–767 px band without touching ≥ 768.
 - [ ] Folding band check at **700×800** (a representative 640–767 width) before/after F1.
 - [ ] Keyboard-open behavior unchanged (composer pinned) at 390×440.
 - [ ] Touch-only run (Playwright `hasTouch:true`, `isMobile:true`) confirms F4 hides hints and F2 actions are tappable without hover.
-- [ ] `bun fmt`, `bun lint`, `bun typecheck` pass.
+- [ ] `yarn fmt`, `yarn lint`, `yarn typecheck` pass.
 
 ## 6. Reproduction
 
 ```bash
 # build web assets if missing
-bun --filter @cafecode/web build
+yarn workspace @cafecode/web build
 # start headless server on loopback
-CAFE_CODE_NO_BROWSER=true bun apps/server/src/bin.ts serve --host 127.0.0.1 --port 13773 --no-https
+CAFE_CODE_NO_BROWSER=true node apps/server/src/bin.ts serve --host 127.0.0.1 --port 13773 --no-https
 # auth status / set
-bun apps/server/src/bin.ts auth password status
+node apps/server/src/bin.ts auth password status
 ```
 
-Then drive with Playwright (installed at `node_modules/.bun/node_modules/playwright`, Chromium in `~/.cache/ms-playwright`) at the viewports in §1. Login field: `#admin-password` on `/pair`; redirects to `/`.
+Then drive with the workspace Playwright installation (Chromium in `~/.cache/ms-playwright`) at the viewports in §1. Login field: `#admin-password` on `/pair`; redirects to `/`.
 
 ---
 
@@ -219,7 +219,7 @@ desktop (≥ 768 px) render is untouched.
 
 ### Verification (Playwright, rebuilt assets)
 
-- `bun --filter @cafecode/web typecheck` ✓, `bun lint` (0 warnings/0 errors) ✓, `bun fmt` ✓.
+- `yarn workspace @cafecode/web typecheck` ✓, `yarn lint` (0 warnings/0 errors) ✓, `yarn fmt` ✓.
 - **Desktop unchanged** at 1280×800 and 768×768: layout matches the pre-change baseline; command-palette keyboard hints still shown on desktop (fine pointer). See `images/mobile-review/after/desktop1280-home.png`, `desktop768-home.png`, `desktop1280-thread.png`.
 - **F1**: at 700×820 the sidebar opens as a ~320 px drawer over visible content (`after/fold700-sidebar-drawer.png`).
 - **F2**: 10 always-visible row-action buttons on a touch context (were hover-only).

@@ -384,7 +384,7 @@ describe("MessagesTimeline", () => {
               createdAt: "2026-03-17T19:12:28.000Z",
               label: "Ran command",
               tone: "tool",
-              command: "bun lint",
+              command: "yarn lint",
             },
           },
           {

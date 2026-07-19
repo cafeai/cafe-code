@@ -6,7 +6,7 @@
     "dist",
     "dist-electron",
     "node_modules",
-    "bun.lock",
+    "yarn.lock",
     "*.tsbuildinfo",
     "**/routeTree.gen.ts",
     "apps/web/public/mockServiceWorker.js",

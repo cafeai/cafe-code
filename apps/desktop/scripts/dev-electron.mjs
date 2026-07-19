@@ -3,6 +3,7 @@ import { watch } from "node:fs";
 import { join } from "node:path";
 
 import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
+import { terminateDesktopDevApps } from "./dev-process-cleanup.mjs";
 import { linuxSafeStorageElectronArgs } from "./linux-safe-storage.mjs";
 import { waitForResources } from "./wait-for-resources.mjs";
 
@@ -64,14 +65,6 @@ function killChildTreeByPid(pid, signal) {
     }
   }
   spawnSync("pkill", [`-${signal}`, "-P", String(pid)], { stdio: "ignore" });
-}
-
-function cleanupStaleDevApps() {
-  if (process.platform === "win32") {
-    return;
-  }
-
-  spawnSync("pkill", ["-f", "--", `--cafecode-dev-root=${desktopDir}`], { stdio: "ignore" });
 }
 
 function startApp() {
@@ -254,7 +247,7 @@ async function shutdown(exitCode) {
 }
 
 startWatchers();
-cleanupStaleDevApps();
+terminateDesktopDevApps({ force: true });
 startApp();
 
 process.on("SIGINT", () => {

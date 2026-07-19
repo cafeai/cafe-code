@@ -22,7 +22,7 @@ export function resolveHostProcessArch(
   if (processArch === "x64") {
     if (platform !== "win32") return "x64";
 
-    // On Windows-on-Arm, x64 Node/Bun can run under emulation while the host
+    // On Windows-on-Arm, x64 Node can run under emulation while the host
     // still reports ARM64 via the processor environment variables.
     return (
       normalizeWindowsArch(env.PROCESSOR_ARCHITEW6432) ??

@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -19,7 +20,9 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const workspaceFiles = [
   "package.json",
-  "bun.lock",
+  "yarn.lock",
+  ".yarnrc.yml",
+  ".yarn/patches/effect.patch",
   "apps/server/package.json",
   "apps/desktop/package.json",
   "apps/web/package.json",
@@ -29,21 +32,11 @@ const workspaceFiles = [
   "packages/shared/package.json",
   "packages/effect-codex-app-server/package.json",
   "scripts/package.json",
+  "packaging/desktop-runtime/package.json",
 ] as const;
 
 function copyWorkspaceManifestFixture(targetRoot: string): void {
   for (const relativePath of workspaceFiles) {
-    const sourcePath = resolve(repoRoot, relativePath);
-    const destinationPath = resolve(targetRoot, relativePath);
-    mkdirSync(dirname(destinationPath), { recursive: true });
-    cpSync(sourcePath, destinationPath);
-  }
-
-  const packageJson = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf8")) as {
-    readonly patchedDependencies?: Record<string, string>;
-  };
-
-  for (const relativePath of Object.values(packageJson.patchedDependencies ?? {})) {
     const sourcePath = resolve(repoRoot, relativePath);
     const destinationPath = resolve(targetRoot, relativePath);
     mkdirSync(dirname(destinationPath), { recursive: true });
@@ -197,19 +190,34 @@ try {
     },
   );
 
-  rmSync(resolve(tempRoot, "bun.lock"), { force: true });
+  const expectedLockfile = readFileSync(resolve(tempRoot, "yarn.lock"), "utf8");
+  rmSync(resolve(tempRoot, "yarn.lock"), { force: true });
 
-  execFileSync("bun", ["install", "--ignore-scripts"], {
+  execFileSync("corepack", ["yarn", "install", "--no-immutable", "--mode=skip-build"], {
     cwd: tempRoot,
     stdio: "inherit",
+    shell: process.platform === "win32",
   });
 
-  const lockfile = readFileSync(resolve(tempRoot, "bun.lock"), "utf8");
+  const lockfile = readFileSync(resolve(tempRoot, "yarn.lock"), "utf8");
+  if (lockfile !== expectedLockfile) {
+    throw new Error("Expected the regenerated Yarn lockfile to match the committed lockfile.");
+  }
   assertContains(
     lockfile,
-    `"version": "9.9.9-smoke.0"`,
-    "Expected bun.lock to contain the smoke version.",
+    "effect@patch:effect@npm%3A4.0.0-beta.59#./.yarn/patches/effect.patch",
+    "Expected yarn.lock to retain the Effect RPC patch.",
   );
+  assertContains(
+    lockfile,
+    '"@cafecode/desktop-runtime@workspace:packaging/desktop-runtime"',
+    "Expected yarn.lock to contain the canonical desktop runtime workspace.",
+  );
+  execFileSync("corepack", ["yarn", "install", "--immutable", "--mode=skip-build"], {
+    cwd: tempRoot,
+    stdio: "inherit",
+    shell: process.platform === "win32",
+  });
 
   const nightlyReleaseMetadata = execFileSync(
     process.execPath,
@@ -286,45 +294,32 @@ try {
   const mergedPreviewWindowsManifestPath = resolve(tempRoot, "release-assets/preview.yml");
   const { arm64Path: winDebugArm64Path, x64Path: winDebugX64Path } =
     writeWindowsBuilderDebugFixtures(tempRoot);
-  execFileSync(
-    "bash",
-    [
-      "-lc",
-      `
-        release_assets_dir=${JSON.stringify(resolve(tempRoot, "release-assets"))}
-        shopt -s nullglob
-        found_windows_manifest=false
-        for x64_manifest in "$release_assets_dir"/*-win-x64.yml; do
-          if [[ "$(basename "$x64_manifest")" == builder-debug-* ]]; then
-            continue
-          fi
-
-          arm64_manifest="\${x64_manifest/-x64.yml/-arm64.yml}"
-          output_manifest="\${x64_manifest/-win-x64.yml/.yml}"
-          if [[ ! -f "$arm64_manifest" ]]; then
-            echo "Missing matching arm64 Windows manifest for $x64_manifest" >&2
-            exit 1
-          fi
-
-          found_windows_manifest=true
-          ${JSON.stringify(process.execPath)} ${JSON.stringify(resolve(repoRoot, "scripts/merge-update-manifests.ts"))} --platform win \
-            "$arm64_manifest" \
-            "$x64_manifest" \
-            "$output_manifest"
-          rm -f "$arm64_manifest" "$x64_manifest"
-        done
-
-        if [[ "$found_windows_manifest" != true ]]; then
-          echo "No Windows updater manifests found to merge." >&2
-          exit 1
-        fi
-      `,
-    ],
-    {
-      cwd: repoRoot,
-      stdio: "inherit",
-    },
-  );
+  const releaseAssetsDir = resolve(tempRoot, "release-assets");
+  const windowsX64Manifests = readdirSync(releaseAssetsDir)
+    .filter((name) => name.endsWith("-win-x64.yml") && !name.startsWith("builder-debug-"))
+    .map((name) => resolve(releaseAssetsDir, name));
+  if (windowsX64Manifests.length === 0) {
+    throw new Error("No Windows updater manifests found to merge.");
+  }
+  for (const x64Manifest of windowsX64Manifests) {
+    const arm64Manifest = x64Manifest.replace(/-x64\.yml$/u, "-arm64.yml");
+    const outputManifest = x64Manifest.replace(/-win-x64\.yml$/u, ".yml");
+    assertExists(arm64Manifest, `Missing matching arm64 Windows manifest for ${x64Manifest}`);
+    execFileSync(
+      process.execPath,
+      [
+        resolve(repoRoot, "scripts/merge-update-manifests.ts"),
+        "--platform",
+        "win",
+        arm64Manifest,
+        x64Manifest,
+        outputManifest,
+      ],
+      { cwd: repoRoot, stdio: "inherit" },
+    );
+    rmSync(arm64Manifest, { force: true });
+    rmSync(x64Manifest, { force: true });
+  }
 
   const mergedWindowsManifest = readFileSync(mergedWindowsManifestPath, "utf8");
   assertContains(

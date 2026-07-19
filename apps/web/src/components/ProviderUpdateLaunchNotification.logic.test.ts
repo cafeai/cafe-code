@@ -118,7 +118,7 @@ describe("provider update launch notification logic", () => {
           instanceId: instanceId("claude_work"),
           latestVersion: "2.1.123",
           canUpdate: true,
-          updateCommand: "bun add -g @anthropic-ai/claude-code@latest",
+          updateCommand: "npm install -g @anthropic-ai/claude-code@latest",
         }),
       ]),
     ).toBe(false);

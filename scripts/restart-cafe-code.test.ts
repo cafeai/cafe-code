@@ -6,7 +6,6 @@ import {
   buildHelperProcessArgs,
   defaultLaunchCommand,
   parseRestartCafeCodeArgs,
-  resolveBunPath,
   resolveRestartLogDir,
 } from "./restart-cafe-code.ts";
 
@@ -17,7 +16,6 @@ describe("restart-cafe-code", () => {
       waitMs: DEFAULT_RESTART_WAIT_MS,
       restartDelayMs: DEFAULT_RESTART_DELAY_MS,
       logDir: undefined,
-      bunPath: undefined,
       launchCommand: undefined,
       dryRun: false,
       help: false,
@@ -31,14 +29,13 @@ describe("restart-cafe-code", () => {
         "--restart-delay-ms",
         "50",
         "--",
-        "bun",
-        "run",
+        "yarn",
         "dev:desktop",
       ]),
     ).toMatchObject({
       waitMs: 25,
       restartDelayMs: 50,
-      launchCommand: ["bun", "run", "dev:desktop"],
+      launchCommand: ["yarn", "dev:desktop"],
     });
   });
 
@@ -46,20 +43,10 @@ describe("restart-cafe-code", () => {
     expect(() => parseRestartCafeCodeArgs(["--"])).toThrow("Expected a launch command");
   });
 
-  it("resolves bun from the current package-manager executable when available", () => {
-    expect(resolveBunPath({ npm_execpath: "/opt/bin/bun" }, "linux")).toBe("/opt/bin/bun");
-    expect(resolveBunPath({ APPDATA: "C:\\Users\\me\\AppData\\Roaming" }, "win32")).toBe(
-      "C:\\Users\\me\\AppData\\Roaming\\npm\\bun.cmd",
-    );
-  });
-
-  it("builds the default desktop launch command through bun", () => {
-    expect(defaultLaunchCommand("/opt/bin/bun")).toEqual([
-      "/opt/bin/bun",
-      "run",
-      "--cwd",
-      "apps/desktop",
-      "start",
+  it("builds the default desktop launch command through Node", () => {
+    expect(defaultLaunchCommand("/opt/bin/node")).toEqual([
+      "/opt/bin/node",
+      "apps/desktop/scripts/start-electron.mjs",
     ]);
   });
 
@@ -70,8 +57,7 @@ describe("restart-cafe-code", () => {
         waitMs: 10,
         restartDelayMs: 20,
         logDir: "/tmp/logs",
-        bunPath: "/opt/bin/bun",
-        launchCommand: ["bun", "run", "dev:desktop"],
+        launchCommand: ["yarn", "dev:desktop"],
       }),
     ).toEqual([
       "/repo/scripts/restart-cafe-code.ts",
@@ -82,11 +68,8 @@ describe("restart-cafe-code", () => {
       "20",
       "--log-dir",
       "/tmp/logs",
-      "--bun-path",
-      "/opt/bin/bun",
       "--",
-      "bun",
-      "run",
+      "yarn",
       "dev:desktop",
     ]);
   });

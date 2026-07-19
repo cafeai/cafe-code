@@ -29,9 +29,9 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const path = yield* Path.Path;
-      const command = ChildProcess.make("bun", ["run", yield* mockPeerPath], {
+      const command = ChildProcess.make(process.execPath, [yield* mockPeerPath], {
         cwd: path.join(import.meta.dirname, ".."),
-        shell: process.platform === "win32",
+        shell: false,
       });
       return yield* spawner.spawn(command);
     });
@@ -139,8 +139,8 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       const path = yield* Path.Path;
       const scope = yield* Scope.make();
       const clientLayer = CodexClient.layerCommand({
-        command: "bun",
-        args: ["run", yield* mockPeerPath],
+        command: process.execPath,
+        args: [yield* mockPeerPath],
         cwd: path.join(import.meta.dirname, ".."),
       });
       const context = yield* Layer.buildWithScope(clientLayer, scope);

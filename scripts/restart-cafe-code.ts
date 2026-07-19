@@ -17,7 +17,6 @@ export interface RestartCafeCodeArgs {
   readonly waitMs: number;
   readonly restartDelayMs: number;
   readonly logDir: string | undefined;
-  readonly bunPath: string | undefined;
   readonly launchCommand: ReadonlyArray<string> | undefined;
   readonly dryRun: boolean;
   readonly help: boolean;
@@ -27,28 +26,26 @@ interface NormalizedRestartOptions extends RestartCafeCodeArgs {
   readonly repoRoot: string;
   readonly scriptPath: string;
   readonly resolvedLogDir: string;
-  readonly resolvedBunPath: string;
 }
 
 const usage = `Usage:
-  bun run restart:desktop [options] [-- command ...]
+  yarn restart:desktop [options] [-- command ...]
 
-Schedules a detached helper that waits briefly, runs 'bun run killall', then
+Schedules a detached Node helper that waits briefly, runs Cafe Code's killall entrypoint, then
 relaunches Cafe Code. The default launch command is:
-  bun run --cwd apps/desktop start
+  node apps/desktop/scripts/start-electron.mjs
 
 Options:
   --wait-ms <n>           Delay before killing the current app (default: 1500)
   --restart-delay-ms <n>  Delay between killall and relaunch (default: 750)
   --log-dir <path>        Restart log directory (default: $CAFE_CODE_HOME/restart-logs)
-  --bun-path <path>       Bun executable used by the helper
   --dry-run               Print what would be scheduled without starting helper
   --help                  Show this help
 
 Examples:
-  bun run restart:desktop
-  bun run restart:desktop -- bun run dev:desktop
-  bun run restart:desktop -- bun run --cwd apps/desktop start -- --cafe-debug
+  yarn restart:desktop
+  yarn restart:desktop -- yarn dev:desktop
+  yarn restart:desktop -- node apps/desktop/scripts/start-electron.mjs --cafe-debug
 `;
 
 function parseIntegerFlag(value: string | undefined, flag: string): number {
@@ -75,7 +72,6 @@ export function parseRestartCafeCodeArgs(args: ReadonlyArray<string>): RestartCa
   let waitMs = DEFAULT_RESTART_WAIT_MS;
   let restartDelayMs = DEFAULT_RESTART_DELAY_MS;
   let logDir: string | undefined;
-  let bunPath: string | undefined;
   let launchCommand: ReadonlyArray<string> | undefined;
   let dryRun = false;
   let help = false;
@@ -136,16 +132,6 @@ export function parseRestartCafeCodeArgs(args: ReadonlyArray<string>): RestartCa
       continue;
     }
 
-    if (arg === "--bun-path") {
-      bunPath = readFlagValue(args, index, arg);
-      index += 1;
-      continue;
-    }
-    if (arg?.startsWith("--bun-path=")) {
-      bunPath = arg.slice("--bun-path=".length);
-      continue;
-    }
-
     throw new Error(`Unknown option: ${String(arg)}`);
   }
 
@@ -154,36 +140,14 @@ export function parseRestartCafeCodeArgs(args: ReadonlyArray<string>): RestartCa
     waitMs,
     restartDelayMs,
     logDir,
-    bunPath,
     launchCommand,
     dryRun,
     help,
   };
 }
 
-function isBunExecutable(candidate: string | undefined): candidate is string {
-  if (candidate === undefined || candidate.trim().length === 0) {
-    return false;
-  }
-  const baseName = NodePath.basename(candidate).toLowerCase();
-  return baseName === "bun" || baseName === "bun.exe" || baseName === "bun.cmd";
-}
-
-export function resolveBunPath(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string {
-  if (isBunExecutable(env.CAFE_CODE_RESTART_BUN_PATH)) {
-    return env.CAFE_CODE_RESTART_BUN_PATH;
-  }
-  if (isBunExecutable(env.npm_execpath)) {
-    return env.npm_execpath;
-  }
-  if (platform === "win32" && env.APPDATA !== undefined && env.APPDATA.trim().length > 0) {
-    return NodePath.win32.join(env.APPDATA, "npm", "bun.cmd");
-  }
-  return "bun";
-}
-
-export function defaultLaunchCommand(bunPath: string): ReadonlyArray<string> {
-  return [bunPath, "run", "--cwd", "apps/desktop", "start"];
+export function defaultLaunchCommand(nodePath = process.execPath): ReadonlyArray<string> {
+  return [nodePath, "apps/desktop/scripts/start-electron.mjs"];
 }
 
 export function resolveRestartLogDir(input: {
@@ -206,7 +170,6 @@ export function buildHelperProcessArgs(input: {
   readonly waitMs: number;
   readonly restartDelayMs: number;
   readonly logDir: string;
-  readonly bunPath: string;
   readonly launchCommand: ReadonlyArray<string> | undefined;
 }): ReadonlyArray<string> {
   const args = [
@@ -218,8 +181,6 @@ export function buildHelperProcessArgs(input: {
     String(input.restartDelayMs),
     "--log-dir",
     input.logDir,
-    "--bun-path",
-    input.bunPath,
   ];
 
   if (input.launchCommand !== undefined) {
@@ -293,7 +254,6 @@ function spawnDetached(command: ReadonlyArray<string>, cwd: string): void {
 function normalizeOptions(args: RestartCafeCodeArgs): NormalizedRestartOptions {
   const scriptPath = fileURLToPath(import.meta.url);
   const repoRoot = NodePath.resolve(NodePath.dirname(scriptPath), "..");
-  const resolvedBunPath = args.bunPath?.trim() || resolveBunPath(process.env, process.platform);
   const resolvedLogDir = resolveRestartLogDir({
     explicitLogDir: args.logDir,
     env: process.env,
@@ -304,7 +264,6 @@ function normalizeOptions(args: RestartCafeCodeArgs): NormalizedRestartOptions {
     ...args,
     repoRoot,
     scriptPath,
-    resolvedBunPath,
     resolvedLogDir,
   };
 }
@@ -319,12 +278,11 @@ async function scheduleRestart(options: NormalizedRestartOptions): Promise<void>
     waitMs: options.waitMs,
     restartDelayMs: options.restartDelayMs,
     logDir: options.resolvedLogDir,
-    bunPath: options.resolvedBunPath,
     launchCommand: options.launchCommand,
   });
 
   if (options.dryRun) {
-    const launchCommand = options.launchCommand ?? defaultLaunchCommand(options.resolvedBunPath);
+    const launchCommand = options.launchCommand ?? defaultLaunchCommand();
     console.log("Cafe Code restart dry run.");
     console.log(`helper: ${process.execPath} (${helperArgs.length} args)`);
     console.log(`launch: ${commandSummary(launchCommand)}`);
@@ -341,7 +299,6 @@ async function scheduleRestart(options: NormalizedRestartOptions): Promise<void>
       cwd: options.repoRoot,
       env: {
         ...process.env,
-        CAFE_CODE_RESTART_BUN_PATH: options.resolvedBunPath,
       },
       stdio: ["ignore", outFd, errFd],
       detached: true,
@@ -356,8 +313,8 @@ async function scheduleRestart(options: NormalizedRestartOptions): Promise<void>
 }
 
 async function runHelper(options: NormalizedRestartOptions): Promise<void> {
-  const launchCommand = options.launchCommand ?? defaultLaunchCommand(options.resolvedBunPath);
-  const killallCommand = [options.resolvedBunPath, "run", "killall"];
+  const launchCommand = options.launchCommand ?? defaultLaunchCommand();
+  const killallCommand = [process.execPath, "apps/server/src/bin.ts", "killall"];
 
   console.log(`[restart] helper pid=${process.pid}`);
   console.log(`[restart] waitMs=${options.waitMs} restartDelayMs=${options.restartDelayMs}`);

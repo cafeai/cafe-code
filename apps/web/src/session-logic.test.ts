@@ -75,7 +75,7 @@ describe("derivePendingApprovals", () => {
         payload: {
           requestId: "req-1",
           requestKind: "command",
-          detail: "bun run lint",
+          detail: "yarn lint",
         },
       }),
       makeActivity({
@@ -101,7 +101,7 @@ describe("derivePendingApprovals", () => {
         requestId: "req-1",
         requestKind: "command",
         createdAt: "2026-02-23T00:00:01.000Z",
-        detail: "bun run lint",
+        detail: "yarn lint",
       },
     ]);
   });
@@ -856,7 +856,7 @@ describe("deriveWorkLogEntries", () => {
         summary: "Ran command",
         payload: {
           itemType: "command_execution",
-          detail: "Bash: bun test",
+          detail: "Bash: yarn test",
         },
       }),
     ];
@@ -897,7 +897,7 @@ describe("deriveWorkLogEntries", () => {
           itemType: "command_execution",
           data: {
             item: {
-              command: ["bun", "run", "lint"],
+              command: ["yarn", "lint"],
             },
           },
         },
@@ -905,7 +905,7 @@ describe("deriveWorkLogEntries", () => {
     ];
 
     const [entry] = deriveWorkLogEntries(activities, undefined);
-    expect(entry?.command).toBe("bun run lint");
+    expect(entry?.command).toBe("yarn lint");
   });
 
   it("unwraps PowerShell command wrappers for displayed command text", () => {
@@ -918,7 +918,7 @@ describe("deriveWorkLogEntries", () => {
           itemType: "command_execution",
           data: {
             item: {
-              command: "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -Command 'bun run lint'",
+              command: "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -Command 'yarn lint'",
             },
           },
         },
@@ -926,9 +926,9 @@ describe("deriveWorkLogEntries", () => {
     ];
 
     const [entry] = deriveWorkLogEntries(activities, undefined);
-    expect(entry?.command).toBe("bun run lint");
+    expect(entry?.command).toBe("yarn lint");
     expect(entry?.rawCommand).toBe(
-      "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -Command 'bun run lint'",
+      "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -Command 'yarn lint'",
     );
   });
 
@@ -1012,7 +1012,7 @@ describe("deriveWorkLogEntries", () => {
           detail: '{ "dev": "vite dev --port 3000" } <exited with exit code 0>',
           data: {
             item: {
-              command: ["bun", "run", "dev"],
+              command: ["yarn", "dev"],
               result: {
                 content: '{ "dev": "vite dev --port 3000" } <exited with exit code 0>',
                 exitCode: 0,
@@ -1025,7 +1025,7 @@ describe("deriveWorkLogEntries", () => {
 
     const [entry] = deriveWorkLogEntries(activities, undefined);
     expect(entry).toMatchObject({
-      command: "bun run dev",
+      command: "yarn dev",
       detail: '{ "dev": "vite dev --port 3000" }',
       itemType: "command_execution",
       toolTitle: "bash",

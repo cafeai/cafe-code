@@ -7,14 +7,15 @@ import { makeWebSocketConnectionFlowControl } from "./ConnectionFlowControl.ts";
 
 describe("WebSocketConnectionFlowControl", () => {
   it("releases encoded-byte permits at the next Ack/pull and on stream finalization", async () => {
+    const control = makeWebSocketConnectionFlowControl({
+      maxConnectionBytes: 1_024,
+      reservedControlBytes: 128,
+      maxFrameBytes: 512,
+    });
+
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const control = makeWebSocketConnectionFlowControl({
-            maxConnectionBytes: 1_024,
-            reservedControlBytes: 128,
-            maxFrameBytes: 512,
-          });
           const pull = yield* Stream.toPull(
             control.wrapBulkStream(
               Stream.concat(Stream.make({ value: "a".repeat(128) }), Stream.never),
@@ -36,9 +37,20 @@ describe("WebSocketConnectionFlowControl", () => {
             activeBulkBytes: 0,
           });
           yield* Fiber.interrupt(waitingPull);
+
+          const abandonedPull = yield* Stream.toPull(
+            control.wrapBulkStream(Stream.make({ value: "held-until-finalization" })),
+          );
+          yield* abandonedPull;
+          expect(control.snapshot().activeBulkFrames).toBe(1);
         }),
       ),
     );
+
+    expect(control.snapshot()).toMatchObject({
+      activeBulkFrames: 0,
+      activeBulkBytes: 0,
+    });
   });
 
   it("emits one accounted RPC frame per source item", async () => {

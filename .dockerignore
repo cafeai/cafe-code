@@ -1,0 +1,12 @@
+.git
+.plans
+.startup-profiles
+.turbo
+.yarn/install-state.gz
+**/node_modules
+**/dist
+**/dist-electron
+release
+packaging/aur/cafe-code/pkg
+packaging/aur/cafe-code/src
+target

@@ -10,13 +10,13 @@ describe("toolActivity", () => {
         title: "Terminal",
         detail: "Terminal",
         data: {
-          command: "bun run lint",
+          command: "yarn lint",
         },
         fallbackSummary: "Terminal",
       }),
     ).toEqual({
       summary: "Ran command",
-      detail: "bun run lint",
+      detail: "yarn lint",
     });
   });
 

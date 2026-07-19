@@ -1,5 +1,7 @@
 node_modules
-.bun
+.yarn/*
+!.yarn/patches/
+!.yarn/patches/**
 .turbo
 .DS_Store
 *.log

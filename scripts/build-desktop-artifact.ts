@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
-import rootPackageJson from "../package.json" with { type: "json" };
 import desktopPackageJson from "../apps/desktop/package.json" with { type: "json" };
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
+import desktopRuntimePackageJson from "../packaging/desktop-runtime/package.json" with { type: "json" };
 
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
-import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+import { readYarnCatalog, resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
 
 import { createHash } from "node:crypto";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
@@ -239,12 +239,49 @@ interface StagePackageJson {
   readonly license: string;
   readonly main: string;
   readonly build: Record<string, unknown>;
-  readonly dependencies: Record<string, unknown>;
-  readonly devDependencies: {
-    readonly electron: string;
-  };
-  readonly overrides: Record<string, unknown>;
+  readonly dependencies: Record<string, string>;
+  readonly devDependencies: Record<string, string>;
 }
+
+export function resolveDesktopRuntimeDependencies(
+  dependencies: Record<string, string>,
+  catalog: Record<string, string>,
+): Record<string, string> {
+  return resolveCatalogDependencies(dependencies, catalog, "packaging/desktop-runtime");
+}
+
+const STAGED_YARN_PROJECT_FILES = [
+  "package.json",
+  "yarn.lock",
+  ".yarnrc.yml",
+  ".yarn/patches/effect.patch",
+  "apps/desktop/package.json",
+  "apps/server/package.json",
+  "apps/web/package.json",
+  "oxlint-plugin-cafecode/package.json",
+  "packages/client-runtime/package.json",
+  "packages/contracts/package.json",
+  "packages/effect-codex-app-server/package.json",
+  "packages/shared/package.json",
+  "scripts/package.json",
+  "scripts/ensure-electron.ts",
+  "packaging/desktop-runtime/package.json",
+] as const;
+
+const copyStagedYarnProject = Effect.fn("copyStagedYarnProject")(function* (
+  repoRoot: string,
+  stageProjectDir: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+
+  for (const relativePath of STAGED_YARN_PROJECT_FILES) {
+    const sourcePath = path.join(repoRoot, relativePath);
+    const targetPath = path.join(stageProjectDir, relativePath);
+    yield* fs.makeDirectory(path.dirname(targetPath), { recursive: true });
+    yield* fs.copyFile(sourcePath, targetPath);
+  }
+});
 
 const AzureTrustedSigningOptionsConfig = Config.all({
   publisherName: Config.string("AZURE_TRUSTED_SIGNING_PUBLISHER_NAME"),
@@ -736,25 +773,9 @@ function validateBundledClientAssets(clientDir: string) {
   });
 }
 
-export function resolveDesktopRuntimeDependencies(
-  dependencies: Record<string, string> | undefined,
-  catalog: Record<string, string>,
-): Record<string, string> {
-  if (!dependencies || Object.keys(dependencies).length === 0) {
-    return {};
-  }
+const DEFAULT_DESKTOP_UPDATE_REPOSITORY = "cafeai/cafe-code";
 
-  const runtimeDependencies = Object.fromEntries(
-    Object.entries(dependencies).filter(
-      ([dependencyName, dependencySpec]) =>
-        dependencyName !== "electron" && !dependencySpec.startsWith("workspace:"),
-    ),
-  );
-
-  return resolveCatalogDependencies(runtimeDependencies, catalog, "apps/desktop");
-}
-
-function resolveGitHubPublishConfig(updateChannel: "latest" | "nightly"):
+export function resolveGitHubPublishConfig(updateChannel: "latest" | "nightly"):
   | {
       readonly provider: "github";
       readonly owner: string;
@@ -766,7 +787,7 @@ function resolveGitHubPublishConfig(updateChannel: "latest" | "nightly"):
   const rawRepo =
     readCafeCodeEnv(process.env, "CAFE_CODE_DESKTOP_UPDATE_REPOSITORY")?.trim() ||
     process.env.GITHUB_REPOSITORY?.trim() ||
-    "";
+    DEFAULT_DESKTOP_UPDATE_REPOSITORY;
   if (!rawRepo) return undefined;
 
   const [owner, repo, ...rest] = rawRepo.split("/");
@@ -779,11 +800,6 @@ function resolveGitHubPublishConfig(updateChannel: "latest" | "nightly"):
     releaseType: updateChannel === "nightly" ? "prerelease" : "release",
     ...(updateChannel === "nightly" ? { channel: "nightly" as const } : {}),
   };
-}
-
-function omitElectronDependency(dependencies: Record<string, string>): Record<string, string> {
-  const { electron: _electron, ...runtimeDependencies } = dependencies;
-  return runtimeDependencies;
 }
 
 export function resolveDesktopUpdateChannel(version: string): "latest" | "nightly" {
@@ -982,55 +998,6 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     });
   }
 
-  const electronVersion = desktopPackageJson.dependencies.electron;
-
-  const serverDependencies = serverPackageJson.dependencies;
-  if (!serverDependencies || Object.keys(serverDependencies).length === 0) {
-    return yield* new BuildScriptError({
-      message: "Could not resolve production dependencies from apps/server/package.json.",
-    });
-  }
-
-  const resolvedOverrides = yield* Effect.try({
-    try: () =>
-      resolveCatalogDependencies(
-        rootPackageJson.overrides,
-        rootPackageJson.workspaces.catalog,
-        "apps/desktop",
-      ),
-    catch: (cause) =>
-      new BuildScriptError({
-        message: "Could not resolve overrides from package.json.",
-        cause,
-      }),
-  });
-
-  const resolvedServerDependencies = yield* Effect.try({
-    try: () =>
-      resolveCatalogDependencies(
-        serverDependencies,
-        rootPackageJson.workspaces.catalog,
-        "apps/server",
-      ),
-    catch: (cause) =>
-      new BuildScriptError({
-        message: "Could not resolve production dependencies from apps/server/package.json.",
-        cause,
-      }),
-  });
-  const resolvedDesktopRuntimeDependencies = yield* Effect.try({
-    try: () =>
-      resolveDesktopRuntimeDependencies(
-        desktopPackageJson.dependencies,
-        rootPackageJson.workspaces.catalog,
-      ),
-    catch: (cause) =>
-      new BuildScriptError({
-        message: "Could not resolve desktop runtime dependencies from apps/desktop/package.json.",
-        cause,
-      }),
-  });
-
   const appVersion = options.version ?? serverPackageJson.version;
   const iconAssets = resolveDesktopBuildIconAssets(appVersion);
   const commitHash = yield* resolveGitCommitHash(repoRoot);
@@ -1039,7 +1006,8 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     prefix: `cafecode-desktop-${options.platform}-stage-`,
   });
 
-  const stageAppDir = path.join(stageRoot, "app");
+  const stageProjectDir = path.join(stageRoot, "project");
+  const stageAppDir = path.join(stageProjectDir, "packaging/desktop-runtime");
   const stageResourcesDir = path.join(stageAppDir, "apps/desktop/resources");
   const distDirs = {
     desktopDist: path.join(repoRoot, "apps/desktop/dist-electron"),
@@ -1051,31 +1019,31 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   if (!options.skipBuild) {
     yield* Effect.log("[desktop-artifact] Building desktop/server/web artifacts...");
     yield* runCommand(
-      ChildProcess.make({
+      ChildProcess.make("corepack", ["yarn", "build:desktop"], {
         cwd: repoRoot,
         ...commandOutputOptions(options.verbose),
-        // Windows needs shell mode to resolve .cmd shims (e.g. bun.cmd).
         shell: process.platform === "win32",
-      })`bun run build:desktop`,
+      }),
     );
   }
 
   for (const [label, dir] of Object.entries(distDirs)) {
     if (!(yield* fs.exists(dir))) {
       return yield* new BuildScriptError({
-        message: `Missing ${label} at ${dir}. Run 'bun run build:desktop' first.`,
+        message: `Missing ${label} at ${dir}. Run 'yarn build:desktop' first.`,
       });
     }
   }
 
   if (!(yield* fs.exists(bundledClientEntry))) {
     return yield* new BuildScriptError({
-      message: `Missing bundled server client at ${bundledClientEntry}. Run 'bun run build:desktop' first.`,
+      message: `Missing bundled server client at ${bundledClientEntry}. Run 'yarn build:desktop' first.`,
     });
   }
 
   yield* validateBundledClientAssets(path.dirname(bundledClientEntry));
 
+  yield* copyStagedYarnProject(repoRoot, stageProjectDir);
   yield* fs.makeDirectory(path.join(stageAppDir, "apps/desktop"), { recursive: true });
   yield* fs.makeDirectory(path.join(stageAppDir, "apps/server"), { recursive: true });
 
@@ -1099,8 +1067,17 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   yield* fs.copy(stageResourcesDir, path.join(stageAppDir, "apps/desktop/prod-resources"));
   yield* stageWindowsManagedRuntime(options, repoRoot, stageResourcesDir);
 
+  const yarnCatalog = yield* Effect.try({
+    try: () => readYarnCatalog(repoRoot),
+    catch: (cause) =>
+      new BuildScriptError({
+        message: "Could not read the root Yarn catalog for desktop packaging.",
+        cause,
+      }),
+  });
+
   const stagePackageJson: StagePackageJson = {
-    name: "cafe-code",
+    ...desktopRuntimePackageJson,
     version: appVersion,
     buildVersion: appVersion,
     cafeCodeCommitHash: commitHash,
@@ -1111,6 +1088,10 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     homepage: "https://github.com/cafeai/cafe-code",
     license: "AGPL-3.0-or-later",
     main: "apps/desktop/dist-electron/main.cjs",
+    dependencies: resolveDesktopRuntimeDependencies(
+      desktopRuntimePackageJson.dependencies,
+      yarnCatalog,
+    ),
     build: yield* createBuildConfig(
       options.platform,
       options.target,
@@ -1119,27 +1100,22 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       options.mockUpdates,
       options.mockUpdateServerPort,
     ),
-    dependencies: {
-      ...omitElectronDependency(resolvedServerDependencies),
-      ...resolvedDesktopRuntimeDependencies,
-    },
-    devDependencies: {
-      electron: electronVersion,
-    },
-    overrides: resolvedOverrides,
   };
 
   const stagePackageJsonString = yield* encodeJsonString(stagePackageJson);
   yield* fs.writeFileString(path.join(stageAppDir, "package.json"), `${stagePackageJsonString}\n`);
 
-  yield* Effect.log("[desktop-artifact] Installing staged production dependencies...");
+  yield* Effect.log("[desktop-artifact] Installing the locked desktop runtime workspace...");
   yield* runCommand(
-    ChildProcess.make({
-      cwd: stageAppDir,
+    ChildProcess.make("corepack", ["yarn", "workspaces", "focus", "@cafecode/desktop-runtime"], {
+      cwd: stageProjectDir,
+      env: {
+        ...process.env,
+        YARN_ENABLE_IMMUTABLE_INSTALLS: "true",
+      },
       ...commandOutputOptions(options.verbose),
-      // Windows needs shell mode to resolve .cmd shims (e.g. bun.cmd).
       shell: process.platform === "win32",
-    })`bun install --production --omit optional`,
+    }),
   );
 
   const buildEnv: NodeJS.ProcessEnv = {
@@ -1173,13 +1149,26 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     `[desktop-artifact] Building ${options.platform}/${options.target} (arch=${options.arch}, version=${appVersion})...`,
   );
   yield* runCommand(
-    ChildProcess.make({
-      cwd: stageAppDir,
-      env: buildEnv,
-      ...commandOutputOptions(options.verbose),
-      // Windows needs shell mode to resolve .cmd shims.
-      shell: process.platform === "win32",
-    })`bun x --install=fallback electron-builder ${platformConfig.cliFlag} --${options.arch} --publish never`,
+    ChildProcess.make(
+      "corepack",
+      [
+        "yarn",
+        "workspace",
+        "@cafecode/desktop-runtime",
+        "exec",
+        "electron-builder",
+        platformConfig.cliFlag,
+        `--${options.arch}`,
+        "--publish",
+        "never",
+      ],
+      {
+        cwd: stageProjectDir,
+        env: buildEnv,
+        ...commandOutputOptions(options.verbose),
+        shell: process.platform === "win32",
+      },
+    ),
   );
 
   const stageDistDir = path.join(stageAppDir, "dist");
@@ -1247,7 +1236,7 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   ),
   skipBuild: Flag.boolean("skip-build").pipe(
     Flag.withDescription(
-      "Skip `bun run build:desktop` and use existing dist artifacts (env: CAFE_CODE_DESKTOP_SKIP_BUILD).",
+      "Skip `yarn build:desktop` and use existing dist artifacts (env: CAFE_CODE_DESKTOP_SKIP_BUILD).",
     ),
     Flag.optional,
   ),

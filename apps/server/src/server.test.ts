@@ -1003,6 +1003,27 @@ const withWsRpcClient = <A, E, R>(
   f: (client: WsRpcClient) => Effect.Effect<A, E, R>,
 ) => makeWsRpcClient.pipe(Effect.flatMap(f), Effect.provide(wsRpcProtocolLayer(wsUrl)));
 
+/**
+ * The broad router suite intentionally uses NodeHttpServer.layerTest because it
+ * is cheap to construct for every business-RPC assertion. Transport-boundary
+ * tests use this layer instead so upgrades, compression, and shutdown execute
+ * through the exact adapter selected by the production server.
+ */
+const makeProductionHttpServerTestLayer = () =>
+  HttpServer.layerTestClient.pipe(
+    Layer.provide(
+      Layer.fresh(FetchHttpClient.layer).pipe(
+        Layer.provide(Layer.succeed(FetchHttpClient.RequestInit)({ keepalive: false })),
+      ),
+    ),
+    Layer.provideMerge(
+      NodeHttpServerCompression.layer(NodeHttp.createServer, {
+        host: "127.0.0.1",
+        port: 0,
+      }),
+    ),
+  );
+
 const getWebSocketUpgradeResponseHeaders = (
   wsUrl: string,
   options?: { readonly offerPerMessageDeflate?: boolean },
@@ -2441,62 +2462,124 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(response.environment.environmentId, testEnvironmentDescriptor.environmentId);
       assert.equal(response.auth.policy, "desktop-managed-local");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 
-  // Bun's bare `ws` compatibility server accepts upgrades but does not
-  // negotiate permessage-deflate. The production compression layer is for
-  // the Node/Electron backend path, so register this assertion only there.
-  if (process.versions.bun === undefined) {
-    it.effect("negotiates websocket compression when a client offers permessage-deflate", () =>
-      Effect.gen(function* () {
-        yield* buildAppUnderTest();
-
-        const bootstrapUrl = yield* getHttpServerUrl("/api/auth/bootstrap");
-        const bootstrapResponse = yield* Effect.promise(() =>
-          fetch(bootstrapUrl, {
-            method: "POST",
-            headers: {
-              "content-type": "application/json",
-            },
-            body: JSON.stringify({
-              credential: defaultDesktopBootstrapToken,
+  it.effect("negotiates websocket compression and carries a large RPC response", () =>
+    Effect.gen(function* () {
+      const largeEnvironmentLabel = `Production transport ${"payload-".repeat(768)}`;
+      yield* buildAppUnderTest({
+        layers: {
+          serverEnvironment: {
+            getDescriptor: Effect.succeed({
+              ...testEnvironmentDescriptor,
+              label: largeEnvironmentLabel,
             }),
+          },
+        },
+      });
+
+      const bootstrapUrl = yield* getHttpServerUrl("/api/auth/bootstrap");
+      const bootstrapResponse = yield* Effect.promise(() =>
+        fetch(bootstrapUrl, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            credential: defaultDesktopBootstrapToken,
           }),
-        );
-        const cookie = bootstrapResponse.headers.get("set-cookie");
+        }),
+      );
+      const cookie = bootstrapResponse.headers.get("set-cookie");
 
-        assert.equal(bootstrapResponse.status, 200);
-        assert.isDefined(cookie);
+      assert.equal(bootstrapResponse.status, 200);
+      assert.isDefined(cookie);
 
-        const wsUrl = appendSessionCookieToWsUrl(
-          yield* getWsServerUrl("/ws", { authenticated: false }),
-          cookie?.split(";")[0] ?? "",
-        );
-        const negotiatedHeaders = yield* getWebSocketUpgradeResponseHeaders(wsUrl, {
-          offerPerMessageDeflate: true,
+      const wsUrl = appendSessionCookieToWsUrl(
+        yield* getWsServerUrl("/ws", { authenticated: false }),
+        cookie?.split(";")[0] ?? "",
+      );
+      const negotiatedHeaders = yield* getWebSocketUpgradeResponseHeaders(wsUrl, {
+        offerPerMessageDeflate: true,
+      });
+      const uncompressedHeaders = yield* getWebSocketUpgradeResponseHeaders(wsUrl, {
+        offerPerMessageDeflate: false,
+      });
+
+      assertInclude(negotiatedHeaders[":status"] ?? "", "101");
+      assertInclude(uncompressedHeaders[":status"] ?? "", "101");
+      assertInclude(negotiatedHeaders["sec-websocket-extensions"] ?? "", "permessage-deflate");
+      assertInclude(
+        negotiatedHeaders["sec-websocket-extensions"] ?? "",
+        "server_no_context_takeover",
+      );
+      assertInclude(
+        negotiatedHeaders["sec-websocket-extensions"] ?? "",
+        "client_no_context_takeover",
+      );
+      assert.equal(uncompressedHeaders["sec-websocket-extensions"] ?? "", "");
+
+      const config = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.serverGetConfig]({})),
+      );
+      assert.equal(config.environment.label, largeEnvironmentLabel);
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect("tracks websocket session connectivity across a real socket lifetime", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const { cookie } = yield* bootstrapBrowserSession();
+      const sessionCookie = cookie?.split(";")[0] ?? "";
+      assert.isNotEmpty(sessionCookie);
+
+      const wsUrl = appendSessionCookieToWsUrl(
+        yield* getWsServerUrl("/ws", { authenticated: false }),
+        sessionCookie,
+      );
+      const readCurrentClient = Effect.gen(function* () {
+        const response = yield* HttpClient.get("/api/auth/clients", {
+          headers: { cookie: sessionCookie },
         });
-        const uncompressedHeaders = yield* getWebSocketUpgradeResponseHeaders(wsUrl, {
-          offerPerMessageDeflate: false,
-        });
+        const clients = (yield* response.json) as ReadonlyArray<{
+          readonly connected: boolean;
+          readonly current: boolean;
+          readonly lastConnectedAt: string | null;
+        }>;
+        const current = clients.find((client) => client.current);
+        assert.isDefined(current);
+        return current;
+      });
 
-        assertInclude(negotiatedHeaders[":status"] ?? "", "101");
-        assertInclude(uncompressedHeaders[":status"] ?? "", "101");
-        assertInclude(negotiatedHeaders["sec-websocket-extensions"] ?? "", "permessage-deflate");
-        assert.equal(uncompressedHeaders["sec-websocket-extensions"] ?? "", "");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            NodeHttpServerCompression.layer(NodeHttp.createServer, {
-              host: "127.0.0.1",
-              port: 0,
-            }),
-            FetchHttpClient.layer,
-          ),
+      const whileConnected = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            yield* client[WS_METHODS.serverGetConfig]({});
+            return yield* readCurrentClient;
+          }),
         ),
-      ),
-    );
-  }
+      );
+      assert.isTrue(whileConnected?.connected ?? false);
+      assert.isNotNull(whileConnected?.lastConnectedAt ?? null);
+
+      const waitForNetworkTurn = Effect.callback<void>((resume) => {
+        const timeout = setTimeout(() => resume(Effect.void), 10);
+        return Effect.sync(() => clearTimeout(timeout));
+      });
+      const afterClose = yield* waitForNetworkTurn.pipe(
+        Effect.andThen(readCurrentClient),
+        Effect.filterOrFail(
+          (client) => client?.connected === false,
+          () => new Error("WebSocket session did not become disconnected"),
+        ),
+        Effect.retry({ times: 100 }),
+      );
+      assert.isFalse(afterClose?.connected ?? true);
+      assert.equal(afterClose?.lastConnectedAt, whileConnected?.lastConnectedAt);
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
 
   it.effect(
     "rejects websocket rpc handshake when a session token is only provided via query string",
@@ -2515,7 +2598,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
         assert.equal(error._tag, "RpcClientError");
         assertInclude(String(error), "SocketOpenError");
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 
   it.effect(
@@ -2545,7 +2628,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
         assert.equal(response.environment.environmentId, testEnvironmentDescriptor.environmentId);
         assert.equal(response.auth.policy, "desktop-managed-local");
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 
   it.effect("serves attachment ids and URL-encoded paths", () =>
@@ -3110,7 +3193,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         failureMessage.includes("Unauthorized") ||
           failureMessage.includes("An error occurred during Open"),
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 
   it.effect("routes websocket rpc subscribeServerConfig streams snapshot then update", () =>

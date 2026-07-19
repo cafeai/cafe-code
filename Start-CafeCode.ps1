@@ -1,7 +1,11 @@
+param(
+  [switch]$Wait,
+  [string[]]$DesktopArgs = @()
+)
+
 $ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
-$bun = Join-Path $env:APPDATA "npm\bun.cmd"
 $logDir = Join-Path $env:USERPROFILE ".cafe-code\launcher-logs"
 $launcherLog = Join-Path $logDir "launcher.log"
 $stdoutLog = Join-Path $logDir "desktop-start.stdout.log"
@@ -9,8 +13,18 @@ $stderrLog = Join-Path $logDir "desktop-start.stderr.log"
 
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
-if (-not (Test-Path -LiteralPath $bun)) {
-  throw "Bun was not found at $bun"
+$node = Get-Command -Name "node.exe" -CommandType Application -ErrorAction SilentlyContinue
+if ($null -eq $node) {
+  $node = Get-Command -Name "node" -CommandType Application -ErrorAction SilentlyContinue
+}
+if ($null -eq $node) {
+  throw "Node.js 24.13.1 or newer in the Node 24 release line was not found on PATH."
+}
+
+$nodeVersionText = (& $node.Source --version).Trim().TrimStart("v")
+$nodeVersion = [Version]$nodeVersionText
+if ($nodeVersion.Major -ne 24 -or $nodeVersion -lt [Version]"24.13.1") {
+  throw "Cafe Code requires Node.js ^24.13.1; found $nodeVersionText at $($node.Source)."
 }
 
 # The current dev build defaults local HTTPS on. Source installs on Windows do
@@ -32,10 +46,16 @@ if ($null -eq $openssl) {
     Add-Content -LiteralPath $launcherLog
 }
 
-Start-Process `
-  -FilePath $bun `
-  -ArgumentList @("run", "--cwd", "apps/desktop", "start") `
+$desktopProcess = Start-Process `
+  -FilePath $node.Source `
+  -ArgumentList (@("apps/desktop/scripts/start-electron.mjs") + $DesktopArgs) `
   -WorkingDirectory $repo `
   -RedirectStandardOutput $stdoutLog `
   -RedirectStandardError $stderrLog `
-  -WindowStyle Hidden
+  -WindowStyle Hidden `
+  -PassThru
+
+if ($Wait) {
+  $desktopProcess.WaitForExit()
+  exit $desktopProcess.ExitCode
+}

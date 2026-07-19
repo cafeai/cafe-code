@@ -1019,7 +1019,7 @@ describe("Codex steer processing diagnostics", () => {
           cpuPercent: 5,
           rssBytes: 50_000,
           elapsed: "00:02",
-          command: "bash -lc bun run build",
+          command: "bash -lc yarn build",
         },
         {
           pid: 105,

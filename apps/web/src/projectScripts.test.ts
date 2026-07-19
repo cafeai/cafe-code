@@ -31,14 +31,14 @@ describe("projectScripts helpers", () => {
       {
         id: "setup",
         name: "Setup",
-        command: "bun install",
+        command: "yarn install --immutable",
         icon: "configure" as const,
         runOnWorktreeCreate: true,
       },
       {
         id: "test",
         name: "Test",
-        command: "bun test",
+        command: "yarn test",
         icon: "test" as const,
         runOnWorktreeCreate: false,
       },

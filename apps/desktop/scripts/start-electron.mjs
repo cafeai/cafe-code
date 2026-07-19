@@ -94,7 +94,7 @@ function spawnLaunchPlan(plan, childEnv) {
         [
           "Cafe Code detected no Linux display server, but the headless server bundle is missing.",
           `Expected server entrypoint: ${resolve(desktopDir, "../server/dist/bin.mjs")}`,
-          "Run bun run build:desktop first, or start the server directly with bun start.",
+          "Run yarn build:desktop first, or start the server directly with yarn start.",
         ].join("\n"),
       );
       process.exit(1);

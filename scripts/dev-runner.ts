@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import * as NodeOS from "node:os";
+import { fileURLToPath } from "node:url";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -28,6 +29,9 @@ const MAX_HASH_OFFSET = 3000;
 const MAX_PORT = 65535;
 const DESKTOP_DEV_LOOPBACK_HOST = "127.0.0.1";
 const DEV_PORT_PROBE_HOSTS = ["127.0.0.1", "0.0.0.0", "::1", "::"] as const;
+const DESKTOP_DEV_CLEANUP_SCRIPT = fileURLToPath(
+  new URL("../apps/desktop/scripts/dev-process-cleanup.mjs", import.meta.url),
+);
 
 export const DEFAULT_CAFE_CODE_HOME = Effect.gen(function* () {
   const path = yield* Path.Path;
@@ -64,6 +68,32 @@ class DevRunnerError extends Data.TaggedError("DevRunnerError")<{
   readonly message: string;
   readonly cause?: unknown;
 }> {}
+
+const cleanupDesktopDevProcesses = Effect.gen(function* () {
+  const runCleanup = (force: boolean) =>
+    Effect.gen(function* () {
+      const child = yield* ChildProcess.make(
+        process.execPath,
+        [DESKTOP_DEV_CLEANUP_SCRIPT, ...(force ? ["--force"] : [])],
+        {
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+          detached: false,
+        },
+      );
+      yield* child.exitCode;
+    }).pipe(Effect.ignore);
+
+  // Turbo can force-kill a persistent task before its nested Electron watcher
+  // finishes cleanup. The outer runner therefore owns a marker-scoped final
+  // cleanup: request normal app shutdown first so the backend can stop, then
+  // remove only a still-stuck source-development Electron process. Provider
+  // daemons have no marker and intentionally survive this operation.
+  yield* runCleanup(false);
+  yield* Effect.sleep("2 seconds");
+  yield* runCleanup(true);
+});
 
 const optionalStringConfig = (name: string): Config.Config<string | undefined> =>
   cafeCodeOptionalValueConfig(name, Config.string);
@@ -457,7 +487,7 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
         stderr: "inherit",
         env,
         extendEnv: false,
-        // Windows needs shell mode to resolve .cmd shims (e.g. bun.cmd).
+        // Windows needs shell mode to resolve command shims such as turbo.cmd.
         shell: process.platform === "win32",
         // Keep turbo in the same process group so terminal signals (Ctrl+C)
         // reach it directly. Effect defaults to detached: true on non-Windows,
@@ -467,7 +497,11 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
       },
     );
 
-    const exitCode = yield* child.exitCode;
+    const exitCode = yield* child.exitCode.pipe(
+      input.mode === "dev:desktop"
+        ? Effect.ensuring(cleanupDesktopDevProcesses)
+        : (effect) => effect,
+    );
     if (exitCode !== 0) {
       return yield* new DevRunnerError({
         message: `turbo exited with code ${exitCode}`,

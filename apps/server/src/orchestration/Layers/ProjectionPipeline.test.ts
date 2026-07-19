@@ -3832,7 +3832,7 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
           {
             id: "script-1",
             name: "Build",
-            command: "bun run build",
+            command: "yarn build",
             icon: "build",
             runOnWorktreeCreate: false,
           },
@@ -3859,7 +3859,7 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
         {
           additionalWorkspaceRoots: '["/tmp/project-docs","/tmp/project-tools"]',
           scriptsJson:
-            '[{"id":"script-1","name":"Build","command":"bun run build","icon":"build","runOnWorktreeCreate":false}]',
+            '[{"id":"script-1","name":"Build","command":"yarn build","icon":"build","runOnWorktreeCreate":false}]',
           defaultModelSelection: '{"instanceId":"codex","model":"gpt-5"}',
         },
       ]);
