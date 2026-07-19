@@ -19,6 +19,7 @@ import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ProviderSupervisorHealthSummary } from "./providerSupervisor.ts";
 
 export const PROVIDER_DAEMON_HEALTH_PATH = "/api/provider-daemon/health";
+export const PROVIDER_DAEMON_LIVENESS_PATH = "/api/provider-daemon/liveness";
 export const PROVIDER_DAEMON_RPC_PATH = "/api/provider-daemon/rpc";
 export const PROVIDER_DAEMON_EVENTS_PATH = "/api/provider-daemon/events";
 export const PROVIDER_DAEMON_LEASES_PATH = "/api/provider-daemon/leases";
@@ -329,6 +330,27 @@ export const ProviderDaemonHealth = Schema.Struct({
   pipelineDiagnostics: Schema.optional(ProviderPipelineDiagnostics),
 });
 export type ProviderDaemonHealth = typeof ProviderDaemonHealth.Type;
+
+/**
+ * Database-free process identity returned to the desktop watchdog.
+ *
+ * Keep this contract intentionally small. The watchdog must be able to prove
+ * that the authenticated daemon event loop and expected process generation are
+ * alive without asking SQLite, provider adapters, or diagnostic projections to
+ * respond. Rich operational state belongs to `ProviderDaemonHealth` instead.
+ */
+export const ProviderDaemonLiveness = Schema.Struct({
+  ok: Schema.Literal(true),
+  mode: ProviderRuntimeProcessMode,
+  protocolVersion: Schema.optional(NonNegativeInt),
+  pid: NonNegativeInt,
+  ppid: NonNegativeInt,
+  version: Schema.String,
+  runtimeBuildId: Schema.optional(Schema.String),
+  startedAt: IsoDateTime,
+  transport: Schema.optional(ProviderDaemonTransport),
+});
+export type ProviderDaemonLiveness = typeof ProviderDaemonLiveness.Type;
 
 export const ProviderDaemonLeaseRequest = Schema.Struct({
   clientKind: Schema.Literals(["desktop-main", "provider-daemon", "debug", "test"]),
