@@ -2185,6 +2185,98 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("keeps progress heartbeats quiet and surfaces each subagent retry once", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "run the delegated task",
+        attachments: [],
+      });
+      yield* Stream.take(adapter.streamEvents, 1).pipe(Stream.runDrain);
+
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-subagent-retry",
+        uuid: "stream-subagent-retry-thread",
+        parent_tool_use_id: null,
+        event: {
+          type: "message_start",
+          message: {
+            id: "msg-subagent-retry-thread",
+          },
+        },
+      } as unknown as SDKMessage);
+      yield* Stream.take(adapter.streamEvents, 1).pipe(Stream.runDrain);
+
+      const progressEventsFiber = yield* Stream.take(adapter.streamEvents, 4).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      harness.query.emit({
+        type: "tool_progress",
+        tool_use_id: "tool-heartbeat-1",
+        tool_name: "Agent",
+        parent_tool_use_id: null,
+        elapsed_time_seconds: 30,
+        heartbeat: true,
+        session_id: "sdk-session-subagent-retry",
+        uuid: "00000000-0000-4000-8000-000000000221",
+      } satisfies SDKMessage);
+      const retryMessage = {
+        type: "tool_progress",
+        tool_use_id: "tool-retry-1",
+        tool_name: "Agent",
+        parent_tool_use_id: null,
+        elapsed_time_seconds: 31,
+        task_id: "task-retry-1",
+        subagent_type: "code-reviewer",
+        subagent_retry: {
+          agent_id: "agent-retry-1",
+          attempt: 2,
+          max_retries: 3,
+          retry_delay_ms: 500,
+          error_status: 529,
+          error_category: "overloaded",
+        },
+        session_id: "sdk-session-subagent-retry",
+        uuid: "00000000-0000-4000-8000-000000000222",
+      } satisfies SDKMessage;
+      harness.query.emit(retryMessage);
+      harness.query.emit({
+        ...retryMessage,
+        uuid: "00000000-0000-4000-8000-000000000223",
+      });
+
+      const progressEvents = Array.from(yield* Fiber.join(progressEventsFiber));
+      assert.equal(progressEvents.filter((event) => event.type === "tool.progress").length, 3);
+      const retryEvents = progressEvents.filter((event) => event.type === "task.progress");
+      assert.equal(retryEvents.length, 1);
+      const retryEvent = retryEvents[0];
+      assert.equal(retryEvent?.type, "task.progress");
+      if (retryEvent?.type === "task.progress") {
+        assert.equal(retryEvent.payload.taskId, RuntimeTaskId.make("task-retry-1"));
+        assert.equal(
+          retryEvent.payload.summary,
+          "Retrying code-reviewer subagent after overloaded (retry 2/3, 500 ms delay).",
+        );
+        assert.equal(retryEvent.payload.lastToolName, "Agent");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("silently ignores Claude thinking token telemetry", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -3556,6 +3648,81 @@ describe("ClaudeAdapterLive", () => {
       assert.deepEqual(resolved.value.providerRefs, {
         providerItemId: ProviderItemId.make("tool-use-1"),
       });
+
+      const permissionResult = yield* Effect.promise(() => permissionPromise);
+      assert.equal((permissionResult as PermissionResult).behavior, "allow");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("honors rule-forced Claude approvals even in full-access mode", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+      const canUseTool = harness.getLastCreateQueryInput()?.options.canUseTool;
+      assert.equal(typeof canUseTool, "function");
+      if (!canUseTool) {
+        return;
+      }
+
+      const permissionPromise = canUseTool(
+        "Bash",
+        { command: "pwd" },
+        {
+          signal: new AbortController().signal,
+          toolUseID: "tool-rule-forced-1",
+          requestId: "permission-rule-forced-1",
+          matchedAskRule: {
+            source: "projectSettings",
+            toolName: "Bash",
+            ruleContent: "Bash(pwd) private-policy-fragment",
+          },
+        },
+      );
+
+      const requested = yield* Stream.runHead(adapter.streamEvents);
+      assert.equal(requested._tag, "Some");
+      if (requested._tag !== "Some" || requested.value.type !== "request.opened") {
+        return;
+      }
+      assert.equal(
+        requested.value.payload.detail,
+        "Permission rule requires confirmation. Bash: pwd",
+      );
+      assert.deepEqual(requested.value.payload.args, {
+        toolName: "Bash",
+        input: { command: "pwd" },
+        toolUseId: "tool-rule-forced-1",
+        matchedAskRule: true,
+      });
+      assert.deepEqual(requested.value.raw?.payload, {
+        toolName: "Bash",
+        input: { command: "pwd" },
+        matchedAskRule: true,
+      });
+
+      const runtimeRequestId = requested.value.requestId;
+      assert.equal(typeof runtimeRequestId, "string");
+      if (runtimeRequestId === undefined) {
+        return;
+      }
+      yield* adapter.respondToRequest(
+        session.threadId,
+        ApprovalRequestId.make(runtimeRequestId),
+        "accept",
+      );
+      const resolved = yield* Stream.runHead(adapter.streamEvents);
+      assert.equal(resolved._tag, "Some");
+      assert.equal(resolved._tag === "Some" ? resolved.value.type : undefined, "request.resolved");
 
       const permissionResult = yield* Effect.promise(() => permissionPromise);
       assert.equal((permissionResult as PermissionResult).behavior, "allow");

@@ -409,6 +409,7 @@ function runtimeEventCarriesActiveTurnWork(event: ProviderRuntimeEvent): boolean
     case "task.progress":
     case "hook.started":
     case "hook.progress":
+    case "tool.progress":
       return true;
     default:
       return false;
@@ -1927,6 +1928,9 @@ const make = Effect.gen(function* () {
             case "item.updated":
             case "task.started":
             case "task.progress":
+            case "hook.started":
+            case "hook.progress":
+            case "tool.progress":
               return "running";
             case "turn.started":
               return "running";

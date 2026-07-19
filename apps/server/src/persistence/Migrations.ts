@@ -72,6 +72,7 @@ import Migration0056 from "./Migrations/056_RebuildTruncatedAssistantMessageProj
 import Migration0058 from "./Migrations/058_UsageStatsDays.ts";
 import Migration0059 from "./Migrations/059_DropLegacyUsageStatsProjections.ts";
 import Migration0060 from "./Migrations/060_ProjectionTurnCheckpointCompletedAt.ts";
+import Migration0061 from "./Migrations/061_UsageStatsTokenBreakdown.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -148,6 +149,7 @@ export const migrationEntries = [
   [58, "UsageStatsDays", Migration0058],
   [59, "DropLegacyUsageStatsProjections", Migration0059],
   [60, "ProjectionTurnCheckpointCompletedAt", Migration0060],
+  [61, "UsageStatsTokenBreakdown", Migration0061],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
