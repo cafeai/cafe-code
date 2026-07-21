@@ -104,20 +104,17 @@ async function waitFor(assertion: () => void): Promise<void> {
       return;
     } catch (error) {
       lastError = error;
-      await new Promise<void>((resolve) => {
-        const channel = new MessageChannel();
-        channel.port1.addEventListener(
-          "message",
-          () => {
-            channel.port1.close();
-            channel.port2.close();
-            resolve();
-          },
-          { once: true },
-        );
-        channel.port1.start();
-        channel.port2.postMessage(undefined);
-      });
+      // Subscription retries intentionally pass through `setTimeout`, even
+      // when their configured delay is zero. Progress whichever timer system
+      // the current test uses so this poll observes retries consistently on
+      // every supported Node event-loop implementation.
+      if (vi.isFakeTimers()) {
+        await vi.advanceTimersByTimeAsync(0);
+      } else {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 0);
+        });
+      }
     }
   }
   throw lastError;

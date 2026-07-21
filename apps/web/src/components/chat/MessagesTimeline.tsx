@@ -142,8 +142,16 @@ const TIMELINE_SUBMIT_STICK_TO_END_SETTLE_TIMEOUTS_MS = [80, 180, 360, 720] as c
 const HISTORICAL_WORK_LOG_PREVIEW_LIMIT = 6;
 const HISTORICAL_WORK_LOG_PAGE_SIZE = 24;
 const HISTORICAL_WORK_LOG_SHOW_ALL_LIMIT = 1_000;
-const TIMELINE_MAINTAIN_VISIBLE_CONTENT_POSITION = {
+// Data-change anchoring can fight explicit tail following because a submitted
+// message and its working row are data changes. Enable it only after the user
+// has detached from the tail. Size anchoring remains active in both modes so
+// rows above the viewport can settle without moving the visible conversation.
+const TIMELINE_FOLLOW_VISIBLE_CONTENT_POSITION = {
   data: false,
+  size: true,
+} as const;
+const TIMELINE_REVIEW_VISIBLE_CONTENT_POSITION = {
+  data: true,
   size: true,
 } as const;
 
@@ -254,6 +262,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const rows = useStableRows(rawRows);
   const stickToEndDeadlineMsRef = useRef(0);
   const submitStickScrollEventRepinFrameRef = useRef<number | null>(null);
+  const tailFollowItemLayoutRepinFrameRef = useRef<number | null>(null);
+  const autoFollowTailRef = useRef(autoFollowTail);
+  autoFollowTailRef.current = autoFollowTail;
   const forcedScrollGenerationRef = useRef(0);
   const touchStartYRef = useRef<number | null>(null);
   const touchReviewIntentReportedRef = useRef(false);
@@ -404,17 +415,51 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     },
     [emitScrollDebugEvent, listRef, onDebugScrollEvent, rows.length],
   );
+  const cancelTailFollowItemLayoutRepin = useCallback(() => {
+    if (tailFollowItemLayoutRepinFrameRef.current === null) {
+      return;
+    }
+    window.cancelAnimationFrame(tailFollowItemLayoutRepinFrameRef.current);
+    tailFollowItemLayoutRepinFrameRef.current = null;
+  }, []);
+  const scheduleTailFollowItemLayoutRepin = useCallback(() => {
+    if (!autoFollowTailRef.current || rows.length === 0) {
+      return;
+    }
+    if (tailFollowItemLayoutRepinFrameRef.current !== null) {
+      return;
+    }
+
+    // LegendList checks its internal `isAtEnd` after recalculating item
+    // positions. A live tool/work-log row can grow enough during that same
+    // measurement to flip the flag before LegendList's own item-layout follow
+    // step runs. Reassert Cafe's explicit follow-mode decision after the
+    // measurement frame. Coalescing keeps this O(1) per paint even when many
+    // rows settle together after a large provider update.
+    tailFollowItemLayoutRepinFrameRef.current = window.requestAnimationFrame(() => {
+      tailFollowItemLayoutRepinFrameRef.current = null;
+      if (!autoFollowTailRef.current) {
+        return;
+      }
+      forceScrollToEnd(rows.length, "tail-follow-item-layout-repin");
+    });
+  }, [forceScrollToEnd, rows.length]);
+  const handleItemSizeChanged = useCallback(() => {
+    scheduleTailFollowItemLayoutRepin();
+  }, [scheduleTailFollowItemLayoutRepin]);
   const cancelSubmitStickToEnd = useCallback(() => {
     // Invalidate every already-scheduled initial/submit hard-scroll callback.
     // Clearing only the deadline is insufficient because the animation-frame
     // loop historically did not consult it before issuing scrollToEnd.
+    autoFollowTailRef.current = false;
+    cancelTailFollowItemLayoutRepin();
     forcedScrollGenerationRef.current += 1;
     stickToEndDeadlineMsRef.current = 0;
     if (submitStickScrollEventRepinFrameRef.current !== null) {
       window.cancelAnimationFrame(submitStickScrollEventRepinFrameRef.current);
       submitStickScrollEventRepinFrameRef.current = null;
     }
-  }, []);
+  }, [cancelTailFollowItemLayoutRepin]);
   const scheduleSubmitStickScrollEventRepin = useCallback(() => {
     if (submitStickScrollEventRepinFrameRef.current !== null) {
       return;
@@ -436,9 +481,20 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         window.cancelAnimationFrame(scrollbarPointerReleaseFrameRef.current);
         scrollbarPointerReleaseFrameRef.current = null;
       }
+      if (tailFollowItemLayoutRepinFrameRef.current !== null) {
+        window.cancelAnimationFrame(tailFollowItemLayoutRepinFrameRef.current);
+        tailFollowItemLayoutRepinFrameRef.current = null;
+      }
     },
     [],
   );
+
+  useEffect(() => {
+    autoFollowTailRef.current = autoFollowTail;
+    if (!autoFollowTail) {
+      cancelTailFollowItemLayoutRepin();
+    }
+  }, [autoFollowTail, cancelTailFollowItemLayoutRepin]);
 
   const handleUserScrollIntent = useCallback(
     (event?: { readonly type?: string }) => {
@@ -784,7 +840,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           initialScrollAtEnd
           maintainScrollAtEnd={autoFollowTail}
           maintainScrollAtEndThreshold={TIMELINE_MAINTAIN_SCROLL_AT_END_THRESHOLD}
-          maintainVisibleContentPosition={TIMELINE_MAINTAIN_VISIBLE_CONTENT_POSITION}
+          maintainVisibleContentPosition={
+            autoFollowTail
+              ? TIMELINE_FOLLOW_VISIBLE_CONTENT_POSITION
+              : TIMELINE_REVIEW_VISIBLE_CONTENT_POSITION
+          }
+          onItemSizeChanged={handleItemSizeChanged}
           onScroll={handleScroll}
           onWheel={handleWheel}
           onTouchStart={handleTouchStart}

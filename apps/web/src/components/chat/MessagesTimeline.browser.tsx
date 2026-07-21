@@ -47,6 +47,13 @@ vi.mock("@legendapp/list/react", async () => {
     onPointerCancel?: React.PointerEventHandler<HTMLDivElement>;
     onKeyDown?: React.KeyboardEventHandler<HTMLDivElement>;
     onScroll?: React.UIEventHandler<HTMLDivElement>;
+    onItemSizeChanged?: (info: {
+      size: number;
+      previous: number;
+      index: number;
+      itemKey: string;
+      itemData: { id: string };
+    }) => void;
     maintainScrollAtEnd?: boolean;
     maintainScrollAtEndThreshold?: number;
     maintainVisibleContentPosition?: unknown;
@@ -352,10 +359,11 @@ describe("MessagesTimeline", () => {
     }
   });
 
-  it("does not let data-change anchoring fight submit-time bottom pinning", async () => {
+  it("uses data anchoring only while the user is reviewing older content", async () => {
+    const props = buildProps();
     const screen = await render(
       <MessagesTimeline
-        {...buildProps()}
+        {...props}
         timelineEntries={[buildUserTimelineEntry("existing conversation tail")]}
       />,
     );
@@ -368,6 +376,90 @@ describe("MessagesTimeline", () => {
         data: false,
         size: true,
       });
+
+      await screen.rerender(
+        <MessagesTimeline
+          {...props}
+          autoFollowTail={false}
+          timelineEntries={[buildUserTimelineEntry("existing conversation tail")]}
+        />,
+      );
+
+      const reviewProps = legendListPropsSpy.mock.calls.at(-1)?.[0] as
+        | { maintainVisibleContentPosition?: unknown }
+        | undefined;
+      expect(reviewProps?.maintainVisibleContentPosition).toEqual({
+        data: true,
+        size: true,
+      });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("repins live row resizes at the tail and cancels that repin on review intent", async () => {
+    const frameCallbacks: FrameRequestCallback[] = [];
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frameCallbacks.push(callback);
+      return frameCallbacks.length;
+    });
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+
+    const props = buildProps();
+    const entry = buildUserTimelineEntry("conversation tail before a live tool update");
+    const screen = await render(<MessagesTimeline {...props} timelineEntries={[entry]} />);
+
+    try {
+      frameCallbacks.length = 0;
+      scrollToEndSpy.mockClear();
+      scrollToIndexSpy.mockClear();
+
+      const tailProps = legendListPropsSpy.mock.calls.at(-1)?.[0] as
+        | {
+            onItemSizeChanged?: (info: {
+              size: number;
+              previous: number;
+              index: number;
+              itemKey: string;
+              itemData: { id: string };
+            }) => void;
+          }
+        | undefined;
+      tailProps?.onItemSizeChanged?.({
+        size: 180,
+        previous: 90,
+        index: 0,
+        itemKey: entry.id,
+        itemData: entry,
+      });
+
+      expect(frameCallbacks).toHaveLength(1);
+      frameCallbacks.shift()?.(0);
+      expect(scrollToEndSpy).toHaveBeenCalledWith({ animated: false });
+      expect(scrollToIndexSpy).toHaveBeenCalledWith({
+        index: 0,
+        animated: false,
+        viewPosition: 1,
+      });
+
+      scrollToEndSpy.mockClear();
+      scrollToIndexSpy.mockClear();
+      tailProps?.onItemSizeChanged?.({
+        size: 240,
+        previous: 180,
+        index: 0,
+        itemKey: entry.id,
+        itemData: entry,
+      });
+      expect(frameCallbacks).toHaveLength(1);
+
+      const list = document.querySelector("[data-testid='legend-list']");
+      list?.dispatchEvent(new WheelEvent("wheel", { deltaY: -120, bubbles: true }));
+      frameCallbacks.shift()?.(0);
+
+      expect(props.onUserScrollIntent).toHaveBeenCalled();
+      expect(scrollToEndSpy).not.toHaveBeenCalled();
+      expect(scrollToIndexSpy).not.toHaveBeenCalled();
     } finally {
       await screen.unmount();
     }
