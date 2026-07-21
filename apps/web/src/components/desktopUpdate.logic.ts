@@ -1,10 +1,15 @@
 import type { DesktopUpdateActionResult, DesktopUpdateState } from "@cafecode/contracts";
 
-export type DesktopUpdateButtonAction = "download" | "install" | "none";
+export type DesktopUpdateButtonAction = "download" | "install" | "manual" | "none";
+
+const DESKTOP_RELEASES_URL = "https://github.com/cafeai/cafe-code/releases";
 
 export function resolveDesktopUpdateButtonAction(
   state: DesktopUpdateState,
 ): DesktopUpdateButtonAction {
+  if (state.installMode === "manual" && state.availableVersion) {
+    return "manual";
+  }
   if (state.downloadedVersion) {
     return "install";
   }
@@ -17,6 +22,11 @@ export function resolveDesktopUpdateButtonAction(
     }
   }
   return "none";
+}
+
+export function getDesktopUpdateReleaseUrl(version: string | null): string {
+  if (!version) return DESKTOP_RELEASES_URL;
+  return `${DESKTOP_RELEASES_URL}/tag/v${encodeURIComponent(version)}`;
 }
 
 export function shouldShowDesktopUpdateButton(state: DesktopUpdateState | null): boolean {
@@ -54,6 +64,9 @@ export function getArm64IntelBuildWarningDescription(state: DesktopUpdateState):
 
 export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string {
   if (state.status === "available") {
+    if (state.installMode === "manual") {
+      return `Update ${state.availableVersion ?? "available"} can be installed from its GitHub release`;
+    }
     return `Update ${state.availableVersion ?? "available"} ready to download`;
   }
   if (state.status === "downloading") {

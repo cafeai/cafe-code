@@ -29,6 +29,10 @@ import * as IpcChannels from "../ipc/channels.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import { resolveDefaultDesktopUpdateChannel } from "./updateChannels.ts";
 import {
+  getAutoUpdateDisabledReason,
+  resolveUnsignedDesktopUpdateInstallMode,
+} from "./updateEligibility.ts";
+import {
   createInitialDesktopUpdateState,
   reduceDesktopUpdateStateOnCheckFailure,
   reduceDesktopUpdateStateOnCheckStart,
@@ -43,11 +47,6 @@ import {
 
 const AUTO_UPDATE_STARTUP_DELAY = "15 seconds";
 const AUTO_UPDATE_POLL_INTERVAL = "4 minutes";
-const DESKTOP_UPDATES_DISABLED_REASON = "Update checks are disabled in this Cafe Code build.";
-
-function areDesktopUpdatesDisabledInThisBuild(): boolean {
-  return true;
-}
 
 const AppUpdateYmlConfig = Schema.Record(Schema.String, Schema.String);
 type AppUpdateYmlConfig = typeof AppUpdateYmlConfig.Type;
@@ -135,7 +134,12 @@ function createBaseUpdateState(
   environment: DesktopEnvironment.DesktopEnvironmentShape,
 ): DesktopUpdateState {
   return {
-    ...createInitialDesktopUpdateState(environment.appVersion, environment.runtimeInfo, channel),
+    ...createInitialDesktopUpdateState(
+      environment.appVersion,
+      environment.runtimeInfo,
+      channel,
+      resolveUnsignedDesktopUpdateInstallMode(environment.platform),
+    ),
     enabled,
     status: enabled ? "idle" : "disabled",
   };
@@ -163,33 +167,6 @@ function shouldBroadcastDownloadProgress(
   return nextStep !== previousStep || nextPercent === 100;
 }
 
-function getAutoUpdateDisabledReason(args: {
-  isDevelopment: boolean;
-  isPackaged: boolean;
-  platform: NodeJS.Platform;
-  appImage?: string | undefined;
-  disabledByEnv: boolean;
-  hasUpdateFeedConfig: boolean;
-}): string | null {
-  if (areDesktopUpdatesDisabledInThisBuild()) {
-    return DESKTOP_UPDATES_DISABLED_REASON;
-  }
-
-  if (!args.hasUpdateFeedConfig) {
-    return "Automatic updates are not available because no update feed is configured.";
-  }
-  if (args.isDevelopment || !args.isPackaged) {
-    return "Automatic updates are only available in packaged production builds.";
-  }
-  if (args.disabledByEnv) {
-    return "Automatic updates are disabled by the CAFE_CODE_DISABLE_AUTO_UPDATE setting.";
-  }
-  if (args.platform === "linux" && !args.appImage) {
-    return "Automatic updates on Linux require running the AppImage build.";
-  }
-  return null;
-}
-
 function isArm64HostRunningIntelBuild(runtimeInfo: DesktopRuntimeInfo): boolean {
   return runtimeInfo.hostArch === "arm64" && runtimeInfo.appArch === "x64";
 }
@@ -215,6 +192,7 @@ const make = Effect.gen(function* () {
       environment.appVersion,
       environment.runtimeInfo,
       environment.defaultDesktopSettings.updateChannel,
+      resolveUnsignedDesktopUpdateInstallMode(environment.platform),
     ),
   );
 
@@ -335,6 +313,7 @@ const make = Effect.gen(function* () {
     if (
       !(yield* Ref.get(updaterConfiguredRef)) ||
       (yield* Ref.get(updateDownloadInFlightRef)) ||
+      state.installMode !== "in-app" ||
       state.status !== "available"
     ) {
       return { accepted: false, completed: false };
@@ -368,6 +347,7 @@ const make = Effect.gen(function* () {
     if (
       (yield* Ref.get(desktopState.quitting)) ||
       !(yield* Ref.get(updaterConfiguredRef)) ||
+      state.installMode !== "in-app" ||
       state.status !== "downloaded"
     ) {
       return { accepted: false, completed: false };

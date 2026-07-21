@@ -1,6 +1,7 @@
 import type {
   DesktopRuntimeInfo,
   DesktopUpdateChannel,
+  DesktopUpdateInstallMode,
   DesktopUpdateState,
 } from "@cafecode/contracts";
 
@@ -18,11 +19,13 @@ export function createInitialDesktopUpdateState(
   currentVersion: string,
   runtimeInfo: DesktopRuntimeInfo,
   channel: DesktopUpdateChannel,
+  installMode: DesktopUpdateInstallMode = "in-app",
 ): DesktopUpdateState {
   return {
     enabled: false,
     status: "disabled",
     channel,
+    installMode,
     currentVersion,
     hostArch: runtimeInfo.hostArch,
     appArch: runtimeInfo.appArch,
