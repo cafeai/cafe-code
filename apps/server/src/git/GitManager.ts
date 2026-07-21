@@ -365,11 +365,12 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     );
   const fileSystem = yield* FileSystem.FileSystem;
 
-  const canonicalizeExistingPath = (value: string) =>
+  const resolveCanonicalExistingPath = (value: string) =>
+    fileSystem.realPath(value).pipe(Effect.catch(() => Effect.succeed(value)));
+
+  const resolveExistingPathIdentity = (value: string) =>
     Effect.gen(function* () {
-      const canonicalPath = yield* fileSystem
-        .realPath(value)
-        .pipe(Effect.catch(() => Effect.succeed(value)));
+      const canonicalPath = yield* resolveCanonicalExistingPath(value);
 
       if (process.platform !== "win32") {
         return canonicalPath;
@@ -393,7 +394,12 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         .toLowerCase();
       return `win32-path:${normalizedPath}`;
     });
-  const normalizeStatusCacheKey = canonicalizeExistingPath;
+  // Cache loaders receive their key as the cwd they query. Keep that key a
+  // valid filesystem path: the Windows identity above is intentionally only
+  // for equality checks and must never escape into a Git subprocess as cwd.
+  // realPath still coalesces ordinary aliases for cache purposes while
+  // preserving a path that Node and Git can open on every platform.
+  const normalizeStatusCacheKey = resolveCanonicalExistingPath;
   const nonRepositoryStatusDetails = {
     isRepo: false,
     hasOriginRemote: false,
@@ -672,7 +678,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     };
     return yield* Effect.gen(function* () {
       const normalizedReference = normalizePullRequestReference(input.reference);
-      const rootWorktreePath = yield* canonicalizeExistingPath(input.cwd);
+      const rootWorktreePath = yield* resolveExistingPathIdentity(input.cwd);
       const pullRequestSummary = yield* (yield* sourceControlProvider(input.cwd)).getChangeRequest({
         cwd: input.cwd,
         reference: normalizedReference,
@@ -747,7 +753,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
             continue;
           }
 
-          const worktreePath = yield* canonicalizeExistingPath(branch.worktreePath);
+          const worktreePath = yield* resolveExistingPathIdentity(branch.worktreePath);
           if (worktreePath !== rootWorktreePath) {
             return branch;
           }
@@ -758,7 +764,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
 
       const existingBranchBeforeFetch = yield* findLocalHeadBranch(input.cwd);
       const existingBranchBeforeFetchPath = existingBranchBeforeFetch?.worktreePath
-        ? yield* canonicalizeExistingPath(existingBranchBeforeFetch.worktreePath)
+        ? yield* resolveExistingPathIdentity(existingBranchBeforeFetch.worktreePath)
         : null;
       if (
         existingBranchBeforeFetch?.worktreePath &&
@@ -786,7 +792,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
 
       const existingBranchAfterFetch = yield* findLocalHeadBranch(input.cwd);
       const existingBranchAfterFetchPath = existingBranchAfterFetch?.worktreePath
-        ? yield* canonicalizeExistingPath(existingBranchAfterFetch.worktreePath)
+        ? yield* resolveExistingPathIdentity(existingBranchAfterFetch.worktreePath)
         : null;
       if (
         existingBranchAfterFetch?.worktreePath &&

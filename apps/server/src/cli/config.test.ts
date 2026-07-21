@@ -351,8 +351,11 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
 
   it.effect("uses bootstrap envelope values as fallbacks when flags and env are absent", () =>
     Effect.gen(function* () {
-      const { join } = yield* Path.Path;
-      const baseDir = "/tmp/t3-bootstrap-home";
+      const { join, resolve } = yield* Path.Path;
+      // Bootstrap homes are resolved before they enter ServerConfig. Resolve
+      // the fixture through the host path service too, so `/tmp` acquires the
+      // current drive on Windows while remaining unchanged on POSIX.
+      const baseDir = resolve("/tmp/t3-bootstrap-home");
       const fd = yield* openBootstrapFd(
         makeDesktopBootstrap({
           port: 4888,
