@@ -17,7 +17,11 @@ export function ensureNodePtySpawnHelperExecutable(
   platform: NodeJS.Platform = process.platform,
   arch: string = process.arch,
 ): string | null {
-  if (platform === "win32") {
+  // node-pty's binding.gyp builds spawn-helper only for macOS, and its native
+  // fork implementation consumes the helper only inside the __APPLE__ branch.
+  // Linux uses forkpty directly, so requiring a helper there rejects a valid
+  // source build after node-gyp has successfully produced pty.node.
+  if (platform !== "darwin") {
     return null;
   }
 
@@ -38,7 +42,7 @@ export function ensureNodePtySpawnHelperExecutable(
   const helperPath = join(nativeDirectory, "spawn-helper");
   let descriptor: number;
   try {
-    // Yarn's node-modules linker currently extracts node-pty's POSIX helper
+    // Yarn's node-modules linker currently extracts node-pty's macOS helper
     // without executable bits. Open the helper without following symlinks,
     // then chmod the already-open file descriptor. This avoids turning a
     // compromised node_modules symlink into an arbitrary chmod target.
@@ -77,7 +81,7 @@ export function ensureInstalledDesktopRuntime(): void {
     throw new Error("The pinned Electron executable is unavailable after installation.");
   }
 
-  if (process.platform !== "win32") {
+  if (process.platform === "darwin") {
     const nodePtyPackageRoot = dirname(desktopRuntimeRequire.resolve("node-pty/package.json"));
     ensureNodePtySpawnHelperExecutable(nodePtyPackageRoot);
   }

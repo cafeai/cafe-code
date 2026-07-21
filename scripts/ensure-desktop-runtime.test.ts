@@ -36,7 +36,7 @@ afterEach(() => {
 
 describe("ensureNodePtySpawnHelperExecutable", () => {
   it.skipIf(process.platform === "win32")(
-    "restores executable permissions on the selected POSIX helper",
+    "restores executable permissions on the selected macOS helper",
     () => {
       const fixture = makeNodePtyFixture();
 
@@ -62,5 +62,9 @@ describe("ensureNodePtySpawnHelperExecutable", () => {
 
   it("does not require a POSIX helper on Windows", () => {
     expect(ensureNodePtySpawnHelperExecutable("unused", "win32", "x64")).toBeNull();
+  });
+
+  it("does not require the macOS-only helper on Linux", () => {
+    expect(ensureNodePtySpawnHelperExecutable("unused", "linux", "x64")).toBeNull();
   });
 });
