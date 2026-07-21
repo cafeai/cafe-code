@@ -139,7 +139,13 @@ export const RuntimeMode = Schema.Literals([
 ]);
 export type RuntimeMode = typeof RuntimeMode.Type;
 export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
-export const ProviderInteractionMode = Schema.Literals(["default", "plan"]);
+// `auto` is provider-specific today: Claude Code exposes it as a first-class
+// permission mode backed by its safety classifier, while Codex only accepts
+// `default` and `plan` collaboration modes. Keeping the value in the shared
+// interaction-mode protocol lets a thread persist the Claude selection across
+// renderer/backend restarts; each provider adapter remains responsible for
+// translating unsupported values conservatively at its protocol boundary.
+export const ProviderInteractionMode = Schema.Literals(["default", "plan", "auto"]);
 export type ProviderInteractionMode = typeof ProviderInteractionMode.Type;
 export const DEFAULT_PROVIDER_INTERACTION_MODE: ProviderInteractionMode = "default";
 export const ProviderRequestKind = Schema.Literals(["command", "file-read", "file-change"]);

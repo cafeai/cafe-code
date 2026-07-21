@@ -12,6 +12,7 @@ import {
   type ProjectId,
   type OrchestrationSession,
   type OrchestrationThread,
+  type ProviderInteractionMode,
   ThreadId,
   type ProviderSession,
   type RuntimeMode,
@@ -697,7 +698,7 @@ const make = Effect.gen(function* () {
       readonly project?: OrchestrationProjectShell;
       readonly activeSession?: ProviderSession | undefined;
       readonly activeSessionResolved?: boolean;
-      readonly interactionMode?: "default" | "plan";
+      readonly interactionMode?: ProviderInteractionMode;
     },
   ) {
     const thread = options?.thread ?? (yield* resolveThread(threadId));
@@ -988,7 +989,7 @@ const make = Effect.gen(function* () {
     readonly messageText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
-    readonly interactionMode?: "default" | "plan";
+    readonly interactionMode?: ProviderInteractionMode;
     readonly createdAt: string;
     readonly thread?: OrchestrationThread;
     readonly project?: OrchestrationProjectShell;

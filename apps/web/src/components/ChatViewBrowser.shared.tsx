@@ -12,6 +12,7 @@ import {
   type ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  type RuntimeMode,
   type ServerConfig,
   type ServerLifecycleWelcomePayload,
   type ThreadId,
@@ -228,7 +229,13 @@ function createSnapshotForTargetUser(options: {
   targetText: string;
   targetAttachmentCount?: number;
   sessionStatus?: OrchestrationSessionStatus;
+  provider?: "codex" | "claudeAgent";
+  runtimeMode?: RuntimeMode;
 }): OrchestrationReadModel {
+  const provider = ProviderDriverKind.make(options.provider ?? "codex");
+  const instanceId = ProviderInstanceId.make(options.provider ?? "codex");
+  const model = provider === "claudeAgent" ? "claude-opus-4-8" : "gpt-5";
+  const runtimeMode = options.runtimeMode ?? "full-access";
   const messages: Array<OrchestrationReadModel["threads"][number]["messages"][number]> = [];
 
   for (let index = 0; index < 22; index += 1) {
@@ -273,8 +280,8 @@ function createSnapshotForTargetUser(options: {
         workspaceRoot: "/repo/project",
         additionalWorkspaceRoots: [],
         defaultModelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5",
+          instanceId,
+          model,
         },
         scripts: [],
         createdAt: NOW_ISO,
@@ -288,11 +295,11 @@ function createSnapshotForTargetUser(options: {
         projectId: PROJECT_ID,
         title: THREAD_TITLE,
         modelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5",
+          instanceId,
+          model,
         },
         interactionMode: "default",
-        runtimeMode: "full-access",
+        runtimeMode,
         branch: "main",
         worktreePath: null,
         latestTurn: null,
@@ -307,8 +314,8 @@ function createSnapshotForTargetUser(options: {
         session: {
           threadId: THREAD_ID,
           status: options.sessionStatus ?? "ready",
-          providerName: "codex",
-          runtimeMode: "full-access",
+          providerName: provider,
+          runtimeMode,
           activeTurnId: null,
           lastError: null,
           updatedAt: NOW_ISO,
@@ -1378,7 +1385,7 @@ async function expectComposerActionsContained(): Promise<void> {
 }
 
 async function waitForInteractionModeButton(
-  expectedLabel: "Build" | "Plan",
+  expectedLabel: "Build" | "Plan" | "Manual" | "Accept edits" | "Auto",
 ): Promise<HTMLButtonElement> {
   return waitForElement(
     () =>
@@ -3158,6 +3165,66 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           },
           { timeout: 8_000, interval: 16 },
         );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("cycles Claude's four normal permission modes with Shift+Tab", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-user-target-claude-mode-hotkey" as MessageId,
+          targetText: "claude mode hotkey target",
+          provider: "claudeAgent",
+          runtimeMode: "approval-required",
+        }),
+        configureFixture: (nextFixture) => {
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            providers: [
+              ...nextFixture.serverConfig.providers,
+              {
+                driver: ProviderDriverKind.make("claudeAgent"),
+                instanceId: ProviderInstanceId.make("claudeAgent"),
+                enabled: true,
+                installed: true,
+                version: "2.1.216",
+                status: "ready",
+                auth: { status: "authenticated" },
+                checkedAt: NOW_ISO,
+                models: [
+                  {
+                    slug: "claude-opus-4-8",
+                    name: "Claude Opus 4.8",
+                    isCustom: false,
+                    capabilities: createModelCapabilities({ optionDescriptors: [] }),
+                  },
+                ],
+                slashCommands: [],
+                skills: [],
+              },
+            ],
+          };
+        },
+      });
+
+      try {
+        await waitForInteractionModeButton("Manual");
+        const composerEditor = await waitForComposerEditor();
+        composerEditor.focus();
+
+        for (const expectedLabel of ["Accept edits", "Plan", "Auto", "Manual"] as const) {
+          composerEditor.dispatchEvent(
+            new KeyboardEvent("keydown", {
+              key: "Tab",
+              shiftKey: true,
+              bubbles: true,
+              cancelable: true,
+            }),
+          );
+          await waitForInteractionModeButton(expectedLabel);
+        }
       } finally {
         await mounted.cleanup();
       }

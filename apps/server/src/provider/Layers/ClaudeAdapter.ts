@@ -30,6 +30,7 @@ import {
   type ModelSelection,
   type ProviderApprovalDecision,
   ProviderDriverKind,
+  type ProviderInteractionMode,
   ProviderInstanceId,
   ProviderItemId,
   type ProviderRuntimeEvent,
@@ -40,6 +41,7 @@ import {
   type ProviderSteerTurnInput,
   type ProviderUserInputAnswers,
   type RuntimeSessionState,
+  type RuntimeMode,
   type RuntimeContentStreamKind,
   RuntimeItemId,
   RuntimeRequestId,
@@ -93,6 +95,33 @@ const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJ
 const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.UnknownFromJsonString);
 
 const PROVIDER = ProviderDriverKind.make("claudeAgent");
+
+function runtimeModeToClaudePermissionMode(runtimeMode: RuntimeMode): PermissionMode | undefined {
+  switch (runtimeMode) {
+    case "approval-required":
+      // Omitting the initial flag lets Claude Code use its standard/manual
+      // permission behavior and matches the Agent SDK's documented default.
+      return undefined;
+    case "auto-accept-edits":
+      return "acceptEdits";
+    case "full-access":
+      return "bypassPermissions";
+  }
+}
+
+function resolveClaudePermissionMode(input: {
+  readonly interactionMode: ProviderInteractionMode | undefined;
+  readonly basePermissionMode: PermissionMode | undefined;
+}): PermissionMode | undefined {
+  // Claude Code 2.1.216 calls the standard UI state "manual", while the Agent
+  // SDK control protocol continues to spell it `default`. Plan and Auto are
+  // real SDK modes, not prompt decorations or aliases for Cafe access policy.
+  if (input.interactionMode === "plan" || input.interactionMode === "auto") {
+    return input.interactionMode;
+  }
+  return input.basePermissionMode;
+}
+
 type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
 type ClaudeToolResultStreamKind = Extract<
   RuntimeContentStreamKind,
@@ -4424,7 +4453,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           } satisfies PermissionResult;
         }
 
-        const runtimeMode = input.runtimeMode ?? "full-access";
         const matchedAskRule = callbackOptions.matchedAskRule !== undefined;
         // Agent SDK 0.3.215 marks prompts forced by a user-configured
         // permissions.ask rule. That explicit rule is more specific than
@@ -4432,7 +4460,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // of being silently auto-approved. Do not persist ruleContent here: it
         // can contain sensitive project policy and is not needed to honor the
         // upstream decision.
-        if (runtimeMode === "full-access" && !matchedAskRule) {
+        // Only true bypass mode may skip Cafe's callback. Auto mode can be
+        // layered over a historical full-access runtime policy, but upstream's
+        // classifier must remain authoritative. If Auto falls back to a human
+        // prompt, silently allowing it here would defeat the safety model.
+        if (context.currentPermissionMode === "bypassPermissions" && !matchedAskRule) {
           return {
             behavior: "allow",
             updatedInput: toolInput,
@@ -4561,12 +4593,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const { apiModelId, selectedContextWindowTokens, effectiveEffort, settings } =
         resolveClaudeModelSessionOptions(modelSelection);
       const fastMode = settings.fastMode === true;
-      const runtimeModeToPermission: Record<string, PermissionMode> = {
-        "auto-accept-edits": "acceptEdits",
-        "full-access": "bypassPermissions",
-      };
-      const permissionMode = runtimeModeToPermission[input.runtimeMode];
-      const initialPermissionMode = input.interactionMode === "plan" ? "plan" : permissionMode;
+      const permissionMode = runtimeModeToClaudePermissionMode(input.runtimeMode);
+      const initialPermissionMode = resolveClaudePermissionMode({
+        interactionMode: input.interactionMode,
+        basePermissionMode: permissionMode,
+      });
       const claudeAdditionalDirectories = [
         ...(input.cwd ? [input.cwd] : []),
         ...(input.additionalDirectories ?? []),
@@ -4944,11 +4975,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // attached the first streamed user message can fail with "No message
     // found" / "No conversation found" on current Claude Agent SDK releases.
     const desiredPermissionMode =
-      input.interactionMode === "plan"
-        ? "plan"
-        : input.interactionMode === "default"
-          ? (context.basePermissionMode ?? "default")
-          : undefined;
+      input.interactionMode === undefined
+        ? undefined
+        : (resolveClaudePermissionMode({
+            interactionMode: input.interactionMode,
+            basePermissionMode: context.basePermissionMode,
+          }) ?? "default");
     if (
       desiredPermissionMode !== undefined &&
       desiredPermissionMode !== context.currentPermissionMode

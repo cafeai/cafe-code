@@ -135,6 +135,7 @@ async function mountMenu(props?: { modelSelection?: ModelSelection; prompt?: str
   const screen = await render(
     <CompactComposerControlsMenu
       activePlan={false}
+      provider={provider}
       interactionMode="default"
       planSidebarLabel="Plan"
       planSidebarOpen={false}
@@ -152,6 +153,7 @@ async function mountMenu(props?: { modelSelection?: ModelSelection; prompt?: str
         />
       }
       onToggleInteractionMode={vi.fn()}
+      onClaudePermissionModeChange={vi.fn()}
       onTogglePlanSidebar={vi.fn()}
       onRuntimeModeChange={vi.fn()}
     />,
@@ -291,18 +293,37 @@ describe("CompactComposerControlsMenu", () => {
     });
   });
 
+  it("shows Claude's complete interactive permission-mode surface", async () => {
+    await using _ = await mountMenu();
+
+    await page.getByLabelText("More composer controls").click();
+
+    await vi.waitFor(() => {
+      const text = document.body.textContent ?? "";
+      expect(text).toContain("Manual");
+      expect(text).toContain("Accept edits");
+      expect(text).toContain("Plan");
+      expect(text).toContain("Auto");
+      expect(text).toContain("Bypass permissions");
+      expect(text).not.toContain("Access");
+      expect(text).not.toContain("Supervised");
+    });
+  });
+
   it("can hide the interaction mode section", async () => {
     const host = document.createElement("div");
     document.body.append(host);
     const screen = await render(
       <CompactComposerControlsMenu
         activePlan={false}
+        provider={ProviderDriverKind.make("codex")}
         interactionMode="default"
         planSidebarLabel="Plan"
         planSidebarOpen={false}
         runtimeMode="approval-required"
         showInteractionModeToggle={false}
         onToggleInteractionMode={vi.fn()}
+        onClaudePermissionModeChange={vi.fn()}
         onTogglePlanSidebar={vi.fn()}
         onRuntimeModeChange={vi.fn()}
       />,
