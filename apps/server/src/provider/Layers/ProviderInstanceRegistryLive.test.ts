@@ -291,6 +291,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       expect(codexSnapshot.continuation?.groupKey).toBe(
         `codex:home:${path.resolve("/home/julius/.codex")}`,
       );
+      expect(codexSnapshot.runtimeCapabilities?.liveSteer).toBe("supported");
 
       const claudeSnapshot = yield* claude!.snapshot.getSnapshot;
       expect(claudeSnapshot.instanceId).toBe(claudeId);
@@ -299,6 +300,12 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       expect(claudeSnapshot.continuation?.groupKey).toBe(
         `claude:home:${path.resolve("/home/julius/.claude-work")}`,
       );
+      // The renderer reads this snapshot capability when deciding whether a
+      // running-turn follow-up is safe to steer. It cannot see the adapter's
+      // private capability object, so both surfaces must agree even for the
+      // initial disabled/pending snapshot before a CLI probe has completed.
+      expect(claudeSnapshot.runtimeCapabilities?.liveSteer).toBe("supported");
+      expect(claude!.adapter.capabilities.liveSteer).toBe("supported");
     }).pipe(Effect.provide(testLayer)),
   );
 });

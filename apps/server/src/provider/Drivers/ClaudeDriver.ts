@@ -102,6 +102,15 @@ const withInstanceIdentity =
     ...(input.accentColor ? { accentColor: input.accentColor } : {}),
     ...(input.authActions ? { authActions: input.authActions } : {}),
     continuation: { groupKey: input.continuationGroupKey },
+    // The renderer chooses between a non-interrupting `thread.turn.steer`
+    // and the legacy interrupt-then-send fallback from this public snapshot,
+    // not from the daemon-only adapter object. Keep the snapshot aligned with
+    // `makeClaudeAdapter().capabilities.liveSteer`: Claude's streaming-input
+    // protocol accepts UUID-stamped messages on the live AsyncIterable and
+    // does not require Query.interrupt(). Omitting this field silently falls
+    // back to "unsupported" at the contract decoder and turns a nudge into a
+    // destructive interrupt even though the adapter can queue it safely.
+    runtimeCapabilities: { ...snapshot.runtimeCapabilities, liveSteer: "supported" },
   });
 
 export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {

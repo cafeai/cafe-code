@@ -786,6 +786,11 @@ describe("ClaudeAdapterLive", () => {
       );
       assert.equal(promptMessageText(messages[0]), "first prompt");
       assert.equal(promptMessageText(messages[1]), "follow-up while active");
+      // Claude Code's interactive correction path is a streamed user message,
+      // not an interrupt followed by a replacement turn. A regression here
+      // would cancel the running tool, collapse Cafe's work log, and reset the
+      // active-turn timer before Claude had incorporated the correction.
+      assert.deepEqual(harness.query.interruptCalls, []);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
