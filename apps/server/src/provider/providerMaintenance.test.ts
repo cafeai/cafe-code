@@ -167,11 +167,13 @@ describe("providerMaintenance", () => {
 
         expect(
           packageToolUpdate.resolve({
-            binaryPath: "package-tool",
+            // The resolver receives the already-resolved executable in
+            // production. Pass that host-native path directly so this Darwin
+            // policy test does not ask a Windows runner to interpret a
+            // Windows PATH with POSIX delimiter semantics.
+            binaryPath: packageToolPath,
             platform: "darwin",
-            env: {
-              PATH: vitePlusBinDir,
-            },
+            env: { PATH: "" },
           }),
         ).toEqual({
           provider: driver("packageTool"),
@@ -256,11 +258,9 @@ describe("providerMaintenance", () => {
 
         expect(
           scopedPackageToolUpdate.resolve({
-            binaryPath: "scoped-package-tool",
+            binaryPath: scopedPackageToolPath,
             platform: "darwin",
-            env: {
-              PATH: pnpmHomeDir,
-            },
+            env: { PATH: "" },
           }),
         ).toEqual({
           provider: driver("scopedPackageTool"),
@@ -315,11 +315,9 @@ describe("providerMaintenance", () => {
 
         expect(
           nativePackageToolUpdate.resolve({
-            binaryPath: "native-package-tool",
+            binaryPath: nativePackageToolPath,
             platform: "darwin",
-            env: {
-              PATH: nativeBinDir,
-            },
+            env: { PATH: "" },
           }),
         ).toEqual({
           provider: driver("nativePackageTool"),
@@ -350,11 +348,9 @@ describe("providerMaintenance", () => {
 
         expect(
           scopedPackageToolUpdate.resolve({
-            binaryPath: "scoped-package-tool",
+            binaryPath: scopedPackageToolPath,
             platform: "darwin",
-            env: {
-              PATH: nativeBinDir,
-            },
+            env: { PATH: "" },
           }),
         ).toEqual({
           provider: driver("scopedPackageTool"),

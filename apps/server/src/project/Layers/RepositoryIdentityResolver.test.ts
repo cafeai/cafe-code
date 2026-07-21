@@ -16,8 +16,6 @@ import {
   repositoryIdentityFromRemoteOutput,
 } from "./RepositoryIdentityResolver.ts";
 
-const normalizePathSeparators = (value: string) => value.replaceAll("\\", "/");
-
 const git = (cwd: string, args: ReadonlyArray<string>) =>
   Effect.gen(function* () {
     const processRunner = yield* ProcessRunner.ProcessRunner;
@@ -53,15 +51,18 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
 
       const resolver = yield* RepositoryIdentityResolver;
       const identity = yield* resolver.resolve(nestedWorkspace);
-      const resolvedIdentityRoot =
-        identity?.rootPath === undefined ? "" : yield* fileSystem.realPath(identity.rootPath);
-      const resolvedRepoRoot = yield* fileSystem.realPath(repoRoot);
 
       expect(identity).not.toBeNull();
       expect(identity?.canonicalKey).toBe("github.com/t3tools/t3code");
-      expect(normalizePathSeparators(resolvedIdentityRoot)).toBe(
-        normalizePathSeparators(resolvedRepoRoot),
-      );
+      const [identityInfo, repoInfo] = yield* Effect.all([
+        fileSystem.stat(identity?.rootPath ?? ""),
+        fileSystem.stat(repoRoot),
+      ]);
+      // Windows can spell the same directory through both its short 8.3 name
+      // and its long name. Device/inode identity verifies the repository
+      // contract without conflating spelling with filesystem identity.
+      expect(identityInfo.dev).toBe(repoInfo.dev);
+      expect(identityInfo.ino).toEqual(repoInfo.ino);
       expect(identity?.displayName).toBe("t3tools/t3code");
       expect(identity?.provider).toBe("github");
       expect(identity?.owner).toBe("t3tools");

@@ -36,16 +36,31 @@ export const readBootstrapEnvelope = Effect.fn("readBootstrapEnvelope")(function
       input: stream,
       crlfDelay: Infinity,
     });
+    let completed = false;
 
     const cleanup = () => {
+      // `Effect.callback` invokes this canceler after a successful resume as
+      // well as on interruption. Once a line/close/error has settled the
+      // callback, let the ReadStream finish its normal EOF auto-close. Calling
+      // destroy in parallel with that close can issue a second close/read on
+      // the descriptor and surface an uncaught EBADF.
+      if (completed) {
+        return;
+      }
       stream.removeListener("error", handleError);
       input.removeListener("line", handleLine);
       input.removeListener("close", handleClose);
       input.close();
-      stream.destroy();
+      // The bootstrap stream owns its descriptor after handoff. On
+      // interruption, destroy initiates that stream's auto-close; the
+      // completed guard above keeps this path from racing normal EOF teardown.
+      if (!stream.destroyed && !stream.closed) {
+        stream.destroy();
+      }
     };
 
     const handleError = (error: Error) => {
+      completed = true;
       if (isUnavailableBootstrapFdError(error)) {
         resume(Effect.succeedNone);
         return;
@@ -61,6 +76,7 @@ export const readBootstrapEnvelope = Effect.fn("readBootstrapEnvelope")(function
     };
 
     const handleLine = (line: string) => {
+      completed = true;
       const parsed = decodeJsonResult(schema)(line);
       if (Result.isSuccess(parsed)) {
         resume(Effect.succeedSome(parsed.success));
@@ -77,6 +93,7 @@ export const readBootstrapEnvelope = Effect.fn("readBootstrapEnvelope")(function
     };
 
     const handleClose = () => {
+      completed = true;
       resume(Effect.succeedNone);
     };
 

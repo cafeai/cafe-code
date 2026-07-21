@@ -854,8 +854,38 @@ function isDurableClaudeResumeState(
   return Boolean(resumeState.resumeSessionAt) || (resumeState.turnCount ?? 0) > 0;
 }
 
-function claudeProjectDirectoryName(path: Path.Path, cwd: string): string {
-  return path.resolve(cwd).replaceAll(path.sep, "-");
+const CLAUDE_PROJECT_DIRECTORY_PREFIX_LIMIT = 200;
+
+function claudeProjectDirectoryHash(value: string): string {
+  // Claude Code uses the conventional signed 32-bit JavaScript string hash
+  // here. Keep the bitwise truncation explicit so long-path transcript lookup
+  // remains byte-for-byte compatible with the upstream CLI on every host.
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+/**
+ * Encode an absolute cwd using Claude Code's project-directory algorithm.
+ *
+ * Agent SDK 0.3.215's `projectKey` implementation replaces every
+ * non-alphanumeric character, not only the host path separator, and bounds
+ * long names with a deterministic hash suffix. Besides matching upstream,
+ * replacing the Windows volume colon prevents an invalid `projects/C:...`
+ * child path from escaping the intended directory component.
+ */
+export function encodeClaudeProjectDirectoryName(resolvedCwd: string): string {
+  const encoded = resolvedCwd.replace(/[^a-zA-Z0-9]/g, "-");
+  if (encoded.length <= CLAUDE_PROJECT_DIRECTORY_PREFIX_LIMIT) {
+    return encoded;
+  }
+  return `${encoded.slice(0, CLAUDE_PROJECT_DIRECTORY_PREFIX_LIMIT)}-${claudeProjectDirectoryHash(resolvedCwd)}`;
+}
+
+export function claudeProjectDirectoryName(path: Pick<Path.Path, "resolve">, cwd: string): string {
+  return encodeClaudeProjectDirectoryName(path.resolve(cwd));
 }
 
 function resolveClaudeConfigDirectory(path: Path.Path, env: NodeJS.ProcessEnv): string {

@@ -12,6 +12,7 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import {
+  type CommandAvailabilityProbe,
   isCommandAvailable,
   launchBrowser,
   launchEditorProcess,
@@ -24,6 +25,11 @@ import {
   resolveTerminalLaunch,
   resolveTerminalProcessLaunch,
 } from "./externalLauncher.ts";
+
+function commandsAvailable(...commands: ReadonlyArray<string>): CommandAvailabilityProbe {
+  const available = new Set(commands);
+  return (command) => available.has(command);
+}
 
 function encodeUtf16LeBase64(input: string): string {
   const bytes = new Uint8Array(input.length * 2);
@@ -454,15 +460,12 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
 
   it.effect("falls back to zeditor when zed is not installed", () =>
     Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-external-launcher-test-" });
-      yield* fs.writeFileString(path.join(dir, "zeditor"), "#!/bin/sh\nexit 0\n");
-      yield* fs.chmod(path.join(dir, "zeditor"), 0o755);
-
-      const result = yield* resolveEditorLaunch({ cwd: "/tmp/workspace", editor: "zed" }, "linux", {
-        PATH: dir,
-      });
+      const result = yield* resolveEditorLaunch(
+        { cwd: "/tmp/workspace", editor: "zed" },
+        "linux",
+        { PATH: "" },
+        commandsAvailable("zeditor"),
+      );
 
       assert.deepEqual(result, {
         command: "zeditor",
@@ -519,21 +522,11 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
 
   it.effect("prefers Dolphin for the file-manager editor in KDE sessions", () =>
     Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-file-manager-" });
-
-      yield* fs.writeFileString(path.join(dir, "dolphin"), "#!/bin/sh\nexit 0\n");
-      yield* fs.writeFileString(path.join(dir, "gio"), "#!/bin/sh\nexit 0\n");
-      yield* fs.writeFileString(path.join(dir, "xdg-open"), "#!/bin/sh\nexit 0\n");
-      yield* fs.chmod(path.join(dir, "dolphin"), 0o755);
-      yield* fs.chmod(path.join(dir, "gio"), 0o755);
-      yield* fs.chmod(path.join(dir, "xdg-open"), 0o755);
-
       const launch = yield* resolveEditorLaunch(
         { cwd: "/tmp/workspace", editor: "file-manager" },
         "linux",
-        { PATH: dir, XDG_CURRENT_DESKTOP: "KDE" },
+        { PATH: "", XDG_CURRENT_DESKTOP: "KDE" },
+        commandsAvailable("dolphin", "gio", "xdg-open"),
       );
 
       assert.deepEqual(launch, {
@@ -545,19 +538,11 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
 
   it.effect("uses gio open for the Linux file-manager editor when available outside KDE", () =>
     Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-file-manager-" });
-
-      yield* fs.writeFileString(path.join(dir, "gio"), "#!/bin/sh\nexit 0\n");
-      yield* fs.writeFileString(path.join(dir, "xdg-open"), "#!/bin/sh\nexit 0\n");
-      yield* fs.chmod(path.join(dir, "gio"), 0o755);
-      yield* fs.chmod(path.join(dir, "xdg-open"), 0o755);
-
       const launch = yield* resolveEditorLaunch(
         { cwd: "/tmp/workspace", editor: "file-manager" },
         "linux",
-        { PATH: dir, XDG_CURRENT_DESKTOP: "GNOME" },
+        { PATH: "", XDG_CURRENT_DESKTOP: "GNOME" },
+        commandsAvailable("gio", "xdg-open"),
       );
 
       assert.deepEqual(launch, {
@@ -968,19 +953,12 @@ it.layer(NodeServices.layer)("resolveAvailableEditors", (it) => {
   );
 
   it.effect("includes zed when only the zeditor command is installed", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-editors-" });
-
-      yield* fs.writeFileString(path.join(dir, "zeditor"), "#!/bin/sh\nexit 0\n");
-      yield* fs.writeFileString(path.join(dir, "xdg-open"), "#!/bin/sh\nexit 0\n");
-      yield* fs.chmod(path.join(dir, "zeditor"), 0o755);
-      yield* fs.chmod(path.join(dir, "xdg-open"), 0o755);
-
-      const editors = resolveAvailableEditors("linux", {
-        PATH: dir,
-      });
+    Effect.sync(() => {
+      const editors = resolveAvailableEditors(
+        "linux",
+        { PATH: "" },
+        commandsAvailable("zeditor", "xdg-open"),
+      );
       assert.deepEqual(editors, ["zed", "file-manager"]);
     }),
   );

@@ -41,6 +41,8 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import {
+  claudeProjectDirectoryName,
+  encodeClaudeProjectDirectoryName,
   makeClaudeAdapter,
   resolveClaudeModelSessionOptions,
   type ClaudeAdapterLiveOptions,
@@ -327,11 +329,21 @@ function promptMessageText(message: SDKUserMessage | undefined): string | undefi
 }
 
 function claudeProjectDirectoryForTest(homePath: string, cwd: string): string {
-  return path.join(homePath, ".claude", "projects", path.resolve(cwd).replaceAll(path.sep, "-"));
+  return path.join(homePath, ".claude", "projects", claudeProjectDirectoryName(path, cwd));
 }
 
 const THREAD_ID = ThreadId.make("thread-claude-1");
 const RESUME_THREAD_ID = ThreadId.make("thread-claude-resume");
+
+describe("Claude project directory encoding", () => {
+  it("matches upstream punctuation replacement and bounded long-path hashing", () => {
+    assert.equal(
+      encodeClaudeProjectDirectoryName(String.raw`C:\Users\mike\work.dir`),
+      "C--Users-mike-work-dir",
+    );
+    assert.equal(encodeClaudeProjectDirectoryName("a".repeat(201)), `${"a".repeat(200)}-rkvsv5`);
+  });
+});
 
 describe("ClaudeAdapterLive", () => {
   it.effect("returns validation error for non-claude provider on startSession", () => {

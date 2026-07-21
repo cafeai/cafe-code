@@ -1257,7 +1257,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             // but custom models are projected into error snapshots, so this
             // proves the aggregator no longer holds the initial snapshot.
             const refreshed = yield* Effect.gen(function* () {
-              for (let attempts = 0; attempts < 60; attempts += 1) {
+              for (let attempts = 0; attempts < 120; attempts += 1) {
                 const providers = yield* registry.getProviders;
                 const codex = providers.find((provider) => provider.instanceId === "codex");
                 if (
@@ -1268,6 +1268,15 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                 }
                 yield* TestClock.adjust("50 millis");
                 yield* Effect.yieldNow;
+                if (process.platform === "win32") {
+                  // The probe intentionally uses the real process spawner to
+                  // observe ENOENT. Advancing TestClock cannot advance libuv's
+                  // Windows process callback, so give that callback a bounded
+                  // slice of wall time under the fully parallel CI workload.
+                  yield* Effect.promise(
+                    () => new Promise<void>((resolve) => setTimeout(resolve, 25)),
+                  );
+                }
               }
               return yield* registry.getProviders;
             });
@@ -1886,7 +1895,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
       );
 
       it.effect("runs Claude status probes with the configured Claude HOME", () => {
-        const claudeHome = "/tmp/t3code-claude-home";
         const recorded = recordingMockSpawnerLayer((args) => {
           const joined = args.join(" ");
           if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
@@ -1900,6 +1908,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         });
 
         return Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const claudeHome = path.resolve("/tmp/t3code-claude-home");
           const status = yield* checkClaudeProviderStatus(
             {
               ...defaultClaudeSettings,

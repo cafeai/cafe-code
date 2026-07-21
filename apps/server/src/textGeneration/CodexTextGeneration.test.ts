@@ -48,8 +48,52 @@ function makeFakeCodexBinary(
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const binDir = path.join(dir, "bin");
-    const codexPath = path.join(binDir, "codex");
     yield* fs.makeDirectory(binDir, { recursive: true });
+
+    if (process.platform === "win32") {
+      // npm exposes Codex through a `.cmd` shim on Windows. Build the real
+      // process smoke fixture in that shape, with a Node helper so argument,
+      // stdin, stderr, and output-file behavior is identical across shells.
+      const fixturePath = path.join(binDir, "codex-fixture.cjs");
+      const codexPath = path.join(binDir, "codex.cmd");
+      const fixtureConfig = Buffer.from(JSON.stringify(input), "utf8").toString("base64");
+      yield* fs.writeFileString(
+        fixturePath,
+        [
+          '"use strict";',
+          'const fs = require("node:fs");',
+          `const config = JSON.parse(Buffer.from(${JSON.stringify(fixtureConfig)}, "base64").toString("utf8"));`,
+          "const args = process.argv.slice(2);",
+          'const outputFlag = args.indexOf("--output-last-message");',
+          "const outputPath = outputFlag >= 0 ? args[outputFlag + 1] : undefined;",
+          'const configValues = args.flatMap((value, index) => args[index - 1] === "--config" ? [value] : []);',
+          'const reasoningEffort = configValues.find((value) => value.startsWith("model_reasoning_effort="));',
+          'let stdin = "";',
+          'process.stdin.setEncoding("utf8");',
+          'process.stdin.on("data", (chunk) => { stdin += chunk; });',
+          'process.stdin.on("end", () => {',
+          "  const fail = (code, message) => { process.stderr.write(`${message}\\n`); process.exitCode = code; };",
+          '  if (config.requireImage && !args.includes("--image")) return fail(2, "missing --image input");',
+          '  if (config.requireFastServiceTier && !configValues.includes(\'service_tier="fast"\')) return fail(5, "missing fast service tier config");',
+          '  if (config.requireReasoningEffort !== undefined && reasoningEffort !== `model_reasoning_effort="${config.requireReasoningEffort}"`) return fail(6, `unexpected reasoning effort config: ${reasoningEffort ?? ""}`);',
+          "  if (config.forbidReasoningEffort && reasoningEffort !== undefined) return fail(7, `reasoning effort config should be omitted: ${reasoningEffort}`);",
+          '  if (config.stdinMustContain !== undefined && !stdin.includes(config.stdinMustContain)) return fail(3, "stdin missing expected content");',
+          '  if (config.stdinMustNotContain !== undefined && stdin.includes(config.stdinMustNotContain)) return fail(4, "stdin contained forbidden content");',
+          "  if (config.stderr !== undefined) process.stderr.write(`${config.stderr}\\n`);",
+          "  if (outputPath) fs.writeFileSync(outputPath, config.output);",
+          "  process.exitCode = config.exitCode ?? 0;",
+          "});",
+          "",
+        ].join("\n"),
+      );
+      yield* fs.writeFileString(
+        codexPath,
+        `@echo off\r\n"${process.execPath}" "%~dp0codex-fixture.cjs" %*\r\n`,
+      );
+      return codexPath;
+    }
+
+    const codexPath = path.join(binDir, "codex");
 
     yield* fs.writeFileString(
       codexPath,
