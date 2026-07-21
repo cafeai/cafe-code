@@ -25,16 +25,23 @@ interface CleanupDependencies {
 
 type ManagedProviderSlug = "codex" | "claude";
 
+interface ProcessOptions {
+  readonly env?: NodeJS.ProcessEnv;
+  readonly timeoutMs?: number;
+  readonly windowsVerbatimArguments?: boolean;
+}
+
 async function runProcess(
   command: string,
   args: readonly string[],
-  options: { readonly env?: NodeJS.ProcessEnv; readonly timeoutMs?: number } = {},
+  options: ProcessOptions = {},
 ): Promise<ProcessResult> {
   return await new Promise<ProcessResult>((resolveProcess, reject) => {
     const child = spawn(command, [...args], {
       env: options.env ?? process.env,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
+      windowsVerbatimArguments: options.windowsVerbatimArguments ?? false,
     });
     let stdout = "";
     let stderr = "";
@@ -182,6 +189,24 @@ export function buildWindowsCmdCommand(commandPath: string, args: readonly strin
   return `""${commandPath}"${renderedArgs.length > 0 ? ` ${renderedArgs}` : ""}"`;
 }
 
+export function buildWindowsCmdInvocation(
+  commandPath: string,
+  args: readonly string[],
+): {
+  readonly command: "cmd.exe";
+  readonly args: readonly ["/d", "/s", "/c", string];
+  readonly windowsVerbatimArguments: true;
+} {
+  return {
+    command: "cmd.exe",
+    args: ["/d", "/s", "/c", buildWindowsCmdCommand(commandPath, args)],
+    // cmd.exe parses /c payloads differently than CommandLineToArgvW. Passing
+    // the serialized command through Node's default Windows quoting escapes the
+    // outer quotes and makes cmd treat the whole payload as a literal filename.
+    windowsVerbatimArguments: true,
+  };
+}
+
 async function assertManagedProviderRuntime(managedRoot: string): Promise<void> {
   const resultPath = join(managedRoot, "install-result.json");
   const result = readRecord(await readJsonFile(resultPath));
@@ -213,14 +238,12 @@ async function assertManagedProviderRuntime(managedRoot: string): Promise<void> 
     const installRoot = join(managedRoot, "providers", provider, "current");
     const shim = join(installRoot, "node_modules", ".bin", executable);
     if (!existsSync(shim)) throw new Error(`Managed ${provider} shim is missing.`);
-    const probe = await runProcess(
-      "cmd.exe",
-      ["/d", "/s", "/c", buildWindowsCmdCommand(shim, ["--version"])],
-      {
-        env: buildManagedProviderProbeEnvironment(managedRoot, provider, process.env),
-        timeoutMs: 60_000,
-      },
-    );
+    const probeInvocation = buildWindowsCmdInvocation(shim, ["--version"]);
+    const probe = await runProcess(probeInvocation.command, probeInvocation.args, {
+      env: buildManagedProviderProbeEnvironment(managedRoot, provider, process.env),
+      timeoutMs: 60_000,
+      windowsVerbatimArguments: probeInvocation.windowsVerbatimArguments,
+    });
     assertSuccessful(probe, `Managed ${provider} version probe`);
   }
 }

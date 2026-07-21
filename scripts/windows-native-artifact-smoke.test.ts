@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { parseJsonText } from "./json-file.ts";
 import {
   buildWindowsCmdCommand,
+  buildWindowsCmdInvocation,
   buildManagedProviderProbeEnvironment,
   removePathWithRetries,
   selectInstalledWindowsExecutables,
@@ -83,13 +84,20 @@ describe("Windows native artifact smoke", () => {
   });
 
   it("quotes managed Windows shim commands for cmd.exe", () => {
-    assert.equal(
-      buildWindowsCmdCommand(
-        "C:\\Users\\runneradmin\\AppData\\Local\\CafeCode\\managed\\providers\\codex\\current\\node_modules\\.bin\\codex.cmd",
-        ["--version"],
-      ),
-      '""C:\\Users\\runneradmin\\AppData\\Local\\CafeCode\\managed\\providers\\codex\\current\\node_modules\\.bin\\codex.cmd" --version"',
-    );
+    const shim =
+      "C:\\Users\\runneradmin\\AppData\\Local\\CafeCode\\managed\\providers\\codex\\current\\node_modules\\.bin\\codex.cmd";
+    assert.equal(buildWindowsCmdCommand(shim, ["--version"]), `""${shim}" --version"`);
+    assert.deepEqual(buildWindowsCmdInvocation(shim, ["--version"]), {
+      command: "cmd.exe",
+      args: ["/d", "/s", "/c", `""${shim}" --version"`],
+      windowsVerbatimArguments: true,
+    });
+  });
+
+  it("supports managed Windows shim commands without arguments", () => {
+    const shim =
+      "C:\\Users\\runneradmin\\AppData\\Local\\CafeCode\\managed\\providers\\claude\\current\\node_modules\\.bin\\claude.cmd";
+    assert.equal(buildWindowsCmdCommand(shim, []), `""${shim}""`);
   });
 
   it("retries transient Windows cleanup errors before removing the smoke root", async () => {
