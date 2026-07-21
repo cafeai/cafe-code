@@ -35,14 +35,17 @@ afterEach(() => {
 });
 
 describe("ensureNodePtySpawnHelperExecutable", () => {
-  it("restores executable permissions on the selected POSIX helper", () => {
-    const fixture = makeNodePtyFixture();
+  it.skipIf(process.platform === "win32")(
+    "restores executable permissions on the selected POSIX helper",
+    () => {
+      const fixture = makeNodePtyFixture();
 
-    expect(ensureNodePtySpawnHelperExecutable(fixture.packageRoot, "darwin", "arm64")).toBe(
-      fixture.helperPath,
-    );
-    expect(lstatSync(fixture.helperPath).mode & 0o111).toBe(0o111);
-  });
+      expect(ensureNodePtySpawnHelperExecutable(fixture.packageRoot, "darwin", "arm64")).toBe(
+        fixture.helperPath,
+      );
+      expect(lstatSync(fixture.helperPath).mode & 0o111).toBe(0o111);
+    },
+  );
 
   it.skipIf(process.platform === "win32")("refuses to chmod a symlinked helper", () => {
     const fixture = makeNodePtyFixture();

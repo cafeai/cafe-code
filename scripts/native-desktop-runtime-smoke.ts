@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve, win32 } from "node:path";
+import { join, posix, resolve, win32 } from "node:path";
 
 const SELF_TEST_SWITCH = "--cafe-runtime-self-test";
 const SELF_TEST_RESULT_ENV = "CAFE_CODE_RUNTIME_SELF_TEST_RESULT";
@@ -67,9 +67,13 @@ export function resolvePackagedResourcesPath(
   appPath: string,
   platform: NodeJS.Platform = process.platform,
 ): string {
-  if (platform === "darwin") return resolve(dirname(appPath), "../Resources");
+  // This helper validates artifacts for a target platform, which may differ
+  // from the CI host. Use the target path implementation rather than the
+  // host-global path functions so Windows can validate macOS metadata and the
+  // converse remains true.
+  if (platform === "darwin") return posix.resolve(posix.dirname(appPath), "../Resources");
   if (platform === "win32") return win32.join(win32.dirname(appPath), "resources");
-  return join(dirname(appPath), "resources");
+  return posix.join(posix.dirname(appPath), "resources");
 }
 
 export function readDebugUrl(output: string): string | undefined {

@@ -4,9 +4,12 @@ import { closeSync, constants, existsSync, fchmodSync, fstatSync, openSync } fro
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 
-// Resolve native runtime packages from the desktop workspace that declares
-// them, rather than relying on the root node_modules hoisting layout.
-const desktopRequire = createRequire(new URL("../apps/desktop/package.json", import.meta.url));
+// Resolve native packages from the runtime workspace that owns this
+// postinstall. Yarn builds that workspace only after its native dependencies,
+// avoiding a race with node-pty's source build on platforms without prebuilds.
+const desktopRuntimeRequire = createRequire(
+  new URL("../packaging/desktop-runtime/package.json", import.meta.url),
+);
 const EXECUTABLE_PERMISSION_BITS = 0o111;
 
 export function ensureNodePtySpawnHelperExecutable(
@@ -69,13 +72,13 @@ export function ensureNodePtySpawnHelperExecutable(
 }
 
 export function ensureInstalledDesktopRuntime(): void {
-  const electronExecutable = desktopRequire("electron") as unknown;
+  const electronExecutable = desktopRuntimeRequire("electron") as unknown;
   if (typeof electronExecutable !== "string" || !existsSync(electronExecutable)) {
     throw new Error("The pinned Electron executable is unavailable after installation.");
   }
 
   if (process.platform !== "win32") {
-    const nodePtyPackageRoot = dirname(desktopRequire.resolve("node-pty/package.json"));
+    const nodePtyPackageRoot = dirname(desktopRuntimeRequire.resolve("node-pty/package.json"));
     ensureNodePtySpawnHelperExecutable(nodePtyPackageRoot);
   }
 }

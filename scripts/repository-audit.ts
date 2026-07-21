@@ -57,7 +57,7 @@ const ignoredFilesystemDirectoryNames = new Set([
 ]);
 
 function isIgnoredFilesystemPath(path: string): boolean {
-  const normalizedPath = path.split(sep).join("/");
+  const normalizedPath = toRepositoryPath(path);
   return (
     normalizedPath === ".yarn/install-state.gz" ||
     normalizedPath === "packaging/aur/cafe-code/pkg" ||
@@ -65,6 +65,10 @@ function isIgnoredFilesystemPath(path: string): boolean {
     normalizedPath === "packaging/aur/cafe-code/src" ||
     normalizedPath.startsWith("packaging/aur/cafe-code/src/")
   );
+}
+
+function toRepositoryPath(path: string): string {
+  return path.split(sep).join("/");
 }
 
 export function listRepositoryFilesFromFilesystem(root: string): ReadonlyArray<string> {
@@ -79,7 +83,7 @@ export function listRepositoryFilesFromFilesystem(root: string): ReadonlyArray<s
         if (!ignoredFilesystemDirectoryNames.has(entry.name)) visit(relativePath);
         continue;
       }
-      if (entry.isFile()) files.push(relativePath);
+      if (entry.isFile()) files.push(toRepositoryPath(relativePath));
     }
   }
 
@@ -147,7 +151,7 @@ export function auditRepository(
     // not use, so it is not first-party prose or executable policy.
     if (path === "yarn.lock") return [];
     return findDeniedReferences(
-      relative(root, absolutePath),
+      toRepositoryPath(relative(root, absolutePath)),
       readFileSync(absolutePath, "utf8"),
       deniedTerms,
     );

@@ -12,7 +12,6 @@
   "type": "module",
   "scripts": {
     "prepare": "effect-language-service patch",
-    "postinstall": "node scripts/ensure-desktop-runtime.ts",
     "dev": "node scripts/dev-runner.ts dev",
     "dev:server": "node scripts/dev-runner.ts dev:server",
     "dev:web": "node scripts/dev-runner.ts dev:web",
