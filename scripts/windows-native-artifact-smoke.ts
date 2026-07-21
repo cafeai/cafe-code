@@ -23,6 +23,8 @@ interface CleanupDependencies {
   readonly sleep?: (ms: number) => Promise<void>;
 }
 
+type ManagedProviderSlug = "codex" | "claude";
+
 async function runProcess(
   command: string,
   args: readonly string[],
@@ -52,6 +54,21 @@ async function runProcess(
       resolveProcess({ exitCode, stdout, stderr });
     });
   });
+}
+
+function prependWindowsPathEntries(
+  env: NodeJS.ProcessEnv,
+  entries: readonly string[],
+): NodeJS.ProcessEnv {
+  const currentPath = env.PATH ?? env.Path ?? "";
+  const nextPath = [...entries.filter((entry) => entry.trim().length > 0), currentPath]
+    .filter((entry) => entry.trim().length > 0)
+    .join(";");
+  return {
+    ...env,
+    PATH: nextPath,
+    Path: undefined,
+  };
 }
 
 function isRetryableWindowsCleanupError(error: unknown): boolean {
@@ -119,7 +136,14 @@ export function selectInstalledWindowsExecutables(fileNames: readonly string[]):
 }
 
 function assertSuccessful(result: ProcessResult, operation: string): void {
-  if (result.exitCode !== 0) throw new Error(`${operation} exited nonzero.`);
+  if (result.exitCode === 0) return;
+
+  const details = [
+    `exitCode=${result.exitCode === null ? "null" : String(result.exitCode)}`,
+    result.stdout.trim().length > 0 ? `stdout:\n${result.stdout.trim()}` : null,
+    result.stderr.trim().length > 0 ? `stderr:\n${result.stderr.trim()}` : null,
+  ].filter((detail): detail is string => detail !== null);
+  throw new Error(`${operation} exited nonzero.\n${details.join("\n\n")}`);
 }
 
 async function readUserPathRegistry(): Promise<string> {
@@ -133,6 +157,24 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+export function buildManagedProviderProbeEnvironment(
+  managedRoot: string,
+  provider: ManagedProviderSlug,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const installRoot = join(managedRoot, "providers", provider, "current");
+  const binaryDir = join(installRoot, "node_modules", ".bin");
+  const nodeDir = join(managedRoot, "node", "current");
+
+  // Match the packaged bundled-runtime launcher: npm shims rely on managed
+  // Node and their local .bin directory being ahead of the ambient user PATH.
+  return {
+    ...prependWindowsPathEntries(baseEnv, [binaryDir, nodeDir]),
+    npm_config_prefix: installRoot,
+    npm_config_cache: join(managedRoot, "npm-cache"),
+  };
 }
 
 async function assertManagedProviderRuntime(managedRoot: string): Promise<void> {
@@ -163,17 +205,11 @@ async function assertManagedProviderRuntime(managedRoot: string): Promise<void> 
     ["codex", "codex.cmd"],
     ["claude", "claude.cmd"],
   ] as const) {
-    const shim = join(
-      managedRoot,
-      "providers",
-      provider,
-      "current",
-      "node_modules",
-      ".bin",
-      executable,
-    );
+    const installRoot = join(managedRoot, "providers", provider, "current");
+    const shim = join(installRoot, "node_modules", ".bin", executable);
     if (!existsSync(shim)) throw new Error(`Managed ${provider} shim is missing.`);
     const probe = await runProcess("cmd.exe", ["/d", "/s", "/c", `"${shim}" --version`], {
+      env: buildManagedProviderProbeEnvironment(managedRoot, provider, process.env),
       timeoutMs: 60_000,
     });
     assertSuccessful(probe, `Managed ${provider} version probe`);

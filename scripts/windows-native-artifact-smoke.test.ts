@@ -1,7 +1,9 @@
 import { assert, describe, it } from "@effect/vitest";
+import { join } from "node:path";
 
 import { parseJsonText } from "./json-file.ts";
 import {
+  buildManagedProviderProbeEnvironment,
   removePathWithRetries,
   selectInstalledWindowsExecutables,
   selectWindowsInstaller,
@@ -56,6 +58,27 @@ describe("Windows native artifact smoke", () => {
       managedProviderRuntimeEnabled: true,
       providers: [],
     });
+  });
+
+  it("probes managed provider shims with the bundled runtime environment", () => {
+    const managedRoot = "C:\\Users\\runneradmin\\AppData\\Local\\CafeCode\\managed";
+    const env = buildManagedProviderProbeEnvironment(managedRoot, "codex", {
+      Path: "C:\\Windows\\System32",
+      PATHEXT: ".COM;.EXE;.BAT;.CMD",
+    });
+    const installRoot = join(managedRoot, "providers", "codex", "current");
+
+    assert.equal(
+      env.PATH,
+      [
+        join(installRoot, "node_modules", ".bin"),
+        join(managedRoot, "node", "current"),
+        "C:\\Windows\\System32",
+      ].join(";"),
+    );
+    assert.equal(env.Path, undefined);
+    assert.equal(env.npm_config_prefix, installRoot);
+    assert.equal(env.npm_config_cache, join(managedRoot, "npm-cache"));
   });
 
   it("retries transient Windows cleanup errors before removing the smoke root", async () => {
