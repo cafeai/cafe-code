@@ -9,6 +9,7 @@ import {
   removePathWithRetries,
   selectInstalledWindowsExecutables,
   selectWindowsInstaller,
+  waitForPathToDisappear,
 } from "./windows-native-artifact-smoke.ts";
 
 describe("Windows native artifact smoke", () => {
@@ -141,5 +142,32 @@ describe("Windows native artifact smoke", () => {
     assert.instanceOf(error, Error);
     assert.match((error as Error).message, /busy/);
     assert.equal(attempts, 1);
+  });
+
+  it("waits for Windows uninstall side effects to remove the app executable", async () => {
+    let attempts = 0;
+    const waits: number[] = [];
+    const disappeared = await waitForPathToDisappear("C:\\temp\\Cafe Code\\Cafe Code.exe", {
+      platform: "win32",
+      exists: () => {
+        attempts += 1;
+        return attempts < 3;
+      },
+      sleep: async (ms) => {
+        waits.push(ms);
+      },
+    });
+    assert.equal(disappeared, true);
+    assert.equal(attempts, 3);
+    assert.deepEqual(waits, [250, 250]);
+  });
+
+  it("fails fast for persistent uninstall leftovers on non-Windows", async () => {
+    const disappeared = await waitForPathToDisappear("/tmp/Cafe Code/Cafe Code.exe", {
+      platform: "linux",
+      exists: () => true,
+      sleep: async () => undefined,
+    });
+    assert.equal(disappeared, false);
   });
 });

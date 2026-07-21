@@ -23,6 +23,12 @@ interface CleanupDependencies {
   readonly sleep?: (ms: number) => Promise<void>;
 }
 
+interface PathDisappearanceDependencies {
+  readonly platform?: NodeJS.Platform;
+  readonly exists?: (path: string) => boolean;
+  readonly sleep?: (ms: number) => Promise<void>;
+}
+
 type ManagedProviderSlug = "codex" | "claude";
 
 interface ProcessOptions {
@@ -111,6 +117,24 @@ export async function removePathWithRetries(
       // releases all file handles in the extracted app directory.
       await wait(WINDOWS_CLEANUP_RETRY_DELAY_MS);
     }
+  }
+}
+
+export async function waitForPathToDisappear(
+  targetPath: string,
+  dependencies: PathDisappearanceDependencies = {},
+): Promise<boolean> {
+  const platform = dependencies.platform ?? process.platform;
+  const pathExists = dependencies.exists ?? existsSync;
+  const wait = dependencies.sleep ?? sleep;
+
+  for (let attempt = 0; ; attempt += 1) {
+    if (!pathExists(targetPath)) return true;
+    if (platform !== "win32" || attempt >= WINDOWS_CLEANUP_RETRY_ATTEMPTS - 1) {
+      return false;
+    }
+    // NSIS can report exit before post-uninstall file deletion finishes.
+    await wait(WINDOWS_CLEANUP_RETRY_DELAY_MS);
   }
 }
 
@@ -284,7 +308,7 @@ export async function runWindowsNativeArtifactSmoke(
 
     const uninstall = await runProcess(uninstallerPath, ["/S"], { timeoutMs: 5 * 60_000 });
     assertSuccessful(uninstall, "NSIS uninstall");
-    if (existsSync(appPath))
+    if (!(await waitForPathToDisappear(appPath)))
       throw new Error("NSIS uninstall left the application executable behind.");
     uninstallerPath = undefined;
     console.info("Windows NSIS install/runtime/managed-provider/uninstall smoke passed.");
