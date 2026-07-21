@@ -29,7 +29,12 @@ async function writeManifest(
   const files: Array<UpdateManifest["files"][number]> = [];
   for (const assetName of assetNames) {
     const bytes = await readFile(join(releaseDir, assetName));
-    files.push({ url: assetName, sha512: sha512(bytes), size: bytes.length });
+    files.push({
+      url: assetName,
+      sha512: sha512(bytes),
+      size: bytes.length,
+      ...(assetName.endsWith(".AppImage") ? { blockMapSize: 263625 } : {}),
+    });
   }
   await writeFile(
     join(releaseDir, fileName),
