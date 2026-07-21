@@ -13,8 +13,8 @@
 import {
   NonNegativeInt,
   ProviderDriverKind,
-  TrimmedNonEmptyString,
   UsageStatsDayKey,
+  UsageStatsModel,
 } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
 import * as Context from "effect/Context";
@@ -29,14 +29,6 @@ export const UsageStatsDayRow = Schema.Struct({
   userMessages: NonNegativeInt,
 });
 export type UsageStatsDayRow = typeof UsageStatsDayRow.Type;
-
-/**
- * Provider model identifiers originate outside Cafe. Bound their persisted
- * size so a hostile or malformed runtime event cannot create unbounded SQLite
- * index keys. The service maps invalid/missing values to a short sentinel.
- */
-export const UsageStatsModel = TrimmedNonEmptyString.check(Schema.isMaxLength(256));
-export type UsageStatsModel = typeof UsageStatsModel.Type;
 
 export const UsageStatsTokenBreakdownDayRow = Schema.Struct({
   day: UsageStatsDayKey,
@@ -60,8 +52,8 @@ export interface UsageStatsRepositoryShape {
 
   /**
    * List provider/model output-token attribution ascending by day and stable
-   * key order. This is deliberately not loaded by the aggregate usage service
-   * or exposed through the current Usage UI.
+   * key order. The usage service hydrates these rows once and aggregates them
+   * in memory; opening Settings must not query SQLite.
    */
   readonly listTokenBreakdownDays: Effect.Effect<
     ReadonlyArray<UsageStatsTokenBreakdownDayRow>,

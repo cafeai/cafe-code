@@ -654,7 +654,15 @@ async function fetchCodexAccountRateLimits(input: {
   }
 }
 
-const readCodexAccountRateLimits = Effect.fn("readCodexAccountRateLimits")(function* (
+/**
+ * Read only the redacted ChatGPT account-usage snapshot used by Codex.
+ *
+ * This deliberately performs no Codex CLI or app-server process operation.
+ * Callers must continue to use the full provider-status path when they need
+ * installation, version, or authentication truth. Credentials stay inside
+ * this module and only the schema-bounded usage summary is returned.
+ */
+export const readCodexAccountRateLimits = Effect.fn("readCodexAccountRateLimits")(function* (
   codexSettings: CodexSettings,
   environment: NodeJS.ProcessEnv,
   checkedAt: string,

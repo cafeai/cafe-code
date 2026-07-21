@@ -13,8 +13,8 @@ import type * as Effect from "effect/Effect";
 
 export interface UsageStatsServiceShape {
   /**
-   * Lifetime totals plus the full per-day history for the activity heatmap.
-   * Served from memory.
+   * Lifetime totals, full per-day history for the activity heatmap, and
+   * provider/model output-token attribution. Served entirely from memory.
    */
   readonly get: Effect.Effect<UsageStatsGetResult>;
 

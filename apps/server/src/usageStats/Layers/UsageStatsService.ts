@@ -1,9 +1,10 @@
 /**
  * UsageStatsServiceLive - In-memory usage accumulator with periodic SQLite flush.
  *
- * Building the layer hydrates lifetime counters from `usage_stats_days`, forks
- * consumers of the domain-event and provider-runtime streams, and forks a
- * flush loop that accrues in-flight generating time and persists pending
+ * Building the layer hydrates lifetime counters from `usage_stats_days` and
+ * provider/model token attribution from `usage_stats_token_breakdown_days`,
+ * forks consumers of the domain-event and provider-runtime streams, and forks
+ * a flush loop that accrues in-flight generating time and persists pending
  * per-day deltas every few seconds. A finalizer performs one last
  * accrue-and-flush on shutdown, so a clean stop loses nothing and a hard kill
  * loses at most one flush interval.
@@ -22,10 +23,12 @@
  * and accrual cursors always advance, so toggling collection partitions time
  * and tokens cleanly instead of retroactively counting the disabled period.
  */
-import type {
-  OrchestrationEvent,
-  ProviderDriverKind,
-  ProviderRuntimeEvent,
+import {
+  USAGE_STATS_MODEL_MAX_CHARS,
+  type OrchestrationEvent,
+  type ProviderDriverKind,
+  type ProviderRuntimeEvent,
+  type UsageStatsTokenBreakdownEntry,
 } from "@cafecode/contracts";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -43,7 +46,6 @@ import { UsageStatsService, type UsageStatsServiceShape } from "../Services/Usag
 
 const FLUSH_INTERVAL_MS = 5_000;
 const MODEL_RESOLUTION_TIMEOUT_MS = 1_000;
-const MAX_USAGE_MODEL_CHARS = 256;
 const UNKNOWN_USAGE_MODEL = "unknown";
 
 interface MutableDayTotals {
@@ -76,6 +78,7 @@ interface ThreadTracking {
 }
 
 type PendingTokenBreakdowns = Map<string, Map<ProviderDriverKind, Map<string, number>>>;
+type TokenBreakdownTotals = Map<ProviderDriverKind, Map<string, number>>;
 
 /**
  * Best-effort output-token extraction from an opaque `turn.completed` usage
@@ -96,7 +99,7 @@ function normalizeUsageModel(value: unknown): string | undefined {
     return undefined;
   }
   const normalized = value.trim();
-  return normalized.length > 0 && normalized.length <= MAX_USAGE_MODEL_CHARS
+  return normalized.length > 0 && normalized.length <= USAGE_STATS_MODEL_MAX_CHARS
     ? normalized
     : undefined;
 }
@@ -131,9 +134,59 @@ const makeUsageStatsService = Effect.gen(function* () {
   const days = new Map<string, MutableDayTotals>();
   const pending = new Map<string, MutableDayTotals>();
   const pendingTokenBreakdowns: PendingTokenBreakdowns = new Map();
+  const tokenBreakdownTotals: TokenBreakdownTotals = new Map();
   const threads = new Map<string, ThreadTracking>();
   const totals: MutableDayTotals = { generatingMs: 0, outputTokens: 0, userMessages: 0 };
+  let tokenBreakdownSnapshot: ReadonlyArray<UsageStatsTokenBreakdownEntry> = [];
+  let tokenBreakdownSnapshotDirty = true;
   let enabled = true;
+
+  const addTokenBreakdownTotal = (
+    provider: ProviderDriverKind,
+    model: string,
+    outputTokens: number,
+  ): void => {
+    if (outputTokens <= 0) {
+      return;
+    }
+    let models = tokenBreakdownTotals.get(provider);
+    if (models === undefined) {
+      models = new Map();
+      tokenBreakdownTotals.set(provider, models);
+    }
+    models.set(model, (models.get(model) ?? 0) + outputTokens);
+    tokenBreakdownSnapshotDirty = true;
+  };
+
+  /**
+   * Materialize the RPC rows only after attribution changes. Usage snapshots
+   * are read frequently, while model attribution changes only when a provider
+   * reports additional output tokens.
+   */
+  const readTokenBreakdown = (): ReadonlyArray<UsageStatsTokenBreakdownEntry> => {
+    if (!tokenBreakdownSnapshotDirty) {
+      return tokenBreakdownSnapshot;
+    }
+    tokenBreakdownSnapshot = Array.from(tokenBreakdownTotals.entries())
+      .flatMap(([provider, models]) =>
+        Array.from(models.entries(), ([model, outputTokens]) => ({
+          provider,
+          model,
+          outputTokens,
+        })),
+      )
+      .toSorted((left, right) => {
+        if (left.provider !== right.provider) {
+          return left.provider < right.provider ? -1 : 1;
+        }
+        if (left.outputTokens !== right.outputTokens) {
+          return right.outputTokens - left.outputTokens;
+        }
+        return left.model < right.model ? -1 : left.model > right.model ? 1 : 0;
+      });
+    tokenBreakdownSnapshotDirty = false;
+    return tokenBreakdownSnapshot;
+  };
 
   yield* repository.listDays.pipe(
     Effect.map((rows) => {
@@ -152,6 +205,19 @@ const makeUsageStatsService = Effect.gen(function* () {
     // remain additive, so the stored history stays intact either way.
     Effect.catch((error) =>
       Effect.logError("usage stats: failed to hydrate day totals", { error }),
+    ),
+  );
+
+  yield* repository.listTokenBreakdownDays.pipe(
+    Effect.map((rows) => {
+      for (const row of rows) {
+        addTokenBreakdownTotal(row.provider, row.model, row.outputTokens);
+      }
+    }),
+    // Aggregate usage remains useful if only the attribution ledger is
+    // damaged. Keep this failure isolated and let current-session rows accrue.
+    Effect.catch((error) =>
+      Effect.logError("usage stats: failed to hydrate token breakdown", { error }),
     ),
   );
 
@@ -197,6 +263,9 @@ const makeUsageStatsService = Effect.gen(function* () {
     }
     addDelta(day, { outputTokens });
 
+    const modelKey = model ?? UNKNOWN_USAGE_MODEL;
+    addTokenBreakdownTotal(provider, modelKey, outputTokens);
+
     let providers = pendingTokenBreakdowns.get(day);
     if (providers === undefined) {
       providers = new Map();
@@ -207,7 +276,6 @@ const makeUsageStatsService = Effect.gen(function* () {
       models = new Map();
       providers.set(provider, models);
     }
-    const modelKey = model ?? UNKNOWN_USAGE_MODEL;
     models.set(modelKey, (models.get(modelKey) ?? 0) + outputTokens);
   };
 
@@ -555,7 +623,7 @@ const makeUsageStatsService = Effect.gen(function* () {
             (left, right) => (left.day < right.day ? -1 : 1),
           )
         : dayRows;
-    return { ...state, days: withLiveToday };
+    return { ...state, days: withLiveToday, tokenBreakdown: readTokenBreakdown() };
   });
 
   yield* Effect.forkScoped(

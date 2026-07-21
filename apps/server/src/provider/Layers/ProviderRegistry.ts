@@ -199,6 +199,7 @@ const buildSnapshotSource = (instance: ProviderInstance): ProviderSnapshotSource
   driverKind: instance.driverKind,
   getSnapshot: instance.snapshot.getSnapshot,
   refresh: instance.snapshot.refresh,
+  refreshAccountUsage: instance.snapshot.refreshAccountUsage,
   streamChanges: instance.snapshot.streamChanges,
 });
 
@@ -549,6 +550,23 @@ export const ProviderRegistryLive = Layer.effect(
       return yield* refreshOneSource(providerSource);
     });
 
+    const refreshInstanceAccountUsage = Effect.fn("refreshInstanceAccountUsage")(function* (
+      instanceId: ProviderInstanceId,
+    ) {
+      const sources = yield* getLiveSources;
+      const providerSource = sources.find((candidate) => candidate.instanceId === instanceId);
+      if (!providerSource?.refreshAccountUsage) {
+        return yield* Ref.get(providersRef);
+      }
+      return yield* providerSource.refreshAccountUsage.pipe(
+        Effect.flatMap((nextProvider) =>
+          correlateSnapshotWithSource(providerSource, nextProvider).pipe(
+            Effect.flatMap(syncProvider),
+          ),
+        ),
+      );
+    });
+
     const getProviderMaintenanceCapabilitiesForInstance = Effect.fn(
       "getProviderMaintenanceCapabilitiesForInstance",
     )(function* (instanceId: ProviderInstanceId, provider: ProviderDriverKind) {
@@ -760,6 +778,8 @@ export const ProviderRegistryLive = Layer.effect(
         refresh(provider).pipe(Effect.catchCause(recoverRefreshFailure)),
       refreshInstance: (instanceId: ProviderInstanceId) =>
         refreshInstance(instanceId).pipe(Effect.catchCause(recoverRefreshFailure)),
+      refreshInstanceAccountUsage: (instanceId: ProviderInstanceId) =>
+        refreshInstanceAccountUsage(instanceId).pipe(Effect.catchCause(recoverRefreshFailure)),
       getProviderMaintenanceCapabilitiesForInstance,
       setProviderMaintenanceActionState,
       updateProviderAccountRateLimits,

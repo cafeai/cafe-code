@@ -565,8 +565,11 @@ const makeWsRpcLayer = (
 
           const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
           const shouldRefresh = yield* Ref.modify(codexPromptUsageRefreshAtRef, (previous) => {
-            const previousRefreshAt = previous.get(instanceId) ?? 0;
-            if (nowMs - previousRefreshAt < CODEX_PROMPT_USAGE_REFRESH_THROTTLE_MS) {
+            const previousRefreshAt = previous.get(instanceId);
+            if (
+              previousRefreshAt !== undefined &&
+              nowMs - previousRefreshAt < CODEX_PROMPT_USAGE_REFRESH_THROTTLE_MS
+            ) {
               return [false, previous] as const;
             }
             const next = new Map(previous);
@@ -580,7 +583,7 @@ const makeWsRpcLayer = (
           // Provider account usage is display metadata, never part of the
           // prompt-send critical path. Refresh it in the background and let the
           // normal provider snapshot stream update the renderer when it lands.
-          yield* providerRegistry.refreshInstance(instanceId).pipe(
+          yield* providerRegistry.refreshInstanceAccountUsage(instanceId).pipe(
             Effect.catchCause((cause) =>
               Effect.logWarning("codex prompt usage refresh failed", {
                 commandType: command.type,
@@ -1318,10 +1321,12 @@ const makeWsRpcLayer = (
                 })),
               );
 
-              yield* providerRegistry
-                .refresh()
-                .pipe(Effect.ignoreCause({ log: true }), Effect.forkScoped);
-
+              // A renderer subscription is a read boundary, not a provider
+              // maintenance command. Managed snapshots already perform an
+              // initial probe and periodic refresh; forcing every provider
+              // here made reconnect storms repeatedly execute CLI version and
+              // login checks. The initial event below reads the latest cached
+              // snapshots, then `providerStatuses` carries future changes.
               const liveUpdates = Stream.merge(
                 keybindingsUpdates,
                 Stream.merge(

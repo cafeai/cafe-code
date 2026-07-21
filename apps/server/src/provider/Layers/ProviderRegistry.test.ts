@@ -899,6 +899,19 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             slashCommands: [],
             skills: [],
           } as const satisfies ServerProvider;
+          const usageRefreshedProvider = {
+            ...cachedProvider,
+            accountRateLimits: {
+              rateLimits: {
+                primary: {
+                  usedPercent: 20,
+                  windowDurationMins: 300,
+                  resetsAt: 1_780_000_000,
+                },
+              },
+              checkedAt: "2026-04-29T10:01:00.000Z",
+            },
+          } as const satisfies ServerProvider;
           const instance = {
             instanceId: codexInstanceId,
             driverKind: codexDriver,
@@ -915,6 +928,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               }),
               getSnapshot: Effect.succeed(cachedProvider),
               refresh: Effect.die(new Error("simulated refresh failure")),
+              refreshAccountUsage: Effect.succeed(usageRefreshedProvider),
               streamChanges: Stream.empty,
             },
             adapter: {} as ProviderInstance["adapter"],
@@ -951,6 +965,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             assert.deepStrictEqual(yield* registry.refresh(codexDriver), [cachedProvider]);
             assert.deepStrictEqual(yield* registry.refreshInstance(codexInstanceId), [
               cachedProvider,
+            ]);
+            assert.deepStrictEqual(yield* registry.refreshInstanceAccountUsage(codexInstanceId), [
+              usageRefreshedProvider,
             ]);
           }).pipe(Effect.provide(runtimeServices));
         }),
