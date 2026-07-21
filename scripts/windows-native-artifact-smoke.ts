@@ -177,6 +177,11 @@ export function buildManagedProviderProbeEnvironment(
   };
 }
 
+export function buildWindowsCmdCommand(commandPath: string, args: readonly string[]): string {
+  const renderedArgs = args.join(" ");
+  return `""${commandPath}"${renderedArgs.length > 0 ? ` ${renderedArgs}` : ""}"`;
+}
+
 async function assertManagedProviderRuntime(managedRoot: string): Promise<void> {
   const resultPath = join(managedRoot, "install-result.json");
   const result = readRecord(await readJsonFile(resultPath));
@@ -208,10 +213,14 @@ async function assertManagedProviderRuntime(managedRoot: string): Promise<void> 
     const installRoot = join(managedRoot, "providers", provider, "current");
     const shim = join(installRoot, "node_modules", ".bin", executable);
     if (!existsSync(shim)) throw new Error(`Managed ${provider} shim is missing.`);
-    const probe = await runProcess("cmd.exe", ["/d", "/s", "/c", `"${shim}" --version`], {
-      env: buildManagedProviderProbeEnvironment(managedRoot, provider, process.env),
-      timeoutMs: 60_000,
-    });
+    const probe = await runProcess(
+      "cmd.exe",
+      ["/d", "/s", "/c", buildWindowsCmdCommand(shim, ["--version"])],
+      {
+        env: buildManagedProviderProbeEnvironment(managedRoot, provider, process.env),
+        timeoutMs: 60_000,
+      },
+    );
     assertSuccessful(probe, `Managed ${provider} version probe`);
   }
 }

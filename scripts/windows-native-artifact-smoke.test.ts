@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { parseJsonText } from "./json-file.ts";
 import {
+  buildWindowsCmdCommand,
   buildManagedProviderProbeEnvironment,
   removePathWithRetries,
   selectInstalledWindowsExecutables,
@@ -79,6 +80,16 @@ describe("Windows native artifact smoke", () => {
     assert.equal(env.Path, undefined);
     assert.equal(env.npm_config_prefix, installRoot);
     assert.equal(env.npm_config_cache, join(managedRoot, "npm-cache"));
+  });
+
+  it("quotes managed Windows shim commands for cmd.exe", () => {
+    assert.equal(
+      buildWindowsCmdCommand(
+        "C:\\Users\\runneradmin\\AppData\\Local\\CafeCode\\managed\\providers\\codex\\current\\node_modules\\.bin\\codex.cmd",
+        ["--version"],
+      ),
+      '""C:\\Users\\runneradmin\\AppData\\Local\\CafeCode\\managed\\providers\\codex\\current\\node_modules\\.bin\\codex.cmd" --version"',
+    );
   });
 
   it("retries transient Windows cleanup errors before removing the smoke root", async () => {
