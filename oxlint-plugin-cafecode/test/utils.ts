@@ -28,7 +28,9 @@ class OxlintFixtureExpectedFailure extends Data.TaggedError("OxlintFixtureExpect
 }
 
 const encodeOxlintConfig = Schema.encodeEffect(Schema.UnknownFromJsonString);
-const OXLINT_FIXTURE_TEST_TIMEOUT_MS = process.platform === "win32" ? 30_000 : undefined;
+// The harness shells out to oxlint and loads the local plugin entrypoint, which can
+// exceed Vitest's default 5s budget on slower CI machines even when the rule passes.
+const OXLINT_FIXTURE_TEST_TIMEOUT_MS = process.platform === "win32" ? 30_000 : 10_000;
 
 interface RuleHarness {
   readonly run: (
