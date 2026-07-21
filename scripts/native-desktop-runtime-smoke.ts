@@ -1,8 +1,10 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix, resolve, win32 } from "node:path";
+
+import { readJsonFile } from "./json-file.ts";
 
 const SELF_TEST_SWITCH = "--cafe-runtime-self-test";
 const SELF_TEST_RESULT_ENV = "CAFE_CODE_RUNTIME_SELF_TEST_RESULT";
@@ -253,7 +255,7 @@ async function runPackagedRuntimeSelfTest(
     { env: { ...environment, [SELF_TEST_RESULT_ENV]: resultPath } },
   );
   if (result.exitCode !== 0) throw new Error("Packaged desktop runtime self-test exited nonzero.");
-  const decoded = JSON.parse(await readFile(resultPath, "utf8")) as unknown;
+  const decoded = await readJsonFile(resultPath);
   return assertRuntimeSelfTestResult(decoded);
 }
 

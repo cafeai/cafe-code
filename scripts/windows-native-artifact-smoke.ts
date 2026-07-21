@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { runNativeDesktopRuntimeSmoke } from "./native-desktop-runtime-smoke.ts";
+import { readJsonFile } from "./json-file.ts";
 
 const PROCESS_TIMEOUT_MS = 15 * 60_000;
 const WINDOWS_CLEANUP_RETRY_DELAY_MS = 250;
@@ -136,7 +137,7 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
 
 async function assertManagedProviderRuntime(managedRoot: string): Promise<void> {
   const resultPath = join(managedRoot, "install-result.json");
-  const result = readRecord(JSON.parse(await readFile(resultPath, "utf8")));
+  const result = readRecord(await readJsonFile(resultPath));
   const providers = Array.isArray(result?.providers) ? result.providers.map(readRecord) : [];
   if (
     result?.managedProviderRuntimeEnabled !== true ||

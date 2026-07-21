@@ -1,5 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 
+import { parseJsonText } from "./json-file.ts";
 import {
   removePathWithRetries,
   selectInstalledWindowsExecutables,
@@ -48,6 +49,13 @@ describe("Windows native artifact smoke", () => {
         uninstaller: "Uninstall Cafe Code (Nightly).exe",
       },
     );
+  });
+
+  it("parses BOM-prefixed managed runtime JSON", () => {
+    assert.deepEqual(parseJsonText('\uFEFF{"managedProviderRuntimeEnabled":true,"providers":[]}'), {
+      managedProviderRuntimeEnabled: true,
+      providers: [],
+    });
   });
 
   it("retries transient Windows cleanup errors before removing the smoke root", async () => {
