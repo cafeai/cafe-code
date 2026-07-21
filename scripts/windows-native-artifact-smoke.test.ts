@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 
 import {
+  removePathWithRetries,
   selectInstalledWindowsExecutables,
   selectWindowsInstaller,
 } from "./windows-native-artifact-smoke.ts";
@@ -47,5 +48,48 @@ describe("Windows native artifact smoke", () => {
         uninstaller: "Uninstall Cafe Code (Nightly).exe",
       },
     );
+  });
+
+  it("retries transient Windows cleanup errors before removing the smoke root", async () => {
+    let attempts = 0;
+    const waits: number[] = [];
+    await removePathWithRetries("C:\\temp\\cafecode-smoke", {
+      platform: "win32",
+      remove: async () => {
+        attempts += 1;
+        if (attempts < 3) {
+          const error = new Error("busy") as NodeJS.ErrnoException;
+          error.code = "EBUSY";
+          throw error;
+        }
+      },
+      sleep: async (ms) => {
+        waits.push(ms);
+      },
+    });
+    assert.equal(attempts, 3);
+    assert.deepEqual(waits, [250, 250]);
+  });
+
+  it("does not retry non-Windows cleanup failures", async () => {
+    let attempts = 0;
+    let error: unknown;
+    try {
+      await removePathWithRetries("/tmp/cafecode-smoke", {
+        platform: "linux",
+        remove: async () => {
+          attempts += 1;
+          const busyError = new Error("busy") as NodeJS.ErrnoException;
+          busyError.code = "EBUSY";
+          throw busyError;
+        },
+        sleep: async () => undefined,
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    assert.instanceOf(error, Error);
+    assert.match((error as Error).message, /busy/);
+    assert.equal(attempts, 1);
   });
 });

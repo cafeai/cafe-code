@@ -7,11 +7,19 @@ import { join, resolve } from "node:path";
 import { runNativeDesktopRuntimeSmoke } from "./native-desktop-runtime-smoke.ts";
 
 const PROCESS_TIMEOUT_MS = 15 * 60_000;
+const WINDOWS_CLEANUP_RETRY_DELAY_MS = 250;
+const WINDOWS_CLEANUP_RETRY_ATTEMPTS = 40;
 
 interface ProcessResult {
   readonly exitCode: number | null;
   readonly stdout: string;
   readonly stderr: string;
+}
+
+interface CleanupDependencies {
+  readonly platform?: NodeJS.Platform;
+  readonly remove?: typeof rm;
+  readonly sleep?: (ms: number) => Promise<void>;
 }
 
 async function runProcess(
@@ -43,6 +51,42 @@ async function runProcess(
       resolveProcess({ exitCode, stdout, stderr });
     });
   });
+}
+
+function isRetryableWindowsCleanupError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "EBUSY" || code === "EPERM" || code === "ENOTEMPTY";
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+export async function removePathWithRetries(
+  targetPath: string,
+  dependencies: CleanupDependencies = {},
+): Promise<void> {
+  const platform = dependencies.platform ?? process.platform;
+  const remove = dependencies.remove ?? rm;
+  const wait = dependencies.sleep ?? sleep;
+
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await remove(targetPath, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (
+        platform !== "win32" ||
+        !isRetryableWindowsCleanupError(error) ||
+        attempt >= WINDOWS_CLEANUP_RETRY_ATTEMPTS - 1
+      ) {
+        throw error;
+      }
+      // Windows can report parent process exit before the installer/uninstaller
+      // releases all file handles in the extracted app directory.
+      await wait(WINDOWS_CLEANUP_RETRY_DELAY_MS);
+    }
+  }
 }
 
 export function selectWindowsInstaller(fileNames: readonly string[]): string {
@@ -179,7 +223,7 @@ export async function runWindowsNativeArtifactSmoke(
     if (uninstallerPath && existsSync(uninstallerPath)) {
       await runProcess(uninstallerPath, ["/S"], { timeoutMs: 5 * 60_000 }).catch(() => undefined);
     }
-    await rm(smokeRoot, { recursive: true, force: true });
+    await removePathWithRetries(smokeRoot);
   }
 }
 
