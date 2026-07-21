@@ -191,9 +191,15 @@ try {
   );
 
   const expectedLockfile = readFileSync(resolve(tempRoot, "yarn.lock"), "utf8");
-  rmSync(resolve(tempRoot, "yarn.lock"), { force: true });
 
-  execFileSync("corepack", ["yarn", "install", "--no-immutable", "--mode=skip-build"], {
+  // A lockfile records concrete versions selected from open semver ranges. A
+  // from-scratch resolution is therefore expected to change whenever an
+  // upstream package publishes a matching release; comparing that result with
+  // a previously committed lockfile tests registry timing, not reproducibility.
+  // Immutable install is the release invariant Cafe actually needs: every
+  // copied manifest and the patched dependency graph must agree exactly with
+  // the committed lockfile after release package versions are rewritten.
+  execFileSync("corepack", ["yarn", "install", "--immutable", "--mode=skip-build"], {
     cwd: tempRoot,
     stdio: "inherit",
     shell: process.platform === "win32",
@@ -201,7 +207,7 @@ try {
 
   const lockfile = readFileSync(resolve(tempRoot, "yarn.lock"), "utf8");
   if (lockfile !== expectedLockfile) {
-    throw new Error("Expected the regenerated Yarn lockfile to match the committed lockfile.");
+    throw new Error("Expected immutable Yarn install to preserve the committed lockfile.");
   }
   assertContains(
     lockfile,
@@ -213,11 +219,6 @@ try {
     '"@cafecode/desktop-runtime@workspace:packaging/desktop-runtime"',
     "Expected yarn.lock to contain the canonical desktop runtime workspace.",
   );
-  execFileSync("corepack", ["yarn", "install", "--immutable", "--mode=skip-build"], {
-    cwd: tempRoot,
-    stdio: "inherit",
-    shell: process.platform === "win32",
-  });
 
   const nightlyReleaseMetadata = execFileSync(
     process.execPath,

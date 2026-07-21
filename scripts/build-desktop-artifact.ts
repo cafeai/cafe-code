@@ -264,7 +264,7 @@ const STAGED_YARN_PROJECT_FILES = [
   "packages/effect-codex-app-server/package.json",
   "packages/shared/package.json",
   "scripts/package.json",
-  "scripts/ensure-electron.ts",
+  "scripts/ensure-desktop-runtime.ts",
   "packaging/desktop-runtime/package.json",
 ] as const;
 

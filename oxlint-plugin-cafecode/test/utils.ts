@@ -91,7 +91,7 @@ export const createOxlintRuleHarness = (ruleName: string): RuleHarness => {
     const configPath = path.join(fixtureDir, ".oxlintrc.json");
     const sourcePaths = sources.map((_, index) => path.join(fixtureDir, `fixture-${index + 1}.ts`));
     const repoRoot = path.join(import.meta.dirname, "..", "..");
-    const oxlintBin = path.join(repoRoot, "node_modules", ".bin", "oxlint");
+    const oxlintEntrypoint = path.join(repoRoot, "node_modules", "oxlint", "bin", "oxlint");
     const pluginPath = path.join(repoRoot, "oxlint-plugin-cafecode", "index.ts");
 
     yield* fs.writeFileString(
@@ -108,7 +108,15 @@ export const createOxlintRuleHarness = (ruleName: string): RuleHarness => {
     );
 
     const output = yield* spawnAndCollectOutput(
-      ChildProcess.make(oxlintBin, ["--config", configPath, ...sourcePaths], { cwd: repoRoot }),
+      // Yarn's Windows `.bin` artifact is a `.cmd` shim and cannot be spawned
+      // directly with `shell: false`. Running Oxlint's JavaScript entrypoint
+      // through the pinned Node executable is portable and avoids introducing
+      // a shell boundary around fixture-controlled paths.
+      ChildProcess.make(
+        process.execPath,
+        [oxlintEntrypoint, "--config", configPath, ...sourcePaths],
+        { cwd: repoRoot },
+      ),
     );
 
     if (output.exitCode !== 0) {
