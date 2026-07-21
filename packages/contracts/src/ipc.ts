@@ -126,6 +126,7 @@ export type DesktopUpdateStatus =
 export type DesktopRuntimeArch = "arm64" | "x64" | "other";
 export type DesktopTheme = "light" | "dark" | "system";
 export type DesktopUpdateChannel = "latest" | "nightly";
+export type DesktopUpdateInstallMode = "in-app" | "manual";
 export type DesktopAppStageLabel = "Alpha" | "Dev" | "Nightly";
 
 export const DesktopUpdateStatusSchema = Schema.Literals([
@@ -141,6 +142,7 @@ export const DesktopUpdateStatusSchema = Schema.Literals([
 export const DesktopRuntimeArchSchema = Schema.Literals(["arm64", "x64", "other"]);
 export const DesktopThemeSchema = Schema.Literals(["light", "dark", "system"]);
 export const DesktopUpdateChannelSchema = Schema.Literals(["latest", "nightly"]);
+export const DesktopUpdateInstallModeSchema = Schema.Literals(["in-app", "manual"]);
 export const DesktopAppStageLabelSchema = Schema.Literals(["Alpha", "Dev", "Nightly"]);
 
 export interface DesktopAppBranding {
@@ -171,6 +173,7 @@ export interface DesktopUpdateState {
   enabled: boolean;
   status: DesktopUpdateStatus;
   channel: DesktopUpdateChannel;
+  installMode: DesktopUpdateInstallMode;
   currentVersion: string;
   hostArch: DesktopRuntimeArch;
   appArch: DesktopRuntimeArch;
@@ -188,6 +191,7 @@ export const DesktopUpdateStateSchema = Schema.Struct({
   enabled: Schema.Boolean,
   status: DesktopUpdateStatusSchema,
   channel: DesktopUpdateChannelSchema,
+  installMode: DesktopUpdateInstallModeSchema,
   currentVersion: Schema.String,
   hostArch: DesktopRuntimeArchSchema,
   appArch: DesktopRuntimeArchSchema,

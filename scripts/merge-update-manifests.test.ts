@@ -5,6 +5,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import { Command, CliError } from "effect/unstable/cli";
 
+import { parseUpdateManifest, serializeUpdateManifest } from "./lib/update-manifest.ts";
 import {
   mergePlatformUpdateManifests,
   mergeUpdateManifestsCommand,
@@ -184,6 +185,26 @@ releaseDate: '2026-03-07T10:36:07.540Z'
     const serialized = serializePlatformUpdateManifest("win", original);
     const reparsed = parsePlatformUpdateManifest("win", serialized, "latest-win-x64.yml");
     assert.equal(reparsed.version, "1.0");
+  });
+
+  it("round-trips embedded AppImage block map metadata", () => {
+    const original = parseUpdateManifest(
+      `version: '1.0.0'
+files:
+  - url: Cafe-Code-1.0.0-x86_64.AppImage
+    sha512: appimagesha
+    size: 125621344
+    blockMapSize: 263625
+releaseDate: '2026-07-21T10:36:07.540Z'
+`,
+      "latest-linux.yml",
+      "Linux",
+    );
+
+    assert.equal(original.files[0]?.blockMapSize, 263625);
+    const serialized = serializeUpdateManifest(original, { platformLabel: "Linux" });
+    const reparsed = parseUpdateManifest(serialized, "latest-linux.yml", "Linux");
+    assert.deepStrictEqual(reparsed, original);
   });
 });
 

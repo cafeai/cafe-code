@@ -114,10 +114,12 @@ import {
   getArm64IntelBuildWarningDescription,
   getDesktopUpdateActionError,
   getDesktopUpdateInstallConfirmationMessage,
+  getDesktopUpdateReleaseUrl,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
   shouldShowArm64IntelBuildWarning,
   shouldToastDesktopUpdateActionResult,
+  type DesktopUpdateButtonAction,
 } from "./desktopUpdate.logic";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "./ui/alert";
 import { Button } from "./ui/button";
@@ -3233,7 +3235,7 @@ interface SidebarProjectsContentProps {
   bootstrappedEnvironmentIds: ReadonlySet<string>;
   showArm64IntelBuildWarning: boolean;
   arm64IntelBuildWarningDescription: string | null;
-  desktopUpdateButtonAction: "download" | "install" | "none";
+  desktopUpdateButtonAction: DesktopUpdateButtonAction;
   desktopUpdateButtonDisabled: boolean;
   handleDesktopUpdateButtonClick: () => void;
   desktopDebugEnabled: boolean;
@@ -3395,7 +3397,9 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 >
                   {desktopUpdateButtonAction === "download"
                     ? "Download ARM build"
-                    : "Install ARM build"}
+                    : desktopUpdateButtonAction === "manual"
+                      ? "View ARM build"
+                      : "Install ARM build"}
                 </Button>
               </AlertAction>
             ) : null}
@@ -4111,6 +4115,27 @@ export default function Sidebar() {
     const bridge = window.desktopBridge;
     if (!bridge || !desktopUpdateState) return;
     if (desktopUpdateButtonDisabled || desktopUpdateButtonAction === "none") return;
+
+    if (desktopUpdateButtonAction === "manual") {
+      void bridge
+        .openExternal(getDesktopUpdateReleaseUrl(desktopUpdateState.availableVersion))
+        .then((opened) => {
+          if (opened) return;
+          toastManager.add({
+            type: "error",
+            title: "Could not open release",
+            description: "Open the Cafe Code releases page in your browser to install the DMG.",
+          });
+        })
+        .catch(() => {
+          toastManager.add({
+            type: "error",
+            title: "Could not open release",
+            description: "Open the Cafe Code releases page in your browser to install the DMG.",
+          });
+        });
+      return;
+    }
 
     if (desktopUpdateButtonAction === "download") {
       void bridge

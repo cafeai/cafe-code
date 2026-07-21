@@ -12,6 +12,7 @@ import {
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
   getDesktopUpdateInstallConfirmationMessage,
+  getDesktopUpdateReleaseUrl,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
   shouldShowArm64IntelBuildWarning,
@@ -39,6 +40,27 @@ export function SidebarUpdatePill() {
     const bridge = window.desktopBridge;
     if (!bridge || !state) return;
     if (disabled || action === "none") return;
+
+    if (action === "manual") {
+      void bridge
+        .openExternal(getDesktopUpdateReleaseUrl(state.availableVersion))
+        .then((opened) => {
+          if (opened) return;
+          toastManager.add({
+            type: "error",
+            title: "Could not open release",
+            description: "Open the Cafe Code releases page in your browser to install the DMG.",
+          });
+        })
+        .catch(() => {
+          toastManager.add({
+            type: "error",
+            title: "Could not open release",
+            description: "Open the Cafe Code releases page in your browser to install the DMG.",
+          });
+        });
+      return;
+    }
 
     if (action === "download") {
       void bridge
@@ -139,6 +161,11 @@ export function SidebarUpdatePill() {
                       <RotateCwIcon className="size-3.5" />
                       <span>Restart to update</span>
                     </>
+                  ) : action === "manual" ? (
+                    <>
+                      <DownloadIcon className="size-3.5" />
+                      <span>View macOS update</span>
+                    </>
                   ) : state?.status === "downloading" ? (
                     <>
                       <DownloadIcon className="size-3.5" />
@@ -160,7 +187,7 @@ export function SidebarUpdatePill() {
             />
             <TooltipPopup side="top">{tooltip}</TooltipPopup>
           </Tooltip>
-          {action === "download" && (
+          {(action === "download" || action === "manual") && (
             <Tooltip>
               <TooltipTrigger
                 render={
