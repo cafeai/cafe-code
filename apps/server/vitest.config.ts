@@ -2,6 +2,8 @@ import { configDefaults, defineConfig, mergeConfig } from "vitest/config";
 
 import baseConfig from "../../vitest.config.ts";
 
+const SERVER_TEST_TIMEOUT_MS = process.platform === "win32" ? 90_000 : 60_000;
+
 export default mergeConfig(
   baseConfig,
   defineConfig({
@@ -18,8 +20,8 @@ export default mergeConfig(
       isolate: true,
       // Server integration tests exercise sqlite, git, and orchestration together.
       // Under package-wide parallel runs they regularly exceed the default 15s budget.
-      testTimeout: 60_000,
-      hookTimeout: 60_000,
+      testTimeout: SERVER_TEST_TIMEOUT_MS,
+      hookTimeout: SERVER_TEST_TIMEOUT_MS,
     },
   }),
 );

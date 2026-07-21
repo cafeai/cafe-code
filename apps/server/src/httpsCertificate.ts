@@ -17,6 +17,8 @@ const execFileAsync = promisify(execFile);
 const CERT_VALID_DAYS = 397;
 const CERT_RENEWAL_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const OPENSSL_EXECUTABLE_NAME = "openssl";
+const OPENSSL_GENERATION_TIMEOUT_MS = 20_000;
+const WINDOWS_OPENSSL_GENERATION_TIMEOUT_MS = 60_000;
 
 export interface HttpsCertificateMaterial {
   readonly cert: string;
@@ -119,6 +121,9 @@ export const resolveOpenSslExecutable = async (
   return OPENSSL_EXECUTABLE_NAME;
 };
 
+export const openSslGenerationTimeoutMs = (platform: NodeJS.Platform = process.platform): number =>
+  platform === "win32" ? WINDOWS_OPENSSL_GENERATION_TIMEOUT_MS : OPENSSL_GENERATION_TIMEOUT_MS;
+
 const certificateIsFresh = async (certPath: string, keyPath: string): Promise<boolean> => {
   try {
     const [certPem, keyPem] = await Promise.all([
@@ -184,7 +189,8 @@ const generateCertificate = async (input: {
         "-out",
         tempCertPath,
       ],
-      { timeout: 20_000 },
+      // Git for Windows OpenSSL can be substantially slower under parallel CI load.
+      { timeout: openSslGenerationTimeoutMs() },
     );
 
     await fs.chmod(tempKeyPath, 0o600);
