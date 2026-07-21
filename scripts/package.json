@@ -8,7 +8,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.215",
+    "@anthropic-ai/claude-agent-sdk": "0.3.216",
     "@anthropic-ai/sdk": "^0.98.0",
     "@cafecode/contracts": "workspace:*",
     "@cafecode/shared": "workspace:*",

@@ -792,6 +792,231 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("keeps one Cafe turn active across a queued Claude follow-up", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "finish the original task",
+        attachments: [],
+      });
+      yield* adapter.steerTurn({
+        threadId: session.threadId,
+        expectedTurnId: turn.turnId,
+        input: "incorporate this follow-up",
+        attachments: [],
+      });
+
+      const messages = yield* Effect.promise(() =>
+        readPromptMessages(harness.getLastCreateQueryInput(), 2),
+      );
+      const firstMessageUuid = messages[0]?.uuid;
+      const followUpMessageUuid = messages[1]?.uuid;
+      assert.isString(firstMessageUuid);
+      assert.isString(followUpMessageUuid);
+      if (firstMessageUuid === undefined || followUpMessageUuid === undefined) {
+        throw new Error("Expected UUID-stamped Claude prompts.");
+      }
+
+      harness.query.emit({
+        type: "system",
+        subtype: "init",
+        capabilities: ["msg_lifecycle_v1"],
+        session_id: "claude-session-follow-up",
+        uuid: "init-follow-up",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "command_lifecycle",
+        command_uuid: firstMessageUuid,
+        state: "started",
+        session_id: "claude-session-follow-up",
+        uuid: "lifecycle-first-started",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "command_lifecycle",
+        command_uuid: followUpMessageUuid,
+        state: "queued",
+        session_id: "claude-session-follow-up",
+        uuid: "lifecycle-follow-up-queued",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "assistant",
+        session_id: "claude-session-follow-up",
+        uuid: "assistant-first-segment",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-first-segment",
+          content: [{ type: "text", text: "Original segment complete." }],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["transient first-segment failure"],
+        session_id: "claude-session-follow-up",
+        uuid: "result-first-segment",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      const activeSessions = yield* adapter.listSessions();
+      assert.equal(activeSessions[0]?.status, "running");
+      assert.equal(activeSessions[0]?.activeTurnId, turn.turnId);
+      assert.equal((yield* adapter.readThread(session.threadId)).turns.length, 0);
+
+      // The real CLI emits the result before retiring the completed command,
+      // then immediately promotes the queued UUID. These lifecycle frames must
+      // not create a second synthetic Cafe turn or close the original turn.
+      harness.query.emit({
+        type: "command_lifecycle",
+        command_uuid: firstMessageUuid,
+        state: "completed",
+        session_id: "claude-session-follow-up",
+        uuid: "lifecycle-first-completed",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "command_lifecycle",
+        command_uuid: followUpMessageUuid,
+        state: "started",
+        session_id: "claude-session-follow-up",
+        uuid: "lifecycle-follow-up-started",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "assistant",
+        session_id: "claude-session-follow-up",
+        uuid: "assistant-follow-up-segment",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-follow-up-segment",
+          content: [{ type: "text", text: "Follow-up incorporated." }],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "claude-session-follow-up",
+        uuid: "result-follow-up-segment",
+        user_message_uuid: followUpMessageUuid,
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      const completedSessions = yield* adapter.listSessions();
+      assert.equal(completedSessions[0]?.status, "ready");
+      assert.equal(completedSessions[0]?.activeTurnId, undefined);
+      const snapshot = yield* adapter.readThread(session.threadId);
+      assert.equal(snapshot.turns.length, 1);
+      assert.equal(snapshot.turns[0]?.id, turn.turnId);
+      assert.equal(snapshot.turns[0]?.items.length, 2);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("completes one Cafe turn for a coalesced Claude follow-up batch", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "first batch message",
+        attachments: [],
+      });
+      yield* adapter.steerTurn({
+        threadId: session.threadId,
+        expectedTurnId: turn.turnId,
+        input: "coalesced follow-up",
+        attachments: [],
+      });
+
+      const messages = yield* Effect.promise(() =>
+        readPromptMessages(harness.getLastCreateQueryInput(), 2),
+      );
+      const firstMessageUuid = messages[0]?.uuid;
+      const followUpMessageUuid = messages[1]?.uuid;
+      if (firstMessageUuid === undefined || followUpMessageUuid === undefined) {
+        throw new Error("Expected UUID-stamped Claude prompts.");
+      }
+
+      // Claude can dequeue several queued UUIDs into one model turn. Both
+      // lifecycle entries become started before the shared assistant/result
+      // segment, and the non-representative UUID completes afterward.
+      for (const [commandUuid, uuid] of [
+        [firstMessageUuid, "lifecycle-coalesced-first-started"],
+        [followUpMessageUuid, "lifecycle-coalesced-follow-up-started"],
+      ] as const) {
+        harness.query.emit({
+          type: "command_lifecycle",
+          command_uuid: commandUuid,
+          state: "started",
+          session_id: "claude-session-coalesced-follow-up",
+          uuid,
+        } as unknown as SDKMessage);
+      }
+      harness.query.emit({
+        type: "assistant",
+        session_id: "claude-session-coalesced-follow-up",
+        uuid: "assistant-coalesced-follow-up",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-coalesced-follow-up",
+          content: [{ type: "text", text: "Both messages handled together." }],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "claude-session-coalesced-follow-up",
+        uuid: "result-coalesced-follow-up",
+        user_message_uuid: firstMessageUuid,
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      assert.equal((yield* adapter.listSessions())[0]?.status, "running");
+
+      harness.query.emit({
+        type: "command_lifecycle",
+        command_uuid: followUpMessageUuid,
+        state: "completed",
+        session_id: "claude-session-coalesced-follow-up",
+        uuid: "lifecycle-coalesced-follow-up-completed",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      const completedSessions = yield* adapter.listSessions();
+      assert.equal(completedSessions[0]?.status, "ready");
+      assert.equal(completedSessions[0]?.activeTurnId, undefined);
+      const snapshot = yield* adapter.readThread(session.threadId);
+      assert.equal(snapshot.turns.length, 1);
+      assert.equal(snapshot.turns[0]?.id, turn.turnId);
+      assert.equal(snapshot.turns[0]?.items.length, 1);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect(
     "tracks Claude command lifecycle and cancels only Cafe-owned interrupt survivors",
     () => {
@@ -888,6 +1113,44 @@ describe("ClaudeAdapterLive", () => {
       if (exit._tag === "Failure") {
         assert.include(String(exit.cause), "active turn mismatch");
       }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("does not close an active user turn when sendTurn is called directly", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const activeTurn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "keep this turn running",
+        attachments: [],
+      });
+      const secondSendExit = yield* Effect.exit(
+        adapter.sendTurn({
+          threadId: session.threadId,
+          input: "this must use the queued follow-up path",
+          attachments: [],
+        }),
+      );
+
+      assert.equal(secondSendExit._tag, "Failure");
+      if (secondSendExit._tag === "Failure") {
+        assert.include(String(secondSendExit.cause), "turn/steer");
+      }
+
+      const activeSessions = yield* adapter.listSessions();
+      assert.equal(activeSessions[0]?.status, "running");
+      assert.equal(activeSessions[0]?.activeTurnId, activeTurn.turnId);
+      assert.equal((yield* adapter.readThread(session.threadId)).turns.length, 0);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -4529,12 +4792,23 @@ describe("ClaudeAdapterLive", () => {
           runtimeMode: "full-access",
         });
 
-        yield* adapter.sendTurn({
+        const firstTurn = yield* adapter.sendTurn({
           threadId: session.threadId,
           input: "hello",
           modelSelection,
           attachments: [],
         });
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          errors: [],
+          session_id: "claude-session-same-model",
+          uuid: "result-same-model-first-turn",
+          user_message_uuid: firstTurn.turnId,
+        } as unknown as SDKMessage);
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
         yield* adapter.sendTurn({
           threadId: session.threadId,
           input: "hello again",
@@ -4561,7 +4835,7 @@ describe("ClaudeAdapterLive", () => {
         runtimeMode: "full-access",
       });
 
-      yield* adapter.sendTurn({
+      const firstTurn = yield* adapter.sendTurn({
         threadId: session.threadId,
         input: "hello",
         modelSelection: createModelSelection(
@@ -4571,6 +4845,17 @@ describe("ClaudeAdapterLive", () => {
         ),
         attachments: [],
       });
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "claude-session-model-change",
+        uuid: "result-model-change-first-turn",
+        user_message_uuid: firstTurn.turnId,
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
       yield* adapter.sendTurn({
         threadId: session.threadId,
         input: "hello again",

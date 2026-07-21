@@ -233,7 +233,8 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     provider,
     capabilities: {
       sessionModelSwitch: "in-session",
-      liveSteer: provider === CODEX_DRIVER ? "supported" : "unsupported",
+      liveSteer:
+        provider === CODEX_DRIVER || provider === CLAUDE_AGENT_DRIVER ? "supported" : "unsupported",
     },
     startSession,
     sendTurn,
@@ -1113,6 +1114,44 @@ routing.layer("ProviderServiceLive routing", (it) => {
             assert.equal(runtimePayload.lastRuntimeEvent, "provider.steerTurn");
           }
         }
+      }),
+  );
+
+  it.effect(
+    "routes direct Claude sendTurn into its queued follow-up path while a turn is active",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+
+        const session = yield* provider.startSession(asThreadId("thread-claude-active"), {
+          provider: CLAUDE_AGENT_DRIVER,
+          providerInstanceId: claudeAgentInstanceId,
+          threadId: asThreadId("thread-claude-active"),
+          cwd: "/tmp/project",
+          runtimeMode: "full-access",
+        });
+        routing.claude.updateSession(session.threadId, (current) => ({
+          ...current,
+          status: "running",
+          activeTurnId: asTurnId("turn-claude-active"),
+        }));
+        routing.claude.sendTurn.mockClear();
+        routing.claude.steerTurn.mockClear();
+
+        const turn = yield* provider.sendTurn({
+          threadId: session.threadId,
+          input: "queue this without interrupting Claude",
+          attachments: [],
+        });
+
+        assert.equal(turn.turnId, asTurnId("turn-claude-active"));
+        assert.equal(routing.claude.sendTurn.mock.calls.length, 0);
+        assert.equal(routing.claude.steerTurn.mock.calls.length, 1);
+        assert.deepEqual(routing.claude.steerTurn.mock.calls[0]?.[0], {
+          threadId: session.threadId,
+          expectedTurnId: asTurnId("turn-claude-active"),
+          input: "queue this without interrupting Claude",
+        });
       }),
   );
 

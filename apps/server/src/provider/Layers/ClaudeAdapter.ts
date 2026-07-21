@@ -193,6 +193,13 @@ interface ClaudeResumeState {
 interface ClaudeTurnState {
   readonly turnId: TurnId;
   readonly startedAt: string;
+  /**
+   * User turns may only be extended through `steerTurn`; a second `sendTurn`
+   * must never silently terminalize them. Synthetic turns are the exception:
+   * they represent provider-initiated background output that arrived between
+   * user prompts and may be closed before the next explicit user turn starts.
+   */
+  readonly origin: "user" | "synthetic";
   readonly items: Array<unknown>;
   readonly assistantTextBlocks: Map<number, AssistantTextBlockState>;
   readonly assistantTextBlockOrder: Array<AssistantTextBlockState>;
@@ -211,6 +218,12 @@ interface ClaudeTurnState {
   promptAttachmentCount?: number;
   watchdogWarningsEmitted: number;
   nextSyntheticAssistantBlockIndex: number;
+}
+
+interface ClaudeDeferredTurnResult {
+  readonly status: ProviderRuntimeTurnStatus;
+  readonly result: SDKResultMessage;
+  readonly errorMessage?: string;
 }
 
 interface AssistantTextBlockState {
@@ -272,6 +285,7 @@ interface ClaudeSessionContext {
   readonly promptLifecycleByUuid: Map<string, ClaudePromptLifecycleState>;
   readonly capabilities: Set<string>;
   turnState: ClaudeTurnState | undefined;
+  deferredTurnResult: ClaudeDeferredTurnResult | undefined;
   lastKnownContextWindow: number | undefined;
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
   lastAssistantUuid: string | undefined;
@@ -283,7 +297,7 @@ interface ClaudeSessionContext {
 
 interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
   readonly interrupt: () => Promise<SDKControlInterruptResponse | undefined>;
-  // The 0.3.209 runtime implements this control request, but its public Query
+  // The 0.3.216 runtime implements this control request, but its public Query
   // interface has not exposed the method yet. Keep it optional for older SDKs.
   readonly cancelAsyncMessage?: (messageUuid: string) => Promise<boolean>;
   readonly setModel: (model?: string) => Promise<void>;
@@ -381,6 +395,43 @@ function readClaudeCommandLifecycleMessage(
 
 function isTerminalClaudeCommandLifecycleState(state: ClaudeCommandLifecycleState): boolean {
   return state === "completed" || state === "cancelled" || state === "discarded";
+}
+
+function claudeResultUserMessageUuid(result: SDKResultMessage): string | undefined {
+  return trimmedStringValue((result as Record<string, unknown>).user_message_uuid);
+}
+
+/**
+ * Retire the Cafe-owned input represented by a Claude result.
+ *
+ * Agent SDK 0.3.216 correlates successful results with `user_message_uuid`.
+ * Older CLIs and error results can omit that field, so the compatibility path
+ * retires the oldest input Claude has acknowledged as started. A final fallback
+ * handles pre-2.1.206 runtimes that do not emit command lifecycle frames at all.
+ * Map insertion order is the provider input order and is never reconstructed
+ * from prompt text, keeping this boundary content-blind and deterministic.
+ */
+function consumeClaudeResultPrompt(
+  context: ClaudeSessionContext,
+  result: SDKResultMessage,
+): string | undefined {
+  const correlatedUuid = claudeResultUserMessageUuid(result);
+  if (correlatedUuid !== undefined) {
+    context.promptLifecycleByUuid.delete(correlatedUuid);
+    return correlatedUuid;
+  }
+
+  const started = Array.from(context.promptLifecycleByUuid).find(
+    ([, state]) => state === "started",
+  );
+  const fallback = started ?? context.promptLifecycleByUuid.entries().next().value;
+  if (fallback === undefined) {
+    return undefined;
+  }
+
+  const [messageUuid] = fallback;
+  context.promptLifecycleByUuid.delete(messageUuid);
+  return messageUuid;
 }
 
 function claudeTaskTerminalStatus(value: unknown): "completed" | "failed" | "stopped" | undefined {
@@ -1356,10 +1407,12 @@ const CLAUDE_EXECUTION_DIAGNOSTIC_PREFIX = "[ede_diagnostic]";
 function makeClaudeTurnState(input: {
   readonly turnId: TurnId;
   readonly startedAt: string;
+  readonly origin: "user" | "synthetic";
 }): ClaudeTurnState {
   return {
     turnId: input.turnId,
     startedAt: input.startedAt,
+    origin: input.origin,
     items: [],
     assistantTextBlocks: new Map(),
     assistantTextBlockOrder: [],
@@ -2408,11 +2461,74 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
   });
 
+  const finalizeTurnSegment = Effect.fn("finalizeTurnSegment")(function* (
+    context: ClaudeSessionContext,
+    status: ProviderRuntimeTurnStatus,
+    result?: SDKResultMessage,
+  ) {
+    const turnState = context.turnState;
+    if (!turnState) {
+      return;
+    }
+
+    for (const [index, tool] of context.inFlightTools.entries()) {
+      const toolStamp = yield* makeEventStamp();
+      yield* offerRuntimeEvent({
+        type: "item.completed",
+        eventId: toolStamp.eventId,
+        provider: PROVIDER,
+        createdAt: toolStamp.createdAt,
+        threadId: context.session.threadId,
+        turnId: turnState.turnId,
+        itemId: asRuntimeItemId(tool.itemId),
+        payload: {
+          itemType: tool.itemType,
+          status: status === "completed" ? "completed" : "failed",
+          title: tool.title,
+          ...(tool.detail ? { detail: tool.detail } : {}),
+          data: {
+            toolName: tool.toolName,
+            input: tool.input,
+          },
+        },
+        providerRefs: nativeProviderRefs(context, {
+          providerItemId: tool.itemId,
+        }),
+        raw: {
+          source: "claude.sdk.message",
+          method: "claude/result",
+          payload: result ?? { status },
+        },
+      });
+      context.inFlightTools.delete(index);
+    }
+    // Clear any remaining stale entries (e.g. from interrupted content blocks).
+    context.inFlightTools.clear();
+
+    for (const block of turnState.assistantTextBlockOrder) {
+      yield* completeAssistantTextBlock(context, block, {
+        force: true,
+        rawMethod: "claude/result",
+        rawPayload: result ?? { status },
+      });
+    }
+
+    // A streaming-input query emits one result per dequeued user-message batch.
+    // A Cafe steer can therefore produce another assistant response with block
+    // index zero while the same Cafe turn remains active. Retain accumulated
+    // turn items, diagnostics, and the canonical turn id, but reset all state
+    // whose identifiers are scoped to one Claude response segment.
+    turnState.assistantTextBlocks.clear();
+    turnState.assistantTextBlockOrder.splice(0);
+    turnState.nextSyntheticAssistantBlockIndex = -1;
+  });
+
   const completeTurn = Effect.fn("completeTurn")(function* (
     context: ClaudeSessionContext,
     status: ProviderRuntimeTurnStatus,
     errorMessage?: string,
     result?: SDKResultMessage,
+    options?: { readonly segmentAlreadyFinalized?: boolean },
   ) {
     const resultContextWindow = maxClaudeContextWindowFromModelUsage(result?.modelUsage);
     const effectiveContextWindow =
@@ -2479,46 +2595,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
-    for (const [index, tool] of context.inFlightTools.entries()) {
-      const toolStamp = yield* makeEventStamp();
-      yield* offerRuntimeEvent({
-        type: "item.completed",
-        eventId: toolStamp.eventId,
-        provider: PROVIDER,
-        createdAt: toolStamp.createdAt,
-        threadId: context.session.threadId,
-        turnId: turnState.turnId,
-        itemId: asRuntimeItemId(tool.itemId),
-        payload: {
-          itemType: tool.itemType,
-          status: status === "completed" ? "completed" : "failed",
-          title: tool.title,
-          ...(tool.detail ? { detail: tool.detail } : {}),
-          data: {
-            toolName: tool.toolName,
-            input: tool.input,
-          },
-        },
-        providerRefs: nativeProviderRefs(context, {
-          providerItemId: tool.itemId,
-        }),
-        raw: {
-          source: "claude.sdk.message",
-          method: "claude/result",
-          payload: result ?? { status },
-        },
-      });
-      context.inFlightTools.delete(index);
-    }
-    // Clear any remaining stale entries (e.g. from interrupted content blocks)
-    context.inFlightTools.clear();
-
-    for (const block of turnState.assistantTextBlockOrder) {
-      yield* completeAssistantTextBlock(context, block, {
-        force: true,
-        rawMethod: "claude/result",
-        rawPayload: result ?? { status },
-      });
+    if (options?.segmentAlreadyFinalized !== true) {
+      yield* finalizeTurnSegment(context, status, result);
     }
 
     const zeroTurnExecutionFailure =
@@ -2561,6 +2639,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
 
     const updatedAt = yield* nowIso;
+    context.deferredTurnResult = undefined;
     context.turnState = undefined;
     context.session = {
       ...context.session,
@@ -2956,6 +3035,33 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       context.promptLifecycleByUuid.set(message.command_uuid, message.state);
     }
 
+    if (message.state === "started" && context.deferredTurnResult !== undefined) {
+      // A queued message promoted after the preceding result owns a new Claude
+      // response segment and will emit its own result. Retire the older deferred
+      // boundary so a later lifecycle-completed frame cannot close Cafe's turn
+      // before this newly started segment reports its terminal result. For a
+      // coalesced batch, every member is already `started` before the shared
+      // result arrives, so this branch does not discard the batch result.
+      context.deferredTurnResult = undefined;
+    }
+
+    if (
+      message.state === "completed" &&
+      context.promptLifecycleByUuid.size === 0 &&
+      context.deferredTurnResult !== undefined
+    ) {
+      // Claude can coalesce several queued user messages into one model turn.
+      // In that case a single result represents the batch while lifecycle
+      // frames retire every UUID. Complete only after the final tracked UUID
+      // reaches terminal state; the response segment was already finalized
+      // when its result arrived, so doing so again would duplicate item events.
+      const deferred = context.deferredTurnResult;
+      context.deferredTurnResult = undefined;
+      yield* completeTurn(context, deferred.status, deferred.errorMessage, deferred.result, {
+        segmentAlreadyFinalized: true,
+      });
+    }
+
     if (message.state === "discarded") {
       yield* Effect.logWarning("claude.commandLifecycle.discarded", {
         threadId: context.session.threadId,
@@ -3007,6 +3113,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       context.turnState = makeClaudeTurnState({
         turnId,
         startedAt,
+        origin: "synthetic",
       });
       context.session = {
         ...context.session,
@@ -3100,6 +3207,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       status !== "completed"
         ? (resultPrimaryError(message) ?? resultErrors[0] ?? "Claude turn failed.")
         : undefined;
+    const completedPromptUuid = consumeClaudeResultPrompt(context, message);
+    const hasQueuedCafeInput = context.promptLifecycleByUuid.size > 0;
 
     if (status === "failed") {
       if (isZeroTurnClaudeExecutionFailure(message)) {
@@ -3135,6 +3244,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             payload: message,
           },
         );
+      } else if (hasQueuedCafeInput) {
+        // A result is scoped to one dequeued command/batch, not to the lifetime
+        // of the streaming query. Claude continues draining its input queue
+        // after recoverable execution errors, so keep this diagnostic in the
+        // work log and let the already-accepted follow-up continue.
+        yield* emitRuntimeWarning(
+          context,
+          "Claude response segment failed; an already-queued follow-up remains active.",
+          {
+            error: sanitizeDiagnosticLine(errorMessage ?? "Claude turn failed."),
+            pendingPromptCount: context.promptLifecycleByUuid.size,
+          },
+        );
       } else {
         yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
       }
@@ -3147,6 +3269,32 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       yield* notifyAuthStatusChanged(false);
     }
 
+    if (!authFailure && hasQueuedCafeInput) {
+      // Claude's stream-json queue emits a result for the response segment that
+      // just finished, then promotes the next queued SDKUserMessage without
+      // ending the process. This remains true for recoverable execution-error
+      // results. Preserve the same user-facing lifecycle Cafe uses for a Codex
+      // steer: one canonical turn stays active while the provider reaches a
+      // safe boundary and incorporates the follow-up. Finalize only segment-
+      // local stream/tool state here; a later result (or the terminal lifecycle
+      // frames of a coalesced batch) closes the canonical turn.
+      yield* finalizeTurnSegment(context, status, message);
+      context.deferredTurnResult = {
+        status,
+        result: message,
+        ...(errorMessage !== undefined ? { errorMessage } : {}),
+      };
+      yield* Effect.logInfo("claude.followUp.resultBoundaryDeferred", {
+        threadId: context.session.threadId,
+        providerInstanceId: boundInstanceId,
+        completedPromptUuid: completedPromptUuid ?? "",
+        pendingPromptCount: context.promptLifecycleByUuid.size,
+        messageLifecycleAdvertised: context.capabilities.has("msg_lifecycle_v1"),
+      });
+      return;
+    }
+
+    context.deferredTurnResult = undefined;
     yield* completeTurn(context, status, errorMessage, message);
     if (authFailure) {
       yield* stopSessionInternal(context, {
@@ -4661,6 +4809,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         promptLifecycleByUuid: new Map(),
         capabilities: new Set(),
         turnState: undefined,
+        deferredTurnResult: undefined,
         lastKnownContextWindow: selectedContextWindowTokens,
         lastKnownTokenUsage: undefined,
         lastAssistantUuid: undefined,
@@ -4755,9 +4904,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         : undefined;
 
     if (context.turnState) {
-      // Auto-close a stale synthetic turn (from background agent responses
-      // between user prompts) to prevent blocking the user's next turn.
-      yield* completeTurn(context, "completed");
+      if (context.turnState.origin === "synthetic") {
+        // Auto-close provider-initiated background output before beginning the
+        // user's next explicit turn. A real user turn is never eligible for
+        // this path because closing it would drop or split a queued follow-up.
+        yield* completeTurn(context, "completed");
+      } else {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "turn/start",
+          detail: `Claude turn '${context.turnState.turnId}' is already active; route additional input through turn/steer so Claude can queue it without interruption.`,
+        });
+      }
     }
 
     if (modelSelection?.model) {
@@ -4822,6 +4980,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const turnState = makeClaudeTurnState({
       turnId,
       startedAt: yield* nowIso,
+      origin: "user",
     });
     turnState.promptTextBytes = Buffer.byteLength(buildPromptText(input, boundInstanceId), "utf8");
     turnState.promptAttachmentCount = input.attachments?.length ?? 0;
