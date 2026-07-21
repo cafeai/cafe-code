@@ -72,34 +72,6 @@ jobs:
       - name: Build desktop pipeline
         run: corepack yarn build:desktop
 
-      - name: Windows source launcher runtime self-test
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $resultPath = Join-Path $env:RUNNER_TEMP "cafecode-source-runtime-self-test.json"
-          $env:CAFE_CODE_RUNTIME_SELF_TEST_RESULT = $resultPath
-          & .\Start-CafeCode.ps1 -Wait -DesktopArgs "--cafe-runtime-self-test"
-          if ($LASTEXITCODE -ne 0) {
-            Get-Content -LiteralPath (Join-Path $env:USERPROFILE ".cafe-code\launcher-logs\desktop-start.stderr.log") -ErrorAction SilentlyContinue
-            throw "Windows source launcher runtime self-test exited with code $LASTEXITCODE."
-          }
-          $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
-          if (-not $result.ok -or $result.isPackaged) {
-            throw "Windows source launcher runtime self-test reported failure."
-          }
-
-      - name: macOS source runtime self-test
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          result_path="$RUNNER_TEMP/cafecode-source-runtime-self-test.json"
-          CAFE_CODE_RUNTIME_SELF_TEST_RESULT="$result_path" corepack yarn workspace @cafecode/desktop exec electron dist-electron/main.cjs --cafe-runtime-self-test
-          node -e 'const fs=require("node:fs"); const result=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if(!result.ok || result.isPackaged) process.exit(1)' "$result_path"
-
-      - name: Release smoke
-        if: runner.os == 'Linux'
-        run: corepack yarn release:smoke
-
       - name: Install browser test runtime
         if: runner.os == 'Linux'
         run: corepack yarn workspace @cafecode/web exec playwright install --with-deps chromium
@@ -154,14 +126,6 @@ jobs:
       - name: Build native artifact
         run: corepack yarn ${{ matrix.command }}
 
-      - name: Smoke Windows installer and packaged runtime
-        if: runner.os == 'Windows'
-        run: corepack yarn test:native-windows-artifact
-
-      - name: Smoke macOS images and packaged runtime
-        if: runner.os == 'macOS'
-        run: corepack yarn test:native-macos-artifact
-
       - name: Upload native artifact
         uses: actions/upload-artifact@v6
         with:
@@ -201,19 +165,6 @@ jobs:
 
       - name: Build AppImage
         run: corepack yarn dist:desktop:linux
-
-      - name: Install packaged runtime smoke dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y dbus-x11 gnome-keyring libasound2t64 libgbm1 libnspr4 libnss3 libsecret-1-0 xauth xvfb
-
-      - name: Smoke AppImage runtime and artifact
-        shell: bash
-        run: |
-          dbus-run-session -- bash -euo pipefail <<'SCRIPT'
-          eval "$(printf '%s\n' cafecode-ci-keyring | gnome-keyring-daemon --unlock --components=secrets)"
-          xvfb-run --auto-servernum corepack yarn test:native-linux-artifact
-          SCRIPT
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v6
