@@ -1555,6 +1555,13 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                 unlimited: false,
                 balance: "9.99",
               },
+              spend_control_reached: true,
+              individual_limit: {
+                limit: "100.00",
+                remaining_percent: 0,
+                resets_at: 1_780_200_000,
+                used: "100.00",
+              },
               rate_limit_reset_credits: {
                 available_count: 2,
                 credits: [
@@ -1606,6 +1613,13 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           assert.strictEqual(status.accountRateLimits?.rateLimits.planType, "pro");
           assert.strictEqual(status.accountRateLimits?.rateLimits.primary?.windowDurationMins, 300);
           assert.strictEqual(status.accountRateLimits?.rateLimits.secondary?.usedPercent, 75);
+          assert.strictEqual(status.accountRateLimits?.rateLimits.spendControlReached, true);
+          assert.deepStrictEqual(status.accountRateLimits?.rateLimits.individualLimit, {
+            limit: "100.00",
+            remainingPercent: 0,
+            resetsAt: 1_780_200_000,
+            used: "100.00",
+          });
           assert.strictEqual(status.accountRateLimits?.rateLimitResetCredits?.availableCount, 2);
           assert.deepStrictEqual(status.accountRateLimits?.rateLimitResetCredits?.credits, [
             {

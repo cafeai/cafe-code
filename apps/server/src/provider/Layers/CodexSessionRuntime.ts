@@ -1454,6 +1454,8 @@ function readNotificationThreadId(notification: CodexServerNotification): string
     case "thread/name/updated":
     case "thread/goal/updated":
     case "thread/goal/cleared":
+    case "thread/environment/connected":
+    case "thread/environment/disconnected":
     case "thread/settings/updated":
     case "thread/tokenUsage/updated":
     case "turn/started":
@@ -1548,8 +1550,8 @@ export function readCodexNotificationRouteFields(notification: CodexServerNotifi
         itemId: readNotificationItemId(notification),
       };
     case "rawResponse/completed":
-      // Codex 0.145 alpha emits this only when `experimentalRawEvents` is
-      // enabled. Cafe intentionally leaves that stream disabled, but retain
+      // Codex 0.145 emits this only when `experimentalRawEvents` is enabled.
+      // Cafe intentionally leaves that stream disabled, but retain
       // its native turn route if a future stable target enables it so exact
       // response-usage telemetry can never leak across aggregate threads.
       return {
@@ -1667,6 +1669,8 @@ function shouldSuppressChildConversationNotification(method: string): boolean {
     method === "thread/deleted" ||
     method === "thread/unarchived" ||
     method === "thread/closed" ||
+    method === "thread/environment/connected" ||
+    method === "thread/environment/disconnected" ||
     method === "thread/compacted" ||
     method === "thread/name/updated" ||
     method === "thread/tokenUsage/updated" ||

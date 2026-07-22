@@ -289,11 +289,14 @@ function summarizeDebugContextWindowUsagePayload(payloadValue: unknown) {
     maxTokens: readDebugNumber(payload.maxTokens),
     inputTokens: readDebugNumber(payload.inputTokens),
     cachedInputTokens: readDebugNumber(payload.cachedInputTokens),
+    cacheWriteInputTokens: readDebugNumber(payload.cacheWriteInputTokens),
+    totalCacheWriteInputTokens: readDebugNumber(payload.totalCacheWriteInputTokens),
     outputTokens: readDebugNumber(payload.outputTokens),
     reasoningOutputTokens: readDebugNumber(payload.reasoningOutputTokens),
     lastUsedTokens: readDebugNumber(payload.lastUsedTokens),
     lastInputTokens: readDebugNumber(payload.lastInputTokens),
     lastCachedInputTokens: readDebugNumber(payload.lastCachedInputTokens),
+    lastCacheWriteInputTokens: readDebugNumber(payload.lastCacheWriteInputTokens),
     lastOutputTokens: readDebugNumber(payload.lastOutputTokens),
     lastReasoningOutputTokens: readDebugNumber(payload.lastReasoningOutputTokens),
     toolUses: readDebugNumber(payload.toolUses),
@@ -305,6 +308,9 @@ function summarizeDebugContextWindowUsagePayload(payloadValue: unknown) {
     usage.inputTokens !== null || usage.lastInputTokens !== null ? "input" : null,
     usage.cachedInputTokens !== null || usage.lastCachedInputTokens !== null
       ? "cached-input"
+      : null,
+    usage.cacheWriteInputTokens !== null || usage.lastCacheWriteInputTokens !== null
+      ? "cache-write-input"
       : null,
     usage.outputTokens !== null || usage.lastOutputTokens !== null ? "output" : null,
     usage.reasoningOutputTokens !== null || usage.lastReasoningOutputTokens !== null
@@ -318,6 +324,8 @@ function summarizeDebugContextWindowUsagePayload(payloadValue: unknown) {
     totals: {
       inputTokens: usage.inputTokens,
       cachedInputTokens: usage.cachedInputTokens,
+      cacheWriteInputTokens: usage.cacheWriteInputTokens,
+      totalCacheWriteInputTokens: usage.totalCacheWriteInputTokens,
       outputTokens: usage.outputTokens,
       reasoningOutputTokens: usage.reasoningOutputTokens,
     },
@@ -325,6 +333,7 @@ function summarizeDebugContextWindowUsagePayload(payloadValue: unknown) {
       usedTokens: usage.lastUsedTokens,
       inputTokens: usage.lastInputTokens,
       cachedInputTokens: usage.lastCachedInputTokens,
+      cacheWriteInputTokens: usage.lastCacheWriteInputTokens,
       outputTokens: usage.lastOutputTokens,
       reasoningOutputTokens: usage.lastReasoningOutputTokens,
     },
