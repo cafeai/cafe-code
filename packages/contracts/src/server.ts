@@ -81,11 +81,22 @@ export const ServerProviderAccountCredits = Schema.Struct({
 });
 export type ServerProviderAccountCredits = typeof ServerProviderAccountCredits.Type;
 
+export const ServerProviderAccountSpendControlLimit = Schema.Struct({
+  limit: TrimmedNonEmptyString,
+  remainingPercent: Schema.Number,
+  resetsAt: NonNegativeInt,
+  used: TrimmedNonEmptyString,
+});
+export type ServerProviderAccountSpendControlLimit =
+  typeof ServerProviderAccountSpendControlLimit.Type;
+
 export const ServerProviderAccountRateLimitSnapshot = Schema.Struct({
   limitId: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
   limitName: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
   planType: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
   rateLimitReachedType: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
+  spendControlReached: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+  individualLimit: Schema.optionalKey(Schema.NullOr(ServerProviderAccountSpendControlLimit)),
   primary: Schema.optionalKey(Schema.NullOr(ServerProviderAccountRateLimitWindow)),
   secondary: Schema.optionalKey(Schema.NullOr(ServerProviderAccountRateLimitWindow)),
   credits: Schema.optionalKey(Schema.NullOr(ServerProviderAccountCredits)),

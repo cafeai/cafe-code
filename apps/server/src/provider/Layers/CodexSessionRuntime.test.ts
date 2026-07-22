@@ -277,6 +277,23 @@ describe("Codex child conversation routing", () => {
         suppressLifecycle: false,
       },
     );
+    assert.deepStrictEqual(
+      resolveCodexChildConversationNotification(
+        routes,
+        {
+          method: "thread/environment/disconnected",
+          params: {
+            threadId: "thread-child",
+            environmentId: "local",
+          },
+        },
+        "thread-parent",
+      ),
+      {
+        parentTurnId,
+        suppressLifecycle: true,
+      },
+    );
   });
 
   it("keeps nested subagent output on the original visible parent turn", () => {

@@ -172,19 +172,32 @@ export function mergePendingSteerSnapshotsForInterruptedTurn(
   };
 }
 
-export function shouldReplayCodexPendingSteerAfterTerminal(input: {
+export function shouldResolvePendingSteerDispatch(input: {
   readonly provider: string | null | undefined;
   readonly terminalTurnAfterSteer: boolean;
   readonly steerProcessingStarted: boolean;
   readonly steerFailureRecorded: boolean;
   readonly steerRecoveryRecorded: boolean;
+  readonly assistantResponseAfterSteer: boolean;
 }): boolean {
+  if (input.steerFailureRecorded || input.steerRecoveryRecorded) {
+    return true;
+  }
+
+  if (input.provider === "codex") {
+    // Upstream Codex owns the active-turn race inside one UserTurn command:
+    // `turn/steer` falls through to exactly one `turn/start` only after
+    // app-server reports that the cached active turn is gone. A terminal
+    // projection by itself is therefore not permission for the renderer to
+    // replay the same input. Wait for provider processing or the backend's
+    // explicit recovery/failure activity instead.
+    return input.steerProcessingStarted;
+  }
+
   return (
-    input.provider === "codex" &&
-    input.terminalTurnAfterSteer &&
-    !input.steerProcessingStarted &&
-    !input.steerFailureRecorded &&
-    !input.steerRecoveryRecorded
+    input.steerProcessingStarted ||
+    input.assistantResponseAfterSteer ||
+    input.terminalTurnAfterSteer
   );
 }
 

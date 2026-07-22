@@ -501,6 +501,8 @@ function normalizeCodexTokenUsage(
   const maxTokens = usage.modelContextWindow ?? undefined;
   const inputTokens = usage.last.inputTokens;
   const cachedInputTokens = usage.last.cachedInputTokens;
+  const cacheWriteInputTokens = usage.last.cacheWriteInputTokens;
+  const totalCacheWriteInputTokens = usage.total.cacheWriteInputTokens;
   const outputTokens = usage.last.outputTokens;
   const reasoningOutputTokens = usage.last.reasoningOutputTokens;
   const totalOutputTokens = usage.total.outputTokens;
@@ -514,11 +516,16 @@ function normalizeCodexTokenUsage(
     ...(maxTokens !== undefined ? { maxTokens } : {}),
     ...(inputTokens !== undefined ? { inputTokens } : {}),
     ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+    ...(cacheWriteInputTokens !== undefined ? { cacheWriteInputTokens } : {}),
+    ...(totalCacheWriteInputTokens !== undefined ? { totalCacheWriteInputTokens } : {}),
     ...(outputTokens !== undefined ? { outputTokens } : {}),
     ...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
     ...(usedTokens !== undefined ? { lastUsedTokens: usedTokens } : {}),
     ...(inputTokens !== undefined ? { lastInputTokens: inputTokens } : {}),
     ...(cachedInputTokens !== undefined ? { lastCachedInputTokens: cachedInputTokens } : {}),
+    ...(cacheWriteInputTokens !== undefined
+      ? { lastCacheWriteInputTokens: cacheWriteInputTokens }
+      : {}),
     ...(outputTokens !== undefined ? { lastOutputTokens: outputTokens } : {}),
     ...(reasoningOutputTokens !== undefined
       ? { lastReasoningOutputTokens: reasoningOutputTokens }

@@ -360,6 +360,18 @@ function mapGeneratedCredits(
   };
 }
 
+function mapGeneratedSpendControlLimit(
+  limit: CodexSchema.V2GetAccountRateLimitsResponse__SpendControlLimitSnapshot | null | undefined,
+): Exclude<ServerProviderAccountRateLimitSnapshot["individualLimit"], undefined> {
+  if (limit === null || limit === undefined) return null;
+  return {
+    limit: limit.limit,
+    remainingPercent: limit.remainingPercent,
+    resetsAt: limit.resetsAt,
+    used: limit.used,
+  };
+}
+
 function mapGeneratedRateLimitSnapshot(
   snapshot: CodexSchema.V2GetAccountRateLimitsResponse__RateLimitSnapshot,
 ): ServerProviderAccountRateLimitSnapshot {
@@ -369,6 +381,12 @@ function mapGeneratedRateLimitSnapshot(
     ...(snapshot.planType !== undefined ? { planType: snapshot.planType } : {}),
     ...(snapshot.rateLimitReachedType !== undefined
       ? { rateLimitReachedType: snapshot.rateLimitReachedType }
+      : {}),
+    ...(snapshot.spendControlReached !== undefined
+      ? { spendControlReached: snapshot.spendControlReached }
+      : {}),
+    ...(snapshot.individualLimit !== undefined
+      ? { individualLimit: mapGeneratedSpendControlLimit(snapshot.individualLimit) }
       : {}),
     ...(snapshot.primary !== undefined
       ? { primary: mapGeneratedRateLimitWindow(snapshot.primary) }
@@ -474,6 +492,22 @@ function mapRawCredits(value: unknown): ServerProviderAccountRateLimitSnapshot["
   };
 }
 
+function mapRawSpendControlLimit(
+  value: unknown,
+): ServerProviderAccountRateLimitSnapshot["individualLimit"] {
+  if (value === null) return null;
+  const record = readRecord(value);
+  if (!record) return undefined;
+  const limit = readTrimmedMetadata(record.limit);
+  const remainingPercent = readFiniteNumber(record.remaining_percent ?? record.remainingPercent);
+  const resetsAt = readNonNegativeInteger(record.resets_at ?? record.resetsAt);
+  const used = readTrimmedMetadata(record.used);
+  if (!limit || remainingPercent === undefined || resetsAt === undefined || !used) {
+    return undefined;
+  }
+  return { limit, remainingPercent, resetsAt, used };
+}
+
 function mapRawRateLimitReachedType(value: unknown): string | undefined {
   const direct = readTrimmedMetadata(value);
   if (direct) return direct;
@@ -548,17 +582,28 @@ function mapRawRateLimitSnapshot(input: {
   readonly credits?: unknown;
   readonly planType?: string | undefined;
   readonly rateLimitReachedType?: string | undefined;
+  readonly spendControlReached?: unknown;
+  readonly individualLimit?: unknown;
 }): ServerProviderAccountRateLimitSnapshot {
   const rateLimit = readRecord(input.rateLimit);
   const primary = mapRawRateLimitWindow(rateLimit?.primary_window ?? rateLimit?.primary);
   const secondary = mapRawRateLimitWindow(rateLimit?.secondary_window ?? rateLimit?.secondary);
   const credits = mapRawCredits(input.credits);
+  const rawSpendControlReached =
+    input.spendControlReached ?? rateLimit?.spend_control_reached ?? rateLimit?.spendControlReached;
+  const spendControlReached =
+    typeof rawSpendControlReached === "boolean" ? rawSpendControlReached : undefined;
+  const individualLimit = mapRawSpendControlLimit(
+    input.individualLimit ?? rateLimit?.individual_limit ?? rateLimit?.individualLimit,
+  );
 
   return {
     limitId: input.limitId,
     ...(input.limitName ? { limitName: input.limitName } : {}),
     ...(input.planType ? { planType: input.planType } : {}),
     ...(input.rateLimitReachedType ? { rateLimitReachedType: input.rateLimitReachedType } : {}),
+    ...(spendControlReached !== undefined ? { spendControlReached } : {}),
+    ...(individualLimit !== undefined ? { individualLimit } : {}),
     ...(primary ? { primary } : {}),
     ...(secondary ? { secondary } : {}),
     ...(credits ? { credits } : {}),
@@ -583,6 +628,8 @@ function parseCodexAccountRateLimitsPayload(
     limitId: "codex",
     rateLimit: record.rate_limit ?? record.rateLimit,
     credits: record.credits,
+    spendControlReached: record.spend_control_reached ?? record.spendControlReached,
+    individualLimit: record.individual_limit ?? record.individualLimit,
     ...(planType ? { planType } : {}),
     ...(rateLimitReachedType ? { rateLimitReachedType } : {}),
   });
@@ -604,6 +651,8 @@ function parseCodexAccountRateLimitsPayload(
         limitId,
         limitName: readTrimmedMetadata(additional.limit_name ?? additional.limitName),
         rateLimit: additional.rate_limit ?? additional.rateLimit,
+        spendControlReached: additional.spend_control_reached ?? additional.spendControlReached,
+        individualLimit: additional.individual_limit ?? additional.individualLimit,
         ...(planType ? { planType } : {}),
       });
     }
