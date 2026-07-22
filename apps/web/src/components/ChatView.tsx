@@ -169,7 +169,7 @@ import {
   resolveSendEnvMode,
   revokeBlobPreviewUrl,
   revokeUserMessagePreviewUrls,
-  shouldReplayCodexPendingSteerAfterTerminal,
+  shouldResolvePendingSteerDispatch,
   shouldPinTimelineToEndForLocalMessage,
   shouldWriteThreadErrorToCurrentServerThread,
   waitForStartedServerThread,
@@ -1667,39 +1667,13 @@ function threadHasSteerProcessingStarted(thread: Thread, pending: PendingSteerDi
 }
 
 function threadHasResolvedPendingSteer(thread: Thread, pending: PendingSteerDispatch) {
-  const hasExplicitProcessingStarted = threadHasSteerProcessingStarted(thread, pending);
-  if (
-    threadHasSteerRecoveryForMessage(thread, pending.messageId) ||
-    threadHasSteerFailureForMessage(thread, pending.messageId)
-  ) {
-    return true;
-  }
-
-  if (thread.session?.provider === "codex") {
-    // Upstream Codex app-server ACKs `turn/steer` before the steer is visible in
-    // the active turn. Keep Cafe's UI in a pending "steering" state until the
-    // provider emits the explicit processing-start signal instead of clearing on
-    // unrelated assistant text that was already in flight.
-    return hasExplicitProcessingStarted;
-  }
-
-  return (
-    hasExplicitProcessingStarted ||
-    threadHasAssistantResponseAfterSteer(thread, pending) ||
-    threadHasTerminalTurnAfterSteer(thread, pending)
-  );
-}
-
-function threadShouldReplayUnprocessedTerminalCodexSteer(
-  thread: Thread,
-  pending: PendingSteerDispatch,
-): boolean {
-  return shouldReplayCodexPendingSteerAfterTerminal({
+  return shouldResolvePendingSteerDispatch({
     provider: thread.session?.provider,
     terminalTurnAfterSteer: threadHasTerminalTurnAfterSteer(thread, pending),
     steerProcessingStarted: threadHasSteerProcessingStarted(thread, pending),
     steerFailureRecorded: threadHasSteerFailureForMessage(thread, pending.messageId),
     steerRecoveryRecorded: threadHasSteerRecoveryForMessage(thread, pending.messageId),
+    assistantResponseAfterSteer: threadHasAssistantResponseAfterSteer(thread, pending),
   });
 }
 
@@ -2243,124 +2217,6 @@ export default function ChatView(props: ChatViewProps) {
       }));
     }
   }, [activeThread, removePendingSteerDispatch, setFollowUpQueueByThreadId]);
-  useEffect(() => {
-    const threadsById = new Map(allThreads.map((thread) => [thread.id, thread]));
-    const pendingByThread = new Map<ThreadId, PendingSteerDispatch[]>();
-
-    for (const [messageId, pending] of Object.entries(pendingSteerDispatchByMessageId)) {
-      const thread = threadsById.get(pending.threadId);
-      if (thread === undefined) {
-        continue;
-      }
-      const interruptRecovery =
-        pendingSteerInterruptRecoveryByThreadIdRef.current[pending.threadId];
-      if (
-        interruptRecovery?.pendingMessageIds.some((pendingMessageId) => {
-          return String(pendingMessageId) === messageId;
-        }) === true
-      ) {
-        continue;
-      }
-      if (!threadShouldReplayUnprocessedTerminalCodexSteer(thread, pending)) {
-        continue;
-      }
-
-      const existing = pendingByThread.get(pending.threadId) ?? [];
-      existing.push(pending);
-      pendingByThread.set(pending.threadId, existing);
-    }
-
-    if (pendingByThread.size === 0) {
-      return;
-    }
-
-    const replayedMessageIds = new Set<string>();
-    const queuedItems: Array<{
-      readonly threadId: ThreadId;
-      readonly item: FollowUpQueueItem;
-    }> = [];
-
-    for (const [threadId, pendingSteers] of pendingByThread) {
-      const orderedPendingSteers = pendingSteers.toSorted((left, right) =>
-        left.dispatchedAt.localeCompare(right.dispatchedAt),
-      );
-      const merged = mergePendingSteerSnapshotsForInterruptedTurn(
-        orderedPendingSteers.map((pending) => pending.snapshot),
-      );
-      if (merged === null || (merged.promptText.length === 0 && merged.images.length === 0)) {
-        for (const pending of orderedPendingSteers) {
-          replayedMessageIds.add(String(pending.messageId));
-        }
-        recordFollowUpQueueDebugAttempt("pending-steer-terminal-replay", "empty-merged-steers", {
-          threadId,
-        });
-        continue;
-      }
-
-      const firstPendingSteer = orderedPendingSteers[0];
-      if (firstPendingSteer === undefined) {
-        continue;
-      }
-      for (const pending of orderedPendingSteers) {
-        replayedMessageIds.add(String(pending.messageId));
-      }
-
-      const queuedItem: FollowUpQueueItem = {
-        ...firstPendingSteer.snapshot,
-        promptText: merged.promptText,
-        images: merged.images,
-        id: newMessageId(),
-        environmentId: firstPendingSteer.environmentId,
-        threadId,
-        queuedAt: new Date().toISOString(),
-        expanded: false,
-        blockedReason: null,
-      };
-      queuedItems.push({ threadId, item: queuedItem });
-      recordFollowUpQueueDebugAttempt("pending-steer-terminal-replay", "requeued-merged-steers", {
-        threadId,
-        itemId: queuedItem.id,
-      });
-    }
-
-    if (replayedMessageIds.size === 0) {
-      return;
-    }
-
-    updatePendingSteerDispatches((current) => {
-      let next: Record<string, PendingSteerDispatch> | null = null;
-      for (const messageId of replayedMessageIds) {
-        if (!(messageId in current)) {
-          continue;
-        }
-        next ??= { ...current };
-        delete next[messageId];
-      }
-      return next ?? current;
-    });
-    setOptimisticUserMessages((existing) => {
-      const removed = existing.filter((message) => replayedMessageIds.has(String(message.id)));
-      for (const message of removed) {
-        revokeUserMessagePreviewUrls(message);
-      }
-      return existing.filter((message) => !replayedMessageIds.has(String(message.id)));
-    });
-    if (queuedItems.length > 0) {
-      setFollowUpQueueByThreadId((existing) => {
-        const next = { ...existing };
-        for (const { threadId, item } of queuedItems) {
-          next[threadId] = [item, ...(next[threadId] ?? EMPTY_FOLLOW_UP_QUEUE)];
-        }
-        return next;
-      });
-    }
-  }, [
-    allThreads,
-    pendingSteerDispatchByMessageId,
-    recordFollowUpQueueDebugAttempt,
-    setFollowUpQueueByThreadId,
-    updatePendingSteerDispatches,
-  ]);
   useEffect(() => {
     const recoveries = Object.values(pendingSteerInterruptRecoveryByThreadId);
     if (recoveries.length === 0) {

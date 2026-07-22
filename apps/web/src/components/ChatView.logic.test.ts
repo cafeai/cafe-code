@@ -19,7 +19,7 @@ import {
   mergePendingSteerSnapshotsForInterruptedTurn,
   resolveFollowUpQueuePhase,
   resolveSendEnvMode,
-  shouldReplayCodexPendingSteerAfterTerminal,
+  shouldResolvePendingSteerDispatch,
   shouldPinTimelineToEndForLocalMessage,
   shouldWriteThreadErrorToCurrentServerThread,
   waitForStartedServerThread,
@@ -114,41 +114,57 @@ describe("mergePendingSteerSnapshotsForInterruptedTurn", () => {
   });
 });
 
-describe("shouldReplayCodexPendingSteerAfterTerminal", () => {
-  it("replays Codex steers when a turn ended before the steer entered provider items", () => {
+describe("shouldResolvePendingSteerDispatch", () => {
+  it("keeps a Codex steer pending when only the previous turn became terminal", () => {
     expect(
-      shouldReplayCodexPendingSteerAfterTerminal({
+      shouldResolvePendingSteerDispatch({
         provider: "codex",
         terminalTurnAfterSteer: true,
         steerProcessingStarted: false,
         steerFailureRecorded: false,
         steerRecoveryRecorded: false,
+        assistantResponseAfterSteer: false,
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
-  it("does not replay once Codex emitted the steer processing marker", () => {
+  it("resolves once Codex emits the steer processing marker", () => {
     expect(
-      shouldReplayCodexPendingSteerAfterTerminal({
+      shouldResolvePendingSteerDispatch({
         provider: "codex",
         terminalTurnAfterSteer: true,
         steerProcessingStarted: true,
         steerFailureRecorded: false,
         steerRecoveryRecorded: false,
+        assistantResponseAfterSteer: false,
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  it("does not replay non-Codex terminal turns", () => {
+  it("resolves once the backend records Codex's no-active-turn recovery", () => {
     expect(
-      shouldReplayCodexPendingSteerAfterTerminal({
+      shouldResolvePendingSteerDispatch({
+        provider: "codex",
+        terminalTurnAfterSteer: true,
+        steerProcessingStarted: false,
+        steerFailureRecorded: false,
+        steerRecoveryRecorded: true,
+        assistantResponseAfterSteer: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("preserves the existing terminal-resolution rule for non-Codex providers", () => {
+    expect(
+      shouldResolvePendingSteerDispatch({
         provider: "claude",
         terminalTurnAfterSteer: true,
         steerProcessingStarted: false,
         steerFailureRecorded: false,
         steerRecoveryRecorded: false,
+        assistantResponseAfterSteer: false,
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 });
 
