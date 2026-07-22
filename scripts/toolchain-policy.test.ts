@@ -90,6 +90,10 @@ describe("repository toolchain policy", () => {
 
     expect(stagePackage.name).toBe("@cafecode/desktop-runtime");
     expect(stagePackage.private).toBe(true);
+    expect(readStringMap(rootPackage.scripts)).not.toHaveProperty("postinstall");
+    expect(readStringMap(stagePackage.scripts).postinstall).toBe(
+      "node ../../scripts/ensure-desktop-runtime.ts",
+    );
     expect(stagePackage.dependencies).toEqual(expectedDependencies);
     expect(stagePackage.devDependencies).toEqual({
       electron: desktopDependencies.electron,

@@ -11,10 +11,6 @@ import * as Option from "effect/Option";
 import type { VcsDriverKind } from "@cafecode/contracts";
 import * as VcsDriver from "../VcsDriver.ts";
 
-function normalizePathForComparison(value: string): string {
-  return value.replaceAll("\\", "/");
-}
-
 export interface VcsDriverFixture<R, E> {
   readonly createRepo: (cwd: string) => Effect.Effect<void, E, R>;
   readonly writeFile: (
@@ -65,17 +61,19 @@ export function runVcsDriverContractSuite<R, E>(input: VcsDriverContractSuiteInp
       it.effect("detects repository identity inside a repository and nested directories", () =>
         Effect.gen(function* () {
           const cwd = yield* makeTmpDir();
+          const fileSystem = yield* FileSystem.FileSystem;
           const driver = yield* VcsDriver.VcsDriver;
 
           yield* input.fixture.createRepo(cwd);
           yield* input.fixture.writeFile(cwd, "src/index.ts", "export const value = 1;\n");
           const identity = yield* driver.detectRepository(cwd);
           assert.equal(identity?.kind, input.kind);
-          assert.isTrue(
-            normalizePathForComparison(identity?.rootPath ?? "").endsWith(
-              normalizePathForComparison(cwd),
-            ),
-          );
+          const [identityInfo, cwdInfo] = yield* Effect.all([
+            fileSystem.stat(identity?.rootPath ?? ""),
+            fileSystem.stat(cwd),
+          ]);
+          assert.equal(identityInfo.dev, cwdInfo.dev);
+          assert.deepStrictEqual(identityInfo.ino, cwdInfo.ino);
           assert.equal(identity?.freshness.source, "live-local");
           assert.isTrue(DateTime.isDateTime(identity?.freshness.observedAt));
           assert.isTrue(Option.isNone(identity?.freshness.expiresAt ?? Option.none()));

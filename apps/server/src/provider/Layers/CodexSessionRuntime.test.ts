@@ -669,6 +669,24 @@ describe("buildTurnStartParams", () => {
     });
   });
 
+  it("normalizes a persisted Claude auto mode when a thread switches to Codex", () => {
+    const params = Effect.runSync(
+      buildTurnStartParams({
+        threadId: "provider-thread-1",
+        runtimeMode: "auto-accept-edits",
+        prompt: "Continue with Codex",
+        model: "gpt-5.3-codex",
+        interactionMode: "auto",
+      }),
+    );
+
+    assert.equal(params.collaborationMode?.mode, "default");
+    assert.equal(
+      params.collaborationMode?.settings.developer_instructions,
+      CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
+    );
+  });
+
   it("omits collaboration mode when interaction mode is absent", () => {
     const params = Effect.runSync(
       buildTurnStartParams({

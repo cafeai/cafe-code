@@ -44,6 +44,7 @@ import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import {
@@ -648,6 +649,7 @@ const buildAppUnderTest = (options?: {
           getProviders: Effect.succeed([]),
           refresh: () => Effect.succeed([]),
           refreshInstance: () => Effect.succeed([]),
+          refreshInstanceAccountUsage: () => Effect.succeed([]),
           getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
             Effect.succeed(
               makeManualOnlyProviderMaintenanceCapabilities({ provider, packageName: null }),
@@ -718,6 +720,7 @@ const buildAppUnderTest = (options?: {
               collectionEnabled: true,
               asOfMs: 0,
               days: [],
+              tokenBreakdown: [],
             }),
             snapshot: Effect.succeed({
               totals: { generatingMs: 0, outputTokens: 0, userMessages: 0 },
@@ -3198,6 +3201,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
   it.effect("routes websocket rpc subscribeServerConfig streams snapshot then update", () =>
     Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const providerRefreshCalls = yield* Ref.make(0);
       const providers = [
         {
           instanceId: ProviderInstanceId.make("codex"),
@@ -3233,6 +3238,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           },
           providerRegistry: {
             getProviders: Effect.succeed(providers),
+            refresh: () =>
+              Ref.update(providerRefreshCalls, (count) => count + 1).pipe(Effect.as(providers)),
           },
         },
       });
@@ -3251,7 +3258,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.deepEqual(first.config.keybindings, []);
         assert.deepEqual(first.config.issues, []);
         assert.deepEqual(first.config.providers, providers);
-        assert.equal(first.config.observability.logsDirectoryPath.endsWith("/logs"), true);
+        assert.equal(path.basename(first.config.observability.logsDirectoryPath), "logs");
         assert.equal(first.config.observability.localTracingEnabled, true);
         assert.equal(first.config.observability.otlpTracesUrl, "http://localhost:4318/v1/traces");
         assert.equal(first.config.observability.otlpTracesEnabled, true);
@@ -3264,6 +3271,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         type: "keybindingsUpdated",
         payload: { keybindings: [], issues: [] },
       });
+      yield* Effect.yieldNow;
+      assert.equal(yield* Ref.get(providerRefreshCalls), 0);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -3459,13 +3468,15 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
   it.effect("routes websocket rpc projects.searchEntries errors", () =>
     Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const missingWorkspace = path.resolve("/definitely/not/a/real/workspace/path");
       yield* buildAppUnderTest();
 
       const wsUrl = yield* getWsServerUrl("/ws");
       const result = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[WS_METHODS.projectsSearchEntries]({
-            cwd: "/definitely/not/a/real/workspace/path",
+            cwd: missingWorkspace,
             query: "needle",
             limit: 10,
           }),
@@ -3474,10 +3485,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assertTrue(result._tag === "Failure");
       assertTrue(result.failure._tag === "ProjectSearchEntriesError");
-      assertInclude(
-        result.failure.message,
-        "Workspace root does not exist: /definitely/not/a/real/workspace/path",
-      );
+      assertInclude(result.failure.message, `Workspace root does not exist: ${missingWorkspace}`);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -4084,6 +4092,73 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
       assert.deepEqual(replayResult, []);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "refreshes Codex account usage without a full provider probe after prompt dispatch",
+    () =>
+      Effect.gen(function* () {
+        const usageRefresh = yield* Deferred.make<ProviderInstanceId>();
+        const fullRefreshCalls = yield* Ref.make(0);
+        const provider = {
+          instanceId: defaultModelSelection.instanceId,
+          driver: ProviderDriverKind.make("codex"),
+          enabled: true,
+          installed: true,
+          version: "0.145.0",
+          status: "ready" as const,
+          auth: { status: "authenticated" as const, type: "chatgpt" as const },
+          checkedAt: "2026-01-01T00:00:00.000Z",
+          models: [],
+          slashCommands: [],
+          skills: [],
+        };
+
+        yield* buildAppUnderTest({
+          layers: {
+            providerRegistry: {
+              getProviders: Effect.succeed([provider]),
+              refreshInstance: () =>
+                Ref.update(fullRefreshCalls, (count) => count + 1).pipe(Effect.as([provider])),
+              refreshInstanceAccountUsage: (instanceId) =>
+                Deferred.succeed(usageRefresh, instanceId).pipe(
+                  Effect.ignore,
+                  Effect.as([provider]),
+                ),
+            },
+            orchestrationEngine: {
+              dispatch: () => Effect.succeed({ sequence: 8 }),
+              readEvents: () => Stream.empty,
+            },
+          },
+        });
+
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const createdAt = "2026-01-01T00:00:00.000Z";
+        const result = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+              type: "thread.turn.start",
+              commandId: CommandId.make("cmd-prompt-usage-refresh"),
+              threadId: defaultThreadId,
+              message: {
+                messageId: MessageId.make("msg-prompt-usage-refresh"),
+                role: "user",
+                text: "hello",
+                attachments: [],
+              },
+              modelSelection: defaultModelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              createdAt,
+            }),
+          ),
+        );
+
+        assert.equal(result.sequence, 8);
+        assert.equal(yield* Deferred.await(usageRefresh), defaultModelSelection.instanceId);
+        assert.equal(yield* Ref.get(fullRefreshCalls), 0);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("filters thread subscription events already covered by the snapshot", () =>

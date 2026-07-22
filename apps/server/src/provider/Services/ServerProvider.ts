@@ -7,5 +7,11 @@ export interface ServerProviderShape {
   readonly maintenanceCapabilities: ProviderMaintenanceCapabilities;
   readonly getSnapshot: Effect.Effect<ServerProvider>;
   readonly refresh: Effect.Effect<ServerProvider>;
+  /**
+   * Refresh account-scoped usage metadata without executing the provider's
+   * binary health/authentication probes. Providers that do not expose a
+   * bounded usage-only path omit this capability.
+   */
+  readonly refreshAccountUsage?: Effect.Effect<ServerProvider>;
   readonly streamChanges: Stream.Stream<ServerProvider>;
 }

@@ -27,8 +27,41 @@ function makeFakeClaudeBinary(dir: string, output: string) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const binDir = path.join(dir, "bin");
-    const claudePath = path.join(binDir, "claude");
     yield* fs.makeDirectory(binDir, { recursive: true });
+
+    if (process.platform === "win32") {
+      // Windows cannot execute a shebang-only extensionless fixture. Exercise
+      // the same `.cmd` shim path used by npm-installed Claude Code while a
+      // Node helper handles stdin/stdout without depending on PowerShell.
+      const fixturePath = path.join(binDir, "claude-fixture.cjs");
+      const claudePath = path.join(binDir, "claude.cmd");
+      yield* fs.writeFileString(
+        fixturePath,
+        [
+          '"use strict";',
+          "let settled = false;",
+          "const deadline = setTimeout(() => {",
+          '  process.stderr.write("timed out waiting for prompt stdin\\n", () => process.exit(2));',
+          "}, 2000);",
+          'process.stdin.setEncoding("utf8");',
+          'process.stdin.on("data", (chunk) => {',
+          "  if (settled || chunk.length === 0) return;",
+          "  settled = true;",
+          "  clearTimeout(deadline);",
+          "  process.stdin.pause();",
+          `  process.stdout.write(${JSON.stringify(output)}, () => process.exit(0));`,
+          "});",
+          "",
+        ].join("\n"),
+      );
+      yield* fs.writeFileString(
+        claudePath,
+        `@echo off\r\n"${process.execPath}" "%~dp0claude-fixture.cjs" %*\r\n`,
+      );
+      return claudePath;
+    }
+
+    const claudePath = path.join(binDir, "claude");
 
     yield* fs.writeFileString(
       claudePath,

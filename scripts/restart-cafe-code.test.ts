@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { join } from "node:path";
 
 import {
   DEFAULT_RESTART_DELAY_MS,
@@ -82,6 +83,6 @@ describe("restart-cafe-code", () => {
         homeDir: "/home/me",
         cwd: "/repo",
       }),
-    ).toBe("/tmp/cafe-home/restart-logs");
+    ).toBe(join("/tmp/cafe-home", "restart-logs"));
   });
 });

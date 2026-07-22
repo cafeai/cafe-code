@@ -899,6 +899,19 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             slashCommands: [],
             skills: [],
           } as const satisfies ServerProvider;
+          const usageRefreshedProvider = {
+            ...cachedProvider,
+            accountRateLimits: {
+              rateLimits: {
+                primary: {
+                  usedPercent: 20,
+                  windowDurationMins: 300,
+                  resetsAt: 1_780_000_000,
+                },
+              },
+              checkedAt: "2026-04-29T10:01:00.000Z",
+            },
+          } as const satisfies ServerProvider;
           const instance = {
             instanceId: codexInstanceId,
             driverKind: codexDriver,
@@ -915,6 +928,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               }),
               getSnapshot: Effect.succeed(cachedProvider),
               refresh: Effect.die(new Error("simulated refresh failure")),
+              refreshAccountUsage: Effect.succeed(usageRefreshedProvider),
               streamChanges: Stream.empty,
             },
             adapter: {} as ProviderInstance["adapter"],
@@ -951,6 +965,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             assert.deepStrictEqual(yield* registry.refresh(codexDriver), [cachedProvider]);
             assert.deepStrictEqual(yield* registry.refreshInstance(codexInstanceId), [
               cachedProvider,
+            ]);
+            assert.deepStrictEqual(yield* registry.refreshInstanceAccountUsage(codexInstanceId), [
+              usageRefreshedProvider,
             ]);
           }).pipe(Effect.provide(runtimeServices));
         }),
@@ -1257,7 +1274,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             // but custom models are projected into error snapshots, so this
             // proves the aggregator no longer holds the initial snapshot.
             const refreshed = yield* Effect.gen(function* () {
-              for (let attempts = 0; attempts < 60; attempts += 1) {
+              for (let attempts = 0; attempts < 120; attempts += 1) {
                 const providers = yield* registry.getProviders;
                 const codex = providers.find((provider) => provider.instanceId === "codex");
                 if (
@@ -1268,6 +1285,15 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                 }
                 yield* TestClock.adjust("50 millis");
                 yield* Effect.yieldNow;
+                if (process.platform === "win32") {
+                  // The probe intentionally uses the real process spawner to
+                  // observe ENOENT. Advancing TestClock cannot advance libuv's
+                  // Windows process callback, so give that callback a bounded
+                  // slice of wall time under the fully parallel CI workload.
+                  yield* Effect.promise(
+                    () => new Promise<void>((resolve) => setTimeout(resolve, 25)),
+                  );
+                }
               }
               return yield* registry.getProviders;
             });
@@ -1886,7 +1912,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
       );
 
       it.effect("runs Claude status probes with the configured Claude HOME", () => {
-        const claudeHome = "/tmp/t3code-claude-home";
         const recorded = recordingMockSpawnerLayer((args) => {
           const joined = args.join(" ");
           if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
@@ -1900,6 +1925,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         });
 
         return Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const claudeHome = path.resolve("/tmp/t3code-claude-home");
           const status = yield* checkClaudeProviderStatus(
             {
               ...defaultClaudeSettings,

@@ -12,7 +12,6 @@
   "type": "module",
   "scripts": {
     "prepare": "effect-language-service patch",
-    "postinstall": "node scripts/ensure-electron.ts",
     "dev": "node scripts/dev-runner.ts dev",
     "dev:server": "node scripts/dev-runner.ts dev:server",
     "dev:web": "node scripts/dev-runner.ts dev:web",
@@ -51,6 +50,7 @@
     "dist:aur:cafe-code": "makepkg --cleanbuild --force --dir packaging/aur/cafe-code",
     "dist:arch:local": "node scripts/build-arch-package.ts",
     "release:smoke": "node scripts/release-smoke.ts",
+    "validate:desktop-release": "node scripts/validate-update-release.ts",
     "audit:repository": "node scripts/repository-audit.ts",
     "db:compact-activity-payloads": "node scripts/compact-activity-payloads.ts",
     "clean": "node scripts/clean.ts",

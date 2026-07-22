@@ -46,6 +46,10 @@ import {
   isDesktopRuntimeSelfTestEnabled,
   runDesktopRuntimeSelfTestAndExit,
 } from "./app/DesktopRuntimeSelfTest.ts";
+import {
+  isDesktopUpdateDetectionProbeEnabled,
+  runDesktopUpdateDetectionProbeAndExit,
+} from "./app/DesktopUpdateDetectionProbe.ts";
 
 startStartupCpuProfiler({ role: "desktop-main" });
 
@@ -142,7 +146,9 @@ const desktopRuntimeLayer = ElectronProtocol.layerSchemePrivileges.pipe(
   ),
 );
 
-if (isDesktopRuntimeSelfTestEnabled()) {
+if (isDesktopUpdateDetectionProbeEnabled()) {
+  void runDesktopUpdateDetectionProbeAndExit();
+} else if (isDesktopRuntimeSelfTestEnabled()) {
   void runDesktopRuntimeSelfTestAndExit();
 } else {
   DesktopApp.program.pipe(Effect.provide(desktopRuntimeLayer), NodeRuntime.runMain);

@@ -92,6 +92,10 @@ const initializeGitWorkspace = Effect.fn(function* (cwd: string) {
   runGit(cwd, ["init", "--initial-branch=main"]);
   runGit(cwd, ["config", "user.email", "test@example.com"]);
   runGit(cwd, ["config", "user.name", "Test User"]);
+  // Checkpoint contents are byte-level test fixtures. Disable the Windows
+  // global autocrlf policy so checkout/revert does not rewrite committed LF
+  // bytes and turn a VCS correctness assertion into a runner preference test.
+  runGit(cwd, ["config", "core.autocrlf", "false"]);
   const fileSystem = yield* FileSystem.FileSystem;
   const { join } = yield* Path.Path;
   yield* fileSystem.writeFileString(join(cwd, "README.md"), "v1\n");

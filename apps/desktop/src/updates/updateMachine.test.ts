@@ -20,6 +20,15 @@ const runtimeInfo = {
 } as const;
 
 describe("updateMachine", () => {
+  it("records the platform install mode in initial state", () => {
+    expect(createInitialDesktopUpdateState("1.0.0", runtimeInfo, "latest").installMode).toBe(
+      "in-app",
+    );
+    expect(
+      createInitialDesktopUpdateState("1.0.0", runtimeInfo, "latest", "manual").installMode,
+    ).toBe("manual");
+  });
+
   it("clears transient errors when a check starts", () => {
     const state = reduceDesktopUpdateStateOnCheckStart(
       {

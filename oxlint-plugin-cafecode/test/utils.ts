@@ -28,7 +28,9 @@ class OxlintFixtureExpectedFailure extends Data.TaggedError("OxlintFixtureExpect
 }
 
 const encodeOxlintConfig = Schema.encodeEffect(Schema.UnknownFromJsonString);
-const OXLINT_FIXTURE_TEST_TIMEOUT_MS = process.platform === "win32" ? 30_000 : undefined;
+// The harness shells out to oxlint and loads the local plugin entrypoint, which can
+// exceed Vitest's default 5s budget on slower CI machines even when the rule passes.
+const OXLINT_FIXTURE_TEST_TIMEOUT_MS = process.platform === "win32" ? 30_000 : 10_000;
 
 interface RuleHarness {
   readonly run: (
@@ -91,7 +93,7 @@ export const createOxlintRuleHarness = (ruleName: string): RuleHarness => {
     const configPath = path.join(fixtureDir, ".oxlintrc.json");
     const sourcePaths = sources.map((_, index) => path.join(fixtureDir, `fixture-${index + 1}.ts`));
     const repoRoot = path.join(import.meta.dirname, "..", "..");
-    const oxlintBin = path.join(repoRoot, "node_modules", ".bin", "oxlint");
+    const oxlintEntrypoint = path.join(repoRoot, "node_modules", "oxlint", "bin", "oxlint");
     const pluginPath = path.join(repoRoot, "oxlint-plugin-cafecode", "index.ts");
 
     yield* fs.writeFileString(
@@ -108,7 +110,15 @@ export const createOxlintRuleHarness = (ruleName: string): RuleHarness => {
     );
 
     const output = yield* spawnAndCollectOutput(
-      ChildProcess.make(oxlintBin, ["--config", configPath, ...sourcePaths], { cwd: repoRoot }),
+      // Yarn's Windows `.bin` artifact is a `.cmd` shim and cannot be spawned
+      // directly with `shell: false`. Running Oxlint's JavaScript entrypoint
+      // through the pinned Node executable is portable and avoids introducing
+      // a shell boundary around fixture-controlled paths.
+      ChildProcess.make(
+        process.execPath,
+        [oxlintEntrypoint, "--config", configPath, ...sourcePaths],
+        { cwd: repoRoot },
+      ),
     );
 
     if (output.exitCode !== 0) {

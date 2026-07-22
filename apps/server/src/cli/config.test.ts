@@ -1,4 +1,5 @@
 import NodeOS from "node:os";
+import { openSync } from "node:fs";
 
 import { assert, expect, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
@@ -51,6 +52,12 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     const filePath = yield* fs.makeTempFileScoped({ prefix: "t3-bootstrap-", suffix: ".ndjson" });
     const encoded = yield* encodeDesktopBootstrap(payload);
     yield* fs.writeFileString(filePath, `${encoded}\n`);
+    if (process.platform === "win32") {
+      // Windows cannot duplicate an inherited descriptor through
+      // `/proc/self/fd` or `/dev/fd`; readBootstrapEnvelope therefore owns
+      // and closes the direct descriptor after this explicit handoff.
+      return openSync(filePath, "r");
+    }
     const { fd } = yield* fs.open(filePath, { flag: "r" });
     return fd;
   });
@@ -344,8 +351,11 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
 
   it.effect("uses bootstrap envelope values as fallbacks when flags and env are absent", () =>
     Effect.gen(function* () {
-      const { join } = yield* Path.Path;
-      const baseDir = "/tmp/t3-bootstrap-home";
+      const { join, resolve } = yield* Path.Path;
+      // Bootstrap homes are resolved before they enter ServerConfig. Resolve
+      // the fixture through the host path service too, so `/tmp` acquires the
+      // current drive on Windows while remaining unchanged on POSIX.
+      const baseDir = resolve("/tmp/t3-bootstrap-home");
       const fd = yield* openBootstrapFd(
         makeDesktopBootstrap({
           port: 4888,

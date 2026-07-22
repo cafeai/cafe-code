@@ -1059,7 +1059,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.kind": routed.adapter.provider,
         ...(input.modelSelection?.model ? { "provider.model": input.modelSelection.model } : {}),
       });
-      if (routed.adapter.provider === ProviderDriverKind.make("codex")) {
+      if (routed.adapter.capabilities.liveSteer === "supported") {
+        // Projection state can lag the provider runtime during long streams or
+        // reconnects. Ask the adapter for its live session before starting a
+        // turn, and route additional input through its supported steer/queue
+        // path whenever it still owns an active turn. This applies to Codex's
+        // native steer RPC and Claude's non-interrupting SDK input queue.
         const activeSessions = yield* routed.adapter.listSessions();
         const activeSession = activeSessions.find((session) => session.threadId === input.threadId);
         if (activeSession?.status === "running" && activeSession.activeTurnId !== undefined) {

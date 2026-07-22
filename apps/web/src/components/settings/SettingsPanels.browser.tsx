@@ -503,6 +503,7 @@ const createDesktopBridgeStub = (overrides?: {
     enabled: false,
     status: "idle",
     channel: "latest",
+    installMode: "in-app",
     currentVersion: "0.0.0-test",
     hostArch: "arm64",
     appArch: "arm64",

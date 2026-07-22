@@ -57,6 +57,11 @@ interface TargetPathAndPosition {
   readonly column: Option.Option<string>;
 }
 
+export type CommandAvailabilityProbe = (
+  command: string,
+  options?: CommandAvailabilityOptions,
+) => boolean;
+
 const TARGET_WITH_POSITION_PATTERN = /^(.*?):(\d+)(?::(\d+))?$/;
 const POWERSHELL_ARGUMENTS_PREFIX = [
   "-NoProfile",
@@ -139,9 +144,10 @@ function resolveEditorArgs(
 function resolveAvailableCommand(
   commands: ReadonlyArray<string>,
   options: CommandAvailabilityOptions = {},
+  commandAvailable: CommandAvailabilityProbe = isCommandAvailable,
 ): Option.Option<string> {
   for (const command of commands) {
-    if (isCommandAvailable(command, options)) {
+    if (commandAvailable(command, options)) {
       return Option.some(command);
     }
   }
@@ -234,6 +240,7 @@ function fileManagerLaunchForPlatform(
   target: string,
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv,
+  commandAvailable: CommandAvailabilityProbe = isCommandAvailable,
 ): EditorLaunch {
   switch (platform) {
     case "darwin":
@@ -246,10 +253,10 @@ function fileManagerLaunchForPlatform(
         // (for example org.kde.dolphin.desktop). In some source-launch
         // environments that id is then treated as an executable name, so prefer
         // the concrete Dolphin binary when Cafe is running in a KDE session.
-        if (isKdeDesktop(env) && isCommandAvailable("dolphin", { platform, env })) {
+        if (isKdeDesktop(env) && commandAvailable("dolphin", { platform, env })) {
           return { command: "dolphin", args: [target] };
         }
-        if (isCommandAvailable("gio", { platform, env })) {
+        if (commandAvailable("gio", { platform, env })) {
           return { command: "gio", args: ["open", target] };
         }
       }
@@ -288,19 +295,20 @@ export function resolveBrowserLaunch(
 export function resolveAvailableEditors(
   platform: NodeJS.Platform = process.platform,
   env: NodeJS.ProcessEnv = process.env,
+  commandAvailable: CommandAvailabilityProbe = isCommandAvailable,
 ): ReadonlyArray<EditorId> {
   const available: EditorId[] = [];
 
   for (const editor of EDITORS) {
     if (editor.commands === null) {
-      const { command } = fileManagerLaunchForPlatform("", platform, env);
-      if (isCommandAvailable(command, { platform, env })) {
+      const { command } = fileManagerLaunchForPlatform("", platform, env, commandAvailable);
+      if (commandAvailable(command, { platform, env })) {
         available.push(editor.id);
       }
       continue;
     }
 
-    const command = resolveAvailableCommand(editor.commands, { platform, env });
+    const command = resolveAvailableCommand(editor.commands, { platform, env }, commandAvailable);
     if (Option.isSome(command)) {
       available.push(editor.id);
     }
@@ -378,6 +386,7 @@ export const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
   input: LaunchEditorInput,
   platform: NodeJS.Platform = process.platform,
   env: NodeJS.ProcessEnv = process.env,
+  commandAvailable: CommandAvailabilityProbe = isCommandAvailable,
 ): Effect.fn.Return<EditorLaunch, ExternalLauncherError> {
   yield* Effect.annotateCurrentSpan({
     "externalLauncher.editor": input.editor,
@@ -391,7 +400,7 @@ export const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
 
   if (editorDef.commands) {
     const command = Option.getOrElse(
-      resolveAvailableCommand(editorDef.commands, { platform, env }),
+      resolveAvailableCommand(editorDef.commands, { platform, env }, commandAvailable),
       () => editorDef.commands[0],
     );
     return {
@@ -404,7 +413,7 @@ export const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
     return yield* new ExternalLauncherError({ message: `Unsupported editor: ${input.editor}` });
   }
 
-  return fileManagerLaunchForPlatform(input.cwd, platform, env);
+  return fileManagerLaunchForPlatform(input.cwd, platform, env, commandAvailable);
 });
 
 export function resolveEditorProcessLaunch(

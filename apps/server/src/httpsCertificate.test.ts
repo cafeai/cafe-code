@@ -4,7 +4,11 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
-import { ensureHttpsCertificateMaterial, resolveOpenSslExecutable } from "./httpsCertificate.ts";
+import {
+  ensureHttpsCertificateMaterial,
+  openSslGenerationTimeoutMs,
+  resolveOpenSslExecutable,
+} from "./httpsCertificate.ts";
 
 it.layer(NodeServices.layer)("ensureHttpsCertificateMaterial", (it) => {
   it.effect("resolves Git for Windows OpenSSL when it is installed outside PATH", () =>
@@ -39,6 +43,14 @@ it.layer(NodeServices.layer)("ensureHttpsCertificateMaterial", (it) => {
 
       assert.equal(executable, "openssl");
       assert.equal(checkedFilesystem, false);
+    }),
+  );
+
+  it.effect("allows slower certificate generation only on Windows", () =>
+    Effect.sync(() => {
+      assert.equal(openSslGenerationTimeoutMs("win32"), 60_000);
+      assert.equal(openSslGenerationTimeoutMs("linux"), 20_000);
+      assert.equal(openSslGenerationTimeoutMs("darwin"), 20_000);
     }),
   );
 

@@ -50,6 +50,16 @@ export interface ProviderRegistryShape {
   ) => Effect.Effect<ReadonlyArray<ServerProvider>>;
 
   /**
+   * Refresh only account-usage metadata for one provider instance. This is a
+   * no-op for providers without a usage-only capability and intentionally
+   * never falls back to the provider's full binary health/authentication
+   * probe.
+   */
+  readonly refreshInstanceAccountUsage: (
+    instanceId: ProviderInstanceId,
+  ) => Effect.Effect<ReadonlyArray<ServerProvider>>;
+
+  /**
    * Resolve the maintenance capabilities owned by one live provider instance.
    * Falls back to manual-only capabilities when the instance is not live.
    */

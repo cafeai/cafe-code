@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { join, resolve } from "node:path";
 
 import { describe, it } from "vitest";
 
@@ -10,6 +11,14 @@ import {
   resolveHeadlessServerEntrypoint,
   resolveLaunchPlan,
 } from "./start-electron.mjs";
+
+// These launcher tests execute on all CI hosts. Build fixture paths with the
+// host path implementation because the production launcher receives paths
+// from that same host, even when a test selects the Linux display branch.
+const fixtureRepositoryRoot = resolve("/repo");
+const fixtureDesktopDir = join(fixtureRepositoryRoot, "apps", "desktop");
+const fixtureServerEntrypoint = join(fixtureRepositoryRoot, "apps", "server", "dist", "bin.mjs");
+const fixtureWorkspaceDir = resolve("/workspace/project");
 
 describe("start-electron launcher", () => {
   it("detects whether Linux has a graphical display available", () => {
@@ -41,33 +50,33 @@ describe("start-electron launcher", () => {
       args: ["--cafe-debug", "--port", "3888"],
       environment: {},
       platform: "linux",
-      runtimeDesktopDir: "/repo/apps/desktop",
-      cwd: "/repo/apps/desktop",
+      runtimeDesktopDir: fixtureDesktopDir,
+      cwd: fixtureDesktopDir,
       electronPath: () => "/electron",
-      serverEntrypoint: "/repo/apps/server/dist/bin.mjs",
+      serverEntrypoint: fixtureServerEntrypoint,
     });
 
     assert.equal(plan.type, "headless-server");
     assert.equal(plan.command, process.execPath);
     assert.deepEqual(plan.args, [
-      "/repo/apps/server/dist/bin.mjs",
+      fixtureServerEntrypoint,
       "serve",
       "--mode",
       "desktop",
       "--port",
       "3888",
     ]);
-    assert.equal(plan.cwd, "/repo");
+    assert.equal(plan.cwd, fixtureRepositoryRoot);
   });
 
   it("preserves the original invocation directory for headless server cwd when available", () => {
     assert.equal(
       resolveHeadlessServerCwd({
-        cwd: "/repo/apps/desktop",
-        environment: { INIT_CWD: "/workspace/project" },
-        runtimeDesktopDir: "/repo/apps/desktop",
+        cwd: fixtureDesktopDir,
+        environment: { INIT_CWD: fixtureWorkspaceDir },
+        runtimeDesktopDir: fixtureDesktopDir,
       }),
-      "/workspace/project",
+      fixtureWorkspaceDir,
     );
   });
 
@@ -76,28 +85,28 @@ describe("start-electron launcher", () => {
       args: ["--user-arg"],
       environment: { DISPLAY: ":0" },
       platform: "linux",
-      runtimeDesktopDir: "/repo/apps/desktop",
-      cwd: "/repo/apps/desktop",
+      runtimeDesktopDir: fixtureDesktopDir,
+      cwd: fixtureDesktopDir,
       electronPath: () => "/electron",
-      serverEntrypoint: "/repo/apps/server/dist/bin.mjs",
+      serverEntrypoint: fixtureServerEntrypoint,
     });
 
     assert.equal(plan.type, "electron");
     assert.equal(plan.command, "/electron");
     assert.deepEqual(plan.args, ["dist-electron/main.cjs", "--user-arg"]);
-    assert.equal(plan.cwd, "/repo/apps/desktop");
+    assert.equal(plan.cwd, fixtureDesktopDir);
   });
 
   it("resolves the staged or source server entrypoint next to the desktop runtime", () => {
     assert.equal(
       resolveHeadlessServerEntrypoint(
-        "/repo/apps/desktop",
-        (path) => path === "/repo/apps/server/dist/bin.mjs",
+        fixtureDesktopDir,
+        (path) => path === fixtureServerEntrypoint,
       ),
-      "/repo/apps/server/dist/bin.mjs",
+      fixtureServerEntrypoint,
     );
     assert.equal(
-      resolveHeadlessServerEntrypoint("/repo/apps/desktop", () => false),
+      resolveHeadlessServerEntrypoint(fixtureDesktopDir, () => false),
       undefined,
     );
   });

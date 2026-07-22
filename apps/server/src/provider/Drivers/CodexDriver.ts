@@ -22,6 +22,7 @@
  * @module provider/Drivers/CodexDriver
  */
 import { CodexSettings, ProviderDriverKind, type ServerProvider } from "@cafecode/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -35,7 +36,11 @@ import { makeCodexTextGeneration } from "../../textGeneration/CodexTextGeneratio
 import { ServerConfig } from "../../config.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
-import { checkCodexCliProviderStatus, makePendingCodexProvider } from "../Layers/CodexProvider.ts";
+import {
+  checkCodexCliProviderStatus,
+  makePendingCodexProvider,
+  readCodexAccountRateLimits,
+} from "../Layers/CodexProvider.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
@@ -55,10 +60,11 @@ import {
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("codex");
-// Keep account usage reasonably fresh without using the heavy app-server
-// metadata path. The Codex status probe intentionally stays on the cheap
-// `codex --version` / `codex login status` / redacted usage-request path, so
-// this periodic refresh does not create hidden Codex app-server sessions.
+// Periodically refresh installation/authentication truth without using the
+// heavy app-server metadata path. Full refreshes are single-flight, while
+// prompt-triggered usage updates below use only the redacted HTTP request, so
+// neither path creates hidden Codex app-server sessions or repeated CLI probe
+// queues.
 const PERIODIC_SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
 const UPDATE_DEFINITION = {
   provider: DRIVER_KIND,
@@ -253,6 +259,32 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         initialSnapshot: (settings) =>
           makePendingCodexProvider(settings).pipe(Effect.map(stampIdentity)),
         checkProvider,
+        // Prompt sends need fresh rate-limit metadata, not another pair of
+        // `codex --version` / `codex login status` subprocesses. Upstream
+        // Codex obtains this data from BackendClient's account usage request;
+        // use the same bounded, redacted HTTP path against the effective
+        // shadow home and leave full health/auth checks on the five-minute and
+        // explicit manual-refresh paths.
+        refreshAccountUsage: ({ settings, snapshot }) => {
+          if (snapshot.auth.status !== "authenticated" || snapshot.auth.type !== "chatgpt") {
+            return Effect.succeed(undefined);
+          }
+          return refreshCodexShadowHome.pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("codex.home.authRefreshBeforeUsageFailed", {
+                instanceId,
+                detail: cause.message,
+              }),
+            ),
+            Effect.andThen(DateTime.now),
+            Effect.map(DateTime.formatIso),
+            Effect.flatMap((checkedAt) =>
+              readCodexAccountRateLimits(settings, effectiveEnvironment, checkedAt),
+            ),
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
+          );
+        },
         enrichSnapshot: ({ snapshot, publishSnapshot }) =>
           enrichProviderSnapshotWithVersionAdvisory(snapshot, maintenanceCapabilities).pipe(
             Effect.provideService(HttpClient.HttpClient, httpClient),

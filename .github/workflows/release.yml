@@ -1,0 +1,304 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-24.04
+    outputs:
+      channel: ${{ steps.release.outputs.channel }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      probe-version: ${{ steps.release.outputs.probe-version }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Validate release tag
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          if [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            channel="latest"
+            prerelease="false"
+            probe_version="${version}-canary.0"
+          elif [[ "${version}" =~ ^([0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8})\.([1-9][0-9]*)$ ]]; then
+            channel="nightly"
+            prerelease="true"
+            probe_version="${BASH_REMATCH[1]}.0"
+          else
+            echo "Unsupported release tag: ${tag}" >&2
+            echo "Expected vX.Y.Z or vX.Y.Z-nightly.YYYYMMDD.N where N is at least 1." >&2
+            exit 1
+          fi
+          {
+            echo "channel=${channel}"
+            echo "prerelease=${prerelease}"
+            echo "probe-version=${probe_version}"
+            echo "version=${version}"
+          } >> "${GITHUB_OUTPUT}"
+
+  quality:
+    name: Release quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.13.1
+
+      - name: Activate pinned Yarn
+        run: |
+          corepack enable
+          corepack prepare yarn@4.17.1 --activate
+
+      - name: Cache Yarn and Turbo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.yarn/berry
+            .turbo
+          key: ${{ runner.os }}-${{ runner.arch }}-release-yarn-${{ hashFiles('yarn.lock') }}-${{ hashFiles('turbo.json') }}
+
+      - name: Install dependencies
+        run: corepack yarn install --immutable
+
+      - name: Verify source
+        run: |
+          corepack yarn fmt:check
+          corepack yarn lint
+          corepack yarn typecheck
+          corepack yarn test
+          corepack yarn build:desktop
+
+  artifacts:
+    name: Build ${{ matrix.name }}
+    needs: [prepare, quality]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-2025
+            command: dist:desktop:win:x64
+          - name: macos-arm64
+            os: macos-15
+            command: dist:desktop:dmg:arm64
+          - name: macos-x64
+            os: macos-15-intel
+            command: dist:desktop:dmg:x64
+          - name: linux-x64
+            os: ubuntu-24.04
+            command: dist:desktop:linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      CAFE_CODE_DESKTOP_SIGNED: "false"
+      CAFE_CODE_DESKTOP_VERSION: ${{ needs.prepare.outputs.version }}
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.13.1
+
+      - name: Activate pinned Yarn
+        run: |
+          corepack enable
+          corepack prepare yarn@4.17.1 --activate
+
+      - name: Cache Yarn and Turbo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.yarn/berry
+            .turbo
+          key: ${{ runner.os }}-${{ runner.arch }}-release-yarn-${{ hashFiles('yarn.lock') }}-${{ hashFiles('turbo.json') }}
+
+      - name: Install dependencies
+        run: corepack yarn install --immutable
+
+      - name: Build unsigned artifact
+        run: corepack yarn ${{ matrix.command }}
+
+      - name: Build lower-version AppImage probe
+        if: matrix.name == 'linux-x64'
+        env:
+          CAFE_CODE_DESKTOP_OUTPUT_DIR: release-probe
+          CAFE_CODE_DESKTOP_VERSION: ${{ needs.prepare.outputs.probe-version }}
+        run: corepack yarn dist:desktop:linux
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: cafe-code-release-${{ matrix.name }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload packaged detection probe
+        if: matrix.name == 'linux-x64'
+        uses: actions/upload-artifact@v6
+        with:
+          name: cafe-code-update-probe-linux-x64
+          path: release-probe/*.AppImage
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish unsigned release
+    needs: [prepare, artifacts]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.13.1
+
+      - name: Activate pinned Yarn
+        run: |
+          corepack enable
+          corepack prepare yarn@4.17.1 --activate
+
+      - name: Install dependencies
+        run: corepack yarn install --immutable
+
+      - name: Download native artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: cafe-code-release-*
+          path: release-assets
+
+      - name: Assemble update feeds
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p release-publish
+
+          for file in release-assets/cafe-code-release-windows-x64/*; do
+            case "${file}" in
+              *.exe|*.blockmap|*/${RELEASE_CHANNEL}.yml) cp "${file}" release-publish/ ;;
+            esac
+          done
+          for file in release-assets/cafe-code-release-linux-x64/*; do
+            case "${file}" in
+              *.AppImage|*.blockmap|*/${RELEASE_CHANNEL}-linux.yml) cp "${file}" release-publish/ ;;
+            esac
+          done
+          for arch in arm64 x64; do
+            for file in release-assets/cafe-code-release-macos-${arch}/*; do
+              case "${file}" in
+                *.dmg|*.zip|*.blockmap) cp "${file}" release-publish/ ;;
+              esac
+            done
+          done
+
+          node scripts/merge-update-manifests.ts \
+            --platform mac \
+            "release-assets/cafe-code-release-macos-arm64/${RELEASE_CHANNEL}-mac.yml" \
+            "release-assets/cafe-code-release-macos-x64/${RELEASE_CHANNEL}-mac.yml" \
+            "release-publish/${RELEASE_CHANNEL}-mac.yml"
+
+      - name: Validate release manifests and checksums
+        run: >-
+          corepack yarn validate:desktop-release
+          --release-dir release-publish
+          --version "${RELEASE_VERSION}"
+          --channel "${RELEASE_CHANNEL}"
+
+      - name: Create GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(
+            "${GITHUB_REF_NAME}"
+            release-publish/*
+            --verify-tag
+            --title "Cafe Code ${RELEASE_VERSION}"
+            --notes "Unsigned desktop release. Windows uses NSIS, macOS provides arm64/x64 DMGs, and Linux support is x64 AppImage only. Verify manual downloads with SHA256SUMS.txt."
+          )
+          if [[ "${{ needs.prepare.outputs.prerelease }}" == "true" ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"
+
+  detect-update:
+    name: Detect published GitHub update
+    needs: [prepare, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download lower-version packaged probe
+        uses: actions/download-artifact@v7
+        with:
+          name: cafe-code-update-probe-linux-x64
+          path: update-probe
+
+      - name: Run detection-only AppImage probe
+        shell: bash
+        env:
+          CAFE_CODE_UPDATE_DETECTION_CHANNEL: ${{ needs.prepare.outputs.channel }}
+          CAFE_CODE_UPDATE_DETECTION_EXPECT_VERSION: ${{ needs.prepare.outputs.version }}
+          CAFE_CODE_UPDATE_DETECTION_RESULT: ${{ runner.temp }}/cafe-update-detection.json
+        run: |
+          set -euo pipefail
+          probe=(update-probe/*.AppImage)
+          if [[ ! -f "${probe[0]}" ]]; then
+            echo "Packaged update probe AppImage is missing." >&2
+            exit 1
+          fi
+          chmod 0755 "${probe[0]}"
+          probe_path="$(realpath "${probe[0]}")"
+          probe_log="${RUNNER_TEMP}/cafe-update-detection.log"
+          if ! env APPIMAGE="${probe_path}" APPIMAGE_EXTRACT_AND_RUN=1 \
+            "${probe_path}" \
+            --no-sandbox \
+            --headless \
+            --disable-gpu \
+            --cafe-update-detection-probe \
+            > "${probe_log}" 2>&1; then
+            tail -100 "${probe_log}" >&2
+            exit 1
+          fi
+          tail -20 "${probe_log}"
+          node -e '
+            const fs = require("node:fs");
+            const result = JSON.parse(fs.readFileSync(process.env.CAFE_CODE_UPDATE_DETECTION_RESULT, "utf8"));
+            if (!result.ok || !result.updateAvailable || result.availableVersion !== process.env.CAFE_CODE_UPDATE_DETECTION_EXPECT_VERSION) {
+              console.error(result);
+              process.exit(1);
+            }
+            console.log(JSON.stringify(result));
+          '

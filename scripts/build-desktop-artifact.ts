@@ -264,7 +264,7 @@ const STAGED_YARN_PROJECT_FILES = [
   "packages/effect-codex-app-server/package.json",
   "packages/shared/package.json",
   "scripts/package.json",
-  "scripts/ensure-electron.ts",
+  "scripts/ensure-desktop-runtime.ts",
   "packaging/desktop-runtime/package.json",
 ] as const;
 
@@ -923,6 +923,12 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
+      ...(signed
+        ? {}
+        : {
+            identity: null,
+            hardenedRuntime: false,
+          }),
     };
   }
 

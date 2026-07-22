@@ -1,12 +1,15 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { runNativeDesktopRuntimeSmoke } from "./native-desktop-runtime-smoke.ts";
+import { readJsonFile } from "./json-file.ts";
 
 const PROCESS_TIMEOUT_MS = 15 * 60_000;
+const WINDOWS_CLEANUP_RETRY_DELAY_MS = 250;
+const WINDOWS_CLEANUP_RETRY_ATTEMPTS = 40;
 
 interface ProcessResult {
   readonly exitCode: number | null;
@@ -14,16 +17,37 @@ interface ProcessResult {
   readonly stderr: string;
 }
 
+interface CleanupDependencies {
+  readonly platform?: NodeJS.Platform;
+  readonly remove?: typeof rm;
+  readonly sleep?: (ms: number) => Promise<void>;
+}
+
+interface PathDisappearanceDependencies {
+  readonly platform?: NodeJS.Platform;
+  readonly exists?: (path: string) => boolean;
+  readonly sleep?: (ms: number) => Promise<void>;
+}
+
+type ManagedProviderSlug = "codex" | "claude";
+
+interface ProcessOptions {
+  readonly env?: NodeJS.ProcessEnv;
+  readonly timeoutMs?: number;
+  readonly windowsVerbatimArguments?: boolean;
+}
+
 async function runProcess(
   command: string,
   args: readonly string[],
-  options: { readonly env?: NodeJS.ProcessEnv; readonly timeoutMs?: number } = {},
+  options: ProcessOptions = {},
 ): Promise<ProcessResult> {
   return await new Promise<ProcessResult>((resolveProcess, reject) => {
     const child = spawn(command, [...args], {
       env: options.env ?? process.env,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
+      windowsVerbatimArguments: options.windowsVerbatimArguments ?? false,
     });
     let stdout = "";
     let stderr = "";
@@ -43,6 +67,75 @@ async function runProcess(
       resolveProcess({ exitCode, stdout, stderr });
     });
   });
+}
+
+function prependWindowsPathEntries(
+  env: NodeJS.ProcessEnv,
+  entries: readonly string[],
+): NodeJS.ProcessEnv {
+  const currentPath = env.PATH ?? env.Path ?? "";
+  const nextPath = [...entries.filter((entry) => entry.trim().length > 0), currentPath]
+    .filter((entry) => entry.trim().length > 0)
+    .join(";");
+  return {
+    ...env,
+    PATH: nextPath,
+    Path: undefined,
+  };
+}
+
+function isRetryableWindowsCleanupError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "EBUSY" || code === "EPERM" || code === "ENOTEMPTY";
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+export async function removePathWithRetries(
+  targetPath: string,
+  dependencies: CleanupDependencies = {},
+): Promise<void> {
+  const platform = dependencies.platform ?? process.platform;
+  const remove = dependencies.remove ?? rm;
+  const wait = dependencies.sleep ?? sleep;
+
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await remove(targetPath, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (
+        platform !== "win32" ||
+        !isRetryableWindowsCleanupError(error) ||
+        attempt >= WINDOWS_CLEANUP_RETRY_ATTEMPTS - 1
+      ) {
+        throw error;
+      }
+      // Windows can report parent process exit before the installer/uninstaller
+      // releases all file handles in the extracted app directory.
+      await wait(WINDOWS_CLEANUP_RETRY_DELAY_MS);
+    }
+  }
+}
+
+export async function waitForPathToDisappear(
+  targetPath: string,
+  dependencies: PathDisappearanceDependencies = {},
+): Promise<boolean> {
+  const platform = dependencies.platform ?? process.platform;
+  const pathExists = dependencies.exists ?? existsSync;
+  const wait = dependencies.sleep ?? sleep;
+
+  for (let attempt = 0; ; attempt += 1) {
+    if (!pathExists(targetPath)) return true;
+    if (platform !== "win32" || attempt >= WINDOWS_CLEANUP_RETRY_ATTEMPTS - 1) {
+      return false;
+    }
+    // NSIS can report exit before post-uninstall file deletion finishes.
+    await wait(WINDOWS_CLEANUP_RETRY_DELAY_MS);
+  }
 }
 
 export function selectWindowsInstaller(fileNames: readonly string[]): string {
@@ -74,7 +167,14 @@ export function selectInstalledWindowsExecutables(fileNames: readonly string[]):
 }
 
 function assertSuccessful(result: ProcessResult, operation: string): void {
-  if (result.exitCode !== 0) throw new Error(`${operation} exited nonzero.`);
+  if (result.exitCode === 0) return;
+
+  const details = [
+    `exitCode=${result.exitCode === null ? "null" : String(result.exitCode)}`,
+    result.stdout.trim().length > 0 ? `stdout:\n${result.stdout.trim()}` : null,
+    result.stderr.trim().length > 0 ? `stderr:\n${result.stderr.trim()}` : null,
+  ].filter((detail): detail is string => detail !== null);
+  throw new Error(`${operation} exited nonzero.\n${details.join("\n\n")}`);
 }
 
 async function readUserPathRegistry(): Promise<string> {
@@ -90,9 +190,50 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+export function buildManagedProviderProbeEnvironment(
+  managedRoot: string,
+  provider: ManagedProviderSlug,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const installRoot = join(managedRoot, "providers", provider, "current");
+  const binaryDir = join(installRoot, "node_modules", ".bin");
+  const nodeDir = join(managedRoot, "node", "current");
+
+  // Match the packaged bundled-runtime launcher: npm shims rely on managed
+  // Node and their local .bin directory being ahead of the ambient user PATH.
+  return {
+    ...prependWindowsPathEntries(baseEnv, [binaryDir, nodeDir]),
+    npm_config_prefix: installRoot,
+    npm_config_cache: join(managedRoot, "npm-cache"),
+  };
+}
+
+export function buildWindowsCmdCommand(commandPath: string, args: readonly string[]): string {
+  const renderedArgs = args.join(" ");
+  return `""${commandPath}"${renderedArgs.length > 0 ? ` ${renderedArgs}` : ""}"`;
+}
+
+export function buildWindowsCmdInvocation(
+  commandPath: string,
+  args: readonly string[],
+): {
+  readonly command: "cmd.exe";
+  readonly args: readonly ["/d", "/s", "/c", string];
+  readonly windowsVerbatimArguments: true;
+} {
+  return {
+    command: "cmd.exe",
+    args: ["/d", "/s", "/c", buildWindowsCmdCommand(commandPath, args)],
+    // cmd.exe parses /c payloads differently than CommandLineToArgvW. Passing
+    // the serialized command through Node's default Windows quoting escapes the
+    // outer quotes and makes cmd treat the whole payload as a literal filename.
+    windowsVerbatimArguments: true,
+  };
+}
+
 async function assertManagedProviderRuntime(managedRoot: string): Promise<void> {
   const resultPath = join(managedRoot, "install-result.json");
-  const result = readRecord(JSON.parse(await readFile(resultPath, "utf8")));
+  const result = readRecord(await readJsonFile(resultPath));
   const providers = Array.isArray(result?.providers) ? result.providers.map(readRecord) : [];
   if (
     result?.managedProviderRuntimeEnabled !== true ||
@@ -118,18 +259,14 @@ async function assertManagedProviderRuntime(managedRoot: string): Promise<void> 
     ["codex", "codex.cmd"],
     ["claude", "claude.cmd"],
   ] as const) {
-    const shim = join(
-      managedRoot,
-      "providers",
-      provider,
-      "current",
-      "node_modules",
-      ".bin",
-      executable,
-    );
+    const installRoot = join(managedRoot, "providers", provider, "current");
+    const shim = join(installRoot, "node_modules", ".bin", executable);
     if (!existsSync(shim)) throw new Error(`Managed ${provider} shim is missing.`);
-    const probe = await runProcess("cmd.exe", ["/d", "/s", "/c", `"${shim}" --version`], {
+    const probeInvocation = buildWindowsCmdInvocation(shim, ["--version"]);
+    const probe = await runProcess(probeInvocation.command, probeInvocation.args, {
+      env: buildManagedProviderProbeEnvironment(managedRoot, provider, process.env),
       timeoutMs: 60_000,
+      windowsVerbatimArguments: probeInvocation.windowsVerbatimArguments,
     });
     assertSuccessful(probe, `Managed ${provider} version probe`);
   }
@@ -171,7 +308,7 @@ export async function runWindowsNativeArtifactSmoke(
 
     const uninstall = await runProcess(uninstallerPath, ["/S"], { timeoutMs: 5 * 60_000 });
     assertSuccessful(uninstall, "NSIS uninstall");
-    if (existsSync(appPath))
+    if (!(await waitForPathToDisappear(appPath)))
       throw new Error("NSIS uninstall left the application executable behind.");
     uninstallerPath = undefined;
     console.info("Windows NSIS install/runtime/managed-provider/uninstall smoke passed.");
@@ -179,7 +316,7 @@ export async function runWindowsNativeArtifactSmoke(
     if (uninstallerPath && existsSync(uninstallerPath)) {
       await runProcess(uninstallerPath, ["/S"], { timeoutMs: 5 * 60_000 }).catch(() => undefined);
     }
-    await rm(smokeRoot, { recursive: true, force: true });
+    await removePathWithRetries(smokeRoot);
   }
 }
 

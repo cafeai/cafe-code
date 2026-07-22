@@ -749,14 +749,20 @@ function buildCodexCollaborationMode(input: {
   if (input.interactionMode === undefined) {
     return undefined;
   }
+  // `auto` is a Claude permission mode persisted in Cafe's provider-neutral
+  // thread state. A thread can later switch providers, but Codex app-server's
+  // collaboration protocol only accepts `default` and `plan`; conservatively
+  // translate every non-plan provider mode to Codex's normal collaboration
+  // mode instead of forwarding an invalid wire value.
+  const mode = input.interactionMode === "plan" ? "plan" : "default";
   const model = normalizeCodexModelSlug(input.model) ?? DEFAULT_MODEL;
   return {
-    mode: input.interactionMode,
+    mode,
     settings: {
       model,
       reasoning_effort: input.effort ?? "medium",
       developer_instructions:
-        input.interactionMode === "plan"
+        mode === "plan"
           ? CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS
           : CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
     },

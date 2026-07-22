@@ -354,7 +354,7 @@ describe("UsageStatsService", () => {
         yield* harness.emitProvider(tokenUsageEvent(THREAD_1, "p5", { outputTokens: 150 }, CODEX));
 
         yield* harness.service.flush;
-        assert.deepEqual(yield* harness.repository.listTokenBreakdownDays, [
+        const expectedRows = [
           {
             day: "1970-01-01",
             provider: CLAUDE,
@@ -373,7 +373,16 @@ describe("UsageStatsService", () => {
             model: "gpt-5.6-codex-mini",
             outputTokens: 50,
           },
-        ]);
+        ];
+        assert.deepEqual(yield* harness.repository.listTokenBreakdownDays, expectedRows);
+
+        const expectedLifetimeBreakdown = expectedRows.map(({ day: _day, ...row }) => row);
+        assert.deepEqual((yield* harness.service.get).tokenBreakdown, expectedLifetimeBreakdown);
+
+        // A fresh process must reconstruct the same lifetime view from the
+        // daily ledger without a Settings-page SQL query.
+        const rebuiltService = yield* harness.rebuildService;
+        assert.deepEqual((yield* rebuiltService.get).tokenBreakdown, expectedLifetimeBreakdown);
       }),
     ),
   );
