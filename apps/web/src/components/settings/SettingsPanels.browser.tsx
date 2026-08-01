@@ -36,6 +36,7 @@ import {
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { __resetLocalApiForTests } from "../../localApi";
+import { settingsProfilesStore } from "../../settingsProfiles";
 import { AppAtomRegistryProvider, resetAppAtomRegistryForTests } from "../../rpc/atomRegistry";
 import { resetServerStateForTests, setServerConfigSnapshot } from "../../rpc/serverState";
 import { useUiStateStore } from "../../uiStateStore";
@@ -629,6 +630,7 @@ describe("settings panels", () => {
     resetServerStateForTests();
     await __resetLocalApiForTests();
     localStorage.clear();
+    settingsProfilesStore.refresh();
     useUiStateStore.setState({ defaultAdvertisedEndpointKey: null });
     authAccessHarness.reset();
   });
@@ -1137,6 +1139,48 @@ describe("settings panels", () => {
     await vi.waitFor(() => {
       expect(updateClientSettings).toHaveBeenCalledWith({ sidebarStarSpeed: 1.25 });
     });
+  });
+
+  it("saves and applies a local settings profile without sensitive settings", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    setServerConfigSnapshot({
+      ...createBaseServerConfig(),
+      clientSettings: {
+        ...DEFAULT_CLIENT_SETTINGS,
+        onboardingCompleted: true,
+        showSidebarMascot: false,
+        notificationsEnabled: true,
+      },
+    });
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <AppearanceSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await page.getByLabelText("New settings profile name").fill("Focus");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect.element(page.getByRole("button", { name: "Focus" })).toBeInTheDocument();
+    await expect.element(page.getByRole("status")).toBeInTheDocument();
+    await expect
+      .element(page.getByText("Saved \u201cFocus\u201d on this device."))
+      .toBeInTheDocument();
+
+    updateClientSettings.mockClear();
+    await page.getByRole("button", { name: "Focus" }).click();
+    await vi.waitFor(() => expect(updateClientSettings).toHaveBeenCalledOnce());
+    await expect.element(page.getByRole("status")).toBeInTheDocument();
+    await expect.element(page.getByText("Applied \u201cFocus\u201d.")).toBeInTheDocument();
+
+    const applied = updateClientSettings.mock.calls[0]?.[0];
+    expect(applied).toMatchObject({ showSidebarMascot: false });
+    expect(applied).not.toHaveProperty("notificationsEnabled");
+    expect(applied).not.toHaveProperty("providerModelPreferences");
+    expect(applied).not.toHaveProperty("sidebarBrandImageDataUrl");
+    expect(applied).not.toHaveProperty("defaultEditor");
   });
 
   it("shows detected editor icons in the Files & Diffs default editor selector", async () => {

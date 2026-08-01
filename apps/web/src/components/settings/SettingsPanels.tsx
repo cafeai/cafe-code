@@ -91,6 +91,7 @@ import {
   type ProviderUpdateCandidate,
 } from "../ProviderUpdateLaunchNotification.logic";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
+import { SettingsProfiles } from "./SettingsProfiles";
 import { DRIVER_OPTIONS, getDriverOption } from "./providerDriverMeta";
 import {
   buildEmptyRecycleBinConfirmationMessage,
@@ -696,6 +697,7 @@ export function AppearanceSettingsPanel() {
 
   return (
     <SettingsPageContainer>
+      <SettingsProfiles />
       <SettingsSection title="Appearance">
         <SettingsRow
           title="Theme"
