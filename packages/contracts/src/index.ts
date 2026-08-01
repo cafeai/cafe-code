@@ -12,6 +12,7 @@ export * from "./providerDaemon.ts";
 export * from "./providerSupervisor.ts";
 export * from "./model.ts";
 export * from "./keybindings.ts";
+export * from "./systemTelemetry.ts";
 export * from "./server.ts";
 export * from "./settings.ts";
 export * from "./git.ts";
