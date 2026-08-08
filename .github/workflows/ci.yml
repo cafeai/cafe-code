@@ -51,6 +51,9 @@ jobs:
       - name: Install dependencies
         run: corepack yarn install --immutable
 
+      - name: Validate provider compatibility pins
+        run: corepack yarn providers:conform smoke
+
       - name: Audit repository toolchain
         if: runner.os == 'Linux'
         run: corepack yarn audit:repository
@@ -79,6 +82,41 @@ jobs:
       - name: Browser tests
         if: runner.os == 'Linux'
         run: corepack yarn workspace @cafecode/web test:browser
+
+  arch-quality:
+    name: Quality (Arch Linux)
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    timeout-minutes: 45
+    steps:
+      - name: Install Arch toolchain
+        run: pacman -Syu --noconfirm git nodejs-lts-krypton npm
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Activate pinned Yarn
+        run: |
+          node -e "const [major, minor] = process.versions.node.split('.').map(Number); if (major !== 24 || minor < 13) process.exit(1)"
+          npm install --global corepack@0.35.0
+          corepack enable
+          corepack install --global "$(node -p "require('./package.json').packageManager")"
+          corepack yarn --version
+
+      - name: Install dependencies
+        run: corepack yarn install --immutable
+
+      - name: Validate provider compatibility pins
+        run: corepack yarn providers:conform smoke
+
+      - name: Typecheck
+        run: corepack yarn typecheck
+
+      - name: Test
+        run: corepack yarn test
+
+      - name: Build desktop pipeline
+        run: corepack yarn build:desktop
 
   native-artifacts:
     name: Native artifact (${{ matrix.name }})

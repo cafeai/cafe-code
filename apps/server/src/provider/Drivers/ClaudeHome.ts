@@ -29,6 +29,12 @@ export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function
   return {
     ...baseEnv,
     HOME: resolvedHomePath,
+    // Club Code owns provider compatibility and only advances this pin after
+    // source review and cross-platform gates. Prevent Claude's background
+    // updater from silently replacing that tested binary between launches;
+    // manual `claude install <version>` remains available to the detached
+    // conformity helper.
+    DISABLE_AUTOUPDATER: "1",
     CLAUDE_CONFIG_DIR:
       configuredConfigDir && configuredConfigDir.length > 0
         ? path.resolve(configuredConfigDir)

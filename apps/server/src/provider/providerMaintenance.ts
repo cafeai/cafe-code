@@ -20,6 +20,7 @@ export interface ProviderMaintenanceCapabilities {
   readonly provider: ProviderDriverKind;
   readonly packageName: string | null;
   readonly update: ProviderMaintenanceCommandAction | null;
+  readonly approvedVersion?: string;
 }
 
 export interface ProviderMaintenanceCommandAction {
@@ -45,6 +46,7 @@ export interface ProviderMaintenanceCapabilitiesResolver {
 export interface PackageManagedProviderMaintenanceDefinition {
   readonly provider: ProviderDriverKind;
   readonly npmPackageName: string;
+  readonly approvedVersion?: string;
   readonly homebrewFormula: string | null;
   readonly nativeUpdate: {
     readonly executable: string;
@@ -78,6 +80,7 @@ export function makeProviderMaintenanceCapabilities(input: {
   readonly updateExecutable: string | null;
   readonly updateArgs: ReadonlyArray<string>;
   readonly updateLockKey: string | null;
+  readonly approvedVersion?: string;
 }): ProviderMaintenanceCapabilities {
   const update =
     input.updateExecutable === null || input.updateLockKey === null
@@ -92,12 +95,14 @@ export function makeProviderMaintenanceCapabilities(input: {
     provider: input.provider,
     packageName: input.packageName,
     update,
+    ...(input.approvedVersion ? { approvedVersion: input.approvedVersion } : {}),
   };
 }
 
 export function makeManualOnlyProviderMaintenanceCapabilities(input: {
   readonly provider: ProviderDriverKind;
   readonly packageName: string | null;
+  readonly approvedVersion?: string;
 }): ProviderMaintenanceCapabilities {
   return makeProviderMaintenanceCapabilities({
     provider: input.provider,
@@ -105,6 +110,7 @@ export function makeManualOnlyProviderMaintenanceCapabilities(input: {
     updateExecutable: null,
     updateArgs: [],
     updateLockKey: null,
+    ...(input.approvedVersion ? { approvedVersion: input.approvedVersion } : {}),
   });
 }
 
@@ -116,36 +122,74 @@ function makeNpmGlobalProviderMaintenanceCapabilities(
   definition: PackageManagedProviderMaintenanceDefinition,
   options?: ProviderMaintenanceCapabilityResolutionOptions,
 ): ProviderMaintenanceCapabilities {
+  if (definition.approvedVersion) {
+    return makeManualOnlyProviderMaintenanceCapabilities({
+      provider: definition.provider,
+      packageName: definition.npmPackageName,
+      approvedVersion: definition.approvedVersion,
+    });
+  }
   return makeProviderMaintenanceCapabilities({
     provider: definition.provider,
     packageName: definition.npmPackageName,
     updateExecutable: resolveNpmGlobalUpdateExecutable(options?.platform),
-    updateArgs: ["install", "-g", `${definition.npmPackageName}@latest`],
+    updateArgs: [
+      "install",
+      "-g",
+      `${definition.npmPackageName}@${definition.approvedVersion ?? "latest"}`,
+    ],
     updateLockKey: "npm-global",
+    ...(definition.approvedVersion ? { approvedVersion: definition.approvedVersion } : {}),
   });
 }
 
 function makePnpmGlobalProviderMaintenanceCapabilities(
   definition: PackageManagedProviderMaintenanceDefinition,
 ): ProviderMaintenanceCapabilities {
+  if (definition.approvedVersion) {
+    return makeManualOnlyProviderMaintenanceCapabilities({
+      provider: definition.provider,
+      packageName: definition.npmPackageName,
+      approvedVersion: definition.approvedVersion,
+    });
+  }
   return makeProviderMaintenanceCapabilities({
     provider: definition.provider,
     packageName: definition.npmPackageName,
     updateExecutable: "pnpm",
-    updateArgs: ["add", "-g", `${definition.npmPackageName}@latest`],
+    updateArgs: [
+      "add",
+      "-g",
+      `${definition.npmPackageName}@${definition.approvedVersion ?? "latest"}`,
+    ],
     updateLockKey: "pnpm-global",
+    ...(definition.approvedVersion ? { approvedVersion: definition.approvedVersion } : {}),
   });
 }
 
 function makeVitePlusGlobalProviderMaintenanceCapabilities(
   definition: PackageManagedProviderMaintenanceDefinition,
 ): ProviderMaintenanceCapabilities {
+  if (definition.approvedVersion) {
+    return makeManualOnlyProviderMaintenanceCapabilities({
+      provider: definition.provider,
+      packageName: definition.npmPackageName,
+      approvedVersion: definition.approvedVersion,
+    });
+  }
   return makeProviderMaintenanceCapabilities({
     provider: definition.provider,
     packageName: definition.npmPackageName,
     updateExecutable: "vp",
-    updateArgs: ["i", "-g", definition.npmPackageName],
+    updateArgs: [
+      "i",
+      "-g",
+      definition.approvedVersion
+        ? `${definition.npmPackageName}@${definition.approvedVersion}`
+        : definition.npmPackageName,
+    ],
     updateLockKey: "vite-plus-global",
+    ...(definition.approvedVersion ? { approvedVersion: definition.approvedVersion } : {}),
   });
 }
 
@@ -156,6 +200,19 @@ function makeHomebrewProviderMaintenanceCapabilities(
     return makeManualOnlyProviderMaintenanceCapabilities({
       provider: definition.provider,
       packageName: definition.npmPackageName,
+      ...(definition.approvedVersion ? { approvedVersion: definition.approvedVersion } : {}),
+    });
+  }
+
+  // Homebrew cannot install the repository's exact npm compatibility pin.
+  // Leave the action manual for compatibility-managed providers; the
+  // detached conformity helper enables it only when the formula's upstream
+  // release is the same version the repository has tested.
+  if (definition.approvedVersion) {
+    return makeManualOnlyProviderMaintenanceCapabilities({
+      provider: definition.provider,
+      packageName: definition.npmPackageName,
+      approvedVersion: definition.approvedVersion,
     });
   }
 
@@ -165,6 +222,7 @@ function makeHomebrewProviderMaintenanceCapabilities(
     updateExecutable: "brew",
     updateArgs: ["upgrade", definition.homebrewFormula],
     updateLockKey: "homebrew",
+    ...(definition.approvedVersion ? { approvedVersion: definition.approvedVersion } : {}),
   });
 }
 
@@ -175,12 +233,25 @@ function makeNativeProviderMaintenanceCapabilities(
     return null;
   }
 
+  // Compatibility-pinned providers must use the detached conformity workflow.
+  // Replacing a live global/native CLI from the in-app maintenance runner can
+  // corrupt a Windows install and lets a provider's floating updater bypass
+  // the repository's tested pin.
+  if (definition.approvedVersion) {
+    return makeManualOnlyProviderMaintenanceCapabilities({
+      provider: definition.provider,
+      packageName: definition.npmPackageName,
+      approvedVersion: definition.approvedVersion,
+    });
+  }
+
   return makeProviderMaintenanceCapabilities({
     provider: definition.provider,
     packageName: definition.npmPackageName,
     updateExecutable: definition.nativeUpdate.executable,
     updateArgs: definition.nativeUpdate.args,
     updateLockKey: definition.nativeUpdate.lockKey,
+    ...(definition.approvedVersion ? { approvedVersion: definition.approvedVersion } : {}),
   });
 }
 
@@ -247,6 +318,7 @@ export function resolvePackageManagedProviderMaintenance(
     return makeManualOnlyProviderMaintenanceCapabilities({
       provider: definition.provider,
       packageName: definition.npmPackageName,
+      ...(definition.approvedVersion ? { approvedVersion: definition.approvedVersion } : {}),
     });
   }
 
@@ -290,12 +362,14 @@ export function resolvePackageManagedProviderMaintenance(
     return makeManualOnlyProviderMaintenanceCapabilities({
       provider: definition.provider,
       packageName: definition.npmPackageName,
+      ...(definition.approvedVersion ? { approvedVersion: definition.approvedVersion } : {}),
     });
   }
 
   return makeManualOnlyProviderMaintenanceCapabilities({
     provider: definition.provider,
     packageName: definition.npmPackageName,
+    ...(definition.approvedVersion ? { approvedVersion: definition.approvedVersion } : {}),
   });
 }
 
@@ -383,19 +457,48 @@ export function createProviderVersionAdvisory(input: {
   const capabilities =
     input.maintenanceCapabilities ?? makeManualProviderMaintenanceCapabilities(input.driver);
   const latestVersion = input.latestVersion ?? null;
+  const approvedVersion = capabilities.approvedVersion;
+  const currentVersionForComparison = input.currentVersion?.split("+", 1)[0] ?? null;
+  const approvedVersionForComparison = approvedVersion?.split("+", 1)[0];
+  const latestVersionForComparison = latestVersion?.split("+", 1)[0] ?? null;
   const advisory = deriveVersionAdvisory({
-    currentVersion: input.currentVersion,
-    latestVersion,
+    currentVersion: currentVersionForComparison,
+    latestVersion: latestVersionForComparison,
   });
+  const needsApprovedVersion =
+    approvedVersionForComparison !== undefined &&
+    currentVersionForComparison !== null &&
+    compareSemverVersions(currentVersionForComparison, approvedVersionForComparison) !== 0;
+  const isAheadOfApproved =
+    needsApprovedVersion &&
+    approvedVersionForComparison !== undefined &&
+    currentVersionForComparison !== null &&
+    compareSemverVersions(currentVersionForComparison, approvedVersionForComparison) > 0;
+  const approvalPending =
+    approvedVersionForComparison !== undefined &&
+    latestVersionForComparison !== null &&
+    compareSemverVersions(latestVersionForComparison, approvedVersionForComparison) > 0 &&
+    !needsApprovedVersion;
+  const upstreamDiffersFromApproved =
+    approvedVersionForComparison !== undefined &&
+    latestVersionForComparison !== null &&
+    compareSemverVersions(latestVersionForComparison, approvedVersionForComparison) > 0;
 
   return {
-    status: advisory.status,
+    // Keep the established wire literal so an older renderer degrades safely.
+    // approvedVersion carries the finer-grained conformity state.
+    status: needsApprovedVersion ? "behind_latest" : advisory.status,
     currentVersion: input.currentVersion,
     latestVersion,
-    updateCommand: capabilities.update?.command ?? null,
-    canUpdate: capabilities.update !== null,
+    approvedVersion: approvedVersion ?? null,
+    updateCommand: approvedVersion === undefined ? (capabilities.update?.command ?? null) : null,
+    canUpdate: approvedVersion === undefined && capabilities.update !== null,
     checkedAt: input.checkedAt ?? null,
-    message: advisory.message,
+    message: needsApprovedVersion
+      ? `Provider ${String(input.currentVersion)} differs from approved version ${approvedVersion}. Run the detached provider conformity workflow to ${isAheadOfApproved ? "revert" : "update"} safely.${upstreamDiffersFromApproved ? ` Upstream ${latestVersion} is still awaiting conformity.` : ""}`
+      : approvalPending
+        ? `Provider ${latestVersion} is available but has not passed Club Code conformity yet.`
+        : advisory.message,
   };
 }
 

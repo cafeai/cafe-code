@@ -255,6 +255,7 @@ function createOutdatedProvider(
       status: "behind_latest",
       currentVersion: "1.0.0",
       latestVersion: "1.1.0",
+      approvedVersion: null,
       message: "Update available.",
       checkedAt: "2026-05-04T10:00:00.000Z",
       updateCommand,

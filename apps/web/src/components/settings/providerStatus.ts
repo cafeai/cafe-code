@@ -1,4 +1,5 @@
 import type { ServerProvider, ServerProviderVersionAdvisory } from "@cafecode/contracts";
+import { compareSemverVersions } from "@cafecode/shared/semver";
 
 /**
  * Visual treatment for each server-reported provider status. Centralized so
@@ -94,25 +95,46 @@ export function getProviderVersionLabel(version: string | null | undefined) {
 export function getProviderVersionAdvisoryPresentation(
   advisory: ServerProviderVersionAdvisory | undefined,
 ): {
+  readonly title: string;
   readonly detail: string;
   readonly updateCommand: string | null;
+  readonly actionable: boolean;
   readonly emphasis: "normal" | "strong";
 } | null {
   if (!advisory || advisory.status === "current" || advisory.status === "unknown") {
     return null;
   }
 
-  const label = "Update available";
-  const version = advisory.latestVersion;
+  const current = advisory.currentVersion?.split("+", 1)[0] ?? null;
+  const approved = advisory.approvedVersion?.split("+", 1)[0] ?? null;
+  const isOffApprovedPin =
+    current !== null && approved !== null && compareSemverVersions(current, approved) !== 0;
+  const isAwaitingConformity =
+    !isOffApprovedPin &&
+    approved !== null &&
+    advisory.latestVersion !== null &&
+    compareSemverVersions(advisory.latestVersion.split("+", 1)[0] ?? "", approved) > 0;
+  const label = isOffApprovedPin
+    ? "Conformity required"
+    : isAwaitingConformity
+      ? "Awaiting conformity"
+      : "Update available";
+  const version = isOffApprovedPin ? advisory.approvedVersion : advisory.latestVersion;
   const versionLabel = getProviderVersionLabel(version);
 
   return {
+    title: label,
     detail:
       advisory.message ??
-      (versionLabel
-        ? `${label}: install ${versionLabel}.`
-        : `${label}: install the latest provider version.`),
+      (isAwaitingConformity
+        ? versionLabel
+          ? `${label}: ${versionLabel}.`
+          : `${label}.`
+        : versionLabel
+          ? `${label}: install ${versionLabel}.`
+          : `${label}: install the latest provider version.`),
     updateCommand: advisory.updateCommand,
+    actionable: advisory.canUpdate && advisory.updateCommand !== null,
     emphasis: "normal" as const,
   };
 }

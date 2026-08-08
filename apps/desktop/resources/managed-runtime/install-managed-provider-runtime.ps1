@@ -125,6 +125,7 @@ function Install-ProviderPackage {
   param(
     [string]$Name,
     [string]$PackageName,
+    [string]$Version,
     [string]$ProviderSlug,
     [string]$BinaryName,
     [string]$ManagedRoot,
@@ -156,10 +157,10 @@ function Install-ProviderPackage {
     "--no-fund",
     "--loglevel",
     "warn",
-    "$PackageName@latest"
+    "$PackageName@$Version"
   )
 
-  Write-InstallerLog "Installing $Name provider package $PackageName into $installRoot."
+  Write-InstallerLog "Installing approved $Name provider package $PackageName@$Version into $installRoot."
   $output = & $NpmPath @arguments 2>&1
   $exitCode = $LASTEXITCODE
   if ($null -ne $output) {
@@ -239,8 +240,8 @@ try {
   ) | Set-Content -LiteralPath $npmUserConfig -Encoding UTF8
 
   $results = @(
-    Install-ProviderPackage -Name "Codex" -PackageName "@openai/codex" -ProviderSlug "codex" -BinaryName "codex" -ManagedRoot $managedRoot -NodeTarget $nodeTarget -NpmPath $npmPath -NpmCache $npmCache -NpmUserConfig $npmUserConfig
-    Install-ProviderPackage -Name "Claude" -PackageName "@anthropic-ai/claude-code" -ProviderSlug "claude" -BinaryName "claude" -ManagedRoot $managedRoot -NodeTarget $nodeTarget -NpmPath $npmPath -NpmCache $npmCache -NpmUserConfig $npmUserConfig
+    Install-ProviderPackage -Name "Codex" -PackageName "@openai/codex" -Version "0.147.0" -ProviderSlug "codex" -BinaryName "codex" -ManagedRoot $managedRoot -NodeTarget $nodeTarget -NpmPath $npmPath -NpmCache $npmCache -NpmUserConfig $npmUserConfig
+    Install-ProviderPackage -Name "Claude" -PackageName "@anthropic-ai/claude-code" -Version "2.1.224" -ProviderSlug "claude" -BinaryName "claude" -ManagedRoot $managedRoot -NodeTarget $nodeTarget -NpmPath $npmPath -NpmCache $npmCache -NpmUserConfig $npmUserConfig
   )
 
   Write-JsonFile -Path (Join-Path $managedRoot "install-result.json") -Value ([ordered]@{

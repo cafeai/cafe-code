@@ -2783,6 +2783,7 @@ describe("ClaudeAdapterLive", () => {
       harness.query.emit({
         type: "system",
         subtype: "model_refusal_fallback",
+        scope: "local",
         trigger: "refusal",
         direction: "retry",
         original_model: "claude-fable-5",
@@ -2907,13 +2908,17 @@ describe("ClaudeAdapterLive", () => {
         true,
       );
 
-      assert.equal(
-        runtimeEvents.some(
-          (event) =>
-            event.type === "runtime.warning" && event.payload.message.includes("fallback model"),
-        ),
-        true,
+      const refusalFallbackWarning = runtimeEvents.find(
+        (event) =>
+          event.type === "runtime.warning" && event.payload.message.includes("fallback model"),
       );
+      assert.equal(refusalFallbackWarning?.type, "runtime.warning");
+      if (refusalFallbackWarning?.type === "runtime.warning") {
+        assert.equal(
+          (refusalFallbackWarning.payload.detail as { readonly scope?: unknown }).scope,
+          "local",
+        );
+      }
       assert.equal(
         runtimeEvents.some(
           (event) =>

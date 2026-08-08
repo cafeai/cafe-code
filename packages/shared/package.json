@@ -128,6 +128,10 @@
       "types": "./src/providerRuntimeEventCompaction.ts",
       "import": "./src/providerRuntimeEventCompaction.ts"
     },
+    "./providerCompatibility": {
+      "types": "./src/providerCompatibility.ts",
+      "import": "./src/providerCompatibility.ts"
+    },
     "./startupProfiler": {
       "types": "./src/startupProfiler.ts",
       "import": "./src/startupProfiler.ts"

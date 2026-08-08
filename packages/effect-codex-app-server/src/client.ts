@@ -93,6 +93,27 @@ type ServerNotificationHandler = (
   payload: unknown,
 ) => Effect.Effect<void, CodexError.CodexAppServerError>;
 
+function normalizeServerRequestPayload(method: string, payload: unknown): unknown {
+  if (
+    method !== "item/tool/requestUserInput" ||
+    typeof payload !== "object" ||
+    payload === null ||
+    Array.isArray(payload) ||
+    "isBlocking" in payload
+  ) {
+    return payload;
+  }
+
+  // Codex 0.147 publishes `isBlocking` as required in its generated schema,
+  // while its Rust wire decoder intentionally defaults the field to true for
+  // requests emitted by older app-server versions. Mirror that compatibility
+  // contract before applying the generated Effect schema.
+  return {
+    ...payload,
+    isBlocking: true,
+  };
+}
+
 export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make")(function* (
   stdio: Stdio.Stdio,
   options: CodexAppServerClientOptions = {},
@@ -235,7 +256,11 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
       const responseSchema = getServerRequestResponseSchema(method);
       const handler = requestHandlers.get(method);
 
-      return decodeOptionalPayload(method, payloadSchema, request.params).pipe(
+      return decodeOptionalPayload(
+        method,
+        payloadSchema,
+        normalizeServerRequestPayload(method, request.params),
+      ).pipe(
         Effect.flatMap((decoded) => runHandler(handler, decoded, method)),
         Effect.flatMap((result) => encodeOptionalPayload(method, responseSchema, result)),
       );

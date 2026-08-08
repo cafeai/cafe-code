@@ -167,6 +167,8 @@ type ClaudeForwardCompatibleSystemMessage =
       readonly api_refusal_explanation?: string;
       readonly retracted_message_uuids?: ReadonlyArray<string>;
       readonly refused_user_message_uuid?: string;
+      /** Added by Agent SDK 0.3.222; absent means the session model changed. */
+      readonly scope?: "session" | "local";
     })
   | (Record<string, unknown> & {
       readonly type: "system";
@@ -3565,6 +3567,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       case "model_refusal_fallback":
         yield* emitRuntimeWarning(context, message.content, {
           subtype: message.subtype,
+          scope: message.scope ?? "session",
           trigger: message.trigger,
           direction: message.direction,
           originalModel: message.original_model,

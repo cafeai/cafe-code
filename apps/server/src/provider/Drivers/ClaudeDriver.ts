@@ -13,6 +13,7 @@
  * @module provider/Drivers/ClaudeDriver
  */
 import { ClaudeSettings, ProviderDriverKind, type ServerProvider } from "@cafecode/contracts";
+import { approvedProviderCliVersion } from "@cafecode/shared/providerCompatibility";
 import * as Cache from "effect/Cache";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -55,6 +56,7 @@ const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
 const SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
 const CAPABILITIES_PROBE_TTL = Duration.minutes(5);
+const APPROVED_CLAUDE_CODE_VERSION = approvedProviderCliVersion("claude");
 
 function isClaudeNativeCommandPath(commandPath: string): boolean {
   const normalized = normalizeCommandPath(commandPath);
@@ -68,10 +70,11 @@ function isClaudeNativeCommandPath(commandPath: string): boolean {
 const UPDATE_DEFINITION = {
   provider: DRIVER_KIND,
   npmPackageName: "@anthropic-ai/claude-code",
+  approvedVersion: APPROVED_CLAUDE_CODE_VERSION,
   homebrewFormula: "claude-code",
   nativeUpdate: {
     executable: "claude",
-    args: ["update"],
+    args: ["install", APPROVED_CLAUDE_CODE_VERSION],
     lockKey: "claude-native",
     isCommandPath: isClaudeNativeCommandPath,
   },

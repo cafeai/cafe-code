@@ -22,6 +22,7 @@
  * @module provider/Drivers/CodexDriver
  */
 import { CodexSettings, ProviderDriverKind, type ServerProvider } from "@cafecode/contracts";
+import { approvedProviderCliVersion } from "@cafecode/shared/providerCompatibility";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -66,10 +67,14 @@ const DRIVER_KIND = ProviderDriverKind.make("codex");
 // neither path creates hidden Codex app-server sessions or repeated CLI probe
 // queues.
 const PERIODIC_SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
+const APPROVED_CODEX_VERSION = approvedProviderCliVersion("codex");
 const UPDATE_DEFINITION = {
   provider: DRIVER_KIND,
   npmPackageName: "@openai/codex",
+  approvedVersion: APPROVED_CODEX_VERSION,
   homebrewFormula: "codex",
+  // `codex update` has no exact-version argument. The standardized detached
+  // updater may use it only after proving registry latest equals this pin.
   nativeUpdate: null,
 } as const;
 const UPDATE = makePackageManagedProviderMaintenanceResolver(UPDATE_DEFINITION);

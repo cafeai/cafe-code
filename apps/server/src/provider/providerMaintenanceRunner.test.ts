@@ -233,6 +233,7 @@ describe("providerMaintenanceRunner", () => {
           status: "behind_latest",
           currentVersion: "2.0.14",
           latestVersion: "2.1.123",
+          approvedVersion: null,
           updateCommand: "pnpm add -g @anthropic-ai/claude-code@latest",
           canUpdate: true,
           checkedAt: "2026-04-30T12:00:00.000Z",
@@ -267,6 +268,45 @@ describe("providerMaintenanceRunner", () => {
           mockSpawnerLayer((command, args) => {
             calls.push({ command, args });
             return { stdout: "updated" };
+          }),
+        ),
+      ),
+    );
+  });
+
+  it.effect("refuses live replacement of a compatibility-managed provider", () => {
+    return Effect.gen(function* () {
+      const { registry } = yield* makeRegistry(baseProvider);
+      const updater = yield* makeTestRunner({
+        ...registry,
+        getProviderMaintenanceCapabilitiesForInstance: () =>
+          Effect.succeed(
+            makeProviderMaintenanceCapabilities({
+              provider: CODEX_DRIVER,
+              packageName: "@openai/codex",
+              updateExecutable: "npm",
+              updateArgs: ["install", "-g", "@openai/codex@0.147.0"],
+              updateLockKey: "npm-global",
+              approvedVersion: "0.147.0",
+            }),
+          ),
+      });
+
+      const exit = yield* updater.updateProvider(CODEX_DRIVER).pipe(Effect.exit);
+      assert.strictEqual(Exit.isFailure(exit), true);
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause);
+        assert.strictEqual(isServerProviderUpdateError(error), true);
+        if (isServerProviderUpdateError(error)) {
+          assert.include(error.reason, "detached provider conformity workflow");
+        }
+      }
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          latestVersionHttpClient("0.147.0"),
+          mockSpawnerLayer(() => {
+            throw new Error("compatibility-managed update must not spawn");
           }),
         ),
       ),

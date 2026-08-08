@@ -174,6 +174,23 @@ function readPayload<A>(
   return isPayload(payload) ? payload : undefined;
 }
 
+function normalizeToolRequestUserInputPayload(
+  payload: ProviderEvent["payload"],
+): ProviderEvent["payload"] {
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload) ||
+    "isBlocking" in payload
+  ) {
+    return payload;
+  }
+
+  // Codex 0.147 publishes isBlocking as required, while its wire decoder still
+  // accepts older app-server requests without it and treats those as blocking.
+  return { ...payload, isBlocking: true };
+}
+
 function trimText(value: string | undefined | null): string | undefined {
   const trimmed = value?.trim();
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
@@ -1065,9 +1082,12 @@ function mapToRuntimeEvents(
 
   if (event.kind === "request") {
     if (event.method === "item/tool/requestUserInput") {
+      const normalizedPayload = normalizeToolRequestUserInputPayload(event.payload);
       const payload =
-        readPayload(EffectCodexSchema.ServerRequest__ToolRequestUserInputParams, event.payload) ??
-        readPayload(EffectCodexSchema.ToolRequestUserInputParams, event.payload);
+        readPayload(
+          EffectCodexSchema.ServerRequest__ToolRequestUserInputParams,
+          normalizedPayload,
+        ) ?? readPayload(EffectCodexSchema.ToolRequestUserInputParams, normalizedPayload);
       const questions = payload ? toUserInputQuestions(payload.questions) : undefined;
       if (!questions) {
         return [];

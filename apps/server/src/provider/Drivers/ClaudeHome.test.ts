@@ -32,6 +32,7 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
 
         expect(yield* resolveClaudeHomePath({ homePath: "" })).toBe(resolved);
         expect(env.HOME).toBe(resolved);
+        expect(env.DISABLE_AUTOUPDATER).toBe("1");
         expect(env.CLAUDE_CONFIG_DIR).toBe(path.join(resolved, ".claude"));
       }),
     );
@@ -66,6 +67,7 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
         );
 
         expect(env.HOME).toBe(path.resolve(NodeOS.homedir()));
+        expect(env.DISABLE_AUTOUPDATER).toBe("1");
         expect(env.CLAUDE_CONFIG_DIR).toBe(explicitConfigDir);
       }),
     );

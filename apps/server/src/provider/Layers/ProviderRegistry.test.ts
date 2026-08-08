@@ -358,6 +358,50 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         }),
       );
 
+      it.effect("labels the Codex 0.147 Business ProLite plan as Business", () =>
+        Effect.gen(function* () {
+          const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+            Effect.succeed(
+              makeCodexProbeSnapshot({
+                account: {
+                  account: {
+                    type: "chatgpt",
+                    email: "business@example.com",
+                    planType: "self_serve_business_prolite",
+                  },
+                  requiresOpenaiAuth: false,
+                },
+              }),
+            ),
+          );
+
+          assert.strictEqual(status.auth.status, "authenticated");
+          assert.strictEqual(status.auth.label, "ChatGPT Business Subscription");
+        }),
+      );
+
+      it.effect("labels the Codex 0.147 Enterprise automation plan as Enterprise", () =>
+        Effect.gen(function* () {
+          const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+            Effect.succeed(
+              makeCodexProbeSnapshot({
+                account: {
+                  account: {
+                    type: "chatgpt",
+                    email: "automation@example.com",
+                    planType: "enterprise_cbp_automation",
+                  },
+                  requiresOpenaiAuth: false,
+                },
+              }),
+            ),
+          );
+
+          assert.strictEqual(status.auth.status, "authenticated");
+          assert.strictEqual(status.auth.label, "ChatGPT Enterprise Subscription");
+        }),
+      );
+
       it.effect("returns unauthenticated when app-server requires OpenAI auth", () =>
         Effect.gen(function* () {
           const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>

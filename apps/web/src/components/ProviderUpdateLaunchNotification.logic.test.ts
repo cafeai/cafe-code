@@ -30,6 +30,7 @@ function provider(input: {
   readonly enabled?: boolean;
   readonly version?: string | null;
   readonly latestVersion?: string | null;
+  readonly approvedVersion?: string | null;
   readonly canUpdate?: boolean;
   readonly updateCommand?: string | null;
   readonly updateState?: ServerProvider["updateState"];
@@ -51,6 +52,7 @@ function provider(input: {
       status: input.advisoryStatus ?? "behind_latest",
       currentVersion: input.version ?? "1.0.0",
       latestVersion: "latestVersion" in input ? input.latestVersion : "1.1.0",
+      approvedVersion: "approvedVersion" in input ? input.approvedVersion : null,
       updateCommand: "updateCommand" in input ? input.updateCommand : "npm install -g provider",
       canUpdate: input.canUpdate ?? true,
       checkedAt,
@@ -82,6 +84,30 @@ describe("provider update launch notification logic", () => {
     ).toBe(false);
     expect(
       isProviderUpdateCandidate(provider({ driver: driver("codex"), latestVersion: null })),
+    ).toBe(false);
+  });
+
+  it("does not expose an in-app action for a compatibility-managed provider", () => {
+    const candidate = provider({
+      driver: driver("claudeAgent"),
+      advisoryStatus: "behind_latest",
+      latestVersion: "2.1.226",
+      approvedVersion: "2.1.224",
+      canUpdate: false,
+      updateCommand: null,
+    });
+    expect(isProviderUpdateCandidate(candidate)).toBe(false);
+  });
+
+  it("does not raise an actionable launch notice for quarantined or manual-only versions", () => {
+    expect(
+      isProviderUpdateCandidate(
+        provider({
+          driver: driver("claudeAgent"),
+          canUpdate: false,
+          updateCommand: null,
+        }),
+      ),
     ).toBe(false);
   });
 
@@ -353,6 +379,28 @@ describe("provider update launch notification logic", () => {
       title: "Codex v1.1.0 update failed",
       description: "command failed",
     });
+  });
+
+  it("labels a compatibility-managed failure with its approved target", () => {
+    const view = getSingleProviderUpdateProgressToastView(
+      provider({
+        driver: driver("claudeAgent"),
+        version: "2.1.220",
+        latestVersion: "2.1.226",
+        approvedVersion: "2.1.224",
+        canUpdate: false,
+        updateCommand: null,
+        updateState: {
+          status: "failed",
+          startedAt: checkedAt,
+          finishedAt: checkedAt,
+          message: "detached update failed",
+          output: "stderr",
+        },
+      }),
+    );
+
+    expect(view).toMatchObject({ title: "Claude v2.1.224 update failed" });
   });
 
   it("keeps unchanged providers actionable from settings", () => {

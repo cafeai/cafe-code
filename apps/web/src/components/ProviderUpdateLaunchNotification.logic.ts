@@ -5,7 +5,6 @@ import {
   type ProviderInstanceId,
   type ServerProvider,
 } from "@cafecode/contracts";
-
 export type ProviderUpdateCandidate = ServerProvider & {
   readonly versionAdvisory: NonNullable<ServerProvider["versionAdvisory"]> & {
     readonly status: "behind_latest";
@@ -106,7 +105,9 @@ function getProviderFailedUpdateTitle(
   provider: Pick<ServerProvider, "driver" | "versionAdvisory">,
 ): string {
   const providerName = PROVIDER_DISPLAY_NAMES[provider.driver] ?? provider.driver;
-  const attemptedVersion = provider.versionAdvisory?.latestVersion;
+  const attemptedVersion = provider.versionAdvisory
+    ? providerAdvisoryTargetVersion(provider.versionAdvisory)
+    : null;
   return attemptedVersion
     ? `${providerName} ${formatVersion(attemptedVersion)} update failed`
     : `${providerName} update failed`;
@@ -117,9 +118,17 @@ export function isProviderUpdateCandidate(
 ): provider is ProviderUpdateCandidate {
   return (
     provider.enabled &&
-    provider.versionAdvisory?.status === "behind_latest" &&
+    provider.versionAdvisory?.canUpdate === true &&
+    provider.versionAdvisory.updateCommand !== null &&
+    provider.versionAdvisory.status === "behind_latest" &&
     provider.versionAdvisory.latestVersion !== null
   );
+}
+
+function providerAdvisoryTargetVersion(
+  advisory: NonNullable<ServerProvider["versionAdvisory"]>,
+): string | null {
+  return advisory.approvedVersion ?? advisory.latestVersion;
 }
 
 export function isProviderUpdateActive(provider: Pick<ServerProvider, "updateState">): boolean {
@@ -178,7 +187,7 @@ export function providerUpdateNotificationKey(
   const parts = dedupeProvidersByDriver(providers)
     .map((provider) => {
       const advisory = provider.versionAdvisory;
-      return [provider.driver, advisory.latestVersion].join(":");
+      return [provider.driver, providerAdvisoryTargetVersion(advisory)].join(":");
     })
     .toSorted();
 
@@ -521,7 +530,7 @@ function getProviderUpdateInitialToastTitle(
   if (providers.length === 1) {
     const provider = providers[0]!;
     const providerName = PROVIDER_DISPLAY_NAMES[provider.driver] ?? provider.driver;
-    return `Update Available: ${providerName} ${formatVersion(provider.versionAdvisory.latestVersion)}`;
+    return `Update Available: ${providerName} ${formatVersion(providerAdvisoryTargetVersion(provider.versionAdvisory)!)}`;
   }
   return `Updates Available: ${providers.length} providers`;
 }

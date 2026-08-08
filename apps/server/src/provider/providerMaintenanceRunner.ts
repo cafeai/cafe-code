@@ -171,7 +171,11 @@ function failureMessage(result: ProviderMaintenanceCommandResult): string {
 }
 
 function isOutdatedProvider(provider: ServerProvider | undefined): boolean {
-  return provider?.versionAdvisory?.status === "behind_latest";
+  return (
+    provider?.versionAdvisory?.status === "behind_latest" &&
+    provider.versionAdvisory.canUpdate === true &&
+    provider.versionAdvisory.updateCommand !== null
+  );
 }
 
 function makeUpdateState(input: {
@@ -289,6 +293,13 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
       provider,
     );
     const update = capabilities.update;
+    if (capabilities.approvedVersion) {
+      return yield* new ServerProviderUpdateError({
+        provider,
+        reason:
+          "Compatibility-managed providers must be updated through the detached provider conformity workflow.",
+      });
+    }
     if (!update) {
       return yield* new ServerProviderUpdateError({
         provider,

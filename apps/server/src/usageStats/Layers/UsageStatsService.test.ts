@@ -36,6 +36,7 @@ import { UsageStatsRepositoryLive } from "../../persistence/Layers/UsageStats.ts
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings.ts";
 import { UsageStatsService, type UsageStatsServiceShape } from "../Services/UsageStatsService.ts";
+import { localDayKey } from "../dayBuckets.ts";
 import { UsageStatsServiceLive } from "./UsageStatsService.ts";
 
 const THREAD_1 = ThreadId.make("thread-1");
@@ -354,21 +355,22 @@ describe("UsageStatsService", () => {
         yield* harness.emitProvider(tokenUsageEvent(THREAD_1, "p5", { outputTokens: 150 }, CODEX));
 
         yield* harness.service.flush;
+        const expectedDay = localDayKey(0);
         const expectedRows = [
           {
-            day: "1970-01-01",
+            day: expectedDay,
             provider: CLAUDE,
             model: "claude-opus-5",
             outputTokens: 70,
           },
           {
-            day: "1970-01-01",
+            day: expectedDay,
             provider: CODEX,
             model: "gpt-5.6-codex",
             outputTokens: 125,
           },
           {
-            day: "1970-01-01",
+            day: expectedDay,
             provider: CODEX,
             model: "gpt-5.6-codex-mini",
             outputTokens: 50,

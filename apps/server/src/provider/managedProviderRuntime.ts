@@ -152,6 +152,9 @@ export function makeManagedProviderMaintenanceCapabilities(input: {
     return makeManualOnlyProviderMaintenanceCapabilities({
       provider: input.definition.provider,
       packageName: input.definition.npmPackageName,
+      ...(input.definition.approvedVersion
+        ? { approvedVersion: input.definition.approvedVersion }
+        : {}),
     });
   }
   return makeProviderMaintenanceCapabilities({
@@ -164,9 +167,12 @@ export function makeManagedProviderMaintenanceCapabilities(input: {
       input.layout.npmPrefixDir,
       "--cache",
       input.layout.npmCacheDir,
-      `${input.definition.npmPackageName}@latest`,
+      `${input.definition.npmPackageName}@${input.definition.approvedVersion ?? "latest"}`,
     ],
     updateLockKey: `managed-npm:${String(input.definition.provider)}`,
+    ...(input.definition.approvedVersion
+      ? { approvedVersion: input.definition.approvedVersion }
+      : {}),
   });
 }
 
@@ -182,6 +188,9 @@ export function resolveProviderRuntimeEnvironment(
       maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
         provider: input.packageMaintenance.provider,
         packageName: input.packageMaintenance.npmPackageName,
+        ...(input.packageMaintenance.approvedVersion
+          ? { approvedVersion: input.packageMaintenance.approvedVersion }
+          : {}),
       }),
       layout: null,
       unavailableReason: null,

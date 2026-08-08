@@ -138,6 +138,170 @@ describe("providerMaintenance", () => {
     });
   });
 
+  it("does not offer an unapproved registry release through one-click maintenance", () => {
+    const capabilities = makeProviderMaintenanceCapabilities({
+      provider: driver("claudeAgent"),
+      packageName: "@anthropic-ai/claude-code",
+      updateExecutable: "claude",
+      updateArgs: ["install", "2.1.224"],
+      updateLockKey: "claude-native",
+      approvedVersion: "2.1.224",
+    });
+    expect(
+      createProviderVersionAdvisory({
+        driver: driver("claudeAgent"),
+        currentVersion: "2.1.224",
+        latestVersion: "2.1.226",
+        maintenanceCapabilities: capabilities,
+      }),
+    ).toMatchObject({
+      status: "behind_latest",
+      approvedVersion: "2.1.224",
+      latestVersion: "2.1.226",
+      updateCommand: null,
+      canUpdate: false,
+      message: "Provider 2.1.226 is available but has not passed Club Code conformity yet.",
+    });
+  });
+
+  it("treats semver-equivalent build metadata as the approved pin", () => {
+    const capabilities = makeProviderMaintenanceCapabilities({
+      provider: driver("claudeAgent"),
+      packageName: "@anthropic-ai/claude-code",
+      updateExecutable: "claude",
+      updateArgs: ["install", "2.1.224"],
+      updateLockKey: "claude-native",
+      approvedVersion: "2.1.224",
+    });
+    expect(
+      createProviderVersionAdvisory({
+        driver: driver("claudeAgent"),
+        currentVersion: "2.1.224+local",
+        latestVersion: "2.1.224+registry",
+        maintenanceCapabilities: capabilities,
+      }),
+    ).toMatchObject({
+      status: "current",
+      canUpdate: false,
+      updateCommand: null,
+      message: null,
+    });
+  });
+
+  it("does not describe a registry version below the approved pin as awaiting conformity", () => {
+    const capabilities = makeProviderMaintenanceCapabilities({
+      provider: driver("claudeAgent"),
+      packageName: "@anthropic-ai/claude-code",
+      updateExecutable: "claude",
+      updateArgs: ["install", "2.1.224"],
+      updateLockKey: "claude-native",
+      approvedVersion: "2.1.224",
+    });
+    expect(
+      createProviderVersionAdvisory({
+        driver: driver("claudeAgent"),
+        currentVersion: "2.1.224",
+        latestVersion: "2.1.220",
+        maintenanceCapabilities: capabilities,
+      }),
+    ).toMatchObject({ status: "current", message: null, canUpdate: false });
+  });
+
+  it("removes live updater commands from every approved package-manager layout", () => {
+    const resolver = makePackageManagedProviderMaintenanceResolver({
+      provider: driver("pinnedTool"),
+      npmPackageName: "@example/pinned-tool",
+      approvedVersion: "2.1.224",
+      homebrewFormula: null,
+      nativeUpdate: null,
+    });
+    for (const binaryPath of [
+      "/usr/lib/node_modules/@example/pinned-tool/bin/tool",
+      "/home/me/.local/share/pnpm/pinned-tool",
+      "/home/me/.vite-plus/bin/pinned-tool",
+    ]) {
+      expect(resolver.resolve({ binaryPath, platform: "linux", env: { PATH: "" } })).toMatchObject({
+        approvedVersion: "2.1.224",
+        update: null,
+      });
+    }
+  });
+
+  it("routes an off-pin approved version through detached conformity", () => {
+    const capabilities = makeProviderMaintenanceCapabilities({
+      provider: driver("claudeAgent"),
+      packageName: "@anthropic-ai/claude-code",
+      updateExecutable: "claude",
+      updateArgs: ["install", "2.1.224"],
+      updateLockKey: "claude-native",
+      approvedVersion: "2.1.224",
+    });
+    expect(
+      createProviderVersionAdvisory({
+        driver: driver("claudeAgent"),
+        currentVersion: "2.1.220",
+        latestVersion: "2.1.226",
+        maintenanceCapabilities: capabilities,
+      }),
+    ).toMatchObject({
+      status: "behind_latest",
+      approvedVersion: "2.1.224",
+      updateCommand: null,
+      canUpdate: false,
+      message:
+        "Provider 2.1.220 differs from approved version 2.1.224. Run the detached provider conformity workflow to update safely. Upstream 2.1.226 is still awaiting conformity.",
+    });
+  });
+
+  it("routes an ahead-of-pin change through a detached revert", () => {
+    const capabilities = makeProviderMaintenanceCapabilities({
+      provider: driver("claudeAgent"),
+      packageName: "@anthropic-ai/claude-code",
+      updateExecutable: "claude",
+      updateArgs: ["install", "2.1.224"],
+      updateLockKey: "claude-native",
+      approvedVersion: "2.1.224",
+    });
+    expect(
+      createProviderVersionAdvisory({
+        driver: driver("claudeAgent"),
+        currentVersion: "2.1.226",
+        latestVersion: "2.1.226",
+        maintenanceCapabilities: capabilities,
+      }),
+    ).toMatchObject({
+      status: "behind_latest",
+      approvedVersion: "2.1.224",
+      updateCommand: null,
+      canUpdate: false,
+      message:
+        "Provider 2.1.226 differs from approved version 2.1.224. Run the detached provider conformity workflow to revert safely. Upstream 2.1.226 is still awaiting conformity.",
+    });
+  });
+
+  it("does not claim an unsupported install layout can be updated automatically", () => {
+    expect(
+      createProviderVersionAdvisory({
+        driver: driver("claudeAgent"),
+        currentVersion: "2.1.220",
+        latestVersion: "2.1.226",
+        maintenanceCapabilities: {
+          provider: driver("claudeAgent"),
+          packageName: "@anthropic-ai/claude-code",
+          update: null,
+          approvedVersion: "2.1.224",
+        },
+      }),
+    ).toMatchObject({
+      status: "behind_latest",
+      approvedVersion: "2.1.224",
+      updateCommand: null,
+      canUpdate: false,
+      message:
+        "Provider 2.1.220 differs from approved version 2.1.224. Run the detached provider conformity workflow to update safely. Upstream 2.1.226 is still awaiting conformity.",
+    });
+  });
+
   it("keeps update commands owned by provider maintenance capabilities", () => {
     expect(staticToolUpdate.resolve()).toEqual({
       provider: driver("staticTool"),
@@ -333,6 +497,36 @@ describe("providerMaintenance", () => {
           },
         });
       }),
+  );
+
+  it.effect("keeps approved native providers on the detached conformity path", () =>
+    Effect.gen(function* () {
+      const tempDir = yield* makeTempDir("t3-pinned-native-capabilities");
+      const nativeBinDir = path.join(tempDir, ".local", "bin");
+      mkdirSync(nativeBinDir, { recursive: true });
+      const binaryPath = path.join(nativeBinDir, "pinned-tool");
+      writeFileSync(binaryPath, "#!/bin/sh\n");
+      chmodSync(binaryPath, 0o755);
+      const resolver = makePackageManagedProviderMaintenanceResolver({
+        provider: driver("pinnedTool"),
+        npmPackageName: "@example/pinned-tool",
+        approvedVersion: "2.1.224",
+        homebrewFormula: null,
+        nativeUpdate: {
+          executable: "pinned-tool",
+          args: ["update"],
+          lockKey: "pinned-tool-native",
+          isCommandPath: isNativeTestCommandPath("/.local/bin/pinned-tool"),
+        },
+      });
+
+      expect(resolver.resolve({ binaryPath, platform: "linux", env: { PATH: "" } })).toEqual({
+        provider: driver("pinnedTool"),
+        packageName: "@example/pinned-tool",
+        update: null,
+        approvedVersion: "2.1.224",
+      });
+    }),
   );
 
   it.effect(
