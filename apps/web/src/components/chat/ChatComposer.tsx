@@ -41,6 +41,12 @@ import {
   expandCollapsedComposerCursor,
   replaceTextRange,
 } from "../../composer-logic";
+import {
+  appendComposerVideoReference,
+  createComposerVideoReference,
+  isComposerVideoReferenceFile,
+  normalizeComposerVideoReferenceName,
+} from "../../composerVideoReference";
 import { deriveComposerSendState, readFileAsDataUrl } from "../ChatView.logic";
 import {
   type ComposerImageAttachment,
@@ -165,6 +171,14 @@ const COMPOSER_FLOATING_LAYER_SELECTOR = [
   '[data-slot="combobox-popup"]',
   '[data-slot="autocomplete-popup"]',
 ].join(",");
+
+function composerDraftTargetsEqual(
+  left: ScopedThreadRef | DraftId,
+  right: ScopedThreadRef | DraftId,
+): boolean {
+  if (typeof left === "string" || typeof right === "string") return left === right;
+  return left.environmentId === right.environmentId && left.threadId === right.threadId;
+}
 
 const extendReplacementRangeForTrailingSpace = (
   text: string,
@@ -920,7 +934,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const nonPersistedComposerImageIds = composerDraft.nonPersistedImageIds;
 
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
-  const addComposerDraftImage = useComposerDraftStore((store) => store.addImage);
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
   const removeComposerDraftImage = useComposerDraftStore((store) => store.removeImage);
   const clearComposerDraftPersistedAttachments = useComposerDraftStore(
@@ -1183,6 +1196,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
   const [isComposerFocused, setIsComposerFocused] = useState(false);
   const [composerFocusRequestRevision, setComposerFocusRequestRevision] = useState(0);
+  const [videoReferenceJobs, setVideoReferenceJobs] = useState(0);
   // Touch capability, not viewport width: foldables and tablets can be wider
   // than any phone breakpoint while still typing through an on-screen keyboard.
   const isOnScreenKeyboardDevice = useHasOnScreenKeyboard();
@@ -1215,6 +1229,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const mobileComposerExpandInFlightRef = useRef(false);
   const dragDepthRef = useRef(0);
   const composerFileInputRef = useRef<HTMLInputElement>(null);
+  const videoReferenceJobsRef = useRef(0);
+  const composerFilePickerTargetRef = useRef<{
+    readonly draftTarget: ScopedThreadRef | DraftId;
+    readonly threadId: ThreadId | null;
+  } | null>(null);
+  const composerDraftTargetRef = useRef(composerDraftTarget);
+  composerDraftTargetRef.current = composerDraftTarget;
 
   // ------------------------------------------------------------------
   // Derived: composer send state
@@ -1231,13 +1252,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedProviderEntry?.displayName ||
     selectedProviderStatus?.displayName?.trim() ||
     String(selectedProviderStatus?.instanceId ?? selectedProvider);
-  const composerPendingStatusLabel = isPreparingWorktree
-    ? "Preparing worktree..."
-    : isSendBusy
-      ? "Submitting prompt..."
-      : isConnecting
-        ? `Starting ${selectedProviderDisplayName}...`
-        : null;
+  const isVideoReferenceBusy = videoReferenceJobs > 0;
+  const isComposerSubmissionBusy = isSendBusy || isVideoReferenceBusy;
+  const composerPendingStatusLabel = isVideoReferenceBusy
+    ? "Analyzing video reference..."
+    : isPreparingWorktree
+      ? "Preparing worktree..."
+      : isSendBusy
+        ? "Submitting prompt..."
+        : isConnecting
+          ? `Starting ${selectedProviderDisplayName}...`
+          : null;
 
   // ------------------------------------------------------------------
   // Derived: composer trigger / menu
@@ -1382,14 +1407,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (showPlanFollowUpPrompt) {
       return prompt.trim().length > 0 ? "plan:refine" : "plan:implement";
     }
-    return `idle:${composerSendState.hasSendableContent}:${isSendBusy}:${isConnecting}:${isPreparingWorktree}`;
+    return `idle:${composerSendState.hasSendableContent}:${isComposerSubmissionBusy}:${isConnecting}:${isPreparingWorktree}`;
   }, [
     activePendingIsResponding,
     activePendingProgress,
     composerSendState.hasSendableContent,
     isConnecting,
     isPreparingWorktree,
-    isSendBusy,
+    isComposerSubmissionBusy,
     phase,
     prompt,
     showPlanFollowUpPrompt,
@@ -1483,20 +1508,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       setComposerDraftPrompt(composerDraftTarget, nextPrompt);
     },
     [composerDraftTarget, setComposerDraftPrompt],
-  );
-
-  const addComposerImage = useCallback(
-    (image: ComposerImageAttachment) => {
-      addComposerDraftImage(composerDraftTarget, image);
-    },
-    [composerDraftTarget, addComposerDraftImage],
-  );
-
-  const addComposerImagesToDraft = useCallback(
-    (images: ComposerImageAttachment[]) => {
-      addComposerDraftImages(composerDraftTarget, images);
-    },
-    [composerDraftTarget, addComposerDraftImages],
   );
 
   const removeComposerImageFromDraft = useCallback(
@@ -2022,6 +2033,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const submitComposer = useCallback(
     (event?: { preventDefault: () => void }) => {
+      if (videoReferenceJobsRef.current > 0) {
+        event?.preventDefault();
+        toastManager.add({
+          type: "warning",
+          title: "Video reference is still being prepared",
+          description: "Wait for the chronological contact sheet to finish before sending.",
+        });
+        return;
+      }
       const keepKeyboardClosed = isOnScreenKeyboardDevice;
       mobileDebugLog("submit-start", { keepKeyboardClosed, ...domSnapshot() });
       void Promise.resolve(onSend(event)).finally(() => {
@@ -2037,6 +2057,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
   const steerComposer = useCallback(
     (event?: { preventDefault: () => void }) => {
+      if (videoReferenceJobsRef.current > 0) {
+        event?.preventDefault();
+        toastManager.add({
+          type: "warning",
+          title: "Video reference is still being prepared",
+          description: "Wait for the chronological contact sheet to finish before steering.",
+        });
+        return;
+      }
       const keepKeyboardClosed = isOnScreenKeyboardDevice;
       void Promise.resolve(onSteer(event)).finally(() => {
         if (keepKeyboardClosed) {
@@ -2154,17 +2183,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // ------------------------------------------------------------------
   // Callbacks: images
   // ------------------------------------------------------------------
-  const addComposerImages = (files: File[]) => {
-    if (!activeThreadId || files.length === 0) return;
-    if (pendingUserInputs.length > 0) {
-      toastManager.add({
-        type: "error",
-        title: "Attach images after answering plan questions.",
-      });
-      return;
-    }
+  const addComposerImages = (
+    files: File[],
+    targetAtStart: ScopedThreadRef | DraftId,
+  ): { readonly addedCount: number; readonly error: string | null } => {
+    if (files.length === 0) return { addedCount: 0, error: null };
     const nextImages: ComposerImageAttachment[] = [];
-    let nextImageCount = composerImagesRef.current.length;
+    let nextImageCount = getComposerDraft(targetAtStart)?.images.length ?? 0;
     let error: string | null = null;
     for (const file of files) {
       if (!file.type.startsWith("image/")) {
@@ -2191,12 +2216,114 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       });
       nextImageCount += 1;
     }
-    if (nextImages.length === 1 && nextImages[0]) {
-      addComposerImage(nextImages[0]);
-    } else if (nextImages.length > 1) {
-      addComposerImagesToDraft(nextImages);
+    if (nextImages.length > 0) {
+      addComposerDraftImages(targetAtStart, nextImages);
     }
-    setThreadError(activeThreadId, error);
+    return { addedCount: nextImages.length, error };
+  };
+
+  const addComposerFiles = async (
+    files: File[],
+    attachmentTarget: {
+      readonly draftTarget: ScopedThreadRef | DraftId;
+      readonly threadId: ThreadId | null;
+    } = { draftTarget: composerDraftTarget, threadId: activeThreadId },
+  ): Promise<boolean> => {
+    const { draftTarget: targetAtStart, threadId: threadIdAtStart } = attachmentTarget;
+    if (!threadIdAtStart || files.length === 0) return false;
+    if (
+      composerDraftTargetsEqual(composerDraftTargetRef.current, targetAtStart) &&
+      pendingUserInputs.length > 0
+    ) {
+      toastManager.add({
+        type: "error",
+        title: "Attach files after answering plan questions.",
+      });
+      return false;
+    }
+
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    const videoFiles = files.filter(isComposerVideoReferenceFile);
+    const unsupportedFile = files.find(
+      (file) => !file.type.startsWith("image/") && !isComposerVideoReferenceFile(file),
+    );
+    const imageResult = addComposerImages(imageFiles, targetAtStart);
+    let error = imageResult.error;
+    let addedVideoReferenceCount = 0;
+
+    if (videoFiles.length > 0) {
+      videoReferenceJobsRef.current += 1;
+      setVideoReferenceJobs(videoReferenceJobsRef.current);
+      try {
+        for (const file of videoFiles.slice(0, PROVIDER_SEND_TURN_MAX_ATTACHMENTS)) {
+          const safeName = normalizeComposerVideoReferenceName(file.name);
+          try {
+            const result = await createComposerVideoReference(file);
+            const targetIsCurrent = composerDraftTargetsEqual(
+              composerDraftTargetRef.current,
+              targetAtStart,
+            );
+            const currentPrompt = targetIsCurrent
+              ? promptRef.current
+              : (getComposerDraft(targetAtStart)?.prompt ?? "");
+            const appended = appendComposerVideoReference({
+              prompt: currentPrompt,
+              analysis: result.analysis,
+            });
+            if (appended === null) {
+              error = `'${safeName}' does not fit within the message size limit.`;
+              continue;
+            }
+            const contactSheetResult = addComposerImages([result.contactSheet], targetAtStart);
+            if (contactSheetResult.addedCount === 0) {
+              error =
+                contactSheetResult.error ?? `Could not attach the contact sheet for '${safeName}'.`;
+              continue;
+            }
+            if (targetIsCurrent) {
+              promptRef.current = appended;
+              flushSync(() => setComposerDraftPrompt(targetAtStart, appended));
+              const nextCursor = collapseExpandedComposerCursor(appended, appended.length);
+              setComposerCursor(nextCursor);
+              setComposerTrigger(detectComposerTrigger(appended, appended.length));
+            } else {
+              setComposerDraftPrompt(targetAtStart, appended);
+            }
+            addedVideoReferenceCount += 1;
+          } catch (cause) {
+            error = cause instanceof Error ? cause.message : `Could not analyze '${safeName}'.`;
+          }
+        }
+      } finally {
+        videoReferenceJobsRef.current = Math.max(0, videoReferenceJobsRef.current - 1);
+        setVideoReferenceJobs(videoReferenceJobsRef.current);
+      }
+    }
+
+    if (videoFiles.length > PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+      error = `You can add up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} video references at a time.`;
+    }
+    if (unsupportedFile) {
+      error = `Unsupported file type for '${normalizeComposerVideoReferenceName(
+        unsupportedFile.name,
+      )}'. Attach images or WebM, MP4, MOV, OGV, MKV, and other browser-decodable video references.`;
+    }
+    if (addedVideoReferenceCount > 0) {
+      toastManager.add({
+        type: "success",
+        title:
+          addedVideoReferenceCount === 1
+            ? "Video reference added to this message"
+            : `${addedVideoReferenceCount} video references added to this message`,
+        description:
+          "Cafe Code sampled each video locally into a chronological contact sheet and visual effect specification. Original videos stay on this device.",
+      });
+    }
+    if (error) {
+      toastManager.add({ type: "error", title: "Some files were not added", description: error });
+    }
+    setThreadError(threadIdAtStart, error);
+    return imageResult.addedCount > 0 || addedVideoReferenceCount > 0;
   };
 
   const removeComposerImage = (imageId: string) => {
@@ -2209,10 +2336,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const onComposerPaste = (event: React.ClipboardEvent<HTMLElement>) => {
     const files = Array.from(event.clipboardData.files);
     if (files.length === 0) return;
-    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
-    if (imageFiles.length === 0) return;
     event.preventDefault();
-    addComposerImages(imageFiles);
+    void addComposerFiles(files);
   };
 
   const onComposerDragEnter = (event: React.DragEvent<HTMLDivElement>) => {
@@ -2246,23 +2371,39 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     dragDepthRef.current = 0;
     setIsDragOverComposer(false);
     const files = Array.from(event.dataTransfer.files);
-    addComposerImages(files);
-    focusComposer();
+    const targetAtDrop = composerDraftTarget;
+    void addComposerFiles(files).finally(() => {
+      if (composerDraftTargetsEqual(composerDraftTargetRef.current, targetAtDrop)) focusComposer();
+    });
   };
 
-  // Touch devices can't paste or drag-drop images, so a file picker is the
+  // Touch devices can't paste or drag-drop files, so a file picker is the
   // only practical way to attach on mobile; desktop gets the affordance too.
   const openComposerImagePicker = () => {
+    composerFilePickerTargetRef.current = {
+      draftTarget: composerDraftTarget,
+      threadId: activeThreadId,
+    };
     composerFileInputRef.current?.click();
   };
 
   const onComposerFileInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
+    const targetAtSelection = composerFilePickerTargetRef.current ?? {
+      draftTarget: composerDraftTarget,
+      threadId: activeThreadId,
+    };
+    composerFilePickerTargetRef.current = null;
     // Reset so picking the same file again after removal still fires change.
     event.target.value = "";
     if (files.length === 0) return;
-    addComposerImages(files);
-    focusComposer();
+    void addComposerFiles(files, targetAtSelection).finally(() => {
+      if (
+        composerDraftTargetsEqual(composerDraftTargetRef.current, targetAtSelection.draftTarget)
+      ) {
+        focusComposer();
+      }
+    });
   };
   const handleInterruptPrimaryAction = useCallback(() => {
     void onInterrupt();
@@ -2431,7 +2572,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       <input
         ref={composerFileInputRef}
         type="file"
-        accept="image/*"
+        accept="image/*,video/*,.webm,.mp4,.m4v,.mov,.ogv,.ogg,.mkv"
         multiple
         className="hidden"
         tabIndex={-1}
@@ -2598,7 +2739,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       isRunning={false}
                       showPlanFollowUpPrompt={false}
                       promptHasText={false}
-                      isSendBusy={isSendBusy}
+                      isSendBusy={isComposerSubmissionBusy}
                       isConnecting={isConnecting}
                       isEnvironmentUnavailable={environmentUnavailable !== null}
                       isPreparingWorktree={false}
@@ -2811,7 +2952,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       pendingUserInputs.length === 0 && showPlanFollowUpPrompt
                     }
                     promptHasText={prompt.trim().length > 0}
-                    isSendBusy={isSendBusy}
+                    isSendBusy={isComposerSubmissionBusy}
                     isConnecting={isConnecting}
                     isEnvironmentUnavailable={environmentUnavailable !== null}
                     isPreparingWorktree={isPreparingWorktree}
@@ -2932,7 +3073,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   isRunning={phase === "running"}
                   showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}
                   promptHasText={prompt.trim().length > 0}
-                  isSendBusy={isSendBusy}
+                  isSendBusy={isComposerSubmissionBusy}
                   isConnecting={isConnecting}
                   isEnvironmentUnavailable={environmentUnavailable !== null}
                   isPreparingWorktree={isPreparingWorktree}
