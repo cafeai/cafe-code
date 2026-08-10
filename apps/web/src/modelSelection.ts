@@ -20,7 +20,11 @@ import {
   resolveSelectableProvider,
 } from "./providerModels";
 import { ModelEsque } from "./components/chat/providerIconUtils";
-import { type ProviderInstanceEntry, deriveProviderInstanceEntries } from "./providerInstances";
+import {
+  type ProviderInstanceEntry,
+  deriveProviderInstanceEntries,
+  isLmStudioProviderInstance,
+} from "./providerInstances";
 import { sortModelsForProviderInstance } from "./modelOrdering";
 
 const MAX_CUSTOM_MODEL_COUNT = 32;
@@ -201,7 +205,11 @@ export function getAppModelOptionsForInstance(
     entry.models.filter((model) => !model.isCustom).map((model) => model.slug),
   );
 
-  const customModels = readInstanceCustomModels(settings, entry.instanceId, entry.driverKind);
+  const instanceConfig = settings.providerInstances?.[entry.instanceId];
+  const customModels =
+    instanceConfig && isLmStudioProviderInstance(instanceConfig)
+      ? []
+      : readInstanceCustomModels(settings, entry.instanceId, entry.driverKind);
   const normalizer = entry.driverKind;
   for (const slug of normalizeCustomModelSlugs(customModels, builtInModelSlugs, normalizer)) {
     if (seen.has(slug)) {
@@ -251,6 +259,17 @@ export function resolveAppModelSelectionForInstance(
   );
 }
 
+function hasAuthoritativeModelInventory(
+  settings: UnifiedSettings,
+  entry: ProviderInstanceEntry,
+): boolean {
+  const configuredInstance = settings.providerInstances?.[entry.instanceId];
+  return (
+    (configuredInstance !== undefined && isLmStudioProviderInstance(configuredInstance)) ||
+    (entry.driverKind === "codex" && entry.snapshot.auth.type === "local")
+  );
+}
+
 /**
  * Instance-keyed model options map. Each configured instance gets its own
  * option list so the model picker can show the same driver's built-in and
@@ -290,7 +309,9 @@ export function resolveAppModelSelectionState(
     const model =
       resolveAppModelSelectionForInstance(entry.instanceId, settings, providers, selectedModel) ??
       entry.models[0]?.slug ??
-      DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER[entry.driverKind];
+      (hasAuthoritativeModelInventory(settings, entry)
+        ? undefined
+        : DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER[entry.driverKind]);
     if (!model) {
       return createModelSelection(entry.instanceId, "", []);
     }

@@ -8,6 +8,7 @@ import {
   readProviderConfigBoolean,
   readProviderConfigNumber,
   readProviderConfigString,
+  validateProviderSettingsFieldValue,
 } from "./ProviderSettingsForm";
 
 describe("ProviderSettingsForm helpers", () => {
@@ -18,10 +19,30 @@ describe("ProviderSettingsForm helpers", () => {
     expect(deriveProviderSettingsFields(codex!).map((field) => field.key)).toEqual([
       "runtimeSource",
       "binaryPath",
+      "ossMode",
+      "ossBaseUrl",
       "homePath",
       "shadowHomePath",
       "autoCompactTokenLimit",
     ]);
+  });
+
+  it("validates LM Studio endpoints before settings are persisted", () => {
+    const field = {
+      key: "ossBaseUrl",
+      control: "text",
+      label: "LM Studio server URL",
+      clearWhenEmpty: "omit",
+    } as const;
+
+    expect(validateProviderSettingsFieldValue(field, "")).toBeNull();
+    expect(validateProviderSettingsFieldValue(field, "http://192.168.50.12:1234/v1")).toBeNull();
+    expect(validateProviderSettingsFieldValue(field, "http://example.com:1234/v1")).toMatch(
+      /private\/loopback IP address/i,
+    );
+    expect(validateProviderSettingsFieldValue(field, "http://169.254.169.254/v1")).toMatch(
+      /metadata/i,
+    );
   });
 
   it("sources labels and descriptions from schema annotations", () => {

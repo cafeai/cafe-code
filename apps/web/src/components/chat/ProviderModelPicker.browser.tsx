@@ -611,6 +611,27 @@ describe("ProviderModelPicker", () => {
     }
   });
 
+  it("shows an explicit empty state for an exact instance with no chat models", async () => {
+    const providers: ReadonlyArray<ServerProvider> = [buildCodexProvider([])];
+    const mounted = await mountPicker({
+      activeInstanceId: CODEX_INSTANCE_ID,
+      model: "stale-cloud-model",
+      lockedProvider: null,
+      providers,
+    });
+
+    try {
+      const trigger = document.querySelector<HTMLElement>(
+        '[data-chat-provider-model-picker="true"]',
+      );
+      expect(trigger).not.toBeNull();
+      expect(trigger?.textContent).toContain("No chat models");
+      expect(trigger?.textContent).not.toContain("stale-cloud-model");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("uses the trigger label for locked Claude subprovider rows", async () => {
     const providers: ReadonlyArray<ServerProvider> = [
       buildClaudePartnerProvider([

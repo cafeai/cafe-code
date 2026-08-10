@@ -7,6 +7,7 @@ import {
   CodexSettings,
   ClaudeSettings,
   CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
+  DEFAULT_LM_STUDIO_BASE_URL,
   DEFAULT_APP_ACCENT_COLOR,
   DEFAULT_BRAND_WORDMARK_PREFIX,
   DEFAULT_CHAT_COPY_FORMAT,
@@ -26,6 +27,7 @@ import {
   MAX_SIDEBAR_BRAND_IMAGE_ID_LENGTH,
   MAX_SIDEBAR_STAR_SPEED,
   MIN_SIDEBAR_STAR_SPEED,
+  normalizeLmStudioBaseUrl,
   ServerSettingsPatch,
 } from "./settings.ts";
 
@@ -258,6 +260,50 @@ describe("client settings", () => {
 });
 
 describe("provider settings", () => {
+  it("defaults Codex to cloud mode and a loopback LM Studio endpoint", () => {
+    const settings = decodeCodexSettings({});
+    expect(settings.ossMode).toBe(false);
+    expect(settings.ossBaseUrl).toBe(DEFAULT_LM_STUDIO_BASE_URL);
+  });
+
+  it("accepts and normalizes private LM Studio API roots", () => {
+    expect(normalizeLmStudioBaseUrl("http://127.0.0.1:1234")).toBe("http://127.0.0.1:1234/v1");
+    expect(normalizeLmStudioBaseUrl("http://192.168.1.25:1234/v1/")).toBe(
+      "http://192.168.1.25:1234/v1",
+    );
+    expect(normalizeLmStudioBaseUrl("https://models.example.com/v1")).toBe(
+      "https://models.example.com/v1",
+    );
+  });
+
+  it("rejects unsafe or ambiguous LM Studio endpoints", () => {
+    for (const value of [
+      "http://models.example.com:1234/v1",
+      "https://8.8.8.8/v1",
+      "https://169.254.169.254/v1",
+      "http://127.0.0.1:1234/api",
+      "http://user@127.0.0.1:1234/v1",
+      "http://127.0.0.1:1234/v1?token=secret",
+      "file:///tmp/lmstudio",
+    ]) {
+      expect(() => decodeCodexSettings({ ossBaseUrl: value }), value).toThrow();
+    }
+  });
+
+  it("saves LM Studio mode through the legacy Codex settings patch", () => {
+    expect(
+      decodeServerSettingsPatch({
+        providers: {
+          codex: { ossMode: true, ossBaseUrl: "http://10.0.0.25:1234/v1" },
+        },
+      }),
+    ).toEqual({
+      providers: {
+        codex: { ossMode: true, ossBaseUrl: "http://10.0.0.25:1234/v1" },
+      },
+    });
+  });
+
   it("defaults Codex and Claude provider runtime source to system", () => {
     expect(decodeCodexSettings({}).runtimeSource).toBe("system");
     expect(decodeClaudeSettings({}).runtimeSource).toBe("system");

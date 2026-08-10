@@ -41,6 +41,7 @@ import {
   createMemoryStorage,
 } from "./lib/storage";
 import { getDefaultServerModel } from "./providerModels";
+import { deriveProviderInstanceEntries, isLmStudioProviderInstance } from "./providerInstances";
 import { UnifiedSettings } from "@cafecode/contracts/settings";
 const isRuntimeMode = Schema.is(RuntimeMode);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
@@ -889,23 +890,38 @@ export function deriveEffectiveComposerModelState(input: {
     instanceDefaults?.defaultModel ??
     input.projectModelSelection?.model ??
     null;
-  const baseModel =
-    (input.selectedInstanceId
-      ? resolveAppModelSelectionForInstance(
-          input.selectedInstanceId,
-          input.settings,
-          input.providers,
-          baseModelCandidate,
-        )
-      : null) ??
-    resolveAppModelSelection(
-      input.selectedProvider,
-      input.settings,
-      input.providers,
-      baseModelCandidate,
-    ) ??
-    normalizeModelSlug(baseModelCandidate, input.selectedProvider) ??
-    getDefaultServerModel(input.providers, input.selectedProvider);
+  const selectedInstanceEntry = input.selectedInstanceId
+    ? deriveProviderInstanceEntries(input.providers).find(
+        (entry) => entry.instanceId === input.selectedInstanceId,
+      )
+    : undefined;
+  const selectedInstanceIsLmStudio =
+    instanceDefaults !== undefined && isLmStudioProviderInstance(instanceDefaults);
+  const requiresExactInstanceRouting =
+    selectedInstanceEntry !== undefined || selectedInstanceIsLmStudio;
+  const preserveUnlistedInstanceModel = (candidate: string | null | undefined): string | null =>
+    selectedInstanceEntry !== undefined && !selectedInstanceIsLmStudio
+      ? normalizeModelSlug(candidate, input.selectedProvider)
+      : null;
+  const exactBaseModel = input.selectedInstanceId
+    ? resolveAppModelSelectionForInstance(
+        input.selectedInstanceId,
+        input.settings,
+        input.providers,
+        baseModelCandidate,
+      )
+    : null;
+  const baseModel = requiresExactInstanceRouting
+    ? (exactBaseModel ?? preserveUnlistedInstanceModel(baseModelCandidate) ?? "")
+    : (exactBaseModel ??
+      resolveAppModelSelection(
+        input.selectedProvider,
+        input.settings,
+        input.providers,
+        baseModelCandidate,
+      ) ??
+      normalizeModelSlug(baseModelCandidate, input.selectedProvider) ??
+      getDefaultServerModel(input.providers, input.selectedProvider));
   // Look up the instance's saved selection first; fall back to the
   // driver-kind bucket so legacy kind-keyed drafts still resolve. Every
   // `ProviderDriverKind` literal is a valid `ProviderInstanceId` slug, so the
@@ -923,18 +939,27 @@ export function deriveEffectiveComposerModelState(input: {
     ? (input.selectedInstanceId ?? defaultInstanceId)
     : defaultInstanceId;
   const selectedModel = activeSelection?.model
-    ? (resolveAppModelSelectionForInstance(
-        activeSelectionInstanceId,
-        input.settings,
-        input.providers,
-        activeSelection.model,
-      ) ??
-      resolveAppModelSelection(
-        input.selectedProvider,
-        input.settings,
-        input.providers,
-        activeSelection.model,
-      ))
+    ? requiresExactInstanceRouting
+      ? (resolveAppModelSelectionForInstance(
+          activeSelectionInstanceId,
+          input.settings,
+          input.providers,
+          activeSelection.model,
+        ) ??
+        preserveUnlistedInstanceModel(activeSelection.model) ??
+        baseModel)
+      : (resolveAppModelSelectionForInstance(
+          activeSelectionInstanceId,
+          input.settings,
+          input.providers,
+          activeSelection.model,
+        ) ??
+        resolveAppModelSelection(
+          input.selectedProvider,
+          input.settings,
+          input.providers,
+          activeSelection.model,
+        ))
     : baseModel;
   const instanceDefaultOptions =
     input.selectedInstanceId &&

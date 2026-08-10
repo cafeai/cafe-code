@@ -8,8 +8,15 @@ import * as Path from "effect/Path";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
 import * as Types from "effect/Types";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import {
+  FetchHttpClient,
+  HttpClient,
+  HttpClientRequest,
+  HttpClientResponse,
+} from "effect/unstable/http";
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexSchema from "effect-codex-app-server/schema";
 import * as CodexErrors from "effect-codex-app-server/errors";
@@ -26,7 +33,7 @@ import type {
   ServerProviderAccountRateLimitWindow,
   ServerProviderAccountRateLimitResetCredit,
 } from "@cafecode/contracts";
-import { ServerSettingsError } from "@cafecode/contracts";
+import { normalizeLmStudioBaseUrl, ServerSettingsError } from "@cafecode/contracts";
 
 import { createModelCapabilities } from "@cafecode/shared/model";
 import {
@@ -52,6 +59,52 @@ const MAX_PROVIDER_EMAIL_LENGTH = 320;
 const CODEX_ACCOUNT_RATE_LIMIT_TIMEOUT_MS = 3_000;
 const CODEX_CHATGPT_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_ORIGINATOR = "cafecode_desktop";
+const LM_STUDIO_DISCOVERY_TIMEOUT_MS = 3_000;
+const MAX_LM_STUDIO_MODEL_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_LM_STUDIO_DISCOVERED_MODELS = 256;
+const MAX_LM_STUDIO_MODEL_ID_LENGTH = 256;
+
+const LmStudioOpenAiModelList = Schema.Struct({
+  data: Schema.Array(Schema.Struct({ id: Schema.String })),
+});
+
+const LmStudioNativeModelList = Schema.Struct({
+  models: Schema.Array(
+    Schema.Struct({
+      type: Schema.Literals(["llm", "embedding"]),
+      key: Schema.String,
+      display_name: Schema.String,
+      loaded_instances: Schema.Array(Schema.Struct({ id: Schema.String })),
+    }),
+  ),
+});
+const decodeLmStudioOpenAiModelList = Schema.decodeUnknownSync(LmStudioOpenAiModelList);
+const decodeLmStudioNativeModelList = Schema.decodeUnknownSync(LmStudioNativeModelList);
+
+export type LmStudioModelDiscovery =
+  | {
+      readonly status: "ready";
+      readonly models: ReadonlyArray<ServerProviderModel>;
+      readonly message: string;
+    }
+  | {
+      readonly status: "empty" | "offline" | "authentication-required" | "invalid-response";
+      readonly models: readonly [];
+      readonly message: string;
+    };
+
+export type LmStudioModelInventoryParseResult =
+  | { readonly status: "ready"; readonly models: ReadonlyArray<ServerProviderModel> }
+  | {
+      readonly status: "invalid-response";
+      readonly reason: "unsupported-shape" | "too-many-models";
+    };
+
+type LmStudioHttpJsonResult =
+  | { readonly status: "ok"; readonly payload: unknown }
+  | { readonly status: "http-error"; readonly statusCode: number }
+  | { readonly status: "invalid-response" }
+  | { readonly status: "offline" };
 
 export interface CodexAppServerProviderSnapshot {
   readonly account: CodexSchema.V2GetAccountResponse;
@@ -989,6 +1042,10 @@ const requestAllCodexModels = Effect.fn("requestAllCodexModels")(function* (
   return models;
 });
 
+export function buildCodexProviderAppServerArgs(ossMode = false): ReadonlyArray<string> {
+  return ossMode ? ["--oss", "--local-provider", "lmstudio", "app-server"] : ["app-server"];
+}
+
 export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
   return {
     clientInfo: {
@@ -1004,6 +1061,7 @@ export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
 
 const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(function* (input: {
   readonly binaryPath: string;
+  readonly ossMode?: boolean;
   readonly homePath?: string;
   readonly cwd: string;
   readonly customModels?: ReadonlyArray<string>;
@@ -1017,7 +1075,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   const clientContext = yield* Layer.build(
     CodexClient.layerCommand({
       command: input.binaryPath,
-      args: ["app-server"],
+      args: buildCodexProviderAppServerArgs(input.ossMode),
       cwd: input.cwd,
       env: {
         ...(input.environment ?? process.env),
@@ -1045,8 +1103,10 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   const versionMatch = initialize.userAgent.match(/\/([^\s]+)/);
   const version = versionMatch ? versionMatch[1] : undefined;
 
-  const accountResponse = yield* client.request("account/read", {});
-  if (!accountResponse.account && accountResponse.requiresOpenaiAuth) {
+  const accountResponse: CodexSchema.V2GetAccountResponse = input.ossMode
+    ? { account: null, requiresOpenaiAuth: false }
+    : yield* client.request("account/read", {});
+  if (!input.ossMode && !accountResponse.account && accountResponse.requiresOpenaiAuth) {
     return {
       account: accountResponse,
       version,
@@ -1056,12 +1116,13 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   }
 
   const rateLimitsCheckedAt = DateTime.formatIso(yield* DateTime.now);
-  const accountRateLimits = accountResponse.account
-    ? yield* client.request("account/rateLimits/read", undefined).pipe(
-        Effect.map((response) => codexAppServerRateLimitsToServer(response, rateLimitsCheckedAt)),
-        Effect.option,
-      )
-    : Option.none<ServerProviderAccountRateLimits>();
+  const accountRateLimits =
+    !input.ossMode && accountResponse.account
+      ? yield* client.request("account/rateLimits/read", undefined).pipe(
+          Effect.map((response) => codexAppServerRateLimitsToServer(response, rateLimitsCheckedAt)),
+          Effect.option,
+        )
+      : Option.none<ServerProviderAccountRateLimits>();
 
   const [skillsResponse, models] = yield* Effect.all(
     [
@@ -1082,7 +1143,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   } satisfies CodexAppServerProviderSnapshot;
 });
 
-const emptyCodexModelsFromSettings = (codexSettings: CodexSettings): ServerProvider["models"] =>
+const customCodexModelsFromSettings = (codexSettings: CodexSettings): ServerProvider["models"] =>
   codexSettings.customModels
     .map((model) => model.trim())
     .filter((model, index, models) => model.length > 0 && models.indexOf(model) === index)
@@ -1095,6 +1156,221 @@ const emptyCodexModelsFromSettings = (codexSettings: CodexSettings): ServerProvi
 
 const fallbackCodexModelsFromSettings = (codexSettings: CodexSettings): ServerProvider["models"] =>
   appendCustomCodexModels(STATIC_CODEX_MODELS, codexSettings.customModels);
+
+const configuredCodexModels = (codexSettings: CodexSettings): ServerProvider["models"] =>
+  codexSettings.ossMode ? [] : fallbackCodexModelsFromSettings(codexSettings);
+
+export function parseLmStudioModelInventory(
+  openAiPayload: unknown,
+  nativePayload?: unknown,
+): LmStudioModelInventoryParseResult {
+  let openAiModels: typeof LmStudioOpenAiModelList.Type;
+  try {
+    openAiModels = decodeLmStudioOpenAiModelList(openAiPayload);
+  } catch {
+    return { status: "invalid-response", reason: "unsupported-shape" };
+  }
+
+  if (openAiModels.data.length === 0) {
+    return { status: "ready", models: [] };
+  }
+
+  let nativeModels: (typeof LmStudioNativeModelList.Type)["models"];
+  try {
+    nativeModels = decodeLmStudioNativeModelList(nativePayload).models;
+  } catch {
+    // `/v1/models` does not identify embedding-only entries. Fail closed
+    // unless LM Studio's native inventory supplies trustworthy model types.
+    return { status: "invalid-response", reason: "unsupported-shape" };
+  }
+
+  const nativeById = new Map<
+    string,
+    { readonly type: "llm" | "embedding"; readonly name: string }
+  >();
+  for (const model of nativeModels) {
+    const metadata = { type: model.type, name: model.display_name.trim() || model.key };
+    nativeById.set(model.key, metadata);
+    for (const loaded of model.loaded_instances) nativeById.set(loaded.id, metadata);
+  }
+
+  const seen = new Set<string>();
+  const models: ServerProviderModel[] = [];
+  for (const candidate of openAiModels.data) {
+    const id = candidate.id.trim();
+    if (id.length === 0 || id.length > MAX_LM_STUDIO_MODEL_ID_LENGTH || seen.has(id)) continue;
+    const metadata = nativeById.get(id);
+    if (metadata === undefined) {
+      return { status: "invalid-response", reason: "unsupported-shape" };
+    }
+    if (metadata?.type === "embedding") continue;
+    if (models.length >= MAX_LM_STUDIO_DISCOVERED_MODELS) {
+      return { status: "invalid-response", reason: "too-many-models" };
+    }
+    seen.add(id);
+    models.push({
+      slug: id,
+      name: metadata?.name ?? id,
+      isCustom: false,
+      capabilities: null,
+    });
+  }
+  return { status: "ready", models };
+}
+
+const readBoundedLmStudioJson = Effect.fn("readBoundedLmStudioJson")(function* (
+  response: HttpClientResponse.HttpClientResponse,
+) {
+  const collected = yield* response.stream.pipe(
+    Stream.runFoldEffect<
+      { readonly chunks: Uint8Array<ArrayBufferLike>[]; readonly bytes: number },
+      Uint8Array<ArrayBufferLike>,
+      Error,
+      never
+    >(
+      () => ({ chunks: [], bytes: 0 }),
+      (state, chunk) => {
+        const nextBytes = state.bytes + chunk.byteLength;
+        if (nextBytes > MAX_LM_STUDIO_MODEL_RESPONSE_BYTES) {
+          return Effect.fail(
+            new Error(
+              `LM Studio model inventory exceeded ${MAX_LM_STUDIO_MODEL_RESPONSE_BYTES} bytes.`,
+            ),
+          );
+        }
+        state.chunks.push(chunk);
+        return Effect.succeed({ chunks: state.chunks, bytes: nextBytes });
+      },
+    ),
+  );
+  return yield* Effect.try({
+    try: (): unknown =>
+      JSON.parse(Buffer.concat(collected.chunks, collected.bytes).toString("utf8")),
+    catch: (cause) => cause,
+  });
+});
+
+const requestLmStudioJson = (
+  url: string,
+  client: HttpClient.HttpClient,
+): Effect.Effect<LmStudioHttpJsonResult> =>
+  Effect.gen(function* () {
+    const responseResult = yield* client
+      .execute(
+        HttpClientRequest.get(url).pipe(HttpClientRequest.setHeader("accept", "application/json")),
+      )
+      .pipe(
+        Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
+        Effect.result,
+      );
+    if (Result.isFailure(responseResult)) return { status: "offline" } as const;
+
+    const response = responseResult.success;
+    if (response.status < 200 || response.status >= 300) {
+      return { status: "http-error", statusCode: response.status } as const;
+    }
+    const payloadResult = yield* readBoundedLmStudioJson(response).pipe(Effect.result);
+    return Result.isFailure(payloadResult)
+      ? ({ status: "invalid-response" } as const)
+      : ({ status: "ok", payload: payloadResult.success } as const);
+  }).pipe(
+    Effect.timeoutOption(Duration.millis(LM_STUDIO_DISCOVERY_TIMEOUT_MS)),
+    Effect.map(Option.getOrElse((): LmStudioHttpJsonResult => ({ status: "offline" }))),
+  );
+
+/** Discover LM Studio's bounded, currently served model inventory. */
+export const discoverLmStudioModels = Effect.fn("discoverLmStudioModels")(function* (
+  baseUrl: string,
+  client: HttpClient.HttpClient,
+): Effect.fn.Return<LmStudioModelDiscovery> {
+  const normalizedBaseUrl = normalizeLmStudioBaseUrl(baseUrl);
+  const openAiResult = yield* requestLmStudioJson(`${normalizedBaseUrl}/models`, client);
+  if (openAiResult.status === "offline") {
+    return {
+      status: "offline",
+      models: [],
+      message: `LM Studio did not answer at ${normalizedBaseUrl}. Start its local server, then refresh provider status.`,
+    };
+  }
+  if (
+    openAiResult.status === "http-error" &&
+    (openAiResult.statusCode === 401 || openAiResult.statusCode === 403)
+  ) {
+    return {
+      status: "authentication-required",
+      models: [],
+      message:
+        "LM Studio requires authentication, but this provider cannot send LM Studio API tokens. Disable Require Authentication or protect the endpoint with a trusted private network, VPN, or firewall.",
+    };
+  }
+  if (openAiResult.status === "http-error") {
+    return {
+      status: "offline",
+      models: [],
+      message: `LM Studio returned HTTP ${openAiResult.statusCode} at ${normalizedBaseUrl}. Redirects are not followed. Check the server URL, then refresh provider status.`,
+    };
+  }
+  if (openAiResult.status === "invalid-response") {
+    return {
+      status: "invalid-response",
+      models: [],
+      message: "LM Studio returned invalid or oversized model-list JSON.",
+    };
+  }
+
+  const nativeUrl = new URL(normalizedBaseUrl);
+  // Keep a configured reverse-proxy prefix. For example, `/team/v1` maps
+  // to `/team/api/v1/models`, while the default `/v1` maps to
+  // `/api/v1/models`.
+  nativeUrl.pathname = `${nativeUrl.pathname.slice(0, -"/v1".length)}/api/v1/models`;
+  nativeUrl.search = "";
+  nativeUrl.hash = "";
+  const nativeResult = yield* requestLmStudioJson(nativeUrl.toString(), client);
+  const parsed = parseLmStudioModelInventory(
+    openAiResult.payload,
+    nativeResult.status === "ok" ? nativeResult.payload : undefined,
+  );
+  if (parsed.status === "invalid-response") {
+    return {
+      status: "invalid-response",
+      models: [],
+      message:
+        parsed.reason === "too-many-models"
+          ? `LM Studio exposed more than ${MAX_LM_STUDIO_DISCOVERED_MODELS} available models.`
+          : "LM Studio did not return compatible model type metadata. Cafe Code cannot safely distinguish chat models from embedding models.",
+    };
+  }
+  if (parsed.models.length === 0) {
+    return {
+      status: "empty",
+      models: [],
+      message:
+        "LM Studio is online but exposes no chat models. Load a chat model or enable Just-In-Time model loading, then refresh provider status.",
+    };
+  }
+  return {
+    status: "ready",
+    models: parsed.models,
+    message: `LM Studio is online with ${parsed.models.length} available chat model${parsed.models.length === 1 ? "" : "s"}.`,
+  };
+});
+
+export function reconcileLmStudioModelDiscovery(
+  provider: ServerProviderDraft,
+  discovery: LmStudioModelDiscovery,
+): ServerProviderDraft {
+  if (!provider.enabled || provider.status === "disabled") return provider;
+  if (provider.status === "error") return { ...provider, models: [] };
+  if (discovery.status === "ready") {
+    return { ...provider, status: "ready", models: discovery.models, message: discovery.message };
+  }
+  return {
+    ...provider,
+    status: discovery.status === "empty" ? "warning" : "error",
+    models: [],
+    message: discovery.message,
+  };
+}
 
 const runCodexCommand = Effect.fn("runCodexCommand")(function* (
   codexSettings: CodexSettings,
@@ -1196,7 +1472,7 @@ const makePendingCodexProvider = (
 ): Effect.Effect<ServerProviderDraft> =>
   Effect.gen(function* () {
     const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
-    const models = fallbackCodexModelsFromSettings(codexSettings);
+    const models = configuredCodexModels(codexSettings);
 
     if (!codexSettings.enabled) {
       return buildServerProvider({
@@ -1209,7 +1485,7 @@ const makePendingCodexProvider = (
           installed: false,
           version: null,
           status: "warning",
-          auth: { status: "unknown" },
+          auth: codexUnknownAuth(codexSettings),
           message: "Codex is disabled in Cafe Code settings.",
         },
       });
@@ -1225,7 +1501,7 @@ const makePendingCodexProvider = (
         installed: false,
         version: null,
         status: "warning",
-        auth: { status: "unknown" },
+        auth: codexUnknownAuth(codexSettings),
         message: "Codex provider status has not been checked in this session yet.",
       },
     });
@@ -1260,10 +1536,17 @@ function accountProbeStatus(account: CodexAppServerProviderSnapshot["account"]):
   return { status: "ready", auth };
 }
 
+function codexUnknownAuth(codexSettings: Pick<CodexSettings, "ossMode">): ServerProvider["auth"] {
+  return codexSettings.ossMode
+    ? { status: "unknown", type: "local", label: "LM Studio / Codex OSS" }
+    : { status: "unknown" };
+}
+
 export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(function* (
   codexSettings: CodexSettings,
   probe: (input: {
     readonly binaryPath: string;
+    readonly ossMode?: boolean;
     readonly homePath?: string;
     readonly cwd: string;
     readonly customModels: ReadonlyArray<string>;
@@ -1280,7 +1563,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   ChildProcessSpawner.ChildProcessSpawner
 > {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
-  const emptyModels = emptyCodexModelsFromSettings(codexSettings);
+  const emptyModels = codexSettings.ossMode ? [] : customCodexModelsFromSettings(codexSettings);
 
   if (!codexSettings.enabled) {
     return buildServerProvider({
@@ -1293,7 +1576,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
         installed: false,
         version: null,
         status: "warning",
-        auth: { status: "unknown" },
+        auth: codexUnknownAuth(codexSettings),
         message: "Codex is disabled in Cafe Code settings.",
       },
     });
@@ -1301,9 +1584,10 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
 
   const probeResult = yield* probe({
     binaryPath: codexSettings.binaryPath,
+    ossMode: codexSettings.ossMode,
     homePath: codexSettings.homePath,
     cwd: process.cwd(),
-    customModels: codexSettings.customModels,
+    customModels: codexSettings.ossMode ? [] : codexSettings.customModels,
     environment,
   }).pipe(
     Effect.scoped,
@@ -1328,7 +1612,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
         installed,
         version: null,
         status: "error",
-        auth: { status: "unknown" },
+        auth: codexUnknownAuth(codexSettings),
         message: installed
           ? `Codex app-server provider probe failed: ${error.message}.`
           : missingMessage,
@@ -1347,13 +1631,31 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
         installed: true,
         version: null,
         status: "error",
-        auth: { status: "unknown" },
+        auth: codexUnknownAuth(codexSettings),
         message: "Timed out while checking Codex app-server provider status.",
       },
     });
   }
 
   const snapshot = probeResult.success.value;
+  if (codexSettings.ossMode) {
+    return buildServerProvider({
+      presentation: CODEX_PRESENTATION,
+      enabled: codexSettings.enabled,
+      checkedAt,
+      // Codex model/list is not LM Studio's current callable inventory.
+      // Direct discovery replaces this empty list in the driver composition.
+      models: [],
+      skills: snapshot.skills,
+      probe: {
+        installed: true,
+        version: snapshot.version ?? null,
+        status: "ready",
+        auth: { status: "unknown", type: "local", label: "LM Studio / Codex OSS" },
+        message: "Codex OSS runtime is available for LM Studio.",
+      },
+    });
+  }
   const accountStatus = accountProbeStatus(snapshot.account);
 
   return buildServerProvider({
@@ -1382,7 +1684,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
   ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
 > {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
-  const models = fallbackCodexModelsFromSettings(codexSettings);
+  const models = configuredCodexModels(codexSettings);
 
   if (!codexSettings.enabled) {
     return buildServerProvider({
@@ -1395,7 +1697,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
         installed: false,
         version: null,
         status: "warning",
-        auth: { status: "unknown" },
+        auth: codexUnknownAuth(codexSettings),
         message: "Codex is disabled in Cafe Code settings.",
       },
     });
@@ -1418,7 +1720,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
         installed: !isCommandMissingCause(error),
         version: null,
         status: "error",
-        auth: { status: "unknown" },
+        auth: codexUnknownAuth(codexSettings),
         message: isCommandMissingCause(error)
           ? "Codex CLI (`codex`) is not installed or not on PATH."
           : `Failed to execute Codex CLI health check: ${error instanceof Error ? error.message : String(error)}.`,
@@ -1437,7 +1739,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
         installed: true,
         version: null,
         status: "error",
-        auth: { status: "unknown" },
+        auth: codexUnknownAuth(codexSettings),
         message: "Codex CLI is installed but failed to run. Timed out while running command.",
       },
     });
@@ -1457,10 +1759,28 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
         installed: true,
         version: parsedVersion,
         status: "error",
-        auth: { status: "unknown" },
+        auth: codexUnknownAuth(codexSettings),
         message: detail
           ? `Codex CLI is installed but failed to run. ${detail}`
           : "Codex CLI is installed but failed to run.",
+      },
+    });
+  }
+
+  if (codexSettings.ossMode) {
+    return buildServerProvider({
+      presentation: CODEX_PRESENTATION,
+      enabled: codexSettings.enabled,
+      checkedAt,
+      models,
+      skills: [],
+      probe: {
+        installed: true,
+        version: parsedVersion,
+        status: "warning",
+        auth: { status: "unknown", type: "local", label: "LM Studio / Codex OSS" },
+        message:
+          "LM Studio mode is configured. Cafe Code has not checked the server or model list yet.",
       },
     });
   }

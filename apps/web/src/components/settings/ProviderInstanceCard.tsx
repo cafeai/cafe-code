@@ -28,7 +28,7 @@ import {
 import { cn } from "../../lib/utils";
 import { formatCodexRateLimitSummary } from "../../lib/codexRateLimits";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
-import { normalizeProviderAccentColor } from "../../providerInstances";
+import { isLmStudioProviderInstance, normalizeProviderAccentColor } from "../../providerInstances";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
@@ -49,6 +49,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { DriverOption } from "./providerDriverMeta";
 import { ProviderSettingsForm } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
+import { LM_STUDIO_LOCAL_DISPLAY_NAME } from "./providerInstanceCreation";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import {
@@ -762,8 +763,11 @@ export function ProviderInstanceCard({
   const versionAdvisory = getProviderVersionAdvisoryPresentation(liveProvider?.versionAdvisory);
   const updateCommand = versionAdvisory?.updateCommand ?? null;
   const FallbackIconComponent = driverOption?.icon;
+  const isLmStudioLocal = isLmStudioProviderInstance(instance);
   const displayName =
-    instance.displayName?.trim() || driverOption?.label || String(instance.driver);
+    instance.displayName?.trim() ||
+    (isLmStudioLocal ? LM_STUDIO_LOCAL_DISPLAY_NAME : driverOption?.label) ||
+    String(instance.driver);
   const accentColor = normalizeProviderAccentColor(instance.accentColor);
   const { copyToClipboard } = useCopyToClipboard<{ providerName: string }>({
     onCopy: ({ providerName }) => {
@@ -798,7 +802,7 @@ export function ProviderInstanceCard({
   // from the current instance config so add/remove reflects immediately.
   const modelsForDisplay = deriveProviderModelsForDisplay({
     liveModels: liveProvider?.models,
-    customModels,
+    customModels: isLmStudioLocal ? [] : customModels,
   });
 
   const updateDisplayName = (value: string) => {
@@ -869,7 +873,7 @@ export function ProviderInstanceCard({
       driverKind={driverKind}
       displayName={displayName}
       accentColor={accentColor}
-      showBadge={Boolean(accentColor)}
+      showBadge={Boolean(accentColor) || isLmStudioLocal}
       statusDotClassName={statusStyle.dot}
       className="size-5"
       iconClassName="size-4 text-foreground/80"
@@ -1253,7 +1257,8 @@ export function ProviderInstanceCard({
                   instanceId={instanceId}
                   driverKind={driverKind}
                   models={modelsForDisplay}
-                  customModels={customModels}
+                  customModels={isLmStudioLocal ? [] : customModels}
+                  allowCustomModels={!isLmStudioLocal}
                   hiddenModels={hiddenModels}
                   favoriteModels={favoriteModels}
                   modelOrder={modelOrder}

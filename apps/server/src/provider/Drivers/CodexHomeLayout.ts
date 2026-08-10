@@ -29,7 +29,7 @@ export interface CodexHomeLayout {
   readonly continuationKey: string;
 }
 
-export type CodexShadowHomeAuthSource = "shared" | "shadow";
+export type CodexShadowHomeAuthSource = "none" | "shared" | "shadow";
 
 const KNOWN_SHARED_DIRECTORIES = [
   "sessions",
@@ -480,6 +480,15 @@ export const materializeCodexShadowHome = Effect.fn("materializeCodexShadowHome"
     },
     { discard: true },
   );
+
+  if (options?.authSource === "none") {
+    // Local OSS providers do not use an OpenAI login. Remove any credential
+    // copy left by an earlier cloud instance with the same routing id.
+    yield* normalizeShadowHomeError(
+      fileSystem.remove(path.join(effectiveHomePath, "auth.json"), { force: true }),
+    );
+    return;
+  }
 
   const authSourcePath =
     options?.authSource === "shadow" ? effectiveHomePath : layout.sharedHomePath;

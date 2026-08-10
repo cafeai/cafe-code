@@ -233,7 +233,13 @@ export interface CodexTransportPolicy {
 
 export function buildCodexAppServerArgs(
   transportPolicy: CodexTransportPolicy | undefined,
+  ossMode = false,
 ): ReadonlyArray<string> {
+  if (ossMode) {
+    // Global flags must precede the subcommand. Select LM Studio explicitly
+    // so a non-interactive launch cannot open the local-provider picker.
+    return ["--oss", "--local-provider", "lmstudio", "app-server"];
+  }
   if (transportPolicy?.responsesWebsockets !== "disabled") {
     return ["app-server"];
   }
@@ -268,6 +274,7 @@ export interface CodexSessionRuntimeOptions {
   readonly homePath?: string;
   readonly environment?: NodeJS.ProcessEnv;
   readonly transportPolicy?: CodexTransportPolicy;
+  readonly ossMode?: boolean;
   readonly cwd: string;
   readonly runtimeMode: RuntimeMode;
   readonly model?: string;
@@ -2423,7 +2430,7 @@ export const makeCodexSessionRuntime = (
       ...(options.environment ?? process.env),
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
     };
-    const appServerArgs = buildCodexAppServerArgs(options.transportPolicy);
+    const appServerArgs = buildCodexAppServerArgs(options.transportPolicy, options.ossMode);
     const appServerCwd = options.appServerCwd ?? process.cwd();
     const child = yield* spawner
       .spawn(

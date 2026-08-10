@@ -112,7 +112,19 @@ export const mergeProviderSnapshot = (
     ? nextProvider
     : {
         ...nextProvider,
-        models: mergeProviderModels(previousProvider.models, nextProvider.models),
+        // LM Studio's current inventory is authoritative. Do not retain stale
+        // local models after unload/offline/auth/empty refreshes, and do not
+        // carry local slugs into cloud Codex (or cloud slugs into local mode)
+        // when an instance is reconfigured in place.
+        models:
+          (nextProvider.driver === ProviderDriverKind.make("codex") &&
+            nextProvider.auth.type === "local") ||
+          (previousProvider.driver === ProviderDriverKind.make("codex") &&
+            nextProvider.driver === ProviderDriverKind.make("codex") &&
+            previousProvider.auth.type !== nextProvider.auth.type &&
+            previousProvider.auth.type === "local")
+            ? nextProvider.models
+            : mergeProviderModels(previousProvider.models, nextProvider.models),
         // Carry forward event-sourced account rate limits when an incoming snapshot
         // omits them. Claude's periodic probe never sends a prompt, so it produces no
         // `accountRateLimits`; without this, each refresh would wipe the limits accrued

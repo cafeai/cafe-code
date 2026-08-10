@@ -16,6 +16,7 @@ import {
   defaultInstanceIdForDriver,
   PROVIDER_DISPLAY_NAMES,
   type ProviderDriverKind,
+  type ProviderInstanceConfig,
   type ProviderInstanceId,
   type ServerProvider,
   type ServerProviderModel,
@@ -83,6 +84,21 @@ export function normalizeProviderAccentColor(value: string | undefined): string 
   const trimmed = value?.trim();
   if (!trimmed) return undefined;
   return /^#[0-9a-fA-F]{6}$/u.test(trimmed) ? trimmed : undefined;
+}
+
+/** LM Studio is presented separately but runs through a Codex OSS instance. */
+export function isLmStudioProviderInstance(
+  instance: Pick<ProviderInstanceConfig, "driver" | "config">,
+): boolean {
+  if (
+    instance.driver !== "codex" ||
+    instance.config === null ||
+    typeof instance.config !== "object" ||
+    Array.isArray(instance.config)
+  ) {
+    return false;
+  }
+  return (instance.config as Record<string, unknown>).ossMode === true;
 }
 
 /**

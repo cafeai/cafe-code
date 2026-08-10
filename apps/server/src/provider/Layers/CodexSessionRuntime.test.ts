@@ -88,6 +88,12 @@ describe("Codex notification emission timestamps", () => {
 describe("buildCodexAppServerArgs", () => {
   it("uses plain app-server args until a transport fallback policy is active", () => {
     assert.deepStrictEqual(buildCodexAppServerArgs(undefined), ["app-server"]);
+    assert.deepStrictEqual(buildCodexAppServerArgs(undefined, true), [
+      "--oss",
+      "--local-provider",
+      "lmstudio",
+      "app-server",
+    ]);
     assert.deepStrictEqual(buildCodexAppServerArgs({ responsesWebsockets: "auto" }), [
       "app-server",
     ]);

@@ -26,6 +26,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
+  DEFAULT_LM_STUDIO_BASE_URL,
   type ClaudeSettings,
   type CodexSettings,
   ProviderDriverKind,
@@ -56,6 +57,8 @@ const makeCodexConfig = (overrides: Partial<CodexSettings>): CodexSettings => ({
   runtimeSource: "system",
   homePath: "",
   shadowHomePath: "",
+  ossMode: false,
+  ossBaseUrl: DEFAULT_LM_STUDIO_BASE_URL,
   customModels: [],
   autoCompactTokenLimit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
   ...overrides,

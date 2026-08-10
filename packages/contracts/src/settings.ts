@@ -386,6 +386,129 @@ export function makeProviderSettingsSchema<const Fields extends Schema.Struct.Fi
 // settings schema default and every runtime consumer share one source of
 // truth; `@cafecode/shared/codexCompaction` re-exports it for existing callers.
 export const CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT = 200_000;
+export const DEFAULT_LM_STUDIO_BASE_URL = "http://127.0.0.1:1234/v1";
+export const MAX_LM_STUDIO_BASE_URL_LENGTH = 512;
+
+function isPrivateOrLoopbackIpv4(hostname: string): boolean {
+  const parts = hostname.split(".");
+  const octets = parts.map((part) => Number(part));
+  if (
+    octets.length !== 4 ||
+    octets.some(
+      (octet, index) =>
+        !Number.isInteger(octet) || octet < 0 || octet > 255 || String(octet) !== parts[index],
+    )
+  ) {
+    return false;
+  }
+
+  return (
+    octets[0] === 10 ||
+    octets[0] === 127 ||
+    (octets[0] === 172 && octets[1]! >= 16 && octets[1]! <= 31) ||
+    (octets[0] === 192 && octets[1] === 168)
+  );
+}
+
+function isPrivateOrLoopbackIpv6(hostname: string): boolean {
+  const normalized = hostname.replace(/^\[|\]$/gu, "").toLowerCase();
+  if (normalized === "::1") return true;
+  const firstSegment = normalized.split(":")[0] ?? "";
+  const firstValue = Number.parseInt(firstSegment, 16);
+  return Number.isFinite(firstValue) && firstValue >= 0xfc00 && firstValue <= 0xfdff;
+}
+
+function isKnownCloudMetadataHost(hostname: string): boolean {
+  const normalized = hostname
+    .replace(/^\[|\]$/gu, "")
+    .replace(/\.$/u, "")
+    .toLowerCase();
+  return (
+    normalized === "169.254.169.254" ||
+    normalized === "100.100.100.200" ||
+    normalized === "fd00:ec2::254" ||
+    normalized === "metadata.google.internal"
+  );
+}
+
+function isPrivateOrLoopbackLmStudioHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return (
+    normalized === "localhost" ||
+    isPrivateOrLoopbackIpv4(normalized) ||
+    isPrivateOrLoopbackIpv6(normalized)
+  );
+}
+
+function isLiteralIpAddress(hostname: string): boolean {
+  return (
+    isPrivateOrLoopbackIpv4(hostname) ||
+    /^\d{1,3}(?:\.\d{1,3}){3}$/u.test(hostname) ||
+    (hostname.startsWith("[") && hostname.endsWith("]"))
+  );
+}
+
+/**
+ * Validate an LM Studio OpenAI-compatible API root without network I/O.
+ * HTTP is limited to literal private addresses and localhost. HTTPS may use
+ * hostnames, but known metadata targets and public literal IPs stay blocked.
+ */
+export function validateLmStudioBaseUrl(value: string): string | null {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return "LM Studio server URL is required.";
+  if (trimmed.length > MAX_LM_STUDIO_BASE_URL_LENGTH) {
+    return `LM Studio server URL must be ${MAX_LM_STUDIO_BASE_URL_LENGTH} characters or fewer.`;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return "Enter a complete http:// or https:// LM Studio server URL.";
+  }
+
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return "LM Studio server URL must use http:// or https://.";
+  }
+  const hasUserinfoDelimiter = /^[a-z][a-z\d+.-]*:\/\/[^/?#]*@/iu.test(trimmed);
+  if (hasUserinfoDelimiter || url.username.length > 0 || url.password.length > 0) {
+    return "LM Studio server URL must not contain a username or password.";
+  }
+  if (url.search.length > 0 || url.hash.length > 0) {
+    return "LM Studio server URL must not contain a query string or fragment.";
+  }
+  if (isKnownCloudMetadataHost(url.hostname)) {
+    return "LM Studio server URL must not target a cloud metadata service.";
+  }
+  if (isLiteralIpAddress(url.hostname) && !isPrivateOrLoopbackLmStudioHost(url.hostname)) {
+    return "LM Studio server URL must use a private or loopback IP address, or an HTTPS hostname.";
+  }
+  if (url.protocol === "http:" && !isPrivateOrLoopbackLmStudioHost(url.hostname)) {
+    return "Plain HTTP is allowed only for localhost or a literal private/loopback IP address. Use an IP address or HTTPS so DNS cannot redirect the endpoint.";
+  }
+
+  const pathname = url.pathname.replace(/\/+$/gu, "");
+  if (pathname.length > 0 && !pathname.endsWith("/v1")) {
+    return "LM Studio server URL must be its OpenAI-compatible API root ending in /v1.";
+  }
+  return null;
+}
+
+export function normalizeLmStudioBaseUrl(value: string): string {
+  const validationError = validateLmStudioBaseUrl(value);
+  if (validationError !== null) throw new TypeError(validationError);
+
+  const url = new URL(value.trim());
+  const pathname = url.pathname.replace(/\/+$/gu, "");
+  url.pathname = pathname.length > 0 ? pathname : "/v1";
+  return url.toString();
+}
+
+export const LmStudioBaseUrl = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(MAX_LM_STUDIO_BASE_URL_LENGTH),
+  Schema.makeFilter((value) => validateLmStudioBaseUrl(value) ?? undefined),
+);
+export type LmStudioBaseUrl = typeof LmStudioBaseUrl.Type;
 
 export const CodexAutoCompactTokenLimit = Schema.Int.check(Schema.isGreaterThan(0));
 export type CodexAutoCompactTokenLimit = typeof CodexAutoCompactTokenLimit.Type;
@@ -410,6 +533,26 @@ export const CodexSettings = makeProviderSettingsSchema(
         providerSettingsForm: {
           control: "select",
           options: ProviderCliRuntimeSourceOptions,
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
+    ossMode: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({
+        title: "LM Studio mode",
+        description: "Use the local LM Studio provider instead of the OpenAI cloud provider.",
+        providerSettingsForm: { control: "switch" },
+      }),
+    ),
+    ossBaseUrl: LmStudioBaseUrl.pipe(
+      Schema.withDecodingDefault(Effect.succeed(DEFAULT_LM_STUDIO_BASE_URL)),
+      Schema.annotateKey({
+        title: "LM Studio server URL",
+        description:
+          "OpenAI-compatible API root for LM Studio. Plain HTTP accepts localhost or literal private/LAN IP addresses. Hostnames require HTTPS. Protect network access with a trusted private network, VPN, or firewall.",
+        providerSettingsForm: {
+          placeholder: DEFAULT_LM_STUDIO_BASE_URL,
           clearWhenEmpty: "omit",
         },
       }),
@@ -458,7 +601,15 @@ export const CodexSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["runtimeSource", "binaryPath", "homePath", "shadowHomePath", "autoCompactTokenLimit"],
+    order: [
+      "runtimeSource",
+      "binaryPath",
+      "ossMode",
+      "ossBaseUrl",
+      "homePath",
+      "shadowHomePath",
+      "autoCompactTokenLimit",
+    ],
   },
 );
 export type CodexSettings = typeof CodexSettings.Type;
@@ -663,6 +814,8 @@ const CodexSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
   runtimeSource: Schema.optionalKey(ProviderCliRuntimeSource),
+  ossMode: Schema.optionalKey(Schema.Boolean),
+  ossBaseUrl: Schema.optionalKey(LmStudioBaseUrl),
   homePath: Schema.optionalKey(TrimmedString),
   shadowHomePath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),

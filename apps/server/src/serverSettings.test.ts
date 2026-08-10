@@ -124,6 +124,8 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         runtimeSource: "system",
         homePath: "/Users/julius/.codex",
         shadowHomePath: "",
+        ossMode: false,
+        ossBaseUrl: "http://127.0.0.1:1234/v1",
         customModels: [],
         autoCompactTokenLimit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
       });
@@ -363,6 +365,8 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         runtimeSource: "system",
         homePath: "",
         shadowHomePath: "",
+        ossMode: false,
+        ossBaseUrl: "http://127.0.0.1:1234/v1",
         customModels: [],
         autoCompactTokenLimit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
       });

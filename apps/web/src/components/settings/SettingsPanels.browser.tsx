@@ -1647,6 +1647,29 @@ describe("settings panels", () => {
     });
   });
 
+  it("shows persistent LM Studio setup and opens its endpoint step", async () => {
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ProviderSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect
+      .element(page.getByRole("heading", { name: "LM Studio Local", exact: true }))
+      .toBeInTheDocument();
+    await expect.element(page.getByText("Not configured", { exact: true })).toBeInTheDocument();
+    await expect.element(page.getByText(/OpenCode is a separate provider\./)).toBeInTheDocument();
+
+    await page.getByRole("button", { name: "Set up LM Studio Local" }).click();
+
+    await expect.element(page.getByText("LM Studio Local through Codex OSS")).toBeInTheDocument();
+    await expect
+      .element(page.getByLabelText("LM Studio server URL"))
+      .toHaveValue("http://127.0.0.1:1234/v1");
+  });
+
   it("runs one-click provider updates from the provider card", async () => {
     const updateProvider = vi.fn<LocalApi["server"]["updateProvider"]>().mockResolvedValue({
       providers: [createOutdatedProvider("codex")],

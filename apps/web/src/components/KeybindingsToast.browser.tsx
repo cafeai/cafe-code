@@ -3,6 +3,7 @@ import "../index.css";
 import {
   CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
   DEFAULT_CLIENT_SETTINGS,
+  DEFAULT_LM_STUDIO_BASE_URL,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   ORCHESTRATION_WS_METHODS,
@@ -118,6 +119,8 @@ function createBaseServerConfig(): ServerConfig {
           runtimeSource: "system",
           homePath: "",
           shadowHomePath: "",
+          ossMode: false,
+          ossBaseUrl: DEFAULT_LM_STUDIO_BASE_URL,
           customModels: [],
           autoCompactTokenLimit: CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
         },

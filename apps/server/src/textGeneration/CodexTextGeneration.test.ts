@@ -247,6 +247,7 @@ type CapturedCodexCommand = {
   readonly command: string;
   readonly args: ReadonlyArray<string>;
   readonly options: {
+    readonly env?: NodeJS.ProcessEnv;
     readonly stdin?: { readonly stream: Stream.Stream<Uint8Array> };
   };
 };
@@ -279,11 +280,14 @@ function withFakeCodexSpawner<A, E, R>(
     forbidReasoningEffort?: boolean;
     stdinMustContain?: string;
     stdinMustNotContain?: string;
+    config?: CodexSettings;
+    environment?: NodeJS.ProcessEnv;
+    assertCommand?: (command: CapturedCodexCommand) => void;
   },
   effectFn: (textGeneration: TextGenerationShape) => Effect.Effect<A, E, R>,
 ) {
   return Effect.gen(function* () {
-    const config = decodeCodexSettings({ binaryPath: "fake-codex" });
+    const config = input.config ?? decodeCodexSettings({ binaryPath: "fake-codex" });
     const spawner = ChildProcessSpawner.make((unknownCommand) =>
       Effect.gen(function* () {
         const command = unknownCommand as unknown as CapturedCodexCommand;
@@ -327,12 +331,13 @@ function withFakeCodexSpawner<A, E, R>(
         if (input.stdinMustNotContain !== undefined) {
           expect(prompt).not.toContain(input.stdinMustNotContain);
         }
+        input.assertCommand?.(command);
         return makeCodexHandle(
           missingRequiredImage ? { exitCode: 2, stderr: "missing --image input" } : input,
         );
       }),
     );
-    const textGeneration = yield* makeCodexTextGeneration(config).pipe(
+    const textGeneration = yield* makeCodexTextGeneration(config, input.environment).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
     );
     return yield* effectFn(textGeneration);
@@ -393,6 +398,44 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
             ]),
           }),
       ),
+  );
+
+  it.effect("uses LM Studio OSS routing for auxiliary Codex text generation", () =>
+    withFakeCodexSpawner(
+      {
+        output: JSON.stringify({ subject: "Use local model", body: "" }),
+        config: decodeCodexSettings({
+          binaryPath: "fake-codex",
+          ossMode: true,
+          ossBaseUrl: "http://192.168.20.15:1234/v1",
+        }),
+        environment: {
+          EXISTING: "kept",
+          CODEX_OSS_BASE_URL: "http://192.168.20.15:1234/v1",
+        },
+        assertCommand: (command) => {
+          expect(command.args.slice(0, 4)).toEqual([
+            "--oss",
+            "--local-provider",
+            "lmstudio",
+            "exec",
+          ]);
+          expect(command.options.env?.CODEX_OSS_BASE_URL).toBe("http://192.168.20.15:1234/v1");
+          expect(command.options.env?.EXISTING).toBe("kept");
+        },
+      },
+      (textGeneration) =>
+        textGeneration.generateCommitMessage({
+          cwd: process.cwd(),
+          branch: "feature/local-model",
+          stagedSummary: "M README.md",
+          stagedPatch: "diff --git a/README.md b/README.md",
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("lmstudio"),
+            "openai/gpt-oss-20b",
+          ),
+        }),
+    ),
   );
 
   it.effect("defaults git text generation codex effort to low", () =>

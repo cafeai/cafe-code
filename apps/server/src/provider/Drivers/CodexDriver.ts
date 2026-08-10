@@ -21,7 +21,12 @@
  *
  * @module provider/Drivers/CodexDriver
  */
-import { CodexSettings, ProviderDriverKind, type ServerProvider } from "@cafecode/contracts";
+import {
+  CodexSettings,
+  normalizeLmStudioBaseUrl,
+  ProviderDriverKind,
+  type ServerProvider,
+} from "@cafecode/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -38,8 +43,11 @@ import { ProviderDriverError } from "../Errors.ts";
 import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
 import {
   checkCodexCliProviderStatus,
+  checkCodexProviderStatus,
+  discoverLmStudioModels,
   makePendingCodexProvider,
   readCodexAccountRateLimits,
+  reconcileLmStudioModelDiscovery,
 } from "../Layers/CodexProvider.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
@@ -56,6 +64,7 @@ import {
   codexContinuationIdentity,
   materializeCodexShadowHome,
   resolveCodexHomeLayout,
+  type CodexShadowHomeAuthSource,
 } from "./CodexHomeLayout.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
@@ -122,13 +131,40 @@ export function withDefaultCodexShadowHome(input: {
   readonly instanceId: ProviderInstance["instanceId"];
   readonly config: CodexSettings;
 }): CodexSettings {
-  if (input.config.homePath.trim().length > 0 || input.config.shadowHomePath.trim().length > 0) {
+  if (input.config.shadowHomePath.trim().length > 0) {
+    return input.config;
+  }
+  // Cloud instances may intentionally run directly from an explicit home.
+  // OSS instances still need an isolated overlay so the effective CODEX_HOME
+  // cannot expose cloud credentials from that shared source directory.
+  if (!input.config.ossMode && input.config.homePath.trim().length > 0) {
     return input.config;
   }
 
   return {
     ...input.config,
     shadowHomePath: `${DEFAULT_SHADOW_HOME_ROOT}/${sanitizeShadowHomeSegment(String(input.instanceId))}`,
+  };
+}
+
+export function resolveCodexShadowHomeAuthSource(
+  config: Pick<CodexSettings, "ossMode" | "homePath" | "shadowHomePath">,
+): CodexShadowHomeAuthSource {
+  if (config.ossMode) return "none";
+  return config.homePath.trim().length === 0 && config.shadowHomePath.trim().length > 0
+    ? "shadow"
+    : "shared";
+}
+
+export function resolveCodexRuntimeEnvironment(
+  config: Pick<CodexSettings, "ossMode" | "ossBaseUrl">,
+  environment: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  if (!config.ossMode) return environment;
+  return {
+    ...environment,
+    // Scope the endpoint to this instance. Never mutate process.env.
+    CODEX_OSS_BASE_URL: normalizeLmStudioBaseUrl(config.ossBaseUrl),
   };
 }
 
@@ -154,10 +190,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // so CLI re-login repairs Cafe automatically. An explicit shadow-only
       // instance is different: users configure those paths to hold separate
       // Codex accounts, so its own auth.json is the source of truth.
-      const authSource =
-        config.homePath.trim().length === 0 && config.shadowHomePath.trim().length > 0
-          ? "shadow"
-          : "shared";
+      const authSource = resolveCodexShadowHomeAuthSource(config);
       const continuationIdentity = codexContinuationIdentity(homeLayout);
       const stampIdentity = withInstanceIdentity({
         instanceId,
@@ -165,7 +198,9 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         accentColor,
         continuationGroupKey: continuationIdentity.continuationKey,
         authActions:
-          layoutConfig.runtimeSource === "bundled" && process.platform === "win32"
+          !layoutConfig.ossMode &&
+          layoutConfig.runtimeSource === "bundled" &&
+          process.platform === "win32"
             ? { login: true }
             : undefined,
       });
@@ -204,7 +239,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         binaryPath: runtime.binaryPath,
         homePath: homeLayout.effectiveHomePath ?? "",
       } satisfies CodexSettings;
-      const effectiveEnvironment = runtime.env;
+      const effectiveEnvironment = resolveCodexRuntimeEnvironment(effectiveConfig, runtime.env);
       const maintenanceCapabilities =
         effectiveConfig.runtimeSource === "bundled"
           ? runtime.maintenanceCapabilities
@@ -237,7 +272,24 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // Starting `codex app-server` just to draw the provider badge can run
       // model/skill metadata requests and block for long enough to show a
       // false "provider unavailable" warning before the user has sent a
-      // message. Real sessions still use the app-server lifecycle below.
+      // message. LM Studio is the exception: its exact callable inventory
+      // comes from a bounded server-side `/v1/models` request.
+      const checkCodexStatus =
+        effectiveConfig.ossMode && effectiveConfig.enabled
+          ? Effect.all(
+              [
+                checkCodexProviderStatus(effectiveConfig, undefined, effectiveEnvironment),
+                discoverLmStudioModels(effectiveConfig.ossBaseUrl, httpClient),
+              ],
+              { concurrency: "unbounded" },
+            ).pipe(
+              Effect.map(([provider, discovery]) =>
+                reconcileLmStudioModelDiscovery(provider, discovery),
+              ),
+            )
+          : effectiveConfig.ossMode
+            ? checkCodexProviderStatus(effectiveConfig, undefined, effectiveEnvironment)
+            : checkCodexCliProviderStatus(effectiveConfig, effectiveEnvironment);
       const checkProvider = refreshCodexShadowHome.pipe(
         Effect.catch((cause) =>
           Effect.logWarning("codex.home.authRefreshBeforeStatusFailed", {
@@ -245,7 +297,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
             detail: cause.message,
           }),
         ),
-        Effect.andThen(checkCodexCliProviderStatus(effectiveConfig, effectiveEnvironment)),
+        Effect.andThen(checkCodexStatus),
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.provideService(FileSystem.FileSystem, fileSystem),

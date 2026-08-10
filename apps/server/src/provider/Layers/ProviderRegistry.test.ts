@@ -27,15 +27,20 @@ import {
   type ServerSettings as ContractServerSettings,
 } from "@cafecode/contracts";
 import * as PlatformError from "effect/PlatformError";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { deepMerge } from "@cafecode/shared/Struct";
 import { createModelCapabilities } from "@cafecode/shared/model";
 import { applyServerSettingsPatch } from "@cafecode/shared/serverSettings";
 
 import {
+  buildCodexProviderAppServerArgs,
   checkCodexCliProviderStatus,
   checkCodexProviderStatus,
+  discoverLmStudioModels,
+  makePendingCodexProvider,
+  parseLmStudioModelInventory,
+  reconcileLmStudioModelDiscovery,
   type CodexAppServerProviderSnapshot,
 } from "./CodexProvider.ts";
 import {
@@ -314,6 +319,328 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
   "ProviderRegistry",
   (it) => {
     describe("checkCodexProviderStatus", () => {
+      it("orders explicit LM Studio flags before the app-server subcommand", () => {
+        assert.deepStrictEqual(buildCodexProviderAppServerArgs(true), [
+          "--oss",
+          "--local-provider",
+          "lmstudio",
+          "app-server",
+        ]);
+        assert.deepStrictEqual(buildCodexProviderAppServerArgs(false), ["app-server"]);
+      });
+
+      it.effect("labels Codex OSS sessions as local LM Studio without cloud login", () =>
+        Effect.gen(function* () {
+          let receivedOssMode = false;
+          const status = yield* checkCodexProviderStatus(
+            decodeCodexSettings({ ossMode: true }),
+            (input) => {
+              receivedOssMode = input.ossMode === true;
+              return Effect.succeed(
+                makeCodexProbeSnapshot({
+                  account: {
+                    account: null,
+                    requiresOpenaiAuth: true,
+                  },
+                }),
+              );
+            },
+          );
+
+          assert.strictEqual(receivedOssMode, true);
+          assert.strictEqual(status.status, "ready");
+          assert.strictEqual(status.auth.status, "unknown");
+          assert.strictEqual(status.auth.type, "local");
+          assert.strictEqual(status.auth.label, "LM Studio / Codex OSS");
+          assert.deepStrictEqual(status.models, []);
+          assert.match(status.message ?? "", /runtime is available/i);
+        }),
+      );
+
+      it.effect("never borrows configured cloud model slugs into LM Studio snapshots", () =>
+        Effect.gen(function* () {
+          const settings = decodeCodexSettings({
+            ossMode: true,
+            customModels: ["gpt-5.6-sol", "cloud/custom-model"],
+          });
+
+          const pending = yield* makePendingCodexProvider(settings);
+          assert.deepStrictEqual(pending.models, []);
+          assert.deepStrictEqual(pending.auth, {
+            status: "unknown",
+            type: "local",
+            label: "LM Studio / Codex OSS",
+          });
+
+          const failed = yield* checkCodexProviderStatus(settings, () =>
+            Effect.fail(
+              new CodexErrors.CodexAppServerSpawnError({
+                command: "codex --oss --local-provider lmstudio app-server",
+                cause: new Error("spawn failed"),
+              }),
+            ),
+          );
+          assert.strictEqual(failed.status, "error");
+          assert.deepStrictEqual(failed.models, []);
+          assert.strictEqual(failed.auth.type, "local");
+        }),
+      );
+
+      it("uses LM Studio inventory and excludes known embedding-only models", () => {
+        const parsed = parseLmStudioModelInventory(
+          {
+            data: [{ id: "openai/gpt-oss-20b" }, { id: "text-embedding-nomic-embed-text-v1.5" }],
+          },
+          {
+            models: [
+              {
+                type: "llm",
+                key: "openai/gpt-oss-20b",
+                display_name: "GPT OSS 20B",
+                loaded_instances: [{ id: "openai/gpt-oss-20b" }],
+              },
+              {
+                type: "embedding",
+                key: "text-embedding-nomic-embed-text-v1.5",
+                display_name: "Nomic Embed",
+                loaded_instances: [{ id: "text-embedding-nomic-embed-text-v1.5" }],
+              },
+            ],
+          },
+        );
+
+        assert.deepStrictEqual(parsed, {
+          status: "ready",
+          models: [
+            {
+              slug: "openai/gpt-oss-20b",
+              name: "GPT OSS 20B",
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+        });
+      });
+
+      it("deduplicates and bounds LM Studio model identifiers", () => {
+        const parsed = parseLmStudioModelInventory(
+          {
+            data: [
+              { id: " local/model " },
+              { id: "local/model" },
+              { id: "" },
+              { id: "m".repeat(257) },
+            ],
+          },
+          {
+            models: [
+              {
+                type: "llm",
+                key: "local/model",
+                display_name: "local/model",
+                loaded_instances: [],
+              },
+            ],
+          },
+        );
+
+        assert.deepStrictEqual(parsed, {
+          status: "ready",
+          models: [
+            {
+              slug: "local/model",
+              name: "local/model",
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+        });
+        const overCapModels = Array.from({ length: 257 }, (_, index) => ({
+          id: `local/model-${index}`,
+        }));
+        assert.deepStrictEqual(
+          parseLmStudioModelInventory(
+            { data: overCapModels },
+            {
+              models: overCapModels.map(({ id }) => ({
+                type: "llm",
+                key: id,
+                display_name: id,
+                loaded_instances: [],
+              })),
+            },
+          ),
+          { status: "invalid-response", reason: "too-many-models" },
+        );
+      });
+
+      it("fails closed when model type metadata is missing, malformed, or incomplete", () => {
+        const openAiPayload = {
+          data: [{ id: "text-embedding-nomic-embed-text-v1.5" }],
+        };
+
+        assert.deepStrictEqual(parseLmStudioModelInventory(openAiPayload), {
+          status: "invalid-response",
+          reason: "unsupported-shape",
+        });
+        assert.deepStrictEqual(parseLmStudioModelInventory(openAiPayload, { models: "invalid" }), {
+          status: "invalid-response",
+          reason: "unsupported-shape",
+        });
+        assert.deepStrictEqual(parseLmStudioModelInventory(openAiPayload, { models: [] }), {
+          status: "invalid-response",
+          reason: "unsupported-shape",
+        });
+      });
+
+      it.effect("discovers only the models served by the configured LM Studio endpoint", () =>
+        Effect.gen(function* () {
+          const requests: string[] = [];
+          const client = HttpClient.make((request) => {
+            requests.push(request.url);
+            return Effect.succeed(
+              HttpClientResponse.fromWeb(
+                request,
+                request.url.endsWith("/api/v1/models")
+                  ? Response.json({
+                      models: [
+                        {
+                          type: "llm",
+                          key: "openai/gpt-oss-20b",
+                          display_name: "GPT OSS 20B",
+                          loaded_instances: [{ id: "openai/gpt-oss-20b" }],
+                        },
+                      ],
+                    })
+                  : Response.json({ data: [{ id: "openai/gpt-oss-20b" }] }),
+              ),
+            );
+          });
+
+          const discovery = yield* discoverLmStudioModels(
+            "https://models.example.test/team/v1",
+            client,
+          );
+
+          assert.strictEqual(discovery.status, "ready");
+          assert.deepStrictEqual(
+            discovery.models.map((model) => model.slug),
+            ["openai/gpt-oss-20b"],
+          );
+          assert.deepStrictEqual(requests, [
+            "https://models.example.test/team/v1/models",
+            "https://models.example.test/team/api/v1/models",
+          ]);
+        }),
+      );
+
+      it.effect("does not follow LM Studio model-discovery redirects", () =>
+        Effect.gen(function* () {
+          const requests: Array<{ readonly url: string; readonly redirect: string }> = [];
+          const discovery = yield* Effect.gen(function* () {
+            const client = yield* HttpClient.HttpClient;
+            return yield* discoverLmStudioModels("http://127.0.0.1:1234/v1", client);
+          }).pipe(
+            Effect.provide(FetchHttpClient.layer),
+            Effect.provideService(FetchHttpClient.Fetch, (url, init) => {
+              requests.push({ url: String(url), redirect: init?.redirect ?? "follow" });
+              return Promise.resolve(
+                new Response(null, {
+                  status: 302,
+                  headers: { location: "http://169.254.169.254/latest/meta-data/" },
+                }),
+              );
+            }),
+          );
+
+          assert.strictEqual(discovery.status, "offline");
+          assert.match(discovery.message, /Redirects are not followed/);
+          assert.deepStrictEqual(requests, [
+            { url: "http://127.0.0.1:1234/v1/models", redirect: "manual" },
+          ]);
+        }),
+      );
+
+      it.effect("reports empty, authentication, and oversized inventory states honestly", () =>
+        Effect.gen(function* () {
+          const emptyClient = HttpClient.make((request) =>
+            Effect.succeed(
+              HttpClientResponse.fromWeb(
+                request,
+                Response.json(
+                  request.url.endsWith("/api/v1/models") ? { models: [] } : { data: [] },
+                ),
+              ),
+            ),
+          );
+          const empty = yield* discoverLmStudioModels("http://127.0.0.1:1234/v1", emptyClient);
+          assert.strictEqual(empty.status, "empty");
+          assert.deepStrictEqual(empty.models, []);
+          assert.match(empty.message, /no chat models/i);
+
+          const authClient = HttpClient.make((request) =>
+            Effect.succeed(
+              HttpClientResponse.fromWeb(request, new Response(null, { status: 401 })),
+            ),
+          );
+          const auth = yield* discoverLmStudioModels("http://127.0.0.1:1234/v1", authClient);
+          assert.strictEqual(auth.status, "authentication-required");
+          assert.deepStrictEqual(auth.models, []);
+          assert.match(auth.message, /cannot send LM Studio API tokens/i);
+
+          const oversizedPayload = `{"data":[{"id":"${"m".repeat(2 * 1024 * 1024)}"}]}`;
+          const oversizedClient = HttpClient.make((request) =>
+            Effect.succeed(
+              HttpClientResponse.fromWeb(
+                request,
+                new Response(oversizedPayload, {
+                  headers: { "content-type": "application/json" },
+                }),
+              ),
+            ),
+          );
+          const oversized = yield* discoverLmStudioModels(
+            "http://127.0.0.1:1234/v1",
+            oversizedClient,
+          );
+          assert.strictEqual(oversized.status, "invalid-response");
+          assert.deepStrictEqual(oversized.models, []);
+          assert.match(oversized.message, /oversized/);
+        }),
+      );
+
+      it.effect("does not let successful discovery erase a failed Codex runtime", () =>
+        Effect.gen(function* () {
+          const provider = yield* checkCodexProviderStatus(
+            decodeCodexSettings({ ossMode: true }),
+            () => Effect.succeed(makeCodexProbeSnapshot()),
+          );
+          const reconciled = reconcileLmStudioModelDiscovery(
+            {
+              ...provider,
+              status: "error" as const,
+              message: "Codex app-server failed to start.",
+            },
+            {
+              status: "ready",
+              models: [
+                {
+                  slug: "local/model",
+                  name: "Local Model",
+                  isCustom: false,
+                  capabilities: null,
+                },
+              ],
+              message: "LM Studio is online with 1 available chat model.",
+            },
+          );
+
+          assert.strictEqual(reconciled.status, "error");
+          assert.strictEqual(reconciled.message, "Codex app-server failed to start.");
+          assert.deepStrictEqual(reconciled.models, []);
+        }),
+      );
+
       it.effect("uses the app-server account and model list for provider status", () =>
         Effect.gen(function* () {
           const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
@@ -555,6 +882,112 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, refreshedProvider).models, [
           ...previousProvider.models,
         ]);
+      });
+
+      it("replaces Codex models when an instance crosses the cloud and local boundary", () => {
+        const cloudProvider = {
+          instanceId: ProviderInstanceId.make("codex"),
+          driver: ProviderDriverKind.make("codex"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated", type: "chatgpt" },
+          checkedAt: "2026-04-14T00:00:00.000Z",
+          version: "1.0.0",
+          models: [
+            {
+              slug: "gpt-5.6-sol",
+              name: "GPT-5.6 Sol",
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+          slashCommands: [],
+          skills: [],
+        } as const satisfies ServerProvider;
+        const localProvider = {
+          ...cloudProvider,
+          auth: { status: "unknown", type: "local", label: "LM Studio / Codex OSS" },
+          models: [
+            {
+              slug: "local-model",
+              name: "Local Model",
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+        } as const satisfies ServerProvider;
+
+        assert.deepStrictEqual(mergeProviderSnapshot(cloudProvider, localProvider).models, [
+          ...localProvider.models,
+        ]);
+        assert.deepStrictEqual(mergeProviderSnapshot(localProvider, cloudProvider).models, [
+          ...cloudProvider.models,
+        ]);
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(cloudProvider, {
+            ...localProvider,
+            status: "error",
+            models: [],
+          }).models,
+          [],
+        );
+      });
+
+      it("treats every LM Studio refresh inventory as authoritative", () => {
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make("lmstudio"),
+          driver: ProviderDriverKind.make("codex"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "unknown", type: "local", label: "LM Studio / Codex OSS" },
+          checkedAt: "2026-07-29T00:00:00.000Z",
+          version: "0.146.0",
+          models: [
+            {
+              slug: "local/removed-model",
+              name: "Removed Model",
+              isCustom: false,
+              capabilities: null,
+            },
+            {
+              slug: "local/retained-model",
+              name: "Retained Model",
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+          slashCommands: [],
+          skills: [],
+        } as const satisfies ServerProvider;
+        const refreshedProvider = {
+          ...previousProvider,
+          checkedAt: "2026-07-29T00:01:00.000Z",
+          models: [
+            {
+              slug: "local/retained-model",
+              name: "Retained Model (refreshed)",
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+        } as const satisfies ServerProvider;
+        const unavailableProvider = {
+          ...refreshedProvider,
+          status: "error",
+          checkedAt: "2026-07-29T00:02:00.000Z",
+          models: [],
+          message: "LM Studio did not answer.",
+        } as const satisfies ServerProvider;
+
+        assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, refreshedProvider).models, [
+          ...refreshedProvider.models,
+        ]);
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(refreshedProvider, unavailableProvider).models,
+          [],
+        );
       });
 
       it("preserves event-sourced account rate limits when a refresh omits them", () => {

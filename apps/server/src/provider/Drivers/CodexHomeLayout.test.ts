@@ -254,6 +254,31 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
       }),
     );
 
+    it.effect("removes stale cloud auth when a local OSS instance uses the shadow home", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const sharedHome = yield* makeTempDir("t3code-codex-shared-");
+        const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+        const shadowHome = path.join(shadowRoot, "shadow");
+
+        yield* writeTextFile(path.join(sharedHome, "auth.json"), '{"token":"cloud"}\n');
+        yield* writeTextFile(path.join(shadowHome, "auth.json"), '{"token":"stale"}\n');
+
+        const layout = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({
+            homePath: sharedHome,
+            shadowHomePath: shadowHome,
+          }),
+        );
+
+        yield* materializeCodexShadowHome(layout, { authSource: "none" });
+
+        expect(yield* fileSystem.exists(path.join(shadowHome, "auth.json"))).toBe(false);
+        expect(yield* fileSystem.exists(path.join(sharedHome, "auth.json"))).toBe(true);
+      }),
+    );
+
     it.effect(
       "does not create shadow auth from shared auth when the shadow is the auth source",
       () =>

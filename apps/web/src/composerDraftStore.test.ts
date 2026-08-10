@@ -14,6 +14,7 @@ import {
   ThreadId,
   type ModelSelection,
   type ProviderOptionSelection,
+  type ServerProvider,
 } from "@cafecode/contracts";
 import { createModelSelection } from "@cafecode/shared/model";
 
@@ -1326,6 +1327,93 @@ describe("composerDraftStore provider-scoped option updates", () => {
 
   beforeEach(() => {
     resetComposerDraftStore();
+  });
+
+  it("does not fall back to a cloud Codex model when LM Studio has no served model", () => {
+    const lmStudioInstance = ProviderInstanceId.make("lmstudio");
+    const resolved = deriveEffectiveComposerModelState({
+      draft: {
+        activeProvider: lmStudioInstance,
+        modelSelectionByProvider: {
+          [lmStudioInstance]: createModelSelection(lmStudioInstance, "gpt-5.6-sol"),
+        },
+      },
+      providers: [],
+      selectedProvider: CODEX_DRIVER,
+      selectedInstanceId: lmStudioInstance,
+      threadModelSelection: null,
+      projectModelSelection: null,
+      settings: {
+        ...DEFAULT_UNIFIED_SETTINGS,
+        providerInstances: {
+          [lmStudioInstance]: {
+            driver: CODEX_DRIVER,
+            enabled: true,
+            config: {
+              ossMode: true,
+              ossBaseUrl: "http://127.0.0.1:1234/v1",
+            },
+          },
+        },
+      },
+    });
+
+    expect(resolved.selectedModel).toBe("");
+  });
+
+  it("selects only the exact model served by the LM Studio instance", () => {
+    const lmStudioInstance = ProviderInstanceId.make("lmstudio");
+    const providers: ReadonlyArray<ServerProvider> = [
+      {
+        instanceId: lmStudioInstance,
+        driver: CODEX_DRIVER,
+        enabled: true,
+        installed: true,
+        version: "0.146.0",
+        status: "ready",
+        auth: { status: "unknown", type: "local", label: "LM Studio / Codex OSS" },
+        checkedAt: "2026-08-10T00:00:00.000Z",
+        models: [
+          {
+            slug: "openai/gpt-oss-20b",
+            name: "GPT OSS 20B",
+            isCustom: false,
+            capabilities: null,
+          },
+        ],
+        slashCommands: [],
+        skills: [],
+      },
+    ];
+    const resolved = deriveEffectiveComposerModelState({
+      draft: {
+        activeProvider: lmStudioInstance,
+        modelSelectionByProvider: {
+          [lmStudioInstance]: createModelSelection(lmStudioInstance, "gpt-5.6-sol"),
+        },
+      },
+      providers,
+      selectedProvider: CODEX_DRIVER,
+      selectedInstanceId: lmStudioInstance,
+      threadModelSelection: null,
+      projectModelSelection: null,
+      settings: {
+        ...DEFAULT_UNIFIED_SETTINGS,
+        providerInstances: {
+          [lmStudioInstance]: {
+            driver: CODEX_DRIVER,
+            enabled: true,
+            config: {
+              ossMode: true,
+              ossBaseUrl: "http://127.0.0.1:1234/v1",
+              customModels: ["gpt-5.6-sol"],
+            },
+          },
+        },
+      },
+    });
+
+    expect(resolved.selectedModel).toBe("openai/gpt-oss-20b");
   });
 
   it("keeps persisted custom-instance effort when another Codex draft bucket exists", () => {

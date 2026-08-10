@@ -60,6 +60,8 @@ interface ProviderModelsSectionProps {
   readonly favoriteModels: ReadonlyArray<string>;
   /** Explicit user-authored model ordering for this provider instance. */
   readonly modelOrder: ReadonlyArray<string>;
+  /** Whether manually authored model slugs are valid for this instance. */
+  readonly allowCustomModels?: boolean;
   /**
    * Commit the new custom-model list. Caller is responsible for routing the
    * write to the correct storage (legacy `settings.providers[kind]` vs.
@@ -90,6 +92,7 @@ export function ProviderModelsSection({
   hiddenModels,
   favoriteModels,
   modelOrder,
+  allowCustomModels = true,
   onChange,
   onHiddenModelsChange,
   onFavoriteModelsChange,
@@ -381,29 +384,37 @@ export function ProviderModelsSection({
         })}
       </div>
 
-      <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-        <Input
-          id={`provider-instance-${instanceId}-custom-model`}
-          value={input}
-          onChange={(event) => {
-            setInput(event.target.value);
-            if (error) setError(null);
-          }}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter") return;
-            event.preventDefault();
-            handleAdd();
-          }}
-          placeholder={driverKind ? CUSTOM_MODEL_PLACEHOLDER_BY_KIND[driverKind] : "model-slug"}
-          spellCheck={false}
-        />
-        <Button className="shrink-0" variant="outline" onClick={handleAdd}>
-          <PlusIcon className="size-3.5" />
-          Add
-        </Button>
-      </div>
-
-      {error ? <p className="mt-2 text-xs text-destructive">{error}</p> : null}
+      {allowCustomModels ? (
+        <>
+          <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+            <Input
+              id={`provider-instance-${instanceId}-custom-model`}
+              value={input}
+              onChange={(event) => {
+                setInput(event.target.value);
+                if (error) setError(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                handleAdd();
+              }}
+              placeholder={driverKind ? CUSTOM_MODEL_PLACEHOLDER_BY_KIND[driverKind] : "model-slug"}
+              spellCheck={false}
+            />
+            <Button className="shrink-0" variant="outline" onClick={handleAdd}>
+              <PlusIcon className="size-3.5" />
+              Add
+            </Button>
+          </div>
+          {error ? <p className="mt-2 text-xs text-destructive">{error}</p> : null}
+        </>
+      ) : (
+        <p className="mt-3 text-xs text-muted-foreground">
+          LM Studio models are discovered from the configured server. Load a chat model in LM
+          Studio, then refresh provider status.
+        </p>
+      )}
     </div>
   );
 }

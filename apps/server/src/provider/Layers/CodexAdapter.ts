@@ -2511,6 +2511,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             : {}),
           runtimeMode: input.runtimeMode,
           autoCompactTokenLimit: codexConfig.autoCompactTokenLimit,
+          ossMode: codexConfig.ossMode,
           ...(input.modelSelection?.instanceId === boundInstanceId
             ? { model: input.modelSelection.model }
             : {}),

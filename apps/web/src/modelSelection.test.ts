@@ -12,6 +12,7 @@ function provider(input: {
   provider?: ProviderDriverKind;
   instanceId: string;
   models?: ReadonlyArray<string>;
+  local?: boolean;
 }): ServerProvider {
   const driver =
     input.provider ??
@@ -25,7 +26,9 @@ function provider(input: {
     installed: true,
     version: null,
     status: "ready",
-    auth: { status: "authenticated" },
+    auth: input.local
+      ? { status: "unknown", type: "local", label: "LM Studio / Codex OSS" }
+      : { status: "authenticated" },
     checkedAt: "2026-01-01T00:00:00.000Z",
     models: (input.models ?? []).map((slug) => ({
       slug,
@@ -80,6 +83,41 @@ describe("instance-scoped model selection", () => {
         (option) => option.slug,
       ),
     ).toContain("openai/gpt-5.5");
+  });
+
+  it("uses only the exact served inventory for an LM Studio instance", () => {
+    const settings: UnifiedSettings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        [ProviderInstanceId.make("lmstudio")]: {
+          driver: ProviderDriverKind.make("codex"),
+          config: {
+            ossMode: true,
+            ossBaseUrl: "http://127.0.0.1:1234/v1",
+            customModels: ["gpt-5.6-sol", "stale/local-model"],
+          },
+        },
+      },
+    };
+    const providers = [
+      provider({
+        instanceId: "lmstudio",
+        models: ["openai/gpt-oss-20b"],
+      }),
+    ];
+    const entry = deriveProviderInstanceEntries(providers)[0]!;
+
+    expect(getAppModelOptionsForInstance(settings, entry).map((option) => option.slug)).toEqual([
+      "openai/gpt-oss-20b",
+    ]);
+    expect(
+      resolveAppModelSelectionForInstance(
+        ProviderInstanceId.make("lmstudio"),
+        settings,
+        providers,
+        "gpt-5.6-sol",
+      ),
+    ).toBe("openai/gpt-oss-20b");
   });
 
   it("resolves a custom slug against the selected custom instance", () => {
@@ -225,5 +263,33 @@ describe("instance-scoped model selection", () => {
       instanceId: ProviderInstanceId.make("claude_openrouter"),
       model: "openai/gpt-5.5",
     });
+  });
+
+  it("does not substitute a cloud model when LM Studio has no discovered chat models", () => {
+    const instanceId = ProviderInstanceId.make("lmstudio");
+    const settings: UnifiedSettings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        [instanceId]: {
+          driver: ProviderDriverKind.make("codex"),
+          enabled: true,
+          displayName: "LM Studio Local",
+          config: {
+            ossMode: true,
+            ossBaseUrl: "http://127.0.0.1:1234/v1",
+          },
+        },
+      },
+      textGenerationModelSelection: {
+        instanceId,
+        model: "gpt-5.5",
+      },
+    };
+
+    expect(
+      resolveAppModelSelectionState(settings, [
+        provider({ instanceId: "lmstudio", models: [], local: true }),
+      ]),
+    ).toEqual({ instanceId, model: "" });
   });
 });
