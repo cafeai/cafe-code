@@ -7,7 +7,7 @@ import type { EnvironmentId, ExecutionEnvironmentDescriptor } from "@cafecode/co
 import { ENVIRONMENT_ENDPOINT_PATHS } from "@cafecode/shared/environmentEndpoint";
 import { create } from "zustand";
 
-import { BootstrapHttpError, retryTransientBootstrap } from "./auth";
+import { BootstrapHttpError, fetchBootstrapRequest, retryTransientBootstrap } from "./auth";
 
 import { readPrimaryEnvironmentTarget, resolvePrimaryEnvironmentHttpUrl } from "./target";
 
@@ -48,7 +48,7 @@ function createPrimaryKnownEnvironment(input: {
 async function fetchPrimaryEnvironmentDescriptor(): Promise<ExecutionEnvironmentDescriptor> {
   return retryTransientBootstrap(async () => {
     for (const pathname of ENVIRONMENT_ENDPOINT_PATHS) {
-      const response = await fetch(resolvePrimaryEnvironmentHttpUrl(pathname));
+      const response = await fetchBootstrapRequest(resolvePrimaryEnvironmentHttpUrl(pathname));
       if (response.ok) {
         const descriptor = (await response.json()) as ExecutionEnvironmentDescriptor;
         writePrimaryEnvironmentDescriptor(descriptor);
