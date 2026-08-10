@@ -1754,6 +1754,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       projectExpandedById: {},
       projectOrder: [],
       threadLastVisitedAtById: {},
+      threadPlanSidebarOpenById: {},
     });
   });
 
@@ -5597,6 +5598,30 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
   }
 
   if (chatViewBrowserPart === "layout") {
+    it("keeps the plan panel inline when a desktop viewport is narrower than 980px", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotWithLongProposedPlan(),
+      });
+
+      try {
+        const planButton = await waitForButtonByText("Plan");
+        planButton.click();
+
+        const closePanelButton = await waitForElement(
+          () => document.querySelector<HTMLElement>('[aria-label="Close plan sidebar"]'),
+          "Unable to find the open plan panel.",
+        );
+        expect(closePanelButton.closest('[data-slot="sheet-popup"]')).toBeNull();
+
+        await page.getByRole("heading", { name: THREAD_TITLE }).click();
+
+        expect(document.querySelector('[aria-label="Close plan sidebar"]')).toBeTruthy();
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
     it("keeps long proposed plans lightweight until the user expands them", async () => {
       const mounted = await mountChatView({
         viewport: DEFAULT_VIEWPORT,
