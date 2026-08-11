@@ -2373,3 +2373,75 @@ it.effect(
     }).pipe(Effect.provide(layer));
   },
 );
+
+it.effect(
+  "ProjectionSnapshotQuery reads an active workspace root without repository identity resolution",
+  () => {
+    const resolveCalls: string[] = [];
+    const layer = OrchestrationProjectionSnapshotQueryLive.pipe(
+      Layer.provideMerge(
+        Layer.succeed(RepositoryIdentityResolver, {
+          resolve: (cwd: string) =>
+            Effect.sync(() => {
+              resolveCalls.push(cwd);
+              return null;
+            }),
+        }),
+      ),
+      Layer.provideMerge(SqlitePersistenceMemory),
+    );
+
+    return Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id,
+          title,
+          workspace_root,
+          default_model_selection_json,
+          scripts_json,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES
+          (
+            'project-root-read-active',
+            'Active project',
+            '/tmp/active-root',
+            NULL,
+            '[]',
+            '2026-04-06T00:00:00.000Z',
+            '2026-04-06T00:00:01.000Z',
+            NULL
+          ),
+          (
+            'project-root-read-deleted',
+            'Deleted project',
+            '/tmp/deleted-root',
+            NULL,
+            '[]',
+            '2026-04-06T00:00:02.000Z',
+            '2026-04-06T00:00:03.000Z',
+            '2026-04-06T00:00:04.000Z'
+          )
+      `;
+
+      const active = yield* snapshotQuery.getProjectWorkspaceRootById(
+        asProjectId("project-root-read-active"),
+      );
+      const deleted = yield* snapshotQuery.getProjectWorkspaceRootById(
+        asProjectId("project-root-read-deleted"),
+      );
+
+      assert.equal(active._tag, "Some");
+      if (active._tag === "Some") {
+        assert.equal(active.value, "/tmp/active-root");
+      }
+      assert.equal(deleted._tag, "None");
+      assert.deepStrictEqual(resolveCalls, []);
+    }).pipe(Effect.provide(layer));
+  },
+);
