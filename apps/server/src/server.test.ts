@@ -9,6 +9,7 @@ import { brotliCompressSync, constants as zlibConstants, gzipSync } from "node:z
 
 import {
   CommandId,
+  DEFAULT_AMBIENT_EXPERIENCE_CAPABILITIES,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   EventId,
@@ -499,6 +500,7 @@ const buildAppUnderTest = (options?: {
       desktopBootstrapToken: defaultDesktopBootstrapToken,
       autoBootstrapProjectFromCwd: false,
       logWebSocketEvents: false,
+      ambientExperienceCapabilities: DEFAULT_AMBIENT_EXPERIENCE_CAPABILITIES,
       ...options?.config,
     };
     const layerConfig = Layer.succeed(ServerConfig, config);

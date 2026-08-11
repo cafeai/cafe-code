@@ -58,7 +58,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
 
   return (
     <SidebarProvider
-      className="h-dvh! min-h-0!"
+      className="relative z-10 h-dvh! min-h-0!"
       open={navigationSidebarOpen}
       onOpenChange={setNavigationSidebarOpen}
     >

@@ -1,0 +1,11 @@
+{
+  "name": "@the-hexagons/the-hexagons-runtime-club-code",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./adapter.mjs",
+    "./runtime": "./runtime/portable.js",
+    "./preset": "./background-preset.mjs"
+  }
+}

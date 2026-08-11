@@ -1,5 +1,6 @@
 import {
   CommandId,
+  DEFAULT_AMBIENT_EXPERIENCE_CAPABILITIES,
   DEFAULT_CLIENT_SETTINGS,
   DEFAULT_SERVER_SETTINGS,
   type DesktopBridge,
@@ -305,6 +306,7 @@ const baseServerConfig: ServerConfig = {
   },
   settings: DEFAULT_SERVER_SETTINGS,
   clientSettings: DEFAULT_CLIENT_SETTINGS,
+  ambientExperienceCapabilities: DEFAULT_AMBIENT_EXPERIENCE_CAPABILITIES,
 };
 
 const baseGitStatus: VcsStatusResult = {

@@ -3,6 +3,7 @@ import * as http from "node:http";
 import * as path from "node:path";
 
 import {
+  DEFAULT_AMBIENT_EXPERIENCE_CAPABILITIES,
   PROVIDER_DAEMON_LEASES_PATH,
   ProviderDaemonHealth,
   ProviderDaemonLeaseResponse,
@@ -146,6 +147,7 @@ const makeServerConfig = (baseDir: string) =>
       desktopBootstrapToken: undefined,
       autoBootstrapProjectFromCwd: false,
       logWebSocketEvents: false,
+      ambientExperienceCapabilities: DEFAULT_AMBIENT_EXPERIENCE_CAPABILITIES,
       providerDaemon: undefined,
       providerSupervisor: undefined,
     } satisfies ServerConfigShape;

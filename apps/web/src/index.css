@@ -200,6 +200,31 @@ body::after {
   background-size: 256px 256px;
 }
 
+/* The imported Hexagons renderer is a real background, not a pointer surface.
+   Keep application text and controls above it, and make only the large shell
+   surfaces translucent. Cards, dialogs, popovers, and input surfaces retain
+   their normal theme colors and contrast. */
+html[data-cafe-hexagons-background="true"],
+html[data-cafe-hexagons-background="true"] body {
+  background-color: #000;
+}
+
+html[data-cafe-hexagons-background="true"] [data-slot="sidebar-wrapper"] {
+  background-color: transparent !important;
+}
+
+html[data-cafe-hexagons-background="true"] [data-slot="sidebar-inner"] {
+  background-color: color-mix(in srgb, var(--card) 84%, transparent) !important;
+}
+
+html[data-cafe-hexagons-background="true"] [data-slot="sidebar-inset"] {
+  background-color: color-mix(in srgb, var(--background) 74%, transparent) !important;
+}
+
+html[data-cafe-hexagons-background="true"] [data-slot="sidebar-inset"] > div {
+  background-color: transparent !important;
+}
+
 @keyframes cafe-sidebar-star-drift {
   0% {
     opacity: 0;
