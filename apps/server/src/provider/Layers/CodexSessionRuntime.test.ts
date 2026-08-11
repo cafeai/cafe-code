@@ -19,6 +19,7 @@ import {
   buildTurnStartParams,
   buildTurnSteerParams,
   claimCodexSnapshotBackfillWatcher,
+  classifyCodexStderrLines,
   codexAggregateNotificationMethod,
   codexAggregateTurnHasUnfinishedChildren,
   codexChildConversationThreadIdsForTurn,
@@ -45,6 +46,31 @@ import {
   updateCodexPendingSteerProcessingFromNotification,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+
+describe("Codex stderr classification", () => {
+  it("keeps one failed-command diagnostic and drops its copied output", () => {
+    const firstChunk = classifyCodexStderrLines([
+      "2026-08-11T06:35:00.905Z ERROR codex_core::tools::router: error=Exit code: 1",
+      "Wall time: 0.2 seconds",
+      "Output:",
+      "first copied command-output line",
+    ]);
+    const secondChunk = classifyCodexStderrLines(
+      [
+        "second copied command-output line",
+        "2026-08-11T06:35:01.000Z INFO codex_core::codex: turn completed",
+        "plain stderr after the structured log",
+      ],
+      firstChunk.suppressCommandFailureDetails,
+    );
+
+    assert.deepEqual(firstChunk.messages, [
+      "2026-08-11T06:35:00.905Z ERROR codex_core::tools::router: error=Exit code: 1",
+    ]);
+    assert.deepEqual(secondChunk.messages, ["plain stderr after the structured log"]);
+    assert.equal(secondChunk.suppressCommandFailureDetails, false);
+  });
+});
 
 describe("Codex notification emission timestamps", () => {
   it("accepts valid provider emission time and rejects malformed or future values", () => {

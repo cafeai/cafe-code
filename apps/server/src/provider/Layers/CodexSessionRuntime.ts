@@ -1347,6 +1347,39 @@ function classifyCodexStderrLine(rawLine: string): { readonly message: string } 
   return { message: line };
 }
 
+export function classifyCodexStderrLines(
+  rawLines: ReadonlyArray<string>,
+  suppressCommandFailureDetails = false,
+): {
+  readonly messages: ReadonlyArray<string>;
+  readonly suppressCommandFailureDetails: boolean;
+} {
+  const messages: string[] = [];
+  let suppressDetails = suppressCommandFailureDetails;
+
+  for (const rawLine of rawLines) {
+    const line = rawLine.replaceAll(ANSI_ESCAPE_REGEX, "").trim();
+    const structuredLog = line.match(CODEX_STDERR_LOG_REGEX);
+    if (structuredLog) {
+      // Codex writes the complete failed command output after this header. The
+      // command item already owns that output. Keep only the diagnostic header.
+      suppressDetails = line.includes(" ERROR codex_core::tools::router: error=Exit code:");
+    } else if (suppressDetails) {
+      continue;
+    }
+
+    const classified = classifyCodexStderrLine(line);
+    if (classified) {
+      messages.push(classified.message);
+    }
+  }
+
+  return {
+    messages,
+    suppressCommandFailureDetails: suppressDetails,
+  };
+}
+
 export function isRecoverableThreadResumeError(error: unknown): boolean {
   const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
   if (!message.includes("thread")) {
@@ -4350,6 +4383,7 @@ export const makeCodexSessionRuntime = (
     );
 
     const stderrRemainderRef = yield* Ref.make("");
+    const stderrCommandFailureDetailsRef = yield* Ref.make(false);
     yield* child.stderr.pipe(
       Stream.decodeText(),
       Stream.runForEach((chunk) =>
@@ -4360,21 +4394,23 @@ export const makeCodexSessionRuntime = (
           return [lines.map((line) => line.replace(/\r$/, "")), remainder] as const;
         }).pipe(
           Effect.flatMap((lines) =>
-            Effect.forEach(
-              lines,
-              (line) => {
-                const classified = classifyCodexStderrLine(line);
-                if (!classified) {
-                  return Effect.void;
-                }
-                return emitEvent({
-                  kind: "notification",
-                  threadId: options.threadId,
-                  method: "process/stderr",
-                  message: classified.message,
-                });
-              },
-              { discard: true },
+            Ref.modify(stderrCommandFailureDetailsRef, (suppressCommandFailureDetails) => {
+              const classified = classifyCodexStderrLines(lines, suppressCommandFailureDetails);
+              return [classified.messages, classified.suppressCommandFailureDetails] as const;
+            }).pipe(
+              Effect.flatMap((messages) =>
+                Effect.forEach(
+                  messages,
+                  (message) =>
+                    emitEvent({
+                      kind: "notification",
+                      threadId: options.threadId,
+                      method: "process/stderr",
+                      message,
+                    }),
+                  { discard: true },
+                ),
+              ),
             ),
           ),
         ),
