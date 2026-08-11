@@ -127,6 +127,9 @@ export interface WsRpcClient {
     readonly getProcessDiagnostics: RpcUnaryNoArgMethod<
       typeof WS_METHODS.serverGetProcessDiagnostics
     >;
+    readonly getProjectSystemTelemetry: RpcUnaryMethod<
+      typeof WS_METHODS.serverGetProjectSystemTelemetry
+    >;
     readonly getProcessResourceHistory: RpcUnaryMethod<
       typeof WS_METHODS.serverGetProcessResourceHistory
     >;
@@ -259,6 +262,12 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
       getProcessDiagnostics: () =>
         transport.request((client) =>
           client[WS_METHODS.serverGetProcessDiagnostics]({}).pipe(Effect.withTracerEnabled(false)),
+        ),
+      getProjectSystemTelemetry: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.serverGetProjectSystemTelemetry](input).pipe(
+            Effect.withTracerEnabled(false),
+          ),
         ),
       getProcessResourceHistory: (input) =>
         transport.request((client) =>

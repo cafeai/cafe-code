@@ -84,6 +84,7 @@ const rpcClientMock = {
     updateSettings: vi.fn(),
     getClientSettings: vi.fn(),
     updateClientSettings: vi.fn(),
+    getProjectSystemTelemetry: vi.fn(),
     subscribeConfig: vi.fn(),
     subscribeLifecycle: vi.fn(),
     subscribeAuthAccess: vi.fn(),
@@ -444,6 +445,17 @@ describe("wsApi", () => {
     await api.vcs.refreshStatus({ cwd: "/repo" });
 
     expect(rpcClientMock.vcs.refreshStatus).toHaveBeenCalledWith({ cwd: "/repo" });
+  });
+
+  it("routes project telemetry through the selected environment RPC client", async () => {
+    const projectId = ProjectId.make("project-telemetry");
+    const response = { projectId, marker: "selected-environment" };
+    rpcClientMock.server.getProjectSystemTelemetry.mockResolvedValue(response);
+
+    const api = createEnvironmentApi(rpcClientMock as never);
+
+    await expect(api.systemTelemetry.readProject({ projectId })).resolves.toBe(response);
+    expect(rpcClientMock.server.getProjectSystemTelemetry).toHaveBeenCalledWith({ projectId });
   });
 
   it("forwards shell stream subscription options to the RPC client", async () => {

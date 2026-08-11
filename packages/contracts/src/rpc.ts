@@ -82,6 +82,11 @@ import {
   ServerUpsertKeybindingResult,
 } from "./server.ts";
 import {
+  ServerProjectSystemTelemetryError,
+  ServerProjectSystemTelemetryInput,
+  ServerProjectSystemTelemetryResult,
+} from "./systemTelemetry.ts";
+import {
   ClientSettingsError,
   ClientSettingsPatch,
   ClientSettingsSchema,
@@ -146,6 +151,7 @@ export const WS_METHODS = {
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverGetTraceDiagnostics: "server.getTraceDiagnostics",
   serverGetProcessDiagnostics: "server.getProcessDiagnostics",
+  serverGetProjectSystemTelemetry: "server.getProjectSystemTelemetry",
   serverGetProcessResourceHistory: "server.getProcessResourceHistory",
   serverGetRuntimeLayerDiagnostics: "server.getRuntimeLayerDiagnostics",
   serverSignalProcess: "server.signalProcess",
@@ -258,6 +264,15 @@ export const WsServerGetProcessDiagnosticsRpc = Rpc.make(WS_METHODS.serverGetPro
   payload: Schema.Struct({}),
   success: ServerProcessDiagnosticsResult,
 });
+
+export const WsServerGetProjectSystemTelemetryRpc = Rpc.make(
+  WS_METHODS.serverGetProjectSystemTelemetry,
+  {
+    payload: ServerProjectSystemTelemetryInput,
+    success: ServerProjectSystemTelemetryResult,
+    error: ServerProjectSystemTelemetryError,
+  },
+);
 
 export const WsServerGetProcessResourceHistoryRpc = Rpc.make(
   WS_METHODS.serverGetProcessResourceHistory,
@@ -535,6 +550,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerDiscoverSourceControlRpc,
   WsServerGetTraceDiagnosticsRpc,
   WsServerGetProcessDiagnosticsRpc,
+  WsServerGetProjectSystemTelemetryRpc,
   WsServerGetProcessResourceHistoryRpc,
   WsServerGetRuntimeLayerDiagnosticsRpc,
   WsServerSignalProcessRpc,
