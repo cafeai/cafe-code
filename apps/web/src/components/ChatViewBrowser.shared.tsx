@@ -2,6 +2,7 @@
 import "../index.css";
 
 import {
+  DEFAULT_AMBIENT_EXPERIENCE_CAPABILITIES,
   EventId,
   type DesktopBridge,
   ORCHESTRATION_WS_METHODS,
@@ -185,6 +186,7 @@ function createBaseServerConfig(): ServerConfig {
       ...DEFAULT_SERVER_SETTINGS,
     },
     clientSettings: { ...DEFAULT_CLIENT_SETTINGS, onboardingCompleted: true },
+    ambientExperienceCapabilities: DEFAULT_AMBIENT_EXPERIENCE_CAPABILITIES,
   };
 }
 

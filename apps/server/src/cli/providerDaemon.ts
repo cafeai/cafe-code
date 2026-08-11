@@ -1,4 +1,7 @@
-import { ProviderDaemonBootstrap } from "@cafecode/contracts";
+import {
+  DEFAULT_AMBIENT_EXPERIENCE_CAPABILITIES,
+  ProviderDaemonBootstrap,
+} from "@cafecode/contracts";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -74,6 +77,7 @@ const resolveProviderDaemonServerConfig = (input: {
       desktopBootstrapToken: undefined,
       autoBootstrapProjectFromCwd: false,
       logWebSocketEvents: false,
+      ambientExperienceCapabilities: DEFAULT_AMBIENT_EXPERIENCE_CAPABILITIES,
       providerDaemon: undefined,
       providerSupervisor: input.providerSupervisor,
     } satisfies ServerConfigShape;
