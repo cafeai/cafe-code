@@ -17,6 +17,7 @@ import { type QueryClient } from "@tanstack/react-query";
 import { Throttler } from "@tanstack/react-pacer";
 import {
   createKnownEnvironment,
+  getKnownEnvironmentHttpBaseUrl,
   getKnownEnvironmentWsBaseUrl,
   scopedThreadKey,
   scopeProjectRef,
@@ -38,6 +39,7 @@ import {
   fetchRemoteEnvironmentDescriptor,
   fetchRemoteSessionState,
   isRemoteEnvironmentAuthHttpError,
+  resolvePrimaryWebSocketConnectionUrl,
   resolveRemoteWebSocketConnectionUrl,
 } from "../remote/api";
 import { resolveRemotePairingTarget } from "../remote/target";
@@ -1274,6 +1276,7 @@ function createPrimaryEnvironmentClient(
   knownEnvironment: ReturnType<typeof getPrimaryKnownEnvironment>,
 ) {
   const wsBaseUrl = getKnownEnvironmentWsBaseUrl(knownEnvironment);
+  const httpBaseUrl = getKnownEnvironmentHttpBaseUrl(knownEnvironment);
   if (!wsBaseUrl) {
     throw new Error(
       `Unable to resolve websocket URL for ${knownEnvironment?.label ?? "primary environment"}.`,
@@ -1282,11 +1285,19 @@ function createPrimaryEnvironmentClient(
   const connectionLabel = knownEnvironment?.label ?? null;
 
   return createWsRpcClient(
-    new WsTransport(wsBaseUrl, {
-      getConnectionLabel: () => connectionLabel,
-      getVersionMismatchHint: () =>
-        resolveServerConfigVersionMismatch(getServerConfig())?.hint ?? null,
-    }),
+    new WsTransport(
+      async () => {
+        if (!httpBaseUrl) {
+          return wsBaseUrl;
+        }
+        return await resolvePrimaryWebSocketConnectionUrl({ wsBaseUrl, httpBaseUrl });
+      },
+      {
+        getConnectionLabel: () => connectionLabel,
+        getVersionMismatchHint: () =>
+          resolveServerConfigVersionMismatch(getServerConfig())?.hint ?? null,
+      },
+    ),
   );
 }
 

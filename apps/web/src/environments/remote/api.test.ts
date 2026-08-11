@@ -5,6 +5,7 @@ import {
   fetchRemoteEnvironmentDescriptor,
   fetchRemoteSessionState,
   issueRemoteWebSocketToken,
+  resolvePrimaryWebSocketConnectionUrl,
   resolveRemoteWebSocketConnectionUrl,
 } from "./api";
 import { resolveRemotePairingTarget } from "./target";
@@ -258,6 +259,30 @@ describe("remote environment api", () => {
         bearerToken: "bearer-token",
       }),
     ).resolves.toBe("wss://remote.example.com/?wsToken=ws-token");
+  });
+
+  it("refreshes the primary WebUI websocket token through same-origin session auth", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          token: "primary-ws-token",
+          expiresAt: "2026-05-01T12:05:00.000Z",
+        }),
+        { status: 200 },
+      ),
+    );
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    await expect(
+      resolvePrimaryWebSocketConnectionUrl({
+        wsBaseUrl: "wss://app.example.com/?stale=value",
+        httpBaseUrl: "https://app.example.com/",
+      }),
+    ).resolves.toBe("wss://app.example.com/?wsToken=primary-ws-token");
+    expect(fetchMock).toHaveBeenCalledWith("https://app.example.com/api/auth/ws-token", {
+      method: "POST",
+      headers: {},
+    });
   });
 
   it("rejects invalid websocket targets before requesting a token", async () => {
