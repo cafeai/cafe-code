@@ -2,6 +2,7 @@ import {
   ChatAttachment,
   AdditionalWorkspaceRoots,
   IsoDateTime,
+  ManualFollowUpQueue,
   MessageId,
   NonNegativeInt,
   OrchestrationCheckpointFile,
@@ -12,6 +13,7 @@ import {
   OrchestrationThreadTurnActivityPageInput,
   ProviderThreadGoal,
   ProjectScript,
+  ThreadAutoNudgeConfig,
   TurnId,
   type OrchestrationCheckpointSummary,
   type OrchestrationLatestTurn,
@@ -22,6 +24,7 @@ import {
   type OrchestrationSession,
   type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
+  type ThreadAutoNudgeSummary,
   ModelSelection,
   ProjectId,
   ThreadId,
@@ -80,6 +83,8 @@ const ProjectionThreadProposedPlanDbRowSchema = ProjectionThreadProposedPlan;
 const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
+    autoNudge: Schema.fromJsonString(ThreadAutoNudgeConfig),
+    manualFollowUps: Schema.fromJsonString(ManualFollowUpQueue),
   }),
 );
 const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
@@ -157,6 +162,21 @@ function maxIso(left: string | null, right: string): string {
     return right;
   }
   return left > right ? left : right;
+}
+
+function toThreadAutoNudgeSummary(config: ThreadAutoNudgeConfig): ThreadAutoNudgeSummary {
+  return {
+    authorityRevision: config.authorityRevision,
+    mode: config.mode,
+    backgroundContinuation: config.backgroundContinuation,
+    maxRounds: config.maxRounds,
+    armedAt: config.armedAt,
+    baselineSettledTurnId: config.baselineSettledTurnId,
+    lastDispatchedSettledTurnId: config.lastDispatchedSettledTurnId,
+    lastDispatchedMessageId: config.lastDispatchedMessageId,
+    roundsDispatched: config.roundsDispatched,
+    lastDispatchedAt: config.lastDispatchedAt,
+  };
 }
 
 function computeSnapshotSequence(
@@ -476,6 +496,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          auto_nudge_json AS "autoNudge",
+          manual_follow_ups_json AS "manualFollowUps",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -504,6 +526,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          auto_nudge_json AS "autoNudge",
+          manual_follow_ups_json AS "manualFollowUps",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -534,6 +558,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          auto_nudge_json AS "autoNudge",
+          manual_follow_ups_json AS "manualFollowUps",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -564,6 +590,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          auto_nudge_json AS "autoNudge",
+          manual_follow_ups_json AS "manualFollowUps",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -999,6 +1027,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          auto_nudge_json AS "autoNudge",
+          manual_follow_ups_json AS "manualFollowUps",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -1604,6 +1634,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 interactionMode: row.interactionMode,
                 branch: row.branch,
                 worktreePath: row.worktreePath,
+                autoNudge: row.autoNudge,
+                manualFollowUps: row.manualFollowUps,
                 latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                 createdAt: row.createdAt,
                 updatedAt: row.updatedAt,
@@ -1832,6 +1864,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   interactionMode: row.interactionMode,
                   branch: row.branch,
                   worktreePath: row.worktreePath,
+                  autoNudge: row.autoNudge,
+                  manualFollowUps: row.manualFollowUps,
                   latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
@@ -1967,6 +2001,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                     interactionMode: row.interactionMode,
                     branch: row.branch,
                     worktreePath: row.worktreePath,
+                    autoNudge: toThreadAutoNudgeSummary(row.autoNudge),
+                    manualFollowUpCount: row.manualFollowUps.length,
                     latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                     createdAt: row.createdAt,
                     updatedAt: row.updatedAt,
@@ -2105,6 +2141,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   interactionMode: row.interactionMode,
                   branch: row.branch,
                   worktreePath: row.worktreePath,
+                  autoNudge: toThreadAutoNudgeSummary(row.autoNudge),
+                  manualFollowUpCount: row.manualFollowUps.length,
                   latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
@@ -2249,6 +2287,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   interactionMode: row.interactionMode,
                   branch: row.branch,
                   worktreePath: row.worktreePath,
+                  autoNudge: toThreadAutoNudgeSummary(row.autoNudge),
+                  manualFollowUpCount: row.manualFollowUps.length,
                   latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
@@ -2461,6 +2501,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         interactionMode: threadRow.value.interactionMode,
         branch: threadRow.value.branch,
         worktreePath: threadRow.value.worktreePath,
+        autoNudge: toThreadAutoNudgeSummary(threadRow.value.autoNudge),
+        manualFollowUpCount: threadRow.value.manualFollowUps.length,
         latestTurn: Option.isSome(latestTurnRow) ? mapLatestTurn(latestTurnRow.value) : null,
         createdAt: threadRow.value.createdAt,
         updatedAt: threadRow.value.updatedAt,
@@ -2649,6 +2691,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         interactionMode: threadRow.value.interactionMode,
         branch: threadRow.value.branch,
         worktreePath: threadRow.value.worktreePath,
+        autoNudge: threadRow.value.autoNudge,
+        manualFollowUps: threadRow.value.manualFollowUps,
         latestTurn: Option.isSome(latestTurnRow) ? mapLatestTurn(latestTurnRow.value) : null,
         createdAt: threadRow.value.createdAt,
         updatedAt: threadRow.value.updatedAt,

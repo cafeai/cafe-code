@@ -2,10 +2,14 @@ import {
   CheckpointRef,
   CommandId,
   CorrelationId,
+  DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
   EventId,
+  ManualFollowUpId,
+  ManualFollowUpQueue,
   MessageId,
   ProjectId,
   ThreadId,
+  ThreadAutoNudgeConfig,
   TurnId,
   ProviderInstanceId,
 } from "@cafecode/contracts";
@@ -15,6 +19,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
@@ -49,6 +54,13 @@ const exists = (filePath: string) =>
     const fileInfo = yield* Effect.result(fileSystem.stat(filePath));
     return fileInfo._tag === "Success";
   });
+
+const decodeStoredThreadAutoNudge = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(ThreadAutoNudgeConfig),
+);
+const decodeStoredManualFollowUps = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(ManualFollowUpQueue),
+);
 
 const BaseTestLayer = makeProjectionPipelinePrefixedTestLayer("t3-projection-pipeline-test-");
 
@@ -170,6 +182,168 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       assert.equal(stateRows.length, Object.keys(ORCHESTRATION_PROJECTOR_NAMES).length);
       for (const row of stateRows) {
         assert.equal(row.lastAppliedSequence, 3);
+      }
+    }),
+  );
+
+  it.effect("persists exact-thread Auto Nudge authority and manual FIFO payloads", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const now = "2026-08-11T00:00:00.000Z";
+      const threadId = ThreadId.make("thread-auto-nudge-persistence");
+      const followUpId = ManualFollowUpId.make("manual-follow-up-persistence");
+      const messageId = MessageId.make("message-manual-follow-up-persistence");
+      const reservationCommandId = CommandId.make("command-manual-follow-up-reserve");
+      const dispatch = {
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.6-sol",
+        },
+        titleSeed: "Persistent operator follow-up",
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+      };
+
+      yield* eventStore.append({
+        type: "project.created",
+        eventId: EventId.make("event-auto-nudge-project-created"),
+        aggregateKind: "project",
+        aggregateId: ProjectId.make("project-auto-nudge-persistence"),
+        occurredAt: now,
+        commandId: CommandId.make("command-auto-nudge-project-created"),
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        payload: {
+          projectId: ProjectId.make("project-auto-nudge-persistence"),
+          title: "Auto Nudge persistence",
+          workspaceRoot: "/tmp/auto-nudge-persistence",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+      yield* eventStore.append({
+        type: "thread.created",
+        eventId: EventId.make("event-auto-nudge-thread-created"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: now,
+        commandId: CommandId.make("command-auto-nudge-thread-created"),
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-auto-nudge-persistence"),
+          title: "Auto Nudge persistence",
+          modelSelection: dispatch.modelSelection,
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+      yield* eventStore.append({
+        type: "thread.auto-nudge-configured",
+        eventId: EventId.make("event-auto-nudge-configured"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: now,
+        commandId: CommandId.make("command-auto-nudge-configured"),
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        payload: {
+          threadId,
+          config: {
+            ...DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+            authorityRevision: 1,
+            mode: "steady-progress",
+            prompt: "Continue this exact thread.",
+            armedAt: now,
+          },
+        },
+      });
+      yield* eventStore.append({
+        type: "thread.manual-follow-up-reserved",
+        eventId: EventId.make("event-manual-follow-up-reserved"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: now,
+        commandId: reservationCommandId,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        payload: {
+          threadId,
+          item: {
+            id: followUpId,
+            messageId,
+            dispatch,
+            status: "reserving",
+            reservationCommandId,
+            enqueuedAt: now,
+          },
+        },
+      });
+      yield* eventStore.append({
+        type: "thread.manual-follow-up-enqueued",
+        eventId: EventId.make("event-manual-follow-up-enqueued"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: now,
+        commandId: CommandId.make("command-manual-follow-up-enqueued"),
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        payload: {
+          threadId,
+          item: {
+            id: followUpId,
+            message: {
+              messageId,
+              role: "user",
+              text: "Run this after earlier operator work.",
+              attachments: [],
+            },
+            dispatch,
+            status: "queued",
+            reservationCommandId,
+            enqueuedAt: now,
+          },
+        },
+      });
+
+      yield* projectionPipeline.bootstrap;
+
+      const rows = yield* sql<{
+        readonly autoNudge: string;
+        readonly manualFollowUps: string;
+      }>`
+        SELECT
+          auto_nudge_json AS "autoNudge",
+          manual_follow_ups_json AS "manualFollowUps"
+        FROM projection_threads
+        WHERE thread_id = ${threadId}
+      `;
+      const row = rows[0];
+      assert.isDefined(row);
+      const storedConfig = yield* decodeStoredThreadAutoNudge(row.autoNudge);
+      const storedQueue = yield* decodeStoredManualFollowUps(row.manualFollowUps);
+      assert.equal(storedConfig.authorityRevision, 1);
+      assert.equal(storedConfig.mode, "steady-progress");
+      assert.equal(storedConfig.prompt, "Continue this exact thread.");
+      assert.equal(storedQueue.length, 1);
+      assert.equal(storedQueue[0]?.id, followUpId);
+      assert.equal(storedQueue[0]?.status, "queued");
+      if (storedQueue[0]?.status === "queued") {
+        assert.equal(storedQueue[0].message.messageId, messageId);
+        assert.equal(storedQueue[0].message.text, "Run this after earlier operator work.");
       }
     }),
   );

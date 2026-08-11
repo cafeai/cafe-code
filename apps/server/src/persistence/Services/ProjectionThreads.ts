@@ -8,11 +8,13 @@
  */
 import {
   IsoDateTime,
+  ManualFollowUpQueue,
   ModelSelection,
   NonNegativeInt,
   ProjectId,
   ProviderInteractionMode,
   RuntimeMode,
+  ThreadAutoNudgeConfig,
   ThreadId,
   TurnId,
 } from "@cafecode/contracts";
@@ -32,6 +34,8 @@ export const ProjectionThread = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
+  autoNudge: ThreadAutoNudgeConfig,
+  manualFollowUps: ManualFollowUpQueue,
   latestTurnId: Schema.NullOr(TurnId),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,

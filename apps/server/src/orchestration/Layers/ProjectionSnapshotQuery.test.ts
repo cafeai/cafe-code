@@ -1,5 +1,7 @@
 import {
   CheckpointRef,
+  DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+  DEFAULT_THREAD_AUTO_NUDGE_SUMMARY,
   EventId,
   MessageId,
   ProjectId,
@@ -320,6 +322,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           updatedAt: "2026-02-24T00:00:03.000Z",
           archivedAt: null,
           deletedAt: null,
+          autoNudge: DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+          manualFollowUps: [],
           messages: [
             {
               id: asMessageId("message-1"),
@@ -379,6 +383,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
 
       const shellSnapshot = yield* snapshotQuery.getShellSnapshot();
       assert.equal(shellSnapshot.snapshotSequence, 5);
+      assert.isDefined(shellSnapshot.threads[0]);
+      assert.isFalse("prompt" in shellSnapshot.threads[0].autoNudge);
       assert.deepEqual(shellSnapshot.projects, [
         {
           id: asProjectId("project-1"),
@@ -445,6 +451,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           hasPendingApprovals: true,
           hasPendingUserInput: false,
           hasActionableProposedPlan: false,
+          autoNudge: DEFAULT_THREAD_AUTO_NUDGE_SUMMARY,
+          manualFollowUpCount: 0,
         },
       ]);
 

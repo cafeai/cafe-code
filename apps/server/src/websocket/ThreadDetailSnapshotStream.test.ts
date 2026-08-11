@@ -1,6 +1,7 @@
 import * as Crypto from "node:crypto";
 
 import {
+  DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
   MessageId,
   OrchestrationThreadDetailSnapshot,
   ProjectId,
@@ -67,6 +68,8 @@ function makeSnapshot(text: string): OrchestrationThreadDetailSnapshotType {
       proposedPlans: [],
       activities: [],
       checkpoints: [],
+      autoNudge: DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+      manualFollowUps: [],
       session: {
         threadId,
         status: "running",

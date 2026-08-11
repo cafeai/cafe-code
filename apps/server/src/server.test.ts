@@ -10,6 +10,8 @@ import { brotliCompressSync, constants as zlibConstants, gzipSync } from "node:z
 import {
   CommandId,
   DEFAULT_SERVER_SETTINGS,
+  DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+  DEFAULT_THREAD_AUTO_NUDGE_SUMMARY,
   EnvironmentId,
   EventId,
   GitCommandError,
@@ -207,6 +209,8 @@ const makeDefaultOrchestrationReadModel = () => {
         activities: [],
         proposedPlans: [],
         checkpoints: [],
+        autoNudge: DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+        manualFollowUps: [],
         deletedAt: null,
       },
     ],
@@ -236,6 +240,8 @@ const makeDefaultOrchestrationThreadShell = (
     hasPendingApprovals: false,
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
+    autoNudge: DEFAULT_THREAD_AUTO_NUDGE_SUMMARY,
+    manualFollowUpCount: 0,
     ...overrides,
   };
 };
@@ -4053,6 +4059,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             activities: [],
             proposedPlans: [],
             checkpoints: [],
+            autoNudge: DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+            manualFollowUps: [],
             deletedAt: null,
           },
         ],
@@ -4199,6 +4207,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         activities: [],
         proposedPlans: [],
         checkpoints: [],
+        autoNudge: DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+        manualFollowUps: [],
         deletedAt: null,
       };
       const makeSessionSetEvent = (

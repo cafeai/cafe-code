@@ -1,4 +1,5 @@
 import {
+  DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
   MessageId,
   OrchestrationThreadDetailSnapshot,
   ProjectId,
@@ -59,6 +60,8 @@ function makeSnapshot(): OrchestrationThreadDetailSnapshotType {
       proposedPlans: [],
       activities: [],
       checkpoints: [],
+      autoNudge: DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+      manualFollowUps: [],
       session: null,
     },
   };

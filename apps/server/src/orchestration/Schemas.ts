@@ -8,6 +8,11 @@ import {
   ThreadMetaUpdatedPayload as ContractsThreadMetaUpdatedPayloadSchema,
   ThreadRuntimeModeSetPayload as ContractsThreadRuntimeModeSetPayloadSchema,
   ThreadInteractionModeSetPayload as ContractsThreadInteractionModeSetPayloadSchema,
+  ThreadAutoNudgeConfiguredPayload as ContractsThreadAutoNudgeConfiguredPayloadSchema,
+  ThreadAutoNudgeStoppedPayload as ContractsThreadAutoNudgeStoppedPayloadSchema,
+  ThreadManualFollowUpReservedPayload as ContractsThreadManualFollowUpReservedPayloadSchema,
+  ThreadManualFollowUpEnqueuedPayload as ContractsThreadManualFollowUpEnqueuedPayloadSchema,
+  ThreadManualFollowUpCancelledPayload as ContractsThreadManualFollowUpCancelledPayloadSchema,
   ThreadDeletedPayload as ContractsThreadDeletedPayloadSchema,
   ThreadRestoredPayload as ContractsThreadRestoredPayloadSchema,
   ThreadUnarchivedPayload as ContractsThreadUnarchivedPayloadSchema,
@@ -36,6 +41,14 @@ export const ThreadArchivedPayload = ContractsThreadArchivedPayloadSchema;
 export const ThreadMetaUpdatedPayload = ContractsThreadMetaUpdatedPayloadSchema;
 export const ThreadRuntimeModeSetPayload = ContractsThreadRuntimeModeSetPayloadSchema;
 export const ThreadInteractionModeSetPayload = ContractsThreadInteractionModeSetPayloadSchema;
+export const ThreadAutoNudgeConfiguredPayload = ContractsThreadAutoNudgeConfiguredPayloadSchema;
+export const ThreadAutoNudgeStoppedPayload = ContractsThreadAutoNudgeStoppedPayloadSchema;
+export const ThreadManualFollowUpReservedPayload =
+  ContractsThreadManualFollowUpReservedPayloadSchema;
+export const ThreadManualFollowUpEnqueuedPayload =
+  ContractsThreadManualFollowUpEnqueuedPayloadSchema;
+export const ThreadManualFollowUpCancelledPayload =
+  ContractsThreadManualFollowUpCancelledPayloadSchema;
 export const ThreadDeletedPayload = ContractsThreadDeletedPayloadSchema;
 export const ThreadRestoredPayload = ContractsThreadRestoredPayloadSchema;
 export const ThreadUnarchivedPayload = ContractsThreadUnarchivedPayloadSchema;
