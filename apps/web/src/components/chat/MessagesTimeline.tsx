@@ -820,7 +820,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   if (rows.length === 0 && !isWorking) {
     return (
-      <div className="flex h-full items-center justify-center">
+      <div className="flex min-h-0 flex-1 items-center justify-center">
         <p className="text-sm text-muted-foreground/30">
           Send a message to start the conversation.
         </p>
@@ -856,7 +856,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           onPointerUp={handlePointerEnd}
           onPointerCancel={handlePointerEnd}
           onKeyDown={handleKeyDown}
-          className="h-full overflow-x-hidden overscroll-y-contain px-3 sm:px-5"
+          className="min-h-0 flex-1 overflow-x-hidden overscroll-y-contain px-3 sm:px-5"
           ListHeaderComponent={TIMELINE_LIST_HEADER}
           ListFooterComponent={TIMELINE_LIST_FOOTER}
         />

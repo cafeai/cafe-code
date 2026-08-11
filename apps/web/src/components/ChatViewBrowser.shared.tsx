@@ -14,6 +14,7 @@ import {
   ProviderInstanceId,
   type RuntimeMode,
   type ServerConfig,
+  type ServerProjectSystemTelemetryResult,
   type ServerLifecycleWelcomePayload,
   type ThreadId,
   type TurnId,
@@ -25,6 +26,7 @@ import {
 import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
 import { createModelCapabilities, createModelSelection } from "@cafecode/shared/model";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
+import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { HttpResponse, http, ws } from "msw";
@@ -905,6 +907,39 @@ function resolveWsRpc(body: NormalizedWsRpcRequestBody): unknown {
   const tag = body._tag;
   if (tag === WS_METHODS.serverGetConfig) {
     return encodeServerConfig(fixture.serverConfig);
+  }
+  if (tag === WS_METHODS.serverGetProjectSystemTelemetry) {
+    const projectId = body.projectId as ProjectId;
+    return {
+      projectId,
+      sampledAt: DateTime.makeUnsafe("2026-07-26T12:00:00.000Z"),
+      minimumSampleIntervalMs: 3_000,
+      platform: "linux",
+      architecture: "x64",
+      cpu: {
+        status: "available",
+        utilizationPercent: 25,
+        logicalProcessorCount: 8,
+        detail: null,
+      },
+      memory: {
+        status: "available",
+        totalBytes: 8 * 1024 ** 3,
+        usedBytes: 4 * 1024 ** 3,
+        availableBytes: 4 * 1024 ** 3,
+        utilizationPercent: 50,
+        detail: null,
+      },
+      projectVolume: {
+        status: "available",
+        totalBytes: 20 * 1024 ** 3,
+        usedBytes: 12 * 1024 ** 3,
+        availableBytes: 8 * 1024 ** 3,
+        utilizationPercent: 60,
+        projectVolumeOnly: true,
+        detail: null,
+      },
+    } satisfies ServerProjectSystemTelemetryResult;
   }
   if (tag === WS_METHODS.serverDiscoverSourceControl) {
     return {
@@ -5597,6 +5632,45 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
   }
 
   if (chatViewBrowserPart === "layout") {
+    it("keeps selected-project telemetry in flow above the message timeline", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotWithLongProposedPlan(),
+      });
+
+      try {
+        const expand = document.querySelector<HTMLButtonElement>(
+          'button[aria-label="Expand Resources"]',
+        );
+        expand?.click();
+        const panel = await waitForElement(
+          () =>
+            document.querySelector<HTMLElement>('[aria-label="Selected project system telemetry"]'),
+          "Unable to find selected-project telemetry panel.",
+        );
+        const slot = panel.closest<HTMLElement>('[data-project-telemetry-slot="true"]');
+        const timeline = slot?.nextElementSibling as HTMLElement | null;
+
+        expect(slot).toBeTruthy();
+        expect(timeline).toBeTruthy();
+        expect(panel.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+          (timeline?.getBoundingClientRect().top ?? 0) + 1,
+        );
+        expect(timeline?.getBoundingClientRect().height).toBeGreaterThan(0);
+        await vi.waitFor(() => {
+          expect(
+            wsRequests.some(
+              (request) =>
+                request._tag === WS_METHODS.serverGetProjectSystemTelemetry &&
+                request.projectId === PROJECT_ID,
+            ),
+          ).toBe(true);
+        });
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
     it("keeps long proposed plans lightweight until the user expands them", async () => {
       const mounted = await mountChatView({
         viewport: DEFAULT_VIEWPORT,

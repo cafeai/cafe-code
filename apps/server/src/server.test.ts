@@ -142,6 +142,7 @@ import { AdminPasswordServiceLive } from "./auth/Layers/AdminPasswordService.ts"
 import { AdminPasswordService } from "./auth/Services/AdminPasswordService.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
+import * as ProjectSystemTelemetry from "./diagnostics/ProjectSystemTelemetry.ts";
 import * as RuntimeLayerDiagnostics from "./diagnostics/RuntimeLayerDiagnostics.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as Data from "effect/Data";
@@ -465,6 +466,7 @@ const buildAppUnderTest = (options?: {
     serverEnvironment?: Partial<ServerEnvironmentShape>;
     repositoryIdentityResolver?: Partial<RepositoryIdentityResolverShape>;
     usageStats?: Partial<UsageStatsServiceShape>;
+    projectSystemTelemetry?: Partial<ProjectSystemTelemetry.ProjectSystemTelemetryShape>;
   };
 }) =>
   Effect.gen(function* () {
@@ -760,20 +762,56 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provide(
-        Layer.mock(ProcessResourceMonitor.ProcessResourceMonitor)({
-          readHistory: (input) =>
-            Effect.succeed({
-              readAt: TEST_EPOCH,
-              windowMs: input.windowMs,
-              bucketMs: input.bucketMs,
-              sampleIntervalMs: 5_000,
-              retainedSampleCount: 0,
-              totalCpuSecondsApprox: 0,
-              buckets: [],
-              topProcesses: [],
-              error: Option.none(),
-            }),
-        }),
+        Layer.mergeAll(
+          Layer.mock(ProcessResourceMonitor.ProcessResourceMonitor)({
+            readHistory: (input) =>
+              Effect.succeed({
+                readAt: TEST_EPOCH,
+                windowMs: input.windowMs,
+                bucketMs: input.bucketMs,
+                sampleIntervalMs: 5_000,
+                retainedSampleCount: 0,
+                totalCpuSecondsApprox: 0,
+                buckets: [],
+                topProcesses: [],
+                error: Option.none(),
+              }),
+          }),
+          Layer.mock(ProjectSystemTelemetry.ProjectSystemTelemetry)({
+            read: (input) =>
+              Effect.succeed({
+                projectId: input.projectId,
+                sampledAt: TEST_EPOCH,
+                minimumSampleIntervalMs: 1_000,
+                platform: "test",
+                architecture: "test",
+                cpu: {
+                  status: "unavailable",
+                  utilizationPercent: null,
+                  logicalProcessorCount: 0,
+                  detail: "CPU telemetry is unavailable.",
+                },
+                memory: {
+                  status: "unavailable",
+                  totalBytes: null,
+                  usedBytes: null,
+                  availableBytes: null,
+                  utilizationPercent: null,
+                  detail: "Memory telemetry is unavailable.",
+                },
+                projectVolume: {
+                  status: "unavailable",
+                  totalBytes: null,
+                  usedBytes: null,
+                  availableBytes: null,
+                  utilizationPercent: null,
+                  projectVolumeOnly: true,
+                  detail: "Project-volume telemetry is unavailable.",
+                },
+              }),
+            ...options?.layers?.projectSystemTelemetry,
+          }),
+        ),
       ),
       Layer.provide(
         Layer.mock(RuntimeLayerDiagnostics.RuntimeLayerDiagnostics)({
@@ -889,6 +927,7 @@ const buildAppUnderTest = (options?: {
             }),
           getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
           getProjectShellById: () => Effect.succeed(Option.none()),
+          getProjectWorkspaceRootById: () => Effect.succeed(Option.none()),
           getThreadShellById: () => Effect.succeed(Option.none()),
           getPostTerminalStaleSteerCandidateThreadIds: () => Effect.succeed([]),
           getThreadTurnActivityPage: () => Effect.die("unused"),
@@ -3161,6 +3200,146 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.deepEqual(response.issues, []);
       assert.deepEqual(response.keybindings, [resolved]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "resolves project telemetry paths on the server instead of accepting renderer paths",
+    () =>
+      Effect.gen(function* () {
+        const authoritativeWorkspaceRoot = "M:\\server-owned\\selected-project";
+        let sampledWorkspaceRoot: string | null = null;
+
+        yield* buildAppUnderTest({
+          layers: {
+            projectionSnapshotQuery: {
+              getProjectWorkspaceRootById: (requestedProjectId) =>
+                Effect.succeed(
+                  requestedProjectId === defaultProjectId
+                    ? Option.some(authoritativeWorkspaceRoot)
+                    : Option.none(),
+                ),
+              getProjectShellById: () => Effect.die("Telemetry must not resolve a project shell."),
+            },
+            projectSystemTelemetry: {
+              read: (input) =>
+                Effect.sync(() => {
+                  sampledWorkspaceRoot = input.workspaceRoot;
+                  return {
+                    projectId: input.projectId,
+                    sampledAt: TEST_EPOCH,
+                    minimumSampleIntervalMs: 1_000,
+                    platform: "win32",
+                    architecture: "x64",
+                    cpu: {
+                      status: "available" as const,
+                      utilizationPercent: 25,
+                      logicalProcessorCount: 8,
+                      detail: null,
+                    },
+                    memory: {
+                      status: "available" as const,
+                      totalBytes: 1_000,
+                      usedBytes: 500,
+                      availableBytes: 500,
+                      utilizationPercent: 50,
+                      detail: null,
+                    },
+                    projectVolume: {
+                      status: "available" as const,
+                      totalBytes: 2_000,
+                      usedBytes: 1_500,
+                      availableBytes: 500,
+                      utilizationPercent: 75,
+                      projectVolumeOnly: true as const,
+                      detail: null,
+                    },
+                  };
+                }),
+            },
+          },
+        });
+
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const response = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.serverGetProjectSystemTelemetry]({
+              projectId: defaultProjectId,
+            }),
+          ),
+        );
+
+        assert.equal(sampledWorkspaceRoot, authoritativeWorkspaceRoot);
+        assert.equal(response.projectId, defaultProjectId);
+        assert.equal(response.projectVolume.projectVolumeOnly, true);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("fails closed when the selected telemetry project no longer exists", () =>
+    Effect.gen(function* () {
+      let sampled = false;
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            getProjectWorkspaceRootById: () => Effect.succeed(Option.none()),
+          },
+          projectSystemTelemetry: {
+            read: () =>
+              Effect.sync(() => {
+                sampled = true;
+                throw new Error("Telemetry must not sample an unknown project.");
+              }),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.serverGetProjectSystemTelemetry]({
+            projectId: ProjectId.make("project-no-longer-present"),
+          }),
+        ).pipe(Effect.result),
+      );
+
+      assert.equal(result._tag, "Failure");
+      assert.equal(sampled, false);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("sanitizes project lookup failures before they cross telemetry RPC", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            getProjectWorkspaceRootById: () =>
+              Effect.fail(
+                new PersistenceSqlError({
+                  operation: "private-project-table",
+                  detail: "M:\\private\\database",
+                }),
+              ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const error = yield* Effect.flip(
+        Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.serverGetProjectSystemTelemetry]({
+              projectId: defaultProjectId,
+            }),
+          ),
+        ),
+      );
+
+      assert.equal(error._tag, "ServerProjectSystemTelemetryError");
+      if (error._tag === "ServerProjectSystemTelemetryError") {
+        assert.equal(error.kind, "project-lookup-failed");
+        assert.equal(error.message, "Failed to resolve the selected project.");
+      }
+      assert.notInclude(JSON.stringify(error), "private");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
