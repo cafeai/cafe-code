@@ -2,6 +2,7 @@ import {
   ChatAttachment,
   AdditionalWorkspaceRoots,
   IsoDateTime,
+  ManualFollowUpQueue,
   MessageId,
   NonNegativeInt,
   OrchestrationCheckpointFile,
@@ -12,6 +13,7 @@ import {
   OrchestrationThreadTurnActivityPageInput,
   ProviderThreadGoal,
   ProjectScript,
+  ThreadAutoNudgeConfig,
   TurnId,
   type OrchestrationCheckpointSummary,
   type OrchestrationLatestTurn,
@@ -22,6 +24,7 @@ import {
   type OrchestrationSession,
   type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
+  type ThreadAutoNudgeSummary,
   ModelSelection,
   ProjectId,
   ThreadId,
@@ -80,6 +83,8 @@ const ProjectionThreadProposedPlanDbRowSchema = ProjectionThreadProposedPlan;
 const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
+    autoNudge: Schema.fromJsonString(ThreadAutoNudgeConfig),
+    manualFollowUps: Schema.fromJsonString(ManualFollowUpQueue),
   }),
 );
 const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
@@ -135,6 +140,9 @@ const ProjectionProjectLookupRowSchema = ProjectionProjectDbRowSchema;
 const ProjectionThreadIdLookupRowSchema = Schema.Struct({
   threadId: ThreadId,
 });
+const CancelledAutoNudgeMessageRowSchema = Schema.Struct({
+  messageId: MessageId,
+});
 const ProjectionThreadCheckpointContextThreadRowSchema = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
@@ -157,6 +165,40 @@ function maxIso(left: string | null, right: string): string {
     return right;
   }
   return left > right ? left : right;
+}
+
+function toThreadAutoNudgeSummary(config: ThreadAutoNudgeConfig): ThreadAutoNudgeSummary {
+  return {
+    authorityRevision: config.authorityRevision,
+    mode: config.mode,
+    backgroundContinuation: config.backgroundContinuation,
+    maxRounds: config.maxRounds,
+    armedAt: config.armedAt,
+    baselineSettledTurnId: config.baselineSettledTurnId,
+    lastDispatchedSettledTurnId: config.lastDispatchedSettledTurnId,
+    lastDispatchedMessageId: config.lastDispatchedMessageId,
+    roundsDispatched: config.roundsDispatched,
+    lastDispatchedAt: config.lastDispatchedAt,
+  };
+}
+
+export function failClosedAutoNudgeAuthorityAfterBootstrap(
+  config: ThreadAutoNudgeConfig,
+  latestTurn: OrchestrationLatestTurn | null,
+): ThreadAutoNudgeConfig {
+  if (
+    config.mode === "off" ||
+    latestTurn?.state !== "completed" ||
+    config.baselineSettledTurnId === latestTurn.turnId ||
+    config.lastDispatchedSettledTurnId === latestTurn.turnId
+  ) {
+    return config;
+  }
+
+  // The lightweight command model cannot reconstruct the original output and
+  // activity boundary after restart. Treat the persisted completion as the new
+  // baseline. A later provider completion can authorize work normally.
+  return { ...config, baselineSettledTurnId: latestTurn.turnId };
 }
 
 function computeSnapshotSequence(
@@ -476,6 +518,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          auto_nudge_json AS "autoNudge",
+          manual_follow_ups_json AS "manualFollowUps",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -504,6 +548,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          auto_nudge_json AS "autoNudge",
+          manual_follow_ups_json AS "manualFollowUps",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -534,6 +580,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          auto_nudge_json AS "autoNudge",
+          manual_follow_ups_json AS "manualFollowUps",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -564,6 +612,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          auto_nudge_json AS "autoNudge",
+          manual_follow_ups_json AS "manualFollowUps",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -999,6 +1049,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          auto_nudge_json AS "autoNudge",
+          manual_follow_ups_json AS "manualFollowUps",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -1146,6 +1198,21 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           activities.sequence ASC,
           activities.created_at ASC,
           activities.activity_id ASC
+      `,
+  });
+
+  const listCancelledAutoNudgeMessageRows = SqlSchema.findAll({
+    Request: ThreadIdLookupInput,
+    Result: CancelledAutoNudgeMessageRowSchema,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT DISTINCT json_extract(payload_json, '$.messageId') AS "messageId"
+        FROM projection_thread_activities
+        WHERE thread_id = ${threadId}
+          AND kind = 'runtime.warning'
+          AND summary = 'Auto Nudge delivery cancelled'
+          AND json_extract(payload_json, '$.providerWorkConsumed') = 0
+          AND json_type(payload_json, '$.messageId') = 'text'
       `,
   });
 
@@ -1604,6 +1671,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 interactionMode: row.interactionMode,
                 branch: row.branch,
                 worktreePath: row.worktreePath,
+                autoNudge: row.autoNudge,
+                manualFollowUps: row.manualFollowUps,
                 latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                 createdAt: row.createdAt,
                 updatedAt: row.updatedAt,
@@ -1823,6 +1892,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 if (!row) {
                   continue;
                 }
+                const latestTurn = latestTurnByThread.get(row.threadId) ?? null;
                 threads.push({
                   id: row.threadId,
                   projectId: row.projectId,
@@ -1832,7 +1902,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   interactionMode: row.interactionMode,
                   branch: row.branch,
                   worktreePath: row.worktreePath,
-                  latestTurn: latestTurnByThread.get(row.threadId) ?? null,
+                  autoNudge: failClosedAutoNudgeAuthorityAfterBootstrap(row.autoNudge, latestTurn),
+                  manualFollowUps: row.manualFollowUps,
+                  latestTurn,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
                   archivedAt: row.archivedAt,
@@ -1967,6 +2039,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                     interactionMode: row.interactionMode,
                     branch: row.branch,
                     worktreePath: row.worktreePath,
+                    autoNudge: toThreadAutoNudgeSummary(row.autoNudge),
+                    manualFollowUpCount: row.manualFollowUps.length,
                     latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                     createdAt: row.createdAt,
                     updatedAt: row.updatedAt,
@@ -2105,6 +2179,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   interactionMode: row.interactionMode,
                   branch: row.branch,
                   worktreePath: row.worktreePath,
+                  autoNudge: toThreadAutoNudgeSummary(row.autoNudge),
+                  manualFollowUpCount: row.manualFollowUps.length,
                   latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
@@ -2249,6 +2325,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   interactionMode: row.interactionMode,
                   branch: row.branch,
                   worktreePath: row.worktreePath,
+                  autoNudge: toThreadAutoNudgeSummary(row.autoNudge),
+                  manualFollowUpCount: row.manualFollowUps.length,
                   latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
@@ -2461,6 +2539,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         interactionMode: threadRow.value.interactionMode,
         branch: threadRow.value.branch,
         worktreePath: threadRow.value.worktreePath,
+        autoNudge: toThreadAutoNudgeSummary(threadRow.value.autoNudge),
+        manualFollowUpCount: threadRow.value.manualFollowUps.length,
         latestTurn: Option.isSome(latestTurnRow) ? mapLatestTurn(latestTurnRow.value) : null,
         createdAt: threadRow.value.createdAt,
         updatedAt: threadRow.value.updatedAt,
@@ -2649,6 +2729,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         interactionMode: threadRow.value.interactionMode,
         branch: threadRow.value.branch,
         worktreePath: threadRow.value.worktreePath,
+        autoNudge: threadRow.value.autoNudge,
+        manualFollowUps: threadRow.value.manualFollowUps,
         latestTurn: Option.isSome(latestTurnRow) ? mapLatestTurn(latestTurnRow.value) : null,
         createdAt: threadRow.value.createdAt,
         updatedAt: threadRow.value.updatedAt,
@@ -2708,6 +2790,19 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       }),
     );
 
+  const getCancelledAutoNudgeMessageIds: NonNullable<
+    ProjectionSnapshotQueryShape["getCancelledAutoNudgeMessageIds"]
+  > = (threadId) =>
+    listCancelledAutoNudgeMessageRows({ threadId }).pipe(
+      Effect.map((rows) => rows.map((row) => row.messageId)),
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getCancelledAutoNudgeMessageIds:query",
+          "ProjectionSnapshotQuery.getCancelledAutoNudgeMessageIds:decodeRows",
+        ),
+      ),
+    );
+
   const getThreadDetailSnapshotById: ProjectionSnapshotQueryShape["getThreadDetailSnapshotById"] = (
     threadId,
   ) =>
@@ -2762,6 +2857,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getThreadTurnActivityPage,
     getThreadTurnWorkLogPresence,
     getThreadDetailById,
+    getCancelledAutoNudgeMessageIds,
     getThreadDetailSnapshotById,
   } satisfies ProjectionSnapshotQueryShape;
 });

@@ -1,5 +1,7 @@
 import {
   CheckpointRef,
+  DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+  DEFAULT_THREAD_AUTO_NUDGE_SUMMARY,
   EventId,
   MessageId,
   ProjectId,
@@ -18,6 +20,7 @@ import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIde
 import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import {
+  failClosedAutoNudgeAuthorityAfterBootstrap,
   OrchestrationProjectionSnapshotQueryLive,
   THREAD_DETAIL_ACTIVITY_LIMIT,
   THREAD_DETAIL_MESSAGE_LIMIT,
@@ -30,6 +33,28 @@ const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asEventId = (value: string): EventId => EventId.make(value);
 const asCheckpointRef = (value: string): CheckpointRef => CheckpointRef.make(value);
 
+it("fails closed over a persisted completion after process bootstrap", () => {
+  const completedTurnId = TurnId.make("persisted-completed-turn");
+  const config = {
+    ...DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+    authorityRevision: 3,
+    mode: "steady-progress" as const,
+    prompt: "Continue.",
+    armedAt: "2026-08-11T00:00:00.000Z",
+  };
+  const failedClosed = failClosedAutoNudgeAuthorityAfterBootstrap(config, {
+    turnId: completedTurnId,
+    state: "completed",
+    requestedAt: "2026-08-11T00:00:30.000Z",
+    startedAt: "2026-08-11T00:00:31.000Z",
+    completedAt: "2026-08-11T00:01:00.000Z",
+    assistantMessageId: null,
+  });
+  assert.strictEqual(failedClosed.baselineSettledTurnId, completedTurnId);
+  assert.strictEqual(failedClosed.lastDispatchedSettledTurnId, null);
+  assert.strictEqual(failedClosed.roundsDispatched, 0);
+});
+
 const projectionSnapshotLayer = it.layer(
   OrchestrationProjectionSnapshotQueryLive.pipe(
     Layer.provideMerge(RepositoryIdentityResolverLive),
@@ -39,6 +64,43 @@ const projectionSnapshotLayer = it.layer(
 );
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+  it.effect("reads durable Auto Nudge cancellation markers outside thread detail", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`DELETE FROM projection_thread_activities`;
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id,
+          thread_id,
+          turn_id,
+          tone,
+          kind,
+          summary,
+          payload_json,
+          sequence,
+          created_at
+        )
+        VALUES (
+          'cancelled-auto-nudge-activity',
+          'cancelled-auto-nudge-thread',
+          NULL,
+          'info',
+          'runtime.warning',
+          'Auto Nudge delivery cancelled',
+          '{"messageId":"cancelled-auto-nudge-message","providerWorkConsumed":false}',
+          1,
+          '2026-08-11T00:00:00.000Z'
+        )
+      `;
+
+      const cancelledMessageIds = yield* snapshotQuery.getCancelledAutoNudgeMessageIds!(
+        ThreadId.make("cancelled-auto-nudge-thread"),
+      );
+      assert.deepStrictEqual(cancelledMessageIds, [MessageId.make("cancelled-auto-nudge-message")]);
+    }),
+  );
+
   it.effect("hydrates read model from projection tables and computes snapshot sequence", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
@@ -320,6 +382,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           updatedAt: "2026-02-24T00:00:03.000Z",
           archivedAt: null,
           deletedAt: null,
+          autoNudge: DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+          manualFollowUps: [],
           messages: [
             {
               id: asMessageId("message-1"),
@@ -379,6 +443,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
 
       const shellSnapshot = yield* snapshotQuery.getShellSnapshot();
       assert.equal(shellSnapshot.snapshotSequence, 5);
+      assert.isDefined(shellSnapshot.threads[0]);
+      assert.isFalse("prompt" in shellSnapshot.threads[0].autoNudge);
       assert.deepEqual(shellSnapshot.projects, [
         {
           id: asProjectId("project-1"),
@@ -445,6 +511,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           hasPendingApprovals: true,
           hasPendingUserInput: false,
           hasActionableProposedPlan: false,
+          autoNudge: DEFAULT_THREAD_AUTO_NUDGE_SUMMARY,
+          manualFollowUpCount: 0,
         },
       ]);
 

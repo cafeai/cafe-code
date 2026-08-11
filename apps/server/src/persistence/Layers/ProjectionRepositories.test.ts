@@ -1,4 +1,10 @@
-import { EventId, ProjectId, ThreadId, ProviderInstanceId } from "@cafecode/contracts";
+import {
+  DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+  EventId,
+  ProjectId,
+  ThreadId,
+  ProviderInstanceId,
+} from "@cafecode/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -99,6 +105,8 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         pendingApprovalCount: 0,
         pendingUserInputCount: 0,
         hasActionableProposedPlan: 0,
+        autoNudge: DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+        manualFollowUps: [],
         deletedAt: null,
       });
 

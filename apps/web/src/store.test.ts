@@ -2,6 +2,7 @@ import { scopeThreadRef } from "@cafecode/client-runtime";
 import {
   CheckpointRef,
   DEFAULT_MODEL,
+  DEFAULT_THREAD_AUTO_NUDGE_SUMMARY,
   EnvironmentId,
   EventId,
   MessageId,
@@ -337,6 +338,8 @@ describe("thread selection memoization", () => {
         hasPendingApprovals: false,
         hasPendingUserInput: false,
         hasActionableProposedPlan: false,
+        autoNudge: DEFAULT_THREAD_AUTO_NUDGE_SUMMARY,
+        manualFollowUpCount: 0,
       },
     };
 

@@ -20,7 +20,11 @@ import type {
   ScopedProjectRef,
   ScopedThreadRef,
 } from "@cafecode/contracts";
-import { isProviderDriverKind, ProviderDriverKind } from "@cafecode/contracts";
+import {
+  DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+  isProviderDriverKind,
+  ProviderDriverKind,
+} from "@cafecode/contracts";
 import type { ThreadId, TurnId } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
 import { resolveModelSlugForProvider } from "@cafecode/shared/model";
@@ -1746,6 +1750,8 @@ function applyEnvironmentOrchestrationEvent(
           activities: [],
           checkpoints: [],
           session: null,
+          autoNudge: DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+          manualFollowUps: [],
           goal: null,
         },
         environmentId,
