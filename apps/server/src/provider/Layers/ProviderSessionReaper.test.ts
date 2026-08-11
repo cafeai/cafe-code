@@ -5,6 +5,7 @@ import {
   TurnId,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ProviderSession,
 } from "@cafecode/contracts";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
@@ -116,6 +117,7 @@ describe("ProviderSessionReaper", () => {
     readonly stopSessionImplementation?: (input: {
       readonly threadId: ThreadId;
     }) => ReturnType<ProviderServiceShape["stopSession"]>;
+    readonly liveSessions?: ReadonlyArray<ProviderSession>;
   }) {
     const stoppedThreadIds = new Set<ThreadId>();
     const stopSession = vi.fn<ProviderServiceShape["stopSession"]>(
@@ -136,7 +138,7 @@ describe("ProviderSessionReaper", () => {
       respondToUserInput: () => unsupported(),
       stopSession,
       restartProviderRuntime: () => unsupported(),
-      listSessions: () => Effect.succeed([]),
+      listSessions: () => Effect.succeed(input.liveSessions ?? []),
       getCapabilities: () =>
         Effect.succeed({ sessionModelSwitch: "in-session", liveSteer: "unsupported" }),
       getInstanceInfo: (instanceId) => {
@@ -261,6 +263,123 @@ describe("ProviderSessionReaper", () => {
 
     expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({ threadId });
     expect(harness.stoppedThreadIds.has(threadId)).toBe(true);
+  });
+
+  it("clears an orphaned runtime turn when the terminal projection has no live provider session", async () => {
+    const threadId = ThreadId.make("thread-reaper-orphaned-runtime");
+    const turnId = TurnId.make("turn-reaper-orphaned-runtime");
+    const now = "2026-04-14T00:00:00.000Z";
+    const harness = await createHarness({
+      readModel: makeReadModel([
+        {
+          id: threadId,
+          session: {
+            threadId,
+            status: "interrupted",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+        },
+      ]),
+    });
+    const repository = await runtime!.runPromise(Effect.service(ProviderSessionRuntimeRepository));
+
+    await runtime!.runPromise(
+      repository.upsert({
+        threadId,
+        providerName: "codex",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        adapterKey: "codex",
+        runtimeMode: "full-access",
+        status: "running",
+        lastSeenAt: now,
+        resumeCursor: { threadId: "provider-thread-orphaned-runtime" },
+        runtimePayload: {
+          activeTurnId: turnId,
+          lastRuntimeEvent: "turn.started",
+          lastRuntimeEventAt: now,
+        },
+      }),
+    );
+
+    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
+    await runtime!.runPromise(reaper.runSweepOnce);
+
+    const reconciled = Option.getOrThrow(
+      await runtime!.runPromise(repository.getByThreadId({ threadId })),
+    );
+    expect(reconciled.status).toBe("stopped");
+    expect(reconciled.resumeCursor).toEqual({ threadId: "provider-thread-orphaned-runtime" });
+    expect(reconciled.runtimePayload).toMatchObject({
+      activeTurnId: null,
+      lastRuntimeEvent: "provider.runtime.orphan-reconciled",
+    });
+    expect(harness.stopSession).not.toHaveBeenCalled();
+  });
+
+  it("preserves a live provider session when the terminal projection is stale", async () => {
+    const threadId = ThreadId.make("thread-reaper-live-runtime");
+    const turnId = TurnId.make("turn-reaper-live-runtime");
+    const now = "2026-04-14T00:00:00.000Z";
+    await createHarness({
+      readModel: makeReadModel([
+        {
+          id: threadId,
+          session: {
+            threadId,
+            status: "interrupted",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+        },
+      ]),
+      liveSessions: [
+        {
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          status: "running",
+          runtimeMode: "full-access",
+          threadId,
+          activeTurnId: turnId,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+    });
+    const repository = await runtime!.runPromise(Effect.service(ProviderSessionRuntimeRepository));
+
+    await runtime!.runPromise(
+      repository.upsert({
+        threadId,
+        providerName: "codex",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        adapterKey: "codex",
+        runtimeMode: "full-access",
+        status: "running",
+        lastSeenAt: now,
+        resumeCursor: { threadId: "provider-thread-live-runtime" },
+        runtimePayload: {
+          activeTurnId: turnId,
+          lastRuntimeEvent: "turn.started",
+          lastRuntimeEventAt: now,
+        },
+      }),
+    );
+
+    const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
+    await runtime!.runPromise(reaper.runSweepOnce);
+
+    const preserved = Option.getOrThrow(
+      await runtime!.runPromise(repository.getByThreadId({ threadId })),
+    );
+    expect(preserved.status).toBe("running");
+    expect(preserved.runtimePayload).toMatchObject({ activeTurnId: turnId });
   });
 
   it("skips stale sessions when the thread still has an active turn", async () => {
