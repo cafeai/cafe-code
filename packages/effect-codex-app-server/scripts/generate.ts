@@ -3,6 +3,7 @@
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { make as makeJsonSchemaGenerator } from "@effect/openapi-generator/JsonSchemaGenerator";
+import { fileURLToPath } from "node:url";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -17,8 +18,11 @@ import {
 } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-const UPSTREAM_REF = "e363b08c9175ac1cbe5893615dd2cb9ddf95043b";
+const UPSTREAM_REF = "be6e8eac029b183056b7e4402879f15d2c85f61b";
 const USER_AGENT = "effect-codex-app-server-generator";
+const OXFMT_ENTRYPOINT = fileURLToPath(
+  new URL("../../../node_modules/oxfmt/bin/oxfmt", import.meta.url),
+);
 const GITHUB_API_BASE =
   "https://api.github.com/repos/openai/codex/contents/codex-rs/app-server-protocol";
 
@@ -752,11 +756,7 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
 
   yield* Effect.service(ChildProcessSpawner.ChildProcessSpawner).pipe(
     Effect.flatMap((spawner) =>
-      spawner.spawn(
-        ChildProcess.make("oxfmt", [generatedDir], {
-          shell: process.platform === "win32",
-        }),
-      ),
+      spawner.spawn(ChildProcess.make(process.execPath, [OXFMT_ENTRYPOINT, generatedDir])),
     ),
     Effect.flatMap((child) => child.exitCode),
     Effect.tap((code) =>

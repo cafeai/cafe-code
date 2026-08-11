@@ -2161,6 +2161,49 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }),
   );
 
+  it.effect("maps current nonblocking requestUserInput requests", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-user-input-nonblocking"),
+        kind: "request",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/tool/requestUserInput",
+        requestId: ApprovalRequestId.make("req-user-input-nonblocking"),
+        payload: {
+          itemId: "item-user-input-nonblocking",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          isBlocking: false,
+          questions: [
+            {
+              id: "next_step",
+              header: "Next step",
+              question: "Continue with the suggested action?",
+              options: [
+                {
+                  label: "Continue",
+                  description: "Proceed with the suggested action.",
+                },
+              ],
+            },
+          ],
+        },
+      } satisfies ProviderEvent);
+
+      const event = Option.getOrUndefined(yield* Fiber.join(eventFiber));
+      assert.equal(event?.type, "user-input.requested");
+      if (event?.type === "user-input.requested") {
+        assert.equal(event.requestId, "req-user-input-nonblocking");
+        assert.equal(event.payload.questions[0]?.id, "next_step");
+      }
+    }),
+  );
+
   it.effect("unwraps Codex token usage payloads for context window events", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
