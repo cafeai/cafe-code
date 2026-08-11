@@ -453,4 +453,195 @@ describe("makeManagedServerProvider", () => {
       }),
     ),
   );
+
+  it.effect("cools down staggered usage polls per provider instance", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const releaseInitialCheck = yield* Deferred.make<void>();
+        const usageCalls = yield* Ref.make(0);
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+          initialSnapshot: () => Effect.succeed(initialSnapshot),
+          checkProvider: Deferred.await(releaseInitialCheck).pipe(Effect.as(refreshedSnapshot)),
+          refreshAccountUsage: () =>
+            Ref.update(usageCalls, (count) => count + 1).pipe(
+              Effect.as(refreshedAccountRateLimits),
+            ),
+          refreshInterval: "1 hour",
+        });
+
+        const initialUpdate = yield* Stream.take(provider.streamChanges, 1).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* Effect.yieldNow;
+        yield* Deferred.succeed(releaseInitialCheck, undefined);
+        yield* Fiber.join(initialUpdate);
+
+        const refreshAccountUsage = provider.refreshAccountUsage;
+        assert.isDefined(refreshAccountUsage);
+        if (!refreshAccountUsage) return;
+
+        const first = yield* refreshAccountUsage;
+        const second = yield* refreshAccountUsage;
+
+        assert.strictEqual(yield* Ref.get(usageCalls), 1);
+        assert.deepStrictEqual(first.accountRateLimits, refreshedAccountRateLimits);
+        assert.deepStrictEqual(second.accountRateLimits, refreshedAccountRateLimits);
+      }),
+    ),
+  );
+
+  it.effect("does not carry a failed usage cooldown across sign-in", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const settingsChanges = yield* PubSub.unbounded<TestSettings>();
+        const usageCalls = yield* Ref.make(0);
+        const usageResult = yield* Ref.make<ServerProvider["accountRateLimits"] | undefined>(
+          undefined,
+        );
+        const signedOutSnapshot: ServerProvider = {
+          ...refreshedSnapshot,
+          auth: { status: "unauthenticated" },
+        };
+        const signedInSnapshot: ServerProvider = {
+          ...refreshedSnapshot,
+          auth: {
+            status: "authenticated",
+            email: "operator@example.com",
+            type: "max",
+          },
+        };
+        const nextProbe = yield* Ref.make<ServerProvider>(signedOutSnapshot);
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.fromPubSub(settingsChanges),
+          haveSettingsChanged: () => true,
+          initialSnapshot: () => Effect.succeed(signedOutSnapshot),
+          checkProvider: Ref.get(nextProbe),
+          refreshAccountUsage: () =>
+            Ref.update(usageCalls, (count) => count + 1).pipe(
+              Effect.flatMap(() => Ref.get(usageResult)),
+            ),
+          refreshInterval: "1 hour",
+        });
+
+        const initialUpdate = yield* Stream.take(provider.streamChanges, 1).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* Effect.yieldNow;
+        yield* Fiber.join(initialUpdate);
+
+        const refreshAccountUsage = provider.refreshAccountUsage;
+        assert.isDefined(refreshAccountUsage);
+        if (!refreshAccountUsage) return;
+
+        assert.strictEqual((yield* refreshAccountUsage).accountRateLimits, undefined);
+        assert.strictEqual(yield* Ref.get(usageCalls), 1);
+
+        yield* Ref.set(nextProbe, signedInSnapshot);
+        const signedInUpdate = yield* Stream.take(provider.streamChanges, 1).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* Effect.yieldNow;
+        yield* PubSub.publish(settingsChanges, { enabled: true });
+        yield* Fiber.join(signedInUpdate);
+
+        yield* Ref.set(usageResult, refreshedAccountRateLimits);
+        const refreshed = yield* refreshAccountUsage;
+        assert.strictEqual(yield* Ref.get(usageCalls), 2);
+        assert.deepStrictEqual(refreshed.accountRateLimits, refreshedAccountRateLimits);
+      }),
+    ),
+  );
+
+  it.effect("resets the usage cooldown only when the authentication binding changes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const usageCalls = yield* Ref.make(0);
+        const authenticatedSnapshot: ServerProvider = {
+          ...refreshedSnapshot,
+          auth: {
+            status: "authenticated",
+            email: "operator@example.com",
+            type: "max",
+          },
+        };
+        const nextProbe = yield* Ref.make<ServerProvider>(authenticatedSnapshot);
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: () => true,
+          initialSnapshot: () => Effect.succeed(authenticatedSnapshot),
+          checkProvider: Ref.get(nextProbe),
+          refreshAccountUsage: () =>
+            Ref.update(usageCalls, (count) => count + 1).pipe(
+              Effect.as(refreshedAccountRateLimits),
+            ),
+          refreshInterval: "1 hour",
+        });
+
+        const initialUpdate = yield* Stream.take(provider.streamChanges, 1).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* Effect.yieldNow;
+        yield* Fiber.join(initialUpdate);
+
+        const refreshAccountUsage = provider.refreshAccountUsage;
+        assert.isDefined(refreshAccountUsage);
+        if (!refreshAccountUsage) return;
+
+        yield* refreshAccountUsage;
+        assert.strictEqual(yield* Ref.get(usageCalls), 1);
+
+        yield* Ref.set(nextProbe, {
+          ...authenticatedSnapshot,
+          version: "2.0.0",
+          message: "A non-authentication field changed.",
+        });
+        yield* provider.refresh;
+        yield* refreshAccountUsage;
+        assert.strictEqual(yield* Ref.get(usageCalls), 1);
+
+        yield* Ref.set(nextProbe, {
+          ...authenticatedSnapshot,
+          auth: {
+            ...authenticatedSnapshot.auth,
+            email: "second@example.com",
+          },
+        });
+        yield* provider.refresh;
+        yield* refreshAccountUsage;
+        assert.strictEqual(yield* Ref.get(usageCalls), 2);
+
+        yield* Ref.set(nextProbe, {
+          ...authenticatedSnapshot,
+          auth: {
+            ...authenticatedSnapshot.auth,
+            email: "second@example.com",
+            type: "api",
+          },
+        });
+        yield* provider.refresh;
+        yield* refreshAccountUsage;
+        assert.strictEqual(yield* Ref.get(usageCalls), 3);
+
+        yield* Ref.set(nextProbe, {
+          ...authenticatedSnapshot,
+          auth: { status: "unauthenticated" },
+        });
+        yield* provider.refresh;
+        yield* refreshAccountUsage;
+        assert.strictEqual(yield* Ref.get(usageCalls), 4);
+      }),
+    ),
+  );
 });

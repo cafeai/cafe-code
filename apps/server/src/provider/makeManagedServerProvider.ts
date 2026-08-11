@@ -1,4 +1,5 @@
 import type { ServerProvider, ServerProviderAccountRateLimits } from "@cafecode/contracts";
+import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -16,6 +17,29 @@ import { ServerSettingsError } from "@cafecode/contracts";
 interface ProviderSnapshotState {
   readonly snapshot: ServerProvider;
   readonly enrichmentGeneration: number;
+}
+
+const ACCOUNT_USAGE_REFRESH_COOLDOWN_MS = 30_000;
+
+function normalizedAccountBinding(value: string | undefined): string | undefined {
+  const normalized = value?.trim().toLowerCase();
+  return normalized ? normalized : undefined;
+}
+
+function hasProviderAccountBindingChanged(
+  previous: ServerProvider["auth"],
+  next: ServerProvider["auth"],
+): boolean {
+  if (previous.status !== next.status) {
+    return true;
+  }
+  if (previous.status !== "authenticated" || next.status !== "authenticated") {
+    return false;
+  }
+  return (
+    normalizedAccountBinding(previous.email) !== normalizedAccountBinding(next.email) ||
+    normalizedAccountBinding(previous.type) !== normalizedAccountBinding(next.type)
+  );
 }
 
 interface SingleFlight<A, E> {
@@ -108,6 +132,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   // snapshot. Keep those writes serialized even though duplicate calls of the
   // same operation are coalesced independently below.
   const snapshotMutationSemaphore = yield* Semaphore.make(1);
+  const lastAccountUsageAttemptRef = yield* Ref.make<number | null>(null);
   const changesPubSub = yield* Effect.acquireRelease(
     PubSub.unbounded<ServerProvider>(),
     PubSub.shutdown,
@@ -188,6 +213,14 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     }
 
     const nextSnapshot = yield* input.checkProvider;
+    const previousSnapshot = yield* Ref.get(snapshotStateRef).pipe(
+      Effect.map((state) => state.snapshot),
+    );
+    // Keep the cooldown for one stable account. Clear it when a provider probe
+    // reports a different authentication binding, so the first poll can run.
+    if (hasProviderAccountBindingChanged(previousSnapshot.auth, nextSnapshot.auth)) {
+      yield* Ref.set(lastAccountUsageAttemptRef, null);
+    }
     const nextGeneration = yield* Ref.modify(snapshotStateRef, (state) => {
       const generation = input.enrichSnapshot
         ? state.enrichmentGeneration + 1
@@ -259,14 +292,32 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   });
 
   const refreshAccountUsageSnapshot = Effect.fn("refreshAccountUsageSnapshot")(function* () {
-    // A full status refresh includes account usage. If one is already active,
-    // share its result instead of issuing a second authenticated HTTP request.
+    // A full status refresh can include account usage. Share fresh usage from
+    // that refresh before starting a separate authenticated request.
     const activeFullRefresh = yield* fullRefreshSingleFlight.current;
     if (activeFullRefresh !== null) {
-      return yield* Deferred.await(activeFullRefresh);
+      const refreshed = yield* Deferred.await(activeFullRefresh);
+      const now = yield* Clock.currentTimeMillis;
+      const checkedAt = refreshed.accountRateLimits
+        ? Date.parse(refreshed.accountRateLimits.checkedAt)
+        : Number.NaN;
+      if (Number.isFinite(checkedAt) && now - checkedAt < ACCOUNT_USAGE_REFRESH_COOLDOWN_MS) {
+        return refreshed;
+      }
     }
     return yield* accountUsageSingleFlight.run(
-      snapshotMutationSemaphore.withPermits(1)(applyAccountUsageBase()),
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis;
+        const admitted = yield* Ref.modify(lastAccountUsageAttemptRef, (lastAttempt) =>
+          lastAttempt !== null && now - lastAttempt < ACCOUNT_USAGE_REFRESH_COOLDOWN_MS
+            ? ([false, lastAttempt] as const)
+            : ([true, now] as const),
+        );
+        if (!admitted) {
+          return (yield* Ref.get(snapshotStateRef)).snapshot;
+        }
+        return yield* snapshotMutationSemaphore.withPermits(1)(applyAccountUsageBase());
+      }),
     );
   });
 
