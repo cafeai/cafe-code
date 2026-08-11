@@ -7,10 +7,12 @@
     "dist-electron",
     "node_modules",
     "yarn.lock",
+    "**/*.hexbg.json",
     "*.tsbuildinfo",
     "**/routeTree.gen.ts",
     "apps/web/public/mockServiceWorker.js",
     "apps/web/src/lib/vendor/qrcodegen.ts",
+    "apps/web/src/vendor/the-hexagons-runtime-club-code/**",
     "*.icon/**"
   ],
   "sortPackageJson": {},

@@ -27,6 +27,64 @@ export type PowerSaveBlockerMode = typeof PowerSaveBlockerMode.Type;
 export const DEFAULT_POWER_SAVE_BLOCKER_MODE: PowerSaveBlockerMode = "off";
 
 export const DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS = false;
+export const MIN_AMBIENT_OPACITY = 0.05;
+export const MAX_AMBIENT_OPACITY = 1;
+export const DEFAULT_AMBIENT_OPACITY = 0.35;
+export const MIN_FALLING_EFFECT_SPEED = 0.25;
+export const MAX_FALLING_EFFECT_SPEED = 4;
+export const DEFAULT_FALLING_EFFECT_SPEED = 1;
+export const MIN_FALLING_EFFECT_DENSITY = 0.5;
+export const MAX_FALLING_EFFECT_DENSITY = 2.5;
+export const DEFAULT_FALLING_EFFECT_DENSITY = 1;
+export const MIN_FALLING_EFFECT_JAPANESE_RATIO = 0;
+export const MAX_FALLING_EFFECT_JAPANESE_RATIO = 1;
+export const DEFAULT_FALLING_EFFECT_JAPANESE_RATIO = 0.45;
+export const MAX_HEXAGONS_BACKGROUND_PRESET_JSON_LENGTH = 32_768;
+export const HexagonsBackgroundPresetJson = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(MAX_HEXAGONS_BACKGROUND_PRESET_JSON_LENGTH),
+);
+export type HexagonsBackgroundPresetJson = typeof HexagonsBackgroundPresetJson.Type;
+export const DEFAULT_HEXAGONS_BACKGROUND_ENABLED = false;
+export const DEFAULT_HEXAGONS_BACKGROUND_PRESET_JSON = null;
+export const DEFAULT_FALLING_EFFECTS_ENABLED = false;
+export const FallingEffectKind = Schema.Literals(["snow", "rain", "matrix"]);
+export type FallingEffectKind = typeof FallingEffectKind.Type;
+export const DEFAULT_FALLING_EFFECT_KIND: FallingEffectKind = "snow";
+export const HexColor = TrimmedNonEmptyString.check(Schema.isPattern(/^#[0-9A-Fa-f]{6}$/)).pipe(
+  Schema.decodeTo(
+    Schema.String,
+    SchemaTransformation.transformOrFail({
+      decode: (value) => Effect.succeed(value.toLowerCase()),
+      encode: (value) => Effect.succeed(value.toLowerCase()),
+    }),
+  ),
+);
+export type HexColor = typeof HexColor.Type;
+export const AmbientColor = Schema.Union([Schema.Literal("auto"), HexColor]);
+export type AmbientColor = typeof AmbientColor.Type;
+export const DEFAULT_AMBIENT_COLOR: AmbientColor = "auto";
+export const AmbientOpacity = Schema.Number.check(
+  Schema.isBetween({ minimum: MIN_AMBIENT_OPACITY, maximum: MAX_AMBIENT_OPACITY }),
+);
+export type AmbientOpacity = typeof AmbientOpacity.Type;
+export const FallingEffectMatrixColorMode = Schema.Literals(["fixed", "rainbow", "rainbow-extra"]);
+export type FallingEffectMatrixColorMode = typeof FallingEffectMatrixColorMode.Type;
+export const DEFAULT_FALLING_EFFECT_MATRIX_COLOR_MODE: FallingEffectMatrixColorMode = "fixed";
+export const FallingEffectSpeed = Schema.Number.check(
+  Schema.isBetween({ minimum: MIN_FALLING_EFFECT_SPEED, maximum: MAX_FALLING_EFFECT_SPEED }),
+);
+export type FallingEffectSpeed = typeof FallingEffectSpeed.Type;
+export const FallingEffectDensity = Schema.Number.check(
+  Schema.isBetween({ minimum: MIN_FALLING_EFFECT_DENSITY, maximum: MAX_FALLING_EFFECT_DENSITY }),
+);
+export type FallingEffectDensity = typeof FallingEffectDensity.Type;
+export const FallingEffectJapaneseRatio = Schema.Number.check(
+  Schema.isBetween({
+    minimum: MIN_FALLING_EFFECT_JAPANESE_RATIO,
+    maximum: MAX_FALLING_EFFECT_JAPANESE_RATIO,
+  }),
+);
+export type FallingEffectJapaneseRatio = typeof FallingEffectJapaneseRatio.Type;
 export const DEFAULT_SHOW_SIDEBAR_SEARCH = true;
 export const DEFAULT_SHOW_SIDEBAR_MASCOT = true;
 export const DEFAULT_SHOW_SIDEBAR_ATTRIBUTION = true;
@@ -137,6 +195,36 @@ export const ClientSettingsSchema = Schema.Struct({
   diffWordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   continueBackgroundAnimations: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS)),
+  ),
+  hexagonsBackgroundEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_HEXAGONS_BACKGROUND_ENABLED)),
+  ),
+  hexagonsBackgroundPresetJson: Schema.NullOr(HexagonsBackgroundPresetJson).pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_HEXAGONS_BACKGROUND_PRESET_JSON)),
+  ),
+  fallingEffectsEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_FALLING_EFFECTS_ENABLED)),
+  ),
+  fallingEffectKind: FallingEffectKind.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_FALLING_EFFECT_KIND)),
+  ),
+  fallingEffectColor: AmbientColor.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_COLOR)),
+  ),
+  fallingEffectMatrixColorMode: FallingEffectMatrixColorMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_FALLING_EFFECT_MATRIX_COLOR_MODE)),
+  ),
+  fallingEffectOpacity: AmbientOpacity.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_OPACITY)),
+  ),
+  fallingEffectSpeed: FallingEffectSpeed.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_FALLING_EFFECT_SPEED)),
+  ),
+  fallingEffectDensity: FallingEffectDensity.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_FALLING_EFFECT_DENSITY)),
+  ),
+  fallingEffectJapaneseRatio: FallingEffectJapaneseRatio.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_FALLING_EFFECT_JAPANESE_RATIO)),
   ),
   showSidebarSearch: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SHOW_SIDEBAR_SEARCH)),
@@ -727,6 +815,16 @@ export const ClientSettingsPatch = Schema.Struct({
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   diffWordWrap: Schema.optionalKey(Schema.Boolean),
   continueBackgroundAnimations: Schema.optionalKey(Schema.Boolean),
+  hexagonsBackgroundEnabled: Schema.optionalKey(Schema.Boolean),
+  hexagonsBackgroundPresetJson: Schema.optionalKey(Schema.NullOr(HexagonsBackgroundPresetJson)),
+  fallingEffectsEnabled: Schema.optionalKey(Schema.Boolean),
+  fallingEffectKind: Schema.optionalKey(FallingEffectKind),
+  fallingEffectColor: Schema.optionalKey(AmbientColor),
+  fallingEffectMatrixColorMode: Schema.optionalKey(FallingEffectMatrixColorMode),
+  fallingEffectOpacity: Schema.optionalKey(AmbientOpacity),
+  fallingEffectSpeed: Schema.optionalKey(FallingEffectSpeed),
+  fallingEffectDensity: Schema.optionalKey(FallingEffectDensity),
+  fallingEffectJapaneseRatio: Schema.optionalKey(FallingEffectJapaneseRatio),
   showSidebarSearch: Schema.optionalKey(Schema.Boolean),
   showSidebarMascot: Schema.optionalKey(Schema.Boolean),
   showSidebarAttribution: Schema.optionalKey(Schema.Boolean),

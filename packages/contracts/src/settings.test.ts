@@ -8,10 +8,19 @@ import {
   ClaudeSettings,
   CODEX_DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
   DEFAULT_APP_ACCENT_COLOR,
+  DEFAULT_AMBIENT_COLOR,
+  DEFAULT_AMBIENT_OPACITY,
   DEFAULT_BRAND_WORDMARK_PREFIX,
   DEFAULT_CHAT_COPY_FORMAT,
   DEFAULT_CLIENT_SETTINGS,
   DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
+  DEFAULT_FALLING_EFFECT_DENSITY,
+  DEFAULT_FALLING_EFFECT_JAPANESE_RATIO,
+  DEFAULT_FALLING_EFFECT_KIND,
+  DEFAULT_FALLING_EFFECT_MATRIX_COLOR_MODE,
+  DEFAULT_FALLING_EFFECT_SPEED,
+  DEFAULT_HEXAGONS_BACKGROUND_ENABLED,
+  DEFAULT_HEXAGONS_BACKGROUND_PRESET_JSON,
   DEFAULT_POWER_SAVE_BLOCKER_MODE,
   DEFAULT_SHOW_SIDEBAR_ATTRIBUTION,
   DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL,
@@ -21,6 +30,7 @@ import {
   DEFAULT_SHOW_SIDEBAR_SEARCH,
   DEFAULT_THEME_ACCENT_COLOR,
   MAX_BRAND_WORDMARK_PREFIX_LENGTH,
+  MAX_HEXAGONS_BACKGROUND_PRESET_JSON_LENGTH,
   MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH,
   MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
   MAX_SIDEBAR_BRAND_IMAGE_ID_LENGTH,
@@ -71,6 +81,24 @@ describe("client settings", () => {
     expect(DEFAULT_CLIENT_SETTINGS.continueBackgroundAnimations).toBe(
       DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
     );
+    expect(DEFAULT_CLIENT_SETTINGS.hexagonsBackgroundEnabled).toBe(
+      DEFAULT_HEXAGONS_BACKGROUND_ENABLED,
+    );
+    expect(DEFAULT_CLIENT_SETTINGS.hexagonsBackgroundPresetJson).toBe(
+      DEFAULT_HEXAGONS_BACKGROUND_PRESET_JSON,
+    );
+    expect(DEFAULT_CLIENT_SETTINGS.fallingEffectsEnabled).toBe(false);
+    expect(DEFAULT_CLIENT_SETTINGS.fallingEffectKind).toBe(DEFAULT_FALLING_EFFECT_KIND);
+    expect(DEFAULT_CLIENT_SETTINGS.fallingEffectColor).toBe(DEFAULT_AMBIENT_COLOR);
+    expect(DEFAULT_CLIENT_SETTINGS.fallingEffectMatrixColorMode).toBe(
+      DEFAULT_FALLING_EFFECT_MATRIX_COLOR_MODE,
+    );
+    expect(DEFAULT_CLIENT_SETTINGS.fallingEffectOpacity).toBe(DEFAULT_AMBIENT_OPACITY);
+    expect(DEFAULT_CLIENT_SETTINGS.fallingEffectSpeed).toBe(DEFAULT_FALLING_EFFECT_SPEED);
+    expect(DEFAULT_CLIENT_SETTINGS.fallingEffectDensity).toBe(DEFAULT_FALLING_EFFECT_DENSITY);
+    expect(DEFAULT_CLIENT_SETTINGS.fallingEffectJapaneseRatio).toBe(
+      DEFAULT_FALLING_EFFECT_JAPANESE_RATIO,
+    );
     expect(DEFAULT_CLIENT_SETTINGS.showSidebarSearch).toBe(DEFAULT_SHOW_SIDEBAR_SEARCH);
     expect(DEFAULT_CLIENT_SETTINGS.showSidebarMascot).toBe(DEFAULT_SHOW_SIDEBAR_MASCOT);
     expect(DEFAULT_CLIENT_SETTINGS.showSidebarAttribution).toBe(DEFAULT_SHOW_SIDEBAR_ATTRIBUTION);
@@ -92,6 +120,60 @@ describe("client settings", () => {
     expect(decodeClientSettings({}).sidebarStarSpeed).toBe(1);
     expect(decodeClientSettings({}).themeAccentColor).toBe("");
     expect(decodeClientSettings({}).appAccentColor).toBe("");
+  });
+
+  it("validates bounded falling-effect patches and supported palette modes", () => {
+    expect(
+      decodeClientSettingsPatch({
+        fallingEffectsEnabled: true,
+        fallingEffectKind: "matrix",
+        fallingEffectColor: "#4ADE80",
+        fallingEffectMatrixColorMode: "rainbow-extra",
+        fallingEffectOpacity: 0.5,
+        fallingEffectSpeed: 2,
+        fallingEffectDensity: 1.5,
+        fallingEffectJapaneseRatio: 0.75,
+      }),
+    ).toEqual({
+      fallingEffectsEnabled: true,
+      fallingEffectKind: "matrix",
+      fallingEffectColor: "#4ade80",
+      fallingEffectMatrixColorMode: "rainbow-extra",
+      fallingEffectOpacity: 0.5,
+      fallingEffectSpeed: 2,
+      fallingEffectDensity: 1.5,
+      fallingEffectJapaneseRatio: 0.75,
+    });
+    expect(() => decodeClientSettingsPatch({ fallingEffectKind: "fog" })).toThrow();
+    expect(() =>
+      decodeClientSettingsPatch({ fallingEffectMatrixColorMode: "music-reactive" }),
+    ).toThrow();
+    expect(() => decodeClientSettingsPatch({ fallingEffectOpacity: 0 })).toThrow();
+    expect(() => decodeClientSettingsPatch({ fallingEffectSpeed: 10 })).toThrow();
+    expect(() => decodeClientSettingsPatch({ fallingEffectDensity: 10 })).toThrow();
+    expect(() => decodeClientSettingsPatch({ fallingEffectJapaneseRatio: 2 })).toThrow();
+  });
+
+  it("persists a bounded The Hexagons preset without enabling it by default", () => {
+    const preset = '{"kind":"the-hexagons-background"}';
+    expect(
+      decodeClientSettingsPatch({
+        hexagonsBackgroundEnabled: true,
+        hexagonsBackgroundPresetJson: preset,
+      }),
+    ).toEqual({
+      hexagonsBackgroundEnabled: true,
+      hexagonsBackgroundPresetJson: preset,
+    });
+    expect(decodeClientSettingsPatch({ hexagonsBackgroundPresetJson: null })).toEqual({
+      hexagonsBackgroundPresetJson: null,
+    });
+    expect(() => decodeClientSettingsPatch({ hexagonsBackgroundPresetJson: " " })).toThrow();
+    expect(() =>
+      decodeClientSettingsPatch({
+        hexagonsBackgroundPresetJson: "x".repeat(MAX_HEXAGONS_BACKGROUND_PRESET_JSON_LENGTH + 1),
+      }),
+    ).toThrow();
   });
 
   it("accepts only supported power-save blocker modes in patches", () => {

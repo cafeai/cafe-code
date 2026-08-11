@@ -13,7 +13,11 @@ import * as LogLevel from "effect/LogLevel";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Context from "effect/Context";
-import type { ProviderDaemonClientConfig } from "@cafecode/contracts";
+import {
+  DEFAULT_AMBIENT_EXPERIENCE_CAPABILITIES,
+  type AmbientExperienceCapabilities,
+  type ProviderDaemonClientConfig,
+} from "@cafecode/contracts";
 
 export const DEFAULT_PORT = 3773;
 
@@ -77,6 +81,11 @@ export interface ServerConfigShape extends ServerDerivedPaths {
   readonly desktopBootstrapToken: string | undefined;
   readonly autoBootstrapProjectFromCwd: boolean;
   readonly logWebSocketEvents: boolean;
+  /**
+   * Process-level availability gates. User settings cannot grant a capability
+   * that the active server did not advertise.
+   */
+  readonly ambientExperienceCapabilities: AmbientExperienceCapabilities;
   readonly providerDaemon?: ProviderDaemonClientConfig | undefined;
   readonly providerSupervisor?: ProviderDaemonClientConfig | undefined;
 }
@@ -186,6 +195,7 @@ export class ServerConfig extends Context.Service<ServerConfig, ServerConfigShap
           mode: "web",
           autoBootstrapProjectFromCwd: false,
           logWebSocketEvents: false,
+          ambientExperienceCapabilities: DEFAULT_AMBIENT_EXPERIENCE_CAPABILITIES,
           providerDaemon: undefined,
           providerSupervisor: undefined,
           port: 0,

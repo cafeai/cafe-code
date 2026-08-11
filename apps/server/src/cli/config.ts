@@ -1,7 +1,11 @@
 import * as NetService from "@cafecode/shared/Net";
 import { cafeCodeConfigWithDefault, cafeCodeOptionalValueConfig } from "@cafecode/shared/compatEnv";
 import { parsePersistedServerObservabilitySettings } from "@cafecode/shared/serverSettings";
-import { DesktopBackendBootstrap, PortSchema } from "@cafecode/contracts";
+import {
+  DEFAULT_AMBIENT_EXPERIENCE_CAPABILITIES,
+  DesktopBackendBootstrap,
+  PortSchema,
+} from "@cafecode/contracts";
 import * as Config from "effect/Config";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -370,6 +374,7 @@ export const resolveServerConfig = (
       desktopBootstrapToken,
       autoBootstrapProjectFromCwd,
       logWebSocketEvents,
+      ambientExperienceCapabilities: DEFAULT_AMBIENT_EXPERIENCE_CAPABILITIES,
       providerDaemon: bootstrap?.providerDaemon,
       providerSupervisor: undefined,
     };
