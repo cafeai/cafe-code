@@ -28,6 +28,27 @@ export function readCafeDocumentVisibility(
   return documentRef.visibilityState === "visible" ? "visible" : "hidden";
 }
 
+export function readCafeDocumentVisibilitySnapshot(
+  documentRef: Pick<Document, "visibilityState"> | undefined = typeof document === "undefined"
+    ? undefined
+    : document,
+): CafeDocumentVisibility {
+  return documentRef ? readCafeDocumentVisibility(documentRef) : "hidden";
+}
+
+export function subscribeCafeDocumentVisibility(
+  listener: CafeVisibilityListener,
+  documentRef:
+    | Pick<CafeVisibilityDocument, "addEventListener" | "removeEventListener">
+    | undefined = typeof document === "undefined" ? undefined : document,
+): () => void {
+  if (!documentRef) return () => undefined;
+  documentRef.addEventListener("visibilitychange", listener);
+  return () => {
+    documentRef.removeEventListener("visibilitychange", listener);
+  };
+}
+
 export function readCafeWindowFocus(
   documentRef: Pick<Document, "hasFocus"> | { hasFocus?: () => boolean },
 ): CafeWindowFocus {

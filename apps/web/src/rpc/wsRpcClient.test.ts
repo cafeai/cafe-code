@@ -3,7 +3,7 @@ import type {
   VcsStatusRemoteResult,
   VcsStatusStreamEvent,
 } from "@cafecode/contracts";
-import { ORCHESTRATION_WS_METHODS } from "@cafecode/contracts";
+import { ORCHESTRATION_WS_METHODS, ProjectId, WS_METHODS } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import { describe, expect, it, vi } from "vitest";
 
@@ -38,6 +38,36 @@ const baseRemoteStatus: VcsStatusRemoteResult = {
 };
 
 describe("wsRpcClient", () => {
+  it("routes project telemetry through its dedicated RPC without accepting a path", async () => {
+    const projectId = ProjectId.make("project-telemetry");
+    const rpcMethod = vi.fn(() => Effect.succeed({ projectId } as never));
+    const requestMock = vi.fn(
+      async <TSuccess>(
+        execute: (client: WsRpcProtocolClient) => Effect.Effect<TSuccess, Error, never>,
+      ) =>
+        Effect.runPromise(
+          execute({
+            [WS_METHODS.serverGetProjectSystemTelemetry]: rpcMethod,
+          } as unknown as WsRpcProtocolClient),
+        ),
+    );
+    const transport = {
+      dispose: vi.fn(async () => undefined),
+      reconnect: vi.fn(async () => undefined),
+      request: requestMock as unknown as WsTransport["request"],
+      requestStream: vi.fn(),
+      subscribe: vi.fn(() => () => undefined),
+    } satisfies Pick<
+      WsTransport,
+      "dispose" | "reconnect" | "request" | "requestStream" | "subscribe"
+    >;
+
+    const client = createWsRpcClient(transport as unknown as WsTransport);
+    await client.server.getProjectSystemTelemetry({ projectId });
+
+    expect(rpcMethod).toHaveBeenCalledWith({ projectId });
+  });
+
   it("retries an interrupted durable command with the same command id", async () => {
     const rpcMethod = vi.fn(() => Effect.succeed({ sequence: 99 }));
     let requestAttempt = 0;

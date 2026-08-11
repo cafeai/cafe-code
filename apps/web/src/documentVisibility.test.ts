@@ -7,8 +7,10 @@ import {
   CAFE_WINDOW_FOCUS_ATTRIBUTE,
   clearCafeBackgroundAnimations,
   readCafeDocumentVisibility,
+  readCafeDocumentVisibilitySnapshot,
   readCafeWindowFocus,
   startCafeDocumentVisibilitySync,
+  subscribeCafeDocumentVisibility,
   type CafeVisibilityDocument,
   type CafeVisibilityWindow,
 } from "./documentVisibility";
@@ -90,6 +92,21 @@ describe("documentVisibility", () => {
   it("maps only visible documents to the visible animation state", () => {
     expect(readCafeDocumentVisibility({ visibilityState: "visible" })).toBe("visible");
     expect(readCafeDocumentVisibility({ visibilityState: "hidden" })).toBe("hidden");
+  });
+
+  it("subscribes to an injected document and removes the listener on cleanup", () => {
+    const fake = makeVisibilityDocument("visible");
+    const observed: string[] = [];
+    const stop = subscribeCafeDocumentVisibility(
+      () => observed.push(readCafeDocumentVisibilitySnapshot(fake.document)),
+      fake.document,
+    );
+
+    fake.setVisibility("hidden");
+    expect(observed).toEqual(["hidden"]);
+    stop();
+    fake.setVisibility("visible");
+    expect(observed).toEqual(["hidden"]);
   });
 
   it("maps window focus into the animation pause state", () => {
