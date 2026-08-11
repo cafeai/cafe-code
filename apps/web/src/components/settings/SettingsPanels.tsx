@@ -91,6 +91,7 @@ import {
   type ProviderUpdateCandidate,
 } from "../ProviderUpdateLaunchNotification.logic";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
+import { SettingsProfiles } from "./SettingsProfiles";
 import { DRIVER_OPTIONS, getDriverOption } from "./providerDriverMeta";
 import {
   buildEmptyRecycleBinConfirmationMessage,
@@ -120,6 +121,7 @@ import {
   uploadSidebarBrandImage,
 } from "../../brandingImages";
 import { ColorWheelPicker } from "./ColorWheelPicker";
+import { WindowAtmosphereSettings } from "./WindowAtmosphereSettings";
 
 const THEME_OPTIONS = [
   {
@@ -696,6 +698,7 @@ export function AppearanceSettingsPanel() {
 
   return (
     <SettingsPageContainer>
+      <SettingsProfiles />
       <SettingsSection title="Appearance">
         <SettingsRow
           title="Theme"
@@ -1044,6 +1047,7 @@ export function AppearanceSettingsPanel() {
           }
         />
       </SettingsSection>
+      <WindowAtmosphereSettings />
     </SettingsPageContainer>
   );
 }

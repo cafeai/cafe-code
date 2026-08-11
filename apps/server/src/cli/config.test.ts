@@ -11,6 +11,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import {
+  DEFAULT_AMBIENT_EXPERIENCE_CAPABILITIES,
   DesktopBackendBootstrap,
   type DesktopBackendBootstrap as DesktopBackendBootstrapValue,
 } from "@cafecode/contracts";
@@ -45,6 +46,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     otlpMetricsUrl: undefined,
     otlpExportIntervalMs: 10_000,
     otlpServiceName: "cafe-code-server",
+    ambientExperienceCapabilities: DEFAULT_AMBIENT_EXPERIENCE_CAPABILITIES,
   } as const;
 
   const openBootstrapFd = Effect.fn(function* (payload: DesktopBackendBootstrapValue) {

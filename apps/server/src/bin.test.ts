@@ -16,6 +16,7 @@ import { FetchHttpClient } from "effect/unstable/http";
 import * as CliError from "effect/unstable/cli/CliError";
 import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/unstable/cli";
+import { DEFAULT_AMBIENT_EXPERIENCE_CAPABILITIES } from "@cafecode/contracts";
 
 import { cli } from "./bin.ts";
 import { deriveServerPaths, ServerConfig, type ServerConfigShape } from "./config.ts";
@@ -79,6 +80,7 @@ const makeCliTestServerConfig = (baseDir: string) =>
       desktopBootstrapToken: undefined,
       autoBootstrapProjectFromCwd: false,
       logWebSocketEvents: false,
+      ambientExperienceCapabilities: DEFAULT_AMBIENT_EXPERIENCE_CAPABILITIES,
     } satisfies ServerConfigShape;
   });
 

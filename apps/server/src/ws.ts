@@ -653,6 +653,7 @@ const makeWsRpcLayer = (
           },
           settings,
           clientSettings: syncedClientSettings,
+          ambientExperienceCapabilities: config.ambientExperienceCapabilities,
         };
       });
 
