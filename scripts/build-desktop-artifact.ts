@@ -832,6 +832,34 @@ export function resolveDesktopProductName(version: string): string {
     : (desktopPackageJson.productName ?? "Cafe Code");
 }
 
+export function resolveMacDesktopBuildConfig(
+  target: string,
+  signed: boolean,
+): Record<string, unknown> {
+  return {
+    mac: {
+      target: target === "dmg" ? [target, "zip"] : [target],
+      icon: "icon.icns",
+      category: "public.app-category.developer-tools",
+      extendInfo: {
+        NSCameraUsageDescription:
+          "Cafe Code uses your camera only when you choose to capture a photo for a chat prompt.",
+      },
+      ...(signed
+        ? {
+            hardenedRuntime: true,
+            entitlements: "apps/desktop/resources/entitlements.mac.plist",
+            entitlementsInherit: "apps/desktop/resources/entitlements.mac.inherit.plist",
+            entitlementsLoginHelper: "apps/desktop/resources/entitlements.mac.login-helper.plist",
+          }
+        : {
+            identity: null,
+            hardenedRuntime: false,
+          }),
+    },
+  };
+}
+
 export function resolveLinuxDesktopBuildConfig(target: string): Record<string, unknown> {
   const linux = {
     target: [target],
@@ -889,7 +917,7 @@ export function resolveLinuxDesktopBuildConfig(target: string): Record<string, u
   };
 }
 
-const createBuildConfig = Effect.fn("createBuildConfig")(function* (
+export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   platform: typeof BuildPlatform.Type,
   target: string,
   version: string,
@@ -919,17 +947,7 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   }
 
   if (platform === "mac") {
-    buildConfig.mac = {
-      target: target === "dmg" ? [target, "zip"] : [target],
-      icon: "icon.icns",
-      category: "public.app-category.developer-tools",
-      ...(signed
-        ? {}
-        : {
-            identity: null,
-            hardenedRuntime: false,
-          }),
-    };
+    Object.assign(buildConfig, resolveMacDesktopBuildConfig(target, signed));
   }
 
   if (platform === "linux") {

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
@@ -6,6 +8,7 @@ import * as Option from "effect/Option";
 
 import {
   MANAGED_WINDOWS_NODE_VERSION,
+  createBuildConfig,
   desktopArtifactListSatisfiesTarget,
   resolveBuildOptions,
   resolveDesktopBuildIconAssets,
@@ -14,6 +17,7 @@ import {
   resolveDesktopUpdateChannel,
   resolveGitHubPublishConfig,
   resolveLinuxDesktopBuildConfig,
+  resolveMacDesktopBuildConfig,
   resolveManagedWindowsNodeArchive,
   resolveMockUpdateServerPort,
   resolveMockUpdateServerUrl,
@@ -148,6 +152,100 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         recommends: [],
       },
     });
+  });
+
+  it.effect("emits the macOS camera purpose string into packaged app metadata", () =>
+    Effect.gen(function* () {
+      assert.deepStrictEqual(resolveMacDesktopBuildConfig("dmg", true), {
+        mac: {
+          target: ["dmg", "zip"],
+          icon: "icon.icns",
+          category: "public.app-category.developer-tools",
+          extendInfo: {
+            NSCameraUsageDescription:
+              "Cafe Code uses your camera only when you choose to capture a photo for a chat prompt.",
+          },
+          hardenedRuntime: true,
+          entitlements: "apps/desktop/resources/entitlements.mac.plist",
+          entitlementsInherit: "apps/desktop/resources/entitlements.mac.inherit.plist",
+          entitlementsLoginHelper: "apps/desktop/resources/entitlements.mac.login-helper.plist",
+        },
+      });
+
+      assert.deepStrictEqual(resolveMacDesktopBuildConfig("zip", false), {
+        mac: {
+          target: ["zip"],
+          icon: "icon.icns",
+          category: "public.app-category.developer-tools",
+          extendInfo: {
+            NSCameraUsageDescription:
+              "Cafe Code uses your camera only when you choose to capture a photo for a chat prompt.",
+          },
+          identity: null,
+          hardenedRuntime: false,
+        },
+      });
+
+      const emittedConfig = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "0.0.17",
+        true,
+        false,
+        undefined,
+      );
+      assert.deepStrictEqual((emittedConfig.mac as { readonly extendInfo: unknown }).extendInfo, {
+        NSCameraUsageDescription:
+          "Cafe Code uses your camera only when you choose to capture a photo for a chat prompt.",
+      });
+      assert.deepStrictEqual(emittedConfig.mac, resolveMacDesktopBuildConfig("dmg", true).mac);
+      const buildResources = (emittedConfig.directories as { readonly buildResources: string })
+        .buildResources;
+      const mac = emittedConfig.mac as {
+        readonly entitlements: string;
+        readonly entitlementsInherit: string;
+        readonly entitlementsLoginHelper: string;
+      };
+      for (const entitlementPath of [
+        mac.entitlements,
+        mac.entitlementsInherit,
+        mac.entitlementsLoginHelper,
+      ]) {
+        assert.equal(entitlementPath.startsWith(`${buildResources}/`), true);
+      }
+    }),
+  );
+
+  it("keeps the signed macOS camera entitlement alongside Electron's helper baseline", () => {
+    const requiredEntitlements = [
+      "com.apple.security.cs.allow-jit",
+      "com.apple.security.cs.allow-unsigned-executable-memory",
+      "com.apple.security.cs.disable-library-validation",
+      "com.apple.security.device.camera",
+    ];
+    for (const resourceName of ["entitlements.mac.plist", "entitlements.mac.inherit.plist"]) {
+      const contents = readFileSync(
+        new URL(`../apps/desktop/resources/${resourceName}`, import.meta.url),
+        "utf8",
+      );
+      const enabledEntitlements = [...contents.matchAll(/<key>([^<]+)<\/key>\s*<true\/>/g)].map(
+        ([, entitlement]) => entitlement,
+      );
+      assert.deepStrictEqual(enabledEntitlements, requiredEntitlements);
+      assert.equal(contents.includes("<false/>"), false);
+      assert.equal(contents.includes("com.apple.security.device.audio-input"), false);
+      assert.equal(contents.includes("com.apple.security.device.microphone"), false);
+    }
+
+    const loginHelperContents = readFileSync(
+      new URL("../apps/desktop/resources/entitlements.mac.login-helper.plist", import.meta.url),
+      "utf8",
+    );
+    const loginHelperEntitlements = [
+      ...loginHelperContents.matchAll(/<key>([^<]+)<\/key>\s*<true\/>/g),
+    ].map(([, entitlement]) => entitlement);
+    assert.deepStrictEqual(loginHelperEntitlements, requiredEntitlements.slice(0, 3));
+    assert.equal(loginHelperContents.includes("com.apple.security.device.camera"), false);
   });
 
   it("requires a Debian artifact instead of accepting builder metadata alone", () => {

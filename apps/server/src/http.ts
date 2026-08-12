@@ -146,6 +146,9 @@ function staticResponseHeaders(input: {
 }): Record<string, string> {
   return {
     "Cache-Control": input.cacheControl,
+    // Permit camera capture only for the top-level Cafe Code origin. Browser
+    // and operating-system permission prompts remain authoritative.
+    "Permissions-Policy": "camera=(self)",
     Vary: "Accept-Encoding",
     ...(input.contentEncoding ? { "Content-Encoding": input.contentEncoding } : {}),
   };

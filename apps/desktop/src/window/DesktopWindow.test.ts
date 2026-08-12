@@ -33,8 +33,18 @@ const environmentInput = {
 } satisfies DesktopEnvironment.MakeDesktopEnvironmentInput;
 
 function makeFakeBrowserWindow() {
+  const mainFrame = {
+    origin: "http://127.0.0.1:5733",
+    isDestroyed: vi.fn(() => false),
+  };
+  const session = {
+    setPermissionCheckHandler: vi.fn(),
+    setPermissionRequestHandler: vi.fn(),
+  };
   const webContents = {
     copyImageAt: vi.fn(),
+    getURL: vi.fn(() => "http://127.0.0.1:5733/thread/local"),
+    isDestroyed: vi.fn(() => false),
     isLoadingMainFrame: vi.fn(() => false),
     on: vi.fn(),
     once: vi.fn(),
@@ -42,6 +52,8 @@ function makeFakeBrowserWindow() {
     replaceMisspelling: vi.fn(),
     send: vi.fn(),
     setWindowOpenHandler: vi.fn(),
+    mainFrame,
+    session,
   };
 
   const window = {
@@ -63,7 +75,10 @@ function makeFakeBrowserWindow() {
   return {
     window: window as unknown as Electron.BrowserWindow,
     loadURL: window.loadURL,
+    on: window.on,
     openDevTools: webContents.openDevTools,
+    setPermissionCheckHandler: session.setPermissionCheckHandler,
+    setPermissionRequestHandler: session.setPermissionRequestHandler,
   };
 }
 
@@ -185,6 +200,22 @@ describe("DesktopWindow", () => {
         assert.equal(yield* Ref.get(createCount), 1);
         assert.deepEqual(fakeWindow.loadURL.mock.calls[0], ["http://127.0.0.1:5733/"]);
         assert.equal(fakeWindow.openDevTools.mock.calls.length, 1);
+        assert.equal(fakeWindow.setPermissionCheckHandler.mock.calls.length, 1);
+        assert.equal(fakeWindow.setPermissionRequestHandler.mock.calls.length, 1);
+        assert.isTrue(
+          fakeWindow.setPermissionCheckHandler.mock.invocationCallOrder[0]! <
+            fakeWindow.loadURL.mock.invocationCallOrder[0]!,
+        );
+        assert.isTrue(
+          fakeWindow.setPermissionRequestHandler.mock.invocationCallOrder[0]! <
+            fakeWindow.loadURL.mock.invocationCallOrder[0]!,
+        );
+
+        const closedListener = fakeWindow.on.mock.calls.find(([event]) => event === "closed")?.[1];
+        assert.isFunction(closedListener);
+        closedListener?.();
+        assert.deepEqual(fakeWindow.setPermissionCheckHandler.mock.lastCall, [null]);
+        assert.deepEqual(fakeWindow.setPermissionRequestHandler.mock.lastCall, [null]);
       }).pipe(Effect.provide(layer));
     }),
   );

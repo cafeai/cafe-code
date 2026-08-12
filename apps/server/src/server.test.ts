@@ -1364,6 +1364,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const response = yield* HttpClient.get("/");
       assert.equal(response.status, 200);
       assert.include(yield* response.text, "router-static-ok");
+      assert.equal(getHeader(response.headers, "permissions-policy"), "camera=(self)");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

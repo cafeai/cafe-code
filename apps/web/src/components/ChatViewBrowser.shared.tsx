@@ -2926,6 +2926,14 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             ),
           "Unable to find composer attach-image button.",
         );
+        const cameraButton = await waitForElement(
+          () =>
+            document.querySelector<HTMLButtonElement>(
+              '[data-chat-composer-form="true"] button[aria-label="Open camera"]',
+            ),
+          "Unable to find composer camera button.",
+        );
+        expect(attachButton.nextElementSibling).toBe(cameraButton);
 
         const fileInput = document.querySelector<HTMLInputElement>(
           '[data-chat-composer-form="true"] input[type="file"]',
@@ -2933,6 +2941,35 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         expect(fileInput).toBeTruthy();
         expect(fileInput!.accept).toBe("image/*");
         expect(fileInput!.multiple).toBe(true);
+        const systemCameraInput = document.querySelector<HTMLInputElement>(
+          '[data-chat-composer-camera-input="true"]',
+        );
+        expect(systemCameraInput).toBeTruthy();
+        expect(systemCameraInput!.accept).toBe("image/*");
+        expect(systemCameraInput!.getAttribute("capture")).toBe("environment");
+        expect(systemCameraInput!.multiple).toBe(false);
+
+        const mediaDevicesDescriptor = Object.getOwnPropertyDescriptor(navigator, "mediaDevices");
+        const originalSystemCameraClick = systemCameraInput!.click.bind(systemCameraInput!);
+        let systemCameraPickerOpened = false;
+        try {
+          Object.defineProperty(navigator, "mediaDevices", {
+            configurable: true,
+            value: undefined,
+          });
+          systemCameraInput!.click = () => {
+            systemCameraPickerOpened = true;
+          };
+          cameraButton.click();
+          expect(systemCameraPickerOpened).toBe(true);
+        } finally {
+          systemCameraInput!.click = originalSystemCameraClick;
+          if (mediaDevicesDescriptor) {
+            Object.defineProperty(navigator, "mediaDevices", mediaDevicesDescriptor);
+          } else {
+            Reflect.deleteProperty(navigator, "mediaDevices");
+          }
+        }
 
         // Tapping the button forwards to the hidden file input's native picker.
         let pickerOpened = false;
@@ -2963,7 +3000,107 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             document.querySelector<HTMLButtonElement>('button[aria-label="Remove diagram.png"]'),
           "Unable to find attached image remove control.",
         );
+
+        const capturedTransfer = new DataTransfer();
+        capturedTransfer.items.add(
+          new File([new Uint8Array([5, 6, 7, 8])], "camera-fallback.jpg", {
+            type: "image/jpeg",
+          }),
+        );
+        systemCameraInput!.files = capturedTransfer.files;
+        systemCameraInput!.dispatchEvent(new Event("change", { bubbles: true }));
+        await waitForElement(
+          () =>
+            document.querySelector<HTMLButtonElement>(
+              'button[aria-label="Preview camera-fallback.jpg"]',
+            ),
+          "Unable to find the system-camera fallback preview.",
+        );
       } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("keeps a native camera result on the thread that opened the picker", async () => {
+      const secondThreadId = "thread-camera-target-second" as ThreadId;
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: addThreadToSnapshot(
+          createSnapshotForTargetUser({
+            targetMessageId: "msg-user-camera-target" as MessageId,
+            targetText: "camera target",
+          }),
+          secondThreadId,
+        ),
+      });
+
+      const mediaDevicesDescriptor = Object.getOwnPropertyDescriptor(navigator, "mediaDevices");
+      try {
+        await waitForComposerEditor();
+        const cameraButton = await waitForElement(
+          () =>
+            document.querySelector<HTMLButtonElement>(
+              '[data-chat-composer-form="true"] button[aria-label="Open camera"]',
+            ),
+          "Unable to find composer camera button.",
+        );
+        const systemCameraInput = await waitForElement(
+          () =>
+            document.querySelector<HTMLInputElement>('[data-chat-composer-camera-input="true"]'),
+          "Unable to find native camera input.",
+        );
+        Object.defineProperty(navigator, "mediaDevices", {
+          configurable: true,
+          value: undefined,
+        });
+        const originalClick = systemCameraInput.click.bind(systemCameraInput);
+        systemCameraInput.click = () => undefined;
+        cameraButton.click();
+        systemCameraInput.click = originalClick;
+
+        await mounted.router.navigate({
+          to: "/$environmentId/$threadId",
+          params: {
+            environmentId: LOCAL_ENVIRONMENT_ID,
+            threadId: secondThreadId,
+          },
+        });
+        await waitForURL(
+          mounted.router,
+          (path) => path === serverThreadPath(secondThreadId),
+          "Route should switch while the native camera is open.",
+        );
+
+        const transfer = new DataTransfer();
+        transfer.items.add(
+          new File([new Uint8Array([9, 8, 7, 6])], "pinned-camera.jpg", {
+            type: "image/jpeg",
+          }),
+        );
+        systemCameraInput.files = transfer.files;
+        systemCameraInput.dispatchEvent(new Event("change", { bubbles: true }));
+
+        await vi.waitFor(() => {
+          expect(
+            useComposerDraftStore
+              .getState()
+              .getComposerDraft(THREAD_REF)
+              ?.images.map((image) => image.name),
+          ).toContain("pinned-camera.jpg");
+          expect(
+            useComposerDraftStore
+              .getState()
+              .getComposerDraft(threadRefFor(secondThreadId))
+              ?.images.map((image) => image.name) ?? [],
+          ).not.toContain("pinned-camera.jpg");
+        });
+        expect(document.querySelector('button[aria-label="Preview pinned-camera.jpg"]')).toBeNull();
+      } finally {
+        if (mediaDevicesDescriptor) {
+          Object.defineProperty(navigator, "mediaDevices", mediaDevicesDescriptor);
+        } else {
+          Reflect.deleteProperty(navigator, "mediaDevices");
+        }
         await mounted.cleanup();
       }
     });
@@ -3000,6 +3137,14 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             ),
           "Unable to find mobile overlay attach-image button.",
         );
+        const overlayCameraButton = await waitForElement(
+          () =>
+            document.querySelector<HTMLButtonElement>(
+              '[data-chat-composer-mobile-pending-actions="true"] button[aria-label="Open camera"]',
+            ),
+          "Unable to find mobile overlay camera button.",
+        );
+        expect(overlayAttachButton.nextElementSibling).toBe(overlayCameraButton);
 
         const fileInput = document.querySelector<HTMLInputElement>(
           '[data-chat-composer-form="true"] input[type="file"]',

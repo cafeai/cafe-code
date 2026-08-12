@@ -56,10 +56,13 @@ import {
 } from "../composerFooterLayout";
 import { type ComposerPromptEditorHandle, ComposerPromptEditor } from "../ComposerPromptEditor";
 import { ProviderModelPicker } from "./ProviderModelPicker";
+import { CameraCaptureDialog } from "./CameraCaptureDialog";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerAttachImageButton } from "./ComposerAttachImageButton";
+import { ComposerCameraButton } from "./ComposerCameraButton";
+import { supportsLiveCameraCapture } from "./cameraCapture";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
@@ -181,6 +184,16 @@ const extendReplacementRangeForTrailingSpace = (
 
 function isInsideComposerFloatingLayer(element: Element): boolean {
   return element.closest(COMPOSER_FLOATING_LAYER_SELECTOR) !== null;
+}
+
+function composerDraftTargetsEqual(
+  left: ScopedThreadRef | DraftId,
+  right: ScopedThreadRef | DraftId,
+): boolean {
+  if (typeof left === "string" || typeof right === "string") {
+    return left === right;
+  }
+  return left.environmentId === right.environmentId && left.threadId === right.threadId;
 }
 
 const ComposerFooterModeControls = memo(function ComposerFooterModeControls(props: {
@@ -926,7 +939,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const nonPersistedComposerImageIds = composerDraft.nonPersistedImageIds;
 
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
-  const addComposerDraftImage = useComposerDraftStore((store) => store.addImage);
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
   const removeComposerDraftImage = useComposerDraftStore((store) => store.removeImage);
   const clearComposerDraftPersistedAttachments = useComposerDraftStore(
@@ -1195,6 +1207,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
   const [isComposerFocused, setIsComposerFocused] = useState(false);
   const [composerFocusRequestRevision, setComposerFocusRequestRevision] = useState(0);
+  const cameraCaptureScopeKey = `${String(environmentId)}\u0000${String(
+    activeThreadId ?? draftId ?? "",
+  )}`;
+  const [openCameraCaptureScopeKey, setOpenCameraCaptureScopeKey] = useState<string | null>(null);
+  const isCameraCaptureOpen = openCameraCaptureScopeKey === cameraCaptureScopeKey;
   // Touch capability, not viewport width: foldables and tablets can be wider
   // than any phone breakpoint while still typing through an on-screen keyboard.
   const isOnScreenKeyboardDevice = useHasOnScreenKeyboard();
@@ -1227,6 +1244,28 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const mobileComposerExpandInFlightRef = useRef(false);
   const dragDepthRef = useRef(0);
   const composerFileInputRef = useRef<HTMLInputElement>(null);
+  const composerSystemCameraInputRef = useRef<HTMLInputElement>(null);
+  const composerFilePickerTargetRef = useRef<{
+    readonly draftTarget: ScopedThreadRef | DraftId;
+    readonly threadId: ThreadId | null;
+  } | null>(null);
+  const composerLiveCameraTargetRef = useRef<{
+    readonly draftTarget: ScopedThreadRef | DraftId;
+    readonly threadId: ThreadId | null;
+  } | null>(null);
+  const composerSystemCameraTargetRef = useRef<{
+    readonly draftTarget: ScopedThreadRef | DraftId;
+    readonly threadId: ThreadId | null;
+  } | null>(null);
+  const composerDraftTargetRef = useRef(composerDraftTarget);
+  composerDraftTargetRef.current = composerDraftTarget;
+
+  useEffect(() => {
+    // A live preview belongs to the route that opened it. Native pickers keep
+    // their pinned target because they can return after the route has changed.
+    setOpenCameraCaptureScopeKey(null);
+    composerLiveCameraTargetRef.current = null;
+  }, [activeThreadId, draftId, environmentId]);
 
   // ------------------------------------------------------------------
   // Derived: composer send state
@@ -1512,20 +1551,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       setComposerDraftPrompt(composerDraftTarget, nextPrompt);
     },
     [composerDraftTarget, setComposerDraftPrompt],
-  );
-
-  const addComposerImage = useCallback(
-    (image: ComposerImageAttachment) => {
-      addComposerDraftImage(composerDraftTarget, image);
-    },
-    [composerDraftTarget, addComposerDraftImage],
-  );
-
-  const addComposerImagesToDraft = useCallback(
-    (images: ComposerImageAttachment[]) => {
-      addComposerDraftImages(composerDraftTarget, images);
-    },
-    [composerDraftTarget, addComposerDraftImages],
   );
 
   const removeComposerImageFromDraft = useCallback(
@@ -2199,17 +2224,30 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // ------------------------------------------------------------------
   // Callbacks: images
   // ------------------------------------------------------------------
-  const addComposerImages = (files: File[]) => {
-    if (!activeThreadId || files.length === 0) return;
-    if (pendingUserInputs.length > 0) {
+  const addComposerImages = (
+    files: File[],
+    attachmentTarget: {
+      readonly draftTarget: ScopedThreadRef | DraftId;
+      readonly threadId: ThreadId | null;
+    } = {
+      draftTarget: composerDraftTarget,
+      threadId: activeThreadId,
+    },
+  ): boolean => {
+    const { draftTarget: targetAtStart, threadId: threadIdAtStart } = attachmentTarget;
+    if (!threadIdAtStart || files.length === 0) return false;
+    if (
+      composerDraftTargetsEqual(composerDraftTargetRef.current, targetAtStart) &&
+      pendingUserInputs.length > 0
+    ) {
       toastManager.add({
         type: "error",
         title: "Attach images after answering plan questions.",
       });
-      return;
+      return false;
     }
     const nextImages: ComposerImageAttachment[] = [];
-    let nextImageCount = composerImagesRef.current.length;
+    let nextImageCount = getComposerDraft(targetAtStart)?.images.length ?? 0;
     let error: string | null = null;
     for (const file of files) {
       if (!file.type.startsWith("image/")) {
@@ -2236,12 +2274,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       });
       nextImageCount += 1;
     }
-    if (nextImages.length === 1 && nextImages[0]) {
-      addComposerImage(nextImages[0]);
-    } else if (nextImages.length > 1) {
-      addComposerImagesToDraft(nextImages);
+    if (nextImages.length > 0) {
+      addComposerDraftImages(targetAtStart, nextImages);
     }
-    setThreadError(activeThreadId, error);
+    setThreadError(threadIdAtStart, error);
+    return nextImages.length > 0;
   };
 
   const removeComposerImage = (imageId: string) => {
@@ -2291,13 +2328,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     dragDepthRef.current = 0;
     setIsDragOverComposer(false);
     const files = Array.from(event.dataTransfer.files);
+    const targetAtDrop = composerDraftTarget;
     addComposerImages(files);
-    focusComposer();
+    if (composerDraftTargetsEqual(composerDraftTargetRef.current, targetAtDrop)) {
+      focusComposer();
+    }
   };
 
   // Touch devices can't paste or drag-drop images, so a file picker is the
   // only practical way to attach on mobile; desktop gets the affordance too.
   const openComposerImagePicker = () => {
+    composerFilePickerTargetRef.current = {
+      draftTarget: composerDraftTarget,
+      threadId: activeThreadId,
+    };
     composerFileInputRef.current?.click();
   };
 
@@ -2306,8 +2350,81 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     // Reset so picking the same file again after removal still fires change.
     event.target.value = "";
     if (files.length === 0) return;
-    addComposerImages(files);
-    focusComposer();
+    const targetAtSelection = composerFilePickerTargetRef.current ?? {
+      draftTarget: composerDraftTarget,
+      threadId: activeThreadId,
+    };
+    composerFilePickerTargetRef.current = null;
+    addComposerImages(files, targetAtSelection);
+    if (composerDraftTargetsEqual(composerDraftTargetRef.current, targetAtSelection.draftTarget)) {
+      scheduleComposerFocus();
+    }
+  };
+
+  const openComposerSystemCameraPicker = (
+    target = composerLiveCameraTargetRef.current ?? {
+      draftTarget: composerDraftTarget,
+      threadId: activeThreadId,
+    },
+  ) => {
+    composerSystemCameraTargetRef.current = target;
+    composerSystemCameraInputRef.current?.click();
+  };
+
+  const openComposerCamera = () => {
+    const target = {
+      draftTarget: composerDraftTarget,
+      threadId: activeThreadId,
+    };
+    if (!supportsLiveCameraCapture()) {
+      // Keep this call synchronous with the click for mobile browser user activation.
+      openComposerSystemCameraPicker(target);
+      return;
+    }
+    composerLiveCameraTargetRef.current = target;
+    setOpenCameraCaptureScopeKey(cameraCaptureScopeKey);
+  };
+
+  const onComposerSystemCameraInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    const targetAtSelection = composerSystemCameraTargetRef.current ?? {
+      draftTarget: composerDraftTarget,
+      threadId: activeThreadId,
+    };
+    composerSystemCameraTargetRef.current = null;
+    // Reset so retaking the same filename still fires change.
+    event.target.value = "";
+    if (!file) return;
+    addComposerImages([file], targetAtSelection);
+    if (composerDraftTargetsEqual(composerDraftTargetRef.current, targetAtSelection.draftTarget)) {
+      scheduleComposerFocus();
+    }
+  };
+
+  const acceptComposerCameraFile = async (file: File) => {
+    const targetAtCapture = composerLiveCameraTargetRef.current ?? {
+      draftTarget: composerDraftTarget,
+      threadId: activeThreadId,
+    };
+    const attached = addComposerImages([file], targetAtCapture);
+    if (!attached) {
+      throw new Error("The captured photo was not attached.");
+    }
+    if (composerDraftTargetsEqual(composerDraftTargetRef.current, targetAtCapture.draftTarget)) {
+      scheduleComposerFocus();
+    }
+  };
+
+  const changeComposerCameraOpen = (open: boolean) => {
+    setOpenCameraCaptureScopeKey(open ? cameraCaptureScopeKey : null);
+    if (open) {
+      composerLiveCameraTargetRef.current = {
+        draftTarget: composerDraftTarget,
+        threadId: activeThreadId,
+      };
+    } else {
+      composerLiveCameraTargetRef.current = null;
+    }
   };
   const handleInterruptPrimaryAction = useCallback(() => {
     void onInterrupt();
@@ -2482,6 +2599,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         tabIndex={-1}
         aria-hidden="true"
         onChange={onComposerFileInputChange}
+      />
+      <input
+        ref={composerSystemCameraInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        className="hidden"
+        tabIndex={-1}
+        aria-hidden="true"
+        data-chat-composer-camera-input="true"
+        onChange={onComposerSystemCameraInputChange}
+      />
+      <CameraCaptureDialog
+        open={isCameraCaptureOpen}
+        onOpenChange={changeComposerCameraOpen}
+        onAcceptFile={acceptComposerCameraFile}
+        onRequestSystemCamera={openComposerSystemCameraPicker}
       />
       <div
         className={cn(
@@ -2842,12 +2976,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   className="absolute bottom-0 right-0 flex items-center justify-end gap-1.5"
                 >
                   {pendingUserInputs.length === 0 ? (
-                    <ComposerAttachImageButton
-                      preserveComposerFocusOnPointerDown
-                      disabled={activeThreadId === null}
-                      className="bg-background/80 hover:bg-background/90"
-                      onClick={openComposerImagePicker}
-                    />
+                    <>
+                      <ComposerAttachImageButton
+                        preserveComposerFocusOnPointerDown
+                        disabled={activeThreadId === null}
+                        className="bg-background/80 hover:bg-background/90"
+                        onClick={openComposerImagePicker}
+                      />
+                      <ComposerCameraButton
+                        preserveComposerFocusOnPointerDown
+                        disabled={activeThreadId === null}
+                        className="bg-background/80 hover:bg-background/90"
+                        onClick={openComposerCamera}
+                      />
+                    </>
                   ) : null}
                   <ComposerPrimaryActions
                     compact
@@ -2900,6 +3042,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 <ComposerAttachImageButton
                   disabled={pendingUserInputs.length > 0 || activeThreadId === null}
                   onClick={openComposerImagePicker}
+                />
+                <ComposerCameraButton
+                  disabled={pendingUserInputs.length > 0 || activeThreadId === null}
+                  onClick={openComposerCamera}
                 />
                 <ProviderModelPicker
                   compact={isComposerFooterCompact}
