@@ -23,6 +23,7 @@ import {
   ThreadTurnStartRequestedPayload,
   ProviderJournalMessageRepairResult,
   ProviderThreadAssistantMessagesRepairResult,
+  PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
@@ -404,6 +405,56 @@ it.effect("decodes thread.turn.steer for client upload and normalized command pa
       createdAt: "2026-01-01T00:00:00.000Z",
     });
     assert.strictEqual(normalizedParsed.type, "thread.turn.steer");
+  }),
+);
+
+it.effect("accepts 30 MiB image attachments and rejects larger uploads", () =>
+  Effect.gen(function* () {
+    const command = {
+      type: "thread.turn.steer",
+      commandId: "cmd-steer-image-limit",
+      threadId: "thread-1",
+      message: {
+        messageId: "msg-steer-image-limit",
+        role: "user",
+        text: "inspect screenshot",
+        attachments: [
+          {
+            type: "image",
+            name: "screen.png",
+            mimeType: "image/png",
+            sizeBytes: PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+            dataUrl: "data:image/png;base64,AAAA",
+          },
+        ],
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+
+    const accepted = yield* decodeClientOrchestrationCommand(command);
+    if (accepted.type !== "thread.turn.steer") {
+      assert.fail("Expected a decoded thread.turn.steer command.");
+    }
+    assert.strictEqual(
+      accepted.message.attachments[0]?.sizeBytes,
+      PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+    );
+
+    const rejected = yield* Effect.exit(
+      decodeClientOrchestrationCommand({
+        ...command,
+        message: {
+          ...command.message,
+          attachments: [
+            {
+              ...command.message.attachments[0],
+              sizeBytes: PROVIDER_SEND_TURN_MAX_IMAGE_BYTES + 1,
+            },
+          ],
+        },
+      }),
+    );
+    assert.strictEqual(rejected._tag, "Failure");
   }),
 );
 
