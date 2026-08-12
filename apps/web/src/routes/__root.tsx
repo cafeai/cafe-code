@@ -18,6 +18,7 @@ import { InitialBackendBootstrapSurface } from "../components/InitialBackendBoot
 import { OnboardingSurface } from "../components/OnboardingSurface";
 import { DesktopNotificationWatcher } from "../components/DesktopNotificationWatcher";
 import { ProviderUpdateLaunchNotification } from "../components/ProviderUpdateLaunchNotification";
+import { AutoNudgeCoordinator } from "../components/AutoNudgeCoordinator";
 import {
   WebSocketConnectionCoordinator,
   WebSocketConnectionSurface,
@@ -158,6 +159,7 @@ function RootRouteView() {
         {primaryEnvironmentAuthenticated ? <AuthenticatedTracingBootstrap /> : null}
         {primaryEnvironmentAuthenticated ? <ServerStateBootstrap /> : null}
         <EnvironmentConnectionManagerBootstrap />
+        <AutoNudgeCoordinator />
         <AppearanceSettingsSync />
         <AmbianceLayer />
         <PowerSaveBlockerSync />

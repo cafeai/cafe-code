@@ -1,4 +1,10 @@
-import type { MessageId, ThreadId, TurnId } from "@cafecode/contracts";
+import {
+  DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+  type MessageId,
+  type ThreadAutoNudgeConfig,
+  type ThreadId,
+  type TurnId,
+} from "@cafecode/contracts";
 import type { EnvironmentState } from "./store";
 import type {
   ChatMessage,
@@ -29,6 +35,7 @@ const threadCache = new WeakMap<
     activities: Thread["activities"];
     proposedPlans: Thread["proposedPlans"];
     turnDiffSummaries: Thread["turnDiffSummaries"];
+    autoNudge: ThreadAutoNudgeConfig;
     thread: Thread;
   }
 >();
@@ -113,6 +120,7 @@ export function getThreadFromEnvironmentState(
   const activities = selectThreadActivities(state, threadId);
   const proposedPlans = selectThreadProposedPlans(state, threadId);
   const turnDiffSummaries = selectThreadTurnDiffSummaries(state, threadId);
+  const autoNudge = state.threadAutoNudgeConfigById?.[threadId] ?? DEFAULT_THREAD_AUTO_NUDGE_CONFIG;
   const cached = threadCache.get(shell);
 
   if (
@@ -122,7 +130,8 @@ export function getThreadFromEnvironmentState(
     cached.messages === messages &&
     cached.activities === activities &&
     cached.proposedPlans === proposedPlans &&
-    cached.turnDiffSummaries === turnDiffSummaries
+    cached.turnDiffSummaries === turnDiffSummaries &&
+    cached.autoNudge === autoNudge
   ) {
     return cached.thread;
   }
@@ -136,6 +145,7 @@ export function getThreadFromEnvironmentState(
     activities,
     proposedPlans,
     turnDiffSummaries,
+    autoNudge,
   };
 
   threadCache.set(shell, {
@@ -145,6 +155,7 @@ export function getThreadFromEnvironmentState(
     activities,
     proposedPlans,
     turnDiffSummaries,
+    autoNudge,
     thread,
   });
 

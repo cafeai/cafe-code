@@ -19,8 +19,15 @@ import type {
   ProjectId,
   ScopedProjectRef,
   ScopedThreadRef,
+  ThreadAutoNudgeConfig,
+  ThreadAutoNudgeSummary,
 } from "@cafecode/contracts";
-import { isProviderDriverKind, ProviderDriverKind } from "@cafecode/contracts";
+import {
+  DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+  DEFAULT_THREAD_AUTO_NUDGE_SUMMARY,
+  isProviderDriverKind,
+  ProviderDriverKind,
+} from "@cafecode/contracts";
 import type { ThreadId, TurnId } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
 import { resolveModelSlugForProvider } from "@cafecode/shared/model";
@@ -65,6 +72,8 @@ export interface EnvironmentState {
   threadShellById: Record<ThreadId, ThreadShell>;
   threadSessionById: Record<ThreadId, ThreadSession | null>;
   threadTurnStateById: Record<ThreadId, ThreadTurnState>;
+  /** Full prompt-bearing configuration from exact-thread detail only. */
+  threadAutoNudgeConfigById?: Record<ThreadId, ThreadAutoNudgeConfig>;
 
   // ---------------------------------------------------------------------------
   // Thread detail content — written ONLY by the detail stream
@@ -105,6 +114,7 @@ const initialEnvironmentState: EnvironmentState = {
   threadShellById: {},
   threadSessionById: {},
   threadTurnStateById: {},
+  threadAutoNudgeConfigById: {},
   messageIdsByThreadId: {},
   messageByThreadId: {},
   activityIdsByThreadId: {},
@@ -275,6 +285,7 @@ function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): T
     worktreePath: thread.worktreePath,
     turnDiffSummaries: thread.checkpoints.map(mapTurnDiffSummary),
     activities: thread.activities.map((activity) => ({ ...activity })),
+    autoNudge: thread.autoNudge,
     goal: thread.goal ?? null,
   };
 }
@@ -303,6 +314,7 @@ function mapThreadShell(
     updatedAt: thread.updatedAt,
     branch: thread.branch,
     worktreePath: thread.worktreePath,
+    autoNudge: thread.autoNudge,
   };
   const session = thread.session ? mapSession(thread.session) : null;
   const turnState: ThreadTurnState = {
@@ -326,12 +338,29 @@ function mapThreadShell(
     hasPendingApprovals: thread.hasPendingApprovals,
     hasPendingUserInput: thread.hasPendingUserInput,
     hasActionableProposedPlan: thread.hasActionableProposedPlan,
+    autoNudge: thread.autoNudge,
+    manualFollowUpCount: thread.manualFollowUpCount,
   };
   return {
     shell,
     session,
     turnState,
     summary,
+  };
+}
+
+function toThreadAutoNudgeSummary(config: ThreadAutoNudgeConfig): ThreadAutoNudgeSummary {
+  return {
+    authorityRevision: config.authorityRevision,
+    mode: config.mode,
+    backgroundContinuation: config.backgroundContinuation,
+    maxRounds: config.maxRounds,
+    armedAt: config.armedAt,
+    baselineSettledTurnId: config.baselineSettledTurnId,
+    lastDispatchedSettledTurnId: config.lastDispatchedSettledTurnId,
+    lastDispatchedMessageId: config.lastDispatchedMessageId,
+    roundsDispatched: config.roundsDispatched,
+    lastDispatchedAt: config.lastDispatchedAt,
   };
 }
 
@@ -351,6 +380,7 @@ function toThreadShell(thread: Thread): ThreadShell {
     updatedAt: thread.updatedAt,
     branch: thread.branch,
     worktreePath: thread.worktreePath,
+    autoNudge: toThreadAutoNudgeSummary(thread.autoNudge ?? DEFAULT_THREAD_AUTO_NUDGE_CONFIG),
   };
 }
 
@@ -559,7 +589,12 @@ function sidebarThreadSummariesEqual(
     left.latestUserMessageAt === right.latestUserMessageAt &&
     left.hasPendingApprovals === right.hasPendingApprovals &&
     left.hasPendingUserInput === right.hasPendingUserInput &&
-    left.hasActionableProposedPlan === right.hasActionableProposedPlan
+    left.hasActionableProposedPlan === right.hasActionableProposedPlan &&
+    threadAutoNudgeSummariesEqual(
+      left.autoNudge ?? DEFAULT_THREAD_AUTO_NUDGE_SUMMARY,
+      right.autoNudge ?? DEFAULT_THREAD_AUTO_NUDGE_SUMMARY,
+    ) &&
+    (left.manualFollowUpCount ?? 0) === (right.manualFollowUpCount ?? 0)
   );
 }
 
@@ -579,8 +614,37 @@ function threadShellsEqual(left: ThreadShell | undefined, right: ThreadShell): b
     left.archivedAt === right.archivedAt &&
     left.updatedAt === right.updatedAt &&
     left.branch === right.branch &&
-    left.worktreePath === right.worktreePath
+    left.worktreePath === right.worktreePath &&
+    threadAutoNudgeSummariesEqual(
+      left.autoNudge ?? DEFAULT_THREAD_AUTO_NUDGE_SUMMARY,
+      right.autoNudge ?? DEFAULT_THREAD_AUTO_NUDGE_SUMMARY,
+    )
   );
+}
+
+function threadAutoNudgeSummariesEqual(
+  left: ThreadAutoNudgeSummary,
+  right: ThreadAutoNudgeSummary,
+): boolean {
+  return (
+    left.authorityRevision === right.authorityRevision &&
+    left.mode === right.mode &&
+    left.backgroundContinuation === right.backgroundContinuation &&
+    left.maxRounds === right.maxRounds &&
+    left.armedAt === right.armedAt &&
+    left.baselineSettledTurnId === right.baselineSettledTurnId &&
+    left.lastDispatchedSettledTurnId === right.lastDispatchedSettledTurnId &&
+    left.lastDispatchedMessageId === right.lastDispatchedMessageId &&
+    left.roundsDispatched === right.roundsDispatched &&
+    left.lastDispatchedAt === right.lastDispatchedAt
+  );
+}
+
+function threadAutoNudgeConfigsEqual(
+  left: ThreadAutoNudgeConfig,
+  right: ThreadAutoNudgeConfig,
+): boolean {
+  return left.prompt === right.prompt && threadAutoNudgeSummariesEqual(left, right);
 }
 
 function threadTurnStatesEqual(left: ThreadTurnState | undefined, right: ThreadTurnState): boolean {
@@ -773,6 +837,21 @@ function writeThreadState(
     };
   }
 
+  const nextAutoNudge = nextThread.autoNudge ?? DEFAULT_THREAD_AUTO_NUDGE_CONFIG;
+  const previousAutoNudge = state.threadAutoNudgeConfigById?.[nextThread.id];
+  if (
+    previousAutoNudge === undefined ||
+    !threadAutoNudgeConfigsEqual(previousAutoNudge, nextAutoNudge)
+  ) {
+    nextState = {
+      ...nextState,
+      threadAutoNudgeConfigById: {
+        ...nextState.threadAutoNudgeConfigById,
+        [nextThread.id]: nextAutoNudge,
+      },
+    };
+  }
+
   if (previousThread?.messages !== nextThread.messages) {
     const nextMessageSlice = buildMessageSlice(nextThread);
     nextState = {
@@ -951,6 +1030,8 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
   const { [threadId]: _removedShell, ...threadShellById } = state.threadShellById;
   const { [threadId]: _removedSession, ...threadSessionById } = state.threadSessionById;
   const { [threadId]: _removedTurnState, ...threadTurnStateById } = state.threadTurnStateById;
+  const { [threadId]: _removedAutoNudge, ...threadAutoNudgeConfigById } =
+    state.threadAutoNudgeConfigById ?? {};
   const { [threadId]: _removedMessageIds, ...messageIdsByThreadId } = state.messageIdsByThreadId;
   const { [threadId]: _removedMessages, ...messageByThreadId } = state.messageByThreadId;
   const { [threadId]: _removedActivityIds, ...activityIdsByThreadId } = state.activityIdsByThreadId;
@@ -971,6 +1052,7 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
     threadShellById,
     threadSessionById,
     threadTurnStateById,
+    threadAutoNudgeConfigById,
     messageIdsByThreadId,
     messageByThreadId,
     activityIdsByThreadId,
@@ -1563,6 +1645,10 @@ function syncEnvironmentShellSnapshot(
     threadShellById: {},
     threadSessionById: {},
     threadTurnStateById: {},
+    threadAutoNudgeConfigById: retainThreadScopedRecord(
+      state.threadAutoNudgeConfigById ?? {},
+      nextThreadIds,
+    ),
     sidebarThreadSummaryById: {},
     messageIdsByThreadId: retainThreadScopedRecord(state.messageIdsByThreadId, nextThreadIds),
     messageByThreadId: retainThreadScopedRecord(state.messageByThreadId, nextThreadIds),
@@ -1746,6 +1832,8 @@ function applyEnvironmentOrchestrationEvent(
           activities: [],
           checkpoints: [],
           session: null,
+          autoNudge: DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+          manualFollowUps: [],
           goal: null,
         },
         environmentId,
@@ -1867,6 +1955,57 @@ function applyEnvironmentOrchestrationEvent(
         goal: event.payload.goal,
         updatedAt: event.occurredAt,
       }));
+
+    case "thread.auto-nudge-configured":
+      return updateThreadState(state, event.payload.threadId, (thread) => ({
+        ...thread,
+        autoNudge: event.payload.config,
+        updatedAt: event.occurredAt,
+      }));
+
+    case "thread.auto-nudge-summary-changed":
+      return state;
+
+    case "thread.auto-nudge-stopped":
+      return updateThreadState(state, event.payload.threadId, (thread) => {
+        const current = thread.autoNudge ?? DEFAULT_THREAD_AUTO_NUDGE_CONFIG;
+        return {
+          ...thread,
+          autoNudge: {
+            authorityRevision: event.payload.authorityRevision,
+            mode: "off",
+            prompt: current.prompt,
+            backgroundContinuation: false,
+            maxRounds: current.maxRounds,
+            armedAt: null,
+            baselineSettledTurnId: null,
+            lastDispatchedSettledTurnId: null,
+            lastDispatchedMessageId: null,
+            roundsDispatched: 0,
+            lastDispatchedAt: null,
+          },
+          updatedAt: event.payload.stoppedAt,
+        };
+      });
+
+    case "thread.auto-nudge-dispatched":
+      return updateThreadState(state, event.payload.threadId, (thread) => {
+        const current = thread.autoNudge ?? DEFAULT_THREAD_AUTO_NUDGE_CONFIG;
+        return current.mode === "off" ||
+          current.authorityRevision !== event.payload.authorityRevision
+          ? thread
+          : {
+              ...thread,
+              autoNudge: {
+                ...current,
+                lastDispatchedSettledTurnId: event.payload.completedTurnId,
+                lastDispatchedMessageId: event.payload.messageId,
+                roundsDispatched: event.payload.roundsDispatched,
+                lastDispatchedAt: event.payload.dispatchedAt,
+              },
+              updatedAt: event.payload.dispatchedAt,
+            };
+      });
 
     case "thread.turn-start-requested":
       return updateThreadState(state, event.payload.threadId, (thread) => {

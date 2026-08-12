@@ -3,6 +3,7 @@ import {
   CheckpointRef,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
+  DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
   MessageId,
   type OrchestrationCommand,
   ProjectId,
@@ -154,6 +155,8 @@ describe("OrchestrationEngine", () => {
           activities: [],
           checkpoints: [],
           session: null,
+          autoNudge: DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+          manualFollowUps: [],
         },
       ],
     };
@@ -790,6 +793,7 @@ describe("OrchestrationEngine", () => {
     expect(events.map((event) => event.type)).toEqual([
       "project.created",
       "thread.created",
+      "thread.auto-nudge-stopped",
       "thread.deleted",
     ]);
     await system.dispose();
@@ -1367,7 +1371,15 @@ describe("OrchestrationEngine", () => {
           threadId: ThreadId.make("thread-sync"),
         }),
       ),
-    ).rejects.toThrow("already archived");
+    ).resolves.toMatchObject({ sequence: 5 });
+
+    expect(events.map((event) => event.type)).toEqual([
+      "project.created",
+      "thread.created",
+      "thread.auto-nudge-stopped",
+      "thread.auto-nudge-stopped",
+      "thread.archived",
+    ]);
 
     await runtime.dispose();
   });
