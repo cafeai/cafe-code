@@ -154,6 +154,55 @@ describe("client settings", () => {
     ).toThrow();
   });
 
+  it("keeps every ambient media activation off by default", () => {
+    const decoded = decodeClientSettings({});
+    expect(decoded.ambientVideoEnabled).toBe(false);
+    expect(decoded.ambientVideoSource).toBeNull();
+    expect(decoded.ambientImageEnabled).toBe(false);
+    expect(decoded.ambientImageAsset).toBeNull();
+    expect(decoded.ambientImageCycleAssets).toEqual([]);
+    expect(decoded.ambientImageCycleEnabled).toBe(false);
+  });
+
+  it("accepts bounded ambient media configuration without requiring activation", () => {
+    const id = `sha256-${"a".repeat(64)}.png`;
+    const asset = {
+      id,
+      url: `/api/ambient-media/image/${id}`,
+      mimeType: "image/png" as const,
+      width: 800,
+      height: 600,
+      sizeBytes: 12_345,
+    };
+
+    expect(
+      decodeClientSettingsPatch({
+        ambientVideoSource: { kind: "video", id: "dQw4w9WgXcQ" },
+        ambientVideoGlowOpacity: 0.5,
+        ambientImageAsset: asset,
+        ambientImageCycleAssets: [asset],
+        ambientImageCycleSeconds: 30,
+      }),
+    ).toEqual({
+      ambientVideoSource: { kind: "video", id: "dQw4w9WgXcQ" },
+      ambientVideoGlowOpacity: 0.5,
+      ambientImageAsset: asset,
+      ambientImageCycleAssets: [asset],
+      ambientImageCycleSeconds: 30,
+    });
+
+    expect(() =>
+      decodeClientSettingsPatch({ ambientVideoSource: { kind: "video", id: "short" } }),
+    ).toThrow();
+    expect(() => decodeClientSettingsPatch({ ambientVideoGlowOpacity: 0 })).toThrow();
+    expect(() =>
+      decodeClientSettingsPatch({
+        ambientImageAsset: { ...asset, mimeType: "image/jpeg" },
+      }),
+    ).toThrow();
+    expect(() => decodeClientSettingsPatch({ ambientImageCycleAssets: [asset, asset] })).toThrow();
+  });
+
   it("accepts only supported power-save blocker modes in patches", () => {
     expect(decodeClientSettingsPatch({ powerSaveBlockerMode: "during-chats" })).toEqual({
       powerSaveBlockerMode: "during-chats",
