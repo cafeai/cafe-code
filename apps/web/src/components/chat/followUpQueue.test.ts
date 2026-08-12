@@ -271,11 +271,8 @@ describe("followUpQueue", () => {
     expect(
       hasQueuedFollowUpDispatchBeenObserved({
         messageId: "msg-queued",
-        dispatchedAt: "2026-05-25T05:00:00.000Z",
         thread: {
           messages: [{ id: "msg-queued" }],
-          latestTurn: null,
-          session: null,
         },
       }),
     ).toBe(true);
@@ -283,24 +280,25 @@ describe("followUpQueue", () => {
     expect(
       hasQueuedFollowUpDispatchBeenObserved({
         messageId: "msg-queued",
-        dispatchedAt: "2026-05-25T05:00:00.000Z",
         thread: {
-          messages: [],
-          latestTurn: { requestedAt: "2026-05-25T05:00:00.001Z" },
-          session: null,
+          messages: [{ id: "msg-unrelated" }],
         },
       }),
-    ).toBe(true);
+    ).toBe(false);
 
     expect(
       hasQueuedFollowUpDispatchBeenObserved({
         messageId: "msg-queued",
-        dispatchedAt: "2026-05-25T05:00:00.000Z",
         thread: {
           messages: [],
-          latestTurn: { requestedAt: "2026-05-25T04:59:59.999Z" },
-          session: { activeTurnId: null, updatedAt: "2026-05-25T05:00:01.000Z" },
         },
+      }),
+    ).toBe(false);
+
+    expect(
+      hasQueuedFollowUpDispatchBeenObserved({
+        messageId: "msg-queued",
+        thread: undefined,
       }),
     ).toBe(false);
   });

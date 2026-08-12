@@ -24,6 +24,7 @@ import {
   shouldWriteThreadErrorToCurrentServerThread,
   waitForStartedServerThread,
 } from "./ChatView.logic";
+import { hasQueuedFollowUpDispatchBeenObserved } from "./chat/followUpQueue";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
 
@@ -165,6 +166,31 @@ describe("shouldResolvePendingSteerDispatch", () => {
         assistantResponseAfterSteer: false,
       }),
     ).toBe(true);
+  });
+
+  it("does not treat command-accepted message projection as provider consumption", () => {
+    const projectedThread = {
+      messages: [{ id: "msg-steer" }],
+    };
+
+    // The same exact message projection is sufficient to release a queued-turn
+    // dispatch guard, but it is only command acceptance for a live steer.
+    expect(
+      hasQueuedFollowUpDispatchBeenObserved({
+        messageId: "msg-steer",
+        thread: projectedThread,
+      }),
+    ).toBe(true);
+    expect(
+      shouldResolvePendingSteerDispatch({
+        provider: "codex",
+        terminalTurnAfterSteer: false,
+        steerProcessingStarted: false,
+        steerFailureRecorded: false,
+        steerRecoveryRecorded: false,
+        assistantResponseAfterSteer: false,
+      }),
+    ).toBe(false);
   });
 });
 

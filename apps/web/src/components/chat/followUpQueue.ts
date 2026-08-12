@@ -128,37 +128,21 @@ export function selectQueuedFollowUpDispatchCandidate<
 
 export interface QueuedFollowUpDispatchObservationInput {
   messageId: string;
-  dispatchedAt: string;
-  thread: {
-    messages: readonly { readonly id: string }[];
-    latestTurn: { readonly requestedAt: string } | null;
-    session: {
-      readonly activeTurnId?: string | null | undefined;
-      readonly updatedAt: string;
-    } | null;
-  };
-}
-
-function isoAtOrAfter(value: string | null | undefined, minimum: string): boolean {
-  if (!value) return false;
-  const valueTime = Date.parse(value);
-  const minimumTime = Date.parse(minimum);
-  return Number.isFinite(valueTime) && Number.isFinite(minimumTime) && valueTime >= minimumTime;
+  thread:
+    | {
+        messages: readonly { readonly id: string }[];
+      }
+    | null
+    | undefined;
 }
 
 export function hasQueuedFollowUpDispatchBeenObserved(
   input: QueuedFollowUpDispatchObservationInput,
 ): boolean {
-  if (input.thread.messages.some((message) => message.id === input.messageId)) {
-    return true;
-  }
-  if (isoAtOrAfter(input.thread.latestTurn?.requestedAt, input.dispatchedAt)) {
-    return true;
-  }
-  return (
-    input.thread.session?.activeTurnId != null &&
-    isoAtOrAfter(input.thread.session.updatedAt, input.dispatchedAt)
-  );
+  // A newer turn or session timestamp can belong to unrelated work. Keep the
+  // local dispatch guard until the authoritative projection contains this
+  // exact message, so another queued item cannot start from stale thread state.
+  return input.thread?.messages.some((message) => message.id === input.messageId) ?? false;
 }
 
 export function previewQueuedFollowUpText(text: string, fallback = "Image-only follow-up"): string {
