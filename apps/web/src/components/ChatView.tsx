@@ -6394,7 +6394,7 @@ export default function ChatView(props: ChatViewProps) {
       <ProviderStatusBanner status={activeProviderStatus} />
       <ThreadErrorBanner
         error={activeThread.error}
-        onDismiss={() => setThreadError(activeThread.id, null)}
+        scopeKey={`${activeThread.environmentId}\u0000${activeThread.id}`}
       />
       {/* Main content area with optional plan sidebar */}
       <div className="flex min-h-0 min-w-0 flex-1">

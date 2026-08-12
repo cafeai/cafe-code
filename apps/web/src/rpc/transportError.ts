@@ -35,6 +35,12 @@ const RECOVERABLE_PROVIDER_ERROR_PATTERNS = [
   // log, but do not let snapshot/replay repeatedly recreate a dismissible
   // thread-level banner from this non-actionable historical diagnostic.
   /\bSelected model is at capacity\b/i,
+  // Cafe previously disabled remote_compaction_v2, forcing Codex onto a
+  // legacy private ChatGPT compact route. That 404 can remain in a persisted
+  // session after a later v2 compaction succeeds. Preserve the provider event
+  // for diagnostics, but do not present the recovered legacy failure as the
+  // thread's current actionable error on every snapshot replay.
+  /\bError running remote compact task:[\s\S]*\b404 Not Found\b[\s\S]*\/backend-api\/codex\/responses\/compact\b/i,
 ] as const;
 
 export function isTransportConnectionErrorMessage(message: string | null | undefined): boolean {

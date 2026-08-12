@@ -72,6 +72,14 @@ describe("transportError", () => {
     ).toBeNull();
   });
 
+  it("keeps recovered legacy Codex compaction 404s in diagnostics only", () => {
+    expect(
+      sanitizeThreadErrorMessage(
+        'Error running remote compact task: unexpected status 404 Not Found: {"detail":"Not Found"}, url: https://chatgpt.com/backend-api/codex/responses/compact, cf-ray: a2a191bbedbc710a-LAX, request id: 127c91b7-49f6-4c81-a1cb-6217a1111e85',
+      ),
+    ).toBeNull();
+  });
+
   describe("describeSendFailureMessage", () => {
     const CONNECTION_MESSAGE =
       "Couldn't reach the server — the connection dropped. Check your connection and try again.";

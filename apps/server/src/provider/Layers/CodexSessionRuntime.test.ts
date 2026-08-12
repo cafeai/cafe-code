@@ -24,6 +24,7 @@ import {
   codexChildConversationThreadIdsForTurn,
   codexElapsedDelayMilliseconds,
   codexElapsedDelayRemainingMilliseconds,
+  codexTerminalSessionPatch,
   isRecoverableThreadResumeError,
   isCodexContextCompactionItemType,
   isCodexChildConversationWorkNotification,
@@ -111,6 +112,30 @@ describe("buildCodexAppServerArgs", () => {
       "-c",
       "model_providers.cafecode-openai-http.supports_websockets=false",
     ]);
+  });
+});
+
+describe("Codex terminal session state", () => {
+  it("clears a previous runtime error after successful completion", () => {
+    assert.deepStrictEqual(codexTerminalSessionPatch({ turnStatus: "completed" }), {
+      status: "ready",
+      activeTurnId: undefined,
+      lastError: undefined,
+    });
+  });
+
+  it("retains the current failure message after failed completion", () => {
+    assert.deepStrictEqual(
+      codexTerminalSessionPatch({
+        turnStatus: "failed",
+        errorMessage: "current turn failed",
+      }),
+      {
+        status: "error",
+        activeTurnId: undefined,
+        lastError: "current turn failed",
+      },
+    );
   });
 });
 
@@ -1662,9 +1687,7 @@ describe("openCodexThread", () => {
         }>;
         readonly runtimeWorkspaceRoots?: ReadonlyArray<string>;
       };
-      assert.deepStrictEqual(payload.config, {
-        "features.remote_compaction_v2": false,
-      });
+      assert.deepStrictEqual(payload.config, {});
       assert.deepStrictEqual(payload.environments, [
         {
           environmentId: "local",
@@ -1710,7 +1733,6 @@ describe("openCodexThread", () => {
       readonly runtimeWorkspaceRoots?: ReadonlyArray<string>;
     };
     assert.deepStrictEqual(payload.config, {
-      "features.remote_compaction_v2": false,
       sandbox_workspace_write: {
         writable_roots: ["/tmp/extra"],
       },
@@ -1768,7 +1790,6 @@ describe("openCodexThread", () => {
     for (const call of calls) {
       const payload = call.payload as { readonly config?: Record<string, unknown> };
       assert.deepStrictEqual(payload.config, {
-        "features.remote_compaction_v2": false,
         model_auto_compact_token_limit: 150_000,
       });
     }

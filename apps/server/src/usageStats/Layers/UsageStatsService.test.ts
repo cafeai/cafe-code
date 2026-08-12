@@ -35,6 +35,7 @@ import {
 import { UsageStatsRepositoryLive } from "../../persistence/Layers/UsageStats.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings.ts";
+import { localDayKey } from "../dayBuckets.ts";
 import { UsageStatsService, type UsageStatsServiceShape } from "../Services/UsageStatsService.ts";
 import { UsageStatsServiceLive } from "./UsageStatsService.ts";
 
@@ -356,19 +357,19 @@ describe("UsageStatsService", () => {
         yield* harness.service.flush;
         const expectedRows = [
           {
-            day: "1970-01-01",
+            day: localDayKey(0),
             provider: CLAUDE,
             model: "claude-opus-5",
             outputTokens: 70,
           },
           {
-            day: "1970-01-01",
+            day: localDayKey(0),
             provider: CODEX,
             model: "gpt-5.6-codex",
             outputTokens: 125,
           },
           {
-            day: "1970-01-01",
+            day: localDayKey(0),
             provider: CODEX,
             model: "gpt-5.6-codex-mini",
             outputTokens: 50,

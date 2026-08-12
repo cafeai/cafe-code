@@ -72,7 +72,6 @@ const BENIGN_ERROR_LOG_SNIPPETS = [
   "state db record_discrepancy: find_thread_path_by_id_str_in_subdir, falling_back",
 ];
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
-const CODEX_REMOTE_COMPACTION_V2_FEATURE_CONFIG_KEY = "features.remote_compaction_v2";
 const CODEX_LOCAL_ENVIRONMENT_ID = "local";
 // App-server and Cafe share the host clock. A small future allowance tolerates
 // clock adjustment without allowing a malformed provider timestamp to push
@@ -690,15 +689,12 @@ function buildThreadStartParams(input: {
   // ceiling, and defaults its accounting scope to `total`. Do not duplicate
   // those defaults here: model metadata changes independently of Cafe, and an
   // injected limit caused Cafe sessions to compact earlier than the CUI.
-  const threadConfig: Record<string, unknown> = {
-    // Upstream Codex rust-v0.143.0 marks remote_compaction_v2 stable and
-    // default-enabled, but its compaction request still builds the normal
-    // model-visible tool set. Cafe has observed text compaction failures from
-    // inherited hosted image-generation tools on accounts/models without that
-    // image model, so this remains a deliberate Cafe reliability quarantine
-    // until a live long-context compaction smoke verifies the v2 path.
-    [CODEX_REMOTE_COMPACTION_V2_FEATURE_CONFIG_KEY]: false,
-  };
+  // Do not override `features.remote_compaction_v2`. Codex marks the feature
+  // stable and default-enabled, and the legacy ChatGPT compaction endpoint can
+  // return 404 for otherwise healthy authenticated sessions. Let app-server
+  // apply its current default (or an explicit user/managed configuration) so
+  // Cafe follows the same compaction path as the upstream CLI.
+  const threadConfig: Record<string, unknown> = {};
   if (input.autoCompactTokenLimit !== undefined) {
     // This is an explicit user override. App-server still applies its upstream
     // context-window clamp and the user's upstream scope configuration.
@@ -2092,6 +2088,21 @@ function updateSession(
   });
 }
 
+export function codexTerminalSessionPatch(input: {
+  readonly turnStatus: string;
+  readonly errorMessage?: string | undefined;
+}): Partial<ProviderSession> {
+  const failed = input.turnStatus === "failed";
+  return {
+    status: failed ? "error" : "ready",
+    activeTurnId: undefined,
+    // `lastError` describes the current runtime outcome, not an append-only
+    // diagnostic. Successful completion must clear a prior failure or later
+    // session polls will resurrect the same recovered error.
+    lastError: failed ? input.errorMessage : undefined,
+  };
+}
+
 function parseThreadSnapshot(
   response: EffectCodexSchema.V2ThreadReadResponse | EffectCodexSchema.V2ThreadRollbackResponse,
 ): CodexThreadSnapshot {
@@ -3138,13 +3149,16 @@ export const makeCodexSessionRuntime = (
         }
 
         const observedAt = yield* nowIso;
-        yield* updateSession(sessionRef, {
-          status: input.turn.status === "failed" ? "error" : "ready",
-          activeTurnId: undefined,
-          ...(input.turn.status === "failed" && input.turn.error?.message
-            ? { lastError: input.turn.error.message }
-            : {}),
-        });
+        // A successful authoritative terminal snapshot supersedes an older
+        // runtime error. Apply the same patch as the live completion path so
+        // reconnect reconciliation cannot replay a recovered failure.
+        yield* updateSession(
+          sessionRef,
+          codexTerminalSessionPatch({
+            turnStatus: input.turn.status,
+            errorMessage: input.turn.error?.message,
+          }),
+        );
         yield* Effect.logInfo("codex.turnProgress.reconciledFromThreadRead", {
           threadId: options.threadId,
           providerInstanceId: options.providerInstanceId ?? PROVIDER,
@@ -3828,11 +3842,13 @@ export const makeCodexSessionRuntime = (
             const turnStatus = readNotificationTurnStatus(notification);
             const errorMessage =
               turnStatus === "failed" ? readNotificationErrorMessage(notification) : undefined;
-            yield* updateSession(sessionRef, {
-              status: turnStatus === "failed" ? "error" : "ready",
-              activeTurnId: undefined,
-              ...(errorMessage ? { lastError: errorMessage } : {}),
-            });
+            yield* updateSession(
+              sessionRef,
+              codexTerminalSessionPatch({
+                turnStatus: turnStatus ?? "completed",
+                errorMessage,
+              }),
+            );
             return;
           }
           case "thread/status/changed": {
