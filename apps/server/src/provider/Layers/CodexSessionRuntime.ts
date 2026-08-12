@@ -73,6 +73,11 @@ const BENIGN_ERROR_LOG_SNIPPETS = [
 ];
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
 const CODEX_LOCAL_ENVIRONMENT_ID = "local";
+// Codex TUI 0.147 uses a 60-second hidden grace followed by a 60-second
+// visible countdown for non-blocking request_user_input calls. The runtime
+// owns the total deadline so background Cafe threads cannot remain wedged just
+// because no renderer currently has that thread mounted.
+const CODEX_NON_BLOCKING_USER_INPUT_AUTO_RESOLUTION_DELAY = "120 seconds" as const;
 // App-server and Cafe share the host clock. A small future allowance tolerates
 // clock adjustment without allowing a malformed provider timestamp to push
 // durable events arbitrarily far into the future.
@@ -338,6 +343,9 @@ export interface CodexSessionRuntimeShape {
     requestId: ApprovalRequestId,
     answers: ProviderUserInputAnswers,
   ) => Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly snoozeUserInput: (
+    requestId: ApprovalRequestId,
+  ) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly events: Stream.Stream<ProviderEvent, never>;
   readonly close: Effect.Effect<void>;
 }
@@ -414,6 +422,61 @@ interface PendingUserInput {
   readonly turnId: TurnId | undefined;
   readonly itemId: ProviderItemId | undefined;
   readonly answers: Deferred.Deferred<ProviderUserInputAnswers>;
+  readonly autoResolutionSnoozed: Deferred.Deferred<void>;
+}
+
+interface CodexUserInputResolution {
+  readonly answers: ProviderUserInputAnswers;
+  readonly source: "explicit" | "automatic";
+}
+
+/**
+ * Wait for a request_user_input answer using Codex TUI 0.147 semantics.
+ *
+ * A non-blocking request has a single automatic deadline. Interaction wins a
+ * separate race and permanently retires that deadline before waiting for the
+ * explicit answer. Keeping that state transition explicit is important: a
+ * `snooze -> await answer` branch raced directly against the timer would leave
+ * the timer alive and could submit an empty answer while the user was typing.
+ */
+export function awaitCodexUserInputResolution(input: {
+  readonly answers: Deferred.Deferred<ProviderUserInputAnswers>;
+  readonly autoResolutionSnoozed: Deferred.Deferred<void>;
+  readonly isBlocking: boolean;
+}): Effect.Effect<CodexUserInputResolution> {
+  const explicitResolution: Effect.Effect<CodexUserInputResolution> = Deferred.await(
+    input.answers,
+  ).pipe(
+    Effect.map((answers) => ({
+      answers,
+      source: "explicit" as const,
+    })),
+  );
+  if (input.isBlocking) {
+    return explicitResolution;
+  }
+
+  const automaticResolutionDecision: Effect.Effect<"snoozed" | "automatic"> = Effect.raceFirst(
+    Deferred.await(input.autoResolutionSnoozed).pipe(Effect.as<"snoozed" | "automatic">("snoozed")),
+    Effect.sleep(CODEX_NON_BLOCKING_USER_INPUT_AUTO_RESOLUTION_DELAY).pipe(
+      Effect.as<"snoozed" | "automatic">("automatic"),
+    ),
+  );
+
+  const resolutionAfterDecision: Effect.Effect<CodexUserInputResolution> =
+    automaticResolutionDecision.pipe(
+      Effect.flatMap(
+        (decision): Effect.Effect<CodexUserInputResolution> =>
+          decision === "snoozed"
+            ? explicitResolution
+            : Effect.succeed({
+                answers: {} satisfies ProviderUserInputAnswers,
+                source: "automatic",
+              }),
+      ),
+    );
+
+  return Effect.raceFirst(explicitResolution, resolutionAfterDecision);
 }
 
 interface CodexTurnStartObservation {
@@ -4267,6 +4330,7 @@ export const makeCodexSessionRuntime = (
         const turnId = TurnId.make(payload.turnId);
         const itemId = ProviderItemId.make(payload.itemId);
         const answers = yield* Deferred.make<ProviderUserInputAnswers>();
+        const autoResolutionSnoozed = yield* Deferred.make<void>();
 
         yield* Ref.update(pendingUserInputsRef, (current) => {
           const next = new Map(current);
@@ -4275,6 +4339,7 @@ export const makeCodexSessionRuntime = (
             turnId,
             itemId,
             answers,
+            autoResolutionSnoozed,
           });
           return next;
         });
@@ -4289,7 +4354,11 @@ export const makeCodexSessionRuntime = (
           payload,
         });
 
-        const resolvedAnswers = yield* Deferred.await(answers).pipe(
+        const resolution = yield* awaitCodexUserInputResolution({
+          answers,
+          autoResolutionSnoozed,
+          isBlocking: payload.isBlocking,
+        }).pipe(
           Effect.ensuring(
             Ref.update(pendingUserInputsRef, (current) => {
               const next = new Map(current);
@@ -4299,14 +4368,35 @@ export const makeCodexSessionRuntime = (
           ),
         );
 
-        return {
-          answers: yield* toCodexUserInputAnswers(resolvedAnswers).pipe(
-            Effect.mapError((error) =>
-              CodexErrors.CodexAppServerRequestError.invalidParams(error.message, {
-                questionId: error.questionId,
-              }),
-            ),
+        const codexAnswers = yield* toCodexUserInputAnswers(resolution.answers).pipe(
+          Effect.mapError((error) =>
+            CodexErrors.CodexAppServerRequestError.invalidParams(error.message, {
+              questionId: error.questionId,
+            }),
           ),
+        );
+
+        if (resolution.source === "automatic") {
+          // The TUI submits an empty answer map when its countdown expires.
+          // Emit the same canonical acknowledgement as an explicit response so
+          // projections clear the pending card and the work log records why the
+          // turn resumed.
+          yield* emitEvent({
+            kind: "notification",
+            threadId: options.threadId,
+            method: "item/tool/requestUserInput/answered",
+            requestId,
+            ...(turnId ? { turnId } : {}),
+            ...(itemId ? { itemId } : {}),
+            payload: {
+              answers: codexAnswers,
+              autoResolved: true,
+            },
+          });
+        }
+
+        return {
+          answers: codexAnswers,
         } satisfies EffectCodexSchema.ToolRequestUserInputResponse;
       }),
     );
@@ -5079,6 +5169,16 @@ export const makeCodexSessionRuntime = (
               answers: codexAnswers,
             },
           });
+        }),
+      snoozeUserInput: (requestId) =>
+        Effect.gen(function* () {
+          const pending = (yield* Ref.get(pendingUserInputsRef)).get(requestId);
+          if (!pending) {
+            return yield* new CodexSessionRuntimePendingUserInputNotFoundError({
+              requestId,
+            });
+          }
+          yield* Deferred.succeed(pending.autoResolutionSnoozed, undefined);
         }),
       events: Stream.fromQueue(events),
       close,

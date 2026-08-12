@@ -485,11 +485,17 @@ export type UserInputQuestion = typeof UserInputQuestion.Type;
 
 const UserInputRequestedPayload = Schema.Struct({
   questions: Schema.Array(UserInputQuestion),
+  // Codex 0.147 makes this explicit. Older providers and persisted events are
+  // blocking by default, preserving the pre-0.147 behavior on decode.
+  isBlocking: Schema.optional(Schema.Boolean).pipe(
+    Schema.withConstructorDefault(Effect.succeed(true)),
+  ),
 });
 export type UserInputRequestedPayload = typeof UserInputRequestedPayload.Type;
 
 const UserInputResolvedPayload = Schema.Struct({
   answers: UnknownRecordSchema,
+  autoResolved: Schema.optional(Schema.Boolean),
 });
 export type UserInputResolvedPayload = typeof UserInputResolvedPayload.Type;
 

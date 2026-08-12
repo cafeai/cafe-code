@@ -17,7 +17,10 @@ import {
 } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-const UPSTREAM_REF = "e363b08c9175ac1cbe5893615dd2cb9ddf95043b";
+// Codex 0.147.0 release commit. Keep generation attached to an immutable
+// upstream commit rather than a moving tag so a reinstall cannot silently
+// change Cafe's protocol boundary.
+const UPSTREAM_REF = "be6e8eac029b183056b7e4402879f15d2c85f61b";
 const USER_AGENT = "effect-codex-app-server-generator";
 const GITHUB_API_BASE =
   "https://api.github.com/repos/openai/codex/contents/codex-rs/app-server-protocol";

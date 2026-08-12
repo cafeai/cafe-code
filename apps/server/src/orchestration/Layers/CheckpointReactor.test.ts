@@ -149,6 +149,7 @@ function createProviderServiceHarness(
     interruptTurn: () => unsupported(),
     respondToRequest: () => unsupported(),
     respondToUserInput: () => unsupported(),
+    snoozeUserInput: () => unsupported(),
     stopSession: () => unsupported(),
     restartProviderRuntime: () => unsupported(),
     listSessions,

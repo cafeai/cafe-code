@@ -7,7 +7,7 @@ import {
   type ThreadSortInput,
 } from "../lib/threadSort";
 import type { SidebarThreadSummary, Thread } from "../types";
-import { cn } from "../lib/utils";
+import { cn, isMacPlatform } from "../lib/utils";
 import { isLatestTurnSettled } from "../session-logic";
 
 export const THREAD_SELECTION_SAFE_SELECTOR = "[data-thread-item], [data-thread-selection-safe]";
@@ -16,6 +16,15 @@ const PROJECT_DELETE_REQUIRES_FORCE_MARKER = "cannot be deleted without force=tr
 // Visible sidebar rows are prewarmed into the thread-detail cache so opening a
 // nearby thread usually reuses an already-hot subscription.
 export const SIDEBAR_THREAD_PREWARM_LIMIT = 10;
+
+export function shouldInsetContentSidebarTrigger(input: {
+  readonly isElectronHost: boolean;
+  readonly isMobile: boolean;
+  readonly platform: string;
+}): boolean {
+  return input.isElectronHost && !input.isMobile && isMacPlatform(input.platform);
+}
+
 export type SidebarNewThreadEnvMode = "local" | "worktree";
 type SidebarProject = {
   id: string;

@@ -125,6 +125,10 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
       Promise.resolve(undefined),
   );
 
+  public readonly snoozeUserInputImpl = vi.fn(
+    (_requestId: ApprovalRequestId): Promise<void> => Promise.resolve(undefined),
+  );
+
   public readonly closeImpl = vi.fn(() => Promise.resolve(undefined));
 
   readonly options: CodexSessionRuntimeOptions;
@@ -149,6 +153,10 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   interruptTurn(turnId?: TurnId) {
     return Effect.promise(() => this.interruptTurnImpl(turnId));
+  }
+
+  snoozeUserInput(_requestId: ApprovalRequestId) {
+    return Effect.promise(() => this.snoozeUserInputImpl(_requestId));
   }
 
   getGoal = Effect.succeed<ProviderThreadGoal | null>(null);
@@ -591,6 +599,19 @@ function startLifecycleRuntime() {
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect("delegates requestUserInput auto-resolution snooze to the live runtime", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const requestId = ApprovalRequestId.make("req-user-input-snooze");
+      const snoozeUserInput = adapter.snoozeUserInput;
+      assert.ok(snoozeUserInput);
+
+      yield* snoozeUserInput(asThreadId("thread-1"), requestId);
+
+      assert.deepEqual(runtime.snoozeUserInputImpl.mock.calls, [[requestId]]);
+    }),
+  );
+
   it.effect("attributes trusted Codex plugin commands in the work log", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
@@ -2111,6 +2132,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
             itemId: "item-user-input-1",
             threadId: "thread-1",
             turnId: "turn-1",
+            isBlocking: false,
             questions: [
               {
                 id: "sandbox_mode",
@@ -2140,6 +2162,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
                 answers: ["workspace-write"],
               },
             },
+            autoResolved: true,
           },
         } satisfies ProviderEvent);
 
@@ -2149,11 +2172,13 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
           assert.equal(events[0].requestId, "req-user-input-1");
           assert.equal(events[0].payload.questions[0]?.id, "sandbox_mode");
           assert.equal(events[0].payload.questions[0]?.multiSelect, false);
+          assert.equal(events[0].payload.isBlocking, false);
         }
 
         assert.equal(events[1]?.type, "user-input.resolved");
         if (events[1]?.type === "user-input.resolved") {
           assert.equal(events[1].requestId, "req-user-input-1");
+          assert.equal(events[1].payload.autoResolved, true);
           assert.deepEqual(events[1].payload.answers, {
             sandbox_mode: "workspace-write",
           });

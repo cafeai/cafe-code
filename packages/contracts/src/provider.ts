@@ -131,6 +131,17 @@ export const ProviderRespondToUserInputInput = Schema.Struct({
 });
 export type ProviderRespondToUserInputInput = typeof ProviderRespondToUserInputInput.Type;
 
+/**
+ * Permanently disables automatic resolution for one live structured-input
+ * request. The operation is intentionally request-scoped: a broad session flag
+ * could let stale renderer intent alter a later provider question.
+ */
+export const ProviderSnoozeUserInputInput = Schema.Struct({
+  threadId: ThreadId,
+  requestId: ApprovalRequestId,
+});
+export type ProviderSnoozeUserInputInput = typeof ProviderSnoozeUserInputInput.Type;
+
 const ProviderEventKind = Schema.Literals(["session", "notification", "request", "error"]);
 
 export const ProviderEvent = Schema.Struct({

@@ -53,6 +53,7 @@ import {
   applySidebarAccentColor,
   applySidebarStarSpeed,
 } from "../themeAccent";
+import { applyInterfaceScalePercent } from "../interfaceScale";
 import {
   ensureEnvironmentConnectionBootstrapped,
   getPrimaryEnvironmentConnection,
@@ -331,6 +332,7 @@ function PowerSaveBlockerSync() {
 
 function AppearanceSettingsSync() {
   const appAccentColor = useSettings((settings) => settings.appAccentColor);
+  const interfaceScalePercent = useSettings((settings) => settings.interfaceScalePercent);
   const sidebarAccentColor = useSettings((settings) => settings.themeAccentColor);
   const continueBackgroundAnimations = useSettings(
     (settings) => settings.continueBackgroundAnimations,
@@ -343,6 +345,13 @@ function AppearanceSettingsSync() {
       applyAppAccentColor(undefined);
     };
   }, [appAccentColor]);
+
+  useEffect(() => {
+    applyInterfaceScalePercent(interfaceScalePercent);
+    return () => {
+      applyInterfaceScalePercent(undefined);
+    };
+  }, [interfaceScalePercent]);
 
   useEffect(() => {
     applySidebarAccentColor(sidebarAccentColor);

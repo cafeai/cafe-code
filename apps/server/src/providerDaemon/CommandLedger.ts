@@ -32,6 +32,7 @@ const MUTATING_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "interruptTurn",
   "respondToRequest",
   "respondToUserInput",
+  "snoozeUserInput",
   "stopSession",
   "restartProviderRuntime",
   "setGoal",

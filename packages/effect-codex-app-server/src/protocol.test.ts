@@ -130,6 +130,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
             id: 77,
             method: "item/tool/requestUserInput",
             params: {
+              isBlocking: true,
               itemId: "item-approval-1",
               threadId: "thread-1",
               turnId: "turn-1",
@@ -179,6 +180,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
             id: 77,
             method: "item/tool/requestUserInput",
             params: {
+              isBlocking: true,
               itemId: "item-approval-1",
               threadId: "thread-1",
               turnId: "turn-1",
@@ -256,6 +258,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
           id: 77,
           method: "item/tool/requestUserInput",
           params: {
+            isBlocking: true,
             itemId: "item-approval-1",
             threadId: "thread-1",
             turnId: "turn-1",

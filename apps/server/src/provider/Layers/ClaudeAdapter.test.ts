@@ -670,7 +670,7 @@ describe("ClaudeAdapterLive", () => {
     }
   });
 
-  it.effect("enables Claude SDK partial messages and subagent progress summaries", () => {
+  it.effect("enables Claude SDK partial messages and complete subagent progress", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -682,6 +682,7 @@ describe("ClaudeAdapterLive", () => {
 
       const createInput = harness.getLastCreateQueryInput();
       assert.equal(createInput?.options.includePartialMessages, true);
+      assert.equal(createInput?.options.forwardSubagentText, true);
       assert.equal(createInput?.options.agentProgressSummaries, true);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -2218,6 +2219,268 @@ describe("ClaudeAdapterLive", () => {
         );
         assert.equal(progressEvent.payload.description, "Running background teammate");
       }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps skip_transcript Claude tasks out of inline runtime activity", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const context = yield* Effect.context<never>();
+      const runFork = Effect.runForkWith(context);
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = runFork(
+        Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            runtimeEvents.push(event);
+          }),
+        ),
+      );
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* Effect.yieldNow;
+      runtimeEvents.length = 0;
+
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "task-ambient-1",
+        tool_use_id: "tool-ambient-1",
+        description: "Refreshing ambient account metadata",
+        task_type: "housekeeping",
+        skip_transcript: true,
+        session_id: "sdk-session-ambient-task",
+        uuid: "task-ambient-started",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_progress",
+        task_id: "task-ambient-1",
+        tool_use_id: "tool-ambient-1",
+        description: "Refreshing ambient account metadata",
+        usage: {
+          total_tokens: 12,
+          tool_uses: 1,
+          duration_ms: 50,
+        },
+        session_id: "sdk-session-ambient-task",
+        uuid: "task-ambient-progress",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "assistant",
+        parent_tool_use_id: "tool-ambient-1",
+        session_id: "sdk-session-ambient-task",
+        uuid: "task-ambient-assistant",
+        message: {
+          id: "task-ambient-assistant-message",
+          role: "assistant",
+          content: [{ type: "text", text: "Ambient task details must stay hidden." }],
+          usage: {
+            input_tokens: 12,
+            output_tokens: 6,
+          },
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: "task-ambient-1",
+        tool_use_id: "tool-ambient-1",
+        status: "completed",
+        output_file: "/tmp/ambient-output",
+        summary: "Ambient refresh complete",
+        session_id: "sdk-session-ambient-task",
+        uuid: "task-ambient-completed",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      assert.equal(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "task.started" ||
+            event.type === "task.progress" ||
+            event.type === "task.completed" ||
+            event.type === "turn.started" ||
+            event.type === "runtime.warning",
+        ),
+        false,
+      );
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("isolates forwarded subagent text, usage, and colliding tool block indexes", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const context = yield* Effect.context<never>();
+      const runFork = Effect.runForkWith(context);
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = runFork(
+        Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            runtimeEvents.push(event);
+          }),
+        ),
+      );
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "delegate the review",
+        attachments: [],
+      });
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEvents.length = 0;
+
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "task-reviewer-1",
+        tool_use_id: "agent-tool-1",
+        description: "Review the provider boundary",
+        subagent_type: "code-reviewer",
+        task_type: "subagent",
+        session_id: "sdk-session-nested-agent",
+        uuid: "task-started-nested-agent",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "stream_event",
+        parent_tool_use_id: null,
+        session_id: "sdk-session-nested-agent",
+        uuid: "main-tool-start",
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "tool_use",
+            id: "main-tool-1",
+            name: "Read",
+            input: { file_path: "main.ts" },
+          },
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "stream_event",
+        parent_tool_use_id: "agent-tool-1",
+        session_id: "sdk-session-nested-agent",
+        uuid: "nested-tool-start",
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "tool_use",
+            id: "nested-tool-1",
+            name: "Read",
+            input: { file_path: "nested.ts" },
+          },
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "assistant",
+        parent_tool_use_id: "agent-tool-1",
+        subagent_type: "code-reviewer",
+        task_description: "Review the provider boundary",
+        session_id: "sdk-session-nested-agent",
+        uuid: "nested-assistant-1",
+        message: {
+          id: "nested-message-1",
+          role: "assistant",
+          content: [{ type: "text", text: "The nested review found one lifecycle issue." }],
+          usage: {
+            input_tokens: 90_000,
+            output_tokens: 2_000,
+          },
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "user",
+        parent_tool_use_id: "agent-tool-1",
+        session_id: "sdk-session-nested-agent",
+        uuid: "nested-tool-result",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "nested-tool-1",
+              content: "nested result",
+              is_error: false,
+            },
+          ],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "user",
+        parent_tool_use_id: null,
+        session_id: "sdk-session-nested-agent",
+        uuid: "main-tool-result",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "main-tool-1",
+              content: "main result",
+              is_error: false,
+            },
+          ],
+        },
+      } as unknown as SDKMessage);
+
+      for (let index = 0; index < 8; index += 1) {
+        yield* Effect.yieldNow;
+      }
+
+      const nestedProgress = runtimeEvents.find(
+        (event) =>
+          event.type === "task.progress" &&
+          event.payload.taskId === RuntimeTaskId.make("task-reviewer-1"),
+      );
+      assert.equal(nestedProgress?.type, "task.progress");
+      if (nestedProgress?.type === "task.progress") {
+        assert.equal(nestedProgress.payload.description, "Review the provider boundary");
+        assert.equal(
+          nestedProgress.payload.summary,
+          "The nested review found one lifecycle issue.",
+        );
+      }
+
+      const completedToolIds = runtimeEvents
+        .filter((event) => event.type === "item.completed")
+        .map((event) => String(event.itemId))
+        .toSorted();
+      assert.deepEqual(completedToolIds, ["main-tool-1", "nested-tool-1"]);
+      assert.equal(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "content.delta" && event.payload.delta.includes("nested review"),
+        ),
+        false,
+      );
+      assert.equal(
+        runtimeEvents.some((event) => event.type === "thread.token-usage.updated"),
+        false,
+      );
+
+      runtimeEventsFiber.interruptUnsafe();
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

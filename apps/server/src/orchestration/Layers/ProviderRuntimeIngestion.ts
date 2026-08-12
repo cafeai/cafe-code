@@ -575,6 +575,7 @@ function runtimeEventToActivities(
           payload: {
             ...(event.requestId ? { requestId: event.requestId } : {}),
             questions: event.payload.questions,
+            isBlocking: event.payload.isBlocking,
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -589,10 +590,13 @@ function runtimeEventToActivities(
           createdAt: event.createdAt,
           tone: "info",
           kind: "user-input.resolved",
-          summary: "User input submitted",
+          summary: event.payload.autoResolved
+            ? "User input continued automatically"
+            : "User input submitted",
           payload: {
             ...(event.requestId ? { requestId: event.requestId } : {}),
             answers: event.payload.answers,
+            ...(event.payload.autoResolved ? { autoResolved: true } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,

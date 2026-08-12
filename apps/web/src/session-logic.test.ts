@@ -262,6 +262,7 @@ describe("derivePendingUserInputs", () => {
       {
         requestId: "req-user-input-1",
         createdAt: "2026-02-23T00:00:01.000Z",
+        isBlocking: true,
         questions: [
           {
             id: "sandbox_mode",
@@ -278,6 +279,33 @@ describe("derivePendingUserInputs", () => {
         ],
       },
     ]);
+  });
+
+  it("preserves an explicit non-blocking Codex prompt", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "user-input-non-blocking",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "user-input.requested",
+        summary: "User input requested",
+        tone: "info",
+        payload: {
+          requestId: "req-user-input-non-blocking",
+          isBlocking: false,
+          questions: [
+            {
+              id: "continue",
+              header: "Continue",
+              question: "Continue automatically?",
+              options: [{ label: "yes", description: "Continue execution" }],
+              multiSelect: false,
+            },
+          ],
+        },
+      }),
+    ];
+
+    expect(derivePendingUserInputs(activities)[0]?.isBlocking).toBe(false);
   });
 
   it("clears stale pending user-input prompts when the provider reports an orphaned request", () => {

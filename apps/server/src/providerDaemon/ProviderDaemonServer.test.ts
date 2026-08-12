@@ -75,6 +75,7 @@ const mockProviderService = {
   interruptTurn: () => Effect.die("unexpected interruptTurn"),
   respondToRequest: () => Effect.die("unexpected respondToRequest"),
   respondToUserInput: () => Effect.die("unexpected respondToUserInput"),
+  snoozeUserInput: () => Effect.die("unexpected snoozeUserInput"),
   stopSession: () => Effect.die("unexpected stopSession"),
   restartProviderRuntime: () => Effect.die("unexpected restartProviderRuntime"),
   listSessions: () => Effect.succeed([]),

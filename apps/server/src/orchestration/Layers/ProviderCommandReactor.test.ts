@@ -292,6 +292,7 @@ describe("ProviderCommandReactor", () => {
     });
     const respondToRequest = vi.fn<ProviderServiceShape["respondToRequest"]>(() => Effect.void);
     const respondToUserInput = vi.fn<ProviderServiceShape["respondToUserInput"]>(() => Effect.void);
+    const snoozeUserInput = vi.fn<ProviderServiceShape["snoozeUserInput"]>(() => Effect.void);
     const stopSession = vi.fn((input: unknown) =>
       Effect.sync(() => {
         const threadId =
@@ -361,6 +362,7 @@ describe("ProviderCommandReactor", () => {
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
+      snoozeUserInput,
       stopSession: stopSession as ProviderServiceShape["stopSession"],
       restartProviderRuntime: () => unsupported(),
       listSessions: () => Effect.succeed(runtimeSessions),
@@ -525,6 +527,7 @@ describe("ProviderCommandReactor", () => {
       goalOperations,
       respondToRequest,
       respondToUserInput,
+      snoozeUserInput,
       stopSession,
       renameBranch,
       refreshStatus,
@@ -2978,6 +2981,46 @@ describe("ProviderCommandReactor", () => {
         sandbox_mode: "workspace-write",
       },
     });
+  });
+
+  it("reacts to thread.user-input.snooze without resolving the request", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-for-user-input-snooze"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.user-input.snooze",
+        commandId: CommandId.make("cmd-user-input-snooze"),
+        threadId: ThreadId.make("thread-1"),
+        requestId: asApprovalRequestId("user-input-request-1"),
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.snoozeUserInput.mock.calls.length === 1);
+    expect(harness.snoozeUserInput.mock.calls[0]?.[0]).toEqual({
+      threadId: "thread-1",
+      requestId: "user-input-request-1",
+    });
+    expect(harness.respondToUserInput).not.toHaveBeenCalled();
   });
 
   it("surfaces stale provider approval request failures without faking approval resolution", async () => {

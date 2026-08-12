@@ -22,7 +22,7 @@ import {
 import { MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES } from "@cafecode/contracts/settings";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import type { ReactNode } from "react";
@@ -1013,6 +1013,14 @@ describe("settings panels", () => {
     };
 
     await expect.element(page.getByText("Accent color")).toBeInTheDocument();
+    await expect.element(page.getByText("Interface size")).toBeInTheDocument();
+    page.getByRole("slider", { name: "Interface size" }).element().focus();
+    await userEvent.keyboard("{ArrowRight}");
+
+    await vi.waitFor(() => {
+      expect(updateClientSettings).toHaveBeenCalledWith({ interfaceScalePercent: 105 });
+    });
+
     setColorInput("Branding prefix", "Acme");
 
     await vi.waitFor(() => {

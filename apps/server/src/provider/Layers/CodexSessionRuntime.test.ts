@@ -1,9 +1,19 @@
 import assert from "node:assert/strict";
 
+import { it as effectIt } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
 import { describe, it } from "vitest";
-import { ProviderInstanceId, ProviderItemId, ThreadId, TurnId } from "@cafecode/contracts";
+import {
+  ProviderInstanceId,
+  ProviderItemId,
+  type ProviderUserInputAnswers,
+  ThreadId,
+  TurnId,
+} from "@cafecode/contracts";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
@@ -18,6 +28,7 @@ import {
   buildCodexThreadSnapshotBackfillEvents,
   buildTurnStartParams,
   buildTurnSteerParams,
+  awaitCodexUserInputResolution,
   claimCodexSnapshotBackfillWatcher,
   codexAggregateNotificationMethod,
   codexAggregateTurnHasUnfinishedChildren,
@@ -46,6 +57,51 @@ import {
   updateCodexPendingSteerProcessingFromNotification,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+
+describe("Codex non-blocking user input", () => {
+  effectIt.effect("submits an empty answer map after the upstream 120-second deadline", () =>
+    Effect.gen(function* () {
+      const answers = yield* Deferred.make<ProviderUserInputAnswers>();
+      const autoResolutionSnoozed = yield* Deferred.make<void>();
+      const resolutionFiber = yield* awaitCodexUserInputResolution({
+        answers,
+        autoResolutionSnoozed,
+        isBlocking: false,
+      }).pipe(Effect.forkChild);
+
+      yield* TestClock.adjust("119 seconds");
+      assert.equal(resolutionFiber.pollUnsafe(), undefined);
+      yield* TestClock.adjust("1 second");
+
+      assert.deepEqual(yield* Fiber.join(resolutionFiber), {
+        answers: {},
+        source: "automatic",
+      });
+    }),
+  );
+
+  effectIt.effect("permanently retires the deadline after the user interacts", () =>
+    Effect.gen(function* () {
+      const answers = yield* Deferred.make<ProviderUserInputAnswers>();
+      const autoResolutionSnoozed = yield* Deferred.make<void>();
+      const resolutionFiber = yield* awaitCodexUserInputResolution({
+        answers,
+        autoResolutionSnoozed,
+        isBlocking: false,
+      }).pipe(Effect.forkChild);
+
+      yield* Deferred.succeed(autoResolutionSnoozed, undefined);
+      yield* TestClock.adjust("5 minutes");
+      assert.equal(resolutionFiber.pollUnsafe(), undefined);
+
+      yield* Deferred.succeed(answers, { choice: "continue" });
+      assert.deepEqual(yield* Fiber.join(resolutionFiber), {
+        answers: { choice: "continue" },
+        source: "explicit",
+      });
+    }),
+  );
+});
 
 describe("Codex notification emission timestamps", () => {
   it("accepts valid provider emission time and rejects malformed or future values", () => {

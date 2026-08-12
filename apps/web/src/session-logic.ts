@@ -73,6 +73,7 @@ export interface PendingUserInput {
   requestId: ApprovalRequestId;
   createdAt: string;
   questions: ReadonlyArray<UserInputQuestion>;
+  isBlocking: boolean;
 }
 
 export interface ActivePlanState {
@@ -358,6 +359,9 @@ export function derivePendingUserInputs(
         requestId,
         createdAt: activity.createdAt,
         questions,
+        // Events written before Codex 0.147 did not carry the field and must
+        // remain blocking. Only an explicit false enables auto-resolution.
+        isBlocking: payload?.isBlocking !== false,
       });
       continue;
     }

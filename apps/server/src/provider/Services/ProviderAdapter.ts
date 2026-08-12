@@ -116,6 +116,15 @@ export interface ProviderAdapterShape<TError> {
   ) => Effect.Effect<void, TError>;
 
   /**
+   * Disable provider-side auto-resolution for one pending user-input request.
+   * Only providers that advertise non-blocking questions need to implement it.
+   */
+  readonly snoozeUserInput?: (
+    threadId: ThreadId,
+    requestId: ApprovalRequestId,
+  ) => Effect.Effect<void, TError>;
+
+  /**
    * Stop one provider session.
    */
   readonly stopSession: (threadId: ThreadId) => Effect.Effect<void, TError>;

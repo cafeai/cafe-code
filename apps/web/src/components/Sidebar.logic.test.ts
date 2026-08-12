@@ -19,6 +19,7 @@ import {
   resolveSidebarNewThreadEnvMode,
   resolveThreadStatusPill,
   shouldClearThreadSelectionOnMouseDown,
+  shouldInsetContentSidebarTrigger,
   sortProjectsForSidebar,
   THREAD_JUMP_HINT_SHOW_DELAY_MS,
 } from "./Sidebar.logic";
@@ -37,6 +38,39 @@ import {
 } from "../types";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
+
+describe("shouldInsetContentSidebarTrigger", () => {
+  it("reserves macOS traffic-light space only for desktop Electron", () => {
+    expect(
+      shouldInsetContentSidebarTrigger({
+        isElectronHost: true,
+        isMobile: false,
+        platform: "MacIntel",
+      }),
+    ).toBe(true);
+    expect(
+      shouldInsetContentSidebarTrigger({
+        isElectronHost: true,
+        isMobile: false,
+        platform: "Win32",
+      }),
+    ).toBe(false);
+    expect(
+      shouldInsetContentSidebarTrigger({
+        isElectronHost: false,
+        isMobile: false,
+        platform: "MacIntel",
+      }),
+    ).toBe(false);
+    expect(
+      shouldInsetContentSidebarTrigger({
+        isElectronHost: true,
+        isMobile: true,
+        platform: "MacIntel",
+      }),
+    ).toBe(false);
+  });
+});
 
 function makeLatestTurn(overrides?: {
   completedAt?: string | null;

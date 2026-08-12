@@ -787,6 +787,14 @@ const ThreadUserInputRespondCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadUserInputSnoozeCommand = Schema.Struct({
+  type: Schema.Literal("thread.user-input.snooze"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  requestId: ApprovalRequestId,
+  createdAt: IsoDateTime,
+});
+
 const ThreadCheckpointRevertCommand = Schema.Struct({
   type: Schema.Literal("thread.checkpoint.revert"),
   commandId: CommandId,
@@ -847,6 +855,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadTurnSteerCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
+  ThreadUserInputSnoozeCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
   ThreadGoalSetCommand,
@@ -873,6 +882,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ClientThreadTurnSteerCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
+  ThreadUserInputSnoozeCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
   ThreadGoalSetCommand,
@@ -1015,6 +1025,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.turn-steer-requested",
   "thread.approval-response-requested",
   "thread.user-input-response-requested",
+  "thread.user-input-snooze-requested",
   "thread.checkpoint-revert-requested",
   "thread.reverted",
   "thread.session-stop-requested",
@@ -1190,6 +1201,12 @@ const ThreadUserInputResponseRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
+  createdAt: IsoDateTime,
+});
+
+const ThreadUserInputSnoozeRequestedPayload = Schema.Struct({
+  threadId: ThreadId,
+  requestId: ApprovalRequestId,
   createdAt: IsoDateTime,
 });
 
@@ -1370,6 +1387,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.user-input-response-requested"),
     payload: ThreadUserInputResponseRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.user-input-snooze-requested"),
+    payload: ThreadUserInputSnoozeRequestedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

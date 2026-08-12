@@ -74,6 +74,7 @@ type ProviderIntentEvent = Extract<
       | "thread.turn-steer-requested"
       | "thread.approval-response-requested"
       | "thread.user-input-response-requested"
+      | "thread.user-input-snooze-requested"
       | "thread.session-stop-requested"
       | "thread.goal-set-requested"
       | "thread.goal-clear-requested";
@@ -2496,6 +2497,33 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const processUserInputSnoozeRequested = Effect.fn("processUserInputSnoozeRequested")(function* (
+    event: Extract<ProviderIntentEvent, { type: "thread.user-input-snooze-requested" }>,
+  ) {
+    const thread = yield* resolveThread(event.payload.threadId);
+    if (!thread?.session || thread.session.status === "stopped") {
+      return;
+    }
+
+    yield* providerService
+      .snoozeUserInput({
+        threadId: event.payload.threadId,
+        requestId: event.payload.requestId,
+      })
+      .pipe(
+        Effect.catchCause((cause) =>
+          // A request may auto-resolve in the narrow interval between the
+          // renderer's first interaction and this command. That race is
+          // harmless and should not become a toast or stale pending card.
+          Effect.logWarning("provider user-input auto-resolution snooze was not applied", {
+            threadId: event.payload.threadId,
+            requestId: event.payload.requestId,
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      );
+  });
+
   const processSessionStopRequested = Effect.fn("processSessionStopRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.session-stop-requested" }>,
   ) {
@@ -2712,6 +2740,9 @@ const make = Effect.gen(function* () {
       case "thread.user-input-response-requested":
         yield* processUserInputResponseRequested(event);
         return;
+      case "thread.user-input-snooze-requested":
+        yield* processUserInputSnoozeRequested(event);
+        return;
       case "thread.session-stop-requested":
         yield* processSessionStopRequested(event);
         return;
@@ -2772,6 +2803,7 @@ const make = Effect.gen(function* () {
         event.type === "thread.turn-steer-requested" ||
         event.type === "thread.approval-response-requested" ||
         event.type === "thread.user-input-response-requested" ||
+        event.type === "thread.user-input-snooze-requested" ||
         event.type === "thread.session-stop-requested" ||
         event.type === "thread.goal-set-requested" ||
         event.type === "thread.goal-clear-requested"

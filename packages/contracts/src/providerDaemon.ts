@@ -5,6 +5,7 @@ import {
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
+  ProviderSnoozeUserInputInput,
   ProviderSendTurnInput,
   ProviderSession,
   ProviderSessionStartInput,
@@ -481,6 +482,11 @@ export const ProviderDaemonRpcRequest = Schema.Union([
     payload: ProviderRespondToUserInputInput,
   }),
   Schema.Struct({
+    method: Schema.Literal("snoozeUserInput"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: ProviderSnoozeUserInputInput,
+  }),
+  Schema.Struct({
     method: Schema.Literal("stopSession"),
     commandId: Schema.optional(ProviderDaemonCommandId),
     payload: ProviderStopSessionInput,
@@ -531,6 +537,7 @@ export const ProviderDaemonRpcResultByMethod = {
   interruptTurn: Schema.Void,
   respondToRequest: Schema.Void,
   respondToUserInput: Schema.Void,
+  snoozeUserInput: Schema.Void,
   stopSession: Schema.Void,
   restartProviderRuntime: ProviderDaemonRuntimeRestartResult,
   listSessions: Schema.Array(ProviderSession),

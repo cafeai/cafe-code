@@ -17,6 +17,7 @@ import {
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
+  ProviderSnoozeUserInputInput,
   ProviderSendTurnInput,
   ProviderSessionStartInput,
   ProviderThreadGoalClearInput,
@@ -1297,6 +1298,34 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   });
 
+  const snoozeUserInput: ProviderServiceShape["snoozeUserInput"] = Effect.fn("snoozeUserInput")(
+    function* (rawInput) {
+      const input = yield* decodeInputOrValidationError({
+        operation: "ProviderService.snoozeUserInput",
+        schema: ProviderSnoozeUserInputInput,
+        payload: rawInput,
+      });
+      const routed = yield* resolveRoutableSession({
+        threadId: input.threadId,
+        operation: "ProviderService.snoozeUserInput",
+        allowRecovery: true,
+      });
+      yield* Effect.annotateCurrentSpan({
+        "provider.operation": "snooze-user-input",
+        "provider.kind": routed.adapter.provider,
+        "provider.thread_id": input.threadId,
+        "provider.request_id": input.requestId,
+      });
+
+      // Blocking-only providers have nothing to snooze. Keeping this capability
+      // optional avoids inventing a fake acknowledgement in Claude/OpenCode while
+      // still routing Codex's explicit non-blocking contract through the daemon.
+      if (routed.adapter.snoozeUserInput) {
+        yield* routed.adapter.snoozeUserInput(routed.threadId, input.requestId);
+      }
+    },
+  );
+
   const stopSession: ProviderServiceShape["stopSession"] = Effect.fn("stopSession")(
     function* (rawInput) {
       const input = yield* decodeInputOrValidationError({
@@ -1781,6 +1810,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     interruptTurn,
     respondToRequest,
     respondToUserInput,
+    snoozeUserInput,
     stopSession,
     restartProviderRuntime,
     listSessions,

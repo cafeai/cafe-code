@@ -134,6 +134,7 @@ describe("ProviderSessionReaper", () => {
       interruptTurn: () => unsupported(),
       respondToRequest: () => unsupported(),
       respondToUserInput: () => unsupported(),
+      snoozeUserInput: () => unsupported(),
       stopSession,
       restartProviderRuntime: () => unsupported(),
       listSessions: () => Effect.succeed([]),

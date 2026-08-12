@@ -35,6 +35,9 @@ export const DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL = "";
 export const DEFAULT_SIDEBAR_BRAND_IMAGE = null;
 export const DEFAULT_APP_ACCENT_COLOR = "";
 export const DEFAULT_THEME_ACCENT_COLOR = "";
+export const MIN_INTERFACE_SCALE_PERCENT = 80;
+export const MAX_INTERFACE_SCALE_PERCENT = 130;
+export const DEFAULT_INTERFACE_SCALE_PERCENT = 100;
 export const MIN_SIDEBAR_STAR_SPEED = 0.25;
 export const MAX_SIDEBAR_STAR_SPEED = 4;
 export const DEFAULT_SIDEBAR_STAR_SPEED = 1;
@@ -85,6 +88,13 @@ export const SidebarStarSpeed = Schema.Number.check(
   }),
 );
 export type SidebarStarSpeed = typeof SidebarStarSpeed.Type;
+export const InterfaceScalePercent = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_INTERFACE_SCALE_PERCENT,
+    maximum: MAX_INTERFACE_SCALE_PERCENT,
+  }),
+);
+export type InterfaceScalePercent = typeof InterfaceScalePercent.Type;
 
 // ── Ambiance (decorative weather layer) ────────────────────────────
 //
@@ -168,6 +178,9 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   diffIgnoreWhitespace: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   diffWordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  interfaceScalePercent: InterfaceScalePercent.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_INTERFACE_SCALE_PERCENT)),
+  ),
   continueBackgroundAnimations: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS)),
   ),
@@ -769,6 +782,7 @@ export const ClientSettingsPatch = Schema.Struct({
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   diffWordWrap: Schema.optionalKey(Schema.Boolean),
+  interfaceScalePercent: Schema.optionalKey(InterfaceScalePercent),
   continueBackgroundAnimations: Schema.optionalKey(Schema.Boolean),
   showSidebarSearch: Schema.optionalKey(Schema.Boolean),
   showSidebarMascot: Schema.optionalKey(Schema.Boolean),

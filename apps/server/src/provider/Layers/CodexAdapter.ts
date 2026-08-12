@@ -1195,7 +1195,10 @@ function mapToRuntimeEvents(
       const payload =
         readPayload(EffectCodexSchema.ServerRequest__ToolRequestUserInputParams, event.payload) ??
         readPayload(EffectCodexSchema.ToolRequestUserInputParams, event.payload);
-      const questions = payload ? toUserInputQuestions(payload.questions) : undefined;
+      if (!payload) {
+        return [];
+      }
+      const questions = toUserInputQuestions(payload.questions);
       if (!questions) {
         return [];
       }
@@ -1205,6 +1208,7 @@ function mapToRuntimeEvents(
           type: "user-input.requested",
           payload: {
             questions,
+            isBlocking: payload.isBlocking,
           },
         },
       ];
@@ -1948,6 +1952,7 @@ function mapToRuntimeEvents(
         type: "user-input.resolved",
         payload: {
           answers: toCanonicalUserInputAnswers(payload.answers),
+          ...(readRecordValue(event.payload)?.autoResolved === true ? { autoResolved: true } : {}),
         },
       },
     ];
@@ -3078,6 +3083,19 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       ),
     );
 
+  const snoozeUserInput: NonNullable<CodexAdapterShape["snoozeUserInput"]> = (
+    threadId,
+    requestId,
+  ) =>
+    requireSession(threadId).pipe(
+      Effect.flatMap((session) => session.runtime.snoozeUserInput(requestId)),
+      Effect.mapError((cause) =>
+        cause._tag === "ProviderAdapterSessionNotFoundError"
+          ? cause
+          : mapCodexRuntimeError(threadId, "item/tool/requestUserInput/snooze", cause),
+      ),
+    );
+
   const writeNativeEvent = Effect.fn("writeNativeEvent")(function* (event: ProviderEvent) {
     if (!nativeEventLogger) {
       return;
@@ -3149,6 +3167,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     rollbackThread,
     respondToRequest,
     respondToUserInput,
+    snoozeUserInput,
     stopSession,
     listSessions,
     hasSession,

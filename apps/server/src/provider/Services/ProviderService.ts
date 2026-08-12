@@ -17,6 +17,7 @@ import type {
   ProviderInstanceId,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
+  ProviderSnoozeUserInputInput,
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
   ProviderSession,
@@ -92,6 +93,11 @@ export interface ProviderServiceShape {
    */
   readonly respondToUserInput: (
     input: ProviderRespondToUserInputInput,
+  ) => Effect.Effect<void, ProviderServiceError>;
+
+  /** Disable automatic resolution for one provider user-input request. */
+  readonly snoozeUserInput: (
+    input: ProviderSnoozeUserInputInput,
   ) => Effect.Effect<void, ProviderServiceError>;
 
   /**

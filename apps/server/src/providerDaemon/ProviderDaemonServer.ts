@@ -735,6 +735,8 @@ const executeRpcRequest = (
       return providerService.respondToRequest(request.payload);
     case "respondToUserInput":
       return providerService.respondToUserInput(request.payload);
+    case "snoozeUserInput":
+      return providerService.snoozeUserInput(request.payload);
     case "stopSession":
       return providerService.stopSession(request.payload);
     case "restartProviderRuntime":

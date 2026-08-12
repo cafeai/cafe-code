@@ -28,6 +28,7 @@ import {
   DEFAULT_APP_ACCENT_COLOR,
   DEFAULT_BRAND_WORDMARK_PREFIX,
   DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
+  DEFAULT_INTERFACE_SCALE_PERCENT,
   DEFAULT_SHOW_SIDEBAR_ATTRIBUTION,
   DEFAULT_SIDEBAR_BRAND_IMAGE,
   DEFAULT_SIDEBAR_STAR_SPEED,
@@ -35,9 +36,11 @@ import {
   DEFAULT_SHOW_SIDEBAR_SEARCH,
   DEFAULT_THEME_ACCENT_COLOR,
   MAX_BRAND_WORDMARK_PREFIX_LENGTH,
+  MAX_INTERFACE_SCALE_PERCENT,
   MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
   MAX_SIDEBAR_STAR_SPEED,
   MIN_SIDEBAR_STAR_SPEED,
+  MIN_INTERFACE_SCALE_PERCENT,
   type ChatCopyFormat,
   type DefaultEditorSelection,
   type PowerSaveBlockerMode,
@@ -80,6 +83,7 @@ import {
   NumberFieldInput,
 } from "../ui/number-field";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+import { Slider } from "../ui/slider";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -113,6 +117,7 @@ import {
   useServerProviders,
 } from "../../rpc/serverState";
 import { resolveEditorOpenOptions, type EditorOpenOption } from "../../editorOpenOptions";
+import { snapInterfaceScalePercent } from "../../interfaceScale";
 import { openInPreferredEditor } from "../../editorPreferences";
 import {
   DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES,
@@ -371,6 +376,9 @@ export function useSettingsRestore(onRestored?: () => void) {
   const changedSettingLabels = useMemo(
     () => [
       ...(theme !== "system" ? ["Theme"] : []),
+      ...(settings.interfaceScalePercent !== DEFAULT_UNIFIED_SETTINGS.interfaceScalePercent
+        ? ["Interface size"]
+        : []),
       ...(settings.continueBackgroundAnimations !==
       DEFAULT_UNIFIED_SETTINGS.continueBackgroundAnimations
         ? ["Background animations"]
@@ -477,6 +485,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.themeAccentColor,
       settings.automaticGitFetchInterval,
       settings.enableAssistantStreaming,
+      settings.interfaceScalePercent,
       settings.sidebarThreadPreviewCount,
       settings.timestampFormat,
       theme,
@@ -496,6 +505,7 @@ export function useSettingsRestore(onRestored?: () => void) {
     setTheme("system");
     updateSettings({
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
+      interfaceScalePercent: DEFAULT_UNIFIED_SETTINGS.interfaceScalePercent,
       continueBackgroundAnimations: DEFAULT_UNIFIED_SETTINGS.continueBackgroundAnimations,
       appAccentColor: DEFAULT_UNIFIED_SETTINGS.appAccentColor,
       showSidebarSearch: DEFAULT_UNIFIED_SETTINGS.showSidebarSearch,
@@ -754,6 +764,38 @@ export function AppearanceSettingsPanel() {
                 ))}
               </SelectPopup>
             </Select>
+          }
+        />
+
+        <SettingsRow
+          title="Interface size"
+          description="Scale text, controls, icons, and spacing across Cafe Code."
+          resetAction={
+            settings.interfaceScalePercent !== DEFAULT_INTERFACE_SCALE_PERCENT ? (
+              <SettingResetButton
+                label="interface size"
+                onClick={() =>
+                  updateSettings({ interfaceScalePercent: DEFAULT_INTERFACE_SCALE_PERCENT })
+                }
+              />
+            ) : null
+          }
+          control={
+            <div className="flex w-full items-center gap-3 sm:w-56">
+              <Slider
+                value={settings.interfaceScalePercent}
+                min={MIN_INTERFACE_SCALE_PERCENT}
+                max={MAX_INTERFACE_SCALE_PERCENT}
+                step={5}
+                aria-label="Interface size"
+                onValueChange={(value) =>
+                  updateSettings({ interfaceScalePercent: snapInterfaceScalePercent(value) })
+                }
+              />
+              <span className="w-10 shrink-0 text-right font-mono text-xs text-muted-foreground">
+                {settings.interfaceScalePercent}%
+              </span>
+            </div>
           }
         />
 

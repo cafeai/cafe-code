@@ -19,6 +19,8 @@ function Slider({ className, ...props }: SliderPrimitive.Root.Props<number>) {
         <SliderPrimitive.Track className="relative h-[3px] w-full rounded-full bg-muted-foreground/25">
           <SliderPrimitive.Indicator className="absolute h-full rounded-full bg-primary" />
           <SliderPrimitive.Thumb
+            aria-label={props["aria-label"]}
+            aria-labelledby={props["aria-labelledby"]}
             className="absolute top-1/2 size-3 -translate-y-1/2 rounded-full bg-foreground shadow-sm outline-none transition-[scale] duration-100 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background active:scale-110 data-disabled:cursor-not-allowed"
             data-slot="slider-thumb"
           />

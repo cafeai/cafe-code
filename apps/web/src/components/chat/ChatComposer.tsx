@@ -753,6 +753,7 @@ export interface ChatComposerProps {
   } | null;
   activePendingResolvedAnswers: Record<string, unknown> | null;
   activePendingIsResponding: boolean;
+  activePendingAutoResolutionSnoozed: boolean;
   activePendingDraftAnswers: Record<string, PendingUserInputDraftAnswer>;
   activePendingQuestionIndex: number;
   respondingRequestIds: ApprovalRequestId[];
@@ -821,6 +822,7 @@ export interface ChatComposerProps {
     expandedCursor: number,
     cursorAdjacentToMention: boolean,
   ) => void;
+  onSnoozeActivePendingUserInput: () => void;
 
   onProviderModelSelect: (instanceId: ProviderInstanceId, model: string) => void;
   toggleInteractionMode: () => void;
@@ -862,6 +864,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activePendingProgress,
     activePendingResolvedAnswers,
     activePendingIsResponding,
+    activePendingAutoResolutionSnoozed,
     activePendingDraftAnswers,
     activePendingQuestionIndex,
     respondingRequestIds,
@@ -905,6 +908,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onAdvanceActivePendingUserInput,
     onPreviousActivePendingUserInputQuestion,
     onChangeActivePendingUserInputCustomAnswer,
+    onSnoozeActivePendingUserInput,
     onProviderModelSelect,
     toggleInteractionMode,
     handleRuntimeModeChange,
@@ -2573,6 +2577,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   questionIndex={activePendingQuestionIndex}
                   onToggleOption={onSelectActivePendingUserInputOption}
                   onAdvance={onAdvanceActivePendingUserInput}
+                  autoResolutionSnoozed={activePendingAutoResolutionSnoozed}
+                  onSnoozeAutoResolution={onSnoozeActivePendingUserInput}
                 />
               </div>
             ) : showPlanFollowUpPrompt && activeProposedPlan ? (
@@ -2613,6 +2619,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 questionIndex={activePendingQuestionIndex}
                 onToggleOption={onSelectActivePendingUserInputOption}
                 onAdvance={onAdvanceActivePendingUserInput}
+                autoResolutionSnoozed={activePendingAutoResolutionSnoozed}
+                onSnoozeAutoResolution={onSnoozeActivePendingUserInput}
               />
               <div className="px-3 pb-3 sm:px-4">
                 <div

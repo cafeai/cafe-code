@@ -19,6 +19,7 @@ import {
   DEFAULT_CHAT_COPY_FORMAT,
   DEFAULT_CLIENT_SETTINGS,
   DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
+  DEFAULT_INTERFACE_SCALE_PERCENT,
   DEFAULT_POWER_SAVE_BLOCKER_MODE,
   DEFAULT_SHOW_SIDEBAR_ATTRIBUTION,
   DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL,
@@ -28,12 +29,14 @@ import {
   DEFAULT_SHOW_SIDEBAR_SEARCH,
   DEFAULT_THEME_ACCENT_COLOR,
   MAX_BRAND_WORDMARK_PREFIX_LENGTH,
+  MAX_INTERFACE_SCALE_PERCENT,
   MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH,
   MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
   MAX_SIDEBAR_BRAND_IMAGE_ID_LENGTH,
   MAX_AMBIANCE_INTENSITY,
   MAX_SIDEBAR_STAR_SPEED,
   MIN_AMBIANCE_INTENSITY,
+  MIN_INTERFACE_SCALE_PERCENT,
   MIN_SIDEBAR_STAR_SPEED,
   ServerSettingsPatch,
 } from "./settings.ts";
@@ -77,6 +80,7 @@ describe("client settings", () => {
   });
 
   it("defaults appearance preferences", () => {
+    expect(DEFAULT_CLIENT_SETTINGS.interfaceScalePercent).toBe(DEFAULT_INTERFACE_SCALE_PERCENT);
     expect(DEFAULT_CLIENT_SETTINGS.continueBackgroundAnimations).toBe(
       DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
     );
@@ -92,6 +96,7 @@ describe("client settings", () => {
     expect(DEFAULT_CLIENT_SETTINGS.themeAccentColor).toBe(DEFAULT_THEME_ACCENT_COLOR);
     expect(DEFAULT_CLIENT_SETTINGS.appAccentColor).toBe(DEFAULT_APP_ACCENT_COLOR);
     expect(decodeClientSettings({}).continueBackgroundAnimations).toBe(false);
+    expect(decodeClientSettings({}).interfaceScalePercent).toBe(100);
     expect(decodeClientSettings({}).showSidebarSearch).toBe(true);
     expect(decodeClientSettings({}).showSidebarMascot).toBe(true);
     expect(decodeClientSettings({}).showSidebarAttribution).toBe(true);
@@ -101,6 +106,22 @@ describe("client settings", () => {
     expect(decodeClientSettings({}).sidebarStarSpeed).toBe(1);
     expect(decodeClientSettings({}).themeAccentColor).toBe("");
     expect(decodeClientSettings({}).appAccentColor).toBe("");
+  });
+
+  it("bounds interface scale patches", () => {
+    expect(
+      decodeClientSettingsPatch({ interfaceScalePercent: MIN_INTERFACE_SCALE_PERCENT }),
+    ).toEqual({ interfaceScalePercent: MIN_INTERFACE_SCALE_PERCENT });
+    expect(
+      decodeClientSettingsPatch({ interfaceScalePercent: MAX_INTERFACE_SCALE_PERCENT }),
+    ).toEqual({ interfaceScalePercent: MAX_INTERFACE_SCALE_PERCENT });
+    expect(() =>
+      decodeClientSettingsPatch({ interfaceScalePercent: MIN_INTERFACE_SCALE_PERCENT - 1 }),
+    ).toThrow();
+    expect(() =>
+      decodeClientSettingsPatch({ interfaceScalePercent: MAX_INTERFACE_SCALE_PERCENT + 1 }),
+    ).toThrow();
+    expect(() => decodeClientSettingsPatch({ interfaceScalePercent: 100.5 })).toThrow();
   });
 
   it("defaults ambiance to off with rain, live reaction, and accent-following color", () => {

@@ -3,8 +3,6 @@ import {
   ArrowUpDownIcon,
   ChevronRightIcon,
   FolderPlusIcon,
-  PanelLeftCloseIcon,
-  PanelLeftIcon,
   PlusIcon,
   SearchIcon,
   SettingsIcon,
@@ -212,11 +210,7 @@ import {
   type SidebarProjectSnapshot,
 } from "../sidebarProjectGrouping";
 import { SidebarProviderUpdatePill } from "./sidebar/SidebarProviderUpdatePill";
-import {
-  SidebarTriggerWithUnreadDot,
-  UnseenCompletionsDot,
-  useHasUnseenThreadCompletions,
-} from "./sidebar/unseenCompletions";
+import { SidebarTriggerWithUnreadDot } from "./sidebar/unseenCompletions";
 const SIDEBAR_SORT_LABELS: Record<SidebarProjectSortOrder, string> = {
   updated_at: "Last user message",
   created_at: "Created at",
@@ -3086,47 +3080,42 @@ const SidebarChromeHeader = memo(function SidebarChromeHeader({
 }: {
   isElectron: boolean;
 }) {
-  const { open } = useSidebar();
   const wordmark = (
-    <div className="flex min-w-0 flex-1 items-center gap-2 group-data-[collapsible=icon]:justify-center">
-      {open ? (
-        <>
-          <SidebarTriggerWithUnreadDot className="md:hidden" />
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                // In Electron the wordmark shares the frameless title bar, so
-                // keep it non-interactive: a <span> inherits the header's
-                // `drag-region` (letting the whole 52px band drag the window),
-                // whereas an <a>/<button> would opt out via `.drag-region a`.
-                // On the web it stays a link back to the threads home.
-                isElectron ? (
-                  <span className="ml-1 flex min-w-0 items-center gap-1">
-                    <CafeCodeWordmark />
-                    <span className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60">
-                      {APP_STAGE_LABEL}
-                    </span>
-                  </span>
-                ) : (
-                  <Link
-                    aria-label="Go to threads"
-                    className="ml-1 flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-md outline-hidden ring-ring transition-colors hover:text-foreground focus-visible:ring-2"
-                    to="/"
-                  >
-                    <CafeCodeWordmark />
-                    <span className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60">
-                      {APP_STAGE_LABEL}
-                    </span>
-                  </Link>
-                )
-              }
-            />
-            <TooltipPopup side="bottom" sideOffset={2}>
-              Version {APP_VERSION}
-            </TooltipPopup>
-          </Tooltip>
-        </>
-      ) : null}
+    <div className="flex min-w-0 flex-1 items-center gap-2">
+      <SidebarTriggerWithUnreadDot />
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            // In Electron the wordmark shares the frameless title bar, so
+            // keep it non-interactive: a <span> inherits the header's
+            // `drag-region` (letting the whole 52px band drag the window),
+            // whereas an <a>/<button> would opt out via `.drag-region a`.
+            // On the web it stays a link back to the threads home.
+            isElectron ? (
+              <span className="ml-1 flex min-w-0 items-center gap-1">
+                <CafeCodeWordmark />
+                <span className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60">
+                  {APP_STAGE_LABEL}
+                </span>
+              </span>
+            ) : (
+              <Link
+                aria-label="Go to threads"
+                className="ml-1 flex min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-md outline-hidden ring-ring transition-colors hover:text-foreground focus-visible:ring-2"
+                to="/"
+              >
+                <CafeCodeWordmark />
+                <span className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-[0.18em] text-muted-foreground/60">
+                  {APP_STAGE_LABEL}
+                </span>
+              </Link>
+            )
+          }
+        />
+        <TooltipPopup side="bottom" sideOffset={2}>
+          Version {APP_VERSION}
+        </TooltipPopup>
+      </Tooltip>
     </div>
   );
   const persistentHeaderClassName = "relative z-30 transition-[padding] duration-200 ease-linear";
@@ -3135,21 +3124,14 @@ const SidebarChromeHeader = memo(function SidebarChromeHeader({
     <SidebarHeader
       className={cn(
         persistentHeaderClassName,
-        "drag-region flex-row items-center gap-2 py-0",
-        open
-          ? "h-[52px] px-4 pl-[90px] wco:h-[env(titlebar-area-height)] wco:pl-[calc(env(titlebar-area-x)+1em)]"
-          : "h-[52px] justify-center px-2",
+        "drag-region h-[52px] flex-row items-center gap-2 px-4 py-0 pl-[90px] wco:h-[env(titlebar-area-height)] wco:pl-[calc(env(titlebar-area-x)+1em)]",
       )}
     >
       {wordmark}
     </SidebarHeader>
   ) : (
     <SidebarHeader
-      className={cn(
-        persistentHeaderClassName,
-        "gap-3 py-2 sm:gap-2.5 sm:py-3",
-        open ? "px-3 sm:px-4" : "items-center px-2",
-      )}
+      className={cn(persistentHeaderClassName, "gap-3 px-3 py-2 sm:gap-2.5 sm:px-4 sm:py-3")}
     >
       {wordmark}
     </SidebarHeader>
@@ -3159,10 +3141,7 @@ const SidebarChromeHeader = memo(function SidebarChromeHeader({
 const SidebarChromeFooter = memo(function SidebarChromeFooter() {
   const navigate = useNavigate();
   const pathname = useLocation({ select: (loc) => loc.pathname });
-  const { isMobile, open, setOpen, setOpenMobile } = useSidebar();
-  const hasUnseenCompletions = useHasUnseenThreadCompletions();
-  const ToggleIcon = open ? PanelLeftCloseIcon : PanelLeftIcon;
-  const toggleLabel = open ? "Hide sidebar" : "Show sidebar";
+  const { isMobile, setOpenMobile } = useSidebar();
   const isOnSettingsFooter = pathname.startsWith("/settings");
   const handleSettingsClick = useCallback(() => {
     if (isMobile) {
@@ -3172,58 +3151,22 @@ const SidebarChromeFooter = memo(function SidebarChromeFooter() {
   }, [isMobile, navigate, setOpenMobile]);
 
   return (
-    <SidebarFooter className="p-2 group-data-[collapsible=icon]:items-center">
-      {open ? (
-        <>
-          <SidebarProviderUpdatePill />
-          <SidebarUpdatePill />
-        </>
-      ) : null}
-      <SidebarMenu className="group-data-[collapsible=icon]:items-center">
-        <SidebarMenuItem
-          className={cn("flex items-center gap-1", open ? "w-full" : "justify-center")}
-        >
-          {open ? (
-            <SidebarMenuButton
-              size="sm"
-              className={cn(
-                "min-w-0 flex-1 gap-2 px-2 py-1.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground",
-                isOnSettingsFooter && "bg-accent text-foreground",
-              )}
-              onClick={handleSettingsClick}
-            >
-              <SettingsIcon className="size-3.5" />
-              <span className="text-xs">Settings</span>
-            </SidebarMenuButton>
-          ) : null}
-          <span className="relative hidden shrink-0 md:inline-flex">
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    aria-label={toggleLabel}
-                    className="size-7 shrink-0 text-muted-foreground/70 hover:bg-accent hover:text-foreground"
-                    onClick={() => {
-                      void setOpen(!open);
-                    }}
-                    size="icon"
-                    type="button"
-                    variant="ghost"
-                  />
-                }
-              >
-                <ToggleIcon className="size-4" />
-              </TooltipTrigger>
-              <TooltipPopup side="top" sideOffset={2}>
-                {toggleLabel}
-              </TooltipPopup>
-            </Tooltip>
-            {/* When the desktop sidebar is collapsed the thread status pills are
-                hidden, so the toggle carries the unseen-completion dot instead. */}
-            {!open && hasUnseenCompletions ? (
-              <UnseenCompletionsDot className="right-0 top-0 ring-sidebar" />
-            ) : null}
-          </span>
+    <SidebarFooter className="p-2">
+      <SidebarProviderUpdatePill />
+      <SidebarUpdatePill />
+      <SidebarMenu>
+        <SidebarMenuItem className="flex w-full items-center gap-1">
+          <SidebarMenuButton
+            size="sm"
+            className={cn(
+              "min-w-0 flex-1 gap-2 px-2 py-1.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground",
+              isOnSettingsFooter && "bg-accent text-foreground",
+            )}
+            onClick={handleSettingsClick}
+          >
+            <SettingsIcon className="size-3.5" />
+            <span className="text-xs">Settings</span>
+          </SidebarMenuButton>
         </SidebarMenuItem>
       </SidebarMenu>
     </SidebarFooter>
@@ -4225,18 +4168,12 @@ export default function Sidebar() {
       <SidebarChromeHeader isElectron={isElectron} />
 
       {isOnSettings ? (
-        <>
-          <div className="flex min-h-0 flex-1 flex-col group-data-[collapsible=icon]:hidden">
-            <SettingsSidebarNav pathname={pathname} />
-          </div>
-          <div aria-hidden="true" className="hidden flex-1 group-data-[collapsible=icon]:block" />
-          <div className="hidden group-data-[collapsible=icon]:block">
-            <SidebarChromeFooter />
-          </div>
-        </>
+        <div className="flex min-h-0 flex-1 flex-col">
+          <SettingsSidebarNav pathname={pathname} />
+        </div>
       ) : (
         <>
-          <div className="flex min-h-0 flex-1 flex-col group-data-[collapsible=icon]:hidden">
+          <div className="flex min-h-0 flex-1 flex-col">
             <SidebarProjectsContent
               primaryEnvironmentBootstrapped={primaryEnvironmentBootstrapped}
               bootstrappedEnvironmentIds={bootstrappedEnvironmentIdSet}
@@ -4286,7 +4223,6 @@ export default function Sidebar() {
 
             <SidebarSeparator />
           </div>
-          <div aria-hidden="true" className="hidden flex-1 group-data-[collapsible=icon]:block" />
           <SidebarChromeFooter />
         </>
       )}

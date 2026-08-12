@@ -781,6 +781,31 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.user-input.snooze": {
+      yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+          metadata: {
+            requestId: command.requestId,
+          },
+        }),
+        type: "thread.user-input-snooze-requested",
+        payload: {
+          threadId: command.threadId,
+          requestId: command.requestId,
+          createdAt: command.createdAt,
+        },
+      };
+    }
+
     case "thread.checkpoint.revert": {
       yield* requireThread({
         readModel,

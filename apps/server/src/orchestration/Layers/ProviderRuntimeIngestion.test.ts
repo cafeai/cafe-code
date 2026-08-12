@@ -124,6 +124,7 @@ function createProviderServiceHarness() {
     interruptTurn: () => unsupported(),
     respondToRequest: () => unsupported(),
     respondToUserInput: () => unsupported(),
+    snoozeUserInput: () => unsupported(),
     stopSession: () => unsupported(),
     restartProviderRuntime: () => unsupported(),
     listSessions: () => Effect.succeed([...runtimeSessions]),
@@ -4705,6 +4706,7 @@ describe("ProviderRuntimeIngestion", () => {
       turnId: asTurnId("turn-user-input"),
       requestId: ApprovalRequestId.make("req-user-input-1"),
       payload: {
+        isBlocking: false,
         questions: [
           {
             id: "sandbox_mode",
@@ -4733,6 +4735,7 @@ describe("ProviderRuntimeIngestion", () => {
         answers: {
           sandbox_mode: "workspace-write",
         },
+        autoResolved: true,
       },
     });
 
@@ -4751,6 +4754,7 @@ describe("ProviderRuntimeIngestion", () => {
       (activity: ProviderRuntimeTestActivity) => activity.id === "evt-user-input-requested",
     );
     expect(requested?.kind).toBe("user-input.requested");
+    expect(requested?.payload).toMatchObject({ isBlocking: false });
 
     const resolved = thread.activities.find(
       (activity: ProviderRuntimeTestActivity) => activity.id === "evt-user-input-resolved",
@@ -4760,9 +4764,11 @@ describe("ProviderRuntimeIngestion", () => {
         ? (resolved.payload as Record<string, unknown>)
         : undefined;
     expect(resolved?.kind).toBe("user-input.resolved");
+    expect(resolved?.summary).toBe("User input continued automatically");
     expect(resolvedPayload?.answers).toEqual({
       sandbox_mode: "workspace-write",
     });
+    expect(resolvedPayload?.autoResolved).toBe(true);
   });
 
   it("continues processing runtime events after a single event handler failure", async () => {

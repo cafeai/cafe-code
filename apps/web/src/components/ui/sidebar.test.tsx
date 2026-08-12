@@ -2,10 +2,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import {
+  Sidebar,
   SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuSubButton,
   SidebarProvider,
+  SidebarTrigger,
 } from "./sidebar";
 
 function renderSidebarButton(className?: string) {
@@ -49,5 +51,33 @@ describe("sidebar interactive cursors", () => {
 
     expect(html).toContain('data-slot="sidebar-menu-sub-button"');
     expect(html).toContain("cursor-pointer");
+  });
+});
+
+describe("sidebar off-canvas controls", () => {
+  it("fully removes a collapsed off-canvas sidebar and shows the open-panel icon", () => {
+    const html = renderToStaticMarkup(
+      <SidebarProvider open={false} onOpenChange={() => {}}>
+        <Sidebar collapsible="offcanvas">Navigation</Sidebar>
+        <SidebarTrigger />
+      </SidebarProvider>,
+    );
+
+    expect(html).toContain('data-collapsible="offcanvas"');
+    expect(html).toContain("group-data-[collapsible=offcanvas]:w-0");
+    expect(html).toContain("lucide-panel-left");
+    expect(html).not.toContain("lucide-panel-left-close");
+  });
+
+  it("shows the close-panel icon while the sidebar is open", () => {
+    const html = renderToStaticMarkup(
+      <SidebarProvider open onOpenChange={() => {}}>
+        <Sidebar collapsible="offcanvas">Navigation</Sidebar>
+        <SidebarTrigger />
+      </SidebarProvider>,
+    );
+
+    expect(html).toContain('data-collapsible=""');
+    expect(html).toContain("lucide-panel-left-close");
   });
 });

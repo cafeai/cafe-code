@@ -1904,6 +1904,10 @@ export default function ChatView(props: ChatViewProps) {
   const [respondingUserInputRequestIds, setRespondingUserInputRequestIds] = useState<
     ApprovalRequestId[]
   >([]);
+  const snoozedUserInputRequestIdsRef = useRef<Set<string>>(new Set());
+  const [snoozedUserInputRequestIds, setSnoozedUserInputRequestIds] = useState<ApprovalRequestId[]>(
+    [],
+  );
   const [pendingUserInputAnswersByRequestId, setPendingUserInputAnswersByRequestId] = useState<
     Record<string, Record<string, PendingUserInputDraftAnswer>>
   >({});
@@ -2761,6 +2765,21 @@ export default function ChatView(props: ChatViewProps) {
   const activePendingIsResponding = activePendingUserInput
     ? respondingUserInputRequestIds.includes(activePendingUserInput.requestId)
     : false;
+  const activePendingAutoResolutionSnoozed = activePendingUserInput
+    ? snoozedUserInputRequestIds.includes(activePendingUserInput.requestId)
+    : false;
+
+  useEffect(() => {
+    const liveRequestIds = new Set(pendingUserInputs.map((request) => String(request.requestId)));
+    for (const requestId of snoozedUserInputRequestIdsRef.current) {
+      if (!liveRequestIds.has(requestId)) {
+        snoozedUserInputRequestIdsRef.current.delete(requestId);
+      }
+    }
+    setSnoozedUserInputRequestIds((existing) =>
+      existing.filter((requestId) => liveRequestIds.has(String(requestId))),
+    );
+  }, [pendingUserInputs]);
   const activeProposedPlan = useMemo(() => {
     if (!latestTurnSettled) {
       return null;
@@ -5853,17 +5872,52 @@ export default function ChatView(props: ChatViewProps) {
     [activeThreadId, environmentId, setThreadError],
   );
 
+  const onSnoozeActivePendingUserInput = useCallback(() => {
+    const requestId = activePendingUserInput?.requestId;
+    const api = readEnvironmentApi(environmentId);
+    if (!requestId || !activeThreadId || !api || activePendingUserInput.isBlocking) {
+      return;
+    }
+    const requestKey = String(requestId);
+    if (snoozedUserInputRequestIdsRef.current.has(requestKey)) {
+      return;
+    }
+
+    snoozedUserInputRequestIdsRef.current.add(requestKey);
+    setSnoozedUserInputRequestIds((existing) =>
+      existing.includes(requestId) ? existing : [...existing, requestId],
+    );
+    void api.orchestration
+      .dispatchCommand({
+        type: "thread.user-input.snooze",
+        commandId: newCommandId(),
+        threadId: activeThreadId,
+        requestId,
+        createdAt: new Date().toISOString(),
+      })
+      .catch(() => {
+        // The request may have auto-resolved before the command reached the
+        // provider. Remove the optimistic marker so a still-live request can
+        // retry on the next interaction; stale requests disappear via events.
+        snoozedUserInputRequestIdsRef.current.delete(requestKey);
+        setSnoozedUserInputRequestIds((existing) =>
+          existing.filter((candidate) => candidate !== requestId),
+        );
+      });
+  }, [activePendingUserInput, activeThreadId, environmentId]);
+
   const setActivePendingUserInputQuestionIndex = useCallback(
     (nextQuestionIndex: number) => {
       if (!activePendingUserInput) {
         return;
       }
+      onSnoozeActivePendingUserInput();
       setPendingUserInputQuestionIndexByRequestId((existing) => ({
         ...existing,
         [activePendingUserInput.requestId]: nextQuestionIndex,
       }));
     },
-    [activePendingUserInput],
+    [activePendingUserInput, onSnoozeActivePendingUserInput],
   );
 
   const onSelectActivePendingUserInputOption = useCallback(
@@ -5871,6 +5925,7 @@ export default function ChatView(props: ChatViewProps) {
       if (!activePendingUserInput) {
         return;
       }
+      onSnoozeActivePendingUserInput();
       setPendingUserInputAnswersByRequestId((existing) => {
         const question =
           (activePendingProgress?.activeQuestion?.id === questionId
@@ -5896,7 +5951,12 @@ export default function ChatView(props: ChatViewProps) {
       promptRef.current = "";
       readComposerHandle(composerRef)?.resetCursorState({ cursor: 0 });
     },
-    [activePendingProgress?.activeQuestion, activePendingUserInput, composerRef],
+    [
+      activePendingProgress?.activeQuestion,
+      activePendingUserInput,
+      composerRef,
+      onSnoozeActivePendingUserInput,
+    ],
   );
 
   const onChangeActivePendingUserInputCustomAnswer = useCallback(
@@ -5910,6 +5970,7 @@ export default function ChatView(props: ChatViewProps) {
       if (!activePendingUserInput) {
         return;
       }
+      onSnoozeActivePendingUserInput();
       promptRef.current = value;
       setPendingUserInputAnswersByRequestId((existing) => ({
         ...existing,
@@ -5930,13 +5991,14 @@ export default function ChatView(props: ChatViewProps) {
         readComposerHandle(composerRef)?.focusAt(nextCursor);
       }
     },
-    [activePendingUserInput, composerRef],
+    [activePendingUserInput, composerRef, onSnoozeActivePendingUserInput],
   );
 
   const onAdvanceActivePendingUserInput = useCallback(() => {
     if (!activePendingUserInput || !activePendingProgress) {
       return;
     }
+    onSnoozeActivePendingUserInput();
     if (activePendingProgress.isLastQuestion) {
       if (activePendingResolvedAnswers) {
         void onRespondToUserInput(activePendingUserInput.requestId, activePendingResolvedAnswers);
@@ -5949,6 +6011,7 @@ export default function ChatView(props: ChatViewProps) {
     activePendingResolvedAnswers,
     activePendingUserInput,
     onRespondToUserInput,
+    onSnoozeActivePendingUserInput,
     setActivePendingUserInputQuestionIndex,
   ]);
 
@@ -6489,6 +6552,7 @@ export default function ChatView(props: ChatViewProps) {
                   activePendingProgress={activePendingProgress}
                   activePendingResolvedAnswers={activePendingResolvedAnswers}
                   activePendingIsResponding={activePendingIsResponding}
+                  activePendingAutoResolutionSnoozed={activePendingAutoResolutionSnoozed}
                   activePendingDraftAnswers={activePendingDraftAnswers}
                   activePendingQuestionIndex={activePendingQuestionIndex}
                   respondingRequestIds={respondingRequestIds}
@@ -6535,6 +6599,7 @@ export default function ChatView(props: ChatViewProps) {
                   onChangeActivePendingUserInputCustomAnswer={
                     onChangeActivePendingUserInputCustomAnswer
                   }
+                  onSnoozeActivePendingUserInput={onSnoozeActivePendingUserInput}
                   onProviderModelSelect={onProviderModelSelect}
                   toggleInteractionMode={toggleInteractionMode}
                   handleRuntimeModeChange={handleRuntimeModeChange}
