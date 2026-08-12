@@ -1764,6 +1764,50 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
   });
 
   if (chatViewBrowserPart === "composer") {
+    it.each([80, 130] as const)(
+      "scales desktop composer typography and editor bounds at %i percent",
+      async (interfaceScalePercent) => {
+        const mounted = await mountChatView({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot: createSnapshotForTargetUser({
+            targetMessageId: `msg-user-scaled-composer-${interfaceScalePercent}` as MessageId,
+            targetText: "scaled composer target",
+          }),
+          configureFixture: (nextFixture) => {
+            nextFixture.serverConfig = {
+              ...nextFixture.serverConfig,
+              clientSettings: {
+                ...nextFixture.serverConfig.clientSettings,
+                interfaceScalePercent,
+              },
+            };
+          },
+        });
+
+        try {
+          await waitForServerConfigToApply();
+          const editor = await waitForComposerEditor();
+
+          await vi.waitFor(() => {
+            const rootFontSize = Number.parseFloat(
+              window.getComputedStyle(document.documentElement).fontSize,
+            );
+            const editorStyle = window.getComputedStyle(editor);
+            const editorFontSize = Number.parseFloat(editorStyle.fontSize);
+            const editorMinHeight = Number.parseFloat(editorStyle.minHeight);
+            const editorMaxHeight = Number.parseFloat(editorStyle.maxHeight);
+
+            expect(rootFontSize).toBeGreaterThan(0);
+            expect(editorFontSize / rootFontSize).toBeCloseTo(0.875, 3);
+            expect(editorMinHeight / rootFontSize).toBeCloseTo(4.375, 3);
+            expect(editorMaxHeight / rootFontSize).toBeCloseTo(12.5, 3);
+          });
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+
     it("renders locked single-environment mobile run context as a static workspace label", async () => {
       const mounted = await mountChatView({
         viewport: COMPACT_FOOTER_VIEWPORT,
