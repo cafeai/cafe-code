@@ -3,6 +3,7 @@ import {
   CheckpointRef,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
+  DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
   MessageId,
   type OrchestrationCommand,
   ProjectId,
@@ -154,6 +155,8 @@ describe("OrchestrationEngine", () => {
           activities: [],
           checkpoints: [],
           session: null,
+          autoNudge: DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+          manualFollowUps: [],
         },
       ],
     };

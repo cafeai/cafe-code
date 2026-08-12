@@ -2,6 +2,7 @@ import {
   type ChatAttachment,
   CommandId,
   EventId,
+  type ManualFollowUpId,
   type MessageId,
   type ModelSelection,
   type OrchestrationMessage,
@@ -115,6 +116,150 @@ function areStringArraysEqual(
   );
 }
 
+function areModelSelectionsEqual(left: ModelSelection, right: ModelSelection): boolean {
+  if (left.instanceId !== right.instanceId || left.model !== right.model) return false;
+  const leftOptions = left.options ?? [];
+  const rightOptions = right.options ?? [];
+  return (
+    leftOptions.length === rightOptions.length &&
+    leftOptions.every((leftOption) =>
+      rightOptions.some(
+        (rightOption) => rightOption.id === leftOption.id && rightOption.value === leftOption.value,
+      ),
+    )
+  );
+}
+
+function isActiveProviderActivityKind(kind: string): boolean {
+  return (
+    kind.endsWith(".started") ||
+    kind.endsWith(".progress") ||
+    kind.endsWith(".updated") ||
+    kind.endsWith(".requested")
+  );
+}
+
+/**
+ * Recheck accepted Auto Nudge authority immediately before provider work. Any
+ * changed exact-thread state cancels delivery without consuming provider work.
+ */
+export function autoNudgeTurnStartCancellationReason(
+  thread: OrchestrationThread,
+  event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
+): string | undefined {
+  if (event.payload.dispatchSource !== "auto-nudge") return undefined;
+  const authority = event.payload.autoNudgeAuthority;
+  if (authority === undefined) return "missing immutable Auto Nudge authority provenance";
+
+  const config = thread.autoNudge;
+  if (thread.archivedAt !== null || thread.deletedAt !== null) return "the thread is inactive";
+  if (config.mode === "off") return "Auto Nudge is off";
+  if (config.authorityRevision !== authority.authorityRevision) {
+    return "Auto Nudge authority was replaced or stopped";
+  }
+  if (config.lastDispatchedSettledTurnId !== authority.completedTurnId) {
+    return "the accepted completion is no longer authoritative";
+  }
+  if (authority.dispatchSource === "background" && !config.backgroundContinuation) {
+    return "background continuation is no longer authorized";
+  }
+  if (thread.manualFollowUps.length > 0) return "manual follow-up work has priority";
+  // The durable projector applies `thread.turn-start-requested` before this
+  // reactor observes it. The exact request therefore owns a `starting`
+  // session marker, not the earlier `ready` marker checked by the decider.
+  // Accept only that exact marker; accepting any generic starting state would
+  // let a different turn-start request borrow this Auto Nudge authority.
+  if (
+    thread.session?.status !== "starting" ||
+    thread.session.activeTurnId !== null ||
+    thread.session.updatedAt !== event.payload.createdAt
+  ) {
+    return "the provider session is no longer ready";
+  }
+  if (
+    thread.latestTurn === null ||
+    thread.latestTurn.state !== "completed" ||
+    thread.latestTurn.completedAt === null ||
+    thread.latestTurn.turnId !== authority.completedTurnId ||
+    thread.latestTurn.completedAt !== authority.completedAt
+  ) {
+    return "the exact accepted provider completion is no longer current";
+  }
+  if (
+    event.payload.modelSelection === undefined ||
+    !areModelSelectionsEqual(thread.modelSelection, event.payload.modelSelection) ||
+    thread.runtimeMode !== event.payload.runtimeMode ||
+    thread.interactionMode !== event.payload.interactionMode
+  ) {
+    return "the provider configuration changed after acceptance";
+  }
+
+  const providerTextContinued = thread.messages.some(
+    (message) =>
+      message.turnId === authority.completedTurnId &&
+      (message.updatedAt > authority.completedAt ||
+        (message.updatedAt === authority.completedAt && message.streaming)),
+  );
+  if (providerTextContinued) return "provider text continued after acceptance";
+
+  const providerActivityContinued = thread.activities.some(
+    (activity) =>
+      activity.turnId === authority.completedTurnId &&
+      activity.kind !== "context-window.updated" &&
+      activity.kind !== "checkpoint.captured" &&
+      (activity.createdAt > authority.completedAt ||
+        (activity.createdAt === authority.completedAt &&
+          isActiveProviderActivityKind(activity.kind))),
+  );
+  return providerActivityContinued ? "provider activity continued after acceptance" : undefined;
+}
+
+/**
+ * Startup may retire a durable manual handoff only when the projection binds
+ * the exact queued message to the exact active provider turn. Session status
+ * and timestamps alone are not proof: unrelated work can become active after
+ * the handoff and must never cause Cafe to discard operator intent.
+ */
+export function manualFollowUpHandoffDeliveryIsProven(input: {
+  readonly thread: OrchestrationThread;
+  readonly head: OrchestrationThread["manualFollowUps"][number];
+  readonly runtimeSession?: ProviderSession | undefined;
+}): boolean {
+  const { thread, head, runtimeSession } = input;
+  if (head.status !== "handoff" || head.activatedAt === null) return false;
+  if (
+    runtimeSession !== undefined &&
+    (runtimeSession.status !== "running" || runtimeSession.activeTurnId === undefined)
+  ) {
+    return false;
+  }
+  const message = thread.messages.find((entry) => entry.id === head.message.messageId);
+  if (message === undefined || message.role !== "user" || message.createdAt !== head.activatedAt) {
+    return false;
+  }
+
+  const projectedActiveTurnId =
+    thread.session?.status === "running" ? thread.session.activeTurnId : null;
+  const runtimeActiveTurnId =
+    runtimeSession?.status === "running" ? (runtimeSession.activeTurnId ?? null) : null;
+  const activeTurnId = projectedActiveTurnId ?? runtimeActiveTurnId;
+  if (activeTurnId === null) return false;
+  if (
+    projectedActiveTurnId !== null &&
+    runtimeActiveTurnId !== null &&
+    projectedActiveTurnId !== runtimeActiveTurnId
+  ) {
+    return false;
+  }
+
+  // A manual steer is projected directly onto the provider-owned active turn,
+  // which is exact durable proof. A new-turn handoff keeps a null message turn
+  // id in the public thread detail; timestamps are not unique authority. Leave
+  // that crash-window handoff quarantined instead of guessing and losing or
+  // duplicating operator work.
+  return message.turnId !== null && message.turnId === activeTurnId;
+}
+
 const turnStartKeyForEvent = (event: ProviderIntentEvent): string =>
   event.commandId !== null ? `command:${event.commandId}` : `event:${event.eventId}`;
 
@@ -129,6 +274,7 @@ const PROVIDER_CONTINUATION_BOOTSTRAP_TRANSCRIPT_MAX_CHARS = 40_000;
 const PROVIDER_CONTINUATION_BOOTSTRAP_MIN_TRANSCRIPT_CHARS = 500;
 const ORPHANED_TURN_START_RESTART_DETAIL =
   "Turn start was interrupted by application restart before a provider turn started. The prompt was not resent automatically to avoid duplicate provider work; resend the message to continue.";
+const AUTO_NUDGE_DELIVERY_CANCELLED_SUMMARY = "Auto Nudge delivery cancelled";
 
 export function providerErrorLabel(value: string | undefined): string {
   const normalized = value?.trim();
@@ -492,6 +638,69 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const transitionManualFollowUpHandoff = Effect.fnUntraced(function* (input: {
+    readonly outcome: "accepted" | "released";
+    readonly threadId: ThreadId;
+    readonly followUpId: ManualFollowUpId;
+    readonly activationCommandId: CommandId;
+    readonly occurredAt: string;
+  }) {
+    const stableCommandId = CommandId.make(
+      `server:manual-follow-up-${input.outcome}:${input.activationCommandId}`,
+    );
+    yield* orchestrationEngine
+      .dispatch(
+        input.outcome === "accepted"
+          ? {
+              type: "thread.manual-follow-up.accept",
+              commandId: stableCommandId,
+              threadId: input.threadId,
+              followUpId: input.followUpId,
+              activationCommandId: input.activationCommandId,
+              acceptedAt: input.occurredAt,
+            }
+          : {
+              type: "thread.manual-follow-up.release",
+              commandId: stableCommandId,
+              threadId: input.threadId,
+              followUpId: input.followUpId,
+              activationCommandId: input.activationCommandId,
+              releasedAt: input.occurredAt,
+            },
+      )
+      .pipe(
+        Effect.asVoid,
+        Effect.catchCause((cause) =>
+          Effect.logWarning("provider command reactor could not transition manual follow-up", {
+            outcome: input.outcome,
+            threadId: input.threadId,
+            followUpId: input.followUpId,
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      );
+  });
+
+  const transitionManualFollowUpForEvent = Effect.fnUntraced(function* (
+    event: Extract<
+      ProviderIntentEvent,
+      { type: "thread.turn-start-requested" | "thread.turn-steer-requested" }
+    >,
+    outcome: "accepted" | "released",
+  ) {
+    const followUpId = event.payload.manualFollowUpId;
+    const activationCommandId = event.payload.manualFollowUpActivationCommandId;
+    if (followUpId === undefined || activationCommandId === undefined) return;
+    const occurredAt = DateTime.formatIso(yield* DateTime.now);
+    yield* transitionManualFollowUpHandoff({
+      outcome,
+      threadId: event.payload.threadId,
+      followUpId,
+      activationCommandId,
+      occurredAt,
+    });
+  });
+
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
     readonly kind:
@@ -634,6 +843,92 @@ const make = Effect.gen(function* () {
       .pipe(Effect.map(Option.getOrUndefined));
   });
 
+  const cancelAutoNudgeDelivery = Effect.fnUntraced(function* (input: {
+    readonly event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>;
+    readonly thread: OrchestrationThread;
+    readonly reason: string;
+    readonly runtimeSession?: ProviderSession | null;
+  }) {
+    const cancelledAt = DateTime.formatIso(yield* DateTime.now);
+    const runtimeSession =
+      input.runtimeSession === undefined
+        ? yield* getProviderSessionForThread(input.event.payload.threadId)
+        : (input.runtimeSession ?? undefined);
+    const projectedSession = input.thread.session;
+    const ownsProjectedPendingStart =
+      projectedSession?.status === "starting" &&
+      projectedSession.activeTurnId === null &&
+      projectedSession.updatedAt === input.event.payload.createdAt;
+
+    if (
+      runtimeSession?.status === "running" &&
+      runtimeSession.activeTurnId !== undefined &&
+      runtimeSession.providerInstanceId !== undefined
+    ) {
+      if (ownsProjectedPendingStart) {
+        // Clear the Auto Nudge pending-turn placeholder before restoring the
+        // unrelated runtime turn. A direct starting -> running transition
+        // would attach the cancelled Auto Nudge message to that active turn.
+        yield* setThreadSession({
+          threadId: input.event.payload.threadId,
+          session: {
+            ...projectedSession,
+            status: "ready",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: cancelledAt,
+          },
+          createdAt: cancelledAt,
+        });
+      }
+      // Preserve the real provider-owned active turn. Auto Nudge is cancelled,
+      // but another already-running turn must remain steerable and visible.
+      yield* setThreadSession({
+        threadId: input.event.payload.threadId,
+        session: {
+          threadId: input.event.payload.threadId,
+          status: "running",
+          providerName: runtimeSession.provider,
+          providerInstanceId: runtimeSession.providerInstanceId,
+          runtimeMode: runtimeSession.runtimeMode ?? input.thread.runtimeMode,
+          activeTurnId: runtimeSession.activeTurnId,
+          lastError: null,
+          updatedAt: cancelledAt,
+        },
+        createdAt: cancelledAt,
+      });
+    } else if (ownsProjectedPendingStart) {
+      // Undo only the pending-start marker owned by this request. Never reset
+      // a newer session state while cancelling stale Auto Nudge authority.
+      yield* setThreadSession({
+        threadId: input.event.payload.threadId,
+        session: {
+          ...projectedSession,
+          status: "ready",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: cancelledAt,
+        },
+        createdAt: cancelledAt,
+      });
+    }
+
+    yield* appendProviderDiagnosticActivity({
+      threadId: input.event.payload.threadId,
+      kind: "runtime.warning",
+      summary: AUTO_NUDGE_DELIVERY_CANCELLED_SUMMARY,
+      detail:
+        "Cafe Code cancelled an accepted Auto Nudge before the provider boundary because its exact thread authority changed.",
+      turnId: input.event.payload.autoNudgeAuthority?.completedTurnId ?? null,
+      createdAt: cancelledAt,
+      payload: {
+        messageId: input.event.payload.messageId,
+        reason: input.reason,
+        providerWorkConsumed: false,
+      },
+    });
+  });
+
   const recoverInterruptedTurnStartsOnStartup = Effect.fn("recoverInterruptedTurnStartsOnStartup")(
     function* () {
       // This startup repair only needs thread shell/session state. Do not use
@@ -693,6 +988,71 @@ const make = Effect.gen(function* () {
       );
     },
   );
+
+  const reconcileManualFollowUpHandoffsOnStartup = Effect.fn(
+    "reconcileManualFollowUpHandoffsOnStartup",
+  )(function* () {
+    const shellSnapshot = yield* projectionSnapshotQuery.getShellSnapshot();
+    const candidateThreads = shellSnapshot.threads.filter(
+      (thread) => thread.manualFollowUpCount > 0,
+    );
+    if (candidateThreads.length === 0) return;
+
+    const providerSessions = yield* providerService.listSessions();
+    const providerSessionByThreadId = new Map(
+      providerSessions.map((session) => [String(session.threadId), session] as const),
+    );
+
+    yield* Effect.forEach(
+      candidateThreads,
+      (shellThread) =>
+        Effect.gen(function* () {
+          const thread = yield* resolveThread(shellThread.id);
+          const head = thread?.manualFollowUps[0];
+          if (
+            thread === undefined ||
+            head === undefined ||
+            head.status !== "handoff" ||
+            head.activatedAt === null ||
+            head.activationCommandId === null
+          ) {
+            return;
+          }
+
+          const runtimeSession = providerSessionByThreadId.get(String(thread.id));
+          if (
+            manualFollowUpHandoffDeliveryIsProven({
+              thread,
+              head,
+              ...(runtimeSession !== undefined ? { runtimeSession } : {}),
+            })
+          ) {
+            yield* transitionManualFollowUpHandoff({
+              outcome: "accepted",
+              threadId: thread.id,
+              followUpId: head.id,
+              activationCommandId: head.activationCommandId,
+              occurredAt: DateTime.formatIso(yield* DateTime.now),
+            });
+            return;
+          }
+
+          // A crash can happen after provider acceptance but before Cafe
+          // persists the acceptance event. Releasing an ambiguous handoff
+          // would resend it and can duplicate expensive provider work. Keep
+          // the durable handoff quarantined for explicit recovery instead.
+          yield* Effect.logWarning(
+            "provider command reactor preserved ambiguous manual follow-up handoff on startup",
+            {
+              threadId: thread.id,
+              followUpId: head.id,
+              activationCommandId: head.activationCommandId,
+            },
+          );
+        }),
+      { concurrency: 1 },
+    );
+  });
 
   const resumeActiveCodexGoalsOnStartup = Effect.fn("resumeActiveCodexGoalsOnStartup")(
     function* () {
@@ -1116,15 +1476,34 @@ const make = Effect.gen(function* () {
       systemPrompt !== undefined
         ? composeSystemPromptProviderInput({ systemPrompt, userMessage: normalizedInput })
         : shouldBootstrapProviderContext
-          ? yield* resolveThread(input.threadId).pipe(
-              Effect.map((latestThread) =>
-                composeProviderContinuationBootstrapInput({
-                  messages: (latestThread ?? thread).messages,
-                  currentMessageId: input.messageId,
-                  currentUserInput: normalizedInput,
+          ? yield* Effect.gen(function* () {
+              const latestThread = yield* resolveThread(input.threadId);
+              const sourceThread = latestThread ?? thread;
+              const persistedCancelledMessageIds =
+                projectionSnapshotQuery.getCancelledAutoNudgeMessageIds === undefined
+                  ? []
+                  : yield* projectionSnapshotQuery.getCancelledAutoNudgeMessageIds(input.threadId);
+              const cancelledAutoNudgeMessageIds = new Set([
+                ...persistedCancelledMessageIds,
+                ...sourceThread.activities.flatMap((activity) => {
+                  if (
+                    activity.kind !== "runtime.warning" ||
+                    activity.summary !== AUTO_NUDGE_DELIVERY_CANCELLED_SUMMARY
+                  ) {
+                    return [];
+                  }
+                  const messageId = readRecord(activity.payload)?.messageId;
+                  return typeof messageId === "string" ? [messageId] : [];
                 }),
-              ),
-            )
+              ]);
+              return composeProviderContinuationBootstrapInput({
+                messages: sourceThread.messages.filter(
+                  (message) => !cancelledAutoNudgeMessageIds.has(message.id),
+                ),
+                currentMessageId: input.messageId,
+                currentUserInput: normalizedInput,
+              });
+            })
           : normalizedInput;
     const normalizedAttachments = input.attachments ?? [];
     const sessionModelSwitch =
@@ -1503,6 +1882,9 @@ const make = Effect.gen(function* () {
   const processTurnStartRequested = Effect.fn("processTurnStartRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
   ) {
+    const isAutoNudge = event.payload.dispatchSource === "auto-nudge";
+    const acceptManualFollowUp = () => transitionManualFollowUpForEvent(event, "accepted");
+    const releaseManualFollowUp = () => transitionManualFollowUpForEvent(event, "released");
     const key = turnStartKeyForEvent(event);
     if (yield* hasHandledTurnStartRecently(key)) {
       return;
@@ -1510,6 +1892,20 @@ const make = Effect.gen(function* () {
 
     const thread = yield* resolveThread(event.payload.threadId);
     if (!thread) {
+      return;
+    }
+    const autoNudgeCancellationReason = autoNudgeTurnStartCancellationReason(thread, event);
+    if (autoNudgeCancellationReason !== undefined) {
+      yield* Effect.logWarning("provider command reactor cancelled stale Auto Nudge delivery", {
+        threadId: event.payload.threadId,
+        messageId: event.payload.messageId,
+        reason: autoNudgeCancellationReason,
+      });
+      yield* cancelAutoNudgeDelivery({
+        event,
+        thread,
+        reason: autoNudgeCancellationReason,
+      });
       return;
     }
     const project = yield* resolveProject(thread.projectId);
@@ -1524,6 +1920,7 @@ const make = Effect.gen(function* () {
         turnId: null,
         createdAt: event.payload.createdAt,
       });
+      yield* releaseManualFollowUp();
       return;
     }
 
@@ -1582,7 +1979,8 @@ const make = Effect.gen(function* () {
     };
 
     const recoverTurnStartFailure = (cause: Cause.Cause<unknown>) =>
-      handleTurnStartFailure(cause).pipe(
+      releaseManualFollowUp().pipe(
+        Effect.andThen(handleTurnStartFailure(cause)),
         Effect.catchCause((recoveryCause) =>
           Effect.logWarning("provider command reactor failed to recover turn start failure", {
             eventType: event.type,
@@ -1598,6 +1996,21 @@ const make = Effect.gen(function* () {
       runtimeActiveSession?.status === "running" &&
       runtimeActiveSession.activeTurnId !== undefined
     ) {
+      if (isAutoNudge) {
+        const reason = "the provider runtime already has active work";
+        yield* Effect.logWarning("provider command reactor cancelled stale Auto Nudge delivery", {
+          threadId: event.payload.threadId,
+          messageId: event.payload.messageId,
+          reason,
+        });
+        yield* cancelAutoNudgeDelivery({
+          event,
+          thread,
+          reason,
+          runtimeSession: runtimeActiveSession,
+        });
+        return;
+      }
       const activeTurnId = runtimeActiveSession.activeTurnId;
       const normalizedInput = toNonEmptyProviderInput(message.text);
       const normalizedAttachments = message.attachments ?? [];
@@ -1703,6 +2116,7 @@ const make = Effect.gen(function* () {
           });
 
           yield* providerService.sendTurn(sendTurnRequest).pipe(
+            Effect.tap(() => acceptManualFollowUp()),
             Effect.tap((turn) =>
               markThreadRunningFromSendTurnResult({
                 threadId: event.payload.threadId,
@@ -1746,6 +2160,7 @@ const make = Effect.gen(function* () {
           ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
         })
         .pipe(
+          Effect.tap(() => acceptManualFollowUp()),
           Effect.tap((turn) =>
             Effect.gen(function* () {
               const updatedAt = DateTime.formatIso(yield* DateTime.now);
@@ -1835,6 +2250,7 @@ const make = Effect.gen(function* () {
             ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
           })
           .pipe(
+            Effect.tap(() => acceptManualFollowUp()),
             Effect.tap((turn) =>
               markThreadRunningFromSendTurnResult({
                 threadId: event.payload.threadId,
@@ -1898,7 +2314,34 @@ const make = Effect.gen(function* () {
       );
     };
 
-    yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+    if (isAutoNudge) {
+      const freshThread = yield* resolveThread(event.payload.threadId);
+      const freshRuntimeSession = yield* getProviderSessionForThread(event.payload.threadId);
+      const finalCancellationReason =
+        freshThread === undefined
+          ? "the thread is no longer active"
+          : (autoNudgeTurnStartCancellationReason(freshThread, event) ??
+            (freshRuntimeSession?.status === "ready"
+              ? undefined
+              : "the provider runtime is no longer ready"));
+      if (finalCancellationReason !== undefined) {
+        yield* Effect.logWarning("provider command reactor cancelled stale Auto Nudge delivery", {
+          threadId: event.payload.threadId,
+          messageId: event.payload.messageId,
+          reason: finalCancellationReason,
+        });
+        yield* cancelAutoNudgeDelivery({
+          event,
+          thread: freshThread ?? thread,
+          reason: finalCancellationReason,
+          runtimeSession: freshRuntimeSession ?? null,
+        });
+        return;
+      }
+    }
+
+    const sendTurn = providerService.sendTurn(sendTurnRequest.value).pipe(
+      Effect.tap(() => acceptManualFollowUp()),
       Effect.tap((turn) =>
         markThreadRunningFromSendTurnResult({
           threadId: event.payload.threadId,
@@ -1908,12 +2351,18 @@ const make = Effect.gen(function* () {
       ),
       Effect.catchCause((cause) => {
         const activeTurnId = detectCodexActiveTurnRunningStartFailure(cause);
-        return activeTurnId !== undefined
+        return activeTurnId !== undefined && !isAutoNudge
           ? recoverActiveCodexStartAsSteer(activeTurnId, cause)
           : recoverTurnStartFailure(cause);
       }),
-      Effect.forkScoped,
     );
+    // Keep ordinary user sends detached so the serial event worker remains
+    // responsive. Auto Nudge must cross the provider boundary in this exact
+    // fiber immediately after its final authority check; forking here would
+    // reopen a scheduling window where stop/manual work could arrive first.
+    yield* isAutoNudge
+      ? sendTurn.pipe(Effect.asVoid)
+      : sendTurn.pipe(Effect.forkScoped, Effect.asVoid);
   });
 
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (
@@ -2078,6 +2527,8 @@ const make = Effect.gen(function* () {
   const processTurnSteerRequested = Effect.fn("processTurnSteerRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-steer-requested" }>,
   ) {
+    const acceptManualFollowUp = () => transitionManualFollowUpForEvent(event, "accepted");
+    const releaseManualFollowUp = () => transitionManualFollowUpForEvent(event, "released");
     const thread = yield* resolveThread(event.payload.threadId);
     if (!thread) {
       return;
@@ -2092,7 +2543,7 @@ const make = Effect.gen(function* () {
         detail: `User message '${event.payload.messageId}' was not found for steer request.`,
         turnId: thread.session?.activeTurnId ?? null,
         createdAt: event.payload.createdAt,
-      });
+      }).pipe(Effect.ensuring(releaseManualFollowUp()));
     }
     const normalizedInput = toNonEmptyProviderInput(message.text);
     const normalizedAttachments = message.attachments ?? [];
@@ -2104,7 +2555,7 @@ const make = Effect.gen(function* () {
         detail: "Either input text or at least one attachment is required.",
         turnId: thread.session?.activeTurnId ?? null,
         createdAt: event.payload.createdAt,
-      });
+      }).pipe(Effect.ensuring(releaseManualFollowUp()));
     }
 
     const retrySteerAsNextTurn = (input: {
@@ -2186,6 +2637,7 @@ const make = Effect.gen(function* () {
         });
 
         yield* providerService.sendTurn(sendTurnRequest).pipe(
+          Effect.tap(() => acceptManualFollowUp()),
           Effect.tap((turn) =>
             markThreadRunningFromSendTurnResult({
               threadId: event.payload.threadId,
@@ -2339,6 +2791,7 @@ const make = Effect.gen(function* () {
         });
 
         yield* providerService.sendTurn(sendTurnRequest).pipe(
+          Effect.tap(() => acceptManualFollowUp()),
           Effect.tap((turn) =>
             markThreadRunningFromSendTurnResult({
               threadId: event.payload.threadId,
@@ -2375,6 +2828,7 @@ const make = Effect.gen(function* () {
         ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       })
       .pipe(
+        Effect.tap(() => acceptManualFollowUp()),
         Effect.catchCause((cause) => {
           if (isCodexNoActiveTurnToSteerFailure(cause)) {
             return recoverStaleCodexSteerAsTurnStart(cause);
@@ -2402,7 +2856,7 @@ const make = Effect.gen(function* () {
                   ...(codexNonSteerableTurnKind !== undefined ? { codexNonSteerableTurnKind } : {}),
                 }
               : {}),
-          });
+          }).pipe(Effect.ensuring(releaseManualFollowUp()));
         }),
         Effect.forkScoped,
       );
@@ -2744,6 +3198,14 @@ const make = Effect.gen(function* () {
       Effect.catchCause((cause) =>
         Effect.logWarning(
           "provider command reactor failed to clear interrupted turn starts after restart",
+          { cause: Cause.pretty(cause) },
+        ),
+      ),
+    );
+    yield* reconcileManualFollowUpHandoffsOnStartup().pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning(
+          "provider command reactor failed to reconcile manual follow-up handoffs after restart",
           { cause: Cause.pretty(cause) },
         ),
       ),

@@ -19,6 +19,7 @@ import type {
   OrchestrationThreadTurnWorkLogPresenceInput,
   OrchestrationThreadTurnWorkLogPresenceResult,
   OrchestrationThreadShell,
+  MessageId,
   ProjectId,
   ThreadId,
 } from "@cafecode/contracts";
@@ -168,6 +169,14 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadDetailById: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<OrchestrationThread>, ProjectionRepositoryError>;
+
+  /**
+   * Read durable Auto Nudge cancellation markers without relying on the
+   * bounded recent-activity window in thread detail.
+   */
+  readonly getCancelledAutoNudgeMessageIds?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<MessageId>, ProjectionRepositoryError>;
 
   /**
    * Read a single active thread detail snapshot and the projection sequence

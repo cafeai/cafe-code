@@ -2,6 +2,8 @@ import { scopeThreadRef } from "@cafecode/client-runtime";
 import {
   CheckpointRef,
   DEFAULT_MODEL,
+  DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+  DEFAULT_THREAD_AUTO_NUDGE_SUMMARY,
   EnvironmentId,
   EventId,
   MessageId,
@@ -309,6 +311,29 @@ describe("environment state removal", () => {
 });
 
 describe("thread selection memoization", () => {
+  it("keeps the exact-thread Auto Nudge prompt out of shell state", () => {
+    const thread = makeThread();
+    const config = {
+      ...DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+      authorityRevision: 1,
+      mode: "steady-progress" as const,
+      prompt: "Continue this exact thread only.",
+      armedAt: "2026-08-11T12:00:00.000Z",
+    };
+    const next = applyOrchestrationEvent(
+      makeState(thread),
+      makeEvent("thread.auto-nudge-configured", { threadId: thread.id, config }),
+      localEnvironmentId,
+    );
+    const environment = localEnvironmentStateOf(next);
+
+    expect(environment.threadAutoNudgeConfigById?.[thread.id]?.prompt).toBe(config.prompt);
+    expect(
+      selectThreadByRef(next, scopeThreadRef(localEnvironmentId, thread.id))?.autoNudge?.prompt,
+    ).toBe(config.prompt);
+    expect(environment.threadShellById[thread.id]?.autoNudge).not.toHaveProperty("prompt");
+  });
+
   it("does not rewrite shell state for structurally equal model selections", () => {
     const thread = makeThread();
     const state = makeState(thread);
@@ -337,6 +362,8 @@ describe("thread selection memoization", () => {
         hasPendingApprovals: false,
         hasPendingUserInput: false,
         hasActionableProposedPlan: false,
+        autoNudge: DEFAULT_THREAD_AUTO_NUDGE_SUMMARY,
+        manualFollowUpCount: 0,
       },
     };
 
