@@ -19,7 +19,10 @@ import {
   type ServerRuntimeLayerDiagnosticsResult,
   type SourceControlDiscoveryResult,
 } from "@cafecode/contracts";
-import { MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES } from "@cafecode/contracts/settings";
+import {
+  DEFAULT_UNIFIED_SETTINGS,
+  MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
+} from "@cafecode/contracts/settings";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import { page } from "vitest/browser";
@@ -36,6 +39,11 @@ import {
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { __resetLocalApiForTests } from "../../localApi";
+import {
+  captureSettingsProfile,
+  createSettingsProfilesStore,
+  settingsProfilesStore,
+} from "../../settingsProfiles";
 import { AppAtomRegistryProvider, resetAppAtomRegistryForTests } from "../../rpc/atomRegistry";
 import { resetServerStateForTests, setServerConfigSnapshot } from "../../rpc/serverState";
 import { useUiStateStore } from "../../uiStateStore";
@@ -640,6 +648,7 @@ describe("settings panels", () => {
     resetServerStateForTests();
     await __resetLocalApiForTests();
     localStorage.clear();
+    settingsProfilesStore.refresh();
     useUiStateStore.setState({ defaultAdvertisedEndpointKey: null });
     authAccessHarness.reset();
   });
@@ -1148,6 +1157,163 @@ describe("settings panels", () => {
     await vi.waitFor(() => {
       expect(updateClientSettings).toHaveBeenCalledWith({ sidebarStarSpeed: 1.25 });
     });
+  });
+
+  it("saves and applies a local settings profile without sensitive settings", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    setServerConfigSnapshot({
+      ...createBaseServerConfig(),
+      clientSettings: {
+        ...DEFAULT_CLIENT_SETTINGS,
+        onboardingCompleted: true,
+        showSidebarMascot: false,
+        notificationsEnabled: true,
+        ambientVideoEnabled: true,
+        ambientVideoSource: { kind: "video", id: "dQw4w9WgXcQ" },
+        ambientImageEnabled: true,
+        ambientImageCycleEnabled: true,
+      },
+    });
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <AppearanceSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await page.getByLabelText("New settings profile name").fill("Focus");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect.element(page.getByText("Focus", { exact: true })).toBeInTheDocument();
+    await expect.element(page.getByRole("status")).toBeInTheDocument();
+    await expect.element(page.getByText("Saved “Focus” on this device.")).toBeInTheDocument();
+
+    updateClientSettings.mockClear();
+    await page.getByRole("button", { name: "Preview Focus" }).click();
+    await expect
+      .element(page.getByRole("region", { name: "Changes from applying Focus" }))
+      .toHaveTextContent("Preview does not apply the profile.");
+    expect(updateClientSettings).not.toHaveBeenCalled();
+
+    await page.getByRole("button", { name: "Apply Focus" }).click();
+    await vi.waitFor(() => expect(updateClientSettings).toHaveBeenCalledOnce());
+    await expect.element(page.getByRole("status")).toBeInTheDocument();
+    await expect.element(page.getByText("Applied “Focus”.")).toBeInTheDocument();
+
+    const applied = updateClientSettings.mock.calls[0]?.[0];
+    expect(applied).toMatchObject({
+      showSidebarMascot: false,
+      ambientVideoSource: { kind: "video", id: "dQw4w9WgXcQ" },
+      ambientVideoEnabled: false,
+      ambientImageEnabled: false,
+      ambientImageCycleEnabled: false,
+    });
+    expect(applied).not.toHaveProperty("notificationsEnabled");
+    expect(applied).not.toHaveProperty("providerModelPreferences");
+    expect(applied).not.toHaveProperty("sidebarBrandImageDataUrl");
+    expect(applied).not.toHaveProperty("defaultEditor");
+
+    updateClientSettings.mockClear();
+    await page.getByRole("button", { name: "Delete Focus" }).click();
+    await expect
+      .element(page.getByRole("heading", { name: /Delete settings profile/u }))
+      .toBeInTheDocument();
+    await page.getByRole("button", { name: "Delete profile" }).click();
+    await expect.element(page.getByText(/Current settings did not change\./u)).toBeInTheDocument();
+    await expect.element(page.getByText("No profiles saved yet.")).toBeInTheDocument();
+    expect(updateClientSettings).not.toHaveBeenCalled();
+  });
+
+  it("does not apply a profile that another window replaced after preview", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    setServerConfigSnapshot({
+      ...createBaseServerConfig(),
+      clientSettings: {
+        ...DEFAULT_CLIENT_SETTINGS,
+        onboardingCompleted: true,
+      },
+    });
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <AppearanceSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await page.getByLabelText("New settings profile name").fill("Shared");
+    await page.getByRole("button", { name: "Save" }).click();
+    await page.getByRole("button", { name: "Preview Shared" }).click();
+    await expect
+      .element(page.getByRole("region", { name: "Changes from applying Shared" }))
+      .toBeInTheDocument();
+
+    const otherWindowStore = createSettingsProfilesStore(
+      window.localStorage,
+      () => new Date("2026-08-02T12:00:00.000Z"),
+    );
+    const original = otherWindowStore.resolve("profile:shared");
+    expect(original).not.toBeNull();
+    expect(otherWindowStore.remove(original!)).toBe("removed");
+    otherWindowStore.create(
+      "Shared",
+      captureSettingsProfile(
+        {
+          ...DEFAULT_UNIFIED_SETTINGS,
+          showSidebarMascot: !DEFAULT_UNIFIED_SETTINGS.showSidebarMascot,
+        },
+        "light",
+      ),
+    );
+
+    updateClientSettings.mockClear();
+    await page.getByRole("button", { name: "Apply Shared" }).click();
+
+    await expect
+      .element(
+        page.getByText(
+          "“Shared” changed in another window. Preview the profile again before you apply it.",
+        ),
+      )
+      .toBeInTheDocument();
+    await expect
+      .element(page.getByRole("region", { name: "Changes from applying Shared" }))
+      .not.toBeInTheDocument();
+    expect(updateClientSettings).not.toHaveBeenCalled();
+
+    await page.getByRole("button", { name: "Preview Shared" }).click();
+    await expect
+      .element(page.getByRole("region", { name: "Changes from applying Shared" }))
+      .toBeInTheDocument();
+  });
+
+  it("gives every settings profile preview a unique accessible name", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    installClientSettingsNativeApi(desktopBridge);
+    setServerConfigSnapshot({
+      ...createBaseServerConfig(),
+      clientSettings: {
+        ...DEFAULT_CLIENT_SETTINGS,
+        onboardingCompleted: true,
+      },
+    });
+    const otherWindowStore = createSettingsProfilesStore(window.localStorage);
+    const payload = captureSettingsProfile(DEFAULT_UNIFIED_SETTINGS, "dark");
+    otherWindowStore.create("Desktop", payload);
+    otherWindowStore.create("Mobile", payload);
+    settingsProfilesStore.refresh();
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <AppearanceSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByRole("button", { name: "Preview Desktop" })).toBeInTheDocument();
+    await expect.element(page.getByRole("button", { name: "Preview Mobile" })).toBeInTheDocument();
   });
 
   it("shows detected editor icons in the Files & Diffs default editor selector", async () => {
