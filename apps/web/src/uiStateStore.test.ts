@@ -12,6 +12,7 @@ import {
   reorderProjects,
   setDefaultAdvertisedEndpointKey,
   setNavigationSidebarOpen,
+  setMobileOptimizedPresentation,
   setProjectExpanded,
   setThreadPlanSidebarOpen,
   syncProjects,
@@ -27,6 +28,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     threadPlanSidebarOpenById: {},
     defaultAdvertisedEndpointKey: null,
     navigationSidebarOpen: true,
+    mobileOptimizedPresentation: false,
     ...overrides,
   };
 }
@@ -88,6 +90,17 @@ describe("uiStateStore pure functions", () => {
     expect(collapsed.navigationSidebarOpen).toBe(false);
     expect(expanded.navigationSidebarOpen).toBe(true);
     expect(setNavigationSidebarOpen(expanded, true)).toBe(expanded);
+  });
+
+  it("setMobileOptimizedPresentation stores the device presentation preference", () => {
+    const initialState = makeUiState();
+
+    const enabled = setMobileOptimizedPresentation(initialState, true);
+    const disabled = setMobileOptimizedPresentation(enabled, false);
+
+    expect(enabled.mobileOptimizedPresentation).toBe(true);
+    expect(disabled.mobileOptimizedPresentation).toBe(false);
+    expect(setMobileOptimizedPresentation(disabled, false)).toBe(disabled);
   });
 
   it("reorderProjects moves all member keys of a multi-member group together", () => {
@@ -582,6 +595,29 @@ describe("uiStateStore persistence round-trip", () => {
       localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}",
     ) as PersistedUiState;
     expect(persisted.navigationSidebarOpen).toBe(false);
+  });
+
+  it("persists the mobile presentation choice for this device", () => {
+    const state = setMobileOptimizedPresentation(makeUiState(), true);
+
+    persistState(state);
+
+    const persisted = JSON.parse(
+      localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}",
+    ) as PersistedUiState;
+    expect(persisted.mobileOptimizedPresentation).toBe(true);
+  });
+
+  it("restores the mobile presentation choice when the renderer reloads", async () => {
+    localStorageStub.setItem(
+      PERSISTED_STATE_KEY,
+      JSON.stringify({ mobileOptimizedPresentation: true } satisfies PersistedUiState),
+    );
+    vi.resetModules();
+
+    const { useUiStateStore: reloadedStore } = await import("./uiStateStore");
+
+    expect(reloadedStore.getState().mobileOptimizedPresentation).toBe(true);
   });
 
   it("persists explicit per-thread plan sidebar choices", () => {

@@ -1,4 +1,6 @@
 import { useCallback, useSyncExternalStore } from "react";
+import { resolveMobileLayout } from "../mobilePresentation";
+import { useUiStateStore } from "../uiStateStore";
 
 const BREAKPOINTS = {
   "2xl": 1536,
@@ -83,7 +85,9 @@ export function useMediaQuery(query: BreakpointQuery | MediaQueryInput | (string
 }
 
 export function useIsMobile(): boolean {
-  return useMediaQuery("max-md");
+  const viewportMatchesMobile = useMediaQuery("max-md");
+  const mobileOptimizedPresentation = useUiStateStore((state) => state.mobileOptimizedPresentation);
+  return resolveMobileLayout(viewportMatchesMobile, mobileOptimizedPresentation);
 }
 
 const ON_SCREEN_KEYBOARD_MEDIA_QUERY = "(hover: none) and (pointer: coarse)";

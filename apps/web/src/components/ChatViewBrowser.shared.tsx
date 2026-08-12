@@ -1755,6 +1755,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       projectExpandedById: {},
       projectOrder: [],
       threadLastVisitedAtById: {},
+      mobileOptimizedPresentation: false,
     });
   });
 
@@ -5598,6 +5599,143 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
   }
 
   if (chatViewBrowserPart === "layout") {
+    it("toggles the device mobile presentation without changing Matrix ambiance", async () => {
+      const mounted = await mountChatView({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-user-mobile-presentation" as MessageId,
+          targetText: "mobile presentation target",
+        }),
+        configureFixture: (testFixture) => {
+          testFixture.serverConfig = {
+            ...testFixture.serverConfig,
+            clientSettings: {
+              ...testFixture.serverConfig.clientSettings,
+              ambianceEnabled: true,
+              ambianceEffect: "matrix",
+              ambianceIntensity: 0.75,
+            },
+          };
+        },
+      });
+
+      try {
+        const toggle = await waitForElement(
+          () =>
+            document.querySelector<HTMLButtonElement>(
+              '[data-testid="composer-presentation-toggle"]',
+            ),
+          "Unable to find the mobile presentation toggle.",
+        );
+        const chatView = await waitForElement(
+          () => document.querySelector<HTMLElement>("[data-chat-presentation]"),
+          "Unable to find the chat presentation surface.",
+        );
+        const sidebarLayout = await waitForElement(
+          () => document.querySelector<HTMLElement>('[data-slot="sidebar-wrapper"]'),
+          "Unable to find the sidebar presentation surface.",
+        );
+        const composerSurface = await waitForElement(
+          () =>
+            document.querySelector<HTMLElement>(
+              "[data-chat-composer-mobile-collapsed][data-chat-composer-keyboard-open]",
+            ),
+          "Unable to find the composer presentation surface.",
+        );
+        const ambianceCanvas = await waitForElement(
+          () => document.querySelector<HTMLCanvasElement>('[data-cafe-ambiance-canvas="true"]'),
+          "Unable to find the Matrix ambiance canvas.",
+        );
+
+        expect(toggle.getAttribute("aria-label")).toBe("Use mobile layout");
+        expect(toggle.getAttribute("aria-pressed")).toBe("false");
+        expect(toggle.dataset.effectiveMobileLayout).toBe("false");
+        expect(toggle.dataset.mobilePresentationSource).toBe("responsive");
+        expect(chatView.dataset.chatPresentation).toBe("desktop");
+        expect(sidebarLayout.dataset.mobileLayout).toBe("false");
+        expect(composerSurface.dataset.chatComposerKeyboardOpen).toBe("false");
+        expect(toggle.getBoundingClientRect().width).toBeGreaterThanOrEqual(44);
+        expect(toggle.getBoundingClientRect().height).toBeGreaterThanOrEqual(44);
+
+        toggle.click();
+
+        await vi.waitFor(
+          () => {
+            expect(toggle.getAttribute("aria-label")).toBe("Use automatic layout");
+            expect(toggle.getAttribute("aria-pressed")).toBe("true");
+            expect(toggle.dataset.effectiveMobileLayout).toBe("true");
+            expect(toggle.dataset.mobilePresentationSource).toBe("operator");
+            expect(chatView.dataset.chatPresentation).toBe("mobile");
+            expect(sidebarLayout.dataset.mobileLayout).toBe("true");
+            expect(composerSurface.dataset.chatComposerKeyboardOpen).toBe("false");
+            expect(document.querySelector('[data-cafe-ambiance-canvas="true"]')).toBe(
+              ambianceCanvas,
+            );
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        await vi.waitFor(
+          () => {
+            const persisted = JSON.parse(localStorage.getItem("cafe-code:ui-state:v1") ?? "{}") as {
+              mobileOptimizedPresentation?: boolean;
+            };
+            expect(persisted.mobileOptimizedPresentation).toBe(true);
+          },
+          { timeout: 8_000, interval: 50 },
+        );
+
+        await mounted.setViewport(COMPACT_FOOTER_VIEWPORT);
+        toggle.click();
+
+        await vi.waitFor(
+          () => {
+            expect(toggle.getAttribute("aria-pressed")).toBe("false");
+            expect(toggle.dataset.effectiveMobileLayout).toBe("true");
+            expect(toggle.dataset.mobilePresentationSource).toBe("viewport");
+            expect(chatView.dataset.chatPresentation).toBe("mobile");
+            expect(sidebarLayout.dataset.mobileLayout).toBe("true");
+            expect(composerSurface.dataset.chatComposerKeyboardOpen).toBe("false");
+            expect(document.querySelector('[data-cafe-ambiance-canvas="true"]')).toBe(
+              ambianceCanvas,
+            );
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        await mounted.setViewport(WIDE_FOOTER_VIEWPORT);
+
+        await vi.waitFor(
+          () => {
+            expect(toggle.getAttribute("aria-label")).toBe("Use mobile layout");
+            expect(toggle.dataset.effectiveMobileLayout).toBe("false");
+            expect(toggle.dataset.mobilePresentationSource).toBe("responsive");
+            expect(chatView.dataset.chatPresentation).toBe("desktop");
+            expect(sidebarLayout.dataset.mobileLayout).toBe("false");
+            expect(document.querySelector('[data-cafe-ambiance-canvas="true"]')).toBe(
+              ambianceCanvas,
+            );
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        expect(fixture.serverConfig.clientSettings).toMatchObject({
+          ambianceEnabled: true,
+          ambianceEffect: "matrix",
+          ambianceIntensity: 0.75,
+        });
+        expect(
+          wsRequests.some(
+            (request) =>
+              request._tag === WS_METHODS.serverUpdateClientSettings ||
+              request._tag === WS_METHODS.serverUpdateSettings,
+          ),
+        ).toBe(false);
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
     it("keeps long proposed plans lightweight until the user expands them", async () => {
       const mounted = await mountChatView({
         viewport: DEFAULT_VIEWPORT,

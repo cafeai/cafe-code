@@ -1912,8 +1912,10 @@ export default function ChatView(props: ChatViewProps) {
   const [draftPlanSidebarOpenByThreadKey, setDraftPlanSidebarOpenByThreadKey] = useState<
     Record<string, boolean>
   >({});
-  const shouldUsePlanSidebarSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
+  const viewportUsesPlanSidebarSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
+  const viewportMatchesMobile = useMediaQuery("max-md");
   const isMobile = useIsMobile();
+  const shouldUsePlanSidebarSheet = isMobile || viewportUsesPlanSidebarSheet;
   const hasOnScreenKeyboard = useHasOnScreenKeyboard();
   const draftPlanSidebarOpen =
     routeKind === "draft" ? draftPlanSidebarOpenByThreadKey[routeThreadKey] : undefined;
@@ -4505,14 +4507,14 @@ export default function ChatView(props: ChatViewProps) {
   // composer stays collapsed until then). Desktop behavior is unchanged.
   useEffect(() => {
     if (!activeThread?.id) return;
-    if (isMobile || hasOnScreenKeyboard) return;
+    if (viewportMatchesMobile || hasOnScreenKeyboard) return;
     const frame = window.requestAnimationFrame(() => {
       focusComposer();
     });
     return () => {
       window.cancelAnimationFrame(frame);
     };
-  }, [activeThread?.id, focusComposer, hasOnScreenKeyboard, isMobile]);
+  }, [activeThread?.id, focusComposer, hasOnScreenKeyboard, viewportMatchesMobile]);
 
   useEffect(() => {
     if (!activeThread?.id) return;
@@ -6359,7 +6361,10 @@ export default function ChatView(props: ChatViewProps) {
   const shouldRenderPlanSidebar = planSidebarOpen && hasPlanSidebarContent;
 
   return (
-    <div className="group/chat-view flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
+    <div
+      className="group/chat-view flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background"
+      data-chat-presentation={isMobile ? "mobile" : "desktop"}
+    >
       {/* Top bar — hidden while the mobile composer has the on-screen keyboard
           open (data attribute set by ChatComposer) to maximize vertical room. */}
       <header
@@ -6368,11 +6373,16 @@ export default function ChatView(props: ChatViewProps) {
           "border-b border-border group-has-[[data-chat-composer-keyboard-open=true]]/chat-view:hidden",
           isElectron
             ? cn(
-                "drag-region flex h-[52px] items-center px-3 sm:px-5 wco:h-[env(titlebar-area-height)]",
+                "drag-region flex h-[52px] items-center px-3 wco:h-[env(titlebar-area-height)]",
+                !isMobile && "sm:px-5",
                 reserveTitleBarControlInset &&
                   "wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]",
               )
-            : "pb-2 pl-[calc(env(safe-area-inset-left)+0.75rem)] pr-[calc(env(safe-area-inset-right)+0.75rem)] pt-2 sm:pb-3 sm:pl-[calc(env(safe-area-inset-left)+1.25rem)] sm:pr-[calc(env(safe-area-inset-right)+1.25rem)] sm:pt-3",
+            : cn(
+                "pb-2 pl-[calc(env(safe-area-inset-left)+0.75rem)] pr-[calc(env(safe-area-inset-right)+0.75rem)] pt-2",
+                !isMobile &&
+                  "sm:pb-3 sm:pl-[calc(env(safe-area-inset-left)+1.25rem)] sm:pr-[calc(env(safe-area-inset-right)+1.25rem)] sm:pt-3",
+              ),
         )}
       >
         <ChatHeader
@@ -6453,14 +6463,16 @@ export default function ChatView(props: ChatViewProps) {
           {/* Input bar */}
           <div
             className={cn(
-              "pl-[calc(env(safe-area-inset-left)+0.75rem)] pr-[calc(env(safe-area-inset-right)+0.75rem)] pt-1.5 sm:pl-[calc(env(safe-area-inset-left)+1.25rem)] sm:pr-[calc(env(safe-area-inset-right)+1.25rem)] sm:pt-2",
+              "pl-[calc(env(safe-area-inset-left)+0.75rem)] pr-[calc(env(safe-area-inset-right)+0.75rem)] pt-1.5",
+              !isMobile &&
+                "sm:pl-[calc(env(safe-area-inset-left)+1.25rem)] sm:pr-[calc(env(safe-area-inset-right)+1.25rem)] sm:pt-2",
               // NOTE: intentionally NOT adding env(safe-area-inset-bottom) here.
               // Mobile browsers (e.g. Firefox Android) already exclude the system
               // nav bar from the viewport yet still report a non-zero
               // safe-area-inset-bottom, so adding it inserts ~48px of phantom empty
               // space below the composer. On desktop the inset is 0, so this is
               // identical to the previous behavior there.
-              isGitRepo ? "pb-1" : "pb-3 sm:pb-4",
+              isGitRepo ? "pb-1" : cn("pb-3", !isMobile && "sm:pb-4"),
             )}
           >
             <div className="relative isolate">

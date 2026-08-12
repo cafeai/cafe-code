@@ -24,6 +24,7 @@ export interface PersistedUiState {
   projectOrderCwds?: string[];
   defaultAdvertisedEndpointKey?: string | null;
   navigationSidebarOpen?: boolean;
+  mobileOptimizedPresentation?: boolean;
   threadPlanSidebarOpenById?: Record<string, boolean>;
 }
 
@@ -49,6 +50,8 @@ export interface UiEndpointState {
 
 export interface UiNavigationState {
   navigationSidebarOpen: boolean;
+  /** Force the responsive mobile presentation on this device. */
+  mobileOptimizedPresentation: boolean;
 }
 
 export interface UiState
@@ -74,6 +77,7 @@ const initialState: UiState = {
   threadPlanSidebarOpenById: {},
   defaultAdvertisedEndpointKey: null,
   navigationSidebarOpen: true,
+  mobileOptimizedPresentation: false,
 };
 
 const persistedCollapsedProjectCwds = new Set<string>();
@@ -117,6 +121,10 @@ function readPersistedState(): UiState {
           : null,
       navigationSidebarOpen:
         typeof parsed.navigationSidebarOpen === "boolean" ? parsed.navigationSidebarOpen : true,
+      mobileOptimizedPresentation:
+        typeof parsed.mobileOptimizedPresentation === "boolean"
+          ? parsed.mobileOptimizedPresentation
+          : false,
       threadPlanSidebarOpenById: sanitizeBooleanRecord(parsed.threadPlanSidebarOpenById),
     };
   } catch {
@@ -183,6 +191,7 @@ export function persistState(state: UiState): void {
         projectOrderCwds,
         defaultAdvertisedEndpointKey: state.defaultAdvertisedEndpointKey,
         navigationSidebarOpen: state.navigationSidebarOpen,
+        mobileOptimizedPresentation: state.mobileOptimizedPresentation,
         threadPlanSidebarOpenById: state.threadPlanSidebarOpenById,
       } satisfies PersistedUiState),
     );
@@ -511,6 +520,16 @@ export function setNavigationSidebarOpen(state: UiState, open: boolean): UiState
   };
 }
 
+export function setMobileOptimizedPresentation(state: UiState, enabled: boolean): UiState {
+  if (state.mobileOptimizedPresentation === enabled) {
+    return state;
+  }
+  return {
+    ...state,
+    mobileOptimizedPresentation: enabled,
+  };
+}
+
 export function toggleProject(state: UiState, projectId: string): UiState {
   const expanded = state.projectExpandedById[projectId] ?? true;
   return {
@@ -587,6 +606,7 @@ interface UiStateStore extends UiState {
   setThreadPlanSidebarOpen: (threadId: string, open: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setNavigationSidebarOpen: (open: boolean) => void;
+  setMobileOptimizedPresentation: (enabled: boolean) => void;
   toggleProject: (projectId: string) => void;
   setProjectExpanded: (projectId: string, expanded: boolean) => void;
   reorderProjects: (
@@ -609,6 +629,8 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
   setDefaultAdvertisedEndpointKey: (key) =>
     set((state) => setDefaultAdvertisedEndpointKey(state, key)),
   setNavigationSidebarOpen: (open) => set((state) => setNavigationSidebarOpen(state, open)),
+  setMobileOptimizedPresentation: (enabled) =>
+    set((state) => setMobileOptimizedPresentation(state, enabled)),
   toggleProject: (projectId) => set((state) => toggleProject(state, projectId)),
   setProjectExpanded: (projectId, expanded) =>
     set((state) => setProjectExpanded(state, projectId, expanded)),

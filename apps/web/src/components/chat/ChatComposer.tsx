@@ -60,6 +60,7 @@ import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommand
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerAttachImageButton } from "./ComposerAttachImageButton";
+import { ComposerPresentationToggle } from "./ComposerPresentationToggle";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
@@ -2901,6 +2902,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   disabled={pendingUserInputs.length > 0 || activeThreadId === null}
                   onClick={openComposerImagePicker}
                 />
+                <ComposerPresentationToggle />
                 <ProviderModelPicker
                   compact={isComposerFooterCompact}
                   activeInstanceId={selectedInstanceId}
