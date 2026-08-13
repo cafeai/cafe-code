@@ -18,6 +18,7 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { Slider } from "../ui/slider";
 import { Switch } from "../ui/switch";
 import { ColorWheelPicker } from "./ColorWheelPicker";
+import { YouTubeQueueSettingsSection } from "./YouTubeQueueSettings";
 import {
   SettingResetButton,
   SettingsPageContainer,
@@ -269,6 +270,7 @@ export function AmbianceSettingsPanel() {
           }
         />
       </SettingsSection>
+      <YouTubeQueueSettingsSection />
     </SettingsPageContainer>
   );
 }
