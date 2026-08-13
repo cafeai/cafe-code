@@ -12,6 +12,7 @@ import {
   type ServerProvider,
   type ScopedThreadRef,
   type ThreadId,
+  type AutoNudgeMode,
   type TurnId,
   OrchestrationThreadActivity,
   ProviderInteractionMode,
@@ -156,6 +157,7 @@ import { resolveEffectiveEnvMode, resolveEnvironmentOptionLabel } from "./Branch
 import { ProviderStatusBanner } from "./chat/ProviderStatusBanner";
 import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+import { AutoNudgeControl } from "./chat/AutoNudgeControl";
 import {
   buildLocalDraftThread,
   collectUserMessageBlobPreviewUrls,
@@ -1828,6 +1830,10 @@ export default function ChatView(props: ChatViewProps) {
       [routeKind, routeThreadRef],
     ),
   );
+  const globalAutoNudgeAuthorityRevision = useStore(
+    (store) =>
+      store.environmentStateById[environmentId]?.autoNudgeAuthority?.authorityRevision ?? 0,
+  );
   const setStoreThreadError = useStore((store) => store.setError);
   const markThreadVisited = useUiStateStore((store) => store.markThreadVisited);
   const activeThreadLastVisitedAt = useUiStateStore((store) =>
@@ -2127,6 +2133,67 @@ export default function ChatView(props: ChatViewProps) {
   );
   const isServerThread = routeKind === "server" && serverThread !== undefined;
   const activeThread = isServerThread ? serverThread : localDraftThread;
+  const [autoNudgeSavingThreadKey, setAutoNudgeSavingThreadKey] = useState<string | null>(null);
+  const [autoNudgeSaveError, setAutoNudgeSaveError] = useState<{
+    readonly threadKey: string;
+    readonly message: string;
+  } | null>(null);
+  const configureActiveThreadAutoNudge = useCallback(
+    async (input: {
+      readonly mode: AutoNudgeMode;
+      readonly prompt: string;
+      readonly backgroundContinuation: boolean;
+    }) => {
+      if (!isServerThread || !activeThread?.autoNudge) return;
+      const targetThreadKey = scopedThreadKey(
+        scopeThreadRef(activeThread.environmentId, activeThread.id),
+      );
+      const api = readEnvironmentApi(activeThread.environmentId);
+      if (!api) {
+        setAutoNudgeSaveError({
+          threadKey: targetThreadKey,
+          message: "This environment is not connected.",
+        });
+        return;
+      }
+      setAutoNudgeSavingThreadKey(targetThreadKey);
+      setAutoNudgeSaveError(null);
+      try {
+        const common = {
+          type: "thread.auto-nudge.configure" as const,
+          commandId: newCommandId(),
+          threadId: activeThread.id,
+          expectedAuthorityRevision: activeThread.autoNudge.authorityRevision,
+          expectedGlobalAuthorityRevision: globalAutoNudgeAuthorityRevision,
+          maxRounds: activeThread.autoNudge.maxRounds,
+          createdAt: new Date().toISOString(),
+        };
+        await api.orchestration.dispatchCommand(
+          input.mode === "off"
+            ? {
+                ...common,
+                mode: "off",
+                prompt: input.prompt,
+                backgroundContinuation: false,
+              }
+            : {
+                ...common,
+                mode: input.mode,
+                prompt: input.prompt,
+                backgroundContinuation: input.backgroundContinuation,
+              },
+        );
+      } catch (error) {
+        setAutoNudgeSaveError({
+          threadKey: targetThreadKey,
+          message: error instanceof Error ? error.message : "Auto Nudge was not saved.",
+        });
+      } finally {
+        setAutoNudgeSavingThreadKey((current) => (current === targetThreadKey ? null : current));
+      }
+    },
+    [activeThread, globalAutoNudgeAuthorityRevision, isServerThread],
+  );
   const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   const interactionMode =
     composerInteractionMode ?? activeThread?.interactionMode ?? DEFAULT_INTERACTION_MODE;
@@ -6527,6 +6594,21 @@ export default function ChatView(props: ChatViewProps) {
             )}
           >
             <div className="relative isolate">
+              {isServerThread && activeThread.autoNudge ? (
+                <AutoNudgeControl
+                  key={routeThreadKey}
+                  config={activeThread.autoNudge}
+                  environmentId={activeThread.environmentId}
+                  onConfigure={configureActiveThreadAutoNudge}
+                  saveError={
+                    autoNudgeSaveError?.threadKey === routeThreadKey
+                      ? autoNudgeSaveError.message
+                      : null
+                  }
+                  saving={autoNudgeSavingThreadKey === routeThreadKey}
+                  threadId={activeThread.id}
+                />
+              ) : null}
               <ComposerBannerStack className="relative z-0" items={composerBannerItems} />
               <div className="relative z-10">
                 <ChatComposer

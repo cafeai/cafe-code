@@ -57,10 +57,16 @@ interface CommandEnvelope {
 }
 
 function commandToAggregateRef(command: OrchestrationCommand): {
-  readonly aggregateKind: "project" | "thread";
-  readonly aggregateId: ProjectId | ThreadId;
+  readonly aggregateKind: "project" | "thread" | "system";
+  readonly aggregateId: ProjectId | ThreadId | "auto-nudge-authority";
 } {
   switch (command.type) {
+    case "auto-nudge.stop-all":
+    case "auto-nudge.allow":
+      return {
+        aggregateKind: "system",
+        aggregateId: "auto-nudge-authority",
+      };
     case "project.create":
     case "project.meta.update":
     case "project.delete":

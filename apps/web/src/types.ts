@@ -17,6 +17,8 @@ import type {
   CheckpointRef,
   ProviderInteractionMode,
   RuntimeMode,
+  ThreadAutoNudgeConfig,
+  ThreadAutoNudgeSummary,
 } from "@cafecode/contracts";
 
 export type SessionPhase = "disconnected" | "connecting" | "ready" | "running";
@@ -109,6 +111,7 @@ export interface Thread {
   worktreePath: string | null;
   turnDiffSummaries: TurnDiffSummary[];
   activities: OrchestrationThreadActivity[];
+  autoNudge?: ThreadAutoNudgeConfig;
   goal?: ProviderThreadGoal | null;
 }
 
@@ -127,6 +130,7 @@ export interface ThreadShell {
   updatedAt?: string | undefined;
   branch: string | null;
   worktreePath: string | null;
+  autoNudge?: ThreadAutoNudgeSummary;
 }
 
 export interface ThreadTurnState {
@@ -151,6 +155,8 @@ export interface SidebarThreadSummary {
   hasPendingApprovals: boolean;
   hasPendingUserInput: boolean;
   hasActionableProposedPlan: boolean;
+  autoNudge?: ThreadAutoNudgeSummary;
+  manualFollowUpCount?: number;
 }
 
 export interface ThreadSession {

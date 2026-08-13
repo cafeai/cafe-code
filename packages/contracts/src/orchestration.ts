@@ -9,6 +9,7 @@ import {
   CommandId,
   EventId,
   IsoDateTime,
+  ManualFollowUpId,
   MessageId,
   NonNegativeInt,
   PositiveInt,
@@ -19,6 +20,21 @@ import {
   TrimmedNonEmptyString,
   TurnId,
 } from "./baseSchemas.ts";
+import {
+  AutoNudgeEnabledMode,
+  AutoNudgeMaxRounds,
+  GlobalAutoNudgeAuthority,
+  GlobalAutoNudgeAuthorityRevision,
+  GlobalAutoNudgeAuthorityWithDefault,
+  StoredThreadAutoNudgePrompt,
+  ThreadAutoNudgeAuthorityRevision,
+  ThreadAutoNudgeConfig,
+  ThreadAutoNudgeConfigWithDefault,
+  ThreadAutoNudgeDispatchSource,
+  ThreadAutoNudgePrompt,
+  ThreadAutoNudgeSummary,
+  ThreadAutoNudgeSummaryWithDefault,
+} from "./autoNudge.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import {
   ProviderThreadGoal,
@@ -204,6 +220,7 @@ export type UploadChatImageAttachment = typeof UploadChatImageAttachment.Type;
 
 export const ChatAttachment = Schema.Union([ChatImageAttachment]);
 export type ChatAttachment = typeof ChatAttachment.Type;
+
 const UploadChatAttachment = Schema.Union([UploadChatImageAttachment]);
 export type UploadChatAttachment = typeof UploadChatAttachment.Type;
 
@@ -280,6 +297,56 @@ const SourceProposedPlanReference = Schema.Struct({
   threadId: ThreadId,
   planId: OrchestrationProposedPlanId,
 });
+
+export const MANUAL_FOLLOW_UP_MAX_ITEMS = 32;
+
+export const ManualFollowUpStatus = Schema.Literals(["reserving", "queued", "handoff"]);
+export type ManualFollowUpStatus = typeof ManualFollowUpStatus.Type;
+
+export const ManualFollowUpDispatchOptions = Schema.Struct({
+  modelSelection: ModelSelection,
+  titleSeed: TrimmedNonEmptyString,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+});
+export type ManualFollowUpDispatchOptions = typeof ManualFollowUpDispatchOptions.Type;
+
+export const ManualFollowUpReservedItem = Schema.Struct({
+  id: ManualFollowUpId,
+  messageId: MessageId,
+  dispatch: ManualFollowUpDispatchOptions,
+  status: Schema.Literal("reserving"),
+  reservationCommandId: CommandId,
+  enqueuedAt: IsoDateTime,
+});
+
+export const ManualFollowUpPayloadItem = Schema.Struct({
+  id: ManualFollowUpId,
+  message: Schema.Struct({
+    messageId: MessageId,
+    role: Schema.Literal("user"),
+    text: Schema.String,
+    attachments: Schema.Array(ChatAttachment),
+  }),
+  dispatch: ManualFollowUpDispatchOptions,
+  status: Schema.Literals(["queued", "handoff"]),
+  reservationCommandId: CommandId,
+  enqueuedAt: IsoDateTime,
+  activatedAt: Schema.NullOr(IsoDateTime),
+  activationCommandId: Schema.NullOr(CommandId),
+});
+
+export const ManualFollowUpItem = Schema.Union([
+  ManualFollowUpReservedItem,
+  ManualFollowUpPayloadItem,
+]);
+export type ManualFollowUpItem = typeof ManualFollowUpItem.Type;
+
+export const ManualFollowUpQueue = Schema.Array(ManualFollowUpItem).check(
+  Schema.isMaxLength(MANUAL_FOLLOW_UP_MAX_ITEMS),
+);
+export type ManualFollowUpQueue = typeof ManualFollowUpQueue.Type;
 
 export const OrchestrationSessionStatus = Schema.Literals([
   "idle",
@@ -381,6 +448,10 @@ export const OrchestrationThread = Schema.Struct({
   updatedAt: IsoDateTime,
   archivedAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   deletedAt: Schema.NullOr(IsoDateTime),
+  /** Prompt-bearing configuration is available only in the exact-thread detail. */
+  autoNudge: ThreadAutoNudgeConfigWithDefault,
+  /** Durable operator intent is available only in the exact-thread detail. */
+  manualFollowUps: ManualFollowUpQueue.pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
   messages: Schema.Array(OrchestrationMessage),
   proposedPlans: Schema.Array(OrchestrationProposedPlan).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
@@ -397,6 +468,7 @@ export type OrchestrationThread = typeof OrchestrationThread.Type;
 
 export const OrchestrationReadModel = Schema.Struct({
   snapshotSequence: NonNegativeInt,
+  autoNudgeAuthority: Schema.optional(GlobalAutoNudgeAuthorityWithDefault),
   projects: Schema.Array(OrchestrationProject),
   threads: Schema.Array(OrchestrationThread),
   updatedAt: IsoDateTime,
@@ -432,6 +504,9 @@ export const OrchestrationThreadShell = Schema.Struct({
   updatedAt: IsoDateTime,
   archivedAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   deletedAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  /** Shell snapshots contain no Auto Nudge prompt text. */
+  autoNudge: ThreadAutoNudgeSummaryWithDefault,
+  manualFollowUpCount: NonNegativeInt.pipe(Schema.withDecodingDefaultKey(Effect.succeed(0))),
   session: Schema.NullOr(OrchestrationSession),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
   hasPendingApprovals: Schema.Boolean,
@@ -442,6 +517,7 @@ export type OrchestrationThreadShell = typeof OrchestrationThreadShell.Type;
 
 export const OrchestrationShellSnapshot = Schema.Struct({
   snapshotSequence: NonNegativeInt,
+  autoNudgeAuthority: Schema.optional(GlobalAutoNudgeAuthorityWithDefault),
   projects: Schema.Array(OrchestrationProjectShell),
   threads: Schema.Array(OrchestrationThreadShell),
   updatedAt: IsoDateTime,
@@ -449,6 +525,11 @@ export const OrchestrationShellSnapshot = Schema.Struct({
 export type OrchestrationShellSnapshot = typeof OrchestrationShellSnapshot.Type;
 
 export const OrchestrationShellStreamEvent = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("auto-nudge-authority-changed"),
+    sequence: NonNegativeInt,
+    authority: GlobalAutoNudgeAuthority,
+  }),
   Schema.Struct({
     kind: Schema.Literal("project-upserted"),
     sequence: NonNegativeInt,
@@ -670,6 +751,136 @@ const ThreadInteractionModeSetCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadAutoNudgeConfigureCommandFields = {
+  type: Schema.Literal("thread.auto-nudge.configure"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  expectedAuthorityRevision: ThreadAutoNudgeAuthorityRevision,
+  expectedGlobalAuthorityRevision: Schema.optional(GlobalAutoNudgeAuthorityRevision),
+  maxRounds: AutoNudgeMaxRounds,
+  createdAt: IsoDateTime,
+} as const;
+
+export const ThreadAutoNudgeConfigureCommand = Schema.Union([
+  Schema.Struct({
+    ...ThreadAutoNudgeConfigureCommandFields,
+    mode: Schema.Literal("off"),
+    prompt: StoredThreadAutoNudgePrompt,
+    backgroundContinuation: Schema.Literal(false),
+  }),
+  Schema.Struct({
+    ...ThreadAutoNudgeConfigureCommandFields,
+    mode: AutoNudgeEnabledMode,
+    prompt: ThreadAutoNudgePrompt,
+    backgroundContinuation: Schema.Boolean,
+  }),
+]);
+
+export const ThreadAutoNudgeStopCommand = Schema.Struct({
+  type: Schema.Literal("thread.auto-nudge.stop"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+
+export const GlobalAutoNudgeStopCommand = Schema.Struct({
+  type: Schema.Literal("auto-nudge.stop-all"),
+  commandId: CommandId,
+  createdAt: IsoDateTime,
+});
+
+export const GlobalAutoNudgeAllowCommand = Schema.Struct({
+  type: Schema.Literal("auto-nudge.allow"),
+  commandId: CommandId,
+  expectedAuthorityRevision: GlobalAutoNudgeAuthorityRevision,
+  createdAt: IsoDateTime,
+});
+
+/**
+ * Automated dispatch carries authority and correlation data only. The server
+ * reads the saved exact-thread prompt after it accepts every invariant.
+ */
+const ThreadAutoNudgeDispatchCommand = Schema.Struct({
+  type: Schema.Literal("thread.auto-nudge.dispatch"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  expectedAuthorityRevision: ThreadAutoNudgeAuthorityRevision,
+  expectedGlobalAuthorityRevision: Schema.optional(GlobalAutoNudgeAuthorityRevision),
+  completedTurnId: TurnId,
+  dispatchSource: ThreadAutoNudgeDispatchSource,
+  messageId: MessageId,
+  createdAt: IsoDateTime,
+});
+
+export const ThreadManualFollowUpReserveCommand = Schema.Struct({
+  type: Schema.Literal("thread.manual-follow-up.reserve"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  followUpId: ManualFollowUpId,
+  messageId: MessageId,
+  dispatch: ManualFollowUpDispatchOptions,
+  createdAt: IsoDateTime,
+});
+
+export const ThreadManualFollowUpEnqueueCommand = Schema.Struct({
+  type: Schema.Literal("thread.manual-follow-up.enqueue"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  followUpId: ManualFollowUpId,
+  reservationCommandId: CommandId,
+  message: Schema.Struct({
+    messageId: MessageId,
+    role: Schema.Literal("user"),
+    text: Schema.String,
+    attachments: Schema.Array(ChatAttachment),
+  }),
+  dispatch: ManualFollowUpDispatchOptions,
+  createdAt: IsoDateTime,
+});
+
+const ClientThreadManualFollowUpEnqueueCommand = Schema.Struct({
+  type: Schema.Literal("thread.manual-follow-up.enqueue"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  followUpId: ManualFollowUpId,
+  reservationCommandId: CommandId,
+  message: Schema.Struct({
+    messageId: MessageId,
+    role: Schema.Literal("user"),
+    text: Schema.String,
+    attachments: Schema.Array(UploadChatAttachment),
+  }),
+  dispatch: ManualFollowUpDispatchOptions,
+  createdAt: IsoDateTime,
+});
+
+export const ThreadManualFollowUpCancelCommand = Schema.Struct({
+  type: Schema.Literal("thread.manual-follow-up.cancel"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  followUpId: ManualFollowUpId,
+  createdAt: IsoDateTime,
+});
+
+export const ManualFollowUpActivationMode = Schema.Literals([
+  "automatic-after-settlement",
+  "operator",
+]);
+export type ManualFollowUpActivationMode = typeof ManualFollowUpActivationMode.Type;
+
+/**
+ * This prompt-free command activates only the durable FIFO head. Automatic
+ * activation may start work after settlement. Only an operator may steer.
+ */
+export const ThreadManualFollowUpActivateCommand = Schema.Struct({
+  type: Schema.Literal("thread.manual-follow-up.activate"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  followUpId: ManualFollowUpId,
+  activationMode: ManualFollowUpActivationMode,
+  createdAt: IsoDateTime,
+});
+
 const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
@@ -695,6 +906,9 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
+export const TurnDispatchSource = Schema.Literals(["user", "auto-nudge"]);
+export type TurnDispatchSource = typeof TurnDispatchSource.Type;
+
 export const ThreadTurnStartCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.start"),
   commandId: CommandId,
@@ -713,6 +927,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
   ),
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  dispatchSource: Schema.optional(TurnDispatchSource),
   createdAt: IsoDateTime,
 });
 
@@ -732,6 +947,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  dispatchSource: Schema.optional(Schema.Literal("user")),
   createdAt: IsoDateTime,
 });
 
@@ -753,6 +969,7 @@ const ThreadTurnSteerCommand = Schema.Struct({
     text: Schema.String,
     attachments: Schema.Array(ChatAttachment),
   }),
+  dispatchSource: Schema.optional(TurnDispatchSource),
   createdAt: IsoDateTime,
 });
 
@@ -766,6 +983,7 @@ const ClientThreadTurnSteerCommand = Schema.Struct({
     text: Schema.String,
     attachments: Schema.Array(UploadChatAttachment),
   }),
+  dispatchSource: Schema.optional(Schema.Literal("user")),
   createdAt: IsoDateTime,
 });
 
@@ -850,6 +1068,15 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
+  ThreadAutoNudgeConfigureCommand,
+  ThreadAutoNudgeStopCommand,
+  GlobalAutoNudgeStopCommand,
+  GlobalAutoNudgeAllowCommand,
+  ThreadAutoNudgeDispatchCommand,
+  ThreadManualFollowUpReserveCommand,
+  ThreadManualFollowUpEnqueueCommand,
+  ThreadManualFollowUpCancelCommand,
+  ThreadManualFollowUpActivateCommand,
   ThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
   ThreadTurnSteerCommand,
@@ -877,6 +1104,15 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
+  ThreadAutoNudgeConfigureCommand,
+  ThreadAutoNudgeStopCommand,
+  GlobalAutoNudgeStopCommand,
+  GlobalAutoNudgeAllowCommand,
+  ThreadAutoNudgeDispatchCommand,
+  ThreadManualFollowUpReserveCommand,
+  ClientThreadManualFollowUpEnqueueCommand,
+  ThreadManualFollowUpCancelCommand,
+  ThreadManualFollowUpActivateCommand,
   ClientThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
   ClientThreadTurnSteerCommand,
@@ -900,6 +1136,24 @@ const ThreadSessionSetCommand = Schema.Struct({
   session: OrchestrationSession,
   terminalTurnRecovery: Schema.optional(TerminalTurnRecoveryReason),
   createdAt: IsoDateTime,
+});
+
+const ThreadManualFollowUpAcceptCommand = Schema.Struct({
+  type: Schema.Literal("thread.manual-follow-up.accept"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  followUpId: ManualFollowUpId,
+  activationCommandId: CommandId,
+  acceptedAt: IsoDateTime,
+});
+
+const ThreadManualFollowUpReleaseCommand = Schema.Struct({
+  type: Schema.Literal("thread.manual-follow-up.release"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  followUpId: ManualFollowUpId,
+  activationCommandId: CommandId,
+  releasedAt: IsoDateTime,
 });
 
 const ThreadMessageAssistantDeltaCommand = Schema.Struct({
@@ -988,6 +1242,8 @@ const ThreadGoalSyncCommand = Schema.Struct({
 
 const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
+  ThreadManualFollowUpAcceptCommand,
+  ThreadManualFollowUpReleaseCommand,
   ThreadMessageAssistantDeltaCommand,
   ThreadMessageAssistantCompleteCommand,
   ThreadMessageAssistantRepairSuffixCommand,
@@ -1018,6 +1274,18 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.meta-updated",
   "thread.runtime-mode-set",
   "thread.interaction-mode-set",
+  "thread.auto-nudge-configured",
+  "thread.auto-nudge-summary-changed",
+  "thread.auto-nudge-stopped",
+  "thread.auto-nudge-dispatched",
+  "system.auto-nudge-authority-changed",
+  "thread.manual-follow-up-reserved",
+  "thread.manual-follow-up-enqueued",
+  "thread.manual-follow-up-cancelled",
+  "thread.manual-follow-up-activated",
+  "thread.manual-follow-up-accepted",
+  "thread.manual-follow-up-released",
+  "thread.manual-follow-up-count-changed",
   "thread.message-sent",
   "thread.message.assistant-repair-applied",
   "thread.turn-start-requested",
@@ -1039,7 +1307,7 @@ export const OrchestrationEventType = Schema.Literals([
 ]);
 export type OrchestrationEventType = typeof OrchestrationEventType.Type;
 
-export const OrchestrationAggregateKind = Schema.Literals(["project", "thread"]);
+export const OrchestrationAggregateKind = Schema.Literals(["project", "thread", "system"]);
 export type OrchestrationAggregateKind = typeof OrchestrationAggregateKind.Type;
 export const OrchestrationActorKind = Schema.Literals(["client", "server", "provider"]);
 
@@ -1137,6 +1405,81 @@ export const ThreadInteractionModeSetPayload = Schema.Struct({
   updatedAt: IsoDateTime,
 });
 
+export const ThreadAutoNudgeConfiguredPayload = Schema.Struct({
+  threadId: ThreadId,
+  config: ThreadAutoNudgeConfig,
+});
+
+export const ThreadAutoNudgeSummaryChangedPayload = Schema.Struct({
+  threadId: ThreadId,
+  summary: ThreadAutoNudgeSummary,
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadAutoNudgeStoppedPayload = Schema.Struct({
+  threadId: ThreadId,
+  authorityRevision: ThreadAutoNudgeAuthorityRevision,
+  stoppedAt: IsoDateTime,
+});
+
+export const ThreadAutoNudgeDispatchedPayload = Schema.Struct({
+  threadId: ThreadId,
+  authorityRevision: ThreadAutoNudgeAuthorityRevision,
+  completedTurnId: TurnId,
+  dispatchSource: ThreadAutoNudgeDispatchSource,
+  messageId: MessageId,
+  roundsDispatched: NonNegativeInt,
+  dispatchedAt: IsoDateTime,
+});
+
+export const GlobalAutoNudgeAuthorityChangedPayload = Schema.Struct({
+  authority: GlobalAutoNudgeAuthority,
+});
+
+export const ThreadManualFollowUpReservedPayload = Schema.Struct({
+  threadId: ThreadId,
+  item: ManualFollowUpReservedItem,
+});
+
+export const ThreadManualFollowUpEnqueuedPayload = Schema.Struct({
+  threadId: ThreadId,
+  item: ManualFollowUpPayloadItem,
+});
+
+export const ThreadManualFollowUpCancelledPayload = Schema.Struct({
+  threadId: ThreadId,
+  followUpId: ManualFollowUpId,
+  cancelledAt: IsoDateTime,
+});
+
+export const ThreadManualFollowUpActivatedPayload = Schema.Struct({
+  threadId: ThreadId,
+  followUpId: ManualFollowUpId,
+  messageId: MessageId,
+  activationCommandId: CommandId,
+  activatedAt: IsoDateTime,
+});
+
+export const ThreadManualFollowUpAcceptedPayload = Schema.Struct({
+  threadId: ThreadId,
+  followUpId: ManualFollowUpId,
+  activationCommandId: CommandId,
+  acceptedAt: IsoDateTime,
+});
+
+export const ThreadManualFollowUpReleasedPayload = Schema.Struct({
+  threadId: ThreadId,
+  followUpId: ManualFollowUpId,
+  activationCommandId: CommandId,
+  releasedAt: IsoDateTime,
+});
+
+export const ThreadManualFollowUpCountChangedPayload = Schema.Struct({
+  threadId: ThreadId,
+  count: NonNegativeInt,
+  updatedAt: IsoDateTime,
+});
+
 export const ThreadMessageSentPayload = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
@@ -1175,6 +1518,18 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  dispatchSource: Schema.optional(TurnDispatchSource),
+  autoNudgeAuthority: Schema.optional(
+    Schema.Struct({
+      authorityRevision: ThreadAutoNudgeAuthorityRevision,
+      globalAuthorityRevision: Schema.optional(GlobalAutoNudgeAuthorityRevision),
+      completedTurnId: TurnId,
+      completedAt: IsoDateTime,
+      dispatchSource: ThreadAutoNudgeDispatchSource,
+    }),
+  ),
+  manualFollowUpId: Schema.optional(ManualFollowUpId),
+  manualFollowUpActivationCommandId: Schema.optional(CommandId),
   createdAt: IsoDateTime,
 });
 
@@ -1187,6 +1542,9 @@ export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
 export const ThreadTurnSteerRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
+  dispatchSource: Schema.optional(TurnDispatchSource),
+  manualFollowUpId: Schema.optional(ManualFollowUpId),
+  manualFollowUpActivationCommandId: Schema.optional(CommandId),
   createdAt: IsoDateTime,
 });
 
@@ -1284,7 +1642,7 @@ const EventBaseFields = {
   sequence: NonNegativeInt,
   eventId: EventId,
   aggregateKind: OrchestrationAggregateKind,
-  aggregateId: Schema.Union([ProjectId, ThreadId]),
+  aggregateId: Schema.Union([ProjectId, ThreadId, Schema.Literal("auto-nudge-authority")]),
   occurredAt: IsoDateTime,
   commandId: Schema.NullOr(CommandId),
   causationEventId: Schema.NullOr(EventId),
@@ -1293,6 +1651,11 @@ const EventBaseFields = {
 } as const;
 
 export const OrchestrationEvent = Schema.Union([
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("system.auto-nudge-authority-changed"),
+    payload: GlobalAutoNudgeAuthorityChangedPayload,
+  }),
   Schema.Struct({
     ...EventBaseFields,
     type: Schema.Literal("project.created"),
@@ -1352,6 +1715,61 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.interaction-mode-set"),
     payload: ThreadInteractionModeSetPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.auto-nudge-configured"),
+    payload: ThreadAutoNudgeConfiguredPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.auto-nudge-summary-changed"),
+    payload: ThreadAutoNudgeSummaryChangedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.auto-nudge-stopped"),
+    payload: ThreadAutoNudgeStoppedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.auto-nudge-dispatched"),
+    payload: ThreadAutoNudgeDispatchedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.manual-follow-up-reserved"),
+    payload: ThreadManualFollowUpReservedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.manual-follow-up-enqueued"),
+    payload: ThreadManualFollowUpEnqueuedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.manual-follow-up-cancelled"),
+    payload: ThreadManualFollowUpCancelledPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.manual-follow-up-activated"),
+    payload: ThreadManualFollowUpActivatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.manual-follow-up-accepted"),
+    payload: ThreadManualFollowUpAcceptedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.manual-follow-up-released"),
+    payload: ThreadManualFollowUpReleasedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.manual-follow-up-count-changed"),
+    payload: ThreadManualFollowUpCountChangedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

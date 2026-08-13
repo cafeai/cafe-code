@@ -3,6 +3,7 @@ import {
   type AssistantDeliveryMode,
   CommandId,
   MessageId,
+  type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationMessage,
   type OrchestrationProposedPlanId,
@@ -1760,6 +1761,10 @@ const make = Effect.gen(function* () {
       const now = event.createdAt;
       const eventTurnId = toTurnId(event.turnId);
       const activeTurnId = thread.session?.activeTurnId ?? null;
+      let deferredCompletedTurnSessionSet: Extract<
+        OrchestrationCommand,
+        { readonly type: "thread.session.set" }
+      > | null = null;
 
       if (event.type === "thread.goal.updated" || event.type === "thread.goal.cleared") {
         const goalIsActive =
@@ -2090,7 +2095,7 @@ const make = Effect.gen(function* () {
             );
           }
 
-          yield* orchestrationEngine.dispatch({
+          const sessionSetCommand = {
             type: "thread.session.set",
             commandId: providerCommandId(event, "thread-session-set"),
             threadId: thread.id,
@@ -2108,7 +2113,15 @@ const make = Effect.gen(function* () {
             },
             ...(terminalTurnRecovery ? { terminalTurnRecovery } : {}),
             createdAt: now,
-          });
+          } satisfies Extract<OrchestrationCommand, { readonly type: "thread.session.set" }>;
+
+          if (event.type === "turn.completed") {
+            // Completion is Auto Nudge authority. Publish it only after text
+            // and activity from this same runtime event have been finalized.
+            deferredCompletedTurnSessionSet = sessionSetCommand;
+          } else {
+            yield* orchestrationEngine.dispatch(sessionSetCommand);
+          }
         }
       }
 
@@ -2450,6 +2463,10 @@ const make = Effect.gen(function* () {
           createdAt: activity.createdAt,
         }),
       ).pipe(Effect.asVoid);
+
+      if (deferredCompletedTurnSessionSet !== null) {
+        yield* orchestrationEngine.dispatch(deferredCompletedTurnSessionSet);
+      }
     });
 
   const processDomainEvent = (event: RuntimeIngestionDomainEvent) =>

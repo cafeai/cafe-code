@@ -1,5 +1,13 @@
-import type { OrchestrationEvent, OrchestrationReadModel, ThreadId } from "@cafecode/contracts";
+import type {
+  CommandId,
+  ManualFollowUpItem,
+  OrchestrationEvent,
+  OrchestrationReadModel,
+  ThreadId,
+} from "@cafecode/contracts";
 import {
+  DEFAULT_GLOBAL_AUTO_NUDGE_AUTHORITY,
+  DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
   EventId,
   MessageId,
   OrchestrationCheckpointSummary,
@@ -25,6 +33,15 @@ import {
   ThreadDeletedPayload,
   ThreadRestoredPayload,
   ThreadInteractionModeSetPayload,
+  ThreadAutoNudgeConfiguredPayload,
+  ThreadAutoNudgeDispatchedPayload,
+  ThreadAutoNudgeStoppedPayload,
+  ThreadManualFollowUpReservedPayload,
+  ThreadManualFollowUpEnqueuedPayload,
+  ThreadManualFollowUpCancelledPayload,
+  ThreadManualFollowUpActivatedPayload,
+  ThreadManualFollowUpAcceptedPayload,
+  ThreadManualFollowUpReleasedPayload,
   ThreadMetaUpdatedPayload,
   ThreadProposedPlanUpsertedPayload,
   ThreadRuntimeModeSetPayload,
@@ -40,6 +57,22 @@ import {
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id">>;
 const MAX_THREAD_MESSAGES = 2_000;
 const MAX_THREAD_CHECKPOINTS = 500;
+
+function activateManualFollowUpItem(
+  item: ManualFollowUpItem,
+  activatedAt: string,
+  activationCommandId: CommandId,
+): ManualFollowUpItem {
+  return item.status === "reserving"
+    ? item
+    : { ...item, status: "handoff", activatedAt, activationCommandId };
+}
+
+function releaseManualFollowUpItem(item: ManualFollowUpItem): ManualFollowUpItem {
+  return item.status === "reserving"
+    ? item
+    : { ...item, status: "queued", activatedAt: null, activationCommandId: null };
+}
 
 function copiedThreadScopedId(targetThreadId: ThreadId, id: string): string {
   return `copy:${targetThreadId}:${id}`;
@@ -293,6 +326,10 @@ function compareThreadActivities(
 export function createEmptyReadModel(nowIso: string): OrchestrationReadModel {
   return {
     snapshotSequence: 0,
+    autoNudgeAuthority: {
+      ...DEFAULT_GLOBAL_AUTO_NUDGE_AUTHORITY,
+      updatedAt: nowIso,
+    },
     projects: [],
     threads: [],
     updatedAt: nowIso,
@@ -310,6 +347,12 @@ export function projectEvent(
   };
 
   switch (event.type) {
+    case "system.auto-nudge-authority-changed":
+      return Effect.succeed({
+        ...nextBase,
+        autoNudgeAuthority: event.payload.authority,
+      });
+
     case "project.created":
       return decodeForEvent(ProjectCreatedPayload, event.payload, event.type, "payload").pipe(
         Effect.map((payload) => {
@@ -403,6 +446,8 @@ export function projectEvent(
             updatedAt: payload.updatedAt,
             archivedAt: null,
             deletedAt: null,
+            autoNudge: DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+            manualFollowUps: [],
             messages: [],
             activities: [],
             checkpoints: [],
@@ -572,6 +617,230 @@ export function projectEvent(
           };
         }),
       );
+
+    case "thread.auto-nudge-configured":
+      return decodeForEvent(
+        ThreadAutoNudgeConfiguredPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            autoNudge: payload.config,
+            updatedAt: event.occurredAt,
+          }),
+        })),
+      );
+
+    case "thread.auto-nudge-summary-changed":
+      return Effect.succeed(nextBase);
+
+    case "thread.auto-nudge-stopped":
+      return decodeForEvent(
+        ThreadAutoNudgeStoppedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) return nextBase;
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              autoNudge: {
+                ...DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+                authorityRevision: payload.authorityRevision,
+                prompt: thread.autoNudge.prompt,
+                maxRounds: thread.autoNudge.maxRounds,
+              },
+              updatedAt: payload.stoppedAt,
+            }),
+          };
+        }),
+      );
+
+    case "thread.auto-nudge-dispatched":
+      return decodeForEvent(
+        ThreadAutoNudgeDispatchedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) return nextBase;
+          const current = thread.autoNudge ?? DEFAULT_THREAD_AUTO_NUDGE_CONFIG;
+          if (current.mode === "off" || current.authorityRevision !== payload.authorityRevision) {
+            return nextBase;
+          }
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              autoNudge: {
+                ...current,
+                lastDispatchedSettledTurnId: payload.completedTurnId,
+                lastDispatchedMessageId: payload.messageId,
+                roundsDispatched: payload.roundsDispatched,
+                lastDispatchedAt: payload.dispatchedAt,
+              },
+              updatedAt: payload.dispatchedAt,
+            }),
+          };
+        }),
+      );
+
+    case "thread.manual-follow-up-reserved":
+      return decodeForEvent(
+        ThreadManualFollowUpReservedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread || thread.manualFollowUps.some((item) => item.id === payload.item.id)) {
+            return nextBase;
+          }
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              manualFollowUps: [...thread.manualFollowUps, payload.item],
+              updatedAt: payload.item.enqueuedAt,
+            }),
+          };
+        }),
+      );
+
+    case "thread.manual-follow-up-enqueued":
+      return decodeForEvent(
+        ThreadManualFollowUpEnqueuedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) return nextBase;
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              manualFollowUps: thread.manualFollowUps.some((item) => item.id === payload.item.id)
+                ? thread.manualFollowUps.map((item) =>
+                    item.id === payload.item.id ? payload.item : item,
+                  )
+                : [...thread.manualFollowUps, payload.item],
+              updatedAt: payload.item.enqueuedAt,
+            }),
+          };
+        }),
+      );
+
+    case "thread.manual-follow-up-cancelled":
+      return decodeForEvent(
+        ThreadManualFollowUpCancelledPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) return nextBase;
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              manualFollowUps: thread.manualFollowUps.filter(
+                (item) => item.id !== payload.followUpId,
+              ),
+              updatedAt: payload.cancelledAt,
+            }),
+          };
+        }),
+      );
+
+    case "thread.manual-follow-up-activated":
+      return decodeForEvent(
+        ThreadManualFollowUpActivatedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) return nextBase;
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              manualFollowUps: thread.manualFollowUps.map((item) =>
+                item.id === payload.followUpId
+                  ? activateManualFollowUpItem(
+                      item,
+                      payload.activatedAt,
+                      payload.activationCommandId,
+                    )
+                  : item,
+              ),
+              updatedAt: payload.activatedAt,
+            }),
+          };
+        }),
+      );
+
+    case "thread.manual-follow-up-accepted":
+      return decodeForEvent(
+        ThreadManualFollowUpAcceptedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) return nextBase;
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              manualFollowUps: thread.manualFollowUps.filter(
+                (item) =>
+                  item.id !== payload.followUpId ||
+                  item.status === "reserving" ||
+                  item.activationCommandId !== payload.activationCommandId,
+              ),
+              updatedAt: payload.acceptedAt,
+            }),
+          };
+        }),
+      );
+
+    case "thread.manual-follow-up-released":
+      return decodeForEvent(
+        ThreadManualFollowUpReleasedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) return nextBase;
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              manualFollowUps: thread.manualFollowUps.map((item) =>
+                item.id === payload.followUpId &&
+                item.status !== "reserving" &&
+                item.activationCommandId === payload.activationCommandId
+                  ? releaseManualFollowUpItem(item)
+                  : item,
+              ),
+              updatedAt: payload.releasedAt,
+            }),
+          };
+        }),
+      );
+
+    case "thread.manual-follow-up-count-changed":
+      return Effect.succeed(nextBase);
 
     case "thread.message-sent":
       return Effect.gen(function* () {

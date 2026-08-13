@@ -330,6 +330,14 @@ const makeWsRpcLayer = (
         }
 
         switch (event.type) {
+          case "system.auto-nudge-authority-changed":
+            return Effect.succeed(
+              Option.some({
+                kind: "auto-nudge-authority-changed" as const,
+                sequence: event.sequence,
+                authority: event.payload.authority,
+              }),
+            );
           case "project.created":
           case "project.meta-updated":
             return projectionSnapshotQuery.getProjectShellById(event.payload.projectId).pipe(

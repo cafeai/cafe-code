@@ -68,7 +68,17 @@ function isThreadDetailEvent(event: OrchestrationEvent): boolean {
     event.type === "thread.activity-appended" ||
     event.type === "thread.turn-diff-completed" ||
     event.type === "thread.reverted" ||
-    event.type === "thread.session-set"
+    event.type === "thread.session-set" ||
+    event.type === "thread.auto-nudge-configured" ||
+    event.type === "thread.auto-nudge-stopped" ||
+    event.type === "thread.auto-nudge-dispatched" ||
+    event.type === "thread.manual-follow-up-reserved" ||
+    event.type === "thread.manual-follow-up-enqueued" ||
+    event.type === "thread.manual-follow-up-cancelled" ||
+    event.type === "thread.manual-follow-up-activated" ||
+    event.type === "thread.manual-follow-up-accepted" ||
+    event.type === "thread.manual-follow-up-released" ||
+    event.type === "thread.manual-follow-up-count-changed"
   );
 }
 
@@ -105,7 +115,49 @@ function eventMatchesRoute(
   ) {
     return false;
   }
+  // Prompt-bearing durable follow-up items and their exact ids/status are
+  // detail-only. Shell clients coordinate from the separate prompt-free count.
+  if (
+    event.type === "thread.manual-follow-up-reserved" ||
+    event.type === "thread.manual-follow-up-enqueued" ||
+    event.type === "thread.manual-follow-up-cancelled" ||
+    event.type === "thread.manual-follow-up-activated" ||
+    event.type === "thread.manual-follow-up-accepted" ||
+    event.type === "thread.manual-follow-up-released"
+  ) {
+    return false;
+  }
   return doesActivityAffectShell(event);
+}
+
+function eventForRoute(
+  event: OrchestrationEvent,
+  route: OrchestrationSubscriptionRoute,
+): OrchestrationEvent | null {
+  if (!eventMatchesRoute(event, route)) return null;
+  if (route.kind !== "shell" || event.type !== "thread.auto-nudge-configured") return event;
+
+  const config = event.payload.config;
+  return {
+    ...event,
+    type: "thread.auto-nudge-summary-changed",
+    payload: {
+      threadId: event.payload.threadId,
+      summary: {
+        authorityRevision: config.authorityRevision,
+        mode: config.mode,
+        backgroundContinuation: config.backgroundContinuation,
+        maxRounds: config.maxRounds,
+        armedAt: config.armedAt,
+        baselineSettledTurnId: config.baselineSettledTurnId,
+        lastDispatchedSettledTurnId: config.lastDispatchedSettledTurnId,
+        lastDispatchedMessageId: config.lastDispatchedMessageId,
+        roundsDispatched: config.roundsDispatched,
+        lastDispatchedAt: config.lastDispatchedAt,
+      },
+      updatedAt: event.occurredAt,
+    },
+  };
 }
 
 function subscriptionError(): OrchestrationGetSnapshotError {
@@ -174,8 +226,10 @@ export const makeOrchestrationSubscriptionHub = (options: {
         }
 
         for (const subscriber of Array.from(subscribers.values())) {
-          if (!eventMatchesRoute(event, subscriber.route)) continue;
-          const classification = classifyOutboundOrchestrationEvent(event);
+          const routedEvent = eventForRoute(event, subscriber.route);
+          if (routedEvent === null) continue;
+          const routedBytes = encodedJsonByteLength(routedEvent);
+          const classification = classifyOutboundOrchestrationEvent(routedEvent);
           const replaceableKey =
             classification.kind === "replaceable"
               ? `${subscriber.coalescingEpoch}:${classification.key}`
@@ -183,7 +237,7 @@ export const makeOrchestrationSubscriptionHub = (options: {
           const previous =
             replaceableKey === null ? undefined : subscriber.pendingReplaceable.get(replaceableKey);
           if (previous !== undefined) {
-            const nextQueuedBytes = subscriber.queuedBytes - previous.bytes + bytes;
+            const nextQueuedBytes = subscriber.queuedBytes - previous.bytes + routedBytes;
             if (nextQueuedBytes > PROVIDER_PIPELINE_POLICY.subscriptionQueueMaxBytes) {
               subscriber.overflowed = true;
               subscribers.delete(subscriber.id);
@@ -192,13 +246,14 @@ export const makeOrchestrationSubscriptionHub = (options: {
               continue;
             }
             subscriber.queuedBytes = nextQueuedBytes;
-            previous.event = event;
-            previous.bytes = bytes;
+            previous.event = routedEvent;
+            previous.bytes = routedBytes;
             coalescedEventCount += 1;
             continue;
           }
           if (
-            subscriber.queuedBytes + bytes > PROVIDER_PIPELINE_POLICY.subscriptionQueueMaxBytes ||
+            subscriber.queuedBytes + routedBytes >
+              PROVIDER_PIPELINE_POLICY.subscriptionQueueMaxBytes ||
             (yield* Queue.size(subscriber.queue)) >=
               PROVIDER_PIPELINE_POLICY.subscriptionQueueMaxEvents
           ) {
@@ -208,10 +263,14 @@ export const makeOrchestrationSubscriptionHub = (options: {
             yield* Queue.shutdown(subscriber.queue);
             continue;
           }
-          const subscriberEntry: QueuedEvent = { event, bytes, replaceableKey };
+          const subscriberEntry: QueuedEvent = {
+            event: routedEvent,
+            bytes: routedBytes,
+            replaceableKey,
+          };
           const accepted = yield* Queue.offer(subscriber.queue, subscriberEntry);
           if (accepted) {
-            subscriber.queuedBytes += bytes;
+            subscriber.queuedBytes += routedBytes;
             if (replaceableKey !== null) {
               subscriber.pendingReplaceable.set(replaceableKey, subscriberEntry);
             } else {
@@ -288,12 +347,24 @@ export const makeOrchestrationSubscriptionHub = (options: {
             Effect.sync(() => {
               const capturedCursor = cursor;
               const oldestRingSequence = replayRing[0]?.event.sequence ?? capturedCursor + 1;
-              const ringEvents = replayRing.filter(
-                (entry) =>
-                  entry.event.sequence > input.fromSequenceExclusive &&
-                  entry.event.sequence <= capturedCursor &&
-                  eventMatchesRoute(entry.event, input.route),
-              );
+              const ringEvents = replayRing.flatMap((entry) => {
+                if (
+                  entry.event.sequence <= input.fromSequenceExclusive ||
+                  entry.event.sequence > capturedCursor
+                ) {
+                  return [];
+                }
+                const routedEvent = eventForRoute(entry.event, input.route);
+                return routedEvent === null
+                  ? []
+                  : [
+                      {
+                        event: routedEvent,
+                        bytes: encodedJsonByteLength(routedEvent),
+                        replaceableKey: null,
+                      } satisfies QueuedEvent,
+                    ];
+              });
               subscribers.set(subscriber.id, subscriber);
               updateSubscriptionDiagnostics();
               return { capturedCursor, oldestRingSequence, ringEvents };
@@ -312,7 +383,10 @@ export const makeOrchestrationSubscriptionHub = (options: {
           const replay = needsDurableCatchup
             ? orchestrationEngine.readEvents(input.fromSequenceExclusive).pipe(
                 Stream.takeWhile((event) => event.sequence <= registration.capturedCursor),
-                Stream.filter((event) => eventMatchesRoute(event, input.route)),
+                Stream.flatMap((event) => {
+                  const routedEvent = eventForRoute(event, input.route);
+                  return routedEvent === null ? Stream.empty : Stream.make(routedEvent);
+                }),
                 Stream.mapError(
                   (cause) =>
                     new OrchestrationGetSnapshotError({

@@ -1,6 +1,7 @@
 import {
   ApprovalRequestId,
   type ChatAttachment,
+  DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
   type OrchestrationEvent,
   ThreadId,
   type TurnId,
@@ -59,6 +60,7 @@ import {
 } from "../../attachmentStore.ts";
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
+  autoNudgeAuthority: "projection.auto-nudge-authority",
   projects: "projection.projects",
   threads: "projection.threads",
   threadMessages: "projection.thread-messages",
@@ -824,6 +826,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             interactionMode: event.payload.interactionMode,
             branch: event.payload.branch,
             worktreePath: event.payload.worktreePath,
+            autoNudge: DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+            manualFollowUps: [],
             latestTurnId: null,
             createdAt: event.payload.createdAt,
             updatedAt: event.payload.updatedAt,
@@ -933,6 +937,187 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           });
           return;
         }
+
+        case "thread.auto-nudge-configured": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) return;
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            autoNudge: event.payload.config,
+            updatedAt: maxIso(
+              existingRow.value.updatedAt,
+              event.payload.config.armedAt ?? event.occurredAt,
+            ),
+          });
+          return;
+        }
+
+        case "thread.auto-nudge-summary-changed":
+          return;
+
+        case "thread.auto-nudge-stopped": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) return;
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            autoNudge: {
+              ...DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+              authorityRevision: event.payload.authorityRevision,
+              prompt: existingRow.value.autoNudge.prompt,
+              maxRounds: existingRow.value.autoNudge.maxRounds,
+            },
+            updatedAt: maxIso(existingRow.value.updatedAt, event.payload.stoppedAt),
+          });
+          return;
+        }
+
+        case "thread.auto-nudge-dispatched": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (
+            Option.isNone(existingRow) ||
+            existingRow.value.autoNudge.mode === "off" ||
+            existingRow.value.autoNudge.authorityRevision !== event.payload.authorityRevision
+          ) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            autoNudge: {
+              ...existingRow.value.autoNudge,
+              lastDispatchedSettledTurnId: event.payload.completedTurnId,
+              lastDispatchedMessageId: event.payload.messageId,
+              roundsDispatched: event.payload.roundsDispatched,
+              lastDispatchedAt: event.payload.dispatchedAt,
+            },
+            updatedAt: maxIso(existingRow.value.updatedAt, event.payload.dispatchedAt),
+          });
+          return;
+        }
+
+        case "thread.manual-follow-up-reserved": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (
+            Option.isNone(existingRow) ||
+            existingRow.value.manualFollowUps.some((item) => item.id === event.payload.item.id)
+          ) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            manualFollowUps: [...existingRow.value.manualFollowUps, event.payload.item],
+            updatedAt: maxIso(existingRow.value.updatedAt, event.payload.item.enqueuedAt),
+          });
+          return;
+        }
+
+        case "thread.manual-follow-up-enqueued": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) return;
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            manualFollowUps: existingRow.value.manualFollowUps.some(
+              (item) => item.id === event.payload.item.id,
+            )
+              ? existingRow.value.manualFollowUps.map((item) =>
+                  item.id === event.payload.item.id ? event.payload.item : item,
+                )
+              : [...existingRow.value.manualFollowUps, event.payload.item],
+            updatedAt: maxIso(existingRow.value.updatedAt, event.payload.item.enqueuedAt),
+          });
+          return;
+        }
+
+        case "thread.manual-follow-up-cancelled": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) return;
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            manualFollowUps: existingRow.value.manualFollowUps.filter(
+              (item) => item.id !== event.payload.followUpId,
+            ),
+            updatedAt: maxIso(existingRow.value.updatedAt, event.payload.cancelledAt),
+          });
+          return;
+        }
+
+        case "thread.manual-follow-up-activated": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) return;
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            manualFollowUps: existingRow.value.manualFollowUps.map((item) =>
+              item.id === event.payload.followUpId && item.status !== "reserving"
+                ? {
+                    ...item,
+                    status: "handoff" as const,
+                    activatedAt: event.payload.activatedAt,
+                    activationCommandId: event.payload.activationCommandId,
+                  }
+                : item,
+            ),
+            updatedAt: maxIso(existingRow.value.updatedAt, event.payload.activatedAt),
+          });
+          return;
+        }
+
+        case "thread.manual-follow-up-accepted": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) return;
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            manualFollowUps: existingRow.value.manualFollowUps.filter(
+              (item) =>
+                item.id !== event.payload.followUpId ||
+                item.status === "reserving" ||
+                item.activationCommandId !== event.payload.activationCommandId,
+            ),
+            updatedAt: maxIso(existingRow.value.updatedAt, event.payload.acceptedAt),
+          });
+          return;
+        }
+
+        case "thread.manual-follow-up-released": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) return;
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            manualFollowUps: existingRow.value.manualFollowUps.map((item) =>
+              item.id === event.payload.followUpId &&
+              item.status !== "reserving" &&
+              item.activationCommandId === event.payload.activationCommandId
+                ? {
+                    ...item,
+                    status: "queued" as const,
+                    activatedAt: null,
+                    activationCommandId: null,
+                  }
+                : item,
+            ),
+            updatedAt: maxIso(existingRow.value.updatedAt, event.payload.releasedAt),
+          });
+          return;
+        }
+
+        case "thread.manual-follow-up-count-changed":
+          return;
 
         case "thread.turn-start-requested": {
           const existingRow = yield* projectionThreadRepository.getById({
@@ -2259,7 +2444,42 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       }
     });
 
+    const applyAutoNudgeAuthorityProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyAutoNudgeAuthorityProjection",
+    )(function* (event, _attachmentSideEffects) {
+      if (event.type !== "system.auto-nudge-authority-changed") return;
+      const authority = event.payload.authority;
+      yield* sql`
+        INSERT INTO projection_auto_nudge_authority (
+          singleton_key,
+          authority_revision,
+          status,
+          stopped_at,
+          updated_at
+        ) VALUES (
+          'global',
+          ${authority.authorityRevision},
+          ${authority.status},
+          ${authority.stoppedAt},
+          ${authority.updatedAt}
+        )
+        ON CONFLICT (singleton_key) DO UPDATE SET
+          authority_revision = excluded.authority_revision,
+          status = excluded.status,
+          stopped_at = excluded.stopped_at,
+          updated_at = excluded.updated_at
+      `.pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionPipeline.applyAutoNudgeAuthorityProjection:query"),
+        ),
+      );
+    });
+
     const projectors: ReadonlyArray<ProjectorDefinition> = [
+      {
+        name: ORCHESTRATION_PROJECTOR_NAMES.autoNudgeAuthority,
+        apply: applyAutoNudgeAuthorityProjection,
+      },
       {
         name: ORCHESTRATION_PROJECTOR_NAMES.projects,
         apply: applyProjectsProjection,

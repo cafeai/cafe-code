@@ -114,6 +114,18 @@ function normalizeDeleteEvent(event: PlannedEvent | ReadonlyArray<PlannedEvent>)
   const events = Array.isArray(event) ? event : [event];
   return events.map((entry) => {
     switch (entry.type) {
+      case "thread.auto-nudge-stopped":
+        return {
+          type: entry.type,
+          aggregateKind: entry.aggregateKind,
+          aggregateId: entry.aggregateId,
+          commandId: entry.commandId,
+          correlationId: entry.correlationId,
+          payload: {
+            threadId: entry.payload.threadId,
+            authorityRevision: entry.payload.authorityRevision,
+          },
+        };
       case "thread.deleted":
         return {
           type: entry.type,
@@ -178,7 +190,9 @@ describe("decider deletion flows", () => {
     const forcedEvents = Array.isArray(forcedResult) ? forcedResult : [forcedResult];
 
     expect(forcedEvents.map((event) => event.type)).toEqual([
+      "thread.auto-nudge-stopped",
       "thread.deleted",
+      "thread.auto-nudge-stopped",
       "thread.deleted",
       "project.deleted",
     ]);

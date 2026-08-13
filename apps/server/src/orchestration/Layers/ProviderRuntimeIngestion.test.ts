@@ -635,6 +635,80 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.status).toBe("ready");
   });
 
+  it("projects completion only after buffered assistant output is finalized", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: false } });
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-completion-after-final-text");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-before-final-text"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      turnId,
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "running" && thread.session.activeTurnId === turnId,
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-buffered-final-text"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      createdAt: "2026-01-01T00:00:01.000Z",
+      turnId,
+      itemId: asItemId("item-buffered-final-text"),
+      payload: { streamKind: "assistant_text", delta: "Final response" },
+    });
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-after-final-text"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      createdAt: "2026-01-01T00:00:02.000Z",
+      turnId,
+      payload: { state: "completed" },
+    });
+
+    const completedThread = await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "ready" &&
+        thread.messages.some(
+          (message: ProviderRuntimeTestMessage) =>
+            message.turnId === turnId && message.text === "Final response" && !message.streaming,
+        ),
+    );
+    const finalMessage = completedThread.messages.find(
+      (message: ProviderRuntimeTestMessage) =>
+        message.turnId === turnId && message.text === "Final response" && !message.streaming,
+    );
+    expect(finalMessage).toBeDefined();
+    const events = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    const finalMessageIndex = events.findIndex(
+      (event) =>
+        event.type === "thread.message-sent" &&
+        event.payload.messageId === finalMessage?.id &&
+        !event.payload.streaming,
+    );
+    const completedSessionIndex = events.findIndex(
+      (event) =>
+        event.type === "thread.session-set" &&
+        event.payload.session.activeTurnId === null &&
+        event.payload.session.status === "ready" &&
+        event.payload.session.updatedAt === "2026-01-01T00:00:02.000Z",
+    );
+    expect(finalMessageIndex).toBeGreaterThanOrEqual(0);
+    expect(completedSessionIndex).toBeGreaterThan(finalMessageIndex);
+  });
+
   it("does not write redundant session heartbeats for active content deltas", async () => {
     const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
     const startedAt = "2026-01-01T00:00:00.000Z";

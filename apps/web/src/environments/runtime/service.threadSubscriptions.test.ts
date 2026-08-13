@@ -1,5 +1,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import {
+  DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+  DEFAULT_THREAD_AUTO_NUDGE_SUMMARY,
   EnvironmentId,
   EventId,
   MessageId,
@@ -156,6 +158,8 @@ function makeThreadShellSnapshot(params: {
         hasPendingApprovals: params.hasPendingApprovals ?? false,
         hasPendingUserInput: params.hasPendingUserInput ?? false,
         hasActionableProposedPlan: params.hasActionableProposedPlan ?? false,
+        autoNudge: DEFAULT_THREAD_AUTO_NUDGE_SUMMARY,
+        manualFollowUpCount: 0,
       },
     ],
   };
@@ -216,6 +220,8 @@ function makeThreadDetail(params: {
     activities: [],
     proposedPlans: [],
     checkpoints: [],
+    autoNudge: DEFAULT_THREAD_AUTO_NUDGE_CONFIG,
+    manualFollowUps: [],
   };
 }
 
