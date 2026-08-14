@@ -116,6 +116,19 @@ function areStringArraysEqual(
   );
 }
 
+function providerDriverDisplayName(value: string | undefined): string {
+  switch (value) {
+    case "claudeAgent":
+      return "Claude";
+    case "codex":
+      return "Codex";
+    case "opencode":
+      return "OpenCode";
+    default:
+      return providerErrorLabel(value);
+  }
+}
+
 const turnStartKeyForEvent = (event: ProviderIntentEvent): string =>
   event.commandId !== null ? `command:${event.commandId}` : `event:${event.eventId}`;
 
@@ -1595,9 +1608,88 @@ const make = Effect.gen(function* () {
       );
 
     const runtimeActiveSession = yield* getProviderSessionForThread(event.payload.threadId);
+    const desiredModelSelection = event.payload.modelSelection ?? thread.modelSelection;
+    const previousProviderInstanceId =
+      runtimeActiveSession?.providerInstanceId ?? thread.session?.providerInstanceId;
+    const providerSwitch =
+      previousProviderInstanceId !== undefined &&
+      previousProviderInstanceId !== desiredModelSelection.instanceId
+        ? yield* Effect.gen(function* () {
+            const [previousInfo, desiredInfo] = yield* Effect.all([
+              providerService.getInstanceInfo(previousProviderInstanceId).pipe(Effect.option),
+              providerService.getInstanceInfo(desiredModelSelection.instanceId).pipe(Effect.option),
+            ]);
+            const previousProvider = Option.isSome(previousInfo)
+              ? previousInfo.value.driverKind
+              : (runtimeActiveSession?.provider ?? thread.session?.providerName ?? undefined);
+            const desiredProvider = Option.isSome(desiredInfo)
+              ? desiredInfo.value.driverKind
+              : String(desiredModelSelection.instanceId);
+            const previousLabel =
+              Option.isSome(previousInfo) && previousInfo.value.displayName
+                ? previousInfo.value.displayName
+                : providerDriverDisplayName(previousProvider);
+            const desiredLabel =
+              Option.isSome(desiredInfo) && desiredInfo.value.displayName
+                ? desiredInfo.value.displayName
+                : providerDriverDisplayName(desiredProvider);
+            const modelSuffix = desiredModelSelection.model
+              ? ` · ${desiredModelSelection.model}`
+              : "";
+            return {
+              summary:
+                previousLabel === desiredLabel
+                  ? `Switched ${desiredLabel} provider${modelSuffix}`
+                  : `Switched from ${previousLabel} to ${desiredLabel}${modelSuffix}`,
+              detail: `Cafe Code started this turn with ${desiredLabel}${
+                desiredModelSelection.model ? ` using ${desiredModelSelection.model}` : ""
+              }.`,
+              payload: {
+                fromProvider: previousProvider,
+                fromProviderInstanceId: previousProviderInstanceId,
+                ...(runtimeActiveSession?.model !== undefined
+                  ? { fromModel: runtimeActiveSession.model }
+                  : {}),
+                toProvider: desiredProvider,
+                toProviderInstanceId: desiredModelSelection.instanceId,
+                ...(desiredModelSelection.model !== undefined
+                  ? { toModel: desiredModelSelection.model }
+                  : {}),
+              },
+            };
+          })
+        : null;
+    const appendProviderSwitchActivity = (turnId: TurnId) =>
+      providerSwitch === null
+        ? Effect.void
+        : Effect.gen(function* () {
+            const switchedAt = DateTime.formatIso(yield* DateTime.now);
+            yield* appendProviderDiagnosticActivity({
+              threadId: event.payload.threadId,
+              kind: "provider.switched",
+              summary: providerSwitch.summary,
+              detail: providerSwitch.detail,
+              turnId,
+              createdAt: switchedAt,
+              payload: providerSwitch.payload,
+            });
+          }).pipe(
+            // The provider turn is already accepted at this point. A work-log
+            // write failure must not turn that successful send into a second
+            // provider submission or a false turn-start error.
+            Effect.catchCause((cause) =>
+              Effect.logWarning("provider switch activity append failed", {
+                threadId: event.payload.threadId,
+                fromProviderInstanceId: previousProviderInstanceId,
+                toProviderInstanceId: desiredModelSelection.instanceId,
+                cause: Cause.pretty(cause),
+              }),
+            ),
+          );
     if (
       runtimeActiveSession?.status === "running" &&
-      runtimeActiveSession.activeTurnId !== undefined
+      runtimeActiveSession.activeTurnId !== undefined &&
+      runtimeActiveSession.providerInstanceId === desiredModelSelection.instanceId
     ) {
       const activeTurnId = runtimeActiveSession.activeTurnId;
       const normalizedInput = toNonEmptyProviderInput(message.text);
@@ -1905,7 +1997,7 @@ const make = Effect.gen(function* () {
           threadId: event.payload.threadId,
           turnId: turn.turnId,
           createdAt: event.payload.createdAt,
-        }),
+        }).pipe(Effect.andThen(appendProviderSwitchActivity(turn.turnId))),
       ),
       Effect.catchCause((cause) => {
         const activeTurnId = detectCodexActiveTurnRunningStartFailure(cause);

@@ -510,7 +510,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      if (threadHasUnsettledTurnStart(targetThread)) {
+      const boundProviderInstanceId =
+        targetThread.session?.providerInstanceId ?? targetThread.session?.providerName;
+      const requestsProviderInstanceSwitch =
+        command.modelSelection !== undefined &&
+        boundProviderInstanceId !== undefined &&
+        command.modelSelection.instanceId !== boundProviderInstanceId;
+      if (threadHasUnsettledTurnStart(targetThread) && !requestsProviderInstanceSwitch) {
         const activeTurnId = activeTurnIdForSteer(targetThread);
         // The renderer can submit from an older ready snapshot while the
         // authoritative aggregate has already moved to `starting`. Claude can
@@ -563,6 +569,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         };
         return [userMessageEvent, turnSteerRequestedEvent];
       }
+      // An explicit provider-instance change cannot be represented as a live
+      // steer: provider steering APIs keep using the session that already owns
+      // the active turn and do not accept a replacement routing key. Preserve
+      // the requested model selection on a normal turn-start intent so the
+      // provider reactor can replace stale runtime ownership before sending.
+      // The renderer queues ordinary sends while a turn is genuinely active;
+      // this branch handles the stale projection/runtime races that otherwise
+      // make a composer-selected Codex turn run through Claude (or vice versa).
       const sourceProposedPlan = command.sourceProposedPlan;
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({

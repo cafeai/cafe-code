@@ -457,7 +457,7 @@ describe("OrchestrationEngine", () => {
     await system.dispose();
   });
 
-  it("routes a turn start on a projected active turn into a steer request", async () => {
+  it("routes a same-provider active turn into a steer but preserves a provider switch", async () => {
     const createdAt = now();
     const system = await createOrchestrationSystem();
     const { engine } = system;
@@ -551,6 +551,55 @@ describe("OrchestrationEngine", () => {
           event.payload.messageId === "msg-start-routes-to-steer",
       ),
     ).toHaveLength(0);
+
+    await system.run(
+      engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-routes-to-provider-switch"),
+        threadId,
+        message: {
+          messageId: asMessageId("msg-start-routes-to-provider-switch"),
+          role: "user",
+          text: "switch from Claude to Codex",
+          attachments: [],
+        },
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.6-sol",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:02.000Z",
+      }),
+    );
+
+    const eventsAfterSwitch = await system.run(
+      Stream.runCollect(engine.readEvents(0)).pipe(
+        Effect.map((chunk): OrchestrationEvent[] => Array.from(chunk)),
+      ),
+    );
+    expect(
+      eventsAfterSwitch.filter((event) => event.type === "thread.turn-steer-requested"),
+    ).toHaveLength(1);
+    expect(
+      eventsAfterSwitch.find(
+        (event): event is Extract<OrchestrationEvent, { type: "thread.turn-start-requested" }> =>
+          event.type === "thread.turn-start-requested" &&
+          event.payload.messageId === "msg-start-routes-to-provider-switch",
+      )?.payload,
+    ).toMatchObject({
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5.6-sol",
+      },
+    });
+    expect(
+      eventsAfterSwitch.find(
+        (event): event is Extract<OrchestrationEvent, { type: "thread.message-sent" }> =>
+          event.type === "thread.message-sent" &&
+          event.payload.messageId === "msg-start-routes-to-provider-switch",
+      )?.payload.turnId,
+    ).toBeNull();
 
     await system.dispose();
   });

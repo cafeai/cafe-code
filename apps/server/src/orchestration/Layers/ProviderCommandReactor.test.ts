@@ -1322,6 +1322,113 @@ describe("ProviderCommandReactor", () => {
     ).toBeUndefined();
   });
 
+  it("switches providers instead of steering a stale active runtime and records the switch", async () => {
+    const harness = await createHarness({
+      threadModelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-sonnet-4-6",
+      },
+      liveSteer: "supported",
+    });
+    const threadId = ThreadId.make("thread-1");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-claude-before-switch"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-claude-before-switch"),
+          role: "user",
+          text: "start with claude",
+          attachments: [],
+        },
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-sonnet-4-6",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    const claudeSession = harness.runtimeSessions[0];
+    if (!claudeSession) {
+      throw new Error("Expected the Claude runtime session to exist.");
+    }
+    harness.runtimeSessions[0] = {
+      ...claudeSession,
+      status: "running",
+      activeTurnId: asTurnId("stale-claude-active-turn"),
+    };
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-codex-provider-switch"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-codex-provider-switch"),
+          role: "user",
+          text: "continue with codex",
+          attachments: [],
+        },
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.6-sol",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === threadId);
+      return thread?.activities.some((activity) => activity.kind === "provider.switched") ?? false;
+    });
+
+    expect(harness.steerTurn).not.toHaveBeenCalled();
+    expect(harness.startSession).toHaveBeenCalledTimes(2);
+    expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5.6-sol",
+      },
+    });
+    expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5.6-sol",
+      },
+    });
+
+    const readModel = await harness.readModel();
+    const switchActivity = readModel.threads
+      .find((entry) => entry.id === threadId)
+      ?.activities.find((activity) => activity.kind === "provider.switched");
+    expect(switchActivity).toMatchObject({
+      tone: "info",
+      summary: "Switched from Claude to Codex · gpt-5.6-sol",
+      turnId: asTurnId("turn-1"),
+      payload: {
+        fromProvider: ProviderDriverKind.make("claudeAgent"),
+        fromProviderInstanceId: ProviderInstanceId.make("claudeAgent"),
+        fromModel: "claude-sonnet-4-6",
+        toProvider: ProviderDriverKind.make("codex"),
+        toProviderInstanceId: ProviderInstanceId.make("codex"),
+        toModel: "gpt-5.6-sol",
+      },
+    });
+  });
+
   it("reuses the same provider session when runtime mode is unchanged", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

@@ -1620,6 +1620,32 @@ describe("deriveWorkLogEntries context window handling", () => {
     expect(entries[0]?.label).toBe("Context compacted");
   });
 
+  it("keeps provider switch notices as normal work log entries", () => {
+    const entries = deriveWorkLogEntries(
+      [
+        makeActivity({
+          id: "provider-switch-1",
+          turnId: "turn-1",
+          kind: "provider.switched",
+          summary: "Switched from Claude to Codex · gpt-5.6-sol",
+          tone: "info",
+          payload: {
+            fromProvider: "claudeAgent",
+            toProvider: "codex",
+            toModel: "gpt-5.6-sol",
+          },
+        }),
+      ],
+      TurnId.make("turn-1"),
+    );
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      label: "Switched from Claude to Codex · gpt-5.6-sol",
+      tone: "info",
+    });
+  });
+
   it("shows active Codex context compaction items and collapses them when completed", () => {
     const entries = deriveWorkLogEntries(
       [
