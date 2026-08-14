@@ -3152,6 +3152,7 @@ describe("ClaudeAdapterLive", () => {
         subtype: "model_refusal_fallback",
         trigger: "refusal",
         direction: "retry",
+        scope: "session",
         original_model: "claude-fable-5",
         fallback_model: "claude-sonnet-4-5",
         request_id: "req-191",
@@ -3281,6 +3282,17 @@ describe("ClaudeAdapterLive", () => {
         ),
         true,
       );
+      const fallbackWarning = runtimeEvents.find(
+        (event) =>
+          event.type === "runtime.warning" && event.payload.message.includes("fallback model"),
+      );
+      assert.equal(fallbackWarning?.type, "runtime.warning");
+      if (fallbackWarning?.type === "runtime.warning") {
+        assert.equal(
+          (fallbackWarning.payload.detail as Record<string, unknown> | undefined)?.scope,
+          "session",
+        );
+      }
       assert.equal(
         runtimeEvents.some(
           (event) =>

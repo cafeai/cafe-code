@@ -3844,7 +3844,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           subtype: message.subtype,
           trigger: message.trigger,
           direction: message.direction,
-          ...(message.scope !== undefined ? { scope: message.scope } : {}),
+          ...("scope" in message && message.scope !== undefined ? { scope: message.scope } : {}),
           originalModel: message.original_model,
           fallbackModel: message.fallback_model,
           requestId: message.request_id,
