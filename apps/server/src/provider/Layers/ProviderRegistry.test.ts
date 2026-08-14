@@ -1427,6 +1427,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               "gpt-5.6-sol",
               "gpt-5.6-terra",
               "gpt-5.6-luna",
+              "gpt-daybreak-blue-latest",
               "gpt-5.5",
               "gpt-5.4",
               "gpt-5.4-mini",
@@ -1466,9 +1467,15 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             ["low", "medium", "high", "xhigh", "max"],
           );
           assert.strictEqual(reasoningDescriptor("gpt-5.6-luna").currentValue, "medium");
+          assert.deepStrictEqual(
+            reasoningDescriptor("gpt-daybreak-blue-latest").options.map((option) => option.id),
+            ["low", "medium", "high", "xhigh", "max", "ultra"],
+          );
+          assert.strictEqual(reasoningDescriptor("gpt-daybreak-blue-latest").currentValue, "low");
           assert.strictEqual(hasFastMode("gpt-5.6-sol"), true);
           assert.strictEqual(hasFastMode("gpt-5.6-terra"), true);
           assert.strictEqual(hasFastMode("gpt-5.6-luna"), true);
+          assert.strictEqual(hasFastMode("gpt-daybreak-blue-latest"), false);
           assert.deepStrictEqual(status.skills, []);
         }),
       );
