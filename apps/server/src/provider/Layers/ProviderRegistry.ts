@@ -81,6 +81,15 @@ const makeManualProviderMaintenanceCapabilities = (provider: ProviderDriverKind)
 const hasModelCapabilities = (model: ServerProvider["models"][number]): boolean =>
   (model.capabilities?.optionDescriptors?.length ?? 0) > 0;
 
+const isSameAuthenticatedProviderAccount = (
+  previousProvider: ServerProvider,
+  nextProvider: ServerProvider,
+): boolean =>
+  previousProvider.auth.status === "authenticated" &&
+  nextProvider.auth.status === "authenticated" &&
+  previousProvider.auth.type === nextProvider.auth.type &&
+  previousProvider.auth.email === nextProvider.auth.email;
+
 const mergeProviderModels = (
   previousModels: ReadonlyArray<ServerProvider["models"][number]>,
   nextModels: ReadonlyArray<ServerProvider["models"][number]>,
@@ -118,14 +127,14 @@ export const mergeProviderSnapshot = (
         // `accountRateLimits`; without this, each refresh would wipe the limits accrued
         // from `rate_limit_event`s.
         //
-        // Codex is different: its account-usage snapshots are account-bound probe
-        // results from upstream `account/rateLimits/read` or the equivalent usage
-        // endpoint. Upstream TUI clears account-derived reset/usage state on account
-        // changes, and an omitted Codex usage snapshot after auth churn should render
-        // as unknown instead of preserving stale percentages from a previous account.
+        // Codex has both full probe snapshots and sparse live updates. Preserve the
+        // latest redacted usage when the same authenticated account suffers a transient
+        // probe failure, but clear it on auth/account churn so a percentage from one
+        // account can never be presented as another account's quota.
         ...(nextProvider.accountRateLimits === undefined &&
         previousProvider.accountRateLimits !== undefined &&
-        nextProvider.driver !== ProviderDriverKind.make("codex")
+        (nextProvider.driver !== ProviderDriverKind.make("codex") ||
+          isSameAuthenticatedProviderAccount(previousProvider, nextProvider))
           ? { accountRateLimits: previousProvider.accountRateLimits }
           : {}),
       };
@@ -153,6 +162,43 @@ export const selectProvidersByKind = (
   providerKinds: ReadonlySet<ProviderDriverKind>,
 ): ReadonlyArray<ServerProvider> =>
   providers.filter((provider) => providerKinds.has(provider.driver));
+
+/**
+ * Merge one sparse, named rate-limit snapshot into a provider's most recent full
+ * account-usage read. Codex rolling notifications omit unavailable fields rather than
+ * clearing them, so top-level metadata and untouched windows must survive. The canonical
+ * `codex` bucket is mirrored into the backward-compatible single-bucket field consumed by
+ * older renderer code.
+ */
+export const mergeProviderAccountRateLimitSnapshot = (input: {
+  readonly previous: ServerProviderAccountRateLimits | undefined;
+  readonly limitId: string;
+  readonly snapshot: ServerProviderAccountRateLimitSnapshot;
+  readonly checkedAt: string;
+}): ServerProviderAccountRateLimits => {
+  const previousByLimitId = input.previous?.rateLimitsByLimitId ?? {};
+  const previousSnapshot =
+    previousByLimitId[input.limitId] ??
+    (input.limitId === "codex" ? input.previous?.rateLimits : undefined);
+  const mergedSnapshot: ServerProviderAccountRateLimitSnapshot = {
+    ...previousSnapshot,
+    ...input.snapshot,
+  };
+  const rateLimits =
+    input.limitId === "codex" ? mergedSnapshot : (input.previous?.rateLimits ?? mergedSnapshot);
+
+  return {
+    rateLimits,
+    rateLimitsByLimitId: {
+      ...previousByLimitId,
+      [input.limitId]: mergedSnapshot,
+    },
+    ...(input.previous?.rateLimitResetCredits !== undefined
+      ? { rateLimitResetCredits: input.previous.rateLimitResetCredits }
+      : {}),
+    checkedAt: input.checkedAt,
+  };
+};
 
 export const haveProvidersChanged = (
   previousProviders: ReadonlyArray<ServerProvider>,
@@ -407,62 +453,75 @@ export const ProviderRegistryLive = Layer.effect(
       return yield* upsertProviders([provider], options);
     });
 
-    const updateProviderAccountRateLimits = Effect.fn("updateProviderAccountRateLimits")(
-      function* (input: {
-        readonly instanceId: ProviderInstanceId;
-        readonly slot: "primary" | "secondary";
-        readonly window: ServerProviderAccountRateLimitWindow;
-        readonly checkedAt: string;
-      }) {
-        type RateLimitUpdateResult =
-          | { readonly changed: false }
-          | { readonly changed: true; readonly providers: ReadonlyArray<ServerProvider> };
-
-        const result = yield* Ref.modify(
-          providersRef,
-          (previousProviders): readonly [RateLimitUpdateResult, ReadonlyArray<ServerProvider>] => {
-            const provider = previousProviders.find(
-              (candidate) => candidate.instanceId === input.instanceId,
-            );
-            if (provider === undefined) {
-              // Event arrived for an instance the aggregator isn't tracking (e.g. a
-              // race at boot). Drop it — the next event will land once it's registered.
-              return [{ changed: false }, previousProviders];
-            }
-            const previousRateLimits = provider.accountRateLimits;
-            const baseSnapshot = previousRateLimits?.rateLimits ?? {};
-            const nextSnapshot: ServerProviderAccountRateLimitSnapshot =
-              input.slot === "primary"
-                ? { ...baseSnapshot, primary: input.window }
-                : { ...baseSnapshot, secondary: input.window };
-            const nextRateLimits: ServerProviderAccountRateLimits = {
-              rateLimits: nextSnapshot,
-              ...(previousRateLimits?.rateLimitsByLimitId != null
-                ? { rateLimitsByLimitId: previousRateLimits.rateLimitsByLimitId }
-                : {}),
-              ...(previousRateLimits?.rateLimitResetCredits !== undefined
-                ? { rateLimitResetCredits: previousRateLimits.rateLimitResetCredits }
-                : {}),
-              checkedAt: input.checkedAt,
-            };
-            const nextProvider: ServerProvider = {
-              ...provider,
-              accountRateLimits: nextRateLimits,
-            };
-            if (Equal.equals(provider, nextProvider)) {
-              return [{ changed: false }, previousProviders];
-            }
-            const nextProviders: ReadonlyArray<ServerProvider> = previousProviders.map(
-              (candidate) => (candidate.instanceId === input.instanceId ? nextProvider : candidate),
-            );
-            return [{ changed: true, providers: nextProviders }, nextProviders];
+    const updateProviderAccountRateLimits = Effect.fn("updateProviderAccountRateLimits")(function* (
+      input:
+        | {
+            readonly instanceId: ProviderInstanceId;
+            readonly slot: "primary" | "secondary";
+            readonly window: ServerProviderAccountRateLimitWindow;
+            readonly checkedAt: string;
+          }
+        | {
+            readonly instanceId: ProviderInstanceId;
+            readonly limitId: string;
+            readonly snapshot: ServerProviderAccountRateLimitSnapshot;
+            readonly checkedAt: string;
           },
-        );
-        if (result.changed) {
-          yield* PubSub.publish(changesPubSub, result.providers);
-        }
-      },
-    );
+    ) {
+      type RateLimitUpdateResult =
+        | { readonly changed: false }
+        | { readonly changed: true; readonly providers: ReadonlyArray<ServerProvider> };
+
+      const result = yield* Ref.modify(
+        providersRef,
+        (previousProviders): readonly [RateLimitUpdateResult, ReadonlyArray<ServerProvider>] => {
+          const provider = previousProviders.find(
+            (candidate) => candidate.instanceId === input.instanceId,
+          );
+          if (provider === undefined) {
+            // Event arrived for an instance the aggregator isn't tracking (e.g. a
+            // race at boot). Drop it — the next event will land once it's registered.
+            return [{ changed: false }, previousProviders];
+          }
+          const previousRateLimits = provider.accountRateLimits;
+          const nextRateLimits: ServerProviderAccountRateLimits =
+            "snapshot" in input
+              ? mergeProviderAccountRateLimitSnapshot({
+                  previous: previousRateLimits,
+                  limitId: input.limitId,
+                  snapshot: input.snapshot,
+                  checkedAt: input.checkedAt,
+                })
+              : {
+                  rateLimits:
+                    input.slot === "primary"
+                      ? { ...previousRateLimits?.rateLimits, primary: input.window }
+                      : { ...previousRateLimits?.rateLimits, secondary: input.window },
+                  ...(previousRateLimits?.rateLimitsByLimitId != null
+                    ? { rateLimitsByLimitId: previousRateLimits.rateLimitsByLimitId }
+                    : {}),
+                  ...(previousRateLimits?.rateLimitResetCredits !== undefined
+                    ? { rateLimitResetCredits: previousRateLimits.rateLimitResetCredits }
+                    : {}),
+                  checkedAt: input.checkedAt,
+                };
+          const nextProvider: ServerProvider = {
+            ...provider,
+            accountRateLimits: nextRateLimits,
+          };
+          if (Equal.equals(provider, nextProvider)) {
+            return [{ changed: false }, previousProviders];
+          }
+          const nextProviders: ReadonlyArray<ServerProvider> = previousProviders.map((candidate) =>
+            candidate.instanceId === input.instanceId ? nextProvider : candidate,
+          );
+          return [{ changed: true, providers: nextProviders }, nextProviders];
+        },
+      );
+      if (result.changed) {
+        yield* PubSub.publish(changesPubSub, result.providers);
+      }
+    });
 
     const setProviderMaintenanceActionState = Effect.fn("setProviderMaintenanceActionState")(
       function* (input: {

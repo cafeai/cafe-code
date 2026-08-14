@@ -52,6 +52,7 @@ import {
 } from "./ProviderInstanceRegistryHydration.ts";
 import {
   haveProvidersChanged,
+  mergeProviderAccountRateLimitSnapshot,
   mergeProviderSnapshot,
   mergeProviderSnapshots,
   ProviderRegistryLive,
@@ -674,6 +675,83 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           mergeProviderSnapshot(previousProvider, refreshedProvider).accountRateLimits,
           undefined,
         );
+      });
+
+      it("preserves live Codex rate limits across a transient same-account probe omission", () => {
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make("codex"),
+          driver: ProviderDriverKind.make("codex"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated", type: "chatgpt", email: "same@example.test" },
+          checkedAt: "2026-08-12T10:00:00.000Z",
+          version: "0.147.0",
+          models: [],
+          slashCommands: [],
+          skills: [],
+          accountRateLimits: {
+            rateLimits: {
+              limitId: "codex",
+              primary: { usedPercent: 1, windowDurationMins: 10_080 },
+            },
+            checkedAt: "2026-08-12T10:00:00.000Z",
+          },
+        } as const satisfies ServerProvider;
+        const { accountRateLimits: _omitted, ...withoutRateLimits } = previousProvider;
+        const refreshedProvider = {
+          ...withoutRateLimits,
+          checkedAt: "2026-08-12T10:05:00.000Z",
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(previousProvider, refreshedProvider).accountRateLimits,
+          previousProvider.accountRateLimits,
+        );
+      });
+
+      it("merges sparse live Codex rate limits into the latest full snapshot", () => {
+        const merged = mergeProviderAccountRateLimitSnapshot({
+          previous: {
+            rateLimits: {
+              limitId: "codex",
+              planType: "pro",
+              primary: { usedPercent: 0, windowDurationMins: 300 },
+              secondary: { usedPercent: 20, windowDurationMins: 10_080 },
+            },
+            rateLimitsByLimitId: {
+              codex: {
+                limitId: "codex",
+                planType: "pro",
+                primary: { usedPercent: 0, windowDurationMins: 300 },
+                secondary: { usedPercent: 20, windowDurationMins: 10_080 },
+              },
+              codex_bengalfox: {
+                limitId: "codex_bengalfox",
+                primary: { usedPercent: 5, windowDurationMins: 60 },
+              },
+            },
+            rateLimitResetCredits: { availableCount: 1 },
+            checkedAt: "2026-08-12T10:00:00.000Z",
+          },
+          limitId: "codex",
+          snapshot: {
+            limitId: "codex",
+            primary: { usedPercent: 1, windowDurationMins: 10_080 },
+          },
+          checkedAt: "2026-08-12T10:01:00.000Z",
+        });
+
+        assert.deepStrictEqual(merged.rateLimits, {
+          limitId: "codex",
+          planType: "pro",
+          primary: { usedPercent: 1, windowDurationMins: 10_080 },
+          secondary: { usedPercent: 20, windowDurationMins: 10_080 },
+        });
+        assert.deepStrictEqual(merged.rateLimitsByLimitId?.codex, merged.rateLimits);
+        assert.strictEqual(merged.rateLimitsByLimitId?.codex_bengalfox?.primary?.usedPercent, 5);
+        assert.deepStrictEqual(merged.rateLimitResetCredits, { availableCount: 1 });
+        assert.strictEqual(merged.checkedAt, "2026-08-12T10:01:00.000Z");
       });
 
       it("fills missing capabilities from the previous provider snapshot", () => {

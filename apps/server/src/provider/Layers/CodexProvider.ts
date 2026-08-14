@@ -22,9 +22,9 @@ import type {
   ServerProviderModel,
   ServerProviderSkill,
   ServerProviderAccountRateLimits,
+  ServerProviderAccountRateLimitResetCredit,
   ServerProviderAccountRateLimitSnapshot,
   ServerProviderAccountRateLimitWindow,
-  ServerProviderAccountRateLimitResetCredit,
 } from "@cafecode/contracts";
 import { ServerSettingsError } from "@cafecode/contracts";
 
@@ -40,6 +40,7 @@ import {
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
+import { codexAppServerRateLimitsToServer } from "../codexRateLimits.ts";
 import packageJson from "../../../package.json" with { type: "json" };
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
 
@@ -339,124 +340,6 @@ const readCodexUsageCredentials = Effect.fn("readCodexUsageCredentials")(functio
   const authJson = yield* fileSystem.readFileString(authPath).pipe(Effect.option);
   return Option.isSome(authJson) ? extractCodexUsageCredentials(authJson.value) : undefined;
 });
-
-function mapGeneratedRateLimitWindow(
-  window: CodexSchema.V2GetAccountRateLimitsResponse__RateLimitWindow | null | undefined,
-): ServerProviderAccountRateLimitWindow | null {
-  if (!window) return null;
-  return {
-    usedPercent: window.usedPercent,
-    ...(window.windowDurationMins !== undefined
-      ? { windowDurationMins: window.windowDurationMins }
-      : {}),
-    ...(window.resetsAt !== undefined ? { resetsAt: window.resetsAt } : {}),
-  };
-}
-
-function mapGeneratedCredits(
-  credits: CodexSchema.V2GetAccountRateLimitsResponse__CreditsSnapshot | null,
-): Exclude<ServerProviderAccountRateLimitSnapshot["credits"], undefined> {
-  if (credits === null) return null;
-  return {
-    hasCredits: credits.hasCredits,
-    unlimited: credits.unlimited,
-    ...(credits.balance !== undefined ? { balance: credits.balance } : {}),
-  };
-}
-
-function mapGeneratedSpendControlLimit(
-  limit: CodexSchema.V2GetAccountRateLimitsResponse__SpendControlLimitSnapshot | null | undefined,
-): Exclude<ServerProviderAccountRateLimitSnapshot["individualLimit"], undefined> {
-  if (limit === null || limit === undefined) return null;
-  return {
-    limit: limit.limit,
-    remainingPercent: limit.remainingPercent,
-    resetsAt: limit.resetsAt,
-    used: limit.used,
-  };
-}
-
-function mapGeneratedRateLimitSnapshot(
-  snapshot: CodexSchema.V2GetAccountRateLimitsResponse__RateLimitSnapshot,
-): ServerProviderAccountRateLimitSnapshot {
-  return {
-    ...(snapshot.limitId !== undefined ? { limitId: snapshot.limitId } : {}),
-    ...(snapshot.limitName !== undefined ? { limitName: snapshot.limitName } : {}),
-    ...(snapshot.planType !== undefined ? { planType: snapshot.planType } : {}),
-    ...(snapshot.rateLimitReachedType !== undefined
-      ? { rateLimitReachedType: snapshot.rateLimitReachedType }
-      : {}),
-    ...(snapshot.spendControlReached !== undefined
-      ? { spendControlReached: snapshot.spendControlReached }
-      : {}),
-    ...(snapshot.individualLimit !== undefined
-      ? { individualLimit: mapGeneratedSpendControlLimit(snapshot.individualLimit) }
-      : {}),
-    ...(snapshot.primary !== undefined
-      ? { primary: mapGeneratedRateLimitWindow(snapshot.primary) }
-      : {}),
-    ...(snapshot.secondary !== undefined
-      ? { secondary: mapGeneratedRateLimitWindow(snapshot.secondary) }
-      : {}),
-    ...(snapshot.credits !== undefined ? { credits: mapGeneratedCredits(snapshot.credits) } : {}),
-  };
-}
-
-function mapGeneratedRateLimitResetCredits(
-  summary:
-    | CodexSchema.V2GetAccountRateLimitsResponse__RateLimitResetCreditsSummary
-    | null
-    | undefined,
-): ServerProviderAccountRateLimits["rateLimitResetCredits"] | undefined {
-  if (summary === undefined) return undefined;
-  if (summary === null) return null;
-  return {
-    availableCount: summary.availableCount,
-    ...(summary.credits !== undefined
-      ? {
-          credits:
-            summary.credits === null ? null : summary.credits.map(mapGeneratedRateLimitResetCredit),
-        }
-      : {}),
-  };
-}
-
-function mapGeneratedRateLimitResetCredit(
-  credit: CodexSchema.V2GetAccountRateLimitsResponse__RateLimitResetCredit,
-): ServerProviderAccountRateLimitResetCredit {
-  return {
-    id: credit.id,
-    resetType: credit.resetType,
-    status: credit.status,
-    grantedAt: credit.grantedAt,
-    ...(credit.expiresAt !== undefined ? { expiresAt: credit.expiresAt } : {}),
-    ...(credit.title !== undefined ? { title: credit.title } : {}),
-    ...(credit.description !== undefined ? { description: credit.description } : {}),
-  };
-}
-
-function codexAppServerRateLimitsToServer(
-  response: CodexSchema.V2GetAccountRateLimitsResponse,
-  checkedAt: string,
-): ServerProviderAccountRateLimits {
-  const byLimitId =
-    response.rateLimitsByLimitId === null || response.rateLimitsByLimitId === undefined
-      ? undefined
-      : Object.fromEntries(
-          Object.entries(response.rateLimitsByLimitId).map(([limitId, snapshot]) => [
-            limitId,
-            mapGeneratedRateLimitSnapshot(snapshot),
-          ]),
-        );
-  const rateLimitResetCredits = mapGeneratedRateLimitResetCredits(response.rateLimitResetCredits);
-
-  return {
-    rateLimits: mapGeneratedRateLimitSnapshot(response.rateLimits),
-    ...(byLimitId ? { rateLimitsByLimitId: byLimitId } : {}),
-    ...(rateLimitResetCredits !== undefined ? { rateLimitResetCredits } : {}),
-    checkedAt,
-  };
-}
 
 function mapRawRateLimitWindow(value: unknown): ServerProviderAccountRateLimitWindow | null {
   const record = readRecord(value);
