@@ -45,6 +45,7 @@ import {
 
 const CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE = "[CLIENT_SETTINGS]";
 let clientSettingsImportAttempted = false;
+let confirmedClientSettingsWriteQueue: Promise<void> = Promise.resolve();
 
 function subscribeClientSettings(listener: () => void): () => void {
   const unsubscribe = subscribeClientSettingsSnapshot(listener);
@@ -116,6 +117,49 @@ function persistClientSettings(settings: ClientSettings): void {
     .catch((error) => {
       console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} persist failed`, error);
     });
+}
+
+/**
+ * Persist one client-settings patch before publishing it to the local view.
+ * Calls are serialized so a slower earlier write cannot replace a newer one.
+ */
+export function updateClientSettingsConfirmed(patch: ClientSettingsPatch): Promise<void> {
+  const write = async () => {
+    try {
+      const currentServerConfig = getServerConfig();
+      if (currentServerConfig) {
+        const persisted = await ensureLocalApi().server.updateClientSettings(patch);
+        // The RPC result is the server-authoritative document after the patch.
+        // Publishing a locally reconstructed value here can regress a
+        // concurrent update that the server already merged.
+        applyClientSettingsUpdated(persisted);
+        return;
+      }
+
+      // A failed hydration is intentionally non-blocking for normal startup,
+      // but a confirmed profile apply must not treat that failure as an empty
+      // document and reset fields that profiles are not allowed to control.
+      // Read the persistence boundary again and reject the confirmed write if
+      // the prior document cannot be read.
+      const persisted = await ensureLocalApi().persistence.getClientSettings();
+      const baseline =
+        persisted === null
+          ? getClientSettingsSnapshot()
+          : { ...DEFAULT_CLIENT_SETTINGS, ...persisted };
+      const next = applyClientSettingsPatch(baseline, patch);
+      await ensureLocalApi().persistence.setClientSettings(next);
+      replaceClientSettingsSnapshot(next);
+    } catch (error) {
+      reportSettingsWriteFailure("client", error);
+      throw error;
+    }
+  };
+  const result = confirmedClientSettingsWriteQueue.then(write, write);
+  confirmedClientSettingsWriteQueue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
 }
 
 function reportSettingsWriteFailure(scope: "server" | "client", error: unknown): void {
@@ -260,11 +304,13 @@ export function useUpdateSettings() {
 
   return {
     updateSettings,
+    updateClientSettingsConfirmed,
     resetSettings,
   };
 }
 
 export function __resetClientSettingsPersistenceForTests(): void {
   clientSettingsImportAttempted = false;
+  confirmedClientSettingsWriteQueue = Promise.resolve();
   resetClientSettingsPersistenceStateForTests();
 }

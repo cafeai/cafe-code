@@ -19,7 +19,10 @@ import {
   type ServerRuntimeLayerDiagnosticsResult,
   type SourceControlDiscoveryResult,
 } from "@cafecode/contracts";
-import { MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES } from "@cafecode/contracts/settings";
+import {
+  DEFAULT_UNIFIED_SETTINGS,
+  MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
+} from "@cafecode/contracts/settings";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import { page, userEvent } from "vitest/browser";
@@ -36,6 +39,12 @@ import {
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { __resetLocalApiForTests } from "../../localApi";
+import { getClientSettings, updateClientSettingsConfirmed } from "../../hooks/useSettings";
+import {
+  captureSettingsProfile,
+  createSettingsProfilesStore,
+  settingsProfilesStore,
+} from "../../settingsProfiles";
 import { AppAtomRegistryProvider, resetAppAtomRegistryForTests } from "../../rpc/atomRegistry";
 import { resetServerStateForTests, setServerConfigSnapshot } from "../../rpc/serverState";
 import { useUiStateStore } from "../../uiStateStore";
@@ -640,6 +649,7 @@ describe("settings panels", () => {
     resetServerStateForTests();
     await __resetLocalApiForTests();
     localStorage.clear();
+    settingsProfilesStore.refresh();
     useUiStateStore.setState({ defaultAdvertisedEndpointKey: null });
     authAccessHarness.reset();
   });
@@ -1156,6 +1166,376 @@ describe("settings panels", () => {
     await vi.waitFor(() => {
       expect(updateClientSettings).toHaveBeenCalledWith({ sidebarStarSpeed: 1.25 });
     });
+  });
+
+  it("saves and applies a local settings profile without sensitive settings", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    setServerConfigSnapshot({
+      ...createBaseServerConfig(),
+      clientSettings: {
+        ...DEFAULT_CLIENT_SETTINGS,
+        onboardingCompleted: true,
+        showSidebarMascot: false,
+        notificationsEnabled: true,
+        ambientVideoEnabled: true,
+        ambientVideoSource: { kind: "video", id: "dQw4w9WgXcQ" },
+        ambientImageEnabled: true,
+        ambientImageCycleEnabled: true,
+      },
+    });
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <AppearanceSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await page.getByLabelText("New settings profile name").fill("Focus");
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect.element(page.getByText("Focus", { exact: true })).toBeInTheDocument();
+    await expect.element(page.getByRole("status")).toBeInTheDocument();
+    await expect.element(page.getByText("Saved “Focus” on this device.")).toBeInTheDocument();
+
+    updateClientSettings.mockClear();
+    await page.getByRole("button", { name: "Preview Focus" }).click();
+    await expect
+      .element(page.getByRole("region", { name: "Changes from applying Focus" }))
+      .toHaveTextContent("Preview does not apply the profile.");
+    expect(updateClientSettings).not.toHaveBeenCalled();
+
+    await page.getByRole("button", { name: "Apply Focus" }).click();
+    await vi.waitFor(() => expect(updateClientSettings).toHaveBeenCalledOnce());
+    await expect.element(page.getByRole("status")).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Update active profile Focus" }))
+      .toBeInTheDocument();
+    expect(settingsProfilesStore.getSnapshot().activeProfileId).toBe("profile:focus");
+    await expect.element(page.getByText("Applied “Focus”.")).toBeInTheDocument();
+
+    const applied = updateClientSettings.mock.calls[0]?.[0];
+    expect(applied).toMatchObject({
+      showSidebarMascot: false,
+      ambientVideoSource: { kind: "video", id: "dQw4w9WgXcQ" },
+      ambientVideoEnabled: false,
+      ambientImageEnabled: false,
+      ambientImageCycleEnabled: false,
+    });
+    expect(applied).not.toHaveProperty("notificationsEnabled");
+    expect(applied).not.toHaveProperty("providerModelPreferences");
+    expect(applied).not.toHaveProperty("sidebarBrandImageDataUrl");
+    expect(applied).not.toHaveProperty("defaultEditor");
+
+    updateClientSettings.mockClear();
+    await page.getByRole("button", { name: "Delete Focus" }).click();
+    await expect
+      .element(page.getByRole("heading", { name: /Delete settings profile/u }))
+      .toBeInTheDocument();
+    await page.getByRole("button", { name: "Delete profile" }).click();
+    await expect.element(page.getByText(/Current settings did not change\./u)).toBeInTheDocument();
+    await expect.element(page.getByText("No profiles saved yet.")).toBeInTheDocument();
+    expect(settingsProfilesStore.getSnapshot().activeProfileId).toBeNull();
+    expect(updateClientSettings).not.toHaveBeenCalled();
+  });
+
+  it("does not apply a profile that another window replaced after preview", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    setServerConfigSnapshot({
+      ...createBaseServerConfig(),
+      clientSettings: {
+        ...DEFAULT_CLIENT_SETTINGS,
+        onboardingCompleted: true,
+      },
+    });
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <AppearanceSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await page.getByLabelText("New settings profile name").fill("Shared");
+    await page.getByRole("button", { name: "Save" }).click();
+    await page.getByRole("button", { name: "Preview Shared" }).click();
+    await expect
+      .element(page.getByRole("region", { name: "Changes from applying Shared" }))
+      .toBeInTheDocument();
+
+    const otherWindowStore = createSettingsProfilesStore(
+      window.localStorage,
+      () => new Date("2026-08-02T12:00:00.000Z"),
+    );
+    const original = otherWindowStore.resolve("profile:shared");
+    expect(original).not.toBeNull();
+    expect(otherWindowStore.remove(original!)).toBe("removed");
+    otherWindowStore.create(
+      "Shared",
+      captureSettingsProfile(
+        {
+          ...DEFAULT_UNIFIED_SETTINGS,
+          showSidebarMascot: !DEFAULT_UNIFIED_SETTINGS.showSidebarMascot,
+        },
+        "light",
+      ),
+    );
+
+    updateClientSettings.mockClear();
+    await page.getByRole("button", { name: "Apply Shared" }).click();
+
+    await expect
+      .element(
+        page.getByText(
+          "“Shared” changed in another window. Preview the profile again before you apply it.",
+        ),
+      )
+      .toBeInTheDocument();
+    await expect
+      .element(page.getByRole("region", { name: "Changes from applying Shared" }))
+      .not.toBeInTheDocument();
+    expect(updateClientSettings).not.toHaveBeenCalled();
+
+    await page.getByRole("button", { name: "Preview Shared" }).click();
+    await expect
+      .element(page.getByRole("region", { name: "Changes from applying Shared" }))
+      .toBeInTheDocument();
+  });
+
+  it("restores settings when a profile is deleted during confirmed apply", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    setServerConfigSnapshot({
+      ...createBaseServerConfig(),
+      clientSettings: {
+        ...DEFAULT_CLIENT_SETTINGS,
+        showSidebarMascot: true,
+      },
+    });
+    const otherWindowStore = createSettingsProfilesStore(window.localStorage);
+    const saved = otherWindowStore.create(
+      "Concurrent",
+      captureSettingsProfile({ ...DEFAULT_UNIFIED_SETTINGS, showSidebarMascot: false }, "light"),
+    );
+    settingsProfilesStore.refresh();
+    updateClientSettings
+      .mockImplementationOnce(async () => {
+        expect(otherWindowStore.remove(saved)).toBe("removed");
+        return DEFAULT_CLIENT_SETTINGS;
+      })
+      .mockResolvedValueOnce(DEFAULT_CLIENT_SETTINGS);
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <AppearanceSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await page.getByRole("button", { name: "Apply Concurrent" }).click();
+    await vi.waitFor(() => expect(updateClientSettings).toHaveBeenCalledTimes(2));
+    expect(updateClientSettings.mock.calls[0]?.[0]).toMatchObject({ showSidebarMascot: false });
+    expect(updateClientSettings.mock.calls[1]?.[0]).toMatchObject({ showSidebarMascot: true });
+    expect(localStorage.getItem("cafe-code:theme")).toBe("dark");
+    expect(settingsProfilesStore.getSnapshot().activeProfileId).toBeNull();
+    await expect
+      .element(page.getByText("“Concurrent” was deleted or renamed while it was being applied."))
+      .toBeInTheDocument();
+  });
+
+  it("restores the theme and keeps the active marker clear when persistence rejects", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    updateClientSettings.mockRejectedValueOnce(new Error("offline"));
+    setServerConfigSnapshot({
+      ...createBaseServerConfig(),
+      clientSettings: DEFAULT_CLIENT_SETTINGS,
+    });
+    const store = createSettingsProfilesStore(window.localStorage);
+    store.create("Rejected", captureSettingsProfile(DEFAULT_UNIFIED_SETTINGS, "light"));
+    settingsProfilesStore.refresh();
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <AppearanceSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await page.getByRole("button", { name: "Apply Rejected" }).click();
+    await expect.element(page.getByText("offline")).toBeInTheDocument();
+    expect(localStorage.getItem("cafe-code:theme")).toBe("dark");
+    expect(settingsProfilesStore.getSnapshot().activeProfileId).toBeNull();
+    expect(updateClientSettings).toHaveBeenCalledTimes(2);
+    expect(updateClientSettings.mock.calls[1]?.[0]).toMatchObject({
+      ambientVideoEnabled: false,
+      ambientImageEnabled: false,
+      ambientImageCycleEnabled: false,
+    });
+  });
+
+  it("publishes the authoritative settings returned by a confirmed write", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    setServerConfigSnapshot({
+      ...createBaseServerConfig(),
+      clientSettings: {
+        ...DEFAULT_CLIENT_SETTINGS,
+        showSidebarMascot: true,
+      },
+    });
+    updateClientSettings.mockResolvedValueOnce({
+      ...DEFAULT_CLIENT_SETTINGS,
+      showSidebarMascot: true,
+      diffWordWrap: false,
+    });
+
+    await updateClientSettingsConfirmed({ showSidebarMascot: false });
+
+    expect(updateClientSettings).toHaveBeenCalledWith({ showSidebarMascot: false });
+    expect(getClientSettings()).toMatchObject({
+      showSidebarMascot: true,
+      diffWordWrap: false,
+    });
+  });
+
+  it("does not overwrite excluded local settings after a confirmed read failure", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    desktopBridge.getClientSettings = vi.fn().mockRejectedValue(new Error("settings unreadable"));
+    const setClientSettings = vi.fn().mockResolvedValue(undefined);
+    desktopBridge.setClientSettings = setClientSettings;
+    window.desktopBridge = desktopBridge;
+    window.nativeApi = {
+      persistence: {
+        getClientSettings: desktopBridge.getClientSettings,
+        setClientSettings,
+      },
+    } as unknown as LocalApi;
+
+    await expect(updateClientSettingsConfirmed({ showSidebarMascot: false })).rejects.toThrow(
+      "settings unreadable",
+    );
+
+    expect(setClientSettings).not.toHaveBeenCalled();
+  });
+
+  it("attempts settings compensation even when theme restoration fails", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    setServerConfigSnapshot({
+      ...createBaseServerConfig(),
+      clientSettings: {
+        ...DEFAULT_CLIENT_SETTINGS,
+        showSidebarMascot: true,
+      },
+    });
+    const otherWindowStore = createSettingsProfilesStore(window.localStorage);
+    const saved = otherWindowStore.create(
+      "Theme failure",
+      captureSettingsProfile({ ...DEFAULT_UNIFIED_SETTINGS, showSidebarMascot: false }, "light"),
+    );
+    settingsProfilesStore.refresh();
+    updateClientSettings
+      .mockImplementationOnce(async () => {
+        expect(otherWindowStore.remove(saved)).toBe("removed");
+        return { ...DEFAULT_CLIENT_SETTINGS, showSidebarMascot: false };
+      })
+      .mockResolvedValueOnce({ ...DEFAULT_CLIENT_SETTINGS, showSidebarMascot: true });
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <AppearanceSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    const nativeSetItem = Storage.prototype.setItem;
+    const setItemSpy = vi
+      .spyOn(Storage.prototype, "setItem")
+      .mockImplementation(function (this: Storage, key, value) {
+        if (key === "cafe-code:theme" && value === "dark") throw new Error("theme storage blocked");
+        return nativeSetItem.call(this, key, value);
+      });
+    try {
+      await page.getByRole("button", { name: "Apply Theme failure" }).click();
+      await vi.waitFor(() => expect(updateClientSettings).toHaveBeenCalledTimes(2));
+      expect(updateClientSettings.mock.calls[1]?.[0]).toMatchObject({ showSidebarMascot: true });
+      expect(settingsProfilesStore.getSnapshot().activeProfileId).toBeNull();
+      await expect
+        .element(
+          page.getByText(
+            "The profile was not activated, and the previous theme could not be restored. Review the current settings before you continue.",
+          ),
+        )
+        .toBeInTheDocument();
+    } finally {
+      setItemSpy.mockRestore();
+    }
+  });
+
+  it("renames and updates the active profile from settings", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    installClientSettingsNativeApi(desktopBridge);
+    setServerConfigSnapshot({
+      ...createBaseServerConfig(),
+      clientSettings: DEFAULT_CLIENT_SETTINGS,
+    });
+    const store = createSettingsProfilesStore(window.localStorage);
+    const saved = store.create(
+      "Original",
+      captureSettingsProfile(DEFAULT_UNIFIED_SETTINGS, "dark"),
+    );
+    expect(store.activate(saved)).toBe("activated");
+    settingsProfilesStore.refresh();
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <AppearanceSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await page.getByRole("button", { name: "Rename Original" }).click();
+    await page.getByLabelText("Settings profile name", { exact: true }).fill("Renamed");
+    await page.getByRole("button", { name: "Rename profile" }).click();
+    await expect
+      .element(page.getByRole("button", { name: "Update active profile Renamed" }))
+      .toBeInTheDocument();
+    expect(settingsProfilesStore.getSnapshot().activeProfileId).toBe("profile:renamed");
+
+    await page.getByRole("button", { name: "Update active profile Renamed" }).click();
+    await expect
+      .element(page.getByText("Updated “Renamed” with the current settings."))
+      .toBeInTheDocument();
+  });
+
+  it("gives every settings profile preview a unique accessible name", async () => {
+    const desktopBridge = createDesktopBridgeStub();
+    window.desktopBridge = desktopBridge;
+    installClientSettingsNativeApi(desktopBridge);
+    setServerConfigSnapshot({
+      ...createBaseServerConfig(),
+      clientSettings: {
+        ...DEFAULT_CLIENT_SETTINGS,
+        onboardingCompleted: true,
+      },
+    });
+    const otherWindowStore = createSettingsProfilesStore(window.localStorage);
+    const payload = captureSettingsProfile(DEFAULT_UNIFIED_SETTINGS, "dark");
+    otherWindowStore.create("Desktop", payload);
+    otherWindowStore.create("Mobile", payload);
+    settingsProfilesStore.refresh();
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <AppearanceSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByRole("button", { name: "Preview Desktop" })).toBeInTheDocument();
+    await expect.element(page.getByRole("button", { name: "Preview Mobile" })).toBeInTheDocument();
   });
 
   it("shows detected editor icons in the Files & Diffs default editor selector", async () => {

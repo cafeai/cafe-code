@@ -104,6 +104,10 @@ it.layer(NodeServices.layer)("server client settings", (it) => {
       const service = yield* ServerClientSettingsService;
 
       const next = yield* service.updateSettings({
+        ambientVideoEnabled: false,
+        ambientVideoSource: { kind: "video", id: "dQw4w9WgXcQ" },
+        ambientImageEnabled: false,
+        ambientImageCycleEnabled: false,
         brandWordmarkPrefix: "Lab",
         defaultEditor: "cursor",
         powerSaveBlockerMode: "during-chats",
@@ -117,6 +121,13 @@ it.layer(NodeServices.layer)("server client settings", (it) => {
       assert.equal(persisted.brandWordmarkPrefix, "Lab");
       assert.equal(persisted.defaultEditor, "cursor");
       assert.equal(persisted.powerSaveBlockerMode, "during-chats");
+      assert.deepEqual(persisted.ambientVideoSource, {
+        kind: "video",
+        id: "dQw4w9WgXcQ",
+      });
+      assert.isFalse(persisted.ambientVideoEnabled);
+      assert.isFalse(persisted.ambientImageEnabled);
+      assert.isFalse(persisted.ambientImageCycleEnabled);
       assert.equal(persisted.showSidebarMascot, DEFAULT_CLIENT_SETTINGS.showSidebarMascot);
       assert.equal(persisted.chatCopyFormat, DEFAULT_CLIENT_SETTINGS.chatCopyFormat);
     }).pipe(Effect.provide(makeServerClientSettingsLayer())),

@@ -129,6 +129,181 @@ export const DEFAULT_AMBIANCE_SURFACE_COMPOSER = true;
 // Empty string means "follow the accent color configured in Appearance".
 export const DEFAULT_AMBIANCE_COLOR = "";
 
+// Ambient media values are inert configuration in Cafe Code. The renderer
+// does not activate or fetch these sources unless a later feature supplies an
+// explicit playback surface. Activation defaults stay off at this boundary.
+export const MIN_AMBIENT_OPACITY = 0.05;
+export const MAX_AMBIENT_OPACITY = 1;
+export const DEFAULT_AMBIENT_OPACITY = 0.35;
+
+export const HexColor = TrimmedNonEmptyString.check(Schema.isPattern(/^#[0-9A-Fa-f]{6}$/)).pipe(
+  Schema.decodeTo(
+    Schema.String,
+    SchemaTransformation.transformOrFail({
+      decode: (value) => Effect.succeed(value.toLowerCase()),
+      encode: (value) => Effect.succeed(value.toLowerCase()),
+    }),
+  ),
+);
+export type HexColor = typeof HexColor.Type;
+
+export const AmbientColor = Schema.Union([Schema.Literal("auto"), HexColor]);
+export type AmbientColor = typeof AmbientColor.Type;
+export const DEFAULT_AMBIENT_COLOR: AmbientColor = "auto";
+
+export const AmbientOpacity = Schema.Number.check(
+  Schema.isBetween({ minimum: MIN_AMBIENT_OPACITY, maximum: MAX_AMBIENT_OPACITY }),
+);
+export type AmbientOpacity = typeof AmbientOpacity.Type;
+
+export const YouTubeVideoId = TrimmedNonEmptyString.check(Schema.isPattern(/^[A-Za-z0-9_-]{11}$/));
+export type YouTubeVideoId = typeof YouTubeVideoId.Type;
+export const YouTubePlaylistId = TrimmedNonEmptyString.check(
+  Schema.isPattern(/^[A-Za-z0-9_-]{10,80}$/),
+);
+export type YouTubePlaylistId = typeof YouTubePlaylistId.Type;
+const YouTubeVideoSource = Schema.Struct({
+  kind: Schema.Literal("video"),
+  id: YouTubeVideoId,
+});
+const YouTubePlaylistSource = Schema.Struct({
+  kind: Schema.Literal("playlist"),
+  id: YouTubePlaylistId,
+  videoId: Schema.optionalKey(YouTubeVideoId),
+});
+
+export const SpotifyEntityType = Schema.Literals([
+  "album",
+  "artist",
+  "episode",
+  "playlist",
+  "show",
+  "track",
+]);
+export type SpotifyEntityType = typeof SpotifyEntityType.Type;
+export const SpotifyEntityId = TrimmedNonEmptyString.check(Schema.isPattern(/^[A-Za-z0-9]{22}$/));
+export type SpotifyEntityId = typeof SpotifyEntityId.Type;
+export const SpotifySource = Schema.Struct({
+  kind: Schema.Literal("spotify"),
+  entityType: SpotifyEntityType,
+  id: SpotifyEntityId,
+});
+export type SpotifySource = typeof SpotifySource.Type;
+export const AmbientVideoSource = Schema.NullOr(
+  Schema.Union([YouTubeVideoSource, YouTubePlaylistSource, SpotifySource]),
+);
+export type AmbientVideoSource = typeof AmbientVideoSource.Type;
+
+export const AmbientMediaLayoutMode = Schema.Literals(["preset", "custom"]);
+export type AmbientMediaLayoutMode = typeof AmbientMediaLayoutMode.Type;
+export const AmbientMediaPresetPlacement = Schema.Literals(["bottom-left", "bottom-right"]);
+export type AmbientMediaPresetPlacement = typeof AmbientMediaPresetPlacement.Type;
+export const AmbientMediaPresetSize = Schema.Literals(["small", "medium", "large"]);
+export type AmbientMediaPresetSize = typeof AmbientMediaPresetSize.Type;
+export const AmbientVideoPresentationMode = Schema.Literals(["floating", "cinema"]);
+export type AmbientVideoPresentationMode = typeof AmbientVideoPresentationMode.Type;
+export const AmbientVideoGlowMode = Schema.Literals(["fixed", "adaptive"]);
+export type AmbientVideoGlowMode = typeof AmbientVideoGlowMode.Type;
+
+export const DEFAULT_AMBIENT_VIDEO_ENABLED = false;
+export const DEFAULT_AMBIENT_VIDEO_SOURCE: AmbientVideoSource = null;
+export const DEFAULT_AMBIENT_VIDEO_LAYOUT_MODE: AmbientMediaLayoutMode = "preset";
+export const DEFAULT_AMBIENT_VIDEO_PRESET_PLACEMENT: AmbientMediaPresetPlacement = "bottom-right";
+export const DEFAULT_AMBIENT_VIDEO_PRESET_SIZE: AmbientMediaPresetSize = "medium";
+export const DEFAULT_AMBIENT_VIDEO_PRESENTATION_MODE: AmbientVideoPresentationMode = "floating";
+export const DEFAULT_AMBIENT_VIDEO_GLOW_ENABLED = false;
+export const DEFAULT_AMBIENT_VIDEO_GLOW_MODE: AmbientVideoGlowMode = "fixed";
+
+export const MAX_AMBIENT_IMAGE_FILE_BYTES = 10 * 1024 * 1024;
+export const MAX_AMBIENT_IMAGE_DIMENSION = 4096;
+export const MAX_AMBIENT_IMAGE_PIXEL_COUNT = 16_777_216;
+export const MAX_AMBIENT_IMAGE_ID_LENGTH = 96;
+export const MAX_AMBIENT_IMAGE_URL_LENGTH = 256;
+export const AmbientImageAssetId = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(MAX_AMBIENT_IMAGE_ID_LENGTH),
+  Schema.isPattern(/^sha256-[a-f0-9]{64}\.(?:gif|jpe?g|png|webp)$/),
+);
+export type AmbientImageAssetId = typeof AmbientImageAssetId.Type;
+export const AmbientImageMimeType = Schema.Literals([
+  "image/gif",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+]);
+export type AmbientImageMimeType = typeof AmbientImageMimeType.Type;
+const AmbientImageAssetFields = Schema.Struct({
+  id: AmbientImageAssetId,
+  url: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(MAX_AMBIENT_IMAGE_URL_LENGTH),
+    Schema.isPattern(/^\/api\/ambient-media\/image\/sha256-[a-f0-9]{64}\.(?:gif|jpe?g|png|webp)$/),
+  ),
+  mimeType: AmbientImageMimeType,
+  width: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: MAX_AMBIENT_IMAGE_DIMENSION })),
+  height: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: MAX_AMBIENT_IMAGE_DIMENSION })),
+  sizeBytes: Schema.Int.check(
+    Schema.isBetween({ minimum: 1, maximum: MAX_AMBIENT_IMAGE_FILE_BYTES }),
+  ),
+});
+const ambientImageMimeTypeForId = (id: AmbientImageAssetId): AmbientImageMimeType => {
+  const extension = id.slice(id.lastIndexOf(".") + 1);
+  switch (extension) {
+    case "gif":
+      return "image/gif";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "png":
+      return "image/png";
+    case "webp":
+      return "image/webp";
+    default:
+      throw new Error("unsupported ambient image extension");
+  }
+};
+export const AmbientImageAsset = AmbientImageAssetFields.check(
+  Schema.makeFilter((asset) =>
+    asset.url === `/api/ambient-media/image/${asset.id}` &&
+    asset.mimeType === ambientImageMimeTypeForId(asset.id) &&
+    asset.width * asset.height <= MAX_AMBIENT_IMAGE_PIXEL_COUNT
+      ? undefined
+      : "must use a matching authenticated asset URL and MIME type within the ambient image pixel budget",
+  ),
+);
+export type AmbientImageAsset = typeof AmbientImageAsset.Type;
+
+export const MAX_AMBIENT_IMAGE_CYCLE_ASSETS = 24;
+export const AmbientImageCycleAssets = Schema.Array(AmbientImageAsset).check(
+  Schema.isMaxLength(MAX_AMBIENT_IMAGE_CYCLE_ASSETS),
+  Schema.makeFilter((assets) =>
+    new Set(assets.map((asset) => asset.id)).size === assets.length
+      ? undefined
+      : "must not contain duplicate image assets",
+  ),
+);
+export type AmbientImageCycleAssets = typeof AmbientImageCycleAssets.Type;
+export const MIN_AMBIENT_IMAGE_CYCLE_SECONDS = 3;
+export const MAX_AMBIENT_IMAGE_CYCLE_SECONDS = 3_600;
+export const AmbientImageCycleSeconds = Schema.Number.check(
+  Schema.isBetween({
+    minimum: MIN_AMBIENT_IMAGE_CYCLE_SECONDS,
+    maximum: MAX_AMBIENT_IMAGE_CYCLE_SECONDS,
+  }),
+);
+export type AmbientImageCycleSeconds = typeof AmbientImageCycleSeconds.Type;
+export const AmbientImagePresentationMode = Schema.Literals(["floating", "theater"]);
+export type AmbientImagePresentationMode = typeof AmbientImagePresentationMode.Type;
+
+export const DEFAULT_AMBIENT_IMAGE_ENABLED = false;
+export const DEFAULT_AMBIENT_IMAGE_ASSET: AmbientImageAsset | null = null;
+export const DEFAULT_AMBIENT_IMAGE_CYCLE_ASSETS: AmbientImageCycleAssets = [];
+export const DEFAULT_AMBIENT_IMAGE_CYCLE_ENABLED = false;
+export const DEFAULT_AMBIENT_IMAGE_CYCLE_SECONDS = 20;
+export const DEFAULT_AMBIENT_IMAGE_PRESENTATION_MODE: AmbientImagePresentationMode = "floating";
+export const DEFAULT_AMBIENT_IMAGE_LAYOUT_MODE: AmbientMediaLayoutMode = "preset";
+export const DEFAULT_AMBIENT_IMAGE_PRESET_PLACEMENT: AmbientMediaPresetPlacement = "bottom-left";
+export const DEFAULT_AMBIENT_IMAGE_PRESET_SIZE: AmbientMediaPresetSize = "medium";
+export const DEFAULT_AMBIENT_IMAGE_GLOW_ENABLED = false;
+
 export const SidebarProjectSortOrder = Schema.Literals(["updated_at", "created_at", "manual"]);
 export type SidebarProjectSortOrder = typeof SidebarProjectSortOrder.Type;
 export const DEFAULT_SIDEBAR_PROJECT_SORT_ORDER: SidebarProjectSortOrder = "updated_at";
@@ -230,6 +405,72 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   ambianceColor: TrimmedString.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_COLOR)),
+  ),
+  ambientVideoEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_VIDEO_ENABLED)),
+  ),
+  ambientVideoSource: AmbientVideoSource.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_VIDEO_SOURCE)),
+  ),
+  ambientVideoLayoutMode: AmbientMediaLayoutMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_VIDEO_LAYOUT_MODE)),
+  ),
+  ambientVideoPresetPlacement: AmbientMediaPresetPlacement.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_VIDEO_PRESET_PLACEMENT)),
+  ),
+  ambientVideoPresetSize: AmbientMediaPresetSize.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_VIDEO_PRESET_SIZE)),
+  ),
+  ambientVideoPresentationMode: AmbientVideoPresentationMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_VIDEO_PRESENTATION_MODE)),
+  ),
+  ambientVideoGlowEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_VIDEO_GLOW_ENABLED)),
+  ),
+  ambientVideoGlowMode: AmbientVideoGlowMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_VIDEO_GLOW_MODE)),
+  ),
+  ambientVideoGlowColor: AmbientColor.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_COLOR)),
+  ),
+  ambientVideoGlowOpacity: AmbientOpacity.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_OPACITY)),
+  ),
+  ambientImageEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_IMAGE_ENABLED)),
+  ),
+  ambientImageAsset: Schema.NullOr(AmbientImageAsset).pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_IMAGE_ASSET)),
+  ),
+  ambientImageCycleAssets: AmbientImageCycleAssets.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_IMAGE_CYCLE_ASSETS)),
+  ),
+  ambientImageCycleEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_IMAGE_CYCLE_ENABLED)),
+  ),
+  ambientImageCycleSeconds: AmbientImageCycleSeconds.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_IMAGE_CYCLE_SECONDS)),
+  ),
+  ambientImagePresentationMode: AmbientImagePresentationMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_IMAGE_PRESENTATION_MODE)),
+  ),
+  ambientImageLayoutMode: AmbientMediaLayoutMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_IMAGE_LAYOUT_MODE)),
+  ),
+  ambientImagePresetPlacement: AmbientMediaPresetPlacement.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_IMAGE_PRESET_PLACEMENT)),
+  ),
+  ambientImagePresetSize: AmbientMediaPresetSize.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_IMAGE_PRESET_SIZE)),
+  ),
+  ambientImageGlowEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_IMAGE_GLOW_ENABLED)),
+  ),
+  ambientImageGlowColor: AmbientColor.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_COLOR)),
+  ),
+  ambientImageGlowOpacity: AmbientOpacity.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIENT_OPACITY)),
   ),
   themeAccentColor: TrimmedString.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_THEME_ACCENT_COLOR)),
@@ -803,6 +1044,28 @@ export const ClientSettingsPatch = Schema.Struct({
   ambianceSurfaceThread: Schema.optionalKey(Schema.Boolean),
   ambianceSurfaceComposer: Schema.optionalKey(Schema.Boolean),
   ambianceColor: Schema.optionalKey(TrimmedString),
+  ambientVideoEnabled: Schema.optionalKey(Schema.Boolean),
+  ambientVideoSource: Schema.optionalKey(AmbientVideoSource),
+  ambientVideoLayoutMode: Schema.optionalKey(AmbientMediaLayoutMode),
+  ambientVideoPresetPlacement: Schema.optionalKey(AmbientMediaPresetPlacement),
+  ambientVideoPresetSize: Schema.optionalKey(AmbientMediaPresetSize),
+  ambientVideoPresentationMode: Schema.optionalKey(AmbientVideoPresentationMode),
+  ambientVideoGlowEnabled: Schema.optionalKey(Schema.Boolean),
+  ambientVideoGlowMode: Schema.optionalKey(AmbientVideoGlowMode),
+  ambientVideoGlowColor: Schema.optionalKey(AmbientColor),
+  ambientVideoGlowOpacity: Schema.optionalKey(AmbientOpacity),
+  ambientImageEnabled: Schema.optionalKey(Schema.Boolean),
+  ambientImageAsset: Schema.optionalKey(Schema.NullOr(AmbientImageAsset)),
+  ambientImageCycleAssets: Schema.optionalKey(AmbientImageCycleAssets),
+  ambientImageCycleEnabled: Schema.optionalKey(Schema.Boolean),
+  ambientImageCycleSeconds: Schema.optionalKey(AmbientImageCycleSeconds),
+  ambientImagePresentationMode: Schema.optionalKey(AmbientImagePresentationMode),
+  ambientImageLayoutMode: Schema.optionalKey(AmbientMediaLayoutMode),
+  ambientImagePresetPlacement: Schema.optionalKey(AmbientMediaPresetPlacement),
+  ambientImagePresetSize: Schema.optionalKey(AmbientMediaPresetSize),
+  ambientImageGlowEnabled: Schema.optionalKey(Schema.Boolean),
+  ambientImageGlowColor: Schema.optionalKey(AmbientColor),
+  ambientImageGlowOpacity: Schema.optionalKey(AmbientOpacity),
   themeAccentColor: Schema.optionalKey(TrimmedString),
   appAccentColor: Schema.optionalKey(TrimmedString),
   defaultEditor: Schema.optionalKey(DefaultEditorSelection),
