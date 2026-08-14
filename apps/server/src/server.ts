@@ -119,6 +119,7 @@ import {
 } from "./orchestration/http.ts";
 import * as NetService from "@cafecode/shared/Net";
 import * as NodeHttpServerCompression from "./nodeHttpServerCompression.ts";
+import { cafeMcpRouteLayer } from "./mcp/http.ts";
 
 const HttpServerLive = Layer.unwrap(
   Effect.gen(function* () {
@@ -341,6 +342,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   brandingSidebarImageServeRouteLayer,
   brandingSidebarImageUploadRouteLayer,
   clientDebugLogRouteLayer,
+  cafeMcpRouteLayer,
   orchestrationDispatchRouteLayer,
   orchestrationSnapshotRouteLayer,
   otlpTracesProxyRouteLayer,

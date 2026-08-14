@@ -66,6 +66,21 @@ For server-only use, run:
 cafe-code-server
 ```
 
+## MCP Control Surface
+
+The server exposes an owner-authenticated Streamable HTTP endpoint at `/mcp`.
+Create a dedicated bearer token with:
+
+```bash
+cafe-code auth session issue --role owner --label cafe-mcp --ttl 30d --token-only
+```
+
+Point an MCP client at the Cafe Code server origin plus `/mcp` and send the
+token in the `Authorization: Bearer <token>` header. Never put the token in the
+URL or source control, and use HTTPS whenever the server is not loopback-only.
+See the repository README for the available control operations and restart
+semantics.
+
 ## License
 
 AGPL-3.0-or-later.

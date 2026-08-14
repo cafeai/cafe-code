@@ -1328,6 +1328,7 @@ const assertBrowserApiCorsHeaders = (headers: HeaderBag) => {
     "authorization",
     "b3",
     "content-type",
+    "mcp-protocol-version",
     "traceparent",
   ]);
 };
@@ -1351,6 +1352,89 @@ const getWsServerUrl = (
   });
 
 it.layer(NodeServices.layer)("server router seam", (it) => {
+  it.effect("requires an authenticated owner session for POST /mcp", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const response = yield* HttpClient.post("/mcp", {
+        headers: {
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+        },
+        body: HttpBody.jsonUnsafe({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "server-test", version: "1.0.0" },
+          },
+        }),
+      });
+
+      assert.equal(response.status, 401);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("serves the authenticated stateless Cafe Code MCP endpoint", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const bearerToken = yield* getAuthenticatedBearerSessionToken();
+
+      const response = yield* HttpClient.post("/mcp", {
+        headers: {
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${bearerToken}`,
+          "content-type": "application/json",
+        },
+        body: HttpBody.jsonUnsafe({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "server-test", version: "1.0.0" },
+          },
+        }),
+      });
+      const body = (yield* response.json) as {
+        readonly result?: { readonly serverInfo?: { readonly name?: string } };
+      };
+
+      assert.equal(response.status, 200);
+      assert.equal(body.result?.serverInfo?.name, "cafe-code");
+
+      // Stateless mode creates a fresh transport for every authenticated
+      // request, so verify a real follow-up MCP operation does not depend on
+      // in-memory initialization state from the first request.
+      const toolsResponse = yield* HttpClient.post("/mcp", {
+        headers: {
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${bearerToken}`,
+          "content-type": "application/json",
+          "mcp-protocol-version": "2025-06-18",
+        },
+        body: HttpBody.jsonUnsafe({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/list",
+          params: {},
+        }),
+      });
+      const toolsBody = (yield* toolsResponse.json) as {
+        readonly result?: { readonly tools?: ReadonlyArray<{ readonly name?: string }> };
+      };
+
+      assert.equal(toolsResponse.status, 200);
+      assert.equal(
+        toolsBody.result?.tools?.some((tool) => tool.name === "send_message"),
+        true,
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("serves static index content for GET / when staticDir is configured", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -2998,6 +3082,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         "authorization",
         "b3",
         "content-type",
+        "mcp-protocol-version",
         "traceparent",
       ]);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
