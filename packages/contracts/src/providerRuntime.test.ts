@@ -181,4 +181,26 @@ describe("ProviderRuntimeEvent", () => {
     expect(parsed.payload.usage.maxTokens).toBe(200000);
     expect(parsed.payload.usage.usedTokens).toBe(31251);
   });
+
+  it("decodes provider VCS invalidation hints without a filesystem path", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "vcs.state.changed",
+      eventId: "event-vcs-state-changed-1",
+      provider: "claudeAgent",
+      createdAt: "2026-08-18T00:00:00.000Z",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      payload: {
+        kind: "commit",
+        branch: "main",
+      },
+    });
+
+    expect(parsed.type).toBe("vcs.state.changed");
+    if (parsed.type !== "vcs.state.changed") {
+      throw new Error("expected vcs.state.changed");
+    }
+    expect(parsed.payload).toEqual({ kind: "commit", branch: "main" });
+    expect("cwd" in parsed.payload).toBe(false);
+  });
 });

@@ -189,6 +189,26 @@ type ClaudeForwardCompatibleSystemMessage =
       readonly type: "system";
       readonly subtype: "worker_shutting_down";
       readonly reason?: string;
+    })
+  | (Record<string, unknown> & {
+      readonly type: "system";
+      readonly subtype: "vcs_state_changed";
+      readonly kind?: string;
+      readonly branch?: string;
+      readonly cwd?: string;
+    })
+  | (Record<string, unknown> & {
+      readonly type: "system";
+      readonly subtype: "code_change_published";
+      readonly provider?: string;
+      readonly url?: string;
+      readonly repo?: string;
+      readonly identifier?: string;
+      readonly action?: string;
+    })
+  | (Record<string, unknown> & {
+      readonly type: "system";
+      readonly subtype: "feedback_draft_queued";
     });
 type ClaudeSdkMessageWithForwardCompatibleSystem =
   | SDKMessage
@@ -3900,6 +3920,91 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         });
         return;
+      case "vcs_state_changed": {
+        // Claude Code 2.1.232+ emits this after a foreground shell command
+        // performs a commit, push, merge, or rebase. Upstream documents it as
+        // an invalidation hint, not proof of repository state. In particular,
+        // `cwd` comes from the provider process and is untrusted: omit it from
+        // the canonical event and let the server resolve the already-bound
+        // session cwd before performing any filesystem or Git operation.
+        const kind = sanitizeDiagnosticLine(message.kind ?? "unknown").slice(0, 64) || "unknown";
+        const branch = message.branch
+          ? sanitizeDiagnosticLine(message.branch).slice(0, 256) || undefined
+          : undefined;
+        yield* offerRuntimeEvent({
+          ...base,
+          type: "vcs.state.changed",
+          payload: {
+            kind,
+            ...(branch ? { branch } : {}),
+          },
+          raw: {
+            source: "claude.sdk.message",
+            method: "claude/system/vcs_state_changed",
+            messageType: "system:vcs_state_changed",
+            // Keep the useful invalidation metadata while deliberately
+            // excluding provider-supplied paths and identifiers from the
+            // canonical/debug event surface.
+            payload: {
+              type: "system",
+              subtype: "vcs_state_changed",
+              kind,
+              ...(branch ? { branch } : {}),
+            },
+          },
+        });
+        return;
+      }
+      case "code_change_published": {
+        // This is a successful publication edge (for example, a pull request),
+        // not an adapter warning. Surface a bounded summary without copying a
+        // provider-controlled URL into work-log text or canonical diagnostics.
+        const action = message.action
+          ? sanitizeDiagnosticLine(message.action).slice(0, 80) || undefined
+          : undefined;
+        const identifier = message.identifier
+          ? sanitizeDiagnosticLine(message.identifier).slice(0, 120) || undefined
+          : undefined;
+        const repo = message.repo
+          ? sanitizeDiagnosticLine(message.repo).slice(0, 160) || undefined
+          : undefined;
+        const provider = message.provider
+          ? sanitizeDiagnosticLine(message.provider).slice(0, 80) || undefined
+          : undefined;
+        const summary = [
+          `Claude ${action ?? "published"} a code change${identifier ? ` ${identifier}` : ""}`,
+          repo ? `in ${repo}` : undefined,
+        ]
+          .filter((part): part is string => part !== undefined)
+          .join(" ");
+        yield* offerRuntimeEvent({
+          ...base,
+          type: "tool.progress",
+          payload: {
+            summary: `${summary}.`,
+          },
+          raw: {
+            source: "claude.sdk.message",
+            method: "claude/system/code_change_published",
+            messageType: "system:code_change_published",
+            payload: {
+              type: "system",
+              subtype: "code_change_published",
+              ...(provider ? { provider } : {}),
+              ...(repo ? { repo } : {}),
+              ...(identifier ? { identifier } : {}),
+              ...(action ? { action } : {}),
+            },
+          },
+        });
+        return;
+      }
+      case "feedback_draft_queued":
+        // Claude's own runtime says this draft is local-only and explicitly
+        // instructs clients not to announce it. The native provider log keeps
+        // the frame for diagnosis; chat, work log, and toast surfaces stay
+        // quiet until the user explicitly submits feedback upstream.
+        return;
       case "notification":
         if (message.priority === "high" || message.priority === "immediate") {
           yield* emitRuntimeWarning(context, message.text, {
@@ -4312,6 +4417,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
       return;
     }
+
+    if (rawMessage.type === "autocompact_state") {
+      // Agent SDK 0.3.234 forwards this lower-level host synchronization frame,
+      // while Cafe already receives authoritative compaction lifecycle through
+      // system/status and system/compact_boundary. Treat it as transport state
+      // rather than duplicating UI or work-log events.
+      return;
+    }
+
+    if (rawMessage.type === "transcript_mirror") {
+      // Current SDK releases consume transcript mirrors internally before the
+      // public async iterator. Keep this guard for mixed CLI/SDK deployments so
+      // a leaked internal persistence frame never becomes a user-facing warning.
+      return;
+    }
   });
 
   const handleSdkMessage = Effect.fn("handleSdkMessage")(function* (
@@ -4339,7 +4459,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (
       rawMessageType === "control_request_progress" ||
       rawMessageType === "conversation_reset" ||
-      rawMessageType === "active_goal"
+      rawMessageType === "active_goal" ||
+      rawMessageType === "autocompact_state" ||
+      rawMessageType === "transcript_mirror"
     ) {
       yield* handleSdkTelemetryMessage(context, message);
       return;

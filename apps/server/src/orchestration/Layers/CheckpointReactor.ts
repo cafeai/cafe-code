@@ -718,6 +718,35 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const refreshGitStatusFromProviderInvalidation = Effect.fn(
+    "refreshGitStatusFromProviderInvalidation",
+  )(function* (event: Extract<ProviderRuntimeEvent, { type: "vcs.state.changed" }>) {
+    const sessionRuntime = yield* resolveSessionRuntimeForThread(event.threadId);
+    if (Option.isNone(sessionRuntime)) {
+      return;
+    }
+
+    // Claude's vcs_state_changed payload contains a cwd, but upstream defines
+    // the event as a cache-invalidation hint rather than authoritative state.
+    // Resolve the filesystem target exclusively from Cafe's established
+    // session binding. This prevents a compromised or malformed provider frame
+    // from making the server inspect an arbitrary repository.
+    const refresh =
+      event.payload.kind === "push"
+        ? vcsStatusBroadcaster.refreshStatus(sessionRuntime.value.cwd)
+        : vcsStatusBroadcaster.refreshLocalStatus(sessionRuntime.value.cwd);
+    yield* refresh.pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("failed to refresh git status after provider VCS invalidation", {
+          threadId: event.threadId,
+          turnId: event.turnId ?? null,
+          kind: event.payload.kind,
+          detail: error.message,
+        }),
+      ),
+    );
+  });
+
   const ensurePreTurnBaselineFromDomainTurnStart = Effect.fn(
     "ensurePreTurnBaselineFromDomainTurnStart",
   )(function* (
@@ -980,6 +1009,11 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    if (event.type === "vcs.state.changed") {
+      yield* refreshGitStatusFromProviderInvalidation(event);
+      return;
+    }
+
     if (event.type === "turn.completed") {
       const turnId = toTurnId(event.turnId);
       if (turnId) {
@@ -1067,7 +1101,11 @@ const make = Effect.gen(function* () {
 
     yield* Effect.forkScoped(
       Stream.runForEach(providerService.streamEvents, (event) => {
-        if (event.type !== "turn.started" && event.type !== "turn.completed") {
+        if (
+          event.type !== "turn.started" &&
+          event.type !== "turn.completed" &&
+          event.type !== "vcs.state.changed"
+        ) {
           return Effect.void;
         }
         return worker.enqueue({ source: "runtime", event });

@@ -3326,6 +3326,113 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("maps Claude VCS changes and quietly accepts current host-only frames", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const context = yield* Effect.context<never>();
+      const runFork = Effect.runForkWith(context);
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+
+      const runtimeEventsFiber = runFork(
+        Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            runtimeEvents.push(event);
+          }),
+        ),
+      );
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEvents.length = 0;
+
+      harness.query.emit({
+        type: "system",
+        subtype: "vcs_state_changed",
+        kind: "commit",
+        branch: "main",
+        cwd: "/untrusted/provider/path",
+        session_id: "sdk-session-vcs",
+        uuid: "vcs-state-changed-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "code_change_published",
+        provider: "github",
+        url: "https://example.invalid/private/change/42",
+        repo: "cafeai/cafe-code",
+        identifier: "#42",
+        action: "published",
+        session_id: "sdk-session-vcs",
+        uuid: "code-change-published-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "feedback_draft_queued",
+        draft_type: "idea",
+        summary: "Private draft summary",
+        details_preview: "Private draft details",
+        session_id: "sdk-session-vcs",
+        uuid: "feedback-draft-queued-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "autocompact_state",
+        state: "eligible",
+        session_id: "sdk-session-vcs",
+        uuid: "autocompact-state-1",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "transcript_mirror",
+        filePath: "/untrusted/provider/transcript.jsonl",
+        entries: [],
+        session_id: "sdk-session-vcs",
+        uuid: "transcript-mirror-1",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      const vcsEvent = runtimeEvents.find((event) => event.type === "vcs.state.changed");
+      assert.equal(vcsEvent?.type, "vcs.state.changed");
+      if (vcsEvent?.type === "vcs.state.changed") {
+        assert.deepEqual(vcsEvent.payload, { kind: "commit", branch: "main" });
+        assert.equal(
+          (JSON.stringify(vcsEvent.raw) ?? "").includes("/untrusted/provider/path"),
+          false,
+        );
+      }
+
+      const publicationEvent = runtimeEvents.find(
+        (event) =>
+          event.type === "tool.progress" &&
+          event.payload.summary === "Claude published a code change #42 in cafeai/cafe-code.",
+      );
+      assert.equal(publicationEvent?.type, "tool.progress");
+      assert.equal(
+        (JSON.stringify(publicationEvent?.raw) ?? "").includes("https://example.invalid"),
+        false,
+      );
+      assert.equal(
+        runtimeEvents.some(
+          (event) =>
+            event.type === "runtime.warning" &&
+            event.payload.message.startsWith("Unhandled Claude"),
+        ),
+        false,
+      );
+
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("emits Claude context window on result completion usage snapshots", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

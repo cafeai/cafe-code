@@ -167,6 +167,7 @@ const ProviderRuntimeEventType = Schema.Literals([
   "thread.started",
   "thread.state.changed",
   "thread.metadata.updated",
+  "vcs.state.changed",
   "thread.token-usage.updated",
   "thread.goal.updated",
   "thread.goal.cleared",
@@ -219,6 +220,7 @@ const SessionExitedType = Schema.Literal("session.exited");
 const ThreadStartedType = Schema.Literal("thread.started");
 const ThreadStateChangedType = Schema.Literal("thread.state.changed");
 const ThreadMetadataUpdatedType = Schema.Literal("thread.metadata.updated");
+const VcsStateChangedType = Schema.Literal("vcs.state.changed");
 const ThreadTokenUsageUpdatedType = Schema.Literal("thread.token-usage.updated");
 const ThreadGoalUpdatedType = Schema.Literal("thread.goal.updated");
 const ThreadGoalClearedType = Schema.Literal("thread.goal.cleared");
@@ -321,6 +323,21 @@ const ThreadMetadataUpdatedPayload = Schema.Struct({
   metadata: Schema.optional(UnknownRecordSchema),
 });
 export type ThreadMetadataUpdatedPayload = typeof ThreadMetadataUpdatedPayload.Type;
+
+/**
+ * Provider-reported repository invalidation hint.
+ *
+ * `kind` is intentionally an open string. Provider CLIs can add mutation
+ * classes before Cafe updates its schemas, and every recognized or future
+ * value has the same safe meaning here: re-read repository state from Cafe's
+ * trusted session workspace. A provider-supplied cwd must never be copied into
+ * this payload or used as a filesystem target.
+ */
+const VcsStateChangedPayload = Schema.Struct({
+  kind: TrimmedNonEmptyStringSchema,
+  branch: Schema.optional(TrimmedNonEmptyStringSchema),
+});
+export type VcsStateChangedPayload = typeof VcsStateChangedPayload.Type;
 
 export const ThreadTokenUsageSnapshot = Schema.Struct({
   usedTokens: NonNegativeInt,
@@ -697,6 +714,13 @@ const ProviderRuntimeThreadMetadataUpdatedEvent = Schema.Struct({
 export type ProviderRuntimeThreadMetadataUpdatedEvent =
   typeof ProviderRuntimeThreadMetadataUpdatedEvent.Type;
 
+const ProviderRuntimeVcsStateChangedEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: VcsStateChangedType,
+  payload: VcsStateChangedPayload,
+});
+export type ProviderRuntimeVcsStateChangedEvent = typeof ProviderRuntimeVcsStateChangedEvent.Type;
+
 const ProviderRuntimeThreadTokenUsageUpdatedEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
   type: ThreadTokenUsageUpdatedType,
@@ -1014,6 +1038,7 @@ export const ProviderRuntimeEventV2 = Schema.Union([
   ProviderRuntimeThreadStartedEvent,
   ProviderRuntimeThreadStateChangedEvent,
   ProviderRuntimeThreadMetadataUpdatedEvent,
+  ProviderRuntimeVcsStateChangedEvent,
   ProviderRuntimeThreadTokenUsageUpdatedEvent,
   ProviderRuntimeThreadGoalUpdatedEvent,
   ProviderRuntimeThreadGoalClearedEvent,
