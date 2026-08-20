@@ -163,7 +163,7 @@ describe("OrchestrationSubscriptionHub", () => {
     );
   });
 
-  it("coalesces only replaceable updates and preserves protected barriers", async () => {
+  it("concatenates append-only deltas and preserves protected barriers", async () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
@@ -241,14 +241,19 @@ describe("OrchestrationSubscriptionHub", () => {
           }
           yield* yieldHub;
 
-          const delivered: number[] = [];
+          const delivered: OrchestrationEvent[] = [];
           for (let index = 0; index < 3; index += 1) {
             const chunk = yield* pull;
             const event = Array.from(chunk)[0];
-            if (event !== undefined) delivered.push(event.sequence);
+            if (event !== undefined) delivered.push(event);
           }
 
-          expect(delivered).toEqual([3, 4, 6]);
+          expect(delivered.map((event) => event.sequence)).toEqual([3, 4, 6]);
+          expect(
+            delivered.map((event) =>
+              event.type === "thread.message-sent" ? event.payload.text : undefined,
+            ),
+          ).toEqual(["alatest-before-barrier", "protected", "afterlatest-after-barrier"]);
           expect((yield* hub.diagnosticsSnapshot).coalescedEventCount).toBe(2);
         }),
       ),

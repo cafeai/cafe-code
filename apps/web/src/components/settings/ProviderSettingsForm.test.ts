@@ -57,6 +57,15 @@ describe("ProviderSettingsForm helpers", () => {
     });
   });
 
+  it("exposes Grok Build as Early Access with only structured launch settings", () => {
+    const grok = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("grok")];
+    expect(grok).toMatchObject({ label: "Grok Build", badgeLabel: "Early Access" });
+    expect(deriveProviderSettingsFields(grok!).map((field) => field.key)).toEqual([
+      "binaryPath",
+      "homePath",
+    ]);
+  });
+
   it("preserves unknown config keys while omitting empty configurable fields", () => {
     const claude = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("claudeAgent")];
     expect(claude).toBeDefined();

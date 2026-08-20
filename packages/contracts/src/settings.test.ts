@@ -6,6 +6,7 @@ import {
   ClientSettingsSchema,
   CodexSettings,
   ClaudeSettings,
+  GrokSettings,
   DEFAULT_AMBIANCE_COLOR,
   DEFAULT_AMBIANCE_EFFECT,
   DEFAULT_AMBIANCE_ENABLED,
@@ -45,6 +46,7 @@ const decodeClientSettings = Schema.decodeSync(ClientSettingsSchema);
 const decodeClientSettingsPatch = Schema.decodeUnknownSync(ClientSettingsPatch);
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
+const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 
 describe("client settings", () => {
@@ -339,6 +341,22 @@ describe("client settings", () => {
 });
 
 describe("provider settings", () => {
+  it("decodes Grok defaults and its legacy settings patch", () => {
+    expect(decodeGrokSettings({})).toEqual({
+      enabled: true,
+      binaryPath: "grok",
+      homePath: "",
+      customModels: [],
+    });
+    expect(
+      decodeServerSettingsPatch({
+        providers: { grok: { binaryPath: "/opt/grok", homePath: "/srv/grok-home" } },
+      }),
+    ).toEqual({
+      providers: { grok: { binaryPath: "/opt/grok", homePath: "/srv/grok-home" } },
+    });
+  });
+
   it("defaults Codex and Claude provider runtime source to system", () => {
     expect(decodeCodexSettings({}).runtimeSource).toBe("system");
     expect(decodeClaudeSettings({}).runtimeSource).toBe("system");

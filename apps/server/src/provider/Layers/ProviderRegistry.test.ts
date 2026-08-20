@@ -677,6 +677,39 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         );
       });
 
+      it("does not preserve Grok usage when a full refresh omits account identity and quota", () => {
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make("grok"),
+          driver: ProviderDriverKind.make("grok"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated", type: "cached-token" },
+          checkedAt: "2026-08-16T00:00:00.000Z",
+          version: "1.0.4",
+          models: [],
+          slashCommands: [],
+          skills: [],
+          accountRateLimits: {
+            rateLimits: {
+              limitId: "grok",
+              primary: { usedPercent: 1, windowDurationMins: 10_080 },
+            },
+            checkedAt: "2026-08-16T00:00:00.000Z",
+          },
+        } as const satisfies ServerProvider;
+        const { accountRateLimits: _omitted, ...withoutRateLimits } = previousProvider;
+        const refreshedProvider = {
+          ...withoutRateLimits,
+          checkedAt: "2026-08-16T00:05:00.000Z",
+        } satisfies ServerProvider;
+
+        assert.strictEqual(
+          mergeProviderSnapshot(previousProvider, refreshedProvider).accountRateLimits,
+          undefined,
+        );
+      });
+
       it("preserves live Codex rate limits across a transient same-account probe omission", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("codex"),

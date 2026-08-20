@@ -28,13 +28,15 @@ import type {
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 
-export type ProviderSessionModelSwitchMode = "in-session" | "unsupported";
+export type ProviderSessionModelSwitchMode = "in-session" | "restart-resume" | "unsupported";
 export type ProviderLiveSteerSupport = "supported" | "unsupported";
 export type ProviderThreadGoalSupport = "supported" | "unsupported";
 
 export interface ProviderAdapterCapabilities {
   /**
-   * Declares whether changing the model on an existing session is supported.
+   * Declares how changing a model or its provider-owned traits is applied.
+   * `restart-resume` preserves the native conversation while atomically
+   * replacing an idle provider process with the newly selected configuration.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
   /**

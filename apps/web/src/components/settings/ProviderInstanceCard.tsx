@@ -29,6 +29,7 @@ import { cn } from "../../lib/utils";
 import {
   formatCodexRateLimitResetAvailability,
   formatCodexRateLimitSummary,
+  shouldSurfaceProviderAccountRateLimits,
 } from "../../lib/codexRateLimits";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { normalizeProviderAccentColor } from "../../providerInstances";
@@ -745,11 +746,9 @@ export function ProviderInstanceCard({
   const authenticatedDetail = hasAuthenticatedEmail
     ? (liveProvider?.auth.label ?? liveProvider?.auth.type ?? null)
     : null;
-  const codexRateLimitSummary =
-    (liveProvider?.driver === "codex" || liveProvider?.driver === "claudeAgent") &&
-    liveProvider.auth.status === "authenticated"
-      ? formatCodexRateLimitSummary(liveProvider.accountRateLimits)
-      : null;
+  const codexRateLimitSummary = shouldSurfaceProviderAccountRateLimits(liveProvider)
+    ? formatCodexRateLimitSummary(liveProvider?.accountRateLimits)
+    : null;
   const codexRateLimitWindowText = codexRateLimitSummary
     ? [codexRateLimitSummary.primary?.text, codexRateLimitSummary.secondary?.text]
         .filter((part): part is string => Boolean(part))

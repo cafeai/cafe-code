@@ -1220,6 +1220,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             previousMessage !== undefined &&
             !previousMessage.isStreaming &&
             previousMessage.text.length > 0;
+          const canonicalCreatedAt =
+            terminalTurnCompletedAt !== null &&
+            (previousMessage?.createdAt ?? event.payload.createdAt) > terminalTurnCompletedAt
+              ? terminalTurnCompletedAt
+              : (previousMessage?.createdAt ?? event.payload.createdAt);
           const nextText = Option.match(existingMessage, {
             onNone: () => event.payload.text,
             onSome: (message) => {
@@ -1254,14 +1259,17 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             // events reopen renderer streaming/work indicators for a completed
             // turn; the CLI's terminal lifecycle is authoritative here.
             isStreaming: event.payload.streaming && terminalTurnCompletedAt === null,
-            createdAt: previousMessage?.createdAt ?? event.payload.createdAt,
+            // A replayed provider delta can be observed after Stop/restart even
+            // though it still belongs to the already-terminal turn. Clamp both
+            // message timestamps to the canonical terminal boundary: `updatedAt`
+            // doubles as the renderer's completed-at value, so advancing it with
+            // transport replay time makes a stopped response appear to keep
+            // working. The text may still repair an otherwise-empty snapshot.
+            createdAt: canonicalCreatedAt,
             updatedAt:
               terminalTurnCompletedAt === null
                 ? maxIso(previousMessage?.updatedAt ?? null, event.payload.updatedAt)
-                : maxIso(
-                    maxIso(previousMessage?.updatedAt ?? null, event.payload.updatedAt),
-                    terminalTurnCompletedAt,
-                  ),
+                : terminalTurnCompletedAt,
           });
           return;
         }
@@ -1976,7 +1984,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               assistantMessageId: event.payload.messageId,
               state: nextState,
               completedAt: isTerminalTurnState(nextState)
-                ? maxIso(existingTurn.value.completedAt, event.payload.updatedAt)
+                ? (existingTurn.value.completedAt ?? event.payload.updatedAt)
                 : existingTurn.value.completedAt,
               startedAt: existingTurn.value.startedAt ?? event.payload.createdAt,
               requestedAt: existingTurn.value.requestedAt ?? event.payload.createdAt,

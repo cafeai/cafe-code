@@ -47,7 +47,7 @@ export interface OrchestrationSubscriptionHubShape {
 interface QueuedEvent {
   event: OrchestrationEvent;
   bytes: number;
-  readonly replaceableKey: string | null;
+  readonly coalescingKey: string | null;
 }
 
 interface Subscriber {
@@ -57,7 +57,38 @@ interface Subscriber {
   queuedBytes: number;
   overflowed: boolean;
   coalescingEpoch: number;
-  readonly pendingReplaceable: Map<string, QueuedEvent>;
+  readonly pendingCoalescible: Map<string, QueuedEvent>;
+}
+
+function appendStreamingMessageEvents(
+  previous: OrchestrationEvent,
+  current: OrchestrationEvent,
+): OrchestrationEvent | undefined {
+  if (
+    previous.type !== "thread.message-sent" ||
+    current.type !== "thread.message-sent" ||
+    previous.payload.role !== "assistant" ||
+    current.payload.role !== "assistant" ||
+    !previous.payload.streaming ||
+    !current.payload.streaming ||
+    previous.aggregateId !== current.aggregateId ||
+    previous.payload.messageId !== current.payload.messageId ||
+    previous.payload.turnId !== current.payload.turnId
+  ) {
+    return undefined;
+  }
+
+  // Provider and orchestration streaming events carry append-only deltas, not
+  // accumulated snapshots. Keep the latest cursor/event identity so replay can
+  // resume after the merged entry, but concatenate every byte of visible text.
+  return {
+    ...current,
+    payload: {
+      ...current.payload,
+      text: `${previous.payload.text}${current.payload.text}`,
+      createdAt: previous.payload.createdAt,
+    },
+  };
 }
 
 function isThreadDetailEvent(event: OrchestrationEvent): boolean {
@@ -158,7 +189,7 @@ export const makeOrchestrationSubscriptionHub = (options: {
         cursor = event.sequence;
         tailEventCount += 1;
         const bytes = encodedJsonByteLength(event);
-        const queued = { event, bytes, replaceableKey: null } satisfies QueuedEvent;
+        const queued = { event, bytes, coalescingKey: null } satisfies QueuedEvent;
 
         if (bytes <= PROVIDER_PIPELINE_POLICY.subscriptionReplayMaxBytes) {
           replayRing.push(queued);
@@ -176,26 +207,37 @@ export const makeOrchestrationSubscriptionHub = (options: {
         for (const subscriber of Array.from(subscribers.values())) {
           if (!eventMatchesRoute(event, subscriber.route)) continue;
           const classification = classifyOutboundOrchestrationEvent(event);
-          const replaceableKey =
-            classification.kind === "replaceable"
-              ? `${subscriber.coalescingEpoch}:${classification.key}`
-              : null;
+          let coalescingKey =
+            classification.kind === "protected"
+              ? null
+              : `${subscriber.coalescingEpoch}:${classification.key}`;
           const previous =
-            replaceableKey === null ? undefined : subscriber.pendingReplaceable.get(replaceableKey);
+            coalescingKey === null ? undefined : subscriber.pendingCoalescible.get(coalescingKey);
           if (previous !== undefined) {
-            const nextQueuedBytes = subscriber.queuedBytes - previous.bytes + bytes;
-            if (nextQueuedBytes > PROVIDER_PIPELINE_POLICY.subscriptionQueueMaxBytes) {
-              subscriber.overflowed = true;
-              subscribers.delete(subscriber.id);
-              slowSubscriberCloseCount += 1;
-              yield* Queue.shutdown(subscriber.queue);
+            const nextEvent =
+              classification.kind === "appendable"
+                ? appendStreamingMessageEvents(previous.event, event)
+                : event;
+            if (nextEvent !== undefined) {
+              const nextBytes = encodedJsonByteLength(nextEvent);
+              const nextQueuedBytes = subscriber.queuedBytes - previous.bytes + nextBytes;
+              if (nextQueuedBytes > PROVIDER_PIPELINE_POLICY.subscriptionQueueMaxBytes) {
+                subscriber.overflowed = true;
+                subscribers.delete(subscriber.id);
+                slowSubscriberCloseCount += 1;
+                yield* Queue.shutdown(subscriber.queue);
+                continue;
+              }
+              subscriber.queuedBytes = nextQueuedBytes;
+              previous.event = nextEvent;
+              previous.bytes = nextBytes;
+              coalescedEventCount += 1;
               continue;
             }
-            subscriber.queuedBytes = nextQueuedBytes;
-            previous.event = event;
-            previous.bytes = bytes;
-            coalescedEventCount += 1;
-            continue;
+
+            // A future appendable class that cannot be combined safely is a
+            // protected barrier by default. Never fall back to overwriting it.
+            coalescingKey = null;
           }
           if (
             subscriber.queuedBytes + bytes > PROVIDER_PIPELINE_POLICY.subscriptionQueueMaxBytes ||
@@ -208,14 +250,14 @@ export const makeOrchestrationSubscriptionHub = (options: {
             yield* Queue.shutdown(subscriber.queue);
             continue;
           }
-          const subscriberEntry: QueuedEvent = { event, bytes, replaceableKey };
+          const subscriberEntry: QueuedEvent = { event, bytes, coalescingKey };
           const accepted = yield* Queue.offer(subscriber.queue, subscriberEntry);
           if (accepted) {
             subscriber.queuedBytes += bytes;
-            if (replaceableKey !== null) {
-              subscriber.pendingReplaceable.set(replaceableKey, subscriberEntry);
+            if (coalescingKey !== null) {
+              subscriber.pendingCoalescible.set(coalescingKey, subscriberEntry);
             } else {
-              // Never move a later replaceable update across a protected event.
+              // Never move a later coalescible update across a protected event.
               subscriber.coalescingEpoch += 1;
             }
           }
@@ -280,7 +322,7 @@ export const makeOrchestrationSubscriptionHub = (options: {
             queuedBytes: 0,
             overflowed: false,
             coalescingEpoch: 0,
-            pendingReplaceable: new Map(),
+            pendingCoalescible: new Map(),
           };
           nextSubscriberId += 1;
 
@@ -328,10 +370,10 @@ export const makeOrchestrationSubscriptionHub = (options: {
               Effect.sync(() => {
                 subscriber.queuedBytes = Math.max(0, subscriber.queuedBytes - entry.bytes);
                 if (
-                  entry.replaceableKey !== null &&
-                  subscriber.pendingReplaceable.get(entry.replaceableKey) === entry
+                  entry.coalescingKey !== null &&
+                  subscriber.pendingCoalescible.get(entry.coalescingKey) === entry
                 ) {
-                  subscriber.pendingReplaceable.delete(entry.replaceableKey);
+                  subscriber.pendingCoalescible.delete(entry.coalescingKey);
                 }
                 updateSubscriptionDiagnostics();
                 return entry.event;

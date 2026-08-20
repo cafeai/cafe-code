@@ -153,7 +153,7 @@ async function mountMenu(props?: { modelSelection?: ModelSelection; prompt?: str
         />
       }
       onToggleInteractionMode={vi.fn()}
-      onClaudePermissionModeChange={vi.fn()}
+      onNativePermissionModeChange={vi.fn()}
       onTogglePlanSidebar={vi.fn()}
       onRuntimeModeChange={vi.fn()}
     />,
@@ -323,7 +323,7 @@ describe("CompactComposerControlsMenu", () => {
         runtimeMode="approval-required"
         showInteractionModeToggle={false}
         onToggleInteractionMode={vi.fn()}
-        onClaudePermissionModeChange={vi.fn()}
+        onNativePermissionModeChange={vi.fn()}
         onTogglePlanSidebar={vi.fn()}
         onRuntimeModeChange={vi.fn()}
       />,
@@ -362,7 +362,7 @@ describe("CompactComposerControlsMenu", () => {
         showGoalControl
         goalStatus="usageLimited"
         onToggleInteractionMode={vi.fn()}
-        onClaudePermissionModeChange={vi.fn()}
+        onNativePermissionModeChange={vi.fn()}
         onTogglePlanSidebar={vi.fn()}
         onRuntimeModeChange={vi.fn()}
         onOpenGoal={onOpenGoal}

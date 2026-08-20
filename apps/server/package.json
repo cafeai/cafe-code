@@ -43,6 +43,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e:provider-pipeline": "vitest run --config vitest.e2e.config.ts integration/providerPipelineLiveness.e2e.test.ts",
+    "test:e2e:grok-acp": "vitest run --config vitest.e2e.config.ts integration/GrokAcpCliProbe.e2e.test.ts",
     "test:e2e:provider-daemon": "vitest run --config vitest.e2e.config.ts"
   },
   "dependencies": {
@@ -68,6 +69,7 @@
     "@effect/language-service": "catalog:",
     "@effect/vitest": "catalog:",
     "@types/node": "catalog:",
+    "effect-acp": "workspace:*",
     "effect-codex-app-server": "workspace:*",
     "tsdown": "catalog:",
     "typescript": "catalog:",

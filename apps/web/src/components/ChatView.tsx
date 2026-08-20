@@ -1494,7 +1494,7 @@ interface FollowUpQueueItem extends ComposerSendSnapshot {
   expanded: boolean;
   blockedReason: string | null;
   automaticSteerRetry?: {
-    readonly nonSteerableTurnKind: CodexNonSteerableTurnKind;
+    readonly nonSteerableTurnKind: CodexNonSteerableTurnKind | null;
     readonly sourceMessageId: MessageId;
   } | null;
 }
@@ -1572,7 +1572,7 @@ function threadHasProviderInterruptFailedForRecovery(
 
 function readRetryableSteerFailure(
   activity: OrchestrationThreadActivity,
-): { readonly messageId: MessageId; readonly turnKind: CodexNonSteerableTurnKind } | null {
+): { readonly messageId: MessageId; readonly turnKind: CodexNonSteerableTurnKind | null } | null {
   if (activity.kind !== "provider.turn.steer.failed") {
     return null;
   }
@@ -1582,12 +1582,12 @@ function readRetryableSteerFailure(
   }
   const messageId = readDebugString(payload.messageId);
   const turnKind = readDebugString(payload.codexNonSteerableTurnKind);
-  if (messageId === null || (turnKind !== "review" && turnKind !== "compact")) {
+  if (messageId === null) {
     return null;
   }
   return {
     messageId: MessageId.make(messageId),
-    turnKind,
+    turnKind: turnKind === "review" || turnKind === "compact" ? turnKind : null,
   };
 }
 
@@ -1599,10 +1599,17 @@ function resolveAutomaticSteerRetryBlocker(input: {
   readonly item: FollowUpQueueItem;
   readonly thread: Thread;
   readonly phase: SessionPhase;
-}): "context-compaction-active" | "review-active-turn" | null {
+}): "context-compaction-active" | "provider-steer-rejected" | "review-active-turn" | null {
   const retry = input.item.automaticSteerRetry ?? null;
   if (retry === null) {
     return null;
+  }
+
+  // A generic provider rejection is retryable only as the next turn. Retrying
+  // it while the same turn is still active would immediately call the same
+  // rejected extension again and could spin an unbounded steer/requeue loop.
+  if (retry.nonSteerableTurnKind === null) {
+    return input.phase === "running" ? "provider-steer-rejected" : null;
   }
 
   // Upstream Codex reports `activeTurnNotSteerable` for `/review` and

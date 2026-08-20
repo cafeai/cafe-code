@@ -4179,72 +4179,71 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  it.effect(
-    "refreshes Codex account usage without a full provider probe after prompt dispatch",
-    () =>
-      Effect.gen(function* () {
-        const usageRefresh = yield* Deferred.make<ProviderInstanceId>();
-        const fullRefreshCalls = yield* Ref.make(0);
-        const provider = {
-          instanceId: defaultModelSelection.instanceId,
-          driver: ProviderDriverKind.make("codex"),
-          enabled: true,
-          installed: true,
-          version: "0.145.0",
-          status: "ready" as const,
-          auth: { status: "authenticated" as const, type: "chatgpt" as const },
-          checkedAt: "2026-01-01T00:00:00.000Z",
-          models: [],
-          slashCommands: [],
-          skills: [],
-        };
+  for (const usageDriver of ["codex", "grok"] as const) {
+    it.effect(
+      `does not refresh ${usageDriver} account usage before a dispatched prompt settles`,
+      () =>
+        Effect.gen(function* () {
+          const usageRefreshCalls = yield* Ref.make(0);
+          const fullRefreshCalls = yield* Ref.make(0);
+          const provider = {
+            instanceId: defaultModelSelection.instanceId,
+            driver: ProviderDriverKind.make(usageDriver),
+            enabled: true,
+            installed: true,
+            version: "0.145.0",
+            status: "ready" as const,
+            auth: { status: "authenticated" as const, type: "chatgpt" as const },
+            checkedAt: "2026-01-01T00:00:00.000Z",
+            models: [],
+            slashCommands: [],
+            skills: [],
+          };
 
-        yield* buildAppUnderTest({
-          layers: {
-            providerRegistry: {
-              getProviders: Effect.succeed([provider]),
-              refreshInstance: () =>
-                Ref.update(fullRefreshCalls, (count) => count + 1).pipe(Effect.as([provider])),
-              refreshInstanceAccountUsage: (instanceId) =>
-                Deferred.succeed(usageRefresh, instanceId).pipe(
-                  Effect.ignore,
-                  Effect.as([provider]),
-                ),
-            },
-            orchestrationEngine: {
-              dispatch: () => Effect.succeed({ sequence: 8 }),
-              readEvents: () => Stream.empty,
-            },
-          },
-        });
-
-        const wsUrl = yield* getWsServerUrl("/ws");
-        const createdAt = "2026-01-01T00:00:00.000Z";
-        const result = yield* Effect.scoped(
-          withWsRpcClient(wsUrl, (client) =>
-            client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
-              type: "thread.turn.start",
-              commandId: CommandId.make("cmd-prompt-usage-refresh"),
-              threadId: defaultThreadId,
-              message: {
-                messageId: MessageId.make("msg-prompt-usage-refresh"),
-                role: "user",
-                text: "hello",
-                attachments: [],
+          yield* buildAppUnderTest({
+            layers: {
+              providerRegistry: {
+                getProviders: Effect.succeed([provider]),
+                refreshInstance: () =>
+                  Ref.update(fullRefreshCalls, (count) => count + 1).pipe(Effect.as([provider])),
+                refreshInstanceAccountUsage: () =>
+                  Ref.update(usageRefreshCalls, (count) => count + 1).pipe(Effect.as([provider])),
               },
-              modelSelection: defaultModelSelection,
-              runtimeMode: "full-access",
-              interactionMode: "default",
-              createdAt,
-            }),
-          ),
-        );
+              orchestrationEngine: {
+                dispatch: () => Effect.succeed({ sequence: 8 }),
+                readEvents: () => Stream.empty,
+              },
+            },
+          });
 
-        assert.equal(result.sequence, 8);
-        assert.equal(yield* Deferred.await(usageRefresh), defaultModelSelection.instanceId);
-        assert.equal(yield* Ref.get(fullRefreshCalls), 0);
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
-  );
+          const wsUrl = yield* getWsServerUrl("/ws");
+          const createdAt = "2026-01-01T00:00:00.000Z";
+          const result = yield* Effect.scoped(
+            withWsRpcClient(wsUrl, (client) =>
+              client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+                type: "thread.turn.start",
+                commandId: CommandId.make("cmd-prompt-usage-refresh"),
+                threadId: defaultThreadId,
+                message: {
+                  messageId: MessageId.make("msg-prompt-usage-refresh"),
+                  role: "user",
+                  text: "hello",
+                  attachments: [],
+                },
+                modelSelection: defaultModelSelection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                createdAt,
+              }),
+            ),
+          );
+
+          assert.equal(result.sequence, 8);
+          assert.equal(yield* Ref.get(usageRefreshCalls), 0);
+          assert.equal(yield* Ref.get(fullRefreshCalls), 0);
+        }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    );
+  }
 
   it.effect("filters thread subscription events already covered by the snapshot", () =>
     Effect.gen(function* () {

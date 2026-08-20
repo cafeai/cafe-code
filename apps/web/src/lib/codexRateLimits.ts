@@ -1,8 +1,18 @@
 import type {
+  ServerProvider,
   ServerProviderAccountRateLimitSnapshot,
   ServerProviderAccountRateLimitWindow,
   ServerProviderAccountRateLimits,
 } from "@cafecode/contracts";
+
+export function shouldSurfaceProviderAccountRateLimits(
+  provider: Pick<ServerProvider, "auth" | "driver"> | null | undefined,
+): boolean {
+  return (
+    provider?.auth.status === "authenticated" &&
+    (provider.driver === "codex" || provider.driver === "claudeAgent" || provider.driver === "grok")
+  );
+}
 
 export interface CodexRateLimitSummaryLine {
   readonly label: string;

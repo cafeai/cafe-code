@@ -1951,6 +1951,20 @@ const make = Effect.gen(function* () {
           (thread.session?.lastError ?? null) !== null ||
           providerRuntimeOwnsConflictingTurn);
 
+      if (event.type === "turn.completed" && eventTurnId !== undefined) {
+        // A terminal session projection closes every streaming message for the
+        // turn. Flush the ingestion coalescer first so a short final token
+        // (commonly a Markdown fence or URL suffix) cannot arrive afterward as
+        // stale replay and be discarded by the terminal projection guard.
+        yield* flushBufferedAssistantMessagesForTurn({
+          event,
+          threadId: thread.id,
+          turnId: eventTurnId,
+          createdAt: now,
+          commandTag: "assistant-delta-flush-before-turn-completed",
+        });
+      }
+
       if (
         event.type === "session.started" ||
         event.type === "session.state.changed" ||

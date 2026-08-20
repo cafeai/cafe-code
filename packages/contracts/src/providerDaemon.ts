@@ -83,6 +83,9 @@ export const ProviderDaemonBootstrap = Schema.Struct({
   host: Schema.optional(Schema.String),
   socketPath: Schema.optional(Schema.String),
   cafeCodeHome: Schema.String,
+  // Main backend loopback port used by provider-owned Cafe MCP clients. The
+  // provider daemon's own transport is not the Cafe application listener.
+  cafeMcpPort: Schema.optional(PortSchema),
   token: ProviderDaemonToken,
   runtimeBuildId: Schema.optional(Schema.String),
   otlpTracesUrl: Schema.optional(Schema.String),
@@ -113,6 +116,7 @@ export const ProviderDaemonMarker = Schema.Struct({
   updatedAt: IsoDateTime,
   appVersion: Schema.String,
   runtimeBuildId: Schema.optional(Schema.String),
+  cafeMcpPort: Schema.optional(PortSchema),
 });
 export type ProviderDaemonMarker = typeof ProviderDaemonMarker.Type;
 
@@ -375,7 +379,7 @@ export const ProviderDaemonLeaseResponse = Schema.Struct({
 export type ProviderDaemonLeaseResponse = typeof ProviderDaemonLeaseResponse.Type;
 
 export const ProviderDaemonAdapterCapabilities = Schema.Struct({
-  sessionModelSwitch: Schema.Literals(["in-session", "unsupported"]),
+  sessionModelSwitch: Schema.Literals(["in-session", "restart-resume", "unsupported"]),
   liveSteer: Schema.Literals(["supported", "unsupported"]),
   // Optional on the wire so a newly built desktop can still interrogate an
   // adopted daemon from before goal capability negotiation existed. Missing

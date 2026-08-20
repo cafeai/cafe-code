@@ -130,9 +130,14 @@ export const mergeProviderSnapshot = (
         // Codex has both full probe snapshots and sparse live updates. Preserve the
         // latest redacted usage when the same authenticated account suffers a transient
         // probe failure, but clear it on auth/account churn so a percentage from one
-        // account can never be presented as another account's quota.
+        // account can never be presented as another account's quota. Grok's ACP auth
+        // response does not currently expose a stable account identity, so an omitted
+        // full-probe usage result must clear instead of guessing that cached-token auth
+        // still represents the same person. Its usage-only prompt refresh independently
+        // preserves a known-good snapshot on transient endpoint failure.
         ...(nextProvider.accountRateLimits === undefined &&
         previousProvider.accountRateLimits !== undefined &&
+        nextProvider.driver !== ProviderDriverKind.make("grok") &&
         (nextProvider.driver !== ProviderDriverKind.make("codex") ||
           isSameAuthenticatedProviderAccount(previousProvider, nextProvider))
           ? { accountRateLimits: previousProvider.accountRateLimits }

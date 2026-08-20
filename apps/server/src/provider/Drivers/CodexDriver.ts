@@ -62,7 +62,7 @@ const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const DRIVER_KIND = ProviderDriverKind.make("codex");
 // Periodically refresh installation/authentication truth without using the
 // heavy app-server metadata path. Full refreshes are single-flight, while
-// prompt-triggered usage updates below use only the redacted HTTP request, so
+// terminal-turn usage updates below use only the redacted HTTP request, so
 // neither path creates hidden Codex app-server sessions or repeated CLI probe
 // queues.
 const PERIODIC_SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);

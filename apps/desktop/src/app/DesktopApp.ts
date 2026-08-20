@@ -364,6 +364,9 @@ const bootstrap = Effect.gen(function* () {
   yield* logBootstrapInfo("bootstrap resolved backend endpoint", {
     baseUrl: backendConfig.httpBaseUrl.href,
   });
+  if (providerDaemonManager.configureCafeMcpPort) {
+    yield* providerDaemonManager.configureCafeMcpPort(backendConfig.port);
+  }
   const providerDaemonReadyFiber = yield* Effect.forkScoped(providerDaemonManager.ensureRunning);
   const providerDaemonEndpoint = yield* waitForProviderDaemonStartingEndpoint(
     providerDaemonManager,

@@ -9,6 +9,7 @@ import { EllipsisIcon, ListTodoIcon, TargetIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import {
   CLAUDE_PERMISSION_MODE_OPTIONS,
+  GROK_PERMISSION_MODE_OPTIONS,
   type ClaudePermissionMode,
   deriveClaudePermissionMode,
   isClaudePermissionMode,
@@ -36,12 +37,16 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   goalStatus?: ProviderThreadGoalStatus | null;
   traitsMenuContent?: ReactNode;
   onToggleInteractionMode: () => void;
-  onClaudePermissionModeChange: (mode: ClaudePermissionMode) => void;
+  onNativePermissionModeChange: (mode: ClaudePermissionMode) => void;
   onTogglePlanSidebar: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
   onOpenGoal?: () => void;
 }) {
   const isClaude = props.provider === "claudeAgent";
+  const usesNativePermissionModes = isClaude || props.provider === "grok";
+  const permissionModeOptions = isClaude
+    ? CLAUDE_PERMISSION_MODE_OPTIONS
+    : GROK_PERMISSION_MODE_OPTIONS;
   const claudePermissionMode = deriveClaudePermissionMode({
     interactionMode: props.interactionMode,
     runtimeMode: props.runtimeMode,
@@ -72,12 +77,12 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
           <>
             <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Mode</div>
             <MenuRadioGroup
-              value={isClaude ? claudePermissionMode : props.interactionMode}
+              value={usesNativePermissionModes ? claudePermissionMode : props.interactionMode}
               onValueChange={(value) => {
                 if (!value) return;
-                if (isClaude) {
+                if (usesNativePermissionModes) {
                   if (isClaudePermissionMode(value) && value !== claudePermissionMode) {
-                    props.onClaudePermissionModeChange(value);
+                    props.onNativePermissionModeChange(value);
                   }
                   return;
                 }
@@ -86,8 +91,8 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
                 }
               }}
             >
-              {isClaude ? (
-                CLAUDE_PERMISSION_MODE_OPTIONS.map((option) => (
+              {usesNativePermissionModes ? (
+                permissionModeOptions.map((option) => (
                   <MenuRadioItem key={option.id} value={option.id}>
                     {option.label}
                   </MenuRadioItem>
@@ -102,7 +107,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             <MenuDivider />
           </>
         ) : null}
-        {!isClaude ? (
+        {!usesNativePermissionModes ? (
           <>
             <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Access</div>
             <MenuRadioGroup

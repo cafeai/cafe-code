@@ -172,10 +172,10 @@ safely restart its own provider process. The resume variant records the exact
 threads that are active when shutdown starts and submits a durable continuation
 message to each of them after the runtime has restarted.
 
-If you want Codex or Claude to do it for you, paste this into the CLI:
+If you want Codex, Claude, or Grok Build to do it for you, paste this into the CLI:
 
 ```text
-Install Cafe Code from source. Clone https://github.com/cafeai/cafe-code.git, install Node.js 24.13.1 and Corepack, run corepack enable, run yarn install --immutable, run yarn build:desktop, then start it with yarn workspace @cafecode/desktop start. Also verify Codex CLI is installed and logged in with codex login, and Claude Code is installed and logged in with claude auth login if I want Claude support.
+Install Cafe Code from source. Clone https://github.com/cafeai/cafe-code.git, install Node.js 24.13.1 and Corepack, run corepack enable, run yarn install --immutable, run yarn build:desktop, then start it with yarn workspace @cafecode/desktop start. Also verify Codex CLI is installed and logged in with codex login, Claude Code is installed and logged in with claude auth login if I want Claude support, and Grok Build 1.0.4 or newer is installed and logged in with grok login if I want the Early Access Grok provider.
 ```
 
 The old npm path is still here for later, but it may lag behind current work:
@@ -192,8 +192,9 @@ authenticated:
 - Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
 - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
 - OpenCode: install [OpenCode](https://opencode.ai/docs/) and configure at least one upstream provider, or configure Cafe Code with an existing OpenCode server URL
+- Grok Build (Early Access): install [Grok Build](https://docs.x.ai/build/overview), run `grok login`, and see [Cafe's Grok integration guide](./docs/grok-build.md)
 
-Cafe Code currently ships Codex, Claude, and OpenCode provider integrations.
+Cafe Code currently ships Codex, Claude, OpenCode, and Early Access Grok Build provider integrations.
 
 ## Local Development
 

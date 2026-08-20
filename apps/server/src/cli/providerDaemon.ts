@@ -76,6 +76,7 @@ const resolveProviderDaemonServerConfig = (input: {
       logWebSocketEvents: false,
       providerDaemon: undefined,
       providerSupervisor: input.providerSupervisor,
+      cafeMcpPort: input.bootstrap.cafeMcpPort,
     } satisfies ServerConfigShape;
   });
 

@@ -122,6 +122,8 @@ function providerDriverDisplayName(value: string | undefined): string {
       return "Claude";
     case "codex":
       return "Codex";
+    case "grok":
+      return "Grok Build";
     case "opencode":
       return "OpenCode";
     default:
@@ -143,6 +145,10 @@ const PROVIDER_CONTINUATION_BOOTSTRAP_TRANSCRIPT_MAX_CHARS = 40_000;
 const PROVIDER_CONTINUATION_BOOTSTRAP_MIN_TRANSCRIPT_CHARS = 500;
 const ORPHANED_TURN_START_RESTART_DETAIL =
   "Turn start was interrupted by application restart before a provider turn started. The prompt was not resent automatically to avoid duplicate provider work; resend the message to continue.";
+const ORPHANED_ACTIVE_TURN_RESTART_DETAIL =
+  "The provider process ended during an active turn. Cafe Code closed the stale running state after restart; send a follow-up to continue from the retained transcript.";
+const INTERRUPT_RETRY_RESTART_DETAIL =
+  "Cafe Code restored a pending Stop after backend restart and cancelled the same provider-owned turn.";
 
 export function providerErrorLabel(value: string | undefined): string {
   const normalized = value?.trim();
@@ -377,6 +383,16 @@ function isUnsupportedLiveSteerFailure(cause: Cause.Cause<unknown>): boolean {
   const providerError = findProviderAdapterRequestError(cause);
   const detail = `${providerError?.detail ?? ""}\n${Cause.pretty(cause)}`.toLowerCase();
   return detail.includes("does not support live steering");
+}
+
+function isRejectedGrokInterjectFailure(cause: Cause.Cause<unknown>): boolean {
+  const providerError = findProviderAdapterRequestError(cause);
+  const detail = `${providerError?.detail ?? ""}\n${Cause.pretty(cause)}`.toLowerCase();
+  return (
+    (String(providerError?.provider ?? "") === "grok" &&
+      providerError?.method === "x.ai/interject") ||
+    (detail.includes("(grok)") && detail.includes("x.ai/interject"))
+  );
 }
 
 function isCodexNoActiveTurnToSteerFailure(cause: Cause.Cause<unknown>): boolean {
@@ -648,65 +664,154 @@ const make = Effect.gen(function* () {
       .pipe(Effect.map(Option.getOrUndefined));
   });
 
-  const recoverInterruptedTurnStartsOnStartup = Effect.fn("recoverInterruptedTurnStartsOnStartup")(
-    function* () {
-      // This startup repair only needs thread shell/session state. Do not use
-      // the full orchestration snapshot here: large long-running workspaces can
-      // contain millions of persisted message/activity rows, and hydrating all
-      // of them during backend boot can push Electron's Node runtime into OOM.
-      const shellSnapshot = yield* projectionSnapshotQuery.getShellSnapshot();
-      const activeProviderSessions = yield* providerService.listSessions();
-      const runningProviderThreadIds = new Set(
-        activeProviderSessions
-          .filter((session) => session.status === "running")
-          .map((session) => String(session.threadId)),
-      );
-      const interruptedThreads = shellSnapshot.threads.filter(
-        (thread) =>
-          thread.session?.status === "starting" &&
-          thread.session.activeTurnId === null &&
-          !runningProviderThreadIds.has(thread.id),
-      );
-      if (interruptedThreads.length === 0) {
-        return;
-      }
-      const recoveredAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
-      yield* Effect.forEach(
-        interruptedThreads,
-        (thread) =>
-          Effect.gen(function* () {
-            const session = thread.session;
-            if (session === null) {
-              return;
-            }
-            yield* setThreadSession({
+  const recoverInterruptedProviderWorkOnStartup = Effect.fn(
+    "recoverInterruptedProviderWorkOnStartup",
+  )(function* () {
+    // This startup repair only needs thread shell/session state. Do not use
+    // the full orchestration snapshot here: large long-running workspaces can
+    // contain millions of persisted message/activity rows, and hydrating all
+    // of them during backend boot can push Electron's Node runtime into OOM.
+    const shellSnapshot = yield* projectionSnapshotQuery.getShellSnapshot();
+    const activeProviderSessions = yield* providerService.listSessions();
+    const providerSessionByThreadId = new Map(
+      activeProviderSessions.map((session) => [String(session.threadId), session] as const),
+    );
+    const runningProviderThreadIds = new Set(
+      activeProviderSessions
+        .filter((session) => session.status === "running")
+        .map((session) => String(session.threadId)),
+    );
+    const interruptedThreads = shellSnapshot.threads.filter(
+      (thread) =>
+        thread.session?.status === "starting" &&
+        thread.session.activeTurnId === null &&
+        !runningProviderThreadIds.has(thread.id),
+    );
+    const orphanedActiveThreads = shellSnapshot.threads.filter(
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session.activeTurnId !== null &&
+        !providerSessionByThreadId.has(thread.id),
+    );
+    const interruptedProviderTurns = shellSnapshot.threads.flatMap((thread) => {
+      const runtimeSession = providerSessionByThreadId.get(thread.id);
+      const runtimeTurnId = runtimeSession?.activeTurnId;
+      return thread.session?.status === "interrupted" &&
+        thread.latestTurn?.state === "interrupted" &&
+        runtimeSession?.status === "running" &&
+        runtimeTurnId !== undefined &&
+        String(thread.latestTurn.turnId) === String(runtimeTurnId)
+        ? [{ thread, runtimeTurnId }]
+        : [];
+    });
+    if (
+      interruptedThreads.length === 0 &&
+      orphanedActiveThreads.length === 0 &&
+      interruptedProviderTurns.length === 0
+    ) {
+      return;
+    }
+    const recoveredAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
+    yield* Effect.forEach(
+      interruptedThreads,
+      (thread) =>
+        Effect.gen(function* () {
+          const session = thread.session;
+          if (session === null) {
+            return;
+          }
+          yield* setThreadSession({
+            threadId: thread.id,
+            session: {
+              ...session,
+              status: "ready",
+              activeTurnId: null,
+              lastError: ORPHANED_TURN_START_RESTART_DETAIL,
+              updatedAt: recoveredAt,
+            },
+            createdAt: recoveredAt,
+          });
+          yield* appendProviderFailureActivity({
+            threadId: thread.id,
+            kind: "provider.turn.start.failed",
+            summary: "Provider turn start interrupted",
+            detail: ORPHANED_TURN_START_RESTART_DETAIL,
+            turnId: null,
+            createdAt: recoveredAt,
+          });
+        }),
+      { concurrency: 1 },
+    );
+    yield* Effect.forEach(
+      orphanedActiveThreads,
+      (thread) =>
+        Effect.gen(function* () {
+          const session = thread.session;
+          if (session === null) {
+            return;
+          }
+          const activeTurnId = session.activeTurnId;
+          yield* setThreadSession({
+            threadId: thread.id,
+            session: {
+              ...session,
+              status: "interrupted",
+              activeTurnId: null,
+              lastError: ORPHANED_ACTIVE_TURN_RESTART_DETAIL,
+              updatedAt: recoveredAt,
+            },
+            createdAt: recoveredAt,
+          });
+          yield* appendProviderDiagnosticActivity({
+            threadId: thread.id,
+            kind: "runtime.warning",
+            summary: "Provider turn interrupted by restart",
+            detail: ORPHANED_ACTIVE_TURN_RESTART_DETAIL,
+            turnId: activeTurnId,
+            createdAt: recoveredAt,
+            tone: "error",
+            payload: { recovery: "orphaned-active-turn" },
+          });
+        }),
+      { concurrency: 1 },
+    );
+    yield* Effect.forEach(
+      interruptedProviderTurns,
+      ({ thread, runtimeTurnId }) =>
+        providerService.interruptTurn({ threadId: thread.id, turnId: runtimeTurnId }).pipe(
+          Effect.flatMap(() =>
+            appendProviderDiagnosticActivity({
               threadId: thread.id,
-              session: {
-                ...session,
-                status: "ready",
-                activeTurnId: null,
-                lastError: ORPHANED_TURN_START_RESTART_DETAIL,
-                updatedAt: recoveredAt,
-              },
+              kind: "provider.turn.interrupt.completed",
+              summary: "Provider turn interrupt restored after restart",
+              detail: INTERRUPT_RETRY_RESTART_DETAIL,
+              turnId: runtimeTurnId,
               createdAt: recoveredAt,
-            });
-            yield* appendProviderFailureActivity({
+              payload: { recovery: "pending-interrupt" },
+            }),
+          ),
+          Effect.catchCause((cause) =>
+            appendProviderFailureActivity({
               threadId: thread.id,
-              kind: "provider.turn.start.failed",
-              summary: "Provider turn start interrupted",
-              detail: ORPHANED_TURN_START_RESTART_DETAIL,
-              turnId: null,
+              kind: "provider.turn.interrupt.failed",
+              summary: "Provider turn interrupt recovery failed",
+              detail: formatFailureDetail(cause),
+              turnId: runtimeTurnId,
               createdAt: recoveredAt,
-            });
-          }),
-        { concurrency: 1 },
-      );
-      yield* Effect.logWarning(
-        "provider command reactor cleared interrupted turn starts after restart",
-        { threadCount: interruptedThreads.length },
-      );
-    },
-  );
+            }),
+          ),
+        ),
+      { concurrency: 1 },
+    );
+    yield* Effect.logWarning(
+      "provider command reactor reconciled interrupted provider work after restart",
+      {
+        interruptedStartCount: interruptedThreads.length,
+        orphanedActiveTurnCount: orphanedActiveThreads.length,
+        retriedInterruptCount: interruptedProviderTurns.length,
+      },
+    );
+  });
 
   const resumeActiveCodexGoalsOnStartup = Effect.fn("resumeActiveCodexGoalsOnStartup")(
     function* () {
@@ -764,6 +869,7 @@ const make = Effect.gen(function* () {
     }
 
     const desiredRuntimeMode = thread.runtimeMode;
+    const desiredInteractionMode = options?.interactionMode ?? thread.interactionMode;
     const requestedModelSelection = options?.modelSelection;
     const resolveActiveSession = (threadId: ThreadId) =>
       providerService
@@ -872,9 +978,7 @@ const make = Effect.gen(function* () {
           : {}),
         modelSelection: desiredModelSelection,
         ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
-        ...(options?.interactionMode !== undefined
-          ? { interactionMode: options.interactionMode }
-          : {}),
+        interactionMode: desiredInteractionMode,
         runtimeMode: desiredRuntimeMode,
       });
 
@@ -946,6 +1050,9 @@ const make = Effect.gen(function* () {
       thread.session && thread.session.status !== "stopped" && activeSession ? thread.id : null;
     if (existingSessionThreadId && activeSession !== undefined) {
       const runtimeModeChanged = thread.runtimeMode !== thread.session?.runtimeMode;
+      const grokInteractionModeChanged =
+        activeSession.provider === ProviderDriverKind.make("grok") &&
+        (activeSession.interactionMode ?? "default") !== desiredInteractionMode;
       const cwdChanged = effectiveCwd !== activeSession?.cwd;
       const additionalDirectoriesChanged = !areStringArraysEqual(
         effectiveAdditionalDirectories,
@@ -961,13 +1068,19 @@ const make = Effect.gen(function* () {
         activeSession?.providerInstanceId !== requestedModelSelection.instanceId;
       const shouldRestartForModelChange = modelChanged && sessionModelSwitch === "unsupported";
       const previousModelSelection = threadModelSelections.get(threadId);
-      const shouldRestartForModelSelectionChange =
-        preferredProvider === "claudeAgent" &&
+      const restartResumeModelSelectionChanged =
+        sessionModelSwitch === "restart-resume" &&
         requestedModelSelection !== undefined &&
-        !Equal.equals(previousModelSelection, requestedModelSelection);
+        !Equal.equals(activeSession.modelSelection, requestedModelSelection);
+      const shouldRestartForModelSelectionChange =
+        restartResumeModelSelectionChanged ||
+        (preferredProvider === "claudeAgent" &&
+          requestedModelSelection !== undefined &&
+          !Equal.equals(previousModelSelection, requestedModelSelection));
 
       if (
         !runtimeModeChanged &&
+        !grokInteractionModeChanged &&
         !cwdChanged &&
         !additionalDirectoriesChanged &&
         !instanceChanged &&
@@ -996,6 +1109,9 @@ const make = Effect.gen(function* () {
         currentRuntimeMode: thread.session?.runtimeMode,
         desiredRuntimeMode: thread.runtimeMode,
         runtimeModeChanged,
+        grokInteractionModeChanged,
+        currentInteractionMode: activeSession.interactionMode ?? "default",
+        desiredInteractionMode,
         previousCwd: activeSession?.cwd,
         desiredCwd: effectiveCwd,
         cwdChanged,
@@ -1007,6 +1123,7 @@ const make = Effect.gen(function* () {
         providerResumeIdentityChanged,
         shouldRestartForModelChange,
         shouldRestartForModelSelectionChange,
+        restartResumeModelSelectionChanged,
         hasResumeCursor: resumeCursor !== undefined,
       });
       const restartedSession = yield* startProviderSession(
@@ -1864,8 +1981,11 @@ const make = Effect.gen(function* () {
             }
             const codexNonSteerableTurnKind = detectCodexNonSteerableTurnKind(cause);
             const unsupportedLiveSteer = isUnsupportedLiveSteerFailure(cause);
+            const rejectedGrokInterject = isRejectedGrokInterjectFailure(cause);
             const retryableFollowUp =
-              codexNonSteerableTurnKind !== undefined || unsupportedLiveSteer;
+              codexNonSteerableTurnKind !== undefined ||
+              unsupportedLiveSteer ||
+              rejectedGrokInterject;
             if (retryableFollowUp) {
               return appendProviderFailureActivity({
                 threadId: event.payload.threadId,
@@ -1968,7 +2088,11 @@ const make = Effect.gen(function* () {
           }
           const codexNonSteerableTurnKind = detectCodexNonSteerableTurnKind(steerCause);
           const unsupportedLiveSteer = isUnsupportedLiveSteerFailure(steerCause);
-          const retryableFollowUp = codexNonSteerableTurnKind !== undefined || unsupportedLiveSteer;
+          const rejectedGrokInterject = isRejectedGrokInterjectFailure(steerCause);
+          const retryableFollowUp =
+            codexNonSteerableTurnKind !== undefined ||
+            unsupportedLiveSteer ||
+            rejectedGrokInterject;
           if (retryableFollowUp) {
             return appendProviderFailureActivity({
               threadId: event.payload.threadId,
@@ -2062,19 +2186,22 @@ const make = Effect.gen(function* () {
       });
     }
 
-    const pauseAndSynchronizeCodexGoal = Effect.gen(function* () {
-      const provider = runtimeSession?.provider ?? thread.session?.providerName;
+    const pauseAndSynchronizeProviderGoal = Effect.gen(function* () {
+      const instanceId =
+        runtimeSession?.providerInstanceId ??
+        thread.session?.providerInstanceId ??
+        thread.modelSelection.instanceId;
+      const capabilities = yield* providerService.getCapabilities(instanceId);
       if (
-        provider !== ProviderDriverKind.make("codex") ||
+        capabilities.threadGoals !== "supported" ||
         providerService.getGoal === undefined ||
         providerService.setGoal === undefined
       ) {
         return;
       }
 
-      // Codex TUI pauses an active goal when the user interrupts. The adapter
-      // performs that provider-local operation before returning, but the
-      // provider's final accounting notification can race the pause event and
+      // Goal-capable providers pause an active goal when the user interrupts.
+      // A provider's final accounting notification can race the pause event and
       // leave Cafe's durable projection showing the older active state. Read
       // the authoritative goal after the interrupt, retry the pause once when
       // necessary, and bind the result back to the Cafe thread aggregate.
@@ -2105,7 +2232,7 @@ const make = Effect.gen(function* () {
       Effect.catchCause((cause) =>
         Effect.gen(function* () {
           const observedAt = DateTime.formatIso(yield* DateTime.now);
-          yield* Effect.logWarning("codex goal pause synchronization after interrupt failed", {
+          yield* Effect.logWarning("provider goal pause synchronization after interrupt failed", {
             threadId: event.payload.threadId,
             providerInstanceId:
               runtimeSession?.providerInstanceId ?? thread.session?.providerInstanceId ?? null,
@@ -2137,7 +2264,7 @@ const make = Effect.gen(function* () {
         Effect.flatMap(() =>
           Effect.gen(function* () {
             const interruptedAt = DateTime.formatIso(yield* DateTime.now);
-            yield* pauseAndSynchronizeCodexGoal;
+            yield* pauseAndSynchronizeProviderGoal;
             yield* appendProviderDiagnosticActivity({
               threadId: event.payload.threadId,
               kind: "provider.turn.interrupt.completed",
@@ -2474,15 +2601,23 @@ const make = Effect.gen(function* () {
           }
           const codexNonSteerableTurnKind = detectCodexNonSteerableTurnKind(cause);
           const unsupportedLiveSteer = isUnsupportedLiveSteerFailure(cause);
-          const retryableFollowUp = codexNonSteerableTurnKind !== undefined || unsupportedLiveSteer;
+          // Grok's own TUI puts every rejected interjection back into its
+          // follow-up queue. Match that lossless behavior through Cafe's
+          // existing queue surface; a private extension rejection must never
+          // strand a durably recorded user message in an error-only state.
+          const rejectedGrokInterject = isRejectedGrokInterjectFailure(cause);
+          const retryableFollowUp =
+            codexNonSteerableTurnKind !== undefined ||
+            unsupportedLiveSteer ||
+            rejectedGrokInterject;
           return appendProviderFailureActivity({
             threadId: event.payload.threadId,
             kind: "provider.turn.steer.failed",
-            summary: "Provider steer failed",
+            summary: retryableFollowUp ? "Provider steer queued" : "Provider steer failed",
             detail:
               codexNonSteerableTurnKind !== undefined
                 ? codexNonSteerableDetail(codexNonSteerableTurnKind)
-                : unsupportedLiveSteer
+                : unsupportedLiveSteer || rejectedGrokInterject
                   ? retryableFollowUpDetail()
                   : formatFailureDetail(cause),
             turnId: thread.session?.activeTurnId ?? null,
@@ -2863,10 +2998,10 @@ const make = Effect.gen(function* () {
   const worker = yield* makeDrainableWorker(processDomainEventSafely);
 
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
-    yield* recoverInterruptedTurnStartsOnStartup().pipe(
+    yield* recoverInterruptedProviderWorkOnStartup().pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning(
-          "provider command reactor failed to clear interrupted turn starts after restart",
+          "provider command reactor failed to reconcile interrupted provider work after restart",
           { cause: Cause.pretty(cause) },
         ),
       ),

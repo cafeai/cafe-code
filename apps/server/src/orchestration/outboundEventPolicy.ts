@@ -2,15 +2,17 @@ import type { OrchestrationEvent } from "@cafecode/contracts";
 
 export type OutboundEventClassification =
   | { readonly kind: "protected" }
+  | { readonly kind: "appendable"; readonly key: string }
   | { readonly kind: "replaceable"; readonly key: string };
 
 /**
  * Conservative overload policy for queued orchestration events.
  *
- * Unknown and lifecycle-shaped events are protected. Only state that is both
- * reconstructable from snapshots and has a stable identity is replaceable.
- * This function is shared by hub routing and connection flow control so adding
- * a new event type cannot accidentally acquire lossy behavior in one layer.
+ * Unknown and lifecycle-shaped events are protected. Snapshot-like state with
+ * a stable identity may be replaced, while append-only streaming text may only
+ * be concatenated in order. This function is shared by hub routing and
+ * connection flow control so adding a new event type cannot accidentally
+ * acquire lossy behavior in one layer.
  */
 export function classifyOutboundOrchestrationEvent(
   event: OrchestrationEvent,
@@ -19,7 +21,7 @@ export function classifyOutboundOrchestrationEvent(
     case "thread.message-sent":
       return event.payload.role === "assistant" && event.payload.streaming
         ? {
-            kind: "replaceable",
+            kind: "appendable",
             key: `streaming-message:${event.aggregateId}:${event.payload.messageId}`,
           }
         : { kind: "protected" };

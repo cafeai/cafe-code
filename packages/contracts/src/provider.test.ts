@@ -188,6 +188,30 @@ describe("providerInstanceId routing key (slice-2 invariant)", () => {
     expect(session.providerInstanceId).toBe("codex_work");
   });
 
+  it("preserves the provider-owned effective model selection on a session", () => {
+    const session = decodeProviderSession({
+      provider: "grok",
+      providerInstanceId: "grok",
+      status: "ready",
+      runtimeMode: "full-access",
+      model: "grok-4.6",
+      modelSelection: {
+        instanceId: "grok",
+        model: "grok-4.6",
+        options: [{ id: "reasoningEffort", value: "low" }],
+      },
+      threadId: "thread-1",
+      createdAt: "2024-01-01T00:00:00Z",
+      updatedAt: "2024-01-01T00:00:00Z",
+    });
+
+    expect(session.modelSelection).toEqual({
+      instanceId: "grok",
+      model: "grok-4.6",
+      options: [{ id: "reasoningEffort", value: "low" }],
+    });
+  });
+
   it("decodes ProviderSession for fork-provided driver kinds", () => {
     const session = decodeProviderSession({
       provider: "ollama",

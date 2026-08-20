@@ -1,13 +1,36 @@
 import { describe, expect, it } from "vitest";
+import { ProviderDriverKind } from "@cafecode/contracts";
 
 import {
   formatCodexRateLimitResetAvailability,
   formatCodexRateLimitInlineText,
   formatCodexRateLimitSummary,
   selectCodexRateLimitSnapshot,
+  shouldSurfaceProviderAccountRateLimits,
 } from "./codexRateLimits";
 
 describe("codexRateLimits", () => {
+  it("allows the shared account-quota surface for authenticated Grok", () => {
+    expect(
+      shouldSurfaceProviderAccountRateLimits({
+        driver: ProviderDriverKind.make("grok"),
+        auth: { status: "authenticated", type: "cached-token" },
+      }),
+    ).toBe(true);
+    expect(
+      shouldSurfaceProviderAccountRateLimits({
+        driver: ProviderDriverKind.make("grok"),
+        auth: { status: "unauthenticated" },
+      }),
+    ).toBe(false);
+    expect(
+      shouldSurfaceProviderAccountRateLimits({
+        driver: ProviderDriverKind.make("opencode"),
+        auth: { status: "authenticated" },
+      }),
+    ).toBe(false);
+  });
+
   it("prefers the codex bucket when additional rate limit buckets are present", () => {
     const snapshot = selectCodexRateLimitSnapshot({
       checkedAt: "2026-05-28T00:00:00.000Z",

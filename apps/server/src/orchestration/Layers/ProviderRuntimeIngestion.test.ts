@@ -3342,6 +3342,114 @@ describe("ProviderRuntimeIngestion", () => {
     ]);
   });
 
+  it("flushes a short final Markdown suffix before turn completion closes the stream", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-grok-final-fence");
+    const itemId = asItemId("item-grok-final-fence");
+    const prefix = "The site is running at **http://127.0.0.1:5173**.\n\n```bash\nnpm run dev\n";
+    const suffix = "```";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-grok-final-fence-started"),
+      provider: ProviderDriverKind.make("grok"),
+      createdAt: now,
+      threadId,
+      turnId,
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "running" && thread.session.activeTurnId === turnId,
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-grok-final-fence-prefix"),
+      provider: ProviderDriverKind.make("grok"),
+      createdAt: now,
+      threadId,
+      turnId,
+      itemId,
+      payload: {
+        streamKind: "assistant_text",
+        delta: prefix,
+      },
+    });
+    await waitForThread(harness.readModel, (thread) =>
+      thread.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-grok-final-fence" && message.text === prefix,
+      ),
+    );
+
+    // Grok can resolve session/prompt without a separate final assistant-item
+    // notification. This short closing fence remains inside the ingestion
+    // coalescer until the terminal event forces it across the durable boundary.
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-grok-final-fence-suffix"),
+      provider: ProviderDriverKind.make("grok"),
+      createdAt: now,
+      threadId,
+      turnId,
+      itemId,
+      payload: {
+        streamKind: "assistant_text",
+        delta: suffix,
+      },
+    });
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-grok-final-fence-completed"),
+      provider: ProviderDriverKind.make("grok"),
+      createdAt: now,
+      threadId,
+      turnId,
+      payload: {
+        state: "completed",
+      },
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "ready" &&
+        entry.messages.some(
+          (message: ProviderRuntimeTestMessage) =>
+            message.id === "assistant:item-grok-final-fence" && !message.streaming,
+        ),
+    );
+    const message = thread.messages.find(
+      (entry: ProviderRuntimeTestMessage) => entry.id === "assistant:item-grok-final-fence",
+    );
+    expect(message?.text).toBe(`${prefix}${suffix}`);
+    expect(message?.streaming).toBe(false);
+
+    const events = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    const suffixSequence = events.find(
+      (event) =>
+        event.type === "thread.message-sent" &&
+        event.payload.messageId === "assistant:item-grok-final-fence" &&
+        event.payload.streaming &&
+        event.payload.text === suffix,
+    )?.sequence;
+    const terminalSessionSequence = events.findLast(
+      (event) =>
+        event.type === "thread.session-set" &&
+        event.payload.threadId === threadId &&
+        event.payload.session.status === "ready",
+    )?.sequence;
+    expect(suffixSequence).toBeDefined();
+    expect(terminalSessionSequence).toBeDefined();
+    expect(suffixSequence!).toBeLessThan(terminalSessionSequence!);
+  });
+
   it("spills oversized buffered deltas and still finalizes full assistant text", async () => {
     const harness = await createHarness({ serverSettings: { enableAssistantStreaming: false } });
     const now = "2026-01-01T00:00:00.000Z";

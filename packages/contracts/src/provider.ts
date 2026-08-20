@@ -39,9 +39,17 @@ export const ProviderSession = Schema.Struct({
   providerInstanceId: Schema.optional(ProviderInstanceId),
   status: ProviderSessionStatus,
   runtimeMode: RuntimeMode,
+  // Provider-owned interaction policy currently materialized in the session.
+  // Optional keeps older detached daemon snapshots decodable.
+  interactionMode: Schema.optional(ProviderInteractionMode),
   cwd: Schema.optional(TrimmedNonEmptyString),
   additionalDirectories: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
   model: Schema.optional(TrimmedNonEmptyString),
+  // Provider-owned effective selection, including model traits such as
+  // reasoning effort. This lets orchestration compare a requested selection
+  // with the process that is actually materialized instead of relying on a
+  // renderer draft or an in-memory command cache after backend recovery.
+  modelSelection: Schema.optional(ModelSelection),
   threadId: ThreadId,
   resumeCursor: Schema.optional(Schema.Unknown),
   activeTurnId: Schema.optional(TurnId),

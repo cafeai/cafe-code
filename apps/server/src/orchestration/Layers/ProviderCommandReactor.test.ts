@@ -166,7 +166,7 @@ describe("ProviderCommandReactor", () => {
     readonly baseDir?: string;
     readonly threadModelSelection?: ModelSelection;
     readonly missingProviderInstanceIds?: ReadonlySet<string>;
-    readonly sessionModelSwitch?: "unsupported" | "in-session";
+    readonly sessionModelSwitch?: "unsupported" | "restart-resume" | "in-session";
     readonly liveSteer?: "supported" | "unsupported";
     readonly threadGoals?: "supported" | "unsupported";
     readonly startReactor?: boolean;
@@ -222,9 +222,19 @@ describe("ProviderCommandReactor", () => {
           typeof input === "object" &&
           input !== null &&
           "runtimeMode" in input &&
-          (input.runtimeMode === "approval-required" || input.runtimeMode === "full-access")
+          (input.runtimeMode === "approval-required" ||
+            input.runtimeMode === "auto-accept-edits" ||
+            input.runtimeMode === "full-access")
             ? input.runtimeMode
             : "full-access",
+        ...(typeof input === "object" &&
+        input !== null &&
+        "interactionMode" in input &&
+        (input.interactionMode === "default" ||
+          input.interactionMode === "plan" ||
+          input.interactionMode === "auto")
+          ? { interactionMode: input.interactionMode }
+          : {}),
         ...(typeof input === "object" &&
         input !== null &&
         "cwd" in input &&
@@ -234,12 +244,20 @@ describe("ProviderCommandReactor", () => {
         ...((inputModelSelection?.model ?? modelSelection.model)
           ? { model: inputModelSelection?.model ?? modelSelection.model }
           : {}),
+        ...(inputModelSelection ? { modelSelection: inputModelSelection } : {}),
         threadId,
         resumeCursor: resumeCursor ?? { opaque: `resume-${sessionIndex}` },
         createdAt: now,
         updatedAt: now,
       };
-      runtimeSessions.push(session);
+      const existingSessionIndex = runtimeSessions.findIndex(
+        (candidate) => candidate.threadId === threadId,
+      );
+      if (existingSessionIndex >= 0) {
+        runtimeSessions.splice(existingSessionIndex, 1, session);
+      } else {
+        runtimeSessions.push(session);
+      }
       return Effect.succeed(session);
     });
     const sendTurn = vi.fn((input: unknown) => {
@@ -642,6 +660,117 @@ describe("ProviderCommandReactor", () => {
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.session?.lastError).toContain("before a provider turn started");
     expect(harness.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it("closes a projected running turn on startup when its provider session is gone", async () => {
+    const harness = await createHarness({ startReactor: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-orphaned-by-restart");
+    const startedAt = "2026-01-01T00:00:01.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-running-before-restart"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: startedAt,
+        },
+        createdAt: startedAt,
+      }),
+    );
+
+    await harness.startReactor();
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === threadId);
+      return (
+        thread?.session?.status === "interrupted" &&
+        thread.session.activeTurnId === null &&
+        thread.latestTurn?.state === "interrupted" &&
+        thread.latestTurn.completedAt !== null
+      );
+    });
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === threadId);
+    expect(thread?.session?.lastError).toContain("provider process ended");
+    expect(
+      thread?.activities.some(
+        (activity) =>
+          activity.kind === "runtime.warning" &&
+          activity.summary === "Provider turn interrupted by restart",
+      ),
+    ).toBe(true);
+    expect(harness.interruptTurn).not.toHaveBeenCalled();
+  });
+
+  it("retries a durable Stop on startup when the provider still owns the same turn", async () => {
+    const harness = await createHarness({ startReactor: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-stop-survived-backend-restart");
+    const startedAt = "2026-01-01T00:00:01.000Z";
+    const interruptedAt = "2026-01-01T00:00:02.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-running-before-stop"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "grok",
+          providerInstanceId: ProviderInstanceId.make("grok"),
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: startedAt,
+        },
+        createdAt: startedAt,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("cmd-stop-before-backend-restart"),
+        threadId,
+        turnId,
+        createdAt: interruptedAt,
+      }),
+    );
+    harness.runtimeSessions.push({
+      provider: ProviderDriverKind.make("grok"),
+      providerInstanceId: ProviderInstanceId.make("grok"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId,
+      activeTurnId: turnId,
+      resumeCursor: { opaque: "resume-live-grok" },
+      createdAt: startedAt,
+      updatedAt: interruptedAt,
+    });
+
+    await harness.startReactor();
+    await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
+
+    expect(harness.interruptTurn.mock.calls[0]?.[0]).toEqual({ threadId, turnId });
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === threadId);
+      return Boolean(
+        thread?.activities.some(
+          (activity) => activity.summary === "Provider turn interrupt restored after restart",
+        ),
+      );
+    });
   });
 
   it("reacts to thread.turn.start by ensuring session and sending provider turn", async () => {
@@ -1679,6 +1808,176 @@ describe("ProviderCommandReactor", () => {
         "claude-sonnet-4-6",
         [{ id: "effort", value: "max" }],
       ),
+    });
+  });
+
+  it("restart-resumes Grok for reasoning and model changes without dropping native context", async () => {
+    const initialSelection = createModelSelection(ProviderInstanceId.make("grok"), "grok-4.6", [
+      { id: "reasoningEffort", value: "high" },
+    ]);
+    const harness = await createHarness({
+      threadModelSelection: initialSelection,
+      sessionModelSwitch: "restart-resume",
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-grok-restart-resume-1"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-grok-restart-resume-1"),
+          role: "user",
+          text: "first grok turn",
+          attachments: [],
+        },
+        modelSelection: initialSelection,
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.markThreadReady();
+
+    const lowerEffortSelection = createModelSelection(ProviderInstanceId.make("grok"), "grok-4.6", [
+      { id: "reasoningEffort", value: "low" },
+    ]);
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-grok-restart-resume-2"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-grok-restart-resume-2"),
+          role: "user",
+          text: "use lower effort",
+          attachments: [],
+        },
+        modelSelection: lowerEffortSelection,
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.startSession.mock.calls.length === 2);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+      resumeCursor: { opaque: "resume-1" },
+      modelSelection: lowerEffortSelection,
+    });
+    await harness.markThreadReady();
+
+    const changedModelSelection = createModelSelection(
+      ProviderInstanceId.make("grok"),
+      "grok-4.5",
+      [{ id: "reasoningEffort", value: "low" }],
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-grok-restart-resume-3"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-grok-restart-resume-3"),
+          role: "user",
+          text: "switch models",
+          attachments: [],
+        },
+        modelSelection: changedModelSelection,
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.startSession.mock.calls.length === 3);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 3);
+    expect(harness.startSession.mock.calls[2]?.[1]).toMatchObject({
+      resumeCursor: { opaque: "resume-1" },
+      modelSelection: changedModelSelection,
+    });
+    expect(harness.sendTurn.mock.calls[2]?.[0]).toMatchObject({
+      modelSelection: changedModelSelection,
+    });
+    await harness.markThreadReady();
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.interaction-mode.set",
+        commandId: CommandId.make("cmd-interaction-mode-grok-restart-resume-plan"),
+        threadId: ThreadId.make("thread-1"),
+        interactionMode: "plan",
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-grok-restart-resume-plan"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-grok-restart-resume-plan"),
+          role: "user",
+          text: "plan this next",
+          attachments: [],
+        },
+        modelSelection: changedModelSelection,
+        interactionMode: "plan",
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.startSession.mock.calls.length === 4);
+    expect(harness.startSession.mock.calls[3]?.[1]).toMatchObject({
+      resumeCursor: { opaque: "resume-1" },
+      interactionMode: "plan",
+      runtimeMode: "approval-required",
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 4);
+    await harness.markThreadReady();
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.interaction-mode.set",
+        commandId: CommandId.make("cmd-interaction-mode-grok-restart-resume-auto"),
+        threadId: ThreadId.make("thread-1"),
+        interactionMode: "auto",
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.runtime-mode.set",
+        commandId: CommandId.make("cmd-runtime-mode-grok-restart-resume-auto"),
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "auto-accept-edits",
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-grok-restart-resume-auto"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-grok-restart-resume-auto"),
+          role: "user",
+          text: "continue in auto",
+          attachments: [],
+        },
+        modelSelection: changedModelSelection,
+        interactionMode: "auto",
+        runtimeMode: "auto-accept-edits",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.startSession.mock.calls.length === 5);
+    expect(harness.startSession.mock.calls[4]?.[1]).toMatchObject({
+      resumeCursor: { opaque: "resume-1" },
+      interactionMode: "auto",
+      runtimeMode: "auto-accept-edits",
     });
   });
 
@@ -2821,6 +3120,93 @@ describe("ProviderCommandReactor", () => {
       codexNonSteerableTurnKind: "review",
     });
     expect(JSON.stringify(failure?.payload)).toContain("review active turn");
+  });
+
+  it("requeues a rejected Grok interjection instead of exposing the extension error", async () => {
+    const harness = await createHarness({
+      liveSteer: "supported",
+      threadModelSelection: {
+        instanceId: ProviderInstanceId.make("grok"),
+        model: "grok-4.6",
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+    const activeTurnId = asTurnId("turn-grok-interject");
+    const messageId = asMessageId("user-message-grok-interject");
+    harness.steerTurn.mockImplementation(() =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: "provider-daemon",
+          method: "steerTurn",
+          detail:
+            "Provider adapter request failed (grok) for x.ai/interject: The ACP provider rejected 'x.ai/interject'.",
+        }),
+      ),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-grok-interject"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "grok",
+          providerInstanceId: ProviderInstanceId.make("grok"),
+          runtimeMode: "approval-required",
+          activeTurnId,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.steer",
+        commandId: CommandId.make("cmd-turn-steer-grok-interject"),
+        threadId,
+        message: {
+          messageId,
+          role: "user",
+          text: "wrap it up quickly",
+          attachments: [],
+        },
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      return (
+        thread?.activities.some(
+          (activity) =>
+            activity.kind === "provider.turn.steer.failed" &&
+            activity.payload !== null &&
+            typeof activity.payload === "object" &&
+            "retryableFollowUp" in activity.payload,
+        ) ?? false
+      );
+    });
+
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    const queued = thread?.activities.find(
+      (activity) => activity.kind === "provider.turn.steer.failed",
+    );
+    expect(queued).toMatchObject({
+      summary: "Provider steer queued",
+      payload: {
+        detail:
+          "Cafe Code preserved this follow-up for automatic delivery after the active turn is ready.",
+        messageId,
+        retryableFollowUp: true,
+        retryAfter: "active-turn",
+      },
+    });
+    expect(JSON.stringify(queued?.payload)).not.toContain("x.ai/interject");
   });
 
   it("does not route steer requests to providers without live steering support", async () => {

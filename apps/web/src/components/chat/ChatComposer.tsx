@@ -112,6 +112,7 @@ import type { SessionPhase, Thread } from "../../types";
 import type { PendingUserInputDraftAnswer } from "../../pendingUserInput";
 import type { PendingApproval, PendingUserInput } from "../../session-logic";
 import { deriveLatestContextWindowSnapshot } from "../../lib/contextWindow";
+import { shouldSurfaceProviderAccountRateLimits } from "../../lib/codexRateLimits";
 import { formatProviderSkillDisplayName } from "../../providerSkillPresentation";
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useHasOnScreenKeyboard } from "../../hooks/useMediaQuery";
@@ -120,6 +121,7 @@ import { domSnapshot, mobileDebugLog } from "../../lib/mobileDebugLog";
 import {
   applyClaudePermissionMode,
   CLAUDE_PERMISSION_MODE_OPTIONS,
+  GROK_PERMISSION_MODE_OPTIONS,
   type ClaudePermissionMode,
   deriveClaudePermissionMode,
   getClaudePermissionModeOption,
@@ -192,11 +194,15 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   planSidebarLabel: string;
   planSidebarOpen: boolean;
   onToggleInteractionMode: () => void;
-  onClaudePermissionModeChange: (mode: ClaudePermissionMode) => void;
+  onNativePermissionModeChange: (mode: ClaudePermissionMode) => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
   onTogglePlanSidebar: () => void;
 }) {
   const isClaude = props.provider === "claudeAgent";
+  const usesNativePermissionModes = isClaude || props.provider === "grok";
+  const permissionModeOptions = isClaude
+    ? CLAUDE_PERMISSION_MODE_OPTIONS
+    : GROK_PERMISSION_MODE_OPTIONS;
   const runtimeModeOption = runtimeModeConfig[props.runtimeMode];
   const RuntimeModeIcon = runtimeModeOption.icon;
   const claudePermissionMode = deriveClaudePermissionMode({
@@ -210,13 +216,13 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
     <>
       <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
 
-      {props.showInteractionModeToggle && isClaude ? (
+      {props.showInteractionModeToggle && usesNativePermissionModes ? (
         <>
           <Select
             value={claudePermissionMode}
             onValueChange={(value) => {
               if (isClaudePermissionMode(value)) {
-                props.onClaudePermissionModeChange(value);
+                props.onNativePermissionModeChange(value);
               }
             }}
           >
@@ -224,14 +230,14 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
               variant="ghost"
               size="sm"
               className="font-medium"
-              aria-label="Claude permission mode"
+              aria-label={`${isClaude ? "Claude" : "Grok"} permission mode`}
               title={claudePermissionModeOption.description}
             >
               <ClaudePermissionModeIcon className="size-4" />
               <SelectValue>{claudePermissionModeOption.label}</SelectValue>
             </SelectTrigger>
             <SelectPopup alignItemWithTrigger={false}>
-              {CLAUDE_PERMISSION_MODE_OPTIONS.map((option) => {
+              {permissionModeOptions.map((option) => {
                 const OptionIcon = claudePermissionModeIcons[option.id];
                 return (
                   <SelectItem key={option.id} value={option.id} className="min-w-72 py-2">
@@ -276,7 +282,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
         </>
       ) : null}
 
-      {!isClaude ? (
+      {!usesNativePermissionModes ? (
         <Select
           value={props.runtimeMode}
           onValueChange={(value) => props.onRuntimeModeChange(value!)}
@@ -457,7 +463,7 @@ export interface FollowUpQueueViewItem {
   canExpand: boolean;
   blockedReason: string | null;
   automaticSteerRetry?: {
-    readonly nonSteerableTurnKind: "review" | "compact";
+    readonly nonSteerableTurnKind: "review" | "compact" | null;
   } | null;
 }
 
@@ -481,7 +487,11 @@ function queuedAutomaticSteerCountLabel(items: readonly FollowUpQueueViewItem[])
 
   if (automaticSteerItems.length === 1) {
     const kind = automaticSteerItems[0]?.automaticSteerRetry?.nonSteerableTurnKind;
-    return kind === "compact" ? "1 steer waiting for compact" : "1 steer waiting for review";
+    return kind === "compact"
+      ? "1 steer waiting for compact"
+      : kind === "review"
+        ? "1 steer waiting for review"
+        : "1 follow-up requeued";
   }
 
   return `${automaticSteerItems.length} steers waiting`;
@@ -498,6 +508,14 @@ function automaticSteerRetryStatus(item: FollowUpQueueViewItem): {
   readonly title: string;
 } | null {
   const kind = item.automaticSteerRetry?.nonSteerableTurnKind ?? null;
+  if (kind === null && item.automaticSteerRetry != null) {
+    return {
+      ariaLabel: "Follow-up requeued after provider steer rejection",
+      label: "Requeued",
+      title:
+        "The provider did not accept this live steer. Cafe Code preserved it and will send it automatically when the active turn is ready.",
+    };
+  }
   if (kind === null) {
     return null;
   }
@@ -1077,12 +1095,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () => selectedProviderEntry?.snapshot ?? null,
     [selectedProviderEntry],
   );
-  const selectedCodexRateLimits =
-    (selectedProviderStatus?.driver === "codex" ||
-      selectedProviderStatus?.driver === "claudeAgent") &&
-    selectedProviderStatus.auth.status === "authenticated"
-      ? (selectedProviderStatus.accountRateLimits ?? null)
-      : null;
+  const selectedCodexRateLimits = shouldSurfaceProviderAccountRateLimits(selectedProviderStatus)
+    ? (selectedProviderStatus?.accountRateLimits ?? null)
+    : null;
   const selectedProviderModels = useMemo<ReadonlyArray<ServerProvider["models"][number]>>(
     () => selectedProviderEntry?.models ?? [],
     [selectedProviderEntry],
@@ -1119,7 +1134,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
   const handleClaudePermissionModeChange = useCallback(
     (mode: ClaudePermissionMode) => {
-      const next = applyClaudePermissionMode({ interactionMode, runtimeMode }, mode);
+      const mapped = applyClaudePermissionMode({ interactionMode, runtimeMode }, mode);
+      const next =
+        selectedProvider === "grok" && mode === "auto"
+          ? { ...mapped, runtimeMode: "auto-accept-edits" as const }
+          : mapped;
       // Both draft-store updates are synchronous. Calling only the fields that
       // changed also avoids an unnecessary Claude session
       // restart when switching between Plan/Auto and the underlying access
@@ -1131,10 +1150,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         handleInteractionModeChange(next.interactionMode);
       }
     },
-    [handleInteractionModeChange, handleRuntimeModeChange, interactionMode, runtimeMode],
+    [
+      handleInteractionModeChange,
+      handleRuntimeModeChange,
+      interactionMode,
+      runtimeMode,
+      selectedProvider,
+    ],
   );
   const cycleComposerInteractionMode = useCallback(() => {
-    if (selectedProvider === "claudeAgent") {
+    if (selectedProvider === "claudeAgent" || selectedProvider === "grok") {
       const currentMode = deriveClaudePermissionMode({ interactionMode, runtimeMode });
       handleClaudePermissionModeChange(getNextClaudePermissionMode(currentMode));
       return;
@@ -2943,7 +2968,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     goalStatus={activeThread?.goal?.status ?? null}
                     traitsMenuContent={providerTraitsMenuContent}
                     onToggleInteractionMode={cycleComposerInteractionMode}
-                    onClaudePermissionModeChange={handleClaudePermissionModeChange}
+                    onNativePermissionModeChange={handleClaudePermissionModeChange}
                     onTogglePlanSidebar={togglePlanSidebar}
                     onRuntimeModeChange={handleRuntimeModeChange}
                     onOpenGoal={onOpenGoalDialog}
@@ -2965,7 +2990,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       planSidebarLabel={planSidebarLabel}
                       planSidebarOpen={planSidebarOpen}
                       onToggleInteractionMode={cycleComposerInteractionMode}
-                      onClaudePermissionModeChange={handleClaudePermissionModeChange}
+                      onNativePermissionModeChange={handleClaudePermissionModeChange}
                       onRuntimeModeChange={handleRuntimeModeChange}
                       onTogglePlanSidebar={togglePlanSidebar}
                     />
