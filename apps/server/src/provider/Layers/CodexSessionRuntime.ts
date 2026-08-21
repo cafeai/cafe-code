@@ -326,6 +326,10 @@ export interface CodexSessionRuntimeShape {
     input: CodexSessionRuntimeSteerTurnInput,
   ) => Effect.Effect<ProviderTurnSteerResult, CodexSessionRuntimeError>;
   readonly interruptTurn: (turnId?: TurnId) => Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly forkThread: Effect.Effect<CodexResumeCursor, CodexSessionRuntimeError>;
+  readonly discardFork: (
+    resumeCursor: CodexResumeCursor,
+  ) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly getGoal: Effect.Effect<ProviderThreadGoal | null, CodexSessionRuntimeError>;
   readonly setGoal: (
     input: Omit<ProviderThreadGoalSetInput, "threadId">,
@@ -5078,6 +5082,37 @@ export const makeCodexSessionRuntime = (
             ),
           );
         }),
+      forkThread: Effect.gen(function* () {
+        const providerThreadId = yield* readProviderThreadId;
+        // Source sessions are checked for idleness by ProviderService. Keep the
+        // fork persistent and let app-server copy the complete stored history,
+        // matching the native Codex UI's thread/fork behavior. The source is
+        // never modified and the target keeps the exact same workspace cwd.
+        const response = yield* client.request("thread/fork", {
+          threadId: providerThreadId,
+          cwd: options.cwd,
+          ephemeral: false,
+        });
+        const forkCursor = { threadId: response.thread.id } satisfies CodexResumeCursor;
+
+        // thread/fork loads the new branch in this app-server process. Cafe
+        // resumes it later in a target-owned runtime, so unsubscribe here to
+        // avoid retaining a second loaded thread in the source process. A
+        // failed unsubscribe is only resource cleanup; the persistent fork is
+        // already valid and must still be returned to the caller.
+        yield* client.request("thread/unsubscribe", { threadId: response.thread.id }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("codex.thread.fork.unsubscribe-failed", {
+              sourceThreadId: options.threadId,
+              providerForkThreadId: response.thread.id,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        );
+        return forkCursor;
+      }),
+      discardFork: (resumeCursor) =>
+        client.request("thread/delete", { threadId: resumeCursor.threadId }).pipe(Effect.asVoid),
       getGoal: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;
         const response = yield* client.request("thread/goal/get", {

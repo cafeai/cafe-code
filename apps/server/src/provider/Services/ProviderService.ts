@@ -21,6 +21,9 @@ import type {
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
   ProviderSession,
+  ProviderSessionForkDiscardInput,
+  ProviderSessionForkInput,
+  ProviderSessionForkResult,
   ProviderSessionStartInput,
   ProviderThreadGoal,
   ProviderThreadGoalClearInput,
@@ -59,6 +62,16 @@ export interface ProviderServiceShape {
     threadId: ThreadId,
     input: ProviderSessionStartInput,
   ) => Effect.Effect<ProviderSession, ProviderServiceError>;
+
+  /** Persistently fork one Codex/Claude conversation into a new Cafe thread id. */
+  readonly forkSession: (
+    input: ProviderSessionForkInput,
+  ) => Effect.Effect<ProviderSessionForkResult, ProviderServiceError>;
+
+  /** Compensate a successful provider fork whose Cafe domain commit failed. */
+  readonly discardSessionFork: (
+    input: ProviderSessionForkDiscardInput,
+  ) => Effect.Effect<void, ProviderServiceError>;
 
   /**
    * Send a provider turn.

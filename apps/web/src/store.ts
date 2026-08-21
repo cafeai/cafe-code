@@ -1788,6 +1788,41 @@ function applyEnvironmentOrchestrationEvent(
       };
     }
 
+    case "thread.forked": {
+      const sourceThread = getThreadFromEnvironmentState(state, event.payload.sourceThreadId);
+      const targetThread = getThreadFromEnvironmentState(state, event.payload.targetThreadId);
+      const targetSummary = state.sidebarThreadSummaryById[event.payload.targetThreadId];
+      if (!sourceThread || !targetThread || !targetSummary) {
+        return state;
+      }
+      const nextThread = cloneThreadContextForDuplicate({
+        sourceThread,
+        targetThread,
+        duplicatedAt: event.payload.forkedAt,
+      });
+      const nextState = writeThreadState(state, nextThread, targetThread);
+      return {
+        ...nextState,
+        sidebarThreadSummaryById: {
+          ...nextState.sidebarThreadSummaryById,
+          [nextThread.id]: {
+            ...targetSummary,
+            session: null,
+            latestTurn: nextThread.latestTurn,
+            latestUserMessageAt:
+              sourceThread.messages.findLast((message) => message.role === "user")?.createdAt ??
+              null,
+            hasPendingApprovals: false,
+            hasPendingUserInput: false,
+            hasActionableProposedPlan: sourceThread.proposedPlans.some(
+              (plan) => plan.implementedAt === null,
+            ),
+            updatedAt: event.payload.forkedAt,
+          },
+        },
+      };
+    }
+
     case "thread.deleted":
       return removeThreadState(state, event.payload.threadId);
 

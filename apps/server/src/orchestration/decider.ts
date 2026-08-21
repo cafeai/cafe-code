@@ -314,6 +314,103 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       ];
     }
 
+    case "thread.fork":
+      return yield* new OrchestrationCommandInvariantError({
+        commandType: command.type,
+        detail:
+          "Provider-native thread forks must be prepared by the authenticated server transport.",
+      });
+
+    case "thread.fork.commit": {
+      const sourceThread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.sourceThreadId,
+      });
+      if (sourceThread.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.sourceThreadId}' is in the Recycle Bin and cannot be forked.`,
+        });
+      }
+      if (
+        sourceThread.latestTurn?.state === "running" ||
+        sourceThread.session?.status === "starting" ||
+        sourceThread.session?.status === "running"
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.sourceThreadId}' must be idle before it can be forked.`,
+        });
+      }
+      yield* requireThreadAbsent({
+        readModel,
+        command,
+        threadId: command.targetThreadId,
+      });
+      if (
+        command.session.threadId !== command.targetThreadId ||
+        command.session.status !== "stopped" ||
+        command.session.activeTurnId !== null
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Fork commits require a stopped target provider session binding.",
+        });
+      }
+
+      return [
+        {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.targetThreadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.created" as const,
+          payload: {
+            threadId: command.targetThreadId,
+            projectId: sourceThread.projectId,
+            title: command.title,
+            modelSelection: sourceThread.modelSelection,
+            runtimeMode: sourceThread.runtimeMode,
+            interactionMode: sourceThread.interactionMode,
+            branch: sourceThread.branch,
+            worktreePath: sourceThread.worktreePath,
+            createdAt: command.createdAt,
+            updatedAt: command.createdAt,
+          },
+        },
+        {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.targetThreadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.forked" as const,
+          payload: {
+            sourceThreadId: command.sourceThreadId,
+            targetThreadId: command.targetThreadId,
+            forkedAt: command.createdAt,
+          },
+        },
+        {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.targetThreadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.session-set" as const,
+          payload: {
+            threadId: command.targetThreadId,
+            session: command.session,
+          },
+        },
+      ];
+    }
+
     case "thread.delete": {
       yield* requireThread({
         readModel,

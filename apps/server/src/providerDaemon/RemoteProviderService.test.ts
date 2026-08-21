@@ -46,6 +46,23 @@ describe("RemoteProviderService", () => {
     assert.equal(typeof request.commandId, "string");
   });
 
+  it("treats provider-native fork creation and cleanup as durable mutations", () => {
+    const request = attachCommandIdToMutatingProviderDaemonRequest({
+      method: "forkSession",
+      payload: {
+        operationId: "cmd-native-fork",
+        sourceThreadId: ThreadId.make("thread-source"),
+        targetThreadId: ThreadId.make("thread-target"),
+        title: "Native fork",
+      },
+    });
+
+    assert.equal(request.method, "forkSession");
+    assert.equal(typeof request.commandId, "string");
+    assert.isFalse(isVoidProviderDaemonRpcMethod("forkSession"));
+    assert.isTrue(isVoidProviderDaemonRpcMethod("discardSessionFork"));
+  });
+
   it("does not add commandId to read-only daemon RPC requests", () => {
     const request = attachCommandIdToMutatingProviderDaemonRequest({
       method: "listSessions",

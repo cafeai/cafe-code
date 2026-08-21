@@ -9,6 +9,7 @@ import {
   ThreadId,
   TurnId,
   type OrchestrationEvent,
+  ProviderDriverKind,
   ProviderInstanceId,
 } from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -841,6 +842,135 @@ describe("OrchestrationEngine", () => {
       "thread.created",
       "thread.deleted",
     ]);
+    await system.dispose();
+  });
+
+  it("commits a provider-native fork as one same-workspace thread transaction", async () => {
+    const system = await createOrchestrationSystem();
+    const { engine } = system;
+    const createdAt = "2026-08-21T12:00:00.000Z";
+    const projectId = asProjectId("project-native-fork");
+    const sourceThreadId = ThreadId.make("thread-native-fork-source");
+    const targetThreadId = ThreadId.make("thread-native-fork-target");
+
+    await system.run(
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-native-fork-project"),
+        projectId,
+        title: "Native Fork Project",
+        workspaceRoot: "/tmp/native-fork-project",
+        defaultModelSelection: null,
+        createdAt,
+      }),
+    );
+    await system.run(
+      engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-native-fork-source"),
+        threadId: sourceThreadId,
+        projectId,
+        title: "Source",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.5",
+        },
+        interactionMode: "plan",
+        runtimeMode: "approval-required",
+        branch: "feature/native-fork",
+        worktreePath: "/tmp/native-fork-project",
+        createdAt,
+      }),
+    );
+    await system.run(
+      engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-native-fork-source-turn"),
+        threadId: sourceThreadId,
+        message: {
+          messageId: asMessageId("message-native-fork-source"),
+          role: "user",
+          text: "Preserve this context",
+          attachments: [],
+        },
+        interactionMode: "plan",
+        runtimeMode: "approval-required",
+        createdAt: "2026-08-21T12:00:00.500Z",
+      }),
+    );
+    await system.run(
+      engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-native-fork-source-ready"),
+        threadId: sourceThreadId,
+        session: {
+          threadId: sourceThreadId,
+          status: "ready",
+          providerName: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: "2026-08-21T12:00:00.750Z",
+        },
+        createdAt: "2026-08-21T12:00:00.750Z",
+      }),
+    );
+    await system.run(
+      engine.dispatch({
+        type: "thread.fork.commit",
+        commandId: CommandId.make("cmd-native-fork-commit"),
+        sourceThreadId,
+        targetThreadId,
+        title: "Source (fork)",
+        createdAt: "2026-08-21T12:00:01.000Z",
+        session: {
+          threadId: targetThreadId,
+          status: "stopped",
+          providerName: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: "2026-08-21T12:00:01.000Z",
+        },
+      }),
+    );
+
+    const snapshot = await system.readModel();
+    const source = snapshot.threads.find((thread) => thread.id === sourceThreadId);
+    const target = snapshot.threads.find((thread) => thread.id === targetThreadId);
+    expect(source?.title).toBe("Source");
+    expect(source?.session?.status).toBe("ready");
+    expect(target).toMatchObject({
+      title: "Source (fork)",
+      projectId,
+      branch: "feature/native-fork",
+      worktreePath: "/tmp/native-fork-project",
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+      session: {
+        threadId: targetThreadId,
+        status: "stopped",
+        providerName: "codex",
+        providerInstanceId: "codex",
+      },
+    });
+    expect(target?.messages).toEqual([
+      expect.objectContaining({
+        id: "copy:thread-native-fork-target:message-native-fork-source",
+        role: "user",
+        text: "Preserve this context",
+        streaming: false,
+      }),
+    ]);
+
+    const eventTypes = await system.run(
+      Stream.runCollect(engine.readEvents(0)).pipe(
+        Effect.map((events) => Array.from(events, (event) => event.type)),
+      ),
+    );
+    expect(eventTypes.slice(-3)).toEqual(["thread.created", "thread.forked", "thread.session-set"]);
     await system.dispose();
   });
 

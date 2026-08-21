@@ -61,6 +61,7 @@ const decodeAdapterCapabilities = Schema.decodeUnknownSync(ProviderDaemonAdapter
 const decodeInstanceRoutingInfo = Schema.decodeUnknownSync(ProviderDaemonInstanceRoutingInfo);
 const encodeRpcRequestJson = Schema.encodeSync(Schema.fromJsonString(ProviderDaemonRpcRequest));
 const VOID_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
+  "discardSessionFork",
   "interruptTurn",
   "respondToRequest",
   "respondToUserInput",
@@ -70,6 +71,8 @@ const VOID_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
 ]);
 const MUTATING_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "startSession",
+  "forkSession",
+  "discardSessionFork",
   "sendTurn",
   "steerTurn",
   "interruptTurn",
@@ -365,6 +368,9 @@ const makeRemoteProviderService = Effect.gen(function* () {
         method: "startSession",
         payload: { ...input, threadId },
       }),
+    forkSession: (input) => rpc(daemonConfig, { method: "forkSession", payload: input }),
+    discardSessionFork: (input) =>
+      rpc(daemonConfig, { method: "discardSessionFork", payload: input }),
     sendTurn: (input) => rpc(daemonConfig, { method: "sendTurn", payload: input }),
     steerTurn: (input) => rpc(daemonConfig, { method: "steerTurn", payload: input }),
     interruptTurn: (input) => rpc(daemonConfig, { method: "interruptTurn", payload: input }),

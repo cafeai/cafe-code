@@ -521,7 +521,7 @@ describe("buildSidebarThreadContextMenuItems", () => {
     });
     expect(items.map((item) => item.id)).toEqual([
       "rename",
-      "duplicate",
+      "fork",
       "move",
       "copy-path",
       "copy-thread-id",
@@ -539,6 +539,19 @@ describe("buildSidebarThreadContextMenuItems", () => {
     expect(repairItem?.disabled).toBe(true);
   });
 
+  it("disables provider-native fork when the source is unsupported or unsettled", () => {
+    const forkItem = buildSidebarThreadContextMenuItems({
+      debugEnabled: false,
+      repairRunning: false,
+      forkDisabled: true,
+    }).find((item) => item.id === "fork");
+
+    expect(forkItem).toMatchObject({
+      label: "Fork thread",
+      disabled: true,
+    });
+  });
+
   it("hides thread repair outside debug mode", () => {
     const items = buildSidebarThreadContextMenuItems({
       debugEnabled: false,
@@ -548,7 +561,7 @@ describe("buildSidebarThreadContextMenuItems", () => {
     expect(items.some((item) => item.id === "repair-thread")).toBe(false);
     expect(items.map((item) => item.id)).toEqual([
       "rename",
-      "duplicate",
+      "fork",
       "move",
       "copy-path",
       "copy-thread-id",

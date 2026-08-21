@@ -725,6 +725,10 @@ const executeRpcRequest = (
   switch (request.method) {
     case "startSession":
       return providerService.startSession(request.payload.threadId, request.payload);
+    case "forkSession":
+      return providerService.forkSession(request.payload);
+    case "discardSessionFork":
+      return providerService.discardSessionFork(request.payload);
     case "sendTurn":
       return providerService.sendTurn(request.payload);
     case "steerTurn":

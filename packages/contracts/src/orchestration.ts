@@ -619,6 +619,15 @@ const ThreadDuplicateCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadForkCommand = Schema.Struct({
+  type: Schema.Literal("thread.fork"),
+  commandId: CommandId,
+  sourceThreadId: ThreadId,
+  targetThreadId: ThreadId,
+  title: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+
 const ThreadDeleteCommand = Schema.Struct({
   type: Schema.Literal("thread.delete"),
   commandId: CommandId,
@@ -843,6 +852,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectDeleteCommand,
   ThreadCreateCommand,
   ThreadDuplicateCommand,
+  ThreadForkCommand,
   ThreadDeleteCommand,
   ThreadRestoreCommand,
   ThreadArchiveCommand,
@@ -870,6 +880,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ProjectDeleteCommand,
   ThreadCreateCommand,
   ThreadDuplicateCommand,
+  ThreadForkCommand,
   ThreadDeleteCommand,
   ThreadRestoreCommand,
   ThreadArchiveCommand,
@@ -899,6 +910,17 @@ const ThreadSessionSetCommand = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
   terminalTurnRecovery: Schema.optional(TerminalTurnRecoveryReason),
+  createdAt: IsoDateTime,
+});
+
+/** Server-only commit produced after a provider-native fork succeeds. */
+const ThreadForkCommitCommand = Schema.Struct({
+  type: Schema.Literal("thread.fork.commit"),
+  commandId: CommandId,
+  sourceThreadId: ThreadId,
+  targetThreadId: ThreadId,
+  title: TrimmedNonEmptyString,
+  session: OrchestrationSession,
   createdAt: IsoDateTime,
 });
 
@@ -987,6 +1009,7 @@ const ThreadGoalSyncCommand = Schema.Struct({
 });
 
 const InternalOrchestrationCommand = Schema.Union([
+  ThreadForkCommitCommand,
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
   ThreadMessageAssistantCompleteCommand,
@@ -1011,6 +1034,7 @@ export const OrchestrationEventType = Schema.Literals([
   "project.deleted",
   "thread.created",
   "thread.duplicated",
+  "thread.forked",
   "thread.deleted",
   "thread.restored",
   "thread.archived",
@@ -1090,6 +1114,12 @@ export const ThreadDuplicatedPayload = Schema.Struct({
   sourceThreadId: ThreadId,
   targetThreadId: ThreadId,
   duplicatedAt: IsoDateTime,
+});
+
+export const ThreadForkedPayload = Schema.Struct({
+  sourceThreadId: ThreadId,
+  targetThreadId: ThreadId,
+  forkedAt: IsoDateTime,
 });
 
 export const ThreadDeletedPayload = Schema.Struct({
@@ -1317,6 +1347,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.duplicated"),
     payload: ThreadDuplicatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.forked"),
+    payload: ThreadForkedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

@@ -75,6 +75,43 @@ export const ProviderSessionStartInput = Schema.Struct({
 });
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 
+/**
+ * Create a provider-native branch of one persisted conversation.
+ *
+ * Cafe thread ids remain the routing identity on both sides of the operation;
+ * adapters keep provider-owned thread/session ids inside the returned resume
+ * cursor so they never leak into client commands or URLs.
+ */
+export const ProviderSessionForkInput = Schema.Struct({
+  /** Stable idempotency/ownership key supplied by the initiating command. */
+  operationId: TrimmedNonEmptyString,
+  sourceThreadId: ThreadId,
+  targetThreadId: ThreadId,
+  title: TrimmedNonEmptyString,
+});
+export type ProviderSessionForkInput = typeof ProviderSessionForkInput.Type;
+
+export const ProviderSessionForkResult = Schema.Struct({
+  operationId: TrimmedNonEmptyString,
+  sourceThreadId: ThreadId,
+  targetThreadId: ThreadId,
+  provider: ProviderDriverKind,
+  providerInstanceId: ProviderInstanceId,
+  runtimeMode: RuntimeMode,
+  interactionMode: Schema.optional(ProviderInteractionMode),
+  cwd: Schema.optional(TrimmedNonEmptyString),
+  additionalDirectories: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  model: Schema.optional(TrimmedNonEmptyString),
+  modelSelection: Schema.optional(ModelSelection),
+  resumeCursor: Schema.Unknown,
+});
+export type ProviderSessionForkResult = typeof ProviderSessionForkResult.Type;
+
+export const ProviderSessionForkDiscardInput = Schema.Struct({
+  fork: ProviderSessionForkResult,
+});
+export type ProviderSessionForkDiscardInput = typeof ProviderSessionForkDiscardInput.Type;
+
 export const ProviderSendTurnInput = Schema.Struct({
   threadId: ThreadId,
   input: Schema.optional(

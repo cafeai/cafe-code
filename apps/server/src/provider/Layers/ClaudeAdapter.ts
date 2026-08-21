@@ -6,7 +6,13 @@
  *
  * @module ClaudeAdapterLive
  */
+import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+
 import {
+  deleteSession,
+  forkSession,
+  type ForkSessionOptions,
+  type ForkSessionResult,
   type CanUseTool,
   type FastModeDisabledReason,
   type FastModeState,
@@ -21,6 +27,8 @@ import {
   type SettingSource,
   type SDKUserMessage,
   type ModelUsage,
+  type SessionStore,
+  type SessionStoreEntry,
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@cafecode/shared/cliArgs";
 import {
@@ -39,6 +47,7 @@ import {
   type ProviderRuntimeTurnStatus,
   type ProviderSendTurnInput,
   type ProviderSession,
+  type ProviderSessionForkResult,
   type ThreadTokenUsageSnapshot,
   type ProviderSteerTurnInput,
   type ProviderUserInputAnswers,
@@ -401,6 +410,11 @@ export interface ClaudeAdapterLiveOptions {
     readonly prompt: AsyncIterable<SDKUserMessage>;
     readonly options: ClaudeQueryOptions;
   }) => ClaudeQueryRuntime;
+  readonly forkNativeSession?: (
+    sessionId: string,
+    options: ForkSessionOptions,
+  ) => Promise<ForkSessionResult>;
+  readonly deleteNativeSession?: (sessionId: string, options: ForkSessionOptions) => Promise<void>;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   /**
@@ -1124,6 +1138,70 @@ function resolveClaudeConfigDirectory(path: Path.Path, env: NodeJS.ProcessEnv): 
   }
   const homePath = env.HOME?.trim();
   return homePath ? path.join(path.resolve(homePath), ".claude") : path.resolve(".claude");
+}
+
+function makeClaudeForkSessionStore(input: {
+  readonly path: Path.Path;
+  readonly env: NodeJS.ProcessEnv;
+  readonly cwd: string;
+}): SessionStore {
+  const projectKey = claudeProjectDirectoryName(input.path, input.cwd);
+  const projectDirectory = input.path.join(
+    resolveClaudeConfigDirectory(input.path, input.env),
+    "projects",
+    projectKey,
+  );
+
+  const sessionPath = (key: { readonly projectKey: string; readonly sessionId: string }) => {
+    if (key.projectKey !== projectKey || !isUuid(key.sessionId)) {
+      throw new Error("Claude fork session store received an invalid project/session key.");
+    }
+    return input.path.join(projectDirectory, `${key.sessionId}.jsonl`);
+  };
+
+  return {
+    load: async (key) => {
+      if (key.subpath !== undefined) {
+        throw new Error("Claude fork session store does not accept subagent paths.");
+      }
+      const filePath = sessionPath(key);
+      const info = await lstat(filePath);
+      if (!info.isFile() || info.isSymbolicLink()) {
+        throw new Error("Claude source transcript is not a regular private file.");
+      }
+      const contents = await readFile(filePath, "utf8");
+      const entries = contents
+        .split(/\r?\n/u)
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as SessionStoreEntry);
+      return entries.length > 0 ? entries : null;
+    },
+    append: async (key, entries) => {
+      if (key.subpath !== undefined) {
+        throw new Error("Claude fork session store does not accept subagent paths.");
+      }
+      await mkdir(projectDirectory, { recursive: true, mode: 0o700 });
+      const contents = `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+      // The SDK allocates a fresh UUID, so exclusive creation both preserves
+      // idempotency and prevents a compromised local path from overwriting an
+      // unrelated transcript. Transcript files remain user-private.
+      await writeFile(sessionPath(key), contents, {
+        encoding: "utf8",
+        flag: "wx",
+        mode: 0o600,
+      });
+    },
+    delete: async (key) => {
+      if (key.subpath !== undefined) {
+        throw new Error("Claude fork session store does not accept subagent paths.");
+      }
+      await rm(sessionPath(key), { force: true });
+      await rm(input.path.join(projectDirectory, key.sessionId), {
+        recursive: true,
+        force: true,
+      });
+    },
+  };
 }
 
 function pathExists(
@@ -2078,6 +2156,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         prompt: input.prompt,
         options: input.options,
       }) as ClaudeQueryRuntime);
+  const forkNativeSession = options?.forkNativeSession ?? forkSession;
+  const deleteNativeSession = options?.deleteNativeSession ?? deleteSession;
 
   const sessions = new Map<ThreadId, ClaudeSessionContext>();
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
@@ -5371,6 +5451,132 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     },
   );
 
+  const forkProviderSession: NonNullable<ClaudeAdapterShape["forkSession"]> = Effect.fn(
+    "forkSession",
+  )(function* (input) {
+    const source = yield* requireSession(input.sourceThreadId);
+    if (
+      source.turnState !== undefined ||
+      source.session.status === "connecting" ||
+      source.session.status === "running" ||
+      source.session.activeTurnId !== undefined
+    ) {
+      return yield* new ProviderAdapterValidationError({
+        provider: PROVIDER,
+        operation: "forkSession",
+        issue: "Claude source session must be idle before it can be forked.",
+      });
+    }
+    if (!source.resumeCursorDurable || !source.resumeSessionId) {
+      return yield* new ProviderAdapterValidationError({
+        provider: PROVIDER,
+        operation: "forkSession",
+        issue: "Claude has not persisted a resumable transcript for this thread yet.",
+      });
+    }
+    const cwd = source.session.cwd;
+    if (!cwd) {
+      return yield* new ProviderAdapterValidationError({
+        provider: PROVIDER,
+        operation: "forkSession",
+        issue: "Claude source session has no workspace directory.",
+      });
+    }
+
+    const artifactStatus = yield* ensureClaudeResumeArtifactsForCwd({
+      fileSystem,
+      path,
+      env: claudeEnvironment,
+      cwd,
+      resumeSessionId: source.resumeSessionId,
+    });
+    if (!artifactStatus.checked || !artifactStatus.sessionFileExists) {
+      return yield* new ProviderAdapterValidationError({
+        provider: PROVIDER,
+        operation: "forkSession",
+        issue: "Claude source transcript is unavailable in this workspace.",
+      });
+    }
+
+    const sessionStore = makeClaudeForkSessionStore({
+      path,
+      env: claudeEnvironment,
+      cwd,
+    });
+    const forked = yield* Effect.tryPromise({
+      try: () =>
+        forkNativeSession(source.resumeSessionId as string, {
+          dir: cwd,
+          title: input.title,
+          sessionStore,
+        }),
+      catch: (cause) =>
+        new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "session/fork",
+          detail: toMessage(cause, "Claude failed to fork the persisted session."),
+          cause,
+        }),
+    });
+
+    const resumeCursor = {
+      threadId: input.targetThreadId,
+      resume: forked.sessionId,
+      turnCount: source.resumeBaseTurnCount + source.turns.length,
+    };
+    return {
+      operationId: input.operationId,
+      sourceThreadId: input.sourceThreadId,
+      targetThreadId: input.targetThreadId,
+      provider: PROVIDER,
+      providerInstanceId: boundInstanceId,
+      runtimeMode: source.session.runtimeMode,
+      ...(source.session.interactionMode !== undefined
+        ? { interactionMode: source.session.interactionMode }
+        : {}),
+      cwd,
+      ...(source.session.additionalDirectories !== undefined
+        ? { additionalDirectories: source.session.additionalDirectories }
+        : {}),
+      ...(source.session.model !== undefined ? { model: source.session.model } : {}),
+      ...(source.session.modelSelection !== undefined
+        ? { modelSelection: source.session.modelSelection }
+        : {}),
+      resumeCursor,
+    } satisfies ProviderSessionForkResult;
+  });
+
+  const discardProviderSessionFork: NonNullable<ClaudeAdapterShape["discardSessionFork"]> =
+    Effect.fn("discardSessionFork")(function* (fork) {
+      const resumeState = readClaudeResumeState(fork.resumeCursor);
+      if (!resumeState?.resume || !fork.cwd) {
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "discardSessionFork",
+          issue: "Claude fork resume state is invalid.",
+        });
+      }
+      const sessionStore = makeClaudeForkSessionStore({
+        path,
+        env: claudeEnvironment,
+        cwd: fork.cwd,
+      });
+      yield* Effect.tryPromise({
+        try: () =>
+          deleteNativeSession(resumeState.resume as string, {
+            ...(fork.cwd !== undefined ? { dir: fork.cwd } : {}),
+            sessionStore,
+          }),
+        catch: (cause) =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session/fork/delete",
+            detail: toMessage(cause, "Claude failed to discard the uncommitted session fork."),
+            cause,
+          }),
+      });
+    });
+
   const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
     const context = yield* requireSession(input.threadId);
     const modelSelection =
@@ -5753,8 +5959,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     capabilities: {
       sessionModelSwitch: "in-session",
       liveSteer: "supported",
+      sessionFork: "supported",
     },
     startSession,
+    forkSession: forkProviderSession,
+    discardSessionFork: discardProviderSessionFork,
     sendTurn,
     steerTurn,
     interruptTurn,

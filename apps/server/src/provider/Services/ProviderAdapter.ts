@@ -15,6 +15,8 @@ import type {
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
   ProviderSession,
+  ProviderSessionForkInput,
+  ProviderSessionForkResult,
   ProviderSessionStartInput,
   ProviderSteerTurnInput,
   ProviderThreadGoal,
@@ -31,6 +33,7 @@ import type * as Stream from "effect/Stream";
 export type ProviderSessionModelSwitchMode = "in-session" | "restart-resume" | "unsupported";
 export type ProviderLiveSteerSupport = "supported" | "unsupported";
 export type ProviderThreadGoalSupport = "supported" | "unsupported";
+export type ProviderSessionForkSupport = "supported" | "unsupported";
 
 export interface ProviderAdapterCapabilities {
   /**
@@ -50,6 +53,11 @@ export interface ProviderAdapterCapabilities {
    * capability existed; absence is always interpreted as unsupported.
    */
   readonly threadGoals?: ProviderThreadGoalSupport;
+  /**
+   * Declares whether the adapter can branch provider-owned conversation state.
+   * Missing is interpreted as unsupported for older/out-of-process adapters.
+   */
+  readonly sessionFork?: ProviderSessionForkSupport;
 }
 
 export interface ProviderThreadTurnSnapshot {
@@ -75,6 +83,18 @@ export interface ProviderAdapterShape<TError> {
   readonly startSession: (
     input: ProviderSessionStartInput,
   ) => Effect.Effect<ProviderSession, TError>;
+
+  /** Fork a completed provider-native conversation without changing the source. */
+  readonly forkSession?: (
+    input: ProviderSessionForkInput,
+  ) => Effect.Effect<ProviderSessionForkResult, TError>;
+
+  /**
+   * Remove a just-created native fork when Cafe cannot commit its matching
+   * thread. This is intentionally narrow cleanup, not a general thread-delete
+   * surface.
+   */
+  readonly discardSessionFork?: (fork: ProviderSessionForkResult) => Effect.Effect<void, TError>;
 
   /**
    * Send a turn to an active provider session.

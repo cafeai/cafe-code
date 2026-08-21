@@ -5,6 +5,9 @@ import {
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
+  ProviderSessionForkDiscardInput,
+  ProviderSessionForkInput,
+  ProviderSessionForkResult,
   ProviderSnoozeUserInputInput,
   ProviderSendTurnInput,
   ProviderSession,
@@ -385,6 +388,9 @@ export const ProviderDaemonAdapterCapabilities = Schema.Struct({
   // adopted daemon from before goal capability negotiation existed. Missing
   // always means unsupported.
   threadGoals: Schema.optional(Schema.Literals(["supported", "unsupported"])),
+  // Optional for compatibility with daemons built before provider-native
+  // thread/session branching was exposed through Cafe.
+  sessionFork: Schema.optional(Schema.Literals(["supported", "unsupported"])),
 });
 export type ProviderDaemonAdapterCapabilities = typeof ProviderDaemonAdapterCapabilities.Type;
 
@@ -466,6 +472,16 @@ export const ProviderDaemonRpcRequest = Schema.Union([
     payload: ProviderSendTurnInput,
   }),
   Schema.Struct({
+    method: Schema.Literal("forkSession"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: ProviderSessionForkInput,
+  }),
+  Schema.Struct({
+    method: Schema.Literal("discardSessionFork"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: ProviderSessionForkDiscardInput,
+  }),
+  Schema.Struct({
     method: Schema.Literal("steerTurn"),
     commandId: Schema.optional(ProviderDaemonCommandId),
     payload: ProviderSteerTurnInput,
@@ -536,6 +552,8 @@ export type ProviderDaemonRpcRequest = typeof ProviderDaemonRpcRequest.Type;
 
 export const ProviderDaemonRpcResultByMethod = {
   startSession: ProviderSession,
+  forkSession: ProviderSessionForkResult,
+  discardSessionFork: Schema.Void,
   sendTurn: ProviderTurnStartResult,
   steerTurn: ProviderTurnSteerResult,
   interruptTurn: Schema.Void,

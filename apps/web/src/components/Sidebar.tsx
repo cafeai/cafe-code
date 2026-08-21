@@ -183,6 +183,7 @@ import {
   ThreadStatusPill,
 } from "./Sidebar.logic";
 import { sortThreads } from "../lib/threadSort";
+import { isLatestTurnSettled } from "../session-logic";
 import { SidebarUpdatePill } from "./sidebar/SidebarUpdatePill";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
@@ -2327,6 +2328,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         buildSidebarThreadContextMenuItems({
           debugEnabled: desktopDebugEnabled,
           repairRunning: threadRepairDialog?.phase === "running",
+          forkDisabled:
+            (thread.session?.provider !== "codex" && thread.session?.provider !== "claudeAgent") ||
+            !isLatestTurnSettled(thread.latestTurn, thread.session),
         }),
         position,
       );
@@ -2338,13 +2342,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         return;
       }
 
-      if (clicked === "duplicate") {
+      if (clicked === "fork") {
         const environmentApi = readEnvironmentApi(threadRef.environmentId);
         if (!environmentApi) {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Unable to duplicate thread",
+              title: "Unable to fork thread",
               description: "The environment for this thread is not available.",
             }),
           );
@@ -2354,11 +2358,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         const targetThreadRef = scopeThreadRef(threadRef.environmentId, newThreadId());
         try {
           await environmentApi.orchestration.dispatchCommand({
-            type: "thread.duplicate",
+            type: "thread.fork",
             commandId: newCommandId(),
             sourceThreadId: threadRef.threadId,
             targetThreadId: targetThreadRef.threadId,
-            title: `${thread.title} (copy)`,
+            title: `${thread.title} (fork)`,
             createdAt: new Date().toISOString(),
           });
           void router.navigate({
@@ -2369,7 +2373,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Failed to duplicate thread",
+              title: "Failed to fork thread",
               description: error instanceof Error ? error.message : "An error occurred.",
             }),
           );

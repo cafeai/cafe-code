@@ -8,6 +8,8 @@ import type {
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
   ProviderSession,
+  ProviderSessionForkInput,
+  ProviderSessionForkResult,
   ProviderSteerTurnInput,
   ProviderTurnSteerResult,
   ProviderTurnStartResult,
@@ -26,6 +28,7 @@ import { it, assert, vi } from "@effect/vitest";
 import { beforeEach } from "vitest";
 
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -141,6 +144,34 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     },
   );
 
+  const forkSession = vi.fn(
+    (
+      input: ProviderSessionForkInput,
+    ): Effect.Effect<ProviderSessionForkResult, ProviderAdapterError> => {
+      const source = sessions.get(input.sourceThreadId);
+      if (!source) {
+        return Effect.fail(
+          new ProviderAdapterSessionNotFoundError({
+            provider,
+            threadId: input.sourceThreadId,
+          }),
+        );
+      }
+      return Effect.succeed({
+        operationId: input.operationId,
+        sourceThreadId: input.sourceThreadId,
+        targetThreadId: input.targetThreadId,
+        provider,
+        providerInstanceId: source.providerInstanceId ?? ProviderInstanceId.make(String(provider)),
+        runtimeMode: source.runtimeMode,
+        ...(source.cwd !== undefined ? { cwd: source.cwd } : {}),
+        resumeCursor: { opaque: `fork-${String(input.targetThreadId)}` },
+      });
+    },
+  );
+
+  const discardSessionFork = vi.fn((): Effect.Effect<void, ProviderAdapterError> => Effect.void);
+
   const steerTurn = vi.fn(
     (
       input: ProviderSteerTurnInput,
@@ -235,8 +266,12 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
       sessionModelSwitch: "in-session",
       liveSteer:
         provider === CODEX_DRIVER || provider === CLAUDE_AGENT_DRIVER ? "supported" : "unsupported",
+      sessionFork:
+        provider === CODEX_DRIVER || provider === CLAUDE_AGENT_DRIVER ? "supported" : "unsupported",
     },
     startSession,
+    forkSession,
+    discardSessionFork,
     sendTurn,
     steerTurn,
     interruptTurn,
@@ -279,6 +314,8 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     emit,
     updateSession,
     startSession,
+    forkSession,
+    discardSessionFork,
     sendTurn,
     steerTurn,
     interruptTurn,
@@ -492,6 +529,142 @@ it.effect("ProviderServiceLive persists stopped runtime state before adapter sto
     fs.rmSync(tempDir, { recursive: true, force: true });
   }).pipe(Effect.provide(NodeServices.layer)),
 );
+
+const nativeFork = makeProviderServiceLayer();
+nativeFork.layer("ProviderServiceLive native session forks", (it) => {
+  beforeEach(nativeFork.reset);
+
+  it.effect("persists an idempotent stopped target binding and discards it safely", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const sourceThreadId = asThreadId("thread-fork-source");
+      const targetThreadId = asThreadId("thread-fork-target");
+      yield* provider.startSession(sourceThreadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId: sourceThreadId,
+        runtimeMode: "full-access",
+        cwd: "/repo/native-fork",
+      });
+
+      const request = {
+        operationId: "cmd-native-fork",
+        sourceThreadId,
+        targetThreadId,
+        title: "Fork target",
+      } as const;
+      const first = yield* provider.forkSession(request);
+      const retry = yield* provider.forkSession(request);
+
+      assert.deepEqual(retry, first);
+      assert.equal(nativeFork.codex.forkSession.mock.calls.length, 1);
+      const binding = Option.getOrThrow(yield* directory.getBinding(targetThreadId));
+      assert.equal(binding.status, "stopped");
+      assert.equal(binding.providerInstanceId, codexInstanceId);
+      assert.deepEqual(binding.resumeCursor, { opaque: "fork-thread-fork-target" });
+      assert.deepInclude(binding.runtimePayload as Record<string, unknown>, {
+        forkOperationId: "cmd-native-fork",
+        forkedFromThreadId: sourceThreadId,
+        cwd: "/repo/native-fork",
+      });
+
+      const conflictingExit = yield* provider
+        .forkSession({ ...request, operationId: "cmd-competing-fork" })
+        .pipe(Effect.exit);
+      assert.equal(Exit.isFailure(conflictingExit), true);
+      assert.equal(nativeFork.codex.forkSession.mock.calls.length, 1);
+
+      yield* provider.discardSessionFork({ fork: first });
+      assert.equal(nativeFork.codex.discardSessionFork.mock.calls.length, 1);
+      assert.equal(Option.isNone(yield* directory.getBinding(targetThreadId)), true);
+    }),
+  );
+
+  it.effect("rejects providers without a native fork contract", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const sourceThreadId = asThreadId("thread-unsupported-fork-source");
+      yield* provider.startSession(sourceThreadId, {
+        provider: TEST_DRIVER,
+        providerInstanceId: ProviderInstanceId.make("testDriver"),
+        threadId: sourceThreadId,
+        runtimeMode: "full-access",
+      });
+
+      const exit = yield* provider
+        .forkSession({
+          operationId: "cmd-unsupported-fork",
+          sourceThreadId,
+          targetThreadId: asThreadId("thread-unsupported-fork-target"),
+          title: "Unsupported fork",
+        })
+        .pipe(Effect.exit);
+      assert.equal(Exit.isFailure(exit), true);
+      assert.equal(nativeFork.testDriver.forkSession.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect("serializes competing target forks before allocating native context", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const sourceThreadId = asThreadId("thread-fork-race-source");
+      const targetThreadId = asThreadId("thread-fork-race-target");
+      yield* provider.startSession(sourceThreadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId: sourceThreadId,
+        runtimeMode: "full-access",
+        cwd: "/repo/fork-race",
+      });
+
+      const firstStarted = yield* Deferred.make<void>();
+      const releaseFirst = yield* Deferred.make<void>();
+      nativeFork.codex.forkSession.mockImplementationOnce((input) =>
+        Deferred.succeed(firstStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseFirst)),
+          Effect.as({
+            operationId: input.operationId,
+            sourceThreadId: input.sourceThreadId,
+            targetThreadId: input.targetThreadId,
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            runtimeMode: "full-access",
+            cwd: "/repo/fork-race",
+            resumeCursor: { opaque: "fork-race-target" },
+          }),
+        ),
+      );
+
+      const firstFiber = yield* provider
+        .forkSession({
+          operationId: "cmd-fork-race-first",
+          sourceThreadId,
+          targetThreadId,
+          title: "First",
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(firstStarted);
+      const competingFiber = yield* provider
+        .forkSession({
+          operationId: "cmd-fork-race-competing",
+          sourceThreadId,
+          targetThreadId,
+          title: "Competing",
+        })
+        .pipe(Effect.exit, Effect.forkChild);
+      yield* Effect.yieldNow;
+      assert.equal(nativeFork.codex.forkSession.mock.calls.length, 1);
+
+      yield* Deferred.succeed(releaseFirst, undefined);
+      const first = yield* Fiber.join(firstFiber);
+      const competingExit = yield* Fiber.join(competingFiber);
+      assert.equal(Exit.isFailure(competingExit), true);
+      assert.equal(nativeFork.codex.forkSession.mock.calls.length, 1);
+      yield* provider.discardSessionFork({ fork: first });
+    }),
+  );
+});
 
 const restart = makeProviderServiceLayer();
 restart.layer("ProviderServiceLive runtime restart", (it) => {

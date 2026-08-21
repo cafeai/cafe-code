@@ -512,10 +512,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     }) {
       const copyPrefix = `copy:${input.targetThreadId}:`;
 
-      // A duplicated thread is a Cafe read-model fork, not a provider-runtime
-      // fork. Keep historical message/turn/plan/work-log context in bulk SQL,
-      // but do not copy sessions, pending approvals, or pending user-input
-      // accounting that would make the target look like live provider work.
+      // Both projection duplicates and native provider forks copy historical
+      // message/turn/plan/work-log context in bulk. Never copy live sessions,
+      // pending approvals, or pending user-input accounting; native forks bind
+      // their dormant target session through the following session-set event.
       yield* sql`
         INSERT INTO projection_thread_messages (
           message_id,
@@ -841,6 +841,19 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             sourceThreadId: event.payload.sourceThreadId,
             targetThreadId: event.payload.targetThreadId,
             duplicatedAt: event.payload.duplicatedAt,
+          }).pipe(
+            Effect.mapError(
+              toPersistenceSqlError("ProjectionPipeline.copyThreadContextProjectionRows:query"),
+            ),
+          );
+          yield* refreshThreadShellSummary(event.payload.targetThreadId);
+          return;
+
+        case "thread.forked":
+          yield* copyThreadContextProjectionRows({
+            sourceThreadId: event.payload.sourceThreadId,
+            targetThreadId: event.payload.targetThreadId,
+            duplicatedAt: event.payload.forkedAt,
           }).pipe(
             Effect.mapError(
               toPersistenceSqlError("ProjectionPipeline.copyThreadContextProjectionRows:query"),

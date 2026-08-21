@@ -18,6 +18,7 @@ import {
   ProjectCreateCommand,
   ThreadMetaUpdatedPayload,
   ThreadDuplicatedPayload,
+  ThreadForkedPayload,
   ThreadTurnStartCommand,
   ThreadCreatedPayload,
   ThreadTurnStartRequestedPayload,
@@ -46,6 +47,7 @@ function getOptionValue(
 }
 const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPayload);
 const decodeThreadDuplicatedPayload = Schema.decodeUnknownEffect(ThreadDuplicatedPayload);
+const decodeThreadForkedPayload = Schema.decodeUnknownEffect(ThreadForkedPayload);
 const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationCommand);
 const decodeClientOrchestrationCommand = Schema.decodeUnknownEffect(ClientOrchestrationCommand);
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
@@ -141,6 +143,31 @@ it.effect("decodes thread.duplicate client commands and duplicated payloads", ()
       sourceThreadId: "source-thread",
       targetThreadId: "target-thread",
       duplicatedAt: "2026-06-05T00:00:00.000Z",
+    });
+    assert.strictEqual(payload.sourceThreadId, "source-thread");
+    assert.strictEqual(payload.targetThreadId, "target-thread");
+  }),
+);
+
+it.effect("decodes provider-native thread fork commands and events", () =>
+  Effect.gen(function* () {
+    const command = yield* decodeClientOrchestrationCommand({
+      type: "thread.fork",
+      commandId: "cmd-fork",
+      sourceThreadId: "source-thread",
+      targetThreadId: "target-thread",
+      title: "Source Thread (fork)",
+      createdAt: "2026-08-21T00:00:00.000Z",
+    });
+    assert.strictEqual(command.type, "thread.fork");
+    if (command.type !== "thread.fork") return;
+    assert.strictEqual(command.sourceThreadId, "source-thread");
+    assert.strictEqual(command.targetThreadId, "target-thread");
+
+    const payload = yield* decodeThreadForkedPayload({
+      sourceThreadId: "source-thread",
+      targetThreadId: "target-thread",
+      forkedAt: "2026-08-21T00:00:00.000Z",
     });
     assert.strictEqual(payload.sourceThreadId, "source-thread");
     assert.strictEqual(payload.targetThreadId, "target-thread");

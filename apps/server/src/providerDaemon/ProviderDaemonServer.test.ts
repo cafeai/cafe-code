@@ -70,6 +70,8 @@ const startProviderDaemonServerOnEphemeralPort = (
 
 const mockProviderService = {
   startSession: () => Effect.die("unexpected startSession"),
+  forkSession: () => Effect.die("unexpected forkSession"),
+  discardSessionFork: () => Effect.die("unexpected discardSessionFork"),
   sendTurn: () => Effect.die("unexpected sendTurn"),
   steerTurn: () => Effect.die("unexpected steerTurn"),
   interruptTurn: () => Effect.die("unexpected interruptTurn"),

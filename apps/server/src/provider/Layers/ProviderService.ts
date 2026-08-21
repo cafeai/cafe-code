@@ -17,6 +17,9 @@ import {
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
+  ProviderSessionForkDiscardInput,
+  ProviderSessionForkInput,
+  ProviderSessionForkResult,
   ProviderSnoozeUserInputInput,
   ProviderSendTurnInput,
   ProviderSessionStartInput,
@@ -45,6 +48,7 @@ import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import {
@@ -97,6 +101,8 @@ const ProviderReadThreadInput = Schema.Struct({
 });
 
 const ProviderRuntimeRestartInput = ServerProviderRuntimeRestartInput;
+const ProviderForkSessionInput = ProviderSessionForkInput;
+const ProviderDiscardSessionForkInput = ProviderSessionForkDiscardInput;
 const PROVIDER_ADAPTER_EVENT_STREAM_RESTART_DELAY = Duration.millis(500);
 
 function toValidationError(
@@ -252,6 +258,18 @@ function readPersistedAdditionalDirectories(
   return directories.length > 0 ? directories : [];
 }
 
+function readPersistedString(
+  runtimePayload: ProviderRuntimeBinding["runtimePayload"],
+  key: string,
+): string | undefined {
+  if (!runtimePayload || typeof runtimePayload !== "object" || Array.isArray(runtimePayload)) {
+    return undefined;
+  }
+  const record = runtimePayload as Record<string, unknown>;
+  const raw = key in record ? record[key] : undefined;
+  return typeof raw === "string" && raw.trim().length > 0 ? raw : undefined;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -378,6 +396,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const directory = yield* ProviderSessionDirectory;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+  // Provider fork APIs allocate a fresh native identity and do not accept
+  // Cafe's idempotency key. Serialize the short, user-initiated mutation so
+  // two transports cannot both observe an empty target binding and create two
+  // native branches before one wins the durable upsert.
+  const sessionForkMutationSemaphore = yield* Semaphore.make(1);
 
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Effect.succeed(event).pipe(
@@ -1026,6 +1049,215 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       );
     },
   );
+
+  const forkSessionUnlocked: ProviderServiceShape["forkSession"] = Effect.fn("forkSession")(
+    function* (rawInput) {
+      const input = yield* decodeInputOrValidationError({
+        operation: "ProviderService.forkSession",
+        schema: ProviderForkSessionInput,
+        payload: rawInput,
+      });
+      if (input.sourceThreadId === input.targetThreadId) {
+        return yield* toValidationError(
+          "ProviderService.forkSession",
+          "A provider fork must use a new target thread id.",
+        );
+      }
+
+      const existingTarget = Option.getOrUndefined(
+        yield* directory.getBinding(input.targetThreadId),
+      );
+      if (existingTarget) {
+        const forkedFromThreadId = readPersistedString(
+          existingTarget.runtimePayload,
+          "forkedFromThreadId",
+        );
+        const forkOperationId = readPersistedString(
+          existingTarget.runtimePayload,
+          "forkOperationId",
+        );
+        const providerInstanceId = yield* requireBindingInstanceId(
+          "ProviderService.forkSession",
+          existingTarget,
+        );
+        if (
+          forkedFromThreadId !== input.sourceThreadId ||
+          forkOperationId !== input.operationId ||
+          existingTarget.resumeCursor === null ||
+          existingTarget.resumeCursor === undefined
+        ) {
+          return yield* toValidationError(
+            "ProviderService.forkSession",
+            `Target thread '${input.targetThreadId}' already has an unrelated provider binding.`,
+          );
+        }
+
+        // A client can retry after the provider fork succeeded but before the
+        // Cafe domain commit/response became visible. The target binding is the
+        // durable idempotency record, so never create a second native branch.
+        return {
+          operationId: input.operationId,
+          sourceThreadId: input.sourceThreadId,
+          targetThreadId: input.targetThreadId,
+          provider: existingTarget.provider,
+          providerInstanceId,
+          runtimeMode: existingTarget.runtimeMode ?? "full-access",
+          ...(readPersistedString(existingTarget.runtimePayload, "interactionMode")
+            ? {
+                interactionMode: readPersistedString(
+                  existingTarget.runtimePayload,
+                  "interactionMode",
+                ) as NonNullable<ProviderSession["interactionMode"]>,
+              }
+            : {}),
+          ...(readPersistedCwd(existingTarget.runtimePayload)
+            ? { cwd: readPersistedCwd(existingTarget.runtimePayload) }
+            : {}),
+          ...(readPersistedAdditionalDirectories(existingTarget.runtimePayload) !== undefined
+            ? {
+                additionalDirectories: readPersistedAdditionalDirectories(
+                  existingTarget.runtimePayload,
+                ),
+              }
+            : {}),
+          ...(readPersistedString(existingTarget.runtimePayload, "model")
+            ? { model: readPersistedString(existingTarget.runtimePayload, "model") }
+            : {}),
+          ...(readPersistedModelSelection(existingTarget.runtimePayload)
+            ? { modelSelection: readPersistedModelSelection(existingTarget.runtimePayload) }
+            : {}),
+          resumeCursor: existingTarget.resumeCursor,
+        } satisfies ProviderSessionForkResult;
+      }
+
+      const routed = yield* resolveRoutableSession({
+        threadId: input.sourceThreadId,
+        operation: "ProviderService.forkSession",
+        allowRecovery: true,
+      });
+      if (
+        routed.adapter.capabilities.sessionFork !== "supported" ||
+        routed.adapter.forkSession === undefined ||
+        routed.adapter.discardSessionFork === undefined
+      ) {
+        return yield* toValidationError(
+          "ProviderService.forkSession",
+          `Provider '${routed.adapter.provider}' does not support native session forks.`,
+        );
+      }
+
+      const liveSession = (yield* routed.adapter.listSessions()).find(
+        (session) => session.threadId === input.sourceThreadId,
+      );
+      if (
+        !liveSession ||
+        liveSession.status === "connecting" ||
+        liveSession.status === "running" ||
+        liveSession.activeTurnId !== undefined
+      ) {
+        return yield* toValidationError(
+          "ProviderService.forkSession",
+          `Thread '${input.sourceThreadId}' must be idle before it can be forked.`,
+        );
+      }
+
+      yield* Effect.annotateCurrentSpan({
+        "provider.operation": "fork-session",
+        "provider.kind": routed.adapter.provider,
+        "provider.instance_id": routed.instanceId,
+        "provider.thread_id": input.sourceThreadId,
+        "provider.fork.target_thread_id": input.targetThreadId,
+      });
+
+      const adapterFork = yield* routed.adapter.forkSession(input);
+      if (
+        adapterFork.operationId !== input.operationId ||
+        adapterFork.sourceThreadId !== input.sourceThreadId ||
+        adapterFork.targetThreadId !== input.targetThreadId ||
+        adapterFork.provider !== routed.adapter.provider ||
+        adapterFork.resumeCursor === null ||
+        adapterFork.resumeCursor === undefined
+      ) {
+        return yield* toValidationError(
+          "ProviderService.forkSession",
+          "Provider returned an invalid or mismatched native fork result.",
+        );
+      }
+
+      const fork = {
+        ...adapterFork,
+        providerInstanceId: routed.instanceId,
+      } satisfies ProviderSessionForkResult;
+      const forkedAt = yield* nowIso;
+      yield* directory.upsert({
+        threadId: fork.targetThreadId,
+        provider: fork.provider,
+        providerInstanceId: routed.instanceId,
+        runtimeMode: fork.runtimeMode,
+        status: "stopped",
+        resumeCursor: fork.resumeCursor,
+        runtimePayload: {
+          forkOperationId: fork.operationId,
+          forkedFromThreadId: fork.sourceThreadId,
+          cwd: fork.cwd ?? null,
+          additionalDirectories: fork.additionalDirectories ?? null,
+          model: fork.model ?? null,
+          modelSelection: fork.modelSelection ?? null,
+          interactionMode: fork.interactionMode ?? null,
+          activeTurnId: null,
+          lastError: null,
+          lastRuntimeEvent: "provider.session.forked",
+          lastRuntimeEventAt: forkedAt,
+        },
+      });
+      return fork;
+    },
+  );
+
+  const discardSessionForkUnlocked: ProviderServiceShape["discardSessionFork"] = Effect.fn(
+    "discardSessionFork",
+  )(function* (rawInput) {
+    const input = yield* decodeInputOrValidationError({
+      operation: "ProviderService.discardSessionFork",
+      schema: ProviderDiscardSessionForkInput,
+      payload: rawInput,
+    });
+    const binding = Option.getOrUndefined(yield* directory.getBinding(input.fork.targetThreadId));
+    if (!binding) {
+      return;
+    }
+    const providerInstanceId = yield* requireBindingInstanceId(
+      "ProviderService.discardSessionFork",
+      binding,
+    );
+    if (
+      providerInstanceId !== input.fork.providerInstanceId ||
+      binding.provider !== input.fork.provider ||
+      readPersistedString(binding.runtimePayload, "forkOperationId") !== input.fork.operationId ||
+      readPersistedString(binding.runtimePayload, "forkedFromThreadId") !==
+        input.fork.sourceThreadId
+    ) {
+      return yield* toValidationError(
+        "ProviderService.discardSessionFork",
+        `Target thread '${input.fork.targetThreadId}' is not the requested provider fork.`,
+      );
+    }
+
+    const adapter = yield* registry.getByInstance(providerInstanceId);
+    if (adapter.discardSessionFork === undefined) {
+      return yield* toValidationError(
+        "ProviderService.discardSessionFork",
+        `Provider '${adapter.provider}' cannot discard native session forks.`,
+      );
+    }
+    yield* adapter.discardSessionFork(input.fork);
+    yield* directory.remove(input.fork.targetThreadId);
+  });
+
+  const forkSession: ProviderServiceShape["forkSession"] = (input) =>
+    sessionForkMutationSemaphore.withPermit(forkSessionUnlocked(input));
+  const discardSessionFork: ProviderServiceShape["discardSessionFork"] = (input) =>
+    sessionForkMutationSemaphore.withPermit(discardSessionForkUnlocked(input));
 
   const sendTurn: ProviderServiceShape["sendTurn"] = Effect.fn("sendTurn")(function* (rawInput) {
     const parsed = yield* decodeInputOrValidationError({
@@ -1805,6 +2037,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   return {
     startSession,
+    forkSession,
+    discardSessionFork,
     sendTurn,
     steerTurn,
     interruptTurn,

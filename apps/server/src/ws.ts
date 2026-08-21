@@ -36,6 +36,7 @@ import { ServerConfig } from "./config.ts";
 import { Keybindings } from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
+import { dispatchProviderNativeThreadFork } from "./orchestration/threadFork.ts";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProviderJournalMessageRepairLive } from "./orchestration/Layers/ProviderJournalMessageRepair.ts";
@@ -518,15 +519,22 @@ const makeWsRpcLayer = (
         normalizedCommand: OrchestrationCommand,
       ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> => {
         const dispatchEffect =
-          normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
-            ? dispatchBootstrapTurnStart(normalizedCommand)
-            : orchestrationEngine
-                .dispatch(normalizedCommand)
-                .pipe(
-                  Effect.mapError((cause) =>
-                    toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
-                  ),
-                );
+          normalizedCommand.type === "thread.fork"
+            ? dispatchProviderNativeThreadFork({
+                command: normalizedCommand,
+                orchestrationEngine,
+                projectionSnapshotQuery,
+                providerService,
+              })
+            : normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
+              ? dispatchBootstrapTurnStart(normalizedCommand)
+              : orchestrationEngine
+                  .dispatch(normalizedCommand)
+                  .pipe(
+                    Effect.mapError((cause) =>
+                      toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
+                    ),
+                  );
 
         return startup
           .enqueueCommand(dispatchEffect)

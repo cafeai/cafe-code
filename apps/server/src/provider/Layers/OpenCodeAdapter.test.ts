@@ -180,6 +180,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
 
 const providerSessionDirectoryTestLayer = Layer.succeed(ProviderSessionDirectory, {
   upsert: () => Effect.void,
+  remove: () => Effect.void,
   getProvider: () =>
     Effect.die(new Error("ProviderSessionDirectory.getProvider is not used in test")),
   getBinding: () => Effect.succeed(Option.none()),

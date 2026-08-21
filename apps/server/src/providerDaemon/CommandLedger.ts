@@ -27,6 +27,8 @@ const encodeProviderDaemonRpcRequestJson = Schema.encodeSync(
 
 const MUTATING_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "startSession",
+  "forkSession",
+  "discardSessionFork",
   "sendTurn",
   "steerTurn",
   "interruptTurn",

@@ -99,6 +99,12 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     (_turnId?: TurnId): Promise<void> => Promise.resolve(undefined),
   );
 
+  public readonly forkThreadImpl = vi.fn(() =>
+    Promise.resolve({ threadId: "provider-thread-fork" }),
+  );
+
+  public readonly discardForkImpl = vi.fn((_resumeCursor: unknown) => Promise.resolve());
+
   public readonly readThreadImpl = vi.fn(
     (): Promise<CodexThreadSnapshot> =>
       Promise.resolve({
@@ -153,6 +159,14 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   interruptTurn(turnId?: TurnId) {
     return Effect.promise(() => this.interruptTurnImpl(turnId));
+  }
+
+  get forkThread() {
+    return Effect.promise(() => this.forkThreadImpl());
+  }
+
+  discardFork(resumeCursor: unknown) {
+    return Effect.promise(() => this.discardForkImpl(resumeCursor));
   }
 
   snoozeUserInput(_requestId: ApprovalRequestId) {
@@ -256,6 +270,7 @@ function makeScopedRuntimeFactory(options?: { readonly failConstruction?: boolea
 
 const providerSessionDirectoryTestLayer = Layer.succeed(ProviderSessionDirectory, {
   upsert: () => Effect.void,
+  remove: () => Effect.void,
   getProvider: () =>
     Effect.die(new Error("ProviderSessionDirectory.getProvider is not used in test")),
   getBinding: () => Effect.succeed(Option.none()),
@@ -328,6 +343,41 @@ validationLayer("CodexAdapterLive validation", (it) => {
         serviceTier: "fast",
         threadId: asThreadId("thread-1"),
         runtimeMode: "full-access",
+      });
+    }),
+  );
+
+  it.effect("forks and discards a persisted Codex thread through the native runtime", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const sourceThreadId = asThreadId("thread-native-fork-source");
+      const targetThreadId = asThreadId("thread-native-fork-target");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        threadId: sourceThreadId,
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const fork = yield* adapter.forkSession!({
+        operationId: "cmd-native-codex-fork",
+        sourceThreadId,
+        targetThreadId,
+        title: "Native Codex fork",
+      });
+      assert.equal(fork.operationId, "cmd-native-codex-fork");
+      assert.equal(fork.sourceThreadId, sourceThreadId);
+      assert.equal(fork.targetThreadId, targetThreadId);
+      assert.equal(fork.provider, ProviderDriverKind.make("codex"));
+      assert.equal(fork.providerInstanceId, ProviderInstanceId.make("codex"));
+      assert.equal(fork.cwd, process.cwd());
+      assert.deepEqual(fork.resumeCursor, { threadId: "provider-thread-fork" });
+      assert.equal(validationRuntimeFactory.lastRuntime?.forkThreadImpl.mock.calls.length, 1);
+
+      yield* adapter.discardSessionFork!(fork);
+      assert.deepEqual(validationRuntimeFactory.lastRuntime?.discardForkImpl.mock.calls[0]?.[0], {
+        threadId: "provider-thread-fork",
       });
     }),
   );

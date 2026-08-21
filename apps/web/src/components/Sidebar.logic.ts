@@ -37,7 +37,7 @@ export type ThreadTraversalDirection = "previous" | "next";
 
 export type SidebarThreadContextMenuAction =
   | "rename"
-  | "duplicate"
+  | "fork"
   | "move"
   | "copy-path"
   | "copy-thread-id"
@@ -54,10 +54,11 @@ export interface SidebarThreadContextMenuItem {
 export function buildSidebarThreadContextMenuItems(input: {
   readonly debugEnabled: boolean;
   readonly repairRunning: boolean;
+  readonly forkDisabled?: boolean;
 }): ReadonlyArray<SidebarThreadContextMenuItem> {
   const items: SidebarThreadContextMenuItem[] = [
     { id: "rename", label: "Rename thread" },
-    { id: "duplicate", label: "Duplicate thread" },
+    { id: "fork", label: "Fork thread", disabled: input.forkDisabled === true },
     { id: "move", label: "Move Thread..." },
     { id: "copy-path", label: "Copy Path" },
     { id: "copy-thread-id", label: "Copy Thread ID" },

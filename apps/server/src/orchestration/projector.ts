@@ -22,6 +22,7 @@ import {
   ThreadArchivedPayload,
   ThreadCreatedPayload,
   ThreadDuplicatedPayload,
+  ThreadForkedPayload,
   ThreadDeletedPayload,
   ThreadRestoredPayload,
   ThreadInteractionModeSetPayload,
@@ -147,12 +148,10 @@ function cloneThreadContextForDuplicate(input: {
         completedAt: checkpoint.completedAt,
       }),
     ),
-    // Provider runtime/session identity is intentionally not copied. A
-    // duplicate carries Cafe-visible conversation context only; the next user
-    // prompt must create a fresh provider boundary instead of resuming Claude
-    // or Codex state owned by the source thread. The target thread's null goal
-    // is likewise retained: Codex goals belong to the source provider thread,
-    // not to copied transcript context.
+    // Context-copy events never clone a live session object. Projection-only
+    // duplicates stay unbound, while provider-native forks immediately apply a
+    // separate thread.session-set event carrying the target's dormant resume
+    // binding. Goals remain provider-thread-owned and are not inferred here.
     session: null,
     goal: null,
     updatedAt: duplicatedAt,
@@ -438,6 +437,32 @@ export function projectEvent(
           sourceThread,
           targetThread,
           duplicatedAt: payload.duplicatedAt,
+        });
+        return {
+          ...nextBase,
+          threads: nextBase.threads.map((entry) =>
+            entry.id === payload.targetThreadId ? copiedThread : entry,
+          ),
+        };
+      });
+
+    case "thread.forked":
+      return Effect.gen(function* () {
+        const payload = yield* decodeForEvent(
+          ThreadForkedPayload,
+          event.payload,
+          event.type,
+          "payload",
+        );
+        const sourceThread = nextBase.threads.find((entry) => entry.id === payload.sourceThreadId);
+        const targetThread = nextBase.threads.find((entry) => entry.id === payload.targetThreadId);
+        if (!sourceThread || !targetThread) {
+          return nextBase;
+        }
+        const copiedThread = cloneThreadContextForDuplicate({
+          sourceThread,
+          targetThread,
+          duplicatedAt: payload.forkedAt,
         });
         return {
           ...nextBase,

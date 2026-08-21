@@ -30,6 +30,7 @@ import {
   ProviderApprovalDecision,
   ThreadId,
   ProviderSendTurnInput,
+  type ProviderSessionForkResult,
   RuntimeTaskId,
 } from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
@@ -2969,6 +2970,70 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)));
   });
 
+  const forkSession: NonNullable<CodexAdapterShape["forkSession"]> = Effect.fn("forkSession")(
+    function* (input) {
+      yield* prepareRuntimeHomeForRequest(input.sourceThreadId, "thread/fork");
+      const source = yield* requireSession(input.sourceThreadId);
+      const sourceSession = yield* source.runtime.getSession;
+      if (
+        sourceSession.status === "connecting" ||
+        sourceSession.status === "running" ||
+        sourceSession.activeTurnId !== undefined
+      ) {
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "forkSession",
+          issue: "Codex source thread must be idle before it can be forked.",
+        });
+      }
+      const resumeCursor = yield* source.runtime.forkThread.pipe(
+        Effect.mapError((cause) =>
+          mapCodexRuntimeError(input.sourceThreadId, "thread/fork", cause),
+        ),
+      );
+      return {
+        operationId: input.operationId,
+        sourceThreadId: input.sourceThreadId,
+        targetThreadId: input.targetThreadId,
+        provider: PROVIDER,
+        providerInstanceId: boundInstanceId,
+        runtimeMode: sourceSession.runtimeMode,
+        ...(sourceSession.interactionMode !== undefined
+          ? { interactionMode: sourceSession.interactionMode }
+          : {}),
+        ...(sourceSession.cwd !== undefined ? { cwd: sourceSession.cwd } : {}),
+        ...(sourceSession.additionalDirectories !== undefined
+          ? { additionalDirectories: sourceSession.additionalDirectories }
+          : {}),
+        ...(sourceSession.model !== undefined ? { model: sourceSession.model } : {}),
+        ...(sourceSession.modelSelection !== undefined
+          ? { modelSelection: sourceSession.modelSelection }
+          : {}),
+        resumeCursor,
+      } satisfies ProviderSessionForkResult;
+    },
+  );
+
+  const discardSessionFork: NonNullable<CodexAdapterShape["discardSessionFork"]> = Effect.fn(
+    "discardSessionFork",
+  )(function* (fork) {
+    if (!isCodexResumeCursorSchema(fork.resumeCursor)) {
+      return yield* new ProviderAdapterValidationError({
+        provider: PROVIDER,
+        operation: "discardSessionFork",
+        issue: "Codex fork resume state is invalid.",
+      });
+    }
+    const source = yield* requireSession(fork.sourceThreadId);
+    yield* source.runtime
+      .discardFork(fork.resumeCursor)
+      .pipe(
+        Effect.mapError((cause) =>
+          mapCodexRuntimeError(fork.sourceThreadId, "thread/delete", cause),
+        ),
+      );
+  });
+
   const steerTurn: CodexAdapterShape["steerTurn"] = Effect.fn("steerTurn")(function* (input) {
     yield* prepareRuntimeHomeForRequest(input.threadId, "turn/steer");
 
@@ -3195,8 +3260,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       sessionModelSwitch: "in-session",
       liveSteer: "supported",
       threadGoals: "supported",
+      sessionFork: "supported",
     },
     startSession,
+    forkSession,
+    discardSessionFork,
     sendTurn,
     steerTurn,
     interruptTurn,
