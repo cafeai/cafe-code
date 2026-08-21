@@ -111,6 +111,10 @@ function codexAccountAuthLabel(account: CodexSchema.V2GetAccountResponse["accoun
       return "ChatGPT Enterprise Subscription";
     case "edu":
       return "ChatGPT Edu Subscription";
+    case "edu_plus":
+      return "ChatGPT Edu Plus Subscription";
+    case "edu_pro":
+      return "ChatGPT Edu Pro Subscription";
     case "unknown":
       return "ChatGPT Subscription";
     default:
@@ -705,7 +709,7 @@ function makeStaticCodexReasoningCapabilities(input: {
 
 const CODEX_STANDARD_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 const CODEX_MAX_REASONING_EFFORTS = [...CODEX_STANDARD_REASONING_EFFORTS, "max"] as const;
-// Mirrors Codex app-server `model/list` from codex-cli 0.147.0. The live
+// Mirrors Codex app-server `model/list` from codex-cli 0.149.0. The live
 // app-server response remains authoritative when available; this fallback keeps
 // fresh installs usable before the full Codex probe refreshes provider cache.
 const CODEX_ULTRA_REASONING_EFFORTS = [...CODEX_MAX_REASONING_EFFORTS, "ultra"] as const;

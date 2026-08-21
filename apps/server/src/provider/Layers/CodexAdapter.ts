@@ -1660,6 +1660,32 @@ function mapToRuntimeEvents(
     ];
   }
 
+  if (event.method === "autoApprovalReview/strictReviewRequired") {
+    const payload = readPayload(
+      EffectCodexSchema.V2StrictReviewRequiredNotification,
+      event.payload,
+    );
+    if (!payload) {
+      return [];
+    }
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "runtime.warning",
+        payload: {
+          // Codex TUI 0.149 keeps the active task running and displays this as
+          // a safety-check status line. Cafe mirrors that lifecycle contract:
+          // the notice is durable work-log context, never a turn transition.
+          message:
+            "Codex is running additional safety checks; some tool calls may take extra time.",
+          detail: {
+            startedAtMs: payload.startedAtMs,
+          },
+        },
+      },
+    ];
+  }
+
   if (event.method === "turn/completed") {
     const payload = readPayload(EffectCodexSchema.V2TurnCompletedNotification, event.payload);
     if (!payload) {
@@ -1991,6 +2017,20 @@ function mapToRuntimeEvents(
     // TUI routes it to the thread but does not render it in chat. Do the same
     // and avoid persisting arbitrary moderation metadata into work-log/debug
     // activity payloads.
+    return [];
+  }
+
+  if (
+    event.method === "thread/reverted" ||
+    event.method === "thread/queue/changed" ||
+    event.method === "project/changed" ||
+    event.method === "thread/project/updated"
+  ) {
+    // Codex 0.149 exposes provider-native history, queue, and project metadata.
+    // Cafe owns these concepts in its durable orchestration database and must
+    // not let an informational app-server notification mutate that separate
+    // state machine. The raw notification remains available in the bounded
+    // native provider log for diagnostics.
     return [];
   }
 

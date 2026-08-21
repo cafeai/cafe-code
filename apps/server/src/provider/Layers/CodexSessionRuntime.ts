@@ -1515,9 +1515,12 @@ function readNotificationThreadId(notification: CodexServerNotification): string
     case "thread/deleted":
     case "thread/unarchived":
     case "thread/closed":
+    case "thread/reverted":
     case "thread/name/updated":
     case "thread/goal/updated":
     case "thread/goal/cleared":
+    case "thread/queue/changed":
+    case "thread/project/updated":
     case "thread/environment/connected":
     case "thread/environment/disconnected":
     case "thread/settings/updated":
@@ -1531,6 +1534,7 @@ function readNotificationThreadId(notification: CodexServerNotification): string
     case "item/started":
     case "item/autoApprovalReview/started":
     case "item/autoApprovalReview/completed":
+    case "autoApprovalReview/strictReviewRequired":
     case "item/completed":
     case "rawResponseItem/completed":
     case "rawResponse/completed":
@@ -1587,6 +1591,7 @@ export function readCodexNotificationRouteFields(notification: CodexServerNotifi
     case "model/verification":
     case "model/safetyBuffering/updated":
     case "turn/moderationMetadata":
+    case "autoApprovalReview/strictReviewRequired":
       return {
         turnId: readNotificationTurnId(notification),
         itemId: undefined,
@@ -1733,6 +1738,7 @@ function shouldSuppressChildConversationNotification(method: string): boolean {
     method === "thread/deleted" ||
     method === "thread/unarchived" ||
     method === "thread/closed" ||
+    method === "thread/reverted" ||
     method === "thread/environment/connected" ||
     method === "thread/environment/disconnected" ||
     method === "thread/compacted" ||
@@ -1740,6 +1746,8 @@ function shouldSuppressChildConversationNotification(method: string): boolean {
     method === "thread/tokenUsage/updated" ||
     method === "thread/goal/updated" ||
     method === "thread/goal/cleared" ||
+    method === "thread/queue/changed" ||
+    method === "thread/project/updated" ||
     method === "turn/started" ||
     method === "turn/completed" ||
     method === "turn/plan/updated" ||
@@ -1829,7 +1837,10 @@ export function isCodexChildConversationWorkNotification(
     method === "thread/archived" ||
     method === "thread/deleted" ||
     method === "thread/closed" ||
+    method === "thread/reverted" ||
     method === "thread/tokenUsage/updated" ||
+    method === "thread/queue/changed" ||
+    method === "thread/project/updated" ||
     method === "warning" ||
     method === "guardianWarning"
   ) {

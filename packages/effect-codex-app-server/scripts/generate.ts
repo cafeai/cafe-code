@@ -17,10 +17,16 @@ import {
 } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-// Codex 0.147.0 release commit. Keep generation attached to an immutable
+import {
+  type ProtocolMethodEntry as MethodEntry,
+  parseNotificationEntries,
+  parseRequestEntries,
+} from "./protocolMethodEntries.ts";
+
+// Codex 0.149.0 release commit. Keep generation attached to an immutable
 // upstream commit rather than a moving tag so a reinstall cannot silently
 // change Cafe's protocol boundary.
-const UPSTREAM_REF = "be6e8eac029b183056b7e4402879f15d2c85f61b";
+const UPSTREAM_REF = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0";
 const USER_AGENT = "effect-codex-app-server-generator";
 const GITHUB_API_BASE =
   "https://api.github.com/repos/openai/codex/contents/codex-rs/app-server-protocol";
@@ -49,11 +55,6 @@ interface GeneratedPaths {
   readonly schemaOutputPath: string;
   readonly metaOutputPath: string;
   readonly namespacesOutputPath: string;
-}
-
-interface MethodEntry {
-  readonly method: string;
-  readonly paramsType?: string;
 }
 
 interface JsonSchemaFile {
@@ -297,32 +298,6 @@ function toPascalCaseMethod(method: string) {
     .join("");
 }
 
-function parseRequestEntries(fileContents: string): ReadonlyArray<MethodEntry> {
-  const entryPattern = /\{\s*"method":\s*"([^"]+)",\s*id:\s*RequestId,\s*params:\s*([^,}]+)/g;
-  const entries: Array<MethodEntry> = [];
-  let match: RegExpExecArray | null;
-  while ((match = entryPattern.exec(fileContents)) !== null) {
-    entries.push({
-      method: match[1]!,
-      paramsType: match[2]!.trim(),
-    });
-  }
-  return entries;
-}
-
-function parseNotificationEntries(fileContents: string): ReadonlyArray<MethodEntry> {
-  const entryPattern = /\{\s*"method":\s*"([^"]+)"(?:,\s*"params":\s*([^ }]+))?\s*\}/g;
-  const entries: Array<MethodEntry> = [];
-  let match: RegExpExecArray | null;
-  while ((match = entryPattern.exec(fileContents)) !== null) {
-    entries.push({
-      method: match[1]!,
-      ...(match[2] ? { paramsType: match[2].trim() } : {}),
-    });
-  }
-  return entries;
-}
-
 function resolveSchemaTypeName(
   rawTypeName: string,
   generatedSchemaNames: ReadonlySet<string>,
@@ -336,6 +311,12 @@ function resolveSchemaTypeName(
     `V2${rawTypeName}`,
     `V1${rawTypeName}`,
     `SerdeJson${rawTypeName}`,
+    // ts-rs emits an optional request parameter's object definition inside a
+    // `NullableFoo` JSON schema even when the TypeScript request union spells
+    // the wire field `params?: Foo | undefined`. Resolve the nested object,
+    // then let the generated RPC map add `undefined` explicitly; using the
+    // nullable top-level schema would incorrectly widen Cafe's client to null.
+    `V2Nullable${rawTypeName}__${rawTypeName}`,
   ];
   for (const candidate of candidates) {
     if (generatedSchemaNames.has(candidate)) {
@@ -408,13 +389,18 @@ function renderSchemaMap(
   constantName: string,
   entries: ReadonlyArray<MethodEntry>,
   typeName: (entry: MethodEntry) => string,
+  isOptional: (entry: MethodEntry) => boolean = () => false,
 ) {
   return [
     `export const ${constantName} = {`,
     ...entries.map((entry) => {
       const schemaName = typeName(entry);
+      const schemaExpression =
+        schemaName === "undefined" ? "undefined" : `CodexSchema.${schemaName}`;
       return `  ${JSON.stringify(entry.method)}: ${
-        schemaName === "undefined" ? "undefined" : `CodexSchema.${schemaName}`
+        isOptional(entry) && schemaName !== "undefined"
+          ? `Schema.UndefinedOr(${schemaExpression})`
+          : schemaExpression
       },`;
     }),
     "} as const;",
@@ -651,6 +637,7 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
 
   const metaOutput = [
     ...prelude,
+    'import * as Schema from "effect/Schema";',
     'import * as CodexSchema from "./schema.gen.ts";',
     "",
     renderMethodConstants("CLIENT_REQUEST_METHODS", clientRequestEntries),
@@ -663,9 +650,12 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
     "export type ServerNotificationMethod = keyof typeof SERVER_NOTIFICATION_METHODS;",
     "",
     renderTypeInterface("ClientRequestParamsByMethod", clientRequestEntries, (entry) =>
-      renderSchemaTypeReference(
-        resolveSchemaTypeName(entry.paramsType ?? "undefined", generatedSchemaNames),
-      ),
+      [
+        renderSchemaTypeReference(
+          resolveSchemaTypeName(entry.paramsType ?? "undefined", generatedSchemaNames),
+        ),
+        ...(entry.paramsOptional ? ["undefined"] : []),
+      ].join(" | "),
     ),
     renderTypeInterface("ClientRequestResponsesByMethod", clientRequestEntries, (entry) =>
       renderSchemaTypeReference(
@@ -678,9 +668,12 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
       ),
     ),
     renderTypeInterface("ServerRequestParamsByMethod", serverRequestEntries, (entry) =>
-      renderSchemaTypeReference(
-        resolveSchemaTypeName(entry.paramsType ?? "undefined", generatedSchemaNames),
-      ),
+      [
+        renderSchemaTypeReference(
+          resolveSchemaTypeName(entry.paramsType ?? "undefined", generatedSchemaNames),
+        ),
+        ...(entry.paramsOptional ? ["undefined"] : []),
+      ].join(" | "),
     ),
     renderTypeInterface("ServerRequestResponsesByMethod", serverRequestEntries, (entry) =>
       renderSchemaTypeReference(
@@ -692,8 +685,11 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
         resolveSchemaTypeName(entry.paramsType ?? "undefined", generatedSchemaNames),
       ),
     ),
-    renderSchemaMap("CLIENT_REQUEST_PARAMS", clientRequestEntries, (entry) =>
-      resolveSchemaTypeName(entry.paramsType ?? "undefined", generatedSchemaNames),
+    renderSchemaMap(
+      "CLIENT_REQUEST_PARAMS",
+      clientRequestEntries,
+      (entry) => resolveSchemaTypeName(entry.paramsType ?? "undefined", generatedSchemaNames),
+      (entry) => entry.paramsOptional === true,
     ),
     renderSchemaMap("CLIENT_REQUEST_RESPONSES", clientRequestEntries, (entry) =>
       resolveResponseTypeName(entry.method, entry.paramsType, generatedSchemaNames),
@@ -701,8 +697,11 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
     renderSchemaMap("CLIENT_NOTIFICATION_PARAMS", clientNotificationEntries, (entry) =>
       resolveSchemaTypeName(entry.paramsType ?? "undefined", generatedSchemaNames),
     ),
-    renderSchemaMap("SERVER_REQUEST_PARAMS", serverRequestEntries, (entry) =>
-      resolveSchemaTypeName(entry.paramsType ?? "undefined", generatedSchemaNames),
+    renderSchemaMap(
+      "SERVER_REQUEST_PARAMS",
+      serverRequestEntries,
+      (entry) => resolveSchemaTypeName(entry.paramsType ?? "undefined", generatedSchemaNames),
+      (entry) => entry.paramsOptional === true,
     ),
     renderSchemaMap("SERVER_REQUEST_RESPONSES", serverRequestEntries, (entry) =>
       resolveResponseTypeName(entry.method, entry.paramsType, generatedSchemaNames),

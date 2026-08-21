@@ -381,6 +381,42 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         }),
       );
 
+      it.effect("labels the Codex education plan variants without collapsing their SKU", () =>
+        Effect.gen(function* () {
+          const eduPlus = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+            Effect.succeed(
+              makeCodexProbeSnapshot({
+                account: {
+                  account: {
+                    type: "chatgpt",
+                    email: "plus@university.example",
+                    planType: "edu_plus",
+                  },
+                  requiresOpenaiAuth: false,
+                },
+              }),
+            ),
+          );
+          const eduPro = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+            Effect.succeed(
+              makeCodexProbeSnapshot({
+                account: {
+                  account: {
+                    type: "chatgpt",
+                    email: "pro@university.example",
+                    planType: "edu_pro",
+                  },
+                  requiresOpenaiAuth: false,
+                },
+              }),
+            ),
+          );
+
+          assert.strictEqual(eduPlus.auth.label, "ChatGPT Edu Plus Subscription");
+          assert.strictEqual(eduPro.auth.label, "ChatGPT Edu Pro Subscription");
+        }),
+      );
+
       it.effect("returns unauthenticated when app-server requires OpenAI auth", () =>
         Effect.gen(function* () {
           const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>

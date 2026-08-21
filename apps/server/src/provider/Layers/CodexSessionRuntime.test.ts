@@ -326,6 +326,24 @@ describe("Codex child conversation routing", () => {
       resolveCodexChildConversationNotification(
         routes,
         {
+          method: "autoApprovalReview/strictReviewRequired",
+          params: {
+            threadId: "thread-child",
+            turnId: "turn-child",
+            startedAtMs: 1_778_000_000_000,
+          },
+        },
+        "thread-parent",
+      ),
+      {
+        parentTurnId,
+        suppressLifecycle: false,
+      },
+    );
+    assert.deepStrictEqual(
+      resolveCodexChildConversationNotification(
+        routes,
+        {
           method: "item/agentMessage/delta",
           params: {
             threadId: "thread-child",
@@ -677,6 +695,20 @@ describe("Codex notification route fields", () => {
         itemId: ProviderItemId.make("review-1"),
       },
     );
+    assert.deepStrictEqual(
+      readCodexNotificationRouteFields({
+        method: "autoApprovalReview/strictReviewRequired",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          startedAtMs: 1_778_000_000_000,
+        },
+      }),
+      {
+        turnId: TurnId.make("turn-1"),
+        itemId: undefined,
+      },
+    );
   });
 
   it("retains turn and item identities for progress and model lifecycle notifications", () => {
@@ -743,6 +775,7 @@ function makeThreadOpenResponse(
       id: threadId,
       modelProvider: "openai",
       preview: "",
+      projectId: null,
       sessionId: "session-1",
       source: "cli",
       turns: [],

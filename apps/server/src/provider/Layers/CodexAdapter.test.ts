@@ -993,6 +993,42 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("keeps strict approval review visible without terminalizing the turn", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-strict-review-required"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "autoApprovalReview/strictReviewRequired",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        payload: {
+          threadId: "provider-thread-1",
+          turnId: "provider-turn-1",
+          startedAtMs: 1_778_000_000_000,
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "runtime.warning") {
+        return;
+      }
+      assert.equal(firstEvent.value.turnId, "turn-1");
+      assert.equal(
+        firstEvent.value.payload.message,
+        "Codex is running additional safety checks; some tool calls may take extra time.",
+      );
+      assert.deepStrictEqual(firstEvent.value.payload.detail, {
+        startedAtMs: 1_778_000_000_000,
+      });
+    }),
+  );
+
   it.effect("maps Codex multi-agent-v2 activity into the parent work log", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
