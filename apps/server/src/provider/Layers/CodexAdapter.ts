@@ -54,6 +54,7 @@ import {
   getModelSelectionBooleanOptionValue,
   getModelSelectionStringOptionValue,
 } from "@cafecode/shared/model";
+import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
 
 import {
   ProviderAdapterRequestError,
@@ -88,6 +89,7 @@ const PROVIDER = ProviderDriverKind.make("codex");
 const CODEX_TRANSPORT_POLICY_FILENAME = "codex-transport-policy.json";
 const CODEX_TRANSPORT_POLICY_PERSISTENCE_ENV = "CAFE_CODE_PERSIST_CODEX_HTTP_FALLBACK";
 const CODEX_WEBSOCKET_FALLBACK_REASON = "responses_websocket_stream_disconnected";
+const CODEX_TOOL_NAME_MAX_CHARS = 160;
 const CODEX_TURN_DIFF_PREVIEW_CHARS = 4_096;
 const CODEX_HOOK_OUTPUT_PREVIEW_CHARS = 4_096;
 const CODEX_PLUGIN_ATTRIBUTION_MAX_CHARS = 512;
@@ -681,10 +683,28 @@ function itemDetail(item: CodexLifecycleItem): string | undefined {
     return agentPath ? `${action} ${agentPath}` : action;
   }
 
+  if (item.type === "mcpToolCall" || item.type === "dynamicToolCall") {
+    const namespace = item.type === "mcpToolCall" ? item.server : item.namespace;
+    const toolName = boundedSingleLine(
+      [namespace, item.tool]
+        .filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+        .join("."),
+      CODEX_TOOL_NAME_MAX_CHARS,
+    );
+    const argumentsPreview = summarizeToolArguments(item.arguments);
+    if (toolName && argumentsPreview) {
+      return `${toolName}: ${argumentsPreview}`;
+    }
+    return toolName || argumentsPreview;
+  }
+
   const candidates = [
     "command" in item ? item.command : undefined,
     "title" in item ? item.title : undefined,
     "summary" in item ? item.summary : undefined,
+    // Codex web-search lifecycle items carry their user-visible search text in
+    // `query` rather than the title/summary fields used by other tool items.
+    "query" in item ? item.query : undefined,
     "text" in item ? item.text : undefined,
     "path" in item ? item.path : undefined,
     "prompt" in item ? item.prompt : undefined,

@@ -1164,6 +1164,143 @@ describe("deriveWorkLogEntries", () => {
     expect(entry?.detail).toBeUndefined();
   });
 
+  it("recovers web-search queries from retained pre-detail activity payloads", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "codex-web-search-complete",
+        kind: "tool.completed",
+        summary: "Web search",
+        payload: {
+          itemType: "web_search",
+          title: "Web search",
+          data: {
+            item: {
+              type: "webSearch",
+              id: "web-search-1",
+              query: "current Codex five-hour and weekly usage limits",
+              action: {
+                type: "search",
+                query: "current Codex five-hour and weekly usage limits",
+              },
+            },
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities, undefined);
+    expect(entry).toMatchObject({
+      toolTitle: "Web search",
+      detail: "current Codex five-hour and weekly usage limits",
+      itemType: "web_search",
+    });
+  });
+
+  it("recovers Codex MCP and dynamic-tool detail from retained activity payloads", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "codex-mcp-complete",
+        kind: "tool.completed",
+        summary: "MCP tool call",
+        payload: {
+          itemType: "mcp_tool_call",
+          title: "MCP tool call",
+          data: {
+            item: {
+              type: "mcpToolCall",
+              server: "openaiDeveloperDocs",
+              tool: "search_openai_docs",
+              arguments: {
+                query: "current Responses API tools",
+                apiKey: "sk-example-secret-value-1234567890",
+              },
+            },
+          },
+        },
+      }),
+      makeActivity({
+        id: "codex-dynamic-complete",
+        kind: "tool.completed",
+        summary: "Tool call",
+        payload: {
+          itemType: "dynamic_tool_call",
+          title: "Tool call",
+          data: {
+            item: {
+              type: "dynamicToolCall",
+              namespace: "workspace",
+              tool: "read_file",
+              arguments: { path: "/workspace/README.md" },
+            },
+          },
+        },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities, undefined);
+    expect(entries.find((entry) => entry.id === "codex-mcp-complete")).toMatchObject({
+      detail:
+        'openaiDeveloperDocs.search_openai_docs: {"query":"current Responses API tools","apiKey":"[redacted]"}',
+      itemType: "mcp_tool_call",
+    });
+    expect(entries.find((entry) => entry.id === "codex-dynamic-complete")).toMatchObject({
+      detail: 'workspace.read_file: {"path":"/workspace/README.md"}',
+      itemType: "dynamic_tool_call",
+    });
+  });
+
+  it("recovers Grok output-side queries and nested tool arguments from retained payloads", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "grok-web-search-complete",
+        kind: "tool.completed",
+        summary: "Web search:",
+        payload: {
+          itemType: "web_search",
+          title: "Web search:",
+          data: {
+            kind: "search",
+            rawInput: { backend: true, variant: "web_search" },
+            rawOutput: {
+              action: {
+                type: "search",
+                query: "current Grok ACP release",
+                sources: [],
+              },
+            },
+          },
+        },
+      }),
+      makeActivity({
+        id: "grok-custom-tool-complete",
+        kind: "tool.completed",
+        summary: "cafe-code__list_threads",
+        payload: {
+          itemType: "dynamic_tool_call",
+          title: "cafe-code__list_threads",
+          data: {
+            kind: "other",
+            rawInput: {
+              variant: "mcp",
+              tool_name: "cafe-code__list_threads",
+              tool_input: { state: "active" },
+            },
+          },
+        },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities, undefined);
+    expect(entries.find((entry) => entry.id === "grok-web-search-complete")).toMatchObject({
+      detail: "current Grok ACP release",
+      itemType: "web_search",
+    });
+    expect(entries.find((entry) => entry.id === "grok-custom-tool-complete")).toMatchObject({
+      detail: '{"state":"active"}',
+      itemType: "dynamic_tool_call",
+    });
+  });
+
   it("uses grep raw output summaries instead of repeating the generic tool label", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

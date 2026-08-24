@@ -1,6 +1,7 @@
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
+import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -27,7 +28,7 @@ export const ACP_MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
 export const ACP_MAX_PENDING_EXTENSION_REQUESTS = 1_024;
 const ACP_SERVER_QUEUE_CAPACITY = 256;
 const ACP_CLIENT_QUEUE_CAPACITY = 2_048;
-const ACP_NOTIFICATION_QUEUE_CAPACITY = 2_048;
+export const ACP_NOTIFICATION_REPLAY_CAPACITY = 2_048;
 const ACP_OUTGOING_QUEUE_CAPACITY = 512;
 const textEncoder = new TextEncoder();
 
@@ -74,6 +75,13 @@ export interface AcpPatchedProtocolOptions {
 export interface AcpPatchedProtocol {
   readonly clientProtocol: RpcClient.Protocol["Service"];
   readonly serverProtocol: RpcServer.Protocol["Service"];
+  /**
+   * Best-effort observation stream for decoded inbound notifications.
+   *
+   * The stream replays a bounded recent tail to late subscribers and drops
+   * older observations when a subscriber cannot keep up. Canonical protocol
+   * delivery always continues independently through `onNotification`.
+   */
   readonly incoming: Stream.Stream<AcpIncomingNotification>;
   readonly request: (method: string, payload: unknown) => Effect.Effect<unknown, AcpError.AcpError>;
   readonly notify: (method: string, payload: unknown) => Effect.Effect<void, AcpError.AcpError>;
@@ -141,9 +149,16 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
   const parser = parserFactory.makeUnsafe();
   const serverQueue = yield* Queue.bounded<RpcMessage.FromClientEncoded>(ACP_SERVER_QUEUE_CAPACITY);
   const clientQueue = yield* Queue.bounded<RpcMessage.FromServerEncoded>(ACP_CLIENT_QUEUE_CAPACITY);
-  const notificationQueue = yield* Queue.bounded<AcpIncomingNotification>(
-    ACP_NOTIFICATION_QUEUE_CAPACITY,
-  );
+  // Raw notifications are an optional observability surface, not a delivery
+  // prerequisite. A bounded backpressured Queue here can deadlock the sole
+  // stdin reader when no one consumes `incoming`: the queue fills before
+  // `onNotification` runs, then the child eventually blocks on its full stdout
+  // pipe. Sliding PubSub keeps a useful bounded replay tail without allowing a
+  // dormant or slow diagnostic subscriber to stall canonical ACP handling.
+  const notificationPubSub = yield* PubSub.sliding<AcpIncomingNotification>({
+    capacity: ACP_NOTIFICATION_REPLAY_CAPACITY,
+    replay: ACP_NOTIFICATION_REPLAY_CAPACITY,
+  });
   const disconnects = yield* Queue.unbounded<number>();
   const outgoing = yield* Queue.bounded<string | Uint8Array, Cause.Done<void>>(
     ACP_OUTGOING_QUEUE_CAPACITY,
@@ -243,7 +258,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     );
 
   const dispatchNotification = (notification: AcpIncomingNotification) =>
-    Queue.offer(notificationQueue, notification).pipe(
+    PubSub.publish(notificationPubSub, notification).pipe(
       Effect.andThen(
         options.onNotification
           ? options.onNotification(notification).pipe(Effect.catch(() => Effect.void))
@@ -673,7 +688,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     clientProtocol,
     serverProtocol,
     get incoming() {
-      return Stream.fromQueue(notificationQueue);
+      return Stream.fromPubSub(notificationPubSub);
     },
     request: sendRequest,
     notify: sendNotification,

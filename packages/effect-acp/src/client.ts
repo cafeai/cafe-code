@@ -30,6 +30,10 @@ export interface AcpClientOptions {
 }
 
 type AcpClientRaw = {
+  /**
+   * Best-effort stream of decoded inbound notifications with bounded recent
+   * replay. Slow or absent consumers never block registered ACP handlers.
+   */
   readonly notifications: Stream.Stream<AcpProtocol.AcpIncomingNotification>;
   readonly request: (method: string, payload: unknown) => Effect.Effect<unknown, AcpError.AcpError>;
   readonly notify: (method: string, payload: unknown) => Effect.Effect<void, AcpError.AcpError>;

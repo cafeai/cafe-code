@@ -135,6 +135,80 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
       }),
   );
 
+  it.effect("keeps canonical handlers live beyond the bounded raw-notification replay", () =>
+    Effect.gen(function* () {
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const notificationCount = AcpProtocol.ACP_NOTIFICATION_REPLAY_CAPACITY + 1;
+      const handledCount = yield* Ref.make(0);
+      const allHandled = yield* Deferred.make<void>();
+      const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        stdio,
+        serverRequestMethods: new Set(),
+        onNotification: () =>
+          Ref.updateAndGet(handledCount, (count) => count + 1).pipe(
+            Effect.flatMap((count) =>
+              count === notificationCount
+                ? Deferred.succeed(allHandled, undefined).pipe(Effect.asVoid)
+                : Effect.void,
+            ),
+          ),
+      });
+
+      const wire = Array.from(
+        { length: notificationCount },
+        (_, sequence) =>
+          `${encodeUnknownJsonString({
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: {
+              sessionId: "session-1",
+              update: {
+                sessionUpdate: "plan",
+                entries: [
+                  {
+                    content: String(sequence),
+                    priority: "high",
+                    status: "in_progress",
+                  },
+                ],
+              },
+            },
+          })}\n`,
+      ).join("");
+
+      // No raw-stream consumer exists while the handler processes more than
+      // the replay capacity. This is the production shape that previously
+      // suspended the stdin reader before the final handler invocation.
+      yield* Queue.offer(input, encoder.encode(wire));
+      yield* Deferred.await(allHandled);
+      assert.equal(yield* Ref.get(handledCount), notificationCount);
+
+      const replayed = yield* transport.incoming.pipe(
+        Stream.take(AcpProtocol.ACP_NOTIFICATION_REPLAY_CAPACITY),
+        Stream.runCollect,
+      );
+      assert.equal(replayed.length, AcpProtocol.ACP_NOTIFICATION_REPLAY_CAPACITY);
+
+      const first = replayed[0];
+      const last = replayed[replayed.length - 1];
+      assert.equal(first?._tag, "SessionUpdate");
+      assert.equal(last?._tag, "SessionUpdate");
+      if (first?._tag !== "SessionUpdate" || last?._tag !== "SessionUpdate") {
+        return assert.fail("Expected session updates in raw replay");
+      }
+      assert.equal(first.params.update.sessionUpdate, "plan");
+      assert.equal(last.params.update.sessionUpdate, "plan");
+      if (
+        first.params.update.sessionUpdate !== "plan" ||
+        last.params.update.sessionUpdate !== "plan"
+      ) {
+        return assert.fail("Expected plan updates in raw replay");
+      }
+      assert.equal(first.params.update.entries[0]?.content, "1");
+      assert.equal(last.params.update.entries[0]?.content, String(notificationCount - 1));
+    }),
+  );
+
   it.effect("keeps invalid core notification values only in the schema cause", () =>
     Effect.gen(function* () {
       const secret = "acp-core-notification-secret-sentinel";

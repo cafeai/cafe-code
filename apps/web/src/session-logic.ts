@@ -12,6 +12,7 @@ import {
   type ThreadId,
   type TurnId,
 } from "@cafecode/contracts";
+import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
 
 import type {
   ChatMessage,
@@ -1123,6 +1124,61 @@ function isCommandToolDetail(payload: Record<string, unknown> | null, heading: s
   );
 }
 
+function extractPersistedWebSearchQuery(payload: Record<string, unknown> | null): string | null {
+  if (extractWorkLogItemType(payload) !== "web_search") {
+    return null;
+  }
+  const data = asRecord(payload?.data);
+  const item = asRecord(data?.item);
+  const action = asRecord(item?.action);
+  const rawInput = asRecord(data?.rawInput);
+  const rawOutput = asRecord(data?.rawOutput);
+  const rawOutputAction = asRecord(rawOutput?.action);
+  const nestedToolInput = asRecord(rawInput?.tool_input);
+  const query =
+    asTrimmedString(item?.query) ??
+    asTrimmedString(action?.query) ??
+    asTrimmedString(rawInput?.query) ??
+    asTrimmedString(rawInput?.pattern) ??
+    asTrimmedString(rawInput?.searchTerm) ??
+    asTrimmedString(rawInput?.url) ??
+    asTrimmedString(nestedToolInput?.query) ??
+    asTrimmedString(nestedToolInput?.pattern) ??
+    asTrimmedString(nestedToolInput?.searchTerm) ??
+    asTrimmedString(rawOutputAction?.query);
+  return summarizeToolArguments(query) ?? null;
+}
+
+function extractPersistedToolInvocationDetail(
+  payload: Record<string, unknown> | null,
+): string | null {
+  const itemType = extractWorkLogItemType(payload);
+  if (itemType !== "mcp_tool_call" && itemType !== "dynamic_tool_call") {
+    return null;
+  }
+  const data = asRecord(payload?.data);
+  const item = asRecord(data?.item);
+  if (item) {
+    const itemKind = asTrimmedString(item.type);
+    if (itemKind === "mcpToolCall" || itemKind === "dynamicToolCall") {
+      const namespace = asTrimmedString(itemKind === "mcpToolCall" ? item.server : item.namespace);
+      const tool = asTrimmedString(item.tool);
+      const toolName = truncateInlinePreview(
+        normalizeInlinePreview([namespace, tool].filter(Boolean).join(".")),
+        160,
+      );
+      const argumentsPreview = summarizeToolArguments(item.arguments);
+      if (toolName && argumentsPreview) {
+        return `${toolName}: ${argumentsPreview}`;
+      }
+      return toolName || argumentsPreview || null;
+    }
+  }
+
+  const rawInput = asRecord(data?.rawInput);
+  return summarizeToolArguments(rawInput?.tool_input) ?? null;
+}
+
 function extractToolDetail(
   payload: Record<string, unknown> | null,
   heading: string,
@@ -1138,6 +1194,21 @@ function extractToolDetail(
 
   if (isCommandToolDetail(payload, heading)) {
     return null;
+  }
+
+  // Older persisted Codex activities predate the adapter's canonical `detail`
+  // mapping but retain the original webSearch item under `data`.
+  const persistedWebSearchQuery = extractPersistedWebSearchQuery(payload);
+  if (persistedWebSearchQuery) {
+    return persistedWebSearchQuery;
+  }
+
+  // Retained Codex and ACP activities can predate the provider-side detail
+  // mapping. Recover only bounded/redacted invocation metadata here so old
+  // rows improve without replaying or rewriting the durable event store.
+  const persistedToolInvocationDetail = extractPersistedToolInvocationDetail(payload);
+  if (persistedToolInvocationDetail) {
+    return persistedToolInvocationDetail;
   }
 
   const rawOutputSummary = summarizeToolRawOutput(payload);

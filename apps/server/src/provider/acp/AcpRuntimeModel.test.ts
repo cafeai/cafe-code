@@ -255,6 +255,71 @@ describe("AcpRuntimeModel", () => {
     }
   });
 
+  it("projects output-side search queries and nested custom-tool arguments", () => {
+    const searchStarted = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "search-1",
+        title: "Web search:",
+        kind: "search",
+        status: "pending",
+        rawInput: { backend: true, variant: "web_search" },
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+    const searchCompleted = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "search-1",
+        status: "completed",
+        rawOutput: {
+          action: {
+            type: "search",
+            query: "current Grok ACP release",
+            sources: [],
+          },
+        },
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    expect(searchStarted.events).toHaveLength(1);
+    expect(searchCompleted.events).toHaveLength(1);
+    const startedEvent = searchStarted.events[0];
+    const completedEvent = searchCompleted.events[0];
+    if (startedEvent?._tag === "ToolCallUpdated" && completedEvent?._tag === "ToolCallUpdated") {
+      expect(mergeToolCallState(startedEvent.toolCall, completedEvent.toolCall)).toMatchObject({
+        title: "Searched files",
+        detail: "current Grok ACP release",
+      });
+    }
+
+    const customTool = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "mcp-1",
+        title: "cafe-code__list_threads",
+        kind: "other",
+        status: "completed",
+        rawInput: {
+          variant: "mcp",
+          tool_name: "cafe-code__list_threads",
+          tool_input: { state: "active" },
+        },
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    expect(customTool.events).toHaveLength(1);
+    expect(customTool.events[0]).toMatchObject({
+      _tag: "ToolCallUpdated",
+      toolCall: {
+        title: "cafe-code__list_threads",
+        detail: '{"state":"active"}',
+      },
+    });
+  });
+
   it("trims padded current mode updates before emitting a mode change", () => {
     const result = parseSessionUpdateEvent({
       sessionId: "session-1",

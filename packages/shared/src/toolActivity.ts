@@ -14,6 +14,122 @@ function asTrimmedString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+const TOOL_ARGUMENT_PREVIEW_MAX_CHARS = 400;
+const TOOL_ARGUMENT_PREVIEW_MAX_DEPTH = 4;
+const TOOL_ARGUMENT_PREVIEW_MAX_KEYS = 16;
+const TOOL_ARGUMENT_PREVIEW_MAX_ARRAY_ITEMS = 12;
+
+function isSensitiveToolArgumentKey(key: string): boolean {
+  const normalized = key.replace(/[^a-z0-9]/giu, "").toLowerCase();
+  return (
+    normalized === "auth" ||
+    normalized === "authorization" ||
+    normalized === "cookie" ||
+    normalized === "headers" ||
+    normalized.endsWith("apikey") ||
+    normalized.endsWith("credential") ||
+    normalized.endsWith("credentials") ||
+    normalized.endsWith("password") ||
+    normalized.endsWith("privatekey") ||
+    normalized.endsWith("secret") ||
+    normalized.endsWith("token")
+  );
+}
+
+function sanitizeToolArgumentText(value: string): string {
+  return value
+    .replace(/[\p{Cc}\p{Bidi_Control}]+/gu, " ")
+    .replace(/(authorization:\s*bearer\s+)[^\s"']+/giu, "$1[redacted]")
+    .replace(/(bearer\s+)[A-Za-z0-9._~+/=-]{16,}/giu, "$1[redacted]")
+    .replace(/\b(?:npm_|sk-)[A-Za-z0-9_-]{16,}\b/gu, "[redacted]")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function sanitizeToolArgumentPreview(
+  value: unknown,
+  depth: number,
+  seen: WeakSet<object>,
+): unknown {
+  if (value === null || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : String(value);
+  }
+  if (typeof value === "string") {
+    return sanitizeToolArgumentText(value);
+  }
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+  if (typeof value !== "object") {
+    return String(value);
+  }
+  if (seen.has(value)) {
+    return "[circular]";
+  }
+  if (depth >= TOOL_ARGUMENT_PREVIEW_MAX_DEPTH) {
+    return Array.isArray(value) ? "[array omitted]" : "[object omitted]";
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    const preview = value
+      .slice(0, TOOL_ARGUMENT_PREVIEW_MAX_ARRAY_ITEMS)
+      .map((entry) => sanitizeToolArgumentPreview(entry, depth + 1, seen));
+    if (value.length > TOOL_ARGUMENT_PREVIEW_MAX_ARRAY_ITEMS) {
+      preview.push(`[${value.length - TOOL_ARGUMENT_PREVIEW_MAX_ARRAY_ITEMS} more items]`);
+    }
+    return preview;
+  }
+
+  const preview: Record<string, unknown> = {};
+  const entries = Object.entries(value);
+  for (const [key, entryValue] of entries.slice(0, TOOL_ARGUMENT_PREVIEW_MAX_KEYS)) {
+    preview[key] = isSensitiveToolArgumentKey(key)
+      ? "[redacted]"
+      : sanitizeToolArgumentPreview(entryValue, depth + 1, seen);
+  }
+  if (entries.length > TOOL_ARGUMENT_PREVIEW_MAX_KEYS) {
+    preview.omittedKeyCount = entries.length - TOOL_ARGUMENT_PREVIEW_MAX_KEYS;
+  }
+  return preview;
+}
+
+/**
+ * Builds a compact user-visible preview of provider tool arguments.
+ *
+ * Provider MCP/dynamic-tool inputs are untrusted and can contain both very
+ * large values and credentials. Keep this presentation bounded and redact
+ * common secret-bearing keys before it is copied into the durable work log.
+ */
+export function summarizeToolArguments(
+  value: unknown,
+  maxChars = TOOL_ARGUMENT_PREVIEW_MAX_CHARS,
+): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const record = asRecord(value);
+  if (record && Object.keys(record).length === 0) {
+    return undefined;
+  }
+  if (Array.isArray(value) && value.length === 0) {
+    return undefined;
+  }
+  const sanitized = sanitizeToolArgumentPreview(value, 0, new WeakSet<object>());
+  const serialized =
+    typeof sanitized === "string" ? sanitized : (JSON.stringify(sanitized) ?? undefined);
+  const normalized = asTrimmedString(serialized);
+  if (!normalized) {
+    return undefined;
+  }
+  if (maxChars <= 3) {
+    return normalized.slice(0, Math.max(0, maxChars));
+  }
+  return normalized.length > maxChars ? `${normalized.slice(0, maxChars - 3)}...` : normalized;
+}
+
 function normalizeCommandValue(value: unknown): string | undefined {
   const direct = asTrimmedString(value);
   if (direct) {
@@ -199,6 +315,9 @@ export function deriveToolActivityPresentation(
   const detail = stripTrailingExitCode(asTrimmedString(input.detail));
   const fallbackSummary = asTrimmedString(input.fallbackSummary) ?? "Tool";
   const data = asRecord(input.data);
+  const rawInput = asRecord(data?.rawInput);
+  const rawOutput = asRecord(data?.rawOutput);
+  const rawOutputAction = asRecord(rawOutput?.action);
   const command = extractToolCommand(data, title);
   const primaryPath = extractPrimaryPath(data);
   const action = classifyToolAction({
@@ -234,10 +353,18 @@ export function deriveToolActivityPresentation(
   }
 
   if (action === "search") {
-    const query =
-      asTrimmedString(asRecord(data?.rawInput)?.query) ??
-      asTrimmedString(asRecord(data?.rawInput)?.pattern) ??
-      asTrimmedString(asRecord(data?.rawInput)?.searchTerm);
+    const query = summarizeToolArguments(
+      asTrimmedString(rawInput?.query) ??
+        asTrimmedString(rawInput?.pattern) ??
+        asTrimmedString(rawInput?.searchTerm) ??
+        asTrimmedString(rawInput?.url) ??
+        asTrimmedString(asRecord(rawInput?.tool_input)?.query) ??
+        asTrimmedString(asRecord(rawInput?.tool_input)?.pattern) ??
+        asTrimmedString(asRecord(rawInput?.tool_input)?.searchTerm) ??
+        // Grok 1.0.4's completed web-search update keeps the query beside the
+        // sources in rawOutput.action rather than repeating it in rawInput.
+        asTrimmedString(rawOutputAction?.query),
+    );
     return {
       summary: "Searched files",
       ...(query ? { detail: query } : {}),
@@ -248,6 +375,14 @@ export function deriveToolActivityPresentation(
     return {
       summary: title ?? fallbackSummary,
       detail,
+    };
+  }
+
+  const nestedToolArguments = summarizeToolArguments(rawInput?.tool_input);
+  if (nestedToolArguments) {
+    return {
+      summary: title ?? fallbackSummary,
+      detail: nestedToolArguments,
     };
   }
 

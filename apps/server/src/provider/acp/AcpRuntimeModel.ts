@@ -344,7 +344,15 @@ function makeToolCallState(
       ? title
       : undefined;
   const data: Record<string, unknown> = { toolCallId };
-  const kind = normalizeToolKind(input.kind);
+  const rawOutputAction = isRecord(input.rawOutput) ? input.rawOutput.action : undefined;
+  const rawOutputActionType = isRecord(rawOutputAction)
+    ? normalizeToolKind(rawOutputAction.type)
+    : undefined;
+  // Grok 1.0.4 can send a completed web-search update with only
+  // rawOutput.action.type/query. Recover the stable ACP kind here so a sparse
+  // completion still produces presentation detail before state is merged.
+  const kind =
+    normalizeToolKind(input.kind) ?? (rawOutputActionType === "search" ? "search" : undefined);
   if (kind) {
     data.kind = kind;
   }

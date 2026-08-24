@@ -33,7 +33,8 @@ export class AcpAgent extends Context.Service<
   {
     readonly raw: {
       /**
-       * Stream of inbound ACP notifications observed on the connection.
+       * Best-effort stream of inbound ACP notifications with bounded recent
+       * replay. Slow or absent consumers never block registered ACP handlers.
        */
       readonly notifications: Stream.Stream<AcpProtocol.AcpIncomingNotification>;
       /**

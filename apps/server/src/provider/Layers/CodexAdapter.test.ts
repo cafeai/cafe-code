@@ -751,6 +751,151 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("maps Codex web-search queries into visible work-log detail", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const query = "current Codex five-hour and weekly usage limits";
+
+      yield* runtime.emit({
+        id: asEventId("evt-web-search-started"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/started",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("web-search-1"),
+        payload: {
+          threadId: "provider-thread-1",
+          turnId: "turn-1",
+          startedAtMs: 1_767_225_600_000,
+          item: {
+            type: "webSearch",
+            id: "web-search-1",
+            query,
+            action: { type: "search", query },
+          },
+        },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-web-search-completed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "item/completed",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("web-search-1"),
+        payload: {
+          threadId: "provider-thread-1",
+          turnId: "turn-1",
+          completedAtMs: 1_767_225_601_000,
+          item: {
+            type: "webSearch",
+            id: "web-search-1",
+            query,
+            action: { type: "search", query },
+            results: [],
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.deepStrictEqual(
+        events.map((event) => event.type),
+        ["item.started", "item.completed"],
+      );
+      for (const event of events) {
+        if (event.type !== "item.started" && event.type !== "item.completed") {
+          continue;
+        }
+        assert.equal(event.payload.itemType, "web_search");
+        assert.equal(event.payload.title, "Web search");
+        assert.equal(event.payload.detail, query);
+      }
+    }),
+  );
+
+  it.effect("maps Codex MCP and dynamic-tool identity and arguments into work-log detail", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-mcp-tool-started"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/started",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("mcp-tool-1"),
+        payload: {
+          threadId: "provider-thread-1",
+          turnId: "turn-1",
+          startedAtMs: 1_767_225_600_000,
+          item: {
+            type: "mcpToolCall",
+            id: "mcp-tool-1",
+            server: "openaiDeveloperDocs",
+            tool: "search_openai_docs",
+            arguments: {
+              query: "current Responses API tools",
+              apiKey: "sk-example-secret-value-1234567890",
+            },
+            status: "inProgress",
+          },
+        },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-dynamic-tool-started"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "item/started",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("dynamic-tool-1"),
+        payload: {
+          threadId: "provider-thread-1",
+          turnId: "turn-1",
+          startedAtMs: 1_767_225_601_000,
+          item: {
+            type: "dynamicToolCall",
+            id: "dynamic-tool-1",
+            namespace: "workspace",
+            tool: "read_file",
+            arguments: { path: "/workspace/README.md" },
+            status: "inProgress",
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.equal(events[0]?.type, "item.started");
+      assert.equal(events[0]?.payload.itemType, "mcp_tool_call");
+      assert.equal(events[0]?.payload.title, "MCP tool call");
+      assert.equal(
+        events[0]?.payload.detail,
+        'openaiDeveloperDocs.search_openai_docs: {"query":"current Responses API tools","apiKey":"[redacted]"}',
+      );
+      assert.equal(events[1]?.type, "item.started");
+      assert.equal(events[1]?.payload.itemType, "dynamic_tool_call");
+      assert.equal(events[1]?.payload.title, "Tool call");
+      assert.equal(
+        events[1]?.payload.detail,
+        'workspace.read_file: {"path":"/workspace/README.md"}',
+      );
+    }),
+  );
+
   it.effect("maps effective Codex thread settings without persisting sensitive fields", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
