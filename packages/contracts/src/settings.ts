@@ -2,7 +2,14 @@ import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
-import { TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
+import {
+  EnvironmentId,
+  IsoDateTime,
+  ThreadId,
+  TrimmedNonEmptyString,
+  TrimmedString,
+  TurnId,
+} from "./baseSchemas.ts";
 import { DEFAULT_GIT_TEXT_GENERATION_MODEL, ProviderOptionSelections } from "./model.ts";
 import { ModelSelection } from "./orchestration.ts";
 import { ProviderInstanceConfig, ProviderInstanceId } from "./providerInstance.ts";
@@ -170,12 +177,41 @@ export const DEFAULT_AMBIANCE_COLOR = "";
 // Task Atrium: a decorative read-only view of everything currently running,
 // opened explicitly from the chat header and dismissed with Escape. It never
 // appears on its own — no idle takeover, no taking over the empty pane — so the
-// only thing this setting controls is whether the button exists. Like the
-// weather layer it is renderer-only and never dispatches orchestration.
+// only thing the enabled setting controls is whether the button exists. Like
+// the weather layer it never dispatches orchestration. Presentation-only error
+// dismissals are persisted separately so a historical provider failure does
+// not reappear after every restart.
 export const DEFAULT_AMBIANCE_ATRIUM_ENABLED = false;
 // Empty string means "follow the ambiance weather color", which itself falls
 // back to the Appearance accent. An explicit value tints only the Atrium.
 export const DEFAULT_AMBIANCE_ATRIUM_COLOR = "";
+
+/**
+ * Maximum number of historical Task Atrium failure occurrences retained in
+ * client settings. The records are also compacted to one per scoped thread by
+ * the renderer before each write. The schema bound is the final defensive
+ * limit for imported or concurrently written settings files.
+ */
+export const MAX_TASK_ATRIUM_ERROR_DISMISSALS = 2_000;
+
+/**
+ * Identity of one dismissed Task Atrium error occurrence.
+ *
+ * Deliberately exclude provider error text, prompts, output, paths, and account
+ * data. A turn id plus its observed timestamp distinguishes a later failure on
+ * the same thread without persisting potentially sensitive diagnostics.
+ */
+export const TaskAtriumErrorDismissal = Schema.Struct({
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  turnId: Schema.NullOr(TurnId),
+  observedAt: IsoDateTime,
+});
+export type TaskAtriumErrorDismissal = typeof TaskAtriumErrorDismissal.Type;
+
+const TaskAtriumErrorDismissals = Schema.Array(TaskAtriumErrorDismissal).check(
+  Schema.isMaxLength(MAX_TASK_ATRIUM_ERROR_DISMISSALS),
+);
 
 export const SidebarProjectSortOrder = Schema.Literals(["updated_at", "created_at", "manual"]);
 export type SidebarProjectSortOrder = typeof SidebarProjectSortOrder.Type;
@@ -287,6 +323,9 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   ambianceAtriumColor: TrimmedString.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_ATRIUM_COLOR)),
+  ),
+  dismissedTaskAtriumErrors: TaskAtriumErrorDismissals.pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
   ),
   themeAccentColor: TrimmedString.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_THEME_ACCENT_COLOR)),
@@ -902,6 +941,7 @@ export const ClientSettingsPatch = Schema.Struct({
   ambianceColor: Schema.optionalKey(TrimmedString),
   ambianceAtriumEnabled: Schema.optionalKey(Schema.Boolean),
   ambianceAtriumColor: Schema.optionalKey(TrimmedString),
+  dismissedTaskAtriumErrors: Schema.optionalKey(TaskAtriumErrorDismissals),
   themeAccentColor: Schema.optionalKey(TrimmedString),
   appAccentColor: Schema.optionalKey(TrimmedString),
   defaultEditor: Schema.optionalKey(DefaultEditorSelection),

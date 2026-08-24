@@ -361,18 +361,30 @@ describe("UsageStatsService", () => {
             provider: CLAUDE,
             model: "claude-opus-5",
             outputTokens: 70,
+            inputTokens: 0,
+            cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            reasoningOutputTokens: 0,
           },
           {
             day: localDayKey(0),
             provider: CODEX,
             model: "gpt-5.6-codex",
             outputTokens: 125,
+            inputTokens: 0,
+            cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            reasoningOutputTokens: 0,
           },
           {
             day: localDayKey(0),
             provider: CODEX,
             model: "gpt-5.6-codex-mini",
             outputTokens: 50,
+            inputTokens: 0,
+            cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            reasoningOutputTokens: 0,
           },
         ];
         assert.deepEqual(yield* harness.repository.listTokenBreakdownDays, expectedRows);
@@ -509,7 +521,18 @@ describe("UsageStatsService", () => {
     withHarness((harness) =>
       Effect.gen(function* () {
         yield* harness.repository.flushDeltas({
-          days: [{ day: "2020-01-01", generatingMs: 60_000, outputTokens: 5000, userMessages: 7 }],
+          days: [
+            {
+              day: "2020-01-01",
+              generatingMs: 60_000,
+              outputTokens: 5000,
+              userMessages: 7,
+              inputTokens: 0,
+              cachedInputTokens: 0,
+              cacheWriteInputTokens: 0,
+              reasoningOutputTokens: 0,
+            },
+          ],
           tokenBreakdowns: [],
         });
         const persisted = yield* harness.repository.listDays;

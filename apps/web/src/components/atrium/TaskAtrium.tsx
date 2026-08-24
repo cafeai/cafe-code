@@ -1,18 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { scopeThreadRef } from "@cafecode/client-runtime";
+import { CircleCheckIcon } from "lucide-react";
 
-import { useSettings } from "../../hooks/useSettings";
+import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { useTheme } from "../../hooks/useTheme";
 import { normalizeAccentColor } from "../../themeAccent";
 import { useStore } from "../../store";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { cn } from "../../lib/utils";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { createAtriumScene, type AtriumScene } from "./atriumScene";
 import {
   EMPTY_ATRIUM,
   formatElapsed,
   MAX_ATRIUM_CARDS,
+  mergeTaskAtriumErrorDismissals,
   selectAtriumSnapshot,
   type AtriumCard,
   type AtriumCardState,
@@ -28,11 +31,11 @@ import { useTaskAtriumStore } from "./taskAtriumStore";
  * Atrium tint, so the colour setting drives the season rather than the scene
  * being locked to cherry pink.
  *
- * It is a display, not a control surface: no approve, no deny, no stop. A card
+ * It is not a provider control surface: no approve, no deny, no stop. A card
  * says a thread is waiting on you because that is information about what is
  * going on, but the decision happens in the thread where the request is
- * visible. Clicking a card opens that thread; that is the whole interaction,
- * which keeps this renderer-only exactly like the ambiance layer above it.
+ * visible. Its only local state mutation clears exact historical error cards
+ * from the presentation; it never alters provider or orchestration state.
  */
 
 const FALLBACK_TINT = "#48cfff";
@@ -355,6 +358,10 @@ function TaskAtriumCardView({
 
 export function TaskAtriumBoard() {
   const tint = useAtriumTint();
+  const dismissedTaskAtriumErrors = useSettings(
+    (settings) => settings.dismissedTaskAtriumErrors,
+  );
+  const { updateSettings } = useUpdateSettings();
   const { resolvedTheme } = useTheme();
   const dark = resolvedTheme !== "light";
   const navigate = useNavigate();
@@ -374,12 +381,14 @@ export function TaskAtriumBoard() {
     const tick = () => {
       const timestamp = Date.now();
       setNow(timestamp);
-      setSnapshot(selectAtriumSnapshot(useStore.getState(), timestamp));
+      setSnapshot(
+        selectAtriumSnapshot(useStore.getState(), timestamp, dismissedTaskAtriumErrors),
+      );
     };
     tick();
     const interval = window.setInterval(tick, 1000);
     return () => window.clearInterval(interval);
-  }, []);
+  }, [dismissedTaskAtriumErrors]);
 
   // Pointer parallax, quantized so a stationary mouse cannot cause a render and
   // skipped entirely under reduced motion.
@@ -418,6 +427,20 @@ export function TaskAtriumBoard() {
   const visible = filtered.slice(0, MAX_ATRIUM_CARDS);
   const overflow = Math.max(0, filtered.length - visible.length);
 
+  const clearErrors = useCallback(() => {
+    const currentErrors = snapshot.cards.flatMap((card) =>
+      card.errorDismissal === null ? [] : [card.errorDismissal],
+    );
+    if (currentErrors.length === 0) return;
+
+    updateSettings({
+      dismissedTaskAtriumErrors: mergeTaskAtriumErrorDismissals(
+        dismissedTaskAtriumErrors,
+        currentErrors,
+      ),
+    });
+  }, [dismissedTaskAtriumErrors, snapshot.cards, updateSettings]);
+
   const openCard = (card: AtriumCard) => {
     // Close on the way out: the overlay is fixed over the whole window, so
     // navigating without closing changes the route behind a panel that still
@@ -448,54 +471,87 @@ export function TaskAtriumBoard() {
 
       {/* Glass pill nav, floating over the scene. */}
       <div className="relative z-20 flex shrink-0 justify-center p-4">
-        <div
-          role="group"
-          aria-label="Filter by provider"
-          className={cn("flex items-center gap-1 rounded-full border p-1 backdrop-blur-md", glass)}
-        >
-          <button
-            type="button"
-            onClick={() => setProviderFilter(null)}
-            aria-pressed={providerFilter === null}
+        <div className="flex items-center gap-2">
+          <div
+            role="group"
+            aria-label="Filter by provider"
             className={cn(
-              "rounded-full px-3 py-1 text-xs whitespace-nowrap transition-colors",
-              "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current",
-              providerFilter === null
-                ? cn("font-semibold", dark ? "bg-white text-[#1b1620]" : "bg-[#2b2029] text-white")
-                : "opacity-70 hover:opacity-100",
+              "flex items-center gap-1 rounded-full border p-1 backdrop-blur-md",
+              glass,
             )}
           >
-            All work {total}
-          </button>
-          {providerCounts.map(([provider, count]) => {
-            const active = providerFilter === provider;
-            return (
-              <button
-                key={provider}
-                type="button"
-                onClick={() => setProviderFilter(active ? null : provider)}
-                aria-pressed={active}
-                className={cn(
-                  "flex items-center gap-1.5 rounded-full px-3 py-1 text-xs whitespace-nowrap transition-colors",
-                  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current",
-                  active
-                    ? cn(
-                        "font-semibold",
-                        dark ? "bg-white text-[#1b1620]" : "bg-[#2b2029] text-white",
-                      )
-                    : "opacity-70 hover:opacity-100",
-                )}
+            <button
+              type="button"
+              onClick={() => setProviderFilter(null)}
+              aria-pressed={providerFilter === null}
+              className={cn(
+                "rounded-full px-3 py-1 text-xs whitespace-nowrap transition-colors",
+                "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current",
+                providerFilter === null
+                  ? cn(
+                      "font-semibold",
+                      dark ? "bg-white text-[#1b1620]" : "bg-[#2b2029] text-white",
+                    )
+                  : "opacity-70 hover:opacity-100",
+              )}
+            >
+              All work {total}
+            </button>
+            {providerCounts.map(([provider, count]) => {
+              const active = providerFilter === provider;
+              return (
+                <button
+                  key={provider}
+                  type="button"
+                  onClick={() => setProviderFilter(active ? null : provider)}
+                  aria-pressed={active}
+                  className={cn(
+                    "flex items-center gap-1.5 rounded-full px-3 py-1 text-xs whitespace-nowrap transition-colors",
+                    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current",
+                    active
+                      ? cn(
+                          "font-semibold",
+                          dark ? "bg-white text-[#1b1620]" : "bg-[#2b2029] text-white",
+                        )
+                      : "opacity-70 hover:opacity-100",
+                  )}
+                >
+                  <span
+                    aria-hidden="true"
+                    className="size-1.5 rounded-full"
+                    style={{ background: PROVIDER_DOT[provider] ?? SETTLED_COLOR }}
+                  />
+                  {providerLabel(provider)}
+                  <span className="tabular-nums opacity-60">{count}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {snapshot.errorCount > 0 ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    onClick={clearErrors}
+                    aria-label="Clear Task Atrium errors"
+                    className={cn(
+                      "flex size-8 items-center justify-center rounded-full border backdrop-blur-md",
+                      "transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current",
+                      "hover:bg-white/75 dark:hover:bg-black/55",
+                      glass,
+                    )}
+                  />
+                }
               >
-                <span
-                  aria-hidden="true"
-                  className="size-1.5 rounded-full"
-                  style={{ background: PROVIDER_DOT[provider] ?? SETTLED_COLOR }}
-                />
-                {providerLabel(provider)}
-                <span className="tabular-nums opacity-60">{count}</span>
-              </button>
-            );
-          })}
+                <CircleCheckIcon className="size-4" />
+              </TooltipTrigger>
+              <TooltipPopup side="bottom">
+                Clear {snapshot.errorCount} historical {snapshot.errorCount === 1 ? "error" : "errors"}
+              </TooltipPopup>
+            </Tooltip>
+          ) : null}
         </div>
       </div>
 
@@ -548,7 +604,7 @@ export function TaskAtriumBoard() {
                 ? `${snapshot.holdingCount} waiting on you. Everything else is moving on its own.`
                 : snapshot.errorCount > 0 && snapshot.runningCount === 0
                   ? `${snapshot.errorCount} ${snapshot.errorCount === 1 ? "thread" : "threads"} stopped on an error. Open one to see what happened.`
-                  : "Nothing here needs you. This is just what the garden looks like while it grows."}
+                  : "Nothing here asks for you. The garden keeps its own hours."}
             </p>
             <div className="mt-6 flex gap-6">
               <div>

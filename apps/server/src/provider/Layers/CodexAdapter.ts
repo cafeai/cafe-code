@@ -526,6 +526,13 @@ function normalizeCodexTokenUsage(
     ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
     ...(cacheWriteInputTokens !== undefined ? { cacheWriteInputTokens } : {}),
     ...(totalCacheWriteInputTokens !== undefined ? { totalCacheWriteInputTokens } : {}),
+    ...(usage.total.inputTokens !== undefined ? { totalInputTokens: usage.total.inputTokens } : {}),
+    ...(usage.total.cachedInputTokens !== undefined
+      ? { totalCachedInputTokens: usage.total.cachedInputTokens }
+      : {}),
+    ...(usage.total.reasoningOutputTokens !== undefined
+      ? { totalReasoningOutputTokens: usage.total.reasoningOutputTokens }
+      : {}),
     ...(outputTokens !== undefined ? { outputTokens } : {}),
     ...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
     ...(usedTokens !== undefined ? { lastUsedTokens: usedTokens } : {}),

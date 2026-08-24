@@ -2474,6 +2474,11 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         cachedInputTokens: 0,
         cacheWriteInputTokens: 12,
         totalCacheWriteInputTokens: 77,
+        // Cumulative input counters are forwarded now: the per-request `last`
+        // values cannot be summed, so usage accounting needs these.
+        totalInputTokens: 11_833,
+        totalCachedInputTokens: 3456,
+        totalReasoningOutputTokens: 0,
         outputTokens: 6,
         reasoningOutputTokens: 0,
         lastUsedTokens: 126,

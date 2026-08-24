@@ -74,6 +74,7 @@ import Migration0059 from "./Migrations/059_DropLegacyUsageStatsProjections.ts";
 import Migration0060 from "./Migrations/060_ProjectionTurnCheckpointCompletedAt.ts";
 import Migration0061 from "./Migrations/061_UsageStatsTokenBreakdown.ts";
 import Migration0062 from "./Migrations/062_ProjectionThreadGoals.ts";
+import Migration0063 from "./Migrations/063_UsageStatsTokenDetail.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -152,6 +153,7 @@ export const migrationEntries = [
   [60, "ProjectionTurnCheckpointCompletedAt", Migration0060],
   [61, "UsageStatsTokenBreakdown", Migration0061],
   [62, "ProjectionThreadGoals", Migration0062],
+  [63, "UsageStatsTokenDetail", Migration0063],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

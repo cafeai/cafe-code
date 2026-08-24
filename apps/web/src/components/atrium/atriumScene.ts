@@ -90,22 +90,24 @@ function buildPalette(tint: string, dark: boolean): ScenePalette {
   const bloom = mix(BLOSSOM_BASE, tint, 0.5);
   if (dark) {
     return {
+      // Moonlit, not lit: petals sit under the cards' brightness so the type
+      // stays the brightest thing on screen.
       petals: [
-        mix(bloom, "#ffffff", 0.45),
-        mix(bloom, "#ffffff", 0.2),
-        mix(bloom, "#8d4f6a", 0.22),
-        mix(bloom, "#ffffff", 0.62),
+        mix(bloom, "#1b1520", 0.34),
+        mix(bloom, "#1b1520", 0.46),
+        mix(bloom, "#1b1520", 0.56),
+        mix(bloom, "#1b1520", 0.22),
       ],
       // Sky takes only a trace of the tint; a saturated wash would fight the
       // cards sitting on top of it.
-      skyTop: mix("#4b3a46", tint, 0.22),
-      skyMid: mix("#3a2c37", tint, 0.16),
-      skyBottom: mix("#241b23", tint, 0.1),
-      glow: mix("#ffe2ec", tint, 0.35),
-      bark: mix("#3a2b2c", tint, 0.12),
-      stamen: "#fff3d8",
-      hazeFrom: mix("#241b23", tint, 0.1),
-      hazeTo: mix("#1e161c", tint, 0.1),
+      skyTop: mix("#1d1622", tint, 0.16),
+      skyMid: mix("#140f19", tint, 0.12),
+      skyBottom: mix("#0a0710", tint, 0.08),
+      glow: mix("#c9b6d8", tint, 0.3),
+      bark: mix("#241a1e", tint, 0.1),
+      stamen: "#e8d6a8",
+      hazeFrom: mix("#0a0710", tint, 0.08),
+      hazeTo: mix("#050309", tint, 0.08),
     };
   }
   return {
@@ -299,7 +301,7 @@ export function createAtriumScene(canvas: HTMLCanvasElement): AtriumScene | null
       layerHeight * 0.85,
     );
     const [gr, gg, gb] = hexRgb(palette.glow);
-    glow.addColorStop(0, `rgba(${gr},${gg},${gb},${dark ? 0.16 : 0.55})`);
+    glow.addColorStop(0, `rgba(${gr},${gg},${gb},${dark ? 0.09 : 0.55})`);
     glow.addColorStop(1, `rgba(${gr},${gg},${gb},0)`);
     fc.fillStyle = glow;
     fc.fillRect(0, 0, layerWidth, layerHeight);
@@ -472,7 +474,7 @@ export function createAtriumScene(canvas: HTMLCanvasElement): AtriumScene | null
     const [hr, hg, hb] = hexRgb(palette.hazeFrom);
     const [tr, tg, tb] = hexRgb(palette.hazeTo);
     haze.addColorStop(0, `rgba(${hr},${hg},${hb},0)`);
-    haze.addColorStop(1, `rgba(${tr},${tg},${tb},${dark ? 0.45 : 0.55})`);
+    haze.addColorStop(1, `rgba(${tr},${tg},${tb},${dark ? 0.6 : 0.55})`);
     context.fillStyle = haze;
     context.fillRect(0, height * 0.72, width, height * 0.28);
   }

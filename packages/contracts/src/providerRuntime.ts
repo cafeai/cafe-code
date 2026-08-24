@@ -351,6 +351,13 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
   cachedInputTokens: Schema.optional(NonNegativeInt),
   cacheWriteInputTokens: Schema.optional(NonNegativeInt),
   totalCacheWriteInputTokens: Schema.optional(NonNegativeInt),
+  // Session-cumulative input counters, mirroring `totalOutputTokens`. Only
+  // adapters whose backends report running totals populate these; usage
+  // accounting needs a monotone counter because the per-request `last*` values
+  // neither grow nor reset predictably and cannot be summed safely.
+  totalInputTokens: Schema.optional(NonNegativeInt),
+  totalCachedInputTokens: Schema.optional(NonNegativeInt),
+  totalReasoningOutputTokens: Schema.optional(NonNegativeInt),
   outputTokens: Schema.optional(NonNegativeInt),
   reasoningOutputTokens: Schema.optional(NonNegativeInt),
   lastUsedTokens: Schema.optional(NonNegativeInt),

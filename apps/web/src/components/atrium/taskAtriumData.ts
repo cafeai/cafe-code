@@ -1,8 +1,10 @@
-import type {
-  EnvironmentId,
-  OrchestrationSessionStatus,
-  OrchestrationThreadActivity,
-  ThreadId,
+import {
+  MAX_TASK_ATRIUM_ERROR_DISMISSALS,
+  type EnvironmentId,
+  type OrchestrationSessionStatus,
+  type OrchestrationThreadActivity,
+  type TaskAtriumErrorDismissal,
+  type ThreadId,
 } from "@cafecode/contracts";
 
 import type { AppState } from "../../store";
@@ -62,6 +64,8 @@ export type AtriumCard = {
   startedAt: number | null;
   subagents: AtriumSubagent[];
   extraSubagents: number;
+  /** Exact terminal failure that the presentation-only clear action dismisses. */
+  errorDismissal: TaskAtriumErrorDismissal | null;
 };
 
 export type AtriumSnapshot = {
@@ -179,12 +183,65 @@ const LIVE_STATUSES: ReadonlySet<OrchestrationSessionStatus> = new Set([
 ] as const);
 
 /**
+ * Settings retain at most one dismissed occurrence per scoped thread. JSON
+ * tuple encoding avoids delimiter collisions because ids are user-importable
+ * strings rather than values whose character set should be guessed here.
+ */
+function errorDismissalScopeKey(
+  dismissal: Pick<TaskAtriumErrorDismissal, "environmentId" | "threadId">,
+): string {
+  return JSON.stringify([dismissal.environmentId, dismissal.threadId]);
+}
+
+function isSameErrorDismissal(
+  left: TaskAtriumErrorDismissal,
+  right: TaskAtriumErrorDismissal,
+): boolean {
+  return (
+    left.environmentId === right.environmentId &&
+    left.threadId === right.threadId &&
+    left.turnId === right.turnId &&
+    left.observedAt === right.observedAt
+  );
+}
+
+/**
+ * Merge current failure watermarks into persisted settings while keeping the
+ * write bounded. Replacing by scoped thread means a later failure supersedes
+ * the old dismissal instead of growing this list for the lifetime of a busy
+ * thread. Insertion order keeps the most recently cleared records when the
+ * defensive cap is reached.
+ */
+export function mergeTaskAtriumErrorDismissals(
+  existing: ReadonlyArray<TaskAtriumErrorDismissal>,
+  current: ReadonlyArray<TaskAtriumErrorDismissal>,
+): TaskAtriumErrorDismissal[] {
+  const byScope = new Map<string, TaskAtriumErrorDismissal>();
+  for (const dismissal of [...existing, ...current]) {
+    const key = errorDismissalScopeKey(dismissal);
+    // Delete first so replacing an existing thread moves its new occurrence to
+    // the end, where it survives bounded retention ahead of stale entries.
+    byScope.delete(key);
+    byScope.set(key, dismissal);
+  }
+  return [...byScope.values()].slice(-MAX_TASK_ATRIUM_ERROR_DISMISSALS);
+}
+
+/**
  * Build the Atrium snapshot from store state. `now` is injected so callers can
  * drive the elapsed readouts from one clock and tests stay deterministic.
  */
-export function selectAtriumSnapshot(state: AppState, now: number): AtriumSnapshot {
+export function selectAtriumSnapshot(
+  state: AppState,
+  now: number,
+  dismissedErrors: ReadonlyArray<TaskAtriumErrorDismissal> = [],
+): AtriumSnapshot {
   const cards: AtriumCard[] = [];
   let subagentCount = 0;
+  const dismissedErrorByScope = new Map<string, TaskAtriumErrorDismissal>();
+  for (const dismissal of dismissedErrors) {
+    dismissedErrorByScope.set(errorDismissalScopeKey(dismissal), dismissal);
+  }
 
   for (const [environmentIdRaw, environment] of Object.entries(state.environmentStateById)) {
     if (!environment) continue;
@@ -219,6 +276,42 @@ export function selectAtriumSnapshot(state: AppState, now: number): AtriumSnapsh
         }
       }
 
+      // A dismissal is tied to one exact failure occurrence. Prefer the turn's
+      // immutable lifecycle timestamps when the turn itself failed; otherwise
+      // use the session error transition timestamp. This survives renderer and
+      // app restarts, while a later failed turn or session transition naturally
+      // receives a new identity and becomes visible again.
+      const errorDismissal: TaskAtriumErrorDismissal | null =
+        cardState === "error"
+          ? latestTurn?.state === "error"
+            ? {
+                environmentId,
+                threadId,
+                turnId: latestTurn.turnId,
+                observedAt:
+                  latestTurn.completedAt ?? latestTurn.startedAt ?? latestTurn.requestedAt,
+              }
+            : {
+                environmentId,
+                threadId,
+                turnId: session?.activeTurnId ?? latestTurn?.turnId ?? null,
+                observedAt:
+                  session?.updatedAt ??
+                  latestTurn?.completedAt ??
+                  latestTurn?.startedAt ??
+                  latestTurn?.requestedAt ??
+                  summary.updatedAt ??
+                  summary.createdAt,
+              }
+          : null;
+
+      if (errorDismissal !== null) {
+        const dismissed = dismissedErrorByScope.get(errorDismissalScopeKey(errorDismissal));
+        if (dismissed !== undefined && isSameErrorDismissal(dismissed, errorDismissal)) {
+          continue;
+        }
+      }
+
       const activityIds = environment.activityIdsByThreadId[threadId];
       const activityById = environment.activityByThreadId[threadId];
       const lastActivity =
@@ -244,6 +337,7 @@ export function selectAtriumSnapshot(state: AppState, now: number): AtriumSnapsh
         startedAt: toEpoch(latestTurn?.startedAt ?? latestTurn?.requestedAt),
         subagents: rows,
         extraSubagents: Math.max(0, total - rows.length),
+        errorDismissal,
       });
     }
   }

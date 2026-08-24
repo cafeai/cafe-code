@@ -9,6 +9,39 @@ import { UsageStatsRepository } from "../Services/UsageStats.ts";
 import { UsageStatsRepositoryLive } from "./UsageStats.ts";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
 
+/**
+ * Token-detail columns default to zero; these builders keep the existing cases
+ * focused on the counters they actually exercise.
+ */
+const ZERO_TOKEN_DETAIL = {
+  inputTokens: 0,
+  cachedInputTokens: 0,
+  cacheWriteInputTokens: 0,
+  reasoningOutputTokens: 0,
+} as const;
+
+const day = (row: {
+  day: string;
+  generatingMs: number;
+  outputTokens: number;
+  userMessages: number;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  cacheWriteInputTokens?: number;
+  reasoningOutputTokens?: number;
+}) => ({ ...ZERO_TOKEN_DETAIL, ...row });
+
+const breakdown = (row: {
+  day: string;
+  provider: ProviderDriverKind;
+  model: string;
+  outputTokens: number;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  cacheWriteInputTokens?: number;
+  reasoningOutputTokens?: number;
+}) => ({ ...ZERO_TOKEN_DETAIL, ...row });
+
 const layer = it.layer(UsageStatsRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)));
 const CODEX = ProviderDriverKind.make("codex");
 const CLAUDE = ProviderDriverKind.make("claudeAgent");
@@ -37,39 +70,45 @@ layer("UsageStatsRepository", (it) => {
       yield* clearUsageStats;
 
       yield* repository.flushDeltas({
-        days: [{ day: "2026-07-06", generatingMs: 4000, outputTokens: 120, userMessages: 1 }],
+        days: [day({ day: "2026-07-06", generatingMs: 4000, outputTokens: 120, userMessages: 1 })],
         tokenBreakdowns: [
-          {
-            day: "2026-07-06",
-            provider: CODEX,
-            model: "gpt-5.6-codex",
-            outputTokens: 120,
-          },
+          breakdown(
+            breakdown({
+              day: "2026-07-06",
+              provider: CODEX,
+              model: "gpt-5.6-codex",
+              outputTokens: 120,
+            }),
+          ),
         ],
       });
       yield* repository.flushDeltas({
-        days: [{ day: "2026-07-06", generatingMs: 6000, outputTokens: 30, userMessages: 2 }],
+        days: [day({ day: "2026-07-06", generatingMs: 6000, outputTokens: 30, userMessages: 2 })],
         tokenBreakdowns: [
-          {
-            day: "2026-07-06",
-            provider: CODEX,
-            model: "gpt-5.6-codex",
-            outputTokens: 30,
-          },
+          breakdown(
+            breakdown({
+              day: "2026-07-06",
+              provider: CODEX,
+              model: "gpt-5.6-codex",
+              outputTokens: 30,
+            }),
+          ),
         ],
       });
 
       const rows = yield* repository.listDays;
       assert.deepEqual(rows, [
-        { day: "2026-07-06", generatingMs: 10_000, outputTokens: 150, userMessages: 3 },
+        day({ day: "2026-07-06", generatingMs: 10_000, outputTokens: 150, userMessages: 3 }),
       ]);
       assert.deepEqual(yield* repository.listTokenBreakdownDays, [
-        {
-          day: "2026-07-06",
-          provider: CODEX,
-          model: "gpt-5.6-codex",
-          outputTokens: 150,
-        },
+        breakdown(
+          breakdown({
+            day: "2026-07-06",
+            provider: CODEX,
+            model: "gpt-5.6-codex",
+            outputTokens: 150,
+          }),
+        ),
       ]);
     }),
   );
@@ -81,13 +120,13 @@ layer("UsageStatsRepository", (it) => {
 
       yield* repository.flushDeltas({
         days: [
-          { day: "2026-08-03", generatingMs: 1000, outputTokens: 10, userMessages: 0 },
-          { day: "2026-08-01", generatingMs: 2000, outputTokens: 20, userMessages: 1 },
+          day({ day: "2026-08-03", generatingMs: 1000, outputTokens: 10, userMessages: 0 }),
+          day({ day: "2026-08-01", generatingMs: 2000, outputTokens: 20, userMessages: 1 }),
         ],
         tokenBreakdowns: [
-          { day: "2026-08-03", provider: CODEX, model: "gpt-b", outputTokens: 4 },
-          { day: "2026-08-03", provider: CLAUDE, model: "claude-a", outputTokens: 3 },
-          { day: "2026-08-03", provider: CODEX, model: "gpt-a", outputTokens: 3 },
+          breakdown({ day: "2026-08-03", provider: CODEX, model: "gpt-b", outputTokens: 4 }),
+          breakdown({ day: "2026-08-03", provider: CLAUDE, model: "claude-a", outputTokens: 3 }),
+          breakdown({ day: "2026-08-03", provider: CODEX, model: "gpt-a", outputTokens: 3 }),
         ],
       });
 
@@ -95,9 +134,9 @@ layer("UsageStatsRepository", (it) => {
       const augustDays = rows.map((row) => row.day).filter((day) => day.startsWith("2026-08"));
       assert.deepEqual(augustDays, ["2026-08-01", "2026-08-03"]);
       assert.deepEqual(yield* repository.listTokenBreakdownDays, [
-        { day: "2026-08-03", provider: CLAUDE, model: "claude-a", outputTokens: 3 },
-        { day: "2026-08-03", provider: CODEX, model: "gpt-a", outputTokens: 3 },
-        { day: "2026-08-03", provider: CODEX, model: "gpt-b", outputTokens: 4 },
+        breakdown({ day: "2026-08-03", provider: CLAUDE, model: "claude-a", outputTokens: 3 }),
+        breakdown({ day: "2026-08-03", provider: CODEX, model: "gpt-a", outputTokens: 3 }),
+        breakdown({ day: "2026-08-03", provider: CODEX, model: "gpt-b", outputTokens: 4 }),
       ]);
     }),
   );
@@ -109,13 +148,17 @@ layer("UsageStatsRepository", (it) => {
 
       const outcome = yield* Effect.exit(
         repository.flushDeltas({
-          days: [{ day: "2026-09-01", generatingMs: 0, outputTokens: 7, userMessages: 0 }],
+          days: [day({ day: "2026-09-01", generatingMs: 0, outputTokens: 7, userMessages: 0 })],
           tokenBreakdowns: [
             {
               day: "2026-09-01",
               provider: CODEX,
               model: "x".repeat(257),
               outputTokens: 7,
+              inputTokens: 0,
+              cachedInputTokens: 0,
+              cacheWriteInputTokens: 0,
+              reasoningOutputTokens: 0,
             },
           ],
         }),

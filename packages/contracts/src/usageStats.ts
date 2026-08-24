@@ -9,18 +9,39 @@ export const USAGE_STATS_MODEL_MAX_CHARS = 256;
 export const UsageStatsDayKey = Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/));
 export type UsageStatsDayKey = typeof UsageStatsDayKey.Type;
 
+/**
+ * Token counters shared by day rows, totals and the model breakdown.
+ *
+ * `cachedInputTokens` and `cacheWriteInputTokens` are subsets of `inputTokens`;
+ * `reasoningOutputTokens` is a subset of `outputTokens`. Adding a subset to its
+ * parent double counts. Uncached input is `inputTokens - cachedInputTokens -
+ * cacheWriteInputTokens`.
+ *
+ * Every field but `outputTokens` was added after the fact, so rows recorded
+ * before that migration carry zeroes rather than real counts — the discarded
+ * values were never stored and cannot be back-filled. Readers that show cost
+ * must treat a day with output but no input as unmeasured, not as free.
+ */
+const UsageStatsTokenCountFields = {
+  outputTokens: NonNegativeInt,
+  inputTokens: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
+  cachedInputTokens: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
+  cacheWriteInputTokens: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
+  reasoningOutputTokens: NonNegativeInt.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
+} as const;
+
 export const UsageStatsDay = Schema.Struct({
   day: UsageStatsDayKey,
   generatingMs: NonNegativeInt,
-  outputTokens: NonNegativeInt,
   userMessages: NonNegativeInt,
+  ...UsageStatsTokenCountFields,
 });
 export type UsageStatsDay = typeof UsageStatsDay.Type;
 
 export const UsageStatsTotals = Schema.Struct({
   generatingMs: NonNegativeInt,
-  outputTokens: NonNegativeInt,
   userMessages: NonNegativeInt,
+  ...UsageStatsTokenCountFields,
 });
 export type UsageStatsTotals = typeof UsageStatsTotals.Type;
 
@@ -38,7 +59,7 @@ export type UsageStatsModel = typeof UsageStatsModel.Type;
 export const UsageStatsTokenBreakdownEntry = Schema.Struct({
   provider: ProviderDriverKind,
   model: UsageStatsModel,
-  outputTokens: NonNegativeInt,
+  ...UsageStatsTokenCountFields,
 });
 export type UsageStatsTokenBreakdownEntry = typeof UsageStatsTokenBreakdownEntry.Type;
 

@@ -27,6 +27,10 @@ export const UsageStatsDayRow = Schema.Struct({
   generatingMs: NonNegativeInt,
   outputTokens: NonNegativeInt,
   userMessages: NonNegativeInt,
+  inputTokens: NonNegativeInt,
+  cachedInputTokens: NonNegativeInt,
+  cacheWriteInputTokens: NonNegativeInt,
+  reasoningOutputTokens: NonNegativeInt,
 });
 export type UsageStatsDayRow = typeof UsageStatsDayRow.Type;
 
@@ -35,6 +39,10 @@ export const UsageStatsTokenBreakdownDayRow = Schema.Struct({
   provider: ProviderDriverKind,
   model: UsageStatsModel,
   outputTokens: NonNegativeInt,
+  inputTokens: NonNegativeInt,
+  cachedInputTokens: NonNegativeInt,
+  cacheWriteInputTokens: NonNegativeInt,
+  reasoningOutputTokens: NonNegativeInt,
 });
 export type UsageStatsTokenBreakdownDayRow = typeof UsageStatsTokenBreakdownDayRow.Type;
 

@@ -41,21 +41,49 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { UsageStatsRepository } from "../../persistence/Services/UsageStats.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { localDayKey, splitSpanIntoDays } from "../dayBuckets.ts";
-import { selectOutputCounter, tokenDelta } from "../tokenDelta.ts";
+import {
+  selectCounter,
+  tokenDelta,
+  USAGE_TOKEN_FIELDS,
+  type UsageTokenField,
+} from "../tokenDelta.ts";
 import { UsageStatsService, type UsageStatsServiceShape } from "../Services/UsageStatsService.ts";
 
 const FLUSH_INTERVAL_MS = 5_000;
 const MODEL_RESOLUTION_TIMEOUT_MS = 1_000;
 const UNKNOWN_USAGE_MODEL = "unknown";
 
-interface MutableDayTotals {
+type TokenCounts = Record<UsageTokenField, number>;
+
+const zeroCounts = (): TokenCounts => ({
+  outputTokens: 0,
+  inputTokens: 0,
+  cachedInputTokens: 0,
+  cacheWriteInputTokens: 0,
+  reasoningOutputTokens: 0,
+});
+
+const addCounts = (target: TokenCounts, delta: TokenCounts): void => {
+  for (const field of USAGE_TOKEN_FIELDS) target[field] += delta[field];
+};
+
+const hasCounts = (counts: TokenCounts): boolean =>
+  USAGE_TOKEN_FIELDS.some((field) => counts[field] > 0);
+
+interface MutableDayTotals extends TokenCounts {
   generatingMs: number;
-  outputTokens: number;
   userMessages: number;
 }
 
+const zeroDayTotals = (): MutableDayTotals => ({
+  ...zeroCounts(),
+  generatingMs: 0,
+  userMessages: 0,
+});
+
 interface ThreadTracking {
-  watermark: number | undefined;
+  /** Per-counter watermarks; see tokenDelta.ts for the reset semantics. */
+  watermarks: Map<UsageTokenField, number>;
   /**
    * Whether this process saw the session begin. Session-cumulative token
    * counters observed without it (e.g. after reattaching to a provider
@@ -77,8 +105,8 @@ interface ThreadTracking {
   modelResolutionAttempted: boolean;
 }
 
-type PendingTokenBreakdowns = Map<string, Map<ProviderDriverKind, Map<string, number>>>;
-type TokenBreakdownTotals = Map<ProviderDriverKind, Map<string, number>>;
+type PendingTokenBreakdowns = Map<string, Map<ProviderDriverKind, Map<string, TokenCounts>>>;
+type TokenBreakdownTotals = Map<ProviderDriverKind, Map<string, TokenCounts>>;
 
 /**
  * Best-effort output-token extraction from an opaque `turn.completed` usage
@@ -136,7 +164,7 @@ const makeUsageStatsService = Effect.gen(function* () {
   const pendingTokenBreakdowns: PendingTokenBreakdowns = new Map();
   const tokenBreakdownTotals: TokenBreakdownTotals = new Map();
   const threads = new Map<string, ThreadTracking>();
-  const totals: MutableDayTotals = { generatingMs: 0, outputTokens: 0, userMessages: 0 };
+  const totals: MutableDayTotals = zeroDayTotals();
   let tokenBreakdownSnapshot: ReadonlyArray<UsageStatsTokenBreakdownEntry> = [];
   let tokenBreakdownSnapshotDirty = true;
   let enabled = true;
@@ -144,9 +172,9 @@ const makeUsageStatsService = Effect.gen(function* () {
   const addTokenBreakdownTotal = (
     provider: ProviderDriverKind,
     model: string,
-    outputTokens: number,
+    counts: TokenCounts,
   ): void => {
-    if (outputTokens <= 0) {
+    if (!hasCounts(counts)) {
       return;
     }
     let models = tokenBreakdownTotals.get(provider);
@@ -154,7 +182,12 @@ const makeUsageStatsService = Effect.gen(function* () {
       models = new Map();
       tokenBreakdownTotals.set(provider, models);
     }
-    models.set(model, (models.get(model) ?? 0) + outputTokens);
+    let entry = models.get(model);
+    if (entry === undefined) {
+      entry = zeroCounts();
+      models.set(model, entry);
+    }
+    addCounts(entry, counts);
     tokenBreakdownSnapshotDirty = true;
   };
 
@@ -169,10 +202,10 @@ const makeUsageStatsService = Effect.gen(function* () {
     }
     tokenBreakdownSnapshot = Array.from(tokenBreakdownTotals.entries())
       .flatMap(([provider, models]) =>
-        Array.from(models.entries(), ([model, outputTokens]) => ({
+        Array.from(models.entries(), ([model, counts]) => ({
           provider,
           model,
-          outputTokens,
+          ...counts,
         })),
       )
       .toSorted((left, right) => {
@@ -191,14 +224,16 @@ const makeUsageStatsService = Effect.gen(function* () {
   yield* repository.listDays.pipe(
     Effect.map((rows) => {
       for (const row of rows) {
-        days.set(row.day, {
+        const entry: MutableDayTotals = {
+          ...zeroCounts(),
           generatingMs: row.generatingMs,
-          outputTokens: row.outputTokens,
           userMessages: row.userMessages,
-        });
+        };
+        for (const field of USAGE_TOKEN_FIELDS) entry[field] = row[field];
+        days.set(row.day, entry);
         totals.generatingMs += row.generatingMs;
-        totals.outputTokens += row.outputTokens;
         totals.userMessages += row.userMessages;
+        addCounts(totals, entry);
       }
     }),
     // Hydration failure degrades to session-local counters; flushed deltas
@@ -211,7 +246,9 @@ const makeUsageStatsService = Effect.gen(function* () {
   yield* repository.listTokenBreakdownDays.pipe(
     Effect.map((rows) => {
       for (const row of rows) {
-        addTokenBreakdownTotal(row.provider, row.model, row.outputTokens);
+        const counts = zeroCounts();
+        for (const field of USAGE_TOKEN_FIELDS) counts[field] = row[field];
+        addTokenBreakdownTotal(row.provider, row.model, counts);
       }
     }),
     // Aggregate usage remains useful if only the attribution ledger is
@@ -228,43 +265,44 @@ const makeUsageStatsService = Effect.gen(function* () {
 
   const addDelta = (day: string, delta: Partial<MutableDayTotals>): void => {
     const generatingMs = delta.generatingMs ?? 0;
-    const outputTokens = delta.outputTokens ?? 0;
     const userMessages = delta.userMessages ?? 0;
-    if (generatingMs <= 0 && outputTokens <= 0 && userMessages <= 0) {
+    const counts = zeroCounts();
+    for (const field of USAGE_TOKEN_FIELDS) counts[field] = delta[field] ?? 0;
+    if (generatingMs <= 0 && userMessages <= 0 && !hasCounts(counts)) {
       return;
     }
     for (const bucket of [days, pending]) {
       let entry = bucket.get(day);
       if (entry === undefined) {
-        entry = { generatingMs: 0, outputTokens: 0, userMessages: 0 };
+        entry = zeroDayTotals();
         bucket.set(day, entry);
       }
       entry.generatingMs += generatingMs;
-      entry.outputTokens += outputTokens;
       entry.userMessages += userMessages;
+      addCounts(entry, counts);
     }
     totals.generatingMs += generatingMs;
-    totals.outputTokens += outputTokens;
     totals.userMessages += userMessages;
+    addCounts(totals, counts);
   };
 
   /**
    * Record the same output-token observation in the aggregate and attribution
    * accumulators. The repository later commits both maps atomically.
    */
-  const addOutputTokenDelta = (
+  const addTokenDeltas = (
     day: string,
-    outputTokens: number,
+    counts: TokenCounts,
     provider: ProviderDriverKind,
     model: string | undefined,
   ): void => {
-    if (outputTokens <= 0) {
+    if (!hasCounts(counts)) {
       return;
     }
-    addDelta(day, { outputTokens });
+    addDelta(day, counts);
 
     const modelKey = model ?? UNKNOWN_USAGE_MODEL;
-    addTokenBreakdownTotal(provider, modelKey, outputTokens);
+    addTokenBreakdownTotal(provider, modelKey, counts);
 
     let providers = pendingTokenBreakdowns.get(day);
     if (providers === undefined) {
@@ -276,14 +314,19 @@ const makeUsageStatsService = Effect.gen(function* () {
       models = new Map();
       providers.set(provider, models);
     }
-    models.set(modelKey, (models.get(modelKey) ?? 0) + outputTokens);
+    let entry = models.get(modelKey);
+    if (entry === undefined) {
+      entry = zeroCounts();
+      models.set(modelKey, entry);
+    }
+    addCounts(entry, counts);
   };
 
   const track = (threadId: string): ThreadTracking => {
     let tracking = threads.get(threadId);
     if (tracking === undefined) {
       tracking = {
-        watermark: undefined,
+        watermarks: new Map(),
         witnessedSessionStart: false,
         sawTokenUsageThisTurn: false,
         accrueFromMs: undefined,
@@ -393,20 +436,30 @@ const makeUsageStatsService = Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis;
           const tracking = track(event.threadId);
           tracking.sawTokenUsageThisTurn = true;
-          const counter = selectOutputCounter(event.payload.usage);
-          if (counter === undefined) {
-            return;
+          // Each counter carries its own watermark: providers mix cumulative
+          // and per-request semantics per field, so they cannot share one.
+          const deltas = zeroCounts();
+          for (const field of USAGE_TOKEN_FIELDS) {
+            const counter = selectCounter(event.payload.usage, field);
+            if (counter === undefined) {
+              continue;
+            }
+            const countFirstObservation =
+              counter.kind === "per-message" || tracking.witnessedSessionStart;
+            const result = tokenDelta(
+              tracking.watermarks.get(field),
+              counter.value,
+              countFirstObservation,
+            );
+            tracking.watermarks.set(field, result.watermark);
+            deltas[field] = result.delta;
           }
-          const countFirstObservation =
-            counter.kind === "per-message" || tracking.witnessedSessionStart;
-          const result = tokenDelta(tracking.watermark, counter.value, countFirstObservation);
-          tracking.watermark = result.watermark;
-          if (enabled && result.delta > 0) {
+          if (enabled && hasCounts(deltas)) {
             if (tracking.provider !== event.provider) {
               resetAttribution(tracking, event.provider);
             }
             yield* resolveTrackingModel(event.threadId, event.provider, tracking);
-            addOutputTokenDelta(localDayKey(now), result.delta, event.provider, tracking.model);
+            addTokenDeltas(localDayKey(now), deltas, event.provider, tracking.model);
           }
         });
       }
@@ -424,7 +477,12 @@ const makeUsageStatsService = Effect.gen(function* () {
                 resetAttribution(tracking, event.provider);
               }
               yield* resolveTrackingModel(event.threadId, event.provider, tracking);
-              addOutputTokenDelta(localDayKey(now), outputTokens, event.provider, tracking.model);
+              addTokenDeltas(
+                localDayKey(now),
+                { ...zeroCounts(), outputTokens },
+                event.provider,
+                tracking.model,
+              );
             }
           }
           tracking.sawTokenUsageThisTurn = false;
@@ -470,17 +528,21 @@ const makeUsageStatsService = Effect.gen(function* () {
     const dayBatch = Array.from(pending.entries(), ([day, delta]) => ({
       day,
       generatingMs: delta.generatingMs,
-      outputTokens: delta.outputTokens,
       userMessages: delta.userMessages,
+      outputTokens: delta.outputTokens,
+      inputTokens: delta.inputTokens,
+      cachedInputTokens: delta.cachedInputTokens,
+      cacheWriteInputTokens: delta.cacheWriteInputTokens,
+      reasoningOutputTokens: delta.reasoningOutputTokens,
     }));
     const tokenBreakdownBatch = Array.from(pendingTokenBreakdowns.entries()).flatMap(
       ([day, providers]) =>
         Array.from(providers.entries()).flatMap(([provider, models]) =>
-          Array.from(models.entries(), ([model, outputTokens]) => ({
+          Array.from(models.entries(), ([model, counts]) => ({
             day,
             provider,
             model,
-            outputTokens,
+            ...counts,
           })),
         ),
     );
@@ -493,14 +555,10 @@ const makeUsageStatsService = Effect.gen(function* () {
           // both snapshots back so retries preserve that same correspondence;
           // live aggregate totals already include these deltas.
           for (const row of dayBatch) {
-            const entry = pending.get(row.day) ?? {
-              generatingMs: 0,
-              outputTokens: 0,
-              userMessages: 0,
-            };
+            const entry = pending.get(row.day) ?? zeroDayTotals();
             entry.generatingMs += row.generatingMs;
-            entry.outputTokens += row.outputTokens;
             entry.userMessages += row.userMessages;
+            for (const field of USAGE_TOKEN_FIELDS) entry[field] += row[field];
             pending.set(row.day, entry);
           }
 
@@ -515,7 +573,12 @@ const makeUsageStatsService = Effect.gen(function* () {
               models = new Map();
               providers.set(row.provider, models);
             }
-            models.set(row.model, (models.get(row.model) ?? 0) + row.outputTokens);
+            let entry = models.get(row.model);
+            if (entry === undefined) {
+              entry = zeroCounts();
+              models.set(row.model, entry);
+            }
+            for (const field of USAGE_TOKEN_FIELDS) entry[field] += row[field];
           }
         }).pipe(
           Effect.flatMap(() => Effect.logError("usage stats: failed to flush deltas", { error })),
@@ -584,17 +647,23 @@ const makeUsageStatsService = Effect.gen(function* () {
       }
     }
     const storedToday = days.get(todayKey);
+    const todayCounts = zeroCounts();
+    if (storedToday !== undefined) {
+      for (const field of USAGE_TOKEN_FIELDS) todayCounts[field] = storedToday[field];
+    }
+    const totalCounts = zeroCounts();
+    for (const field of USAGE_TOKEN_FIELDS) totalCounts[field] = totals[field];
     return {
       totals: {
         generatingMs: totals.generatingMs + liveMs,
-        outputTokens: totals.outputTokens,
         userMessages: totals.userMessages,
+        ...totalCounts,
       },
       today: {
         day: todayKey,
         generatingMs: (storedToday?.generatingMs ?? 0) + todayLiveMs,
-        outputTokens: storedToday?.outputTokens ?? 0,
         userMessages: storedToday?.userMessages ?? 0,
+        ...todayCounts,
       },
       activeSessionCount,
       collectionEnabled: enabled,
@@ -609,12 +678,16 @@ const makeUsageStatsService = Effect.gen(function* () {
 
   const get: UsageStatsServiceShape["get"] = Effect.map(Clock.currentTimeMillis, (now) => {
     const state = liveState(now);
-    const dayRows = Array.from(days.entries(), ([day, dayTotals]) => ({
-      day,
-      generatingMs: dayTotals.generatingMs,
-      outputTokens: dayTotals.outputTokens,
-      userMessages: dayTotals.userMessages,
-    })).toSorted((left, right) => (left.day < right.day ? -1 : 1));
+    const dayRows = Array.from(days.entries(), ([day, dayTotals]) => {
+      const counts = zeroCounts();
+      for (const field of USAGE_TOKEN_FIELDS) counts[field] = dayTotals[field];
+      return {
+        day,
+        generatingMs: dayTotals.generatingMs,
+        userMessages: dayTotals.userMessages,
+        ...counts,
+      };
+    }).toSorted((left, right) => (left.day < right.day ? -1 : 1));
     // Present in-flight time on today's row so the heatmap cell matches the
     // headline counters without the client having to merge anything.
     const withLiveToday =

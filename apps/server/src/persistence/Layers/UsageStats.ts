@@ -32,7 +32,11 @@ const makeUsageStatsRepository = Effect.gen(function* () {
           day,
           generating_ms AS "generatingMs",
           output_tokens AS "outputTokens",
-          user_messages AS "userMessages"
+          user_messages AS "userMessages",
+          input_tokens AS "inputTokens",
+          cached_input_tokens AS "cachedInputTokens",
+          cache_write_input_tokens AS "cacheWriteInputTokens",
+          reasoning_output_tokens AS "reasoningOutputTokens"
         FROM usage_stats_days
         ORDER BY day ASC
       `,
@@ -42,13 +46,37 @@ const makeUsageStatsRepository = Effect.gen(function* () {
     Request: UsageStatsDayRow,
     execute: (row) =>
       sql`
-        INSERT INTO usage_stats_days (day, generating_ms, output_tokens, user_messages)
-        VALUES (${row.day}, ${row.generatingMs}, ${row.outputTokens}, ${row.userMessages})
+        INSERT INTO usage_stats_days (
+          day,
+          generating_ms,
+          output_tokens,
+          user_messages,
+          input_tokens,
+          cached_input_tokens,
+          cache_write_input_tokens,
+          reasoning_output_tokens
+        )
+        VALUES (
+          ${row.day},
+          ${row.generatingMs},
+          ${row.outputTokens},
+          ${row.userMessages},
+          ${row.inputTokens},
+          ${row.cachedInputTokens},
+          ${row.cacheWriteInputTokens},
+          ${row.reasoningOutputTokens}
+        )
         ON CONFLICT (day)
         DO UPDATE SET
           generating_ms = generating_ms + excluded.generating_ms,
           output_tokens = output_tokens + excluded.output_tokens,
-          user_messages = user_messages + excluded.user_messages
+          user_messages = user_messages + excluded.user_messages,
+          input_tokens = input_tokens + excluded.input_tokens,
+          cached_input_tokens = cached_input_tokens + excluded.cached_input_tokens,
+          cache_write_input_tokens =
+            cache_write_input_tokens + excluded.cache_write_input_tokens,
+          reasoning_output_tokens =
+            reasoning_output_tokens + excluded.reasoning_output_tokens
       `,
   });
 
@@ -61,7 +89,11 @@ const makeUsageStatsRepository = Effect.gen(function* () {
           day,
           provider_driver AS provider,
           model,
-          output_tokens AS "outputTokens"
+          output_tokens AS "outputTokens",
+          input_tokens AS "inputTokens",
+          cached_input_tokens AS "cachedInputTokens",
+          cache_write_input_tokens AS "cacheWriteInputTokens",
+          reasoning_output_tokens AS "reasoningOutputTokens"
         FROM usage_stats_token_breakdown_days
         ORDER BY day ASC, provider_driver ASC, model ASC
       `,
@@ -75,12 +107,31 @@ const makeUsageStatsRepository = Effect.gen(function* () {
           day,
           provider_driver,
           model,
-          output_tokens
+          output_tokens,
+          input_tokens,
+          cached_input_tokens,
+          cache_write_input_tokens,
+          reasoning_output_tokens
         )
-        VALUES (${row.day}, ${row.provider}, ${row.model}, ${row.outputTokens})
+        VALUES (
+          ${row.day},
+          ${row.provider},
+          ${row.model},
+          ${row.outputTokens},
+          ${row.inputTokens},
+          ${row.cachedInputTokens},
+          ${row.cacheWriteInputTokens},
+          ${row.reasoningOutputTokens}
+        )
         ON CONFLICT (day, provider_driver, model)
         DO UPDATE SET
-          output_tokens = output_tokens + excluded.output_tokens
+          output_tokens = output_tokens + excluded.output_tokens,
+          input_tokens = input_tokens + excluded.input_tokens,
+          cached_input_tokens = cached_input_tokens + excluded.cached_input_tokens,
+          cache_write_input_tokens =
+            cache_write_input_tokens + excluded.cache_write_input_tokens,
+          reasoning_output_tokens =
+            reasoning_output_tokens + excluded.reasoning_output_tokens
       `,
   });
 
