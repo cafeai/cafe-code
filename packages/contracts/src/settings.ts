@@ -102,7 +102,31 @@ export type InterfaceScalePercent = typeof InterfaceScalePercent.Type;
 // app chrome. Off by default so fresh installs keep the plain sidebar stars.
 // All values are client settings so every connected renderer (Electron and
 // browser) shares the same ambiance once the backend syncs client settings.
-export const AmbianceEffect = Schema.Literals(["stars", "rain", "snow", "matrix", "fire"]);
+// Effects are split by rendering backend. The first five plus the canvas-2D
+// additions draw on a 2D context; the rest are fullscreen-quad fragment
+// shaders on a WebGL context. A canvas can only ever hold one context type, so
+// the renderer mounts one canvas or the other for the selected effect — see
+// `ambianceEffects.ts` for the backend/cost table the settings picker reads.
+export const AmbianceEffect = Schema.Literals([
+  // canvas 2D
+  "stars",
+  "rain",
+  "snow",
+  "matrix",
+  "fire",
+  "glass",
+  "lattice",
+  "blossom",
+  // WebGL fullscreen quad
+  "aurora",
+  "grid",
+  "horizon",
+  "resonance",
+  "converge",
+  "beam",
+  "terminal",
+  "core",
+]);
 export type AmbianceEffect = typeof AmbianceEffect.Type;
 export const DEFAULT_AMBIANCE_ENABLED = false;
 export const DEFAULT_AMBIANCE_EFFECT: AmbianceEffect = "rain";
@@ -128,6 +152,28 @@ export const DEFAULT_AMBIANCE_SURFACE_THREAD = true;
 export const DEFAULT_AMBIANCE_SURFACE_COMPOSER = true;
 // Empty string means "follow the accent color configured in Appearance".
 export const DEFAULT_AMBIANCE_COLOR = "";
+
+// Task Atrium: a decorative read-only view of everything currently running,
+// drawn over the ambiance scene. "empty-state" replaces the otherwise blank
+// no-thread pane; "empty-state-and-idle" additionally fades the view over the
+// whole window after the idle delay while work is still in flight. Like the
+// weather layer it is renderer-only — it never dispatches orchestration.
+export const AmbianceAtriumMode = Schema.Literals(["off", "empty-state", "empty-state-and-idle"]);
+export type AmbianceAtriumMode = typeof AmbianceAtriumMode.Type;
+export const DEFAULT_AMBIANCE_ATRIUM: AmbianceAtriumMode = "off";
+export const MIN_AMBIANCE_ATRIUM_IDLE_MINUTES = 1;
+export const MAX_AMBIANCE_ATRIUM_IDLE_MINUTES = 30;
+export const DEFAULT_AMBIANCE_ATRIUM_IDLE_MINUTES = 5;
+// Empty string means "follow the ambiance weather color", which itself falls
+// back to the Appearance accent. An explicit value tints only the Atrium.
+export const DEFAULT_AMBIANCE_ATRIUM_COLOR = "";
+export const AmbianceAtriumIdleMinutes = Schema.Number.check(
+  Schema.isBetween({
+    minimum: MIN_AMBIANCE_ATRIUM_IDLE_MINUTES,
+    maximum: MAX_AMBIANCE_ATRIUM_IDLE_MINUTES,
+  }),
+);
+export type AmbianceAtriumIdleMinutes = typeof AmbianceAtriumIdleMinutes.Type;
 
 export const SidebarProjectSortOrder = Schema.Literals(["updated_at", "created_at", "manual"]);
 export type SidebarProjectSortOrder = typeof SidebarProjectSortOrder.Type;
@@ -230,6 +276,15 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   ambianceColor: TrimmedString.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_COLOR)),
+  ),
+  ambianceAtrium: AmbianceAtriumMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_ATRIUM)),
+  ),
+  ambianceAtriumIdleMinutes: AmbianceAtriumIdleMinutes.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_ATRIUM_IDLE_MINUTES)),
+  ),
+  ambianceAtriumColor: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_ATRIUM_COLOR)),
   ),
   themeAccentColor: TrimmedString.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_THEME_ACCENT_COLOR)),
@@ -842,6 +897,9 @@ export const ClientSettingsPatch = Schema.Struct({
   ambianceSurfaceThread: Schema.optionalKey(Schema.Boolean),
   ambianceSurfaceComposer: Schema.optionalKey(Schema.Boolean),
   ambianceColor: Schema.optionalKey(TrimmedString),
+  ambianceAtrium: Schema.optionalKey(AmbianceAtriumMode),
+  ambianceAtriumIdleMinutes: Schema.optionalKey(AmbianceAtriumIdleMinutes),
+  ambianceAtriumColor: Schema.optionalKey(TrimmedString),
   themeAccentColor: Schema.optionalKey(TrimmedString),
   appAccentColor: Schema.optionalKey(TrimmedString),
   defaultEditor: Schema.optionalKey(DefaultEditorSelection),

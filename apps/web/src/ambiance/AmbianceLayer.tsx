@@ -10,6 +10,7 @@ import type {
 } from "@cafecode/contracts";
 
 import { useSettings } from "../hooks/useSettings";
+import { ambianceBackend } from "./ambianceEffects";
 import { useTheme } from "../hooks/useTheme";
 import { normalizeAccentColor } from "../themeAccent";
 import { selectAnyThreadRunning, useStore, type AppState } from "../store";
@@ -156,6 +157,7 @@ type AmbianceConfigInputs = {
   surfaceSidebar: boolean;
   surfaceThread: boolean;
   reducedMotion: boolean;
+  dark: boolean;
 };
 
 function buildEngineConfig(inputs: AmbianceConfigInputs) {
@@ -166,15 +168,21 @@ function buildEngineConfig(inputs: AmbianceConfigInputs) {
     tint: resolveAmbianceTint(inputs.ambianceColor, inputs.appAccentColor, inputs.themeAccentColor),
     surfaces: { sidebar: inputs.surfaceSidebar, thread: inputs.surfaceThread },
     reducedMotion: inputs.reducedMotion,
+    dark: inputs.dark,
   };
 }
 
 function AmbianceCanvas() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<AmbianceEngine | null>(null);
-  const { theme } = useTheme();
+  const { theme, resolvedTheme } = useTheme();
+  const dark = resolvedTheme !== "light";
 
   const effect = useSettings((settings) => settings.ambianceEffect);
+  // A canvas holds exactly one context type, so switching between a 2D effect
+  // and a shader one must remount the element. Keying the canvas on the backend
+  // does that, and the engine is rebuilt in the same pass.
+  const backend = ambianceBackend(effect);
   const intensity = useSettings((settings) => settings.ambianceIntensity);
   const reactMode = useSettings((settings) => settings.ambianceReactMode);
   const surfaceSidebar = useSettings((settings) => settings.ambianceSurfaceSidebar);
@@ -210,15 +218,18 @@ function AmbianceCanvas() {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const engine = new AmbianceEngine(canvas);
+    const engine = new AmbianceEngine(canvas, configInputsRef.current.effect);
     engineRef.current = engine;
+    engine.setConfig(buildEngineConfig(configInputsRef.current));
     return () => {
-      engine.stop();
+      // dispose() also releases the WebGL context rather than leaving it
+      // resident until GC; effect switches must never stack up contexts.
+      engine.dispose();
       engine.clear();
       engineRef.current = null;
       clearAmbianceCssVariables();
     };
-  }, []);
+  }, [backend]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -240,6 +251,7 @@ function AmbianceCanvas() {
     surfaceSidebar,
     surfaceThread,
     reducedMotion,
+    dark,
   });
   configInputsRef.current = {
     effect,
@@ -251,6 +263,7 @@ function AmbianceCanvas() {
     surfaceSidebar,
     surfaceThread,
     reducedMotion,
+    dark,
   };
 
   // Settings → engine config. `theme` is a dependency so the accent-variable
@@ -268,6 +281,7 @@ function AmbianceCanvas() {
     surfaceThread,
     theme,
     themeAccentColor,
+    dark,
   ]);
 
   // Geometry: full-window canvas plus the sidebar/thread split boundary.
@@ -322,7 +336,7 @@ function AmbianceCanvas() {
       window.clearInterval(interval);
       observer?.disconnect();
     };
-  }, []);
+  }, [backend]);
 
   // Run/pause mirroring the CSS background-animation convention: pause when
   // the document is hidden or the window is blurred unless the user opted
@@ -352,7 +366,7 @@ function AmbianceCanvas() {
       window.removeEventListener("blur", syncRunState);
       engine.stop();
     };
-  }, [continueBackgroundAnimations]);
+  }, [backend, continueBackgroundAnimations]);
 
   // Focused-thread signals → engine. Pulses fire only on observed
   // transitions, never on initial subscription, so opening an old thread
@@ -503,9 +517,11 @@ function AmbianceCanvas() {
 
   return (
     <canvas
+      key={backend}
       ref={canvasRef}
       aria-hidden="true"
       data-cafe-ambiance-canvas="true"
+      data-cafe-ambiance-backend={backend}
       className="pointer-events-none fixed inset-0 z-40"
       style={canvasStyle}
     />
