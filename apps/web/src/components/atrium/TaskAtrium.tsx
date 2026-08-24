@@ -53,6 +53,18 @@ const currencyFormat = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 });
 
+/**
+ * Compact currency for the stat grid. Full precision overflows a narrow column
+ * and truncates to something like "$140,83…", which is worse than rounding.
+ */
+function compactCurrency(value: number): string {
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
+  if (abs >= 10_000) return `$${(value / 1_000).toFixed(0)}K`;
+  if (abs >= 1_000) return `$${(value / 1_000).toFixed(1)}K`;
+  return currencyFormat.format(value);
+}
+
 /** `48.0B` / `142M` — matches the Usage page so the two figures read alike. */
 function compactTokens(value: number): string {
   const abs = Math.abs(value);
@@ -648,7 +660,7 @@ export function TaskAtriumBoard() {
               {usage.cacheSavings > 0 ? (
                 <Stat
                   label="Cache saved"
-                  value={currencyFormat.format(usage.cacheSavings)}
+                  value={compactCurrency(usage.cacheSavings)}
                   tone={heading}
                   muted={label}
                 />
@@ -683,7 +695,14 @@ export function TaskAtriumBoard() {
           still has something worth reading. Scrolls on its own and collapses to
           one column on narrow layouts, where the panels stack. */}
       {usage.loaded && usage.raw ? (
-        <div className="relative z-20 mx-4 mb-4 max-h-[46vh] shrink-0 overflow-y-auto lg:mx-10">
+        <div
+          // Fades at the bottom edge so a clipped panel reads as "scroll for
+          // more" rather than as a layout that ran out of room.
+          className={cn(
+            "relative z-20 mx-4 mb-4 max-h-[46vh] shrink-0 overflow-y-auto lg:mx-10",
+            "[mask-image:linear-gradient(to_bottom,black_calc(100%-2.5rem),transparent)]",
+          )}
+        >
           <div className={cn("rounded-2xl border backdrop-blur-md", glass)}>
             <div className="flex items-center gap-3 px-4 pt-3 sm:px-5">
               <span className={cn("font-mono text-[10px] uppercase tracking-[0.14em]", label)}>
