@@ -3,11 +3,18 @@ import type {
   EnvironmentId,
   OrchestrationThreadActivity,
   ProjectId,
+  TaskAtriumErrorDismissal,
   ThreadId,
+  TurnId,
 } from "@cafecode/contracts";
 
 import type { AppState } from "../../store";
-import { formatElapsed, selectAtriumSnapshot, MAX_SUBAGENT_ROWS } from "./taskAtriumData";
+import {
+  formatElapsed,
+  MAX_SUBAGENT_ROWS,
+  mergeTaskAtriumErrorDismissals,
+  selectAtriumSnapshot,
+} from "./taskAtriumData";
 
 const ENV = "env-1" as EnvironmentId;
 const THREAD = "thread-1" as ThreadId;
@@ -36,8 +43,14 @@ function buildState(options: {
   status?: string;
   holding?: boolean;
   provider?: string;
+  latestTurnState?: "running" | "interrupted" | "completed" | "error";
+  turnId?: TurnId;
+  sessionUpdatedAt?: string;
+  completedAt?: string;
 }): AppState {
   const activities = options.activities ?? [];
+  const latestTurnState = options.latestTurnState ?? "running";
+  const turnId = options.turnId ?? ("turn-1" as TurnId);
   const activityById: Record<string, OrchestrationThreadActivity> = {};
   for (const entry of activities) activityById[entry.id] = entry;
 
@@ -69,15 +82,22 @@ function buildState(options: {
             session: {
               provider: options.provider ?? "claudeAgent",
               orchestrationStatus: options.status ?? "running",
+              status: options.status === "error" ? "error" : "running",
+              activeTurnId: turnId,
+              createdAt: new Date(NOW - 60_000).toISOString(),
+              updatedAt: options.sessionUpdatedAt ?? new Date(NOW - 10_000).toISOString(),
             },
             createdAt: new Date(NOW - 60_000).toISOString(),
             archivedAt: null,
             latestTurn: {
-              turnId: "turn-1",
-              state: "running",
+              turnId,
+              state: latestTurnState,
               requestedAt: new Date(NOW - 45_000).toISOString(),
               startedAt: new Date(NOW - 45_000).toISOString(),
-              completedAt: null,
+              completedAt:
+                latestTurnState === "error"
+                  ? (options.completedAt ?? new Date(NOW - 5_000).toISOString())
+                  : null,
               assistantMessageId: null,
             },
             branch: null,
@@ -215,6 +235,85 @@ describe("selectAtriumSnapshot", () => {
     const summary = state.environmentStateById[ENV]!.sidebarThreadSummaryById[THREAD]!;
     summary.latestTurn = null;
     expect(selectAtriumSnapshot(state, NOW).cards).toHaveLength(0);
+  });
+
+  it("suppresses only the exact historical error occurrence that was cleared", () => {
+    const failedState = buildState({ status: "error", latestTurnState: "error" });
+    const initial = selectAtriumSnapshot(failedState, NOW);
+    const dismissed = initial.cards[0]?.errorDismissal;
+
+    expect(initial.errorCount).toBe(1);
+    expect(dismissed).not.toBeNull();
+    if (!dismissed) throw new Error("Expected an error occurrence watermark");
+    expect(selectAtriumSnapshot(failedState, NOW, [dismissed]).cards).toHaveLength(0);
+
+    const settledProjection = buildState({
+      status: "error",
+      latestTurnState: "error",
+      completedAt: new Date(NOW - 2_000).toISOString(),
+    });
+    expect(selectAtriumSnapshot(settledProjection, NOW, [dismissed]).cards).toHaveLength(0);
+
+    const laterFailure = buildState({
+      status: "error",
+      latestTurnState: "error",
+      turnId: "turn-2" as TurnId,
+    });
+    const later = selectAtriumSnapshot(laterFailure, NOW, [dismissed]);
+    expect(later.errorCount).toBe(1);
+    expect(later.cards[0]?.errorDismissal?.turnId).toBe("turn-2");
+  });
+
+  it("uses the transition timestamp to distinguish turnless session failures", () => {
+    const firstState = buildState({
+      status: "error",
+      sessionUpdatedAt: "2026-08-25T01:00:00.000Z",
+    });
+    const firstSummary = firstState.environmentStateById[ENV]!.sidebarThreadSummaryById[THREAD]!;
+    firstSummary.latestTurn = null;
+    if (!firstSummary.session) throw new Error("Expected a session fixture");
+    firstSummary.session.activeTurnId = undefined;
+
+    const dismissed = selectAtriumSnapshot(firstState, NOW).cards[0]?.errorDismissal;
+    expect(dismissed?.turnId).toBeNull();
+    if (!dismissed) throw new Error("Expected a turnless error occurrence watermark");
+    expect(selectAtriumSnapshot(firstState, NOW, [dismissed]).cards).toHaveLength(0);
+
+    const laterState = buildState({
+      status: "error",
+      sessionUpdatedAt: "2026-08-25T02:00:00.000Z",
+    });
+    const laterSummary = laterState.environmentStateById[ENV]!.sidebarThreadSummaryById[THREAD]!;
+    laterSummary.latestTurn = null;
+    if (!laterSummary.session) throw new Error("Expected a session fixture");
+    laterSummary.session.activeTurnId = undefined;
+
+    expect(selectAtriumSnapshot(laterState, NOW, [dismissed]).errorCount).toBe(1);
+  });
+
+  it("keeps one most-recent dismissal per scoped thread", () => {
+    const first: TaskAtriumErrorDismissal = {
+      environmentId: ENV,
+      threadId: THREAD,
+      turnId: "turn-1" as TurnId,
+      observedAt: "2026-08-25T01:00:00.000Z",
+    };
+    const other: TaskAtriumErrorDismissal = {
+      environmentId: ENV,
+      threadId: "thread-2" as ThreadId,
+      turnId: null,
+      observedAt: "2026-08-25T02:00:00.000Z",
+    };
+    const replacement: TaskAtriumErrorDismissal = {
+      ...first,
+      turnId: "turn-3" as TurnId,
+      observedAt: "2026-08-25T03:00:00.000Z",
+    };
+
+    expect(mergeTaskAtriumErrorDismissals([first, other], [replacement])).toEqual([
+      other,
+      replacement,
+    ]);
   });
 });
 

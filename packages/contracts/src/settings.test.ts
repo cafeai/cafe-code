@@ -36,6 +36,7 @@ import {
   MAX_SIDEBAR_BRAND_IMAGE_ID_LENGTH,
   MAX_AMBIANCE_INTENSITY,
   MAX_SIDEBAR_STAR_SPEED,
+  MAX_TASK_ATRIUM_ERROR_DISMISSALS,
   MIN_AMBIANCE_INTENSITY,
   MIN_INTERFACE_SCALE_PERCENT,
   MIN_SIDEBAR_STAR_SPEED,
@@ -174,6 +175,33 @@ describe("client settings", () => {
     ).toThrow();
     expect(() =>
       decodeClientSettingsPatch({ ambianceIntensity: MIN_AMBIANCE_INTENSITY - 0.5 }),
+    ).toThrow();
+  });
+
+  it("defaults Task Atrium error dismissals and validates persisted occurrence identities", () => {
+    expect(DEFAULT_CLIENT_SETTINGS.dismissedTaskAtriumErrors).toEqual([]);
+
+    const dismissal = {
+      environmentId: "environment-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      observedAt: "2026-08-25T04:00:00.000Z",
+    };
+    expect(decodeClientSettingsPatch({ dismissedTaskAtriumErrors: [dismissal] })).toEqual({
+      dismissedTaskAtriumErrors: [dismissal],
+    });
+    expect(() =>
+      decodeClientSettingsPatch({
+        dismissedTaskAtriumErrors: [{ ...dismissal, environmentId: "" }],
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeClientSettingsPatch({
+        dismissedTaskAtriumErrors: Array.from(
+          { length: MAX_TASK_ATRIUM_ERROR_DISMISSALS + 1 },
+          () => dismissal,
+        ),
+      }),
     ).toThrow();
   });
 

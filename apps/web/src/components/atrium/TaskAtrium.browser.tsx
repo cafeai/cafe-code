@@ -13,7 +13,7 @@ const atriumHarness = vi.hoisted(() => {
       [env]: {
         projectIds: ["project-1"],
         projectById: { "project-1": { id: "project-1", name: "cafe-code" } },
-        threadIds: [thread, "thread-2"],
+        threadIds: [thread, "thread-2", "thread-error"],
         threadSessionById: {},
         threadTurnStateById: {},
         activityIdsByThreadId: { [thread]: ["a1", "a2"] },
@@ -44,6 +44,36 @@ const atriumHarness = vi.hoisted(() => {
           },
         },
         sidebarThreadSummaryById: {
+          "thread-error": {
+            id: "thread-error",
+            environmentId: env,
+            projectId: "project-1",
+            title: "Recover failed provider session",
+            session: {
+              provider: "claudeAgent",
+              orchestrationStatus: "error",
+              status: "error",
+              activeTurnId: "turn-error",
+              createdAt: new Date(now - 180_000).toISOString(),
+              updatedAt: new Date(now - 30_000).toISOString(),
+            },
+            createdAt: new Date(now - 180_000).toISOString(),
+            archivedAt: null,
+            latestTurn: {
+              turnId: "turn-error",
+              state: "error",
+              requestedAt: new Date(now - 90_000).toISOString(),
+              startedAt: new Date(now - 89_000).toISOString(),
+              completedAt: new Date(now - 30_000).toISOString(),
+              assistantMessageId: null,
+            },
+            branch: null,
+            worktreePath: null,
+            latestUserMessageAt: null,
+            hasPendingApprovals: false,
+            hasPendingUserInput: false,
+            hasActionableProposedPlan: false,
+          },
           "thread-2": {
             id: "thread-2",
             environmentId: env,
@@ -98,8 +128,10 @@ const atriumHarness = vi.hoisted(() => {
     getState: () => state,
   });
   const theme = { value: "dark" as "light" | "dark" };
+  const updateSettings = vi.fn();
   return {
     theme,
+    updateSettings,
     settings: {
       ambianceAtriumEnabled: true,
       continueBackgroundAnimations: true,
@@ -107,6 +139,7 @@ const atriumHarness = vi.hoisted(() => {
       ambianceColor: "",
       appAccentColor: "",
       themeAccentColor: "",
+      dismissedTaskAtriumErrors: [],
     },
     useStore,
   };
@@ -115,6 +148,10 @@ const atriumHarness = vi.hoisted(() => {
 vi.mock("../../hooks/useSettings", () => ({
   useSettings: (selector: (settings: typeof atriumHarness.settings) => unknown) =>
     selector(atriumHarness.settings),
+  useUpdateSettings: () => ({
+    updateSettings: atriumHarness.updateSettings,
+    resetSettings: vi.fn(),
+  }),
 }));
 
 vi.mock("../../hooks/useTheme", () => ({
@@ -267,6 +304,34 @@ describe("TaskAtriumOverlay", () => {
 });
 
 describe("TaskAtriumBoard interaction", () => {
+  it("persists exact historical error occurrences when errors are cleared", async () => {
+    atriumHarness.updateSettings.mockClear();
+    const { host, screen } = await renderInTheme("dark");
+    try {
+      const clearButtonSelector = "button[aria-label='Clear Task Atrium errors']";
+      await vi.waitFor(() => {
+        expect(host.querySelector(clearButtonSelector)).not.toBeNull();
+      });
+      host.querySelector<HTMLElement>(clearButtonSelector)?.click();
+
+      await vi.waitFor(() => {
+        expect(atriumHarness.updateSettings).toHaveBeenCalledOnce();
+      });
+      expect(atriumHarness.updateSettings).toHaveBeenCalledWith({
+        dismissedTaskAtriumErrors: [
+          expect.objectContaining({
+            environmentId: "env-1",
+            threadId: "thread-error",
+            turnId: "turn-error",
+          }),
+        ],
+      });
+    } finally {
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
   it("opens the thread and closes the panel when a card is clicked", async () => {
     navigations.length = 0;
     useTaskAtriumStore.getState().setOpen(true);

@@ -197,12 +197,18 @@ function isSameErrorDismissal(
   left: TaskAtriumErrorDismissal,
   right: TaskAtriumErrorDismissal,
 ): boolean {
-  return (
-    left.environmentId === right.environmentId &&
-    left.threadId === right.threadId &&
-    left.turnId === right.turnId &&
-    left.observedAt === right.observedAt
-  );
+  if (left.environmentId !== right.environmentId || left.threadId !== right.threadId) {
+    return false;
+  }
+  // The session projection can enter `error` before the corresponding turn
+  // projection settles. Treat the turn id as authoritative so that timestamp
+  // drift between those two events cannot resurrect a failure the user just
+  // cleared. A turnless provider/session failure has no durable occurrence id,
+  // so its transition timestamp is the stable fallback.
+  if (left.turnId !== null || right.turnId !== null) {
+    return left.turnId === right.turnId;
+  }
+  return left.observedAt === right.observedAt;
 }
 
 /**
@@ -294,7 +300,10 @@ export function selectAtriumSnapshot(
             : {
                 environmentId,
                 threadId,
-                turnId: session?.activeTurnId ?? latestTurn?.turnId ?? null,
+                // Do not attach a session-level failure to an unrelated last
+                // completed turn. Only an actively owned turn is authoritative;
+                // otherwise the session transition timestamp identifies it.
+                turnId: session?.activeTurnId ?? null,
                 observedAt:
                   session?.updatedAt ??
                   latestTurn?.completedAt ??

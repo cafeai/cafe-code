@@ -198,8 +198,9 @@ export const MAX_TASK_ATRIUM_ERROR_DISMISSALS = 2_000;
  * Identity of one dismissed Task Atrium error occurrence.
  *
  * Deliberately exclude provider error text, prompts, output, paths, and account
- * data. A turn id plus its observed timestamp distinguishes a later failure on
- * the same thread without persisting potentially sensitive diagnostics.
+ * data. A turn id identifies turn-bound failures; the observed timestamp
+ * distinguishes turnless session failures on the same thread. Neither path
+ * persists potentially sensitive diagnostics.
  */
 export const TaskAtriumErrorDismissal = Schema.Struct({
   environmentId: EnvironmentId,

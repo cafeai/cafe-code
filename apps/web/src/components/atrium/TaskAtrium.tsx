@@ -358,9 +358,7 @@ function TaskAtriumCardView({
 
 export function TaskAtriumBoard() {
   const tint = useAtriumTint();
-  const dismissedTaskAtriumErrors = useSettings(
-    (settings) => settings.dismissedTaskAtriumErrors,
-  );
+  const dismissedTaskAtriumErrors = useSettings((settings) => settings.dismissedTaskAtriumErrors);
   const { updateSettings } = useUpdateSettings();
   const { resolvedTheme } = useTheme();
   const dark = resolvedTheme !== "light";
@@ -381,9 +379,7 @@ export function TaskAtriumBoard() {
     const tick = () => {
       const timestamp = Date.now();
       setNow(timestamp);
-      setSnapshot(
-        selectAtriumSnapshot(useStore.getState(), timestamp, dismissedTaskAtriumErrors),
-      );
+      setSnapshot(selectAtriumSnapshot(useStore.getState(), timestamp, dismissedTaskAtriumErrors));
     };
     tick();
     const interval = window.setInterval(tick, 1000);
@@ -548,7 +544,8 @@ export function TaskAtriumBoard() {
                 <CircleCheckIcon className="size-4" />
               </TooltipTrigger>
               <TooltipPopup side="bottom">
-                Clear {snapshot.errorCount} historical {snapshot.errorCount === 1 ? "error" : "errors"}
+                Clear {snapshot.errorCount} historical{" "}
+                {snapshot.errorCount === 1 ? "error" : "errors"}
               </TooltipPopup>
             </Tooltip>
           ) : null}
