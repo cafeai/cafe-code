@@ -85,7 +85,14 @@ function StatTile({
   );
 }
 
-export function UsageCostSection({ usage }: { usage: UsageStatsGetResult | null }) {
+/**
+ * The cost panels, without surrounding chrome.
+ *
+ * Rendered both inside Settings and over the Task Atrium's scene, so it stays
+ * surface-agnostic: colours come from theme tokens and the caller owns the
+ * background, padding and heading.
+ */
+export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null }) {
   const overrides = useSettings((settings) => settings.modelPricingOverrides) as
     | Record<string, ModelRate>
     | undefined;
@@ -219,9 +226,8 @@ export function UsageCostSection({ usage }: { usage: UsageStatsGetResult | null 
   const maxProviderCost = Math.max(0, ...view.providers.map((entry) => entry.cost));
 
   return (
-    <SettingsSection
-      title="Cost"
-      headerAction={
+    <>
+      <div className="flex justify-end px-4 pt-3 sm:px-5">
         <div className="flex overflow-hidden rounded-md border border-border/70 text-[11px]">
           {(["cost", "tokens"] as const).map((option) => (
             <button
@@ -240,8 +246,7 @@ export function UsageCostSection({ usage }: { usage: UsageStatsGetResult | null 
             </button>
           ))}
         </div>
-      }
-    >
+      </div>
       <div className="grid gap-5 px-4 py-4 sm:px-5 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]">
         {/* Hero + provider split */}
         <div className="min-w-0">
@@ -458,6 +463,15 @@ export function UsageCostSection({ usage }: { usage: UsageStatsGetResult | null 
           </p>
         </div>
       </div>
+    </>
+  );
+}
+
+/** Settings → Usage placement. */
+export function UsageCostSection({ usage }: { usage: UsageStatsGetResult | null }) {
+  return (
+    <SettingsSection title="Cost">
+      <UsageCostContent usage={usage} />
     </SettingsSection>
   );
 }

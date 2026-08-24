@@ -10,8 +10,7 @@ import { useStore } from "../../store";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { cn } from "../../lib/utils";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { UsageAreaChart } from "../stats/UsageAreaChart";
-import { useCountUp } from "../stats/useCountUp";
+import { UsageCostContent } from "../settings/UsageCostSection";
 import { useUsageCostSummary } from "../stats/useUsageCostSummary";
 import { createAtriumScene, type AtriumScene } from "./atriumScene";
 import {
@@ -69,21 +68,6 @@ const STATE_LABEL: Record<AtriumCardState, string> = {
   error: "Error",
   done: "Done",
 };
-
-/**
- * Card slots, mirroring the staged composition rather than a grid. Each slot
- * carries a depth: nearer cards sit larger and take more of the parallax.
- */
-const SLOTS: ReadonlyArray<{ left: string; top: string; depth: 1 | 2 | 3 }> = [
-  { left: "0%", top: "4%", depth: 1 },
-  { left: "50%", top: "0%", depth: 2 },
-  { left: "2%", top: "56%", depth: 2 },
-  { left: "52%", top: "50%", depth: 3 },
-  { left: "24%", top: "28%", depth: 3 },
-  { left: "70%", top: "24%", depth: 3 },
-];
-
-const DEPTH_SCALE: Record<1 | 2 | 3, number> = { 1: 1, 2: 0.94, 3: 0.88 };
 
 function useAtriumTint(): string {
   const atriumColor = useSettings((settings) => settings.ambianceAtriumColor);
@@ -244,39 +228,54 @@ function AtriumSceneCanvas({
   );
 }
 
+function Stat({
+  label,
+  value,
+  tone,
+  muted,
+  color,
+}: {
+  label: string;
+  value: string;
+  tone: string;
+  muted: string;
+  color?: string;
+}) {
+  return (
+    <div className="min-w-0">
+      <dt className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", muted)}>{label}</dt>
+      <dd
+        className={cn("mt-0.5 truncate text-xl tabular-nums", tone)}
+        style={color ? { color } : undefined}
+      >
+        {value}
+      </dd>
+    </div>
+  );
+}
+
 function TaskAtriumCardView({
   card,
-  slot,
   now,
   tint,
   onOpen,
 }: {
   card: AtriumCard;
-  slot: (typeof SLOTS)[number];
   now: number;
   tint: string;
   onOpen: (card: AtriumCard) => void;
 }) {
   const accent = stateColor(card.state, tint);
   const elapsed = formatElapsed(card.startedAt, now);
-  const scale = DEPTH_SCALE[slot.depth];
 
   return (
     <button
       type="button"
       onClick={() => onOpen(card)}
       aria-label={`Open ${card.title}`}
-      style={
-        {
-          "--cafe-atrium-accent": accent,
-          "--cafe-atrium-card-scale": `scale(${scale})`,
-          "--cafe-atrium-left": slot.left,
-          "--cafe-atrium-top": slot.top,
-          zIndex: 10 - slot.depth,
-        } as CSSProperties
-      }
+      style={{ "--cafe-atrium-accent": accent } as CSSProperties}
       className={cn(
-        "group overflow-hidden rounded-2xl p-4 text-left will-change-transform",
+        "group w-full overflow-hidden rounded-2xl p-4 text-left",
         "border backdrop-blur-md transition-shadow duration-200",
         // Paper stock on a light sky, dark glass on a dusk one — the card has
         // to belong to the theme, not just to the scene behind it.
@@ -284,11 +283,6 @@ function TaskAtriumCardView({
         "dark:border-white/12 dark:bg-[#1b1620]/88 dark:text-[#eee7ec]",
         "hover:shadow-[0_30px_60px_-18px_rgba(0,0,0,0.6)]",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--cafe-atrium-accent)]",
-        // Staged slots on wide layouts; a plain stacked column on narrow ones,
-        // where absolute positioning would only overlap.
-        "lg:absolute lg:w-[46%] lg:min-w-[250px]",
-        "lg:left-[var(--cafe-atrium-left)] lg:top-[var(--cafe-atrium-top)]",
-        "lg:[transform:var(--cafe-atrium-card-scale)]",
         card.state === "done" && "opacity-80",
       )}
     >
@@ -383,8 +377,6 @@ export function TaskAtriumBoard() {
   // Lifetime spend, alongside the live work. Same odometer as the Usage page,
   // so the two never animate differently.
   const usage = useUsageCostSummary(true);
-  const costDisplay = useCountUp(usage.cost, { decimals: 2 });
-  const tokensDisplay = useCountUp(usage.tokens);
 
   // Derivation allocates fresh arrays, so subscribing to the store directly
   // would re-render this board on every streamed token. Poll on one slow clock
@@ -613,102 +605,70 @@ export function TaskAtriumBoard() {
                   ? `${snapshot.errorCount} ${snapshot.errorCount === 1 ? "thread" : "threads"} stopped on an error. Open one to see what happened.`
                   : "Nothing here asks for you. The garden keeps its own hours."}
             </p>
-            <div className="mt-6 flex gap-6">
-              <div>
-                <div className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", label)}>
-                  Threads
-                </div>
-                <div className={cn("mt-0.5 text-xl tabular-nums", heading)}>{filtered.length}</div>
-              </div>
-              <div>
-                <div className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", label)}>
-                  Subagents
-                </div>
-                <div className={cn("mt-0.5 text-xl tabular-nums", heading)}>
-                  {snapshot.subagentCount}
-                </div>
-              </div>
-              {usage.loaded ? (
-                <div>
-                  <div className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", label)}>
-                    Tokens
-                  </div>
-                  <div className={cn("mt-0.5 text-xl tabular-nums", heading)}>
-                    {compactTokens(tokensDisplay)}
-                  </div>
-                </div>
-              ) : null}
-              {usage.loaded && usage.cost > 0 ? (
-                <div>
-                  <div className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", label)}>
-                    Cost{usage.hasUnpriced ? "*" : ""}
-                  </div>
-                  <div
-                    className={cn("mt-0.5 text-xl tabular-nums", heading)}
-                    // Some volume carries no rate, so this covers only part of it.
-                    title={
-                      usage.hasUnpriced
-                        ? "At full API rate. Some models have no rate, so this covers only priced usage."
-                        : "At full API rate."
-                    }
-                  >
-                    {currencyFormat.format(costDisplay)}
-                  </div>
-                </div>
-              ) : null}
+            <dl className="mt-7 grid max-w-md grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
+              <Stat label="Threads" value={String(filtered.length)} tone={heading} muted={label} />
+              <Stat
+                label="Subagents"
+                value={String(snapshot.subagentCount)}
+                tone={heading}
+                muted={label}
+              />
+              <Stat
+                label="Running"
+                value={String(snapshot.runningCount)}
+                tone={heading}
+                muted={label}
+              />
               {snapshot.holdingCount > 0 ? (
-                <div>
-                  <div className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", label)}>
-                    Holding
-                  </div>
-                  <div className="mt-0.5 text-xl tabular-nums" style={{ color: HOLD_COLOR }}>
-                    {snapshot.holdingCount}
-                  </div>
-                </div>
+                <Stat
+                  label="Holding"
+                  value={String(snapshot.holdingCount)}
+                  tone=""
+                  muted={label}
+                  color={HOLD_COLOR}
+                />
               ) : null}
               {snapshot.errorCount > 0 ? (
-                <div>
-                  <div className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", label)}>
-                    Errors
-                  </div>
-                  <div className="mt-0.5 text-xl tabular-nums" style={{ color: FAULT_COLOR }}>
-                    {snapshot.errorCount}
-                  </div>
-                </div>
-              ) : null}
-            </div>
-
-            {/* Last 30 days across all recorded usage, not just the threads on
-                the wall — the meters above are lifetime, this is the shape. */}
-            {usage.loaded && usage.daily.length > 1 ? (
-              <div className="mt-6 max-w-xs">
-                <div className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", label)}>
-                  Last 30 days
-                </div>
-                <UsageAreaChart
-                  className="mt-1"
-                  height={56}
-                  labels={usage.daily.map((entry) => entry.day.slice(5))}
-                  series={[
-                    {
-                      key: "tokens",
-                      label: "Tokens",
-                      color: tint,
-                      values: usage.daily.map((entry) => entry.tokens),
-                    },
-                  ]}
-                  format={(value) => `${compactTokens(value)} tokens`}
+                <Stat
+                  label="Errors"
+                  value={String(snapshot.errorCount)}
+                  tone=""
+                  muted={label}
+                  color={FAULT_COLOR}
                 />
-              </div>
-            ) : null}
+              ) : null}
+              {usage.cachedShare !== null ? (
+                <Stat
+                  label="Cache hits"
+                  value={`${(usage.cachedShare * 100).toFixed(1)}%`}
+                  tone={heading}
+                  muted={label}
+                />
+              ) : null}
+              {usage.cacheSavings > 0 ? (
+                <Stat
+                  label="Cache saved"
+                  value={currencyFormat.format(usage.cacheSavings)}
+                  tone={heading}
+                  muted={label}
+                />
+              ) : null}
+              {usage.outputTokens > 0 ? (
+                <Stat
+                  label="Output"
+                  value={compactTokens(usage.outputTokens)}
+                  tone={heading}
+                  muted={label}
+                />
+              ) : null}
+            </dl>
           </div>
 
-          <div className="relative min-h-0 self-stretch max-lg:flex max-lg:flex-col max-lg:gap-3 max-lg:overflow-y-auto max-lg:py-2">
-            {visible.map((card, index) => (
+          <div className="flex min-h-0 flex-col gap-3 self-stretch overflow-y-auto py-2 lg:ml-auto lg:w-full lg:max-w-md">
+            {visible.map((card) => (
               <TaskAtriumCardView
                 key={card.key}
                 card={card}
-                slot={SLOTS[index % SLOTS.length]!}
                 now={now}
                 tint={tint}
                 onOpen={openCard}
@@ -717,6 +677,23 @@ export function TaskAtriumBoard() {
           </div>
         </div>
       )}
+
+      {/* The same cost panels as Settings → Usage, not a second implementation.
+          Always rendered: it describes every thread ever run, so an idle Atrium
+          still has something worth reading. Scrolls on its own and collapses to
+          one column on narrow layouts, where the panels stack. */}
+      {usage.loaded && usage.raw ? (
+        <div className="relative z-20 mx-4 mb-4 max-h-[46vh] shrink-0 overflow-y-auto lg:mx-10">
+          <div className={cn("rounded-2xl border backdrop-blur-md", glass)}>
+            <div className="flex items-center gap-3 px-4 pt-3 sm:px-5">
+              <span className={cn("font-mono text-[10px] uppercase tracking-[0.14em]", label)}>
+                Summary &middot; all threads
+              </span>
+            </div>
+            <UsageCostContent usage={usage.raw} />
+          </div>
+        </div>
+      ) : null}
 
       {overflow > 0 ? (
         <div

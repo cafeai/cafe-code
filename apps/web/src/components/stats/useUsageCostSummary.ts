@@ -25,6 +25,17 @@ export interface UsageCostSummary {
   readonly hasUnpriced: boolean;
   /** Daily totals for a sparkline, oldest first. Covers all usage, not one view. */
   readonly daily: ReadonlyArray<{ day: string; tokens: number; cost: number }>;
+  /** Totals over `dayWindow` only, for surfaces that offer a range selector. */
+  readonly rangeTokens: number;
+  readonly rangeCost: number;
+  /** Lifetime output tokens, for surfaces showing composition. */
+  readonly outputTokens: number;
+  /** Share of input served from cache, 0..1, or null when there is no input. */
+  readonly cachedShare: number | null;
+  /** USD not spent because the cache served input at its lower rate. */
+  readonly cacheSavings: number;
+  /** The raw response, for surfaces rendering the full cost panels. */
+  readonly raw: UsageStatsGetResult | null;
 }
 
 const EMPTY: UsageCostSummary = {
@@ -33,6 +44,12 @@ const EMPTY: UsageCostSummary = {
   loaded: false,
   hasUnpriced: false,
   daily: [],
+  rangeTokens: 0,
+  rangeCost: 0,
+  outputTokens: 0,
+  cachedShare: null,
+  cacheSavings: 0,
+  raw: null,
 };
 
 export function useUsageCostSummary(enabled: boolean, dayWindow = 30): UsageCostSummary {
@@ -91,6 +108,17 @@ export function useUsageCostSummary(enabled: boolean, dayWindow = 30): UsageCost
       loaded: true,
       hasUnpriced: rollup.unpricedTokens > 0,
       daily,
+      rangeTokens: daily.reduce((total, day) => total + day.tokens, 0),
+      // Blended, like the daily series it is summed from. The lifetime `cost`
+      // above is the exact figure; this one is scoped to the window.
+      rangeCost: daily.reduce((total, day) => total + day.cost, 0),
+      outputTokens: usage.totals.outputTokens,
+      cachedShare:
+        usage.totals.inputTokens > 0
+          ? usage.totals.cachedInputTokens / usage.totals.inputTokens
+          : null,
+      cacheSavings: rollup.cacheSavings,
+      raw: usage,
     };
   }, [usage, overrides, dayWindow]);
 }
