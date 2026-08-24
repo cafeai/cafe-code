@@ -103,6 +103,32 @@ export const InterfaceScalePercent = Schema.Int.check(
 );
 export type InterfaceScalePercent = typeof InterfaceScalePercent.Type;
 
+// ── Model pricing (Usage page) ─────────────────────────────────────
+//
+// Cost on the Usage page is computed client-side from recorded token counters.
+// A bundled rate table ships with the app so the page works out of the box;
+// these overrides win over it, keyed by model id or by a prefix covering a
+// family. Rates are USD per million tokens, matching provider price sheets.
+// Models matched by neither are reported as unpriced rather than free.
+export const MAX_MODEL_PRICING_OVERRIDES = 200;
+export const MAX_MODEL_RATE_USD_PER_MILLION = 10_000;
+
+const ModelRateValue = Schema.Number.check(
+  Schema.isBetween({ minimum: 0, maximum: MAX_MODEL_RATE_USD_PER_MILLION }),
+);
+
+export const ModelRateOverride = Schema.Struct({
+  input: ModelRateValue,
+  cachedInput: ModelRateValue,
+  cacheWrite: ModelRateValue,
+  output: ModelRateValue,
+});
+export type ModelRateOverride = typeof ModelRateOverride.Type;
+
+export const ModelPricingOverrides = Schema.Record(TrimmedNonEmptyString, ModelRateOverride);
+export type ModelPricingOverrides = typeof ModelPricingOverrides.Type;
+export const DEFAULT_MODEL_PRICING_OVERRIDES: ModelPricingOverrides = {};
+
 // ── Ambiance (decorative weather layer) ────────────────────────────
 //
 // Purely cosmetic renderer state: an animated weather canvas drawn over the
@@ -321,6 +347,9 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   ambianceAtriumEnabled: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_ATRIUM_ENABLED)),
+  ),
+  modelPricingOverrides: ModelPricingOverrides.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_MODEL_PRICING_OVERRIDES)),
   ),
   ambianceAtriumColor: TrimmedString.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_ATRIUM_COLOR)),
@@ -942,6 +971,7 @@ export const ClientSettingsPatch = Schema.Struct({
   ambianceColor: Schema.optionalKey(TrimmedString),
   ambianceAtriumEnabled: Schema.optionalKey(Schema.Boolean),
   ambianceAtriumColor: Schema.optionalKey(TrimmedString),
+  modelPricingOverrides: Schema.optionalKey(ModelPricingOverrides),
   dismissedTaskAtriumErrors: Schema.optionalKey(TaskAtriumErrorDismissals),
   themeAccentColor: Schema.optionalKey(TrimmedString),
   appAccentColor: Schema.optionalKey(TrimmedString),
