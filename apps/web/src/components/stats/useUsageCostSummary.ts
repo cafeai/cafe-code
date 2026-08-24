@@ -23,11 +23,19 @@ export interface UsageCostSummary {
   readonly loaded: boolean;
   /** Some recorded volume has no rate, so `cost` covers only part of it. */
   readonly hasUnpriced: boolean;
+  /** Daily totals for a sparkline, oldest first. Covers all usage, not one view. */
+  readonly daily: ReadonlyArray<{ day: string; tokens: number; cost: number }>;
 }
 
-const EMPTY: UsageCostSummary = { cost: 0, tokens: 0, loaded: false, hasUnpriced: false };
+const EMPTY: UsageCostSummary = {
+  cost: 0,
+  tokens: 0,
+  loaded: false,
+  hasUnpriced: false,
+  daily: [],
+};
 
-export function useUsageCostSummary(enabled: boolean): UsageCostSummary {
+export function useUsageCostSummary(enabled: boolean, dayWindow = 30): UsageCostSummary {
   const overrides = useSettings((settings) => settings.modelPricingOverrides) as
     | Record<string, ModelRate>
     | undefined;
@@ -69,11 +77,20 @@ export function useUsageCostSummary(enabled: boolean): UsageCostSummary {
   return useMemo(() => {
     if (usage === null) return EMPTY;
     const rollup = rollUpCost(usage.tokenBreakdown, overrides);
+    // Daily rows carry no model dimension, so per-day cost uses the blended
+    // rate implied by the lifetime ledger. Good enough for a sparkline's shape;
+    // the exact figure is the headline beside it.
+    const blended = rollup.pricedTokens > 0 ? rollup.cost / rollup.pricedTokens : 0;
+    const daily = usage.days.slice(-dayWindow).map((day) => {
+      const tokens = day.inputTokens + day.outputTokens;
+      return { day: day.day, tokens, cost: tokens * blended };
+    });
     return {
       cost: rollup.cost,
       tokens: usage.totals.inputTokens + usage.totals.outputTokens,
       loaded: true,
       hasUnpriced: rollup.unpricedTokens > 0,
+      daily,
     };
-  }, [usage, overrides]);
+  }, [usage, overrides, dayWindow]);
 }

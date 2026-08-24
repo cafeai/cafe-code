@@ -44,6 +44,21 @@ function compactTokens(value: number): string {
 
 type Mode = "cost" | "tokens";
 
+/**
+ * Chart window. The daily ledger is the only day-indexed data we have, so a
+ * range narrows the chart and the in-range subtotal beside it. The headline and
+ * the model table stay lifetime figures — those come from the per-model ledger,
+ * which carries no day dimension, and silently relabelling them as ranged would
+ * be a lie.
+ */
+const RANGES = [
+  { key: "7", label: "7 days", days: 7 },
+  { key: "30", label: "30 days", days: 30 },
+  { key: "90", label: "90 days", days: 90 },
+  { key: "all", label: "All", days: Number.POSITIVE_INFINITY },
+] as const;
+type RangeKey = (typeof RANGES)[number]["key"];
+
 const TOKEN_BAND_COLORS = {
   cached: "#48cfff",
   fresh: "#a78bfa",
@@ -75,6 +90,7 @@ export function UsageCostSection({ usage }: { usage: UsageStatsGetResult | null 
     | Record<string, ModelRate>
     | undefined;
   const [mode, setMode] = useState<Mode>("cost");
+  const [range, setRange] = useState<RangeKey>("30");
 
   const view = useMemo(() => {
     const breakdown = usage?.tokenBreakdown ?? [];
@@ -137,8 +153,11 @@ export function UsageCostSection({ usage }: { usage: UsageStatsGetResult | null 
   const tokensDisplay = useCountUp(view.processed);
 
   const chart = useMemo(() => {
-    const days = usage?.days ?? [];
+    const all = usage?.days ?? [];
+    const window = RANGES.find((entry) => entry.key === range)?.days ?? 30;
+    const days = Number.isFinite(window) ? all.slice(-window) : all;
     const labels = days.map((day) => day.day.slice(5));
+    const rangeTokens = days.reduce((total, day) => total + day.inputTokens + day.outputTokens, 0);
     if (mode === "tokens") {
       const series: UsageChartSeries[] = [
         {
@@ -162,7 +181,12 @@ export function UsageCostSection({ usage }: { usage: UsageStatsGetResult | null 
           values: days.map((day) => day.outputTokens),
         },
       ];
-      return { labels, series, format: (value: number) => `${compactTokens(value)} tokens` };
+      return {
+        labels,
+        series,
+        rangeTokens,
+        format: (value: number) => `${compactTokens(value)} tokens`,
+      };
     }
 
     // Daily rows carry no model dimension, so cost per day is approximated with
@@ -177,8 +201,8 @@ export function UsageCostSection({ usage }: { usage: UsageStatsGetResult | null 
         values: days.map((day) => (day.inputTokens + day.outputTokens) * blended),
       },
     ];
-    return { labels, series, format: (value: number) => currency.format(value) };
-  }, [usage, mode, view.rollup]);
+    return { labels, series, rangeTokens, format: (value: number) => currency.format(value) };
+  }, [usage, mode, range, view.rollup]);
 
   const share = view.rollup.pricedTokens + view.rollup.unpricedTokens;
   const pricedPercent = share === 0 ? null : (view.rollup.pricedTokens / share) * 100;
@@ -271,8 +295,27 @@ export function UsageCostSection({ usage }: { usage: UsageStatsGetResult | null 
 
         {/* Chart */}
         <div className="min-w-0">
-          <div className="mb-1 flex items-center gap-3 text-[11px] text-muted-foreground">
+          <div className="mb-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
             <span>{mode === "cost" ? "Estimated daily cost" : "Daily tokens"}</span>
+            <div className="flex overflow-hidden rounded-md border border-border/70">
+              {RANGES.map((entry) => (
+                <button
+                  key={entry.key}
+                  type="button"
+                  onClick={() => setRange(entry.key)}
+                  aria-pressed={range === entry.key}
+                  className={cn(
+                    "px-2 py-0.5 transition-colors",
+                    range === entry.key ? "bg-foreground text-background" : "hover:text-foreground",
+                  )}
+                >
+                  {entry.label}
+                </button>
+              ))}
+            </div>
+            <span className="tabular-nums text-muted-foreground/70">
+              {compactTokens(chart.rangeTokens)} tokens in range
+            </span>
             {mode === "tokens" ? (
               <span className="ml-auto flex items-center gap-3">
                 {(
