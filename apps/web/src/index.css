@@ -1577,8 +1577,8 @@ label:has(> select#reasoning-effort) select {
 .cafe-ambiance-preview-converge::before {
   background: repeating-conic-gradient(
     from 0deg at 50% 92%,
-    color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 55%, transparent) 0deg
-      3deg,
+    color-mix(in srgb, var(--cafe-ambiance-accent, var(--cafe-sidebar-accent)) 55%, transparent)
+      0deg 3deg,
     transparent 3deg 22deg
   );
   filter: blur(1px);

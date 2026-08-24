@@ -24,6 +24,7 @@ export interface PersistedUiState {
   projectOrderCwds?: string[];
   defaultAdvertisedEndpointKey?: string | null;
   navigationSidebarOpen?: boolean;
+  threadLastVisitedAtById?: Record<string, string>;
   threadPlanSidebarOpenById?: Record<string, boolean>;
 }
 
@@ -89,6 +90,15 @@ const currentProjectCwdsByLogicalKey = new Map<string, string[]>();
 const currentLogicalKeyByPhysicalKey = new Map<string, string>();
 let legacyKeysCleanedUp = false;
 
+// Renderer storage is user-controlled input. Keep the persisted read-cursor
+// map bounded so a corrupt profile cannot turn startup hydration into
+// unbounded allocation or timestamp parsing work. Normal scoped thread keys
+// are far below this limit, and syncThreads prunes records for deleted threads
+// after the authoritative shell snapshot arrives.
+const MAX_PERSISTED_THREAD_VISIT_ENTRIES = 10_000;
+const MAX_PERSISTED_THREAD_KEY_LENGTH = 512;
+const MAX_PERSISTED_TIMESTAMP_LENGTH = 64;
+
 function readPersistedState(): UiState {
   if (typeof window === "undefined") {
     return initialState;
@@ -101,27 +111,46 @@ function readPersistedState(): UiState {
         if (!legacyRaw) {
           continue;
         }
-        hydratePersistedProjectState(JSON.parse(legacyRaw) as PersistedUiState);
-        return initialState;
+        return hydratePersistedUiState(JSON.parse(legacyRaw) as PersistedUiState);
       }
       return initialState;
     }
     const parsed = JSON.parse(raw) as PersistedUiState;
-    hydratePersistedProjectState(parsed);
-    return {
-      ...initialState,
-      defaultAdvertisedEndpointKey:
-        typeof parsed.defaultAdvertisedEndpointKey === "string" &&
-        parsed.defaultAdvertisedEndpointKey.length > 0
-          ? parsed.defaultAdvertisedEndpointKey
-          : null,
-      navigationSidebarOpen:
-        typeof parsed.navigationSidebarOpen === "boolean" ? parsed.navigationSidebarOpen : true,
-      threadPlanSidebarOpenById: sanitizeBooleanRecord(parsed.threadPlanSidebarOpenById),
-    };
+    return hydratePersistedUiState(parsed);
   } catch {
     return initialState;
   }
+}
+
+function sanitizeThreadVisitRecord(input: unknown): Record<string, string> {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    return {};
+  }
+
+  const sanitizedEntries: Array<[string, string]> = [];
+  let inspected = 0;
+  for (const threadKey in input as Record<string, unknown>) {
+    if (inspected >= MAX_PERSISTED_THREAD_VISIT_ENTRIES) {
+      break;
+    }
+    inspected += 1;
+    if (!Object.hasOwn(input, threadKey)) {
+      continue;
+    }
+    const visitedAt = (input as Record<string, unknown>)[threadKey];
+    if (
+      threadKey.length === 0 ||
+      threadKey.length > MAX_PERSISTED_THREAD_KEY_LENGTH ||
+      typeof visitedAt !== "string" ||
+      visitedAt.length === 0 ||
+      visitedAt.length > MAX_PERSISTED_TIMESTAMP_LENGTH ||
+      !Number.isFinite(Date.parse(visitedAt))
+    ) {
+      continue;
+    }
+    sanitizedEntries.push([threadKey, visitedAt]);
+  }
+  return Object.fromEntries(sanitizedEntries);
 }
 
 function sanitizeBooleanRecord(input: unknown): Record<string, boolean> {
@@ -133,6 +162,28 @@ function sanitizeBooleanRecord(input: unknown): Record<string, boolean> {
       (entry): entry is [string, boolean] => entry[0].length > 0 && typeof entry[1] === "boolean",
     ),
   );
+}
+
+/**
+ * Decode the durable renderer preferences used during a fresh application
+ * startup. In particular, completed-turn read cursors must be restored before
+ * sidebar status derivation runs; otherwise every completed turn appears new
+ * after each restart even though the user already opened it.
+ */
+export function hydratePersistedUiState(parsed: PersistedUiState): UiState {
+  hydratePersistedProjectState(parsed);
+  return {
+    ...initialState,
+    defaultAdvertisedEndpointKey:
+      typeof parsed.defaultAdvertisedEndpointKey === "string" &&
+      parsed.defaultAdvertisedEndpointKey.length > 0
+        ? parsed.defaultAdvertisedEndpointKey
+        : null,
+    navigationSidebarOpen:
+      typeof parsed.navigationSidebarOpen === "boolean" ? parsed.navigationSidebarOpen : true,
+    threadLastVisitedAtById: sanitizeThreadVisitRecord(parsed.threadLastVisitedAtById),
+    threadPlanSidebarOpenById: sanitizeBooleanRecord(parsed.threadPlanSidebarOpenById),
+  };
 }
 
 export function hydratePersistedProjectState(parsed: PersistedUiState): void {
@@ -183,6 +234,7 @@ export function persistState(state: UiState): void {
         projectOrderCwds,
         defaultAdvertisedEndpointKey: state.defaultAdvertisedEndpointKey,
         navigationSidebarOpen: state.navigationSidebarOpen,
+        threadLastVisitedAtById: state.threadLastVisitedAtById,
         threadPlanSidebarOpenById: state.threadPlanSidebarOpenById,
       } satisfies PersistedUiState),
     );

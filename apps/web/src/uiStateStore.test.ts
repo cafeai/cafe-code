@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearThreadUi,
   hydratePersistedProjectState,
+  hydratePersistedUiState,
   markThreadVisited,
   PERSISTED_STATE_KEY,
   type PersistedUiState,
@@ -602,6 +603,40 @@ describe("uiStateStore persistence round-trip", () => {
     expect(persisted.threadPlanSidebarOpenById).toEqual({
       [thread1]: false,
       [thread2]: true,
+    });
+  });
+
+  it("preserves completed-turn read cursors across restart", () => {
+    const threadKey = "environment-primary:thread-1";
+    const visitedAt = "2026-08-25T00:02:37.000Z";
+    const state = makeUiState({
+      threadLastVisitedAtById: {
+        [threadKey]: visitedAt,
+      },
+    });
+
+    persistState(state);
+
+    const persisted = JSON.parse(
+      localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}",
+    ) as PersistedUiState;
+    const rehydrated = hydratePersistedUiState(persisted);
+
+    expect(persisted.threadLastVisitedAtById).toEqual({ [threadKey]: visitedAt });
+    expect(rehydrated.threadLastVisitedAtById).toEqual({ [threadKey]: visitedAt });
+  });
+
+  it("rejects malformed completed-turn read cursors during startup hydration", () => {
+    const rehydrated = hydratePersistedUiState({
+      threadLastVisitedAtById: {
+        "environment-primary:valid-thread": "2026-08-25T00:02:37.000Z",
+        "environment-primary:invalid-thread": "not-a-timestamp",
+        "": "2026-08-25T00:02:37.000Z",
+      },
+    });
+
+    expect(rehydrated.threadLastVisitedAtById).toEqual({
+      "environment-primary:valid-thread": "2026-08-25T00:02:37.000Z",
     });
   });
 
