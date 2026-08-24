@@ -13,7 +13,7 @@ const atriumHarness = vi.hoisted(() => {
       [env]: {
         projectIds: ["project-1"],
         projectById: { "project-1": { id: "project-1", name: "cafe-code" } },
-        threadIds: [thread],
+        threadIds: [thread, "thread-2"],
         threadSessionById: {},
         threadTurnStateById: {},
         activityIdsByThreadId: { [thread]: ["a1", "a2"] },
@@ -44,6 +44,29 @@ const atriumHarness = vi.hoisted(() => {
           },
         },
         sidebarThreadSummaryById: {
+          "thread-2": {
+            id: "thread-2",
+            environmentId: env,
+            projectId: "project-1",
+            title: "Fix flaky provider reconnect test",
+            session: { provider: "codex", orchestrationStatus: "running" },
+            createdAt: new Date(now - 300_000).toISOString(),
+            archivedAt: null,
+            latestTurn: {
+              turnId: "t2",
+              state: "running",
+              requestedAt: new Date(now - 252_000).toISOString(),
+              startedAt: new Date(now - 252_000).toISOString(),
+              completedAt: null,
+              assistantMessageId: null,
+            },
+            branch: null,
+            worktreePath: null,
+            latestUserMessageAt: null,
+            hasPendingApprovals: false,
+            hasPendingUserInput: false,
+            hasActionableProposedPlan: false,
+          },
           [thread]: {
             id: thread,
             environmentId: env,
@@ -107,9 +130,13 @@ vi.mock("../../store", () => ({
   useStore: atriumHarness.useStore,
 }));
 
+const navigations: Array<Record<string, unknown>> = [];
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@tanstack/react-router")>()),
-  useNavigate: () => () => Promise.resolve(),
+  useNavigate: () => (options: Record<string, unknown>) => {
+    navigations.push(options);
+    return Promise.resolve();
+  },
 }));
 
 import { TaskAtriumBoard } from "./TaskAtrium";
@@ -183,16 +210,16 @@ describe("TaskAtriumBoard", () => {
   });
 });
 
+async function mountOverlay() {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const screen = await render(<TaskAtriumOverlay />, { container: host });
+  return { host, screen };
+}
+
+const overlay = () => document.querySelector('[data-cafe-task-atrium-overlay="true"]');
+
 describe("TaskAtriumOverlay", () => {
-  const overlay = () => document.querySelector('[data-cafe-task-atrium-overlay="true"]');
-
-  async function mountOverlay() {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const screen = await render(<TaskAtriumOverlay />, { container: host });
-    return { host, screen };
-  }
-
   it("stays closed until it is opened", async () => {
     useTaskAtriumStore.getState().setOpen(false);
     const { host, screen } = await mountOverlay();
@@ -233,6 +260,65 @@ describe("TaskAtriumOverlay", () => {
     } finally {
       atriumHarness.settings.ambianceAtriumEnabled = true;
       useTaskAtriumStore.getState().setOpen(false);
+      await screen.unmount();
+      host.remove();
+    }
+  });
+});
+
+describe("TaskAtriumBoard interaction", () => {
+  it("opens the thread and closes the panel when a card is clicked", async () => {
+    navigations.length = 0;
+    useTaskAtriumStore.getState().setOpen(true);
+    const { host, screen } = await renderInTheme("dark");
+    try {
+      const cardSelector = "button[aria-label='Open Port the ambiance engine to WebGL']";
+      await vi.waitFor(() => {
+        expect(host.querySelector(cardSelector)).not.toBeNull();
+      });
+      host.querySelector<HTMLElement>(cardSelector)?.click();
+
+      await vi.waitFor(() => {
+        expect(navigations).toHaveLength(1);
+        expect(navigations[0]?.to).toBe("/$environmentId/$threadId");
+        expect((navigations[0]?.params as { threadId?: string })?.threadId).toBe("thread-1");
+        // The overlay covers the whole window, so navigating without closing
+        // would change the route behind a panel that still hides it.
+        expect(useTaskAtriumStore.getState().open).toBe(false);
+      });
+    } finally {
+      useTaskAtriumStore.getState().setOpen(false);
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("restricts the board to one provider when its pill is pressed", async () => {
+    const { host, screen } = await renderInTheme("dark");
+    try {
+      await vi.waitFor(() => {
+        expect(host.textContent).toContain("Port the ambiance engine to WebGL");
+        expect(host.textContent).toContain("Fix flaky provider reconnect test");
+      });
+
+      const codexPill = [...host.querySelectorAll("button")].find((button) =>
+        button.textContent?.startsWith("Codex"),
+      );
+      expect(codexPill).toBeDefined();
+      codexPill?.click();
+
+      await vi.waitFor(() => {
+        expect(host.textContent).toContain("Fix flaky provider reconnect test");
+        expect(host.textContent).not.toContain("Port the ambiance engine to WebGL");
+        expect(codexPill?.getAttribute("aria-pressed")).toBe("true");
+      });
+
+      // Pressing it again clears the filter rather than stranding the board.
+      codexPill?.click();
+      await vi.waitFor(() => {
+        expect(host.textContent).toContain("Port the ambiance engine to WebGL");
+      });
+    } finally {
       await screen.unmount();
       host.remove();
     }

@@ -12,10 +12,12 @@ import { createAtriumScene, type AtriumScene } from "./atriumScene";
 import {
   EMPTY_ATRIUM,
   formatElapsed,
+  MAX_ATRIUM_CARDS,
   selectAtriumSnapshot,
   type AtriumCard,
   type AtriumCardState,
 } from "./taskAtriumData";
+import { useTaskAtriumStore } from "./taskAtriumStore";
 
 /**
  * Task Atrium — a read-only view of everything running, staged as a scene.
@@ -356,8 +358,11 @@ export function TaskAtriumBoard() {
   const { resolvedTheme } = useTheme();
   const dark = resolvedTheme !== "light";
   const navigate = useNavigate();
+  const closeAtrium = useTaskAtriumStore((state) => state.setOpen);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const [pointer, setPointer] = useState({ x: 0, y: 0 });
+  // null = "All work". Cleared automatically if that provider stops running.
+  const [providerFilter, setProviderFilter] = useState<string | null>(null);
 
   // Derivation allocates fresh arrays, so subscribing to the store directly
   // would re-render this board on every streamed token. Poll on one slow clock
@@ -390,22 +395,41 @@ export function TaskAtriumBoard() {
   }, []);
   const onPointerLeave = useCallback(() => setPointer({ x: 0, y: 0 }), []);
 
-  const providerCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const card of snapshot.cards) {
-      counts.set(card.provider, (counts.get(card.provider) ?? 0) + 1);
+  const providerCounts = snapshot.providerCounts;
+
+  // Drop a filter whose provider no longer has anything running, so the view
+  // cannot get stuck showing an empty board.
+  useEffect(() => {
+    if (providerFilter === null) return;
+    if (!providerCounts.some(([provider]) => provider === providerFilter)) {
+      setProviderFilter(null);
     }
-    return [...counts.entries()].filter(([provider]) => provider.length > 0);
-  }, [snapshot.cards]);
+  }, [providerCounts, providerFilter]);
+
+  // Filter first, then cap — capping first would hide threads the filter was
+  // meant to reveal.
+  const filtered = useMemo(
+    () =>
+      providerFilter === null
+        ? snapshot.cards
+        : snapshot.cards.filter((card) => card.provider === providerFilter),
+    [snapshot.cards, providerFilter],
+  );
+  const visible = filtered.slice(0, MAX_ATRIUM_CARDS);
+  const overflow = Math.max(0, filtered.length - visible.length);
 
   const openCard = (card: AtriumCard) => {
+    // Close on the way out: the overlay is fixed over the whole window, so
+    // navigating without closing changes the route behind a panel that still
+    // covers it and nothing appears to happen.
+    closeAtrium(false);
     void navigate({
       to: "/$environmentId/$threadId",
       params: buildThreadRouteParams(scopeThreadRef(card.environmentId, card.threadId)),
     });
   };
 
-  const total = snapshot.cards.length + snapshot.overflow;
+  const total = snapshot.cards.length;
   const glass = dark
     ? "border-white/15 bg-black/35 text-white/85"
     : "border-black/10 bg-white/60 text-[#3a3038]";
@@ -425,38 +449,65 @@ export function TaskAtriumBoard() {
       {/* Glass pill nav, floating over the scene. */}
       <div className="relative z-20 flex shrink-0 justify-center p-4">
         <div
+          role="group"
+          aria-label="Filter by provider"
           className={cn("flex items-center gap-1 rounded-full border p-1 backdrop-blur-md", glass)}
         >
-          <span
+          <button
+            type="button"
+            onClick={() => setProviderFilter(null)}
+            aria-pressed={providerFilter === null}
             className={cn(
-              "rounded-full px-3 py-1 text-xs font-semibold",
-              dark ? "bg-white text-[#1b1620]" : "bg-[#2b2029] text-white",
+              "rounded-full px-3 py-1 text-xs whitespace-nowrap transition-colors",
+              "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current",
+              providerFilter === null
+                ? cn("font-semibold", dark ? "bg-white text-[#1b1620]" : "bg-[#2b2029] text-white")
+                : "opacity-70 hover:opacity-100",
             )}
           >
             All work {total}
-          </span>
-          {providerCounts.map(([provider, count]) => (
-            <span
-              key={provider}
-              className="flex items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1 text-xs"
-            >
-              <span
-                aria-hidden="true"
-                className="size-1.5 rounded-full"
-                style={{ background: PROVIDER_DOT[provider] ?? SETTLED_COLOR }}
-              />
-              {providerLabel(provider)}
-              <span className="tabular-nums opacity-60">{count}</span>
-            </span>
-          ))}
+          </button>
+          {providerCounts.map(([provider, count]) => {
+            const active = providerFilter === provider;
+            return (
+              <button
+                key={provider}
+                type="button"
+                onClick={() => setProviderFilter(active ? null : provider)}
+                aria-pressed={active}
+                className={cn(
+                  "flex items-center gap-1.5 rounded-full px-3 py-1 text-xs whitespace-nowrap transition-colors",
+                  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current",
+                  active
+                    ? cn(
+                        "font-semibold",
+                        dark ? "bg-white text-[#1b1620]" : "bg-[#2b2029] text-white",
+                      )
+                    : "opacity-70 hover:opacity-100",
+                )}
+              >
+                <span
+                  aria-hidden="true"
+                  className="size-1.5 rounded-full"
+                  style={{ background: PROVIDER_DOT[provider] ?? SETTLED_COLOR }}
+                />
+                {providerLabel(provider)}
+                <span className="tabular-nums opacity-60">{count}</span>
+              </button>
+            );
+          })}
         </div>
       </div>
 
-      {snapshot.cards.length === 0 ? (
+      {visible.length === 0 ? (
         <div className="relative z-10 flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-          <p className={cn("text-2xl font-light tracking-tight", heading)}>The garden is quiet</p>
+          <p className={cn("text-2xl font-light tracking-tight", heading)}>
+            {providerFilter === null ? "The garden is quiet" : "Nothing from this provider"}
+          </p>
           <p className={cn("max-w-sm text-sm", muted)}>
-            When threads and their subagents are working, they appear here.
+            {providerFilter === null
+              ? "When threads and their subagents are working, they appear here."
+              : `No ${providerLabel(providerFilter)} threads are running right now.`}
           </p>
         </div>
       ) : (
@@ -476,7 +527,7 @@ export function TaskAtriumBoard() {
                 heading,
               )}
             >
-              {snapshot.runningCount === 1 ? "One thread" : `${snapshot.runningCount} threads`},
+              {filtered.length === 1 ? "One thread" : `${filtered.length} threads`},
               <br />
               <span className="font-semibold" style={{ color: tint }}>
                 {snapshot.subagentCount === 1
@@ -484,19 +535,27 @@ export function TaskAtriumBoard() {
                   : `${snapshot.subagentCount} subagents`}
               </span>
               ,<br />
-              all working.
+              {snapshot.holdingCount > 0
+                ? "one needs you."
+                : snapshot.runningCount > 0
+                  ? "all working."
+                  : snapshot.errorCount > 0
+                    ? "stopped."
+                    : "all done."}
             </h2>
             <p className={cn("mt-3 max-w-xs text-sm", muted)}>
               {snapshot.holdingCount > 0
                 ? `${snapshot.holdingCount} waiting on you. Everything else is moving on its own.`
-                : "Nothing here needs you. This is just what the garden looks like while it grows."}
+                : snapshot.errorCount > 0 && snapshot.runningCount === 0
+                  ? `${snapshot.errorCount} ${snapshot.errorCount === 1 ? "thread" : "threads"} stopped on an error. Open one to see what happened.`
+                  : "Nothing here needs you. This is just what the garden looks like while it grows."}
             </p>
             <div className="mt-6 flex gap-6">
               <div>
                 <div className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", label)}>
                   Threads
                 </div>
-                <div className={cn("mt-0.5 text-xl tabular-nums", heading)}>{total}</div>
+                <div className={cn("mt-0.5 text-xl tabular-nums", heading)}>{filtered.length}</div>
               </div>
               <div>
                 <div className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", label)}>
@@ -516,11 +575,21 @@ export function TaskAtriumBoard() {
                   </div>
                 </div>
               ) : null}
+              {snapshot.errorCount > 0 ? (
+                <div>
+                  <div className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", label)}>
+                    Errors
+                  </div>
+                  <div className="mt-0.5 text-xl tabular-nums" style={{ color: FAULT_COLOR }}>
+                    {snapshot.errorCount}
+                  </div>
+                </div>
+              ) : null}
             </div>
           </div>
 
           <div className="relative min-h-0 self-stretch max-lg:flex max-lg:flex-col max-lg:gap-3 max-lg:overflow-y-auto max-lg:py-2">
-            {snapshot.cards.map((card, index) => (
+            {visible.map((card, index) => (
               <TaskAtriumCardView
                 key={card.key}
                 card={card}
@@ -535,14 +604,14 @@ export function TaskAtriumBoard() {
         </div>
       )}
 
-      {snapshot.overflow > 0 ? (
+      {overflow > 0 ? (
         <div
           className={cn(
             "relative z-20 mx-6 mb-4 shrink-0 rounded-xl border px-4 py-2 text-xs backdrop-blur-md",
             glass,
           )}
         >
-          and {snapshot.overflow} more {snapshot.overflow === 1 ? "thread" : "threads"} running
+          and {overflow} more {overflow === 1 ? "thread" : "threads"}
         </div>
       ) : null}
     </div>

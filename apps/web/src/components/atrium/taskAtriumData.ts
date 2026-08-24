@@ -28,7 +28,11 @@ import type { AppState } from "../../store";
 const ACTIVITY_SCAN_LIMIT = 120;
 /** Rows shown per card before the remainder is counted instead. */
 export const MAX_SUBAGENT_ROWS = 3;
-/** Cards floated before the remainder collapses into the overflow strip. */
+/**
+ * Cards floated before the remainder collapses into the overflow strip. The cap
+ * is applied by the view, not here, so it lands *after* the provider filter —
+ * capping first would hide threads the filter was meant to reveal.
+ */
 export const MAX_ATRIUM_CARDS = 6;
 /** A finished thread stays on the wall this long so completions are visible. */
 const RECENTLY_DONE_MS = 3 * 60 * 1000;
@@ -61,20 +65,23 @@ export type AtriumCard = {
 };
 
 export type AtriumSnapshot = {
+  /** Every card, sorted. The view filters and caps. */
   cards: AtriumCard[];
-  /** Cards beyond the float cap, still counted for the overflow strip. */
-  overflow: number;
   runningCount: number;
   holdingCount: number;
+  errorCount: number;
   subagentCount: number;
+  /** Live thread count per provider, over all cards, for the filter pills. */
+  providerCounts: Array<[provider: string, count: number]>;
 };
 
 export const EMPTY_ATRIUM: AtriumSnapshot = {
   cards: [],
-  overflow: 0,
   runningCount: 0,
   holdingCount: 0,
+  errorCount: 0,
   subagentCount: 0,
+  providerCounts: [],
 };
 
 function activityPayloadField(
@@ -247,15 +254,19 @@ export function selectAtriumSnapshot(state: AppState, now: number): AtriumSnapsh
     return (b.startedAt ?? 0) - (a.startedAt ?? 0);
   });
 
-  const runningCount = cards.filter((card) => card.state === "running").length;
-  const holdingCount = cards.filter((card) => card.state === "holding").length;
+  const counts = new Map<string, number>();
+  for (const card of cards) {
+    if (card.provider.length === 0) continue;
+    counts.set(card.provider, (counts.get(card.provider) ?? 0) + 1);
+  }
 
   return {
-    cards: cards.slice(0, MAX_ATRIUM_CARDS),
-    overflow: Math.max(0, cards.length - MAX_ATRIUM_CARDS),
-    runningCount,
-    holdingCount,
+    cards,
+    runningCount: cards.filter((card) => card.state === "running").length,
+    holdingCount: cards.filter((card) => card.state === "holding").length,
+    errorCount: cards.filter((card) => card.state === "error").length,
     subagentCount,
+    providerCounts: [...counts.entries()],
   };
 }
 
