@@ -291,6 +291,34 @@ describe("selectAtriumSnapshot", () => {
     expect(selectAtriumSnapshot(laterState, NOW, [dismissed]).errorCount).toBe(1);
   });
 
+  it("ages a stale failure off the board without needing a dismissal", () => {
+    const state = buildState({ status: "error" });
+    const summary = state.environmentStateById[ENV]!.sidebarThreadSummaryById[THREAD]!;
+    // A thread that failed days ago is history, not current work. Leaving it
+    // pinned forever is what made the board read as permanently broken.
+    summary.session = {
+      ...summary.session!,
+      orchestrationStatus: "error",
+      updatedAt: new Date(NOW - 40 * 60 * 60 * 1000).toISOString(),
+    };
+    summary.latestTurn = null;
+    expect(selectAtriumSnapshot(state, NOW).cards).toHaveLength(0);
+  });
+
+  it("still shows a failure that happened recently", () => {
+    const state = buildState({ status: "error" });
+    const summary = state.environmentStateById[ENV]!.sidebarThreadSummaryById[THREAD]!;
+    summary.session = {
+      ...summary.session!,
+      orchestrationStatus: "error",
+      updatedAt: new Date(NOW - 60_000).toISOString(),
+    };
+    summary.latestTurn = null;
+    const snapshot = selectAtriumSnapshot(state, NOW);
+    expect(snapshot.cards).toHaveLength(1);
+    expect(snapshot.cards[0]?.state).toBe("error");
+  });
+
   it("keeps one most-recent dismissal per scoped thread", () => {
     const first: TaskAtriumErrorDismissal = {
       environmentId: ENV,

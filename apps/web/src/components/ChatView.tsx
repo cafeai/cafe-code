@@ -6465,6 +6465,8 @@ export default function ChatView(props: ChatViewProps) {
       <ThreadErrorBanner
         error={activeThread.error}
         scopeKey={`${activeThread.environmentId}\u0000${activeThread.id}`}
+        environmentId={activeThread.environmentId}
+        threadId={activeThread.id}
       />
       {/* Main content area with optional plan sidebar */}
       <div className="flex min-h-0 min-w-0 flex-1">

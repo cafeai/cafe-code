@@ -1,10 +1,12 @@
 import {
   MAX_TASK_ATRIUM_ERROR_DISMISSALS,
   type EnvironmentId,
+  type OrchestrationLatestTurn,
   type OrchestrationSessionStatus,
   type OrchestrationThreadActivity,
   type TaskAtriumErrorDismissal,
   type ThreadId,
+  type TurnId,
 } from "@cafecode/contracts";
 
 import type { AppState } from "../../store";
@@ -38,6 +40,15 @@ export const MAX_SUBAGENT_ROWS = 3;
 export const MAX_ATRIUM_CARDS = 6;
 /** A finished thread stays on the wall this long so completions are visible. */
 const RECENTLY_DONE_MS = 3 * 60 * 1000;
+/**
+ * How long a failure stays on the wall.
+ *
+ * The Atrium answers "what is going on right now". A thread that failed days
+ * ago is history, not current work, and leaving it pinned there forever made
+ * the board read as permanently broken. Dismissal clears a failure early; this
+ * makes sure one is never required just to stop seeing stale ones.
+ */
+const RECENTLY_ERRORED_MS = 12 * 60 * 60 * 1000;
 
 export type AtriumSubagent = {
   id: string;
@@ -237,6 +248,45 @@ export function mergeTaskAtriumErrorDismissals(
  * Build the Atrium snapshot from store state. `now` is injected so callers can
  * drive the elapsed readouts from one clock and tests stay deterministic.
  */
+/**
+ * Identity of one failure occurrence, shared by the Atrium and the in-thread
+ * error banner so that acknowledging a failure in either place clears it in
+ * both. Prefer the turn's immutable lifecycle timestamps when the turn itself
+ * failed; otherwise use the session error transition. A later failure receives
+ * a new identity and becomes visible again on its own.
+ */
+export function buildThreadErrorDismissal(input: {
+  environmentId: EnvironmentId;
+  threadId: ThreadId;
+  session: { activeTurnId?: TurnId | undefined; updatedAt?: string | undefined } | null;
+  latestTurn: OrchestrationLatestTurn | null;
+  summary: { updatedAt?: string | undefined; createdAt: string };
+}): TaskAtriumErrorDismissal {
+  const { environmentId, threadId, session, latestTurn, summary } = input;
+  if (latestTurn?.state === "error") {
+    return {
+      environmentId,
+      threadId,
+      turnId: latestTurn.turnId,
+      observedAt: latestTurn.completedAt ?? latestTurn.startedAt ?? latestTurn.requestedAt,
+    };
+  }
+  return {
+    environmentId,
+    threadId,
+    // Do not attach a session-level failure to an unrelated last completed
+    // turn. Only an actively owned turn is authoritative.
+    turnId: session?.activeTurnId ?? null,
+    observedAt:
+      session?.updatedAt ??
+      latestTurn?.completedAt ??
+      latestTurn?.startedAt ??
+      latestTurn?.requestedAt ??
+      summary.updatedAt ??
+      summary.createdAt,
+  };
+}
+
 export function selectAtriumSnapshot(
   state: AppState,
   now: number,
@@ -282,37 +332,18 @@ export function selectAtriumSnapshot(
         }
       }
 
-      // A dismissal is tied to one exact failure occurrence. Prefer the turn's
-      // immutable lifecycle timestamps when the turn itself failed; otherwise
-      // use the session error transition timestamp. This survives renderer and
-      // app restarts, while a later failed turn or session transition naturally
-      // receives a new identity and becomes visible again.
-      const errorDismissal: TaskAtriumErrorDismissal | null =
+      const errorDismissal =
         cardState === "error"
-          ? latestTurn?.state === "error"
-            ? {
-                environmentId,
-                threadId,
-                turnId: latestTurn.turnId,
-                observedAt:
-                  latestTurn.completedAt ?? latestTurn.startedAt ?? latestTurn.requestedAt,
-              }
-            : {
-                environmentId,
-                threadId,
-                // Do not attach a session-level failure to an unrelated last
-                // completed turn. Only an actively owned turn is authoritative;
-                // otherwise the session transition timestamp identifies it.
-                turnId: session?.activeTurnId ?? null,
-                observedAt:
-                  session?.updatedAt ??
-                  latestTurn?.completedAt ??
-                  latestTurn?.startedAt ??
-                  latestTurn?.requestedAt ??
-                  summary.updatedAt ??
-                  summary.createdAt,
-              }
+          ? buildThreadErrorDismissal({ environmentId, threadId, session, latestTurn, summary })
           : null;
+
+      // Age stale failures off the board entirely. Without this, one old
+      // crashed thread sits on the wall forever and the only way to clear it is
+      // to dismiss it by hand.
+      if (errorDismissal !== null) {
+        const failedAt = toEpoch(errorDismissal.observedAt);
+        if (failedAt !== null && now - failedAt > RECENTLY_ERRORED_MS) continue;
+      }
 
       if (errorDismissal !== null) {
         const dismissed = dismissedErrorByScope.get(errorDismissalScopeKey(errorDismissal));
