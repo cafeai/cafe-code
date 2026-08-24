@@ -343,7 +343,7 @@ export function AmbianceSettingsPanel() {
       <SettingsSection title="Task Atrium">
         <SettingsRow
           title="Task Atrium"
-          description="Show what every thread and subagent is working on, over the ambiance scene. It is a display only — no approvals, no controls. Requires ambiance to be on."
+          description="Replace the empty no-thread pane with a live view of what every thread and subagent is working on, over its own blossom scene. Display only — no approvals, no controls. Works whether or not ambiance is on."
           resetAction={
             settings.ambianceAtrium !== DEFAULT_AMBIANCE_ATRIUM ? (
               <SettingResetButton

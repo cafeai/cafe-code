@@ -57,6 +57,7 @@ import {
   parseThreadSegmentFromAttachmentId,
   toSafeThreadAttachmentSegment,
 } from "../../attachmentStore.ts";
+import { isStaleProvisionalSessionReplay } from "../sessionLifecycle.ts";
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
@@ -1669,6 +1670,19 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       const existingSession = yield* projectionThreadSessionRepository.getByThreadId({
         threadId: event.payload.threadId,
       });
+      if (
+        Option.isSome(existingSession) &&
+        isStaleProvisionalSessionReplay({
+          current: existingSession.value,
+          incoming: event.payload.session,
+        })
+      ) {
+        // Provider-daemon replay is at-least-once and can finish an old
+        // multi-command runtime event after startup reconciliation has already
+        // advanced the session. Preserve append-only audit history, but do not
+        // resurrect provisional startup intent that has no provider turn.
+        return;
+      }
       const runningActiveTurn =
         event.payload.session.status === "running" && event.payload.session.activeTurnId !== null
           ? yield* projectionTurnRepository.getByTurnId({

@@ -1238,6 +1238,50 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-terminal-sessio
         });
         yield* appendAndProject({
           type: "thread.session-set",
+          eventId: EventId.make("evt-terminal-replay-stale-starting"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-05-24T17:00:04.000Z",
+          commandId: CommandId.make("cmd-terminal-replay-stale-starting"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-terminal-replay-stale-starting"),
+          metadata: {},
+          payload: {
+            threadId,
+            session: {
+              threadId,
+              status: "starting",
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              // This old logical time reproduces a daemon event whose second
+              // orchestration command resumed after restart recovery.
+              updatedAt: "2026-05-24T17:00:01.500Z",
+            },
+          },
+        });
+
+        const afterStaleStarting = yield* sql<{
+          readonly status: string;
+          readonly updatedAt: string;
+        }>`
+          SELECT
+            status,
+            updated_at AS "updatedAt"
+          FROM projection_thread_sessions
+          WHERE thread_id = ${threadId}
+        `;
+        assert.deepEqual(afterStaleStarting, [
+          {
+            status: "ready",
+            updatedAt: "2026-05-24T17:00:03.000Z",
+          },
+        ]);
+
+        yield* appendAndProject({
+          type: "thread.session-set",
           eventId: EventId.make("evt-terminal-replay-late-running"),
           aggregateKind: "thread",
           aggregateId: threadId,

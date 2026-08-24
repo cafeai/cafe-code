@@ -488,6 +488,104 @@ describe("ProviderRuntimeIngestion", () => {
     });
   });
 
+  it("does not revive a superseded goal when provider replay resumes midway through fanout", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const staleEventId = asEventId("evt-stale-active-goal-replay");
+    const goalCreatedAt = "2026-01-01T00:00:01.000Z";
+    const blockedAt = "2026-01-01T00:00:03.000Z";
+
+    // Model the exact crash boundary: the first goal-sync command from an old
+    // provider event committed, a newer provider event blocked the goal, but
+    // the old event's separate session-state command never committed.
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.goal.sync",
+        commandId: CommandId.make(`provider:codex:${threadId}:${staleEventId}:thread-goal-sync`),
+        threadId,
+        goal: {
+          threadId,
+          objective: "Run until the proof is complete",
+          status: "active",
+          tokenBudget: null,
+          tokensUsed: 10,
+          timeUsedSeconds: 1,
+          createdAt: goalCreatedAt,
+          updatedAt: goalCreatedAt,
+        },
+        createdAt: goalCreatedAt,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.goal.sync",
+        commandId: CommandId.make("cmd-block-goal-after-partial-runtime-fanout"),
+        threadId,
+        goal: {
+          threadId,
+          objective: "Run until the proof is complete",
+          status: "blocked",
+          tokenBudget: null,
+          tokensUsed: 20,
+          timeUsedSeconds: 2,
+          createdAt: goalCreatedAt,
+          updatedAt: blockedAt,
+        },
+        createdAt: blockedAt,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-ready-after-goal-blocked"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: blockedAt,
+        },
+        createdAt: blockedAt,
+      }),
+    );
+    await waitForThread(
+      harness.readModel,
+      (entry) => entry.goal?.status === "blocked" && entry.session?.status === "ready",
+    );
+
+    harness.emit({
+      type: "thread.goal.updated",
+      eventId: staleEventId,
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      createdAt: goalCreatedAt,
+      payload: {
+        goal: {
+          threadId,
+          objective: "Run until the proof is complete",
+          status: "active",
+          tokenBudget: null,
+          tokensUsed: 10,
+          timeUsedSeconds: 1,
+          createdAt: goalCreatedAt,
+          updatedAt: goalCreatedAt,
+        },
+      },
+    });
+    await harness.drain();
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.goal?.status === "blocked" && entry.session?.status === "ready",
+    );
+    expect(thread.goal?.updatedAt).toBe(blockedAt);
+    expect(thread.session?.updatedAt).toBe(blockedAt);
+  });
+
   it("keeps an interrupted Codex goal terminal despite delayed active-goal accounting", async () => {
     const harness = await createHarness();
     const goalCreatedAt = "2026-01-01T00:00:01.000Z";

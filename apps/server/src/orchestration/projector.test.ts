@@ -275,6 +275,92 @@ describe("orchestration projector", () => {
     });
   });
 
+  it("ignores an older provisional starting session in the renderer projection", async () => {
+    const createdAt = "2026-08-24T15:20:00.000Z";
+    const created = await Effect.runPromise(
+      projectEvent(
+        createEmptyReadModel(createdAt),
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-stale-session-clock",
+          occurredAt: createdAt,
+          commandId: "cmd-create-stale-session-clock",
+          payload: {
+            threadId: "thread-stale-session-clock",
+            projectId: "project-1",
+            title: "Stale session clock",
+            modelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        }),
+      ),
+    );
+    const recovered = await Effect.runPromise(
+      projectEvent(
+        created,
+        makeEvent({
+          sequence: 2,
+          type: "thread.session-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-stale-session-clock",
+          occurredAt: "2026-08-24T15:31:06.753Z",
+          commandId: "cmd-recover-stale-session-clock",
+          payload: {
+            threadId: "thread-stale-session-clock",
+            session: {
+              threadId: "thread-stale-session-clock",
+              status: "ready",
+              providerName: "codex",
+              providerInstanceId: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: "2026-08-24T15:31:06.753Z",
+            },
+          },
+        }),
+      ),
+    );
+    const replayed = await Effect.runPromise(
+      projectEvent(
+        recovered,
+        makeEvent({
+          sequence: 3,
+          type: "thread.session-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-stale-session-clock",
+          occurredAt: "2026-08-24T15:31:07.000Z",
+          commandId: "cmd-replay-stale-session-clock",
+          payload: {
+            threadId: "thread-stale-session-clock",
+            session: {
+              threadId: "thread-stale-session-clock",
+              status: "starting",
+              providerName: "codex",
+              providerInstanceId: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: "2026-08-24T14:25:45.050Z",
+            },
+          },
+        }),
+      ),
+    );
+
+    expect(replayed.threads[0]?.session).toMatchObject({
+      status: "ready",
+      updatedAt: "2026-08-24T15:31:06.753Z",
+    });
+  });
+
   it("applies assistant repair suffix events without reopening streaming state", async () => {
     const now = "2026-01-01T00:00:00.000Z";
     const created = await Effect.runPromise(

@@ -37,6 +37,7 @@ import {
   ThreadTurnInterruptRequestedPayload,
   ThreadTurnStartRequestedPayload,
 } from "./Schemas.ts";
+import { isStaleProvisionalSessionReplay } from "./sessionLifecycle.ts";
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id">>;
 const MAX_THREAD_MESSAGES = 2_000;
@@ -709,6 +710,15 @@ export function projectEvent(
           event.type,
           "session",
         );
+        if (
+          thread.session !== null &&
+          isStaleProvisionalSessionReplay({ current: thread.session, incoming: session })
+        ) {
+          // Keep the renderer's event projector consistent with the SQLite
+          // projector. An older, provider-less start remains in the durable
+          // audit log but cannot revive a spinner after reconciliation.
+          return nextBase;
+        }
         const existingActiveTurnId =
           thread.session?.activeTurnId ??
           (thread.latestTurn?.state === "running" ? thread.latestTurn.turnId : null);

@@ -15,6 +15,7 @@ import {
   type OrchestrationProposedPlan,
   type OrchestrationThread,
   type OrchestrationThreadActivity,
+  type ProviderThreadGoal,
   type ProviderRuntimeEvent,
 } from "@cafecode/contracts";
 import { readCafeCodeEnv } from "@cafecode/shared/compatEnv";
@@ -881,6 +882,26 @@ const make = Effect.gen(function* () {
   // This bounded set bridges the intentional gap between one turn completing
   // and the next goal turn starting, without manufacturing a Cafe prompt.
   const activeGoalThreadIds = new Set<string>();
+  const goalLifecycleByThreadId = new Map<
+    string,
+    { readonly goal: ProviderThreadGoal | null; readonly observedAt: string }
+  >();
+  const observeGoalLifecycle = (input: {
+    readonly threadId: ThreadId;
+    readonly goal: ProviderThreadGoal | null;
+    readonly observedAt: string;
+  }): ProviderThreadGoal | null => {
+    const current = goalLifecycleByThreadId.get(input.threadId);
+    const effective =
+      current !== undefined && current.observedAt > input.observedAt ? current : input;
+    goalLifecycleByThreadId.set(input.threadId, effective);
+    if (effective.goal?.status === "active") {
+      activeGoalThreadIds.add(input.threadId);
+    } else {
+      activeGoalThreadIds.delete(input.threadId);
+    }
+    return effective.goal;
+  };
   // A user interrupt is a cancellation barrier, even if an in-flight Codex
   // goal-accounting notification still reports the goal as active. Upstream
   // Codex pauses active goals on interrupt and does not reinterpret the
@@ -1762,13 +1783,6 @@ const make = Effect.gen(function* () {
       const activeTurnId = thread.session?.activeTurnId ?? null;
 
       if (event.type === "thread.goal.updated" || event.type === "thread.goal.cleared") {
-        const goalIsActive =
-          event.type === "thread.goal.updated" && event.payload.goal.status === "active";
-        if (goalIsActive) {
-          activeGoalThreadIds.add(thread.id);
-        } else {
-          activeGoalThreadIds.delete(thread.id);
-        }
         yield* orchestrationEngine.dispatch({
           type: "thread.goal.sync",
           commandId: providerCommandId(event, "thread-goal-sync"),
@@ -1776,8 +1790,24 @@ const make = Effect.gen(function* () {
           goal: event.type === "thread.goal.updated" ? event.payload.goal : null,
           createdAt: now,
         });
+
+        // Runtime journal delivery is at-least-once, and one provider event
+        // fans out to more than one orchestration command. A backend restart
+        // can therefore occur after the idempotent goal sync commits but before
+        // its session-state command commits. The goal lifecycle index is
+        // hydrated from projection state and advanced by ordered domain/runtime
+        // events, so a replayed payload cannot supersede a newer blocked or
+        // completed goal and leave the UI indefinitely on "Starting provider"
+        // with no live provider process.
+        const incomingGoal = event.type === "thread.goal.updated" ? event.payload.goal : null;
+        const effectiveGoal = observeGoalLifecycle({
+          threadId: thread.id,
+          goal: incomingGoal,
+          observedAt: now,
+        });
+        const goalIsActive = effectiveGoal?.status === "active";
         const currentSession = thread.session;
-        if (currentSession !== null && activeTurnId === null) {
+        if (currentSession !== null && currentSession.activeTurnId === null) {
           const nextStatus =
             goalIsActive &&
             (currentSession.status === "ready" ||
@@ -1796,7 +1826,9 @@ const make = Effect.gen(function* () {
                 status: nextStatus,
                 activeTurnId: null,
                 lastError: null,
-                updatedAt: now,
+                // Session clocks are monotonic even when an older daemon event
+                // resumes midway through its fanout after a restart.
+                updatedAt: currentSession.updatedAt > now ? currentSession.updatedAt : now,
               },
               createdAt: now,
             });
@@ -2484,11 +2516,11 @@ const make = Effect.gen(function* () {
       if (event.type !== "thread.goal-synced") {
         return;
       }
-      if (event.payload.goal?.status === "active") {
-        activeGoalThreadIds.add(event.payload.threadId);
-      } else {
-        activeGoalThreadIds.delete(event.payload.threadId);
-      }
+      observeGoalLifecycle({
+        threadId: event.payload.threadId,
+        goal: event.payload.goal ?? null,
+        observedAt: event.occurredAt,
+      });
     });
 
   const processRuntimeEventOnce = (event: ProviderRuntimeEvent) =>
@@ -2582,8 +2614,14 @@ const make = Effect.gen(function* () {
       yield* Effect.gen(function* () {
         const readModel = yield* projectionSnapshotQuery.getCommandReadModel();
         for (const thread of readModel.threads) {
+          if (thread.goal !== undefined) {
+            observeGoalLifecycle({
+              threadId: thread.id,
+              goal: thread.goal,
+              observedAt: thread.goal?.updatedAt ?? thread.updatedAt,
+            });
+          }
           if (thread.goal?.status === "active") {
-            activeGoalThreadIds.add(thread.id);
             if (thread.session?.status === "interrupted") {
               interruptedGoalThreadIds.add(thread.id);
             }
