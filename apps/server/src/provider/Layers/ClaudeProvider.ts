@@ -2,6 +2,7 @@ import {
   type ClaudeSettings,
   type ModelCapabilities,
   type ModelSelection,
+  ProviderOptionDescriptor as ProviderOptionDescriptorSchema,
   ProviderDriverKind,
   ServerProviderModel as ServerProviderModelSchema,
   type ServerProviderModel,
@@ -40,10 +41,6 @@ import {
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import claudeModelCatalog from "./ClaudeModelCatalog.json" with { type: "json" };
 
-const DEFAULT_CLAUDE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
-  optionDescriptors: [],
-});
-
 const PROVIDER = ProviderDriverKind.make("claudeAgent");
 const CLAUDE_PRESENTATION = {
   displayName: "Claude",
@@ -55,6 +52,7 @@ interface VersionedClaudeModel extends ServerProviderModel {
 }
 
 const decodeServerProviderModel = Schema.decodeUnknownSync(ServerProviderModelSchema);
+const decodeProviderOptionDescriptor = Schema.decodeUnknownSync(ProviderOptionDescriptorSchema);
 
 function decodeVersionedClaudeModel(raw: unknown): VersionedClaudeModel {
   const model = decodeServerProviderModel(raw);
@@ -67,21 +65,65 @@ function decodeVersionedClaudeModel(raw: unknown): VersionedClaudeModel {
     : model;
 }
 
-function decodeClaudeModelCatalog(raw: unknown): ReadonlyArray<VersionedClaudeModel> {
+function decodeClaudeModelCatalog(raw: unknown) {
   if (!raw || typeof raw !== "object" || !("models" in raw)) {
     throw new Error("Claude model catalog must be an object with a models array.");
   }
-  const models = (raw as { readonly models?: unknown }).models;
+  const catalog = raw as {
+    readonly schemaVersion?: unknown;
+    readonly sharedOptionDescriptors?: unknown;
+    readonly models?: unknown;
+  };
+  if (catalog.schemaVersion !== 2) {
+    throw new Error("Claude model catalog schemaVersion must be 2.");
+  }
+  const models = catalog.models;
   if (!Array.isArray(models)) {
     throw new Error("Claude model catalog models field must be an array.");
   }
-  return models.map(decodeVersionedClaudeModel);
+  if (!Array.isArray(catalog.sharedOptionDescriptors)) {
+    throw new Error("Claude model catalog sharedOptionDescriptors field must be an array.");
+  }
+
+  const sharedOptionDescriptors = catalog.sharedOptionDescriptors.map((descriptor) =>
+    decodeProviderOptionDescriptor(descriptor),
+  );
+  const decodedModels = models.map((rawModel) => {
+    const model = decodeVersionedClaudeModel(rawModel);
+    const modelOptionDescriptors = model.capabilities?.optionDescriptors ?? [];
+    const optionDescriptors = [...modelOptionDescriptors, ...sharedOptionDescriptors];
+    const optionIds = new Set<string>();
+    for (const descriptor of optionDescriptors) {
+      if (optionIds.has(descriptor.id)) {
+        throw new Error(
+          `Claude model catalog contains duplicate option descriptor '${descriptor.id}' for '${model.slug}'.`,
+        );
+      }
+      optionIds.add(descriptor.id);
+    }
+
+    // Shared controls are decoded once but cloned into every model capability
+    // so downstream selection code cannot mutate one model through another.
+    return Object.assign({}, model, {
+      capabilities: createModelCapabilities({ optionDescriptors }),
+    });
+  });
+  return {
+    sharedOptionDescriptors,
+    models: decodedModels,
+  };
 }
 
-const VERSIONED_BUILT_IN_MODELS = decodeClaudeModelCatalog(claudeModelCatalog);
+const DECODED_CLAUDE_MODEL_CATALOG = decodeClaudeModelCatalog(claudeModelCatalog);
+const VERSIONED_BUILT_IN_MODELS = DECODED_CLAUDE_MODEL_CATALOG.models;
 const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = VERSIONED_BUILT_IN_MODELS.map(
   ({ minimumClaudeCodeVersion: _minimumClaudeCodeVersion, ...model }) => model,
 );
+const DEFAULT_CLAUDE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
+  // Output style and SDK progress policy are provider-wide controls, so keep
+  // them available even when a user enters a custom Claude model slug.
+  optionDescriptors: DECODED_CLAUDE_MODEL_CATALOG.sharedOptionDescriptors,
+});
 
 function isClaudeModelSupportedByVersion(
   model: VersionedClaudeModel,

@@ -65,6 +65,7 @@ import {
   applyClaudePromptEffortPrefix,
   getModelSelectionBooleanOptionValue,
   getModelSelectionStringOptionValue,
+  getProviderOptionCurrentValue,
   getProviderOptionDescriptors,
   resolvePromptInjectedEffort,
 } from "@cafecode/shared/model";
@@ -794,13 +795,18 @@ export function resolveClaudeModelSessionOptions(modelSelection: ModelSelection 
   readonly apiModelId: string | undefined;
   readonly selectedContextWindowTokens: number | undefined;
   readonly effectiveEffort: ClaudeSdkEffort | null;
+  readonly agentProgressSummaries: boolean;
   readonly settings: {
     readonly alwaysThinkingEnabled?: boolean;
     readonly fastMode?: true;
+    readonly outputStyle?: "Concise";
   };
 } {
   const caps = getClaudeModelCapabilities(modelSelection?.model);
-  const descriptors = getProviderOptionDescriptors({ caps });
+  const descriptors = getProviderOptionDescriptors({
+    caps,
+    selections: modelSelection?.options,
+  });
   const rawEffort = getModelSelectionStringOptionValue(modelSelection, "effort");
   const effort = resolveClaudeSessionEffort(caps, rawEffort) ?? null;
   const fastModeSupported = descriptors.some(
@@ -808,6 +814,16 @@ export function resolveClaudeModelSessionOptions(modelSelection: ModelSelection 
   );
   const thinkingSupported = descriptors.some(
     (descriptor) => descriptor.type === "boolean" && descriptor.id === "thinking",
+  );
+  const outputStyle = getProviderOptionCurrentValue(
+    descriptors.find(
+      (descriptor) => descriptor.type === "select" && descriptor.id === "outputStyle",
+    ),
+  );
+  const agentProgressSummaries = getProviderOptionCurrentValue(
+    descriptors.find(
+      (descriptor) => descriptor.type === "boolean" && descriptor.id === "agentProgressSummaries",
+    ),
   );
   const fastMode =
     getModelSelectionBooleanOptionValue(modelSelection, "fastMode") === true && fastModeSupported;
@@ -819,9 +835,14 @@ export function resolveClaudeModelSessionOptions(modelSelection: ModelSelection 
     apiModelId: modelSelection ? resolveClaudeApiModelId(modelSelection) : undefined,
     selectedContextWindowTokens: resolveClaudeSelectedContextWindowTokens(modelSelection),
     effectiveEffort: getEffectiveClaudeAgentEffort(effort),
+    agentProgressSummaries: agentProgressSummaries !== false,
     settings: {
       ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
       ...(fastMode ? { fastMode: true as const } : {}),
+      // Output-style names enter Claude's system prompt. Forward only the
+      // built-in value Cafe advertises; never treat a persisted arbitrary
+      // string as an inline Claude settings fragment.
+      ...(outputStyle === "concise" ? { outputStyle: "Concise" as const } : {}),
     },
   };
 }
@@ -5104,8 +5125,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const extraArgs = parseCliArgs(claudeSettings.launchArgs).flags;
       const modelSelection =
         input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
-      const { apiModelId, selectedContextWindowTokens, effectiveEffort, settings } =
-        resolveClaudeModelSessionOptions(modelSelection);
+      const {
+        apiModelId,
+        selectedContextWindowTokens,
+        effectiveEffort,
+        agentProgressSummaries,
+        settings,
+      } = resolveClaudeModelSessionOptions(modelSelection);
       const fastMode = settings.fastMode === true;
       const permissionMode = runtimeModeToClaudePermissionMode(input.runtimeMode);
       const initialPermissionMode = resolveClaudePermissionMode({
@@ -5220,6 +5246,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // send upstream resume coordinates after a real persisted Claude
         // transcript has produced a session_id.
         includePartialMessages: true,
+        // Cafe has no next-prompt suggestion surface. Disable the speculative
+        // model request explicitly so provider/user settings cannot spend
+        // tokens on a message that Cafe intentionally discards.
+        promptSuggestions: false,
         // Claude's SDK intentionally withholds subagent prose by default. Cafe
         // opts into the complete nested stream, then uses parent_tool_use_id to
         // keep child text in task/work-log activity rather than corrupting the
@@ -5230,7 +5260,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // periodic AI-written summaries for long-running subagents. Without it,
         // Claude can be doing real background work while Cafe only sees sparse
         // task/tool lifecycle frames, which makes long turns look silent.
-        agentProgressSummaries: true,
+        agentProgressSummaries,
         canUseTool,
         stderr: (data: string) => {
           const lines = splitClaudeStderrLines(data);

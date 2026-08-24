@@ -2107,6 +2107,30 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           )
           .map((model) => model.slug);
         assert.deepStrictEqual(fastModeSlugs, ["claude-opus-5", "claude-opus-4-8"]);
+
+        for (const model of getBuiltInClaudeModelsForVersion("2.1.219")) {
+          const descriptors = model.capabilities?.optionDescriptors ?? [];
+          const outputStyle = descriptors.find(
+            (descriptor) => descriptor.type === "select" && descriptor.id === "outputStyle",
+          );
+          assert.deepStrictEqual(
+            outputStyle?.type === "select"
+              ? outputStyle.options.map((option) => option.id)
+              : undefined,
+            ["providerDefault", "concise"],
+            `${model.slug}: output style`,
+          );
+          assert.equal(
+            descriptors.some(
+              (descriptor) =>
+                descriptor.type === "boolean" &&
+                descriptor.id === "agentProgressSummaries" &&
+                descriptor.currentValue === true,
+            ),
+            true,
+            `${model.slug}: progress summaries`,
+          );
+        }
       });
 
       it("formats Claude subscription labels without probing the provider", () => {

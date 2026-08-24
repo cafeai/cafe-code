@@ -1,5 +1,23 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "sharedOptionDescriptors": [
+    {
+      "id": "outputStyle",
+      "label": "Output Style",
+      "type": "select",
+      "options": [
+        { "id": "providerDefault", "label": "Provider Default", "isDefault": true },
+        { "id": "concise", "label": "Concise" }
+      ],
+      "currentValue": "providerDefault"
+    },
+    {
+      "id": "agentProgressSummaries",
+      "label": "Subagent Progress Summaries",
+      "type": "boolean",
+      "currentValue": true
+    }
+  ],
   "models": [
     {
       "slug": "claude-opus-5",

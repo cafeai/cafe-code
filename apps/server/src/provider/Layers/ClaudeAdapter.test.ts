@@ -680,10 +680,30 @@ describe("ClaudeAdapterLive", () => {
         testCase.expected.settings as unknown,
         testCase.name,
       );
+      assert.equal(resolved.agentProgressSummaries, true, testCase.name);
     }
+
+    const concise = resolveClaudeModelSessionOptions(
+      createModelSelection(instanceId, "claude-opus-5", [{ id: "outputStyle", value: "concise" }]),
+    );
+    assert.deepEqual(concise.settings as unknown, { outputStyle: "Concise" });
+
+    const noProgressSummaries = resolveClaudeModelSessionOptions(
+      createModelSelection(instanceId, "claude-opus-5", [
+        { id: "agentProgressSummaries", value: false },
+      ]),
+    );
+    assert.equal(noProgressSummaries.agentProgressSummaries, false);
+
+    const unsupportedOutputStyle = resolveClaudeModelSessionOptions(
+      createModelSelection(instanceId, "claude-opus-5", [
+        { id: "outputStyle", value: "untrusted-custom-style" },
+      ]),
+    );
+    assert.deepEqual(unsupportedOutputStyle.settings as unknown, {});
   });
 
-  it.effect("enables Claude SDK partial messages and complete subagent progress", () => {
+  it.effect("configures Claude SDK streaming without unused prompt suggestions", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -697,6 +717,30 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(createInput?.options.includePartialMessages, true);
       assert.equal(createInput?.options.forwardSubagentText, true);
       assert.equal(createInput?.options.agentProgressSummaries, true);
+      assert.equal(createInput?.options.promptSuggestions, false);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("can disable Claude subagent progress summary model calls", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-opus-5",
+          [{ id: "agentProgressSummaries", value: false }],
+        ),
+        runtimeMode: "full-access",
+      });
+
+      const createInput = harness.getLastCreateQueryInput();
+      assert.equal(createInput?.options.agentProgressSummaries, false);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
