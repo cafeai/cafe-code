@@ -10,6 +10,7 @@ import { useStore } from "../../store";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { cn } from "../../lib/utils";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { UsageAreaChart } from "../stats/UsageAreaChart";
 import { useCountUp } from "../stats/useCountUp";
 import { useUsageCostSummary } from "../stats/useUsageCostSummary";
 import { createAtriumScene, type AtriumScene } from "./atriumScene";
@@ -83,7 +84,6 @@ const SLOTS: ReadonlyArray<{ left: string; top: string; depth: 1 | 2 | 3 }> = [
 ];
 
 const DEPTH_SCALE: Record<1 | 2 | 3, number> = { 1: 1, 2: 0.94, 3: 0.88 };
-const DEPTH_SHIFT: Record<1 | 2 | 3, number> = { 1: 26, 2: 17, 3: 10 };
 
 function useAtriumTint(): string {
   const atriumColor = useSettings((settings) => settings.ambianceAtriumColor);
@@ -249,19 +249,16 @@ function TaskAtriumCardView({
   slot,
   now,
   tint,
-  pointer,
   onOpen,
 }: {
   card: AtriumCard;
   slot: (typeof SLOTS)[number];
   now: number;
   tint: string;
-  pointer: { x: number; y: number };
   onOpen: (card: AtriumCard) => void;
 }) {
   const accent = stateColor(card.state, tint);
   const elapsed = formatElapsed(card.startedAt, now);
-  const shift = DEPTH_SHIFT[slot.depth];
   const scale = DEPTH_SCALE[slot.depth];
 
   return (
@@ -272,10 +269,7 @@ function TaskAtriumCardView({
       style={
         {
           "--cafe-atrium-accent": accent,
-          // Transform-only parallax keeps the whole field on the compositor.
-          "--cafe-atrium-parallax": `translate3d(${(-pointer.x * shift).toFixed(1)}px, ${(
-            -pointer.y * shift
-          ).toFixed(1)}px, 0) scale(${scale})`,
+          "--cafe-atrium-card-scale": `scale(${scale})`,
           "--cafe-atrium-left": slot.left,
           "--cafe-atrium-top": slot.top,
           zIndex: 10 - slot.depth,
@@ -294,7 +288,7 @@ function TaskAtriumCardView({
         // where absolute positioning would only overlap.
         "lg:absolute lg:w-[46%] lg:min-w-[250px]",
         "lg:left-[var(--cafe-atrium-left)] lg:top-[var(--cafe-atrium-top)]",
-        "lg:[transform:var(--cafe-atrium-parallax)]",
+        "lg:[transform:var(--cafe-atrium-card-scale)]",
         card.state === "done" && "opacity-80",
       )}
     >
@@ -589,14 +583,7 @@ export function TaskAtriumBoard() {
       ) : (
         <div className="relative z-10 grid min-h-0 flex-1 grid-cols-1 items-center gap-4 px-6 pb-6 lg:grid-cols-[1fr_1.2fr] lg:px-10">
           {/* Lede. Hidden on narrow layouts, where the cards need the room. */}
-          <div
-            className="hidden lg:block"
-            style={{
-              transform: `translate3d(${(-pointer.x * 8).toFixed(1)}px, ${(-pointer.y * 8).toFixed(
-                1,
-              )}px, 0)`,
-            }}
-          >
+          <div className="hidden lg:block">
             <h2
               className={cn(
                 "text-4xl leading-[1.06] font-light tracking-tight xl:text-5xl",
@@ -690,6 +677,30 @@ export function TaskAtriumBoard() {
                 </div>
               ) : null}
             </div>
+
+            {/* Last 30 days across all recorded usage, not just the threads on
+                the wall — the meters above are lifetime, this is the shape. */}
+            {usage.loaded && usage.daily.length > 1 ? (
+              <div className="mt-6 max-w-xs">
+                <div className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", label)}>
+                  Last 30 days
+                </div>
+                <UsageAreaChart
+                  className="mt-1"
+                  height={56}
+                  labels={usage.daily.map((entry) => entry.day.slice(5))}
+                  series={[
+                    {
+                      key: "tokens",
+                      label: "Tokens",
+                      color: tint,
+                      values: usage.daily.map((entry) => entry.tokens),
+                    },
+                  ]}
+                  format={(value) => `${compactTokens(value)} tokens`}
+                />
+              </div>
+            ) : null}
           </div>
 
           <div className="relative min-h-0 self-stretch max-lg:flex max-lg:flex-col max-lg:gap-3 max-lg:overflow-y-auto max-lg:py-2">
@@ -700,7 +711,6 @@ export function TaskAtriumBoard() {
                 slot={SLOTS[index % SLOTS.length]!}
                 now={now}
                 tint={tint}
-                pointer={pointer}
                 onOpen={openCard}
               />
             ))}
