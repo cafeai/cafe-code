@@ -1,21 +1,17 @@
 import { useMemo, type CSSProperties } from "react";
 import {
   DEFAULT_UNIFIED_SETTINGS,
-  DEFAULT_AMBIANCE_ATRIUM,
+  DEFAULT_AMBIANCE_ATRIUM_ENABLED,
   DEFAULT_AMBIANCE_ATRIUM_COLOR,
-  DEFAULT_AMBIANCE_ATRIUM_IDLE_MINUTES,
   DEFAULT_AMBIANCE_COLOR,
   DEFAULT_AMBIANCE_EFFECT,
   DEFAULT_AMBIANCE_INTENSITY,
   DEFAULT_AMBIANCE_OPACITY,
   DEFAULT_AMBIANCE_REACT_MODE,
-  MAX_AMBIANCE_ATRIUM_IDLE_MINUTES,
   MAX_AMBIANCE_INTENSITY,
   MAX_AMBIANCE_OPACITY,
-  MIN_AMBIANCE_ATRIUM_IDLE_MINUTES,
   MIN_AMBIANCE_INTENSITY,
   MIN_AMBIANCE_OPACITY,
-  type AmbianceAtriumMode,
   type AmbianceReactMode,
 } from "@cafecode/contracts/settings";
 
@@ -47,12 +43,6 @@ const REACT_MODE_LABELS: Record<AmbianceReactMode, string> = {
   off: "Nothing",
   session: "Session state",
   live: "Session + activity",
-};
-
-const ATRIUM_MODE_LABELS: Record<AmbianceAtriumMode, string> = {
-  off: "Off",
-  "empty-state": "On the empty state",
-  "empty-state-and-idle": "Empty state + when idle",
 };
 
 /**
@@ -343,86 +333,27 @@ export function AmbianceSettingsPanel() {
       <SettingsSection title="Task Atrium">
         <SettingsRow
           title="Task Atrium"
-          description="Replace the empty no-thread pane with a live view of what every thread and subagent is working on, over its own blossom scene. Display only — no approvals, no controls. Works whether or not ambiance is on."
+          description="Adds a button to the chat header that opens a live view of what every thread and subagent is working on, over its own blossom scene. Display only — no approvals, no controls. It never opens on its own."
           resetAction={
-            settings.ambianceAtrium !== DEFAULT_AMBIANCE_ATRIUM ? (
+            settings.ambianceAtriumEnabled !== DEFAULT_AMBIANCE_ATRIUM_ENABLED ? (
               <SettingResetButton
                 label="task atrium"
-                onClick={() => updateSettings({ ambianceAtrium: DEFAULT_AMBIANCE_ATRIUM })}
+                onClick={() =>
+                  updateSettings({ ambianceAtriumEnabled: DEFAULT_AMBIANCE_ATRIUM_ENABLED })
+                }
               />
             ) : null
           }
           control={
-            <Select
-              value={settings.ambianceAtrium}
-              onValueChange={(value) => {
-                if (
-                  value === "off" ||
-                  value === "empty-state" ||
-                  value === "empty-state-and-idle"
-                ) {
-                  updateSettings({ ambianceAtrium: value });
-                }
-              }}
-            >
-              <SelectTrigger className="w-full sm:w-52" aria-label="Task Atrium">
-                <SelectValue>{ATRIUM_MODE_LABELS[settings.ambianceAtrium]}</SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value="off">
-                  {ATRIUM_MODE_LABELS.off}
-                </SelectItem>
-                <SelectItem hideIndicator value="empty-state">
-                  {ATRIUM_MODE_LABELS["empty-state"]}
-                </SelectItem>
-                <SelectItem hideIndicator value="empty-state-and-idle">
-                  {ATRIUM_MODE_LABELS["empty-state-and-idle"]}
-                </SelectItem>
-              </SelectPopup>
-            </Select>
+            <Switch
+              checked={settings.ambianceAtriumEnabled}
+              onCheckedChange={(checked) =>
+                updateSettings({ ambianceAtriumEnabled: Boolean(checked) })
+              }
+              aria-label="Enable Task Atrium"
+            />
           }
         />
-
-        {settings.ambianceAtrium === "empty-state-and-idle" ? (
-          <SettingsRow
-            title="Idle delay"
-            description="How long the window stays untouched before the Atrium fades up over it. Any key or pointer movement dismisses it."
-            resetAction={
-              settings.ambianceAtriumIdleMinutes !== DEFAULT_AMBIANCE_ATRIUM_IDLE_MINUTES ? (
-                <SettingResetButton
-                  label="atrium idle delay"
-                  onClick={() =>
-                    updateSettings({
-                      ambianceAtriumIdleMinutes: DEFAULT_AMBIANCE_ATRIUM_IDLE_MINUTES,
-                    })
-                  }
-                />
-              ) : null
-            }
-            control={
-              <div className="flex w-full items-center gap-3 sm:w-56">
-                <Slider
-                  value={settings.ambianceAtriumIdleMinutes}
-                  min={MIN_AMBIANCE_ATRIUM_IDLE_MINUTES}
-                  max={MAX_AMBIANCE_ATRIUM_IDLE_MINUTES}
-                  step={1}
-                  aria-label="Atrium idle delay in minutes"
-                  onValueChange={(value) =>
-                    updateSettings({
-                      ambianceAtriumIdleMinutes: Math.min(
-                        MAX_AMBIANCE_ATRIUM_IDLE_MINUTES,
-                        Math.max(MIN_AMBIANCE_ATRIUM_IDLE_MINUTES, Math.round(value)),
-                      ),
-                    })
-                  }
-                />
-                <span className="w-11 shrink-0 text-right font-mono text-xs text-muted-foreground">
-                  {settings.ambianceAtriumIdleMinutes}m
-                </span>
-              </div>
-            }
-          />
-        ) : null}
 
         <SettingsRow
           title="Atrium color"

@@ -11,7 +11,7 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { QueryClient, useQueryClient } from "@tanstack/react-query";
 
 import { AmbianceLayer } from "../ambiance/AmbianceLayer";
-import { TaskAtriumIdleOverlay } from "../components/atrium/TaskAtriumIdleOverlay";
+import { TaskAtriumOverlay } from "../components/atrium/TaskAtriumOverlay";
 import { APP_DISPLAY_NAME } from "../branding";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
 import { CommandPalette } from "../components/CommandPalette";
@@ -161,7 +161,7 @@ function RootRouteView() {
         {primaryEnvironmentAuthenticated ? <ServerStateBootstrap /> : null}
         <EnvironmentConnectionManagerBootstrap />
         <AppearanceSettingsSync />
-        <TaskAtriumIdleOverlay />
+        <TaskAtriumOverlay />
         <AmbianceLayer />
         <PowerSaveBlockerSync />
         {primaryEnvironmentAuthenticated ? <EventRouter /> : null}

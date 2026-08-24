@@ -168,26 +168,14 @@ export const DEFAULT_AMBIANCE_SURFACE_COMPOSER = true;
 export const DEFAULT_AMBIANCE_COLOR = "";
 
 // Task Atrium: a decorative read-only view of everything currently running,
-// drawn over the ambiance scene. "empty-state" replaces the otherwise blank
-// no-thread pane; "empty-state-and-idle" additionally fades the view over the
-// whole window after the idle delay while work is still in flight. Like the
-// weather layer it is renderer-only — it never dispatches orchestration.
-export const AmbianceAtriumMode = Schema.Literals(["off", "empty-state", "empty-state-and-idle"]);
-export type AmbianceAtriumMode = typeof AmbianceAtriumMode.Type;
-export const DEFAULT_AMBIANCE_ATRIUM: AmbianceAtriumMode = "off";
-export const MIN_AMBIANCE_ATRIUM_IDLE_MINUTES = 1;
-export const MAX_AMBIANCE_ATRIUM_IDLE_MINUTES = 30;
-export const DEFAULT_AMBIANCE_ATRIUM_IDLE_MINUTES = 5;
+// opened explicitly from the chat header and dismissed with Escape. It never
+// appears on its own — no idle takeover, no taking over the empty pane — so the
+// only thing this setting controls is whether the button exists. Like the
+// weather layer it is renderer-only and never dispatches orchestration.
+export const DEFAULT_AMBIANCE_ATRIUM_ENABLED = false;
 // Empty string means "follow the ambiance weather color", which itself falls
 // back to the Appearance accent. An explicit value tints only the Atrium.
 export const DEFAULT_AMBIANCE_ATRIUM_COLOR = "";
-export const AmbianceAtriumIdleMinutes = Schema.Number.check(
-  Schema.isBetween({
-    minimum: MIN_AMBIANCE_ATRIUM_IDLE_MINUTES,
-    maximum: MAX_AMBIANCE_ATRIUM_IDLE_MINUTES,
-  }),
-);
-export type AmbianceAtriumIdleMinutes = typeof AmbianceAtriumIdleMinutes.Type;
 
 export const SidebarProjectSortOrder = Schema.Literals(["updated_at", "created_at", "manual"]);
 export type SidebarProjectSortOrder = typeof SidebarProjectSortOrder.Type;
@@ -294,11 +282,8 @@ export const ClientSettingsSchema = Schema.Struct({
   ambianceColor: TrimmedString.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_COLOR)),
   ),
-  ambianceAtrium: AmbianceAtriumMode.pipe(
-    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_ATRIUM)),
-  ),
-  ambianceAtriumIdleMinutes: AmbianceAtriumIdleMinutes.pipe(
-    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_ATRIUM_IDLE_MINUTES)),
+  ambianceAtriumEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_ATRIUM_ENABLED)),
   ),
   ambianceAtriumColor: TrimmedString.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_ATRIUM_COLOR)),
@@ -915,8 +900,7 @@ export const ClientSettingsPatch = Schema.Struct({
   ambianceSurfaceThread: Schema.optionalKey(Schema.Boolean),
   ambianceSurfaceComposer: Schema.optionalKey(Schema.Boolean),
   ambianceColor: Schema.optionalKey(TrimmedString),
-  ambianceAtrium: Schema.optionalKey(AmbianceAtriumMode),
-  ambianceAtriumIdleMinutes: Schema.optionalKey(AmbianceAtriumIdleMinutes),
+  ambianceAtriumEnabled: Schema.optionalKey(Schema.Boolean),
   ambianceAtriumColor: Schema.optionalKey(TrimmedString),
   themeAccentColor: Schema.optionalKey(TrimmedString),
   appAccentColor: Schema.optionalKey(TrimmedString),

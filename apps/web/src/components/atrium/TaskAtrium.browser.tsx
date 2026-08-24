@@ -78,9 +78,8 @@ const atriumHarness = vi.hoisted(() => {
   return {
     theme,
     settings: {
-      ambianceAtrium: "empty-state",
+      ambianceAtriumEnabled: true,
       continueBackgroundAnimations: true,
-      ambianceAtriumIdleMinutes: 5,
       ambianceAtriumColor: "",
       ambianceColor: "",
       appAccentColor: "",
@@ -114,6 +113,8 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 
 import { TaskAtriumBoard } from "./TaskAtrium";
+import { TaskAtriumOverlay } from "./TaskAtriumOverlay";
+import { useTaskAtriumStore } from "./taskAtriumStore";
 
 async function renderInTheme(theme: "light" | "dark") {
   atriumHarness.theme.value = theme;
@@ -176,6 +177,62 @@ describe("TaskAtriumBoard", () => {
       });
     } finally {
       environments["env-1"]!.threadIds = previous;
+      await screen.unmount();
+      host.remove();
+    }
+  });
+});
+
+describe("TaskAtriumOverlay", () => {
+  const overlay = () => document.querySelector('[data-cafe-task-atrium-overlay="true"]');
+
+  async function mountOverlay() {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const screen = await render(<TaskAtriumOverlay />, { container: host });
+    return { host, screen };
+  }
+
+  it("stays closed until it is opened", async () => {
+    useTaskAtriumStore.getState().setOpen(false);
+    const { host, screen } = await mountOverlay();
+    try {
+      expect(overlay()).toBeNull();
+      useTaskAtriumStore.getState().setOpen(true);
+      await vi.waitFor(() => expect(overlay()).not.toBeNull());
+    } finally {
+      useTaskAtriumStore.getState().setOpen(false);
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("closes on Escape", async () => {
+    useTaskAtriumStore.getState().setOpen(true);
+    const { host, screen } = await mountOverlay();
+    try {
+      await vi.waitFor(() => expect(overlay()).not.toBeNull());
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      await vi.waitFor(() => {
+        expect(overlay()).toBeNull();
+        expect(useTaskAtriumStore.getState().open).toBe(false);
+      });
+    } finally {
+      useTaskAtriumStore.getState().setOpen(false);
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("never renders while the feature is switched off", async () => {
+    atriumHarness.settings.ambianceAtriumEnabled = false;
+    useTaskAtriumStore.getState().setOpen(true);
+    const { host, screen } = await mountOverlay();
+    try {
+      await vi.waitFor(() => expect(overlay()).toBeNull());
+    } finally {
+      atriumHarness.settings.ambianceAtriumEnabled = true;
+      useTaskAtriumStore.getState().setOpen(false);
       await screen.unmount();
       host.remove();
     }

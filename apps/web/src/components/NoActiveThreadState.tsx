@@ -1,17 +1,10 @@
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "./ui/empty";
-import { TaskAtriumBoard } from "./atrium/TaskAtrium";
-import { useSettings } from "~/hooks/useSettings";
 import { SidebarInset } from "./ui/sidebar";
 import { ContentSidebarTriggerWithUnreadDot } from "./sidebar/unseenCompletions";
 import { isElectron } from "../env";
 import { cn } from "~/lib/utils";
 
 export function NoActiveThreadState() {
-  // The Atrium's default home. This pane is otherwise blank, which is exactly
-  // the moment an overview is wanted and costs the app nothing it was using.
-  const atriumMode = useSettings((settings) => settings.ambianceAtrium);
-  const showAtrium = atriumMode !== "off";
-
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
@@ -32,28 +25,22 @@ export function NoActiveThreadState() {
             <div className="flex items-center gap-2">
               <ContentSidebarTriggerWithUnreadDot />
               <span className="text-sm font-medium text-foreground md:text-muted-foreground/60">
-                {showAtrium ? "Task Atrium" : "No active thread"}
+                No active thread
               </span>
             </div>
           )}
         </header>
 
-        {showAtrium ? (
-          <TaskAtriumBoard />
-        ) : (
-          <Empty className="flex-1">
-            <div className="w-full max-w-lg rounded-3xl border border-border/55 bg-card/20 px-8 py-12 shadow-sm/5">
-              <EmptyHeader className="max-w-none">
-                <EmptyTitle className="text-foreground text-xl">
-                  Pick a thread to continue
-                </EmptyTitle>
-                <EmptyDescription className="mt-2 text-sm text-muted-foreground/78">
-                  Select an existing thread or create a new one to get started.
-                </EmptyDescription>
-              </EmptyHeader>
-            </div>
-          </Empty>
-        )}
+        <Empty className="flex-1">
+          <div className="w-full max-w-lg rounded-3xl border border-border/55 bg-card/20 px-8 py-12 shadow-sm/5">
+            <EmptyHeader className="max-w-none">
+              <EmptyTitle className="text-foreground text-xl">Pick a thread to continue</EmptyTitle>
+              <EmptyDescription className="mt-2 text-sm text-muted-foreground/78">
+                Select an existing thread or create a new one to get started.
+              </EmptyDescription>
+            </EmptyHeader>
+          </div>
+        </Empty>
       </div>
     </SidebarInset>
   );

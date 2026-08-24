@@ -11,6 +11,7 @@ import { Badge } from "../ui/badge";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { Toggle } from "../ui/toggle";
 import { ContentSidebarTriggerWithUnreadDot } from "../sidebar/unseenCompletions";
+import { TaskAtriumHeaderButton } from "../atrium/TaskAtriumHeaderButton";
 import { ConnectionStatusIndicator } from "./ConnectionStatusIndicator";
 import { OpenInPicker } from "./OpenInPicker";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
@@ -125,6 +126,7 @@ export const ChatHeader = memo(function ChatHeader({
               : `Newer ${sourceUpdateState?.trackedBranch}`}
           </Badge>
         )}
+        <TaskAtriumHeaderButton />
         <ConnectionStatusIndicator />
         {showOpenInPicker && (
           <OpenInPicker
