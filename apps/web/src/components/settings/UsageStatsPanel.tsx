@@ -9,6 +9,7 @@ import { PROVIDER_ICON_BY_PROVIDER } from "../chat/providerIconUtils";
 import { Skeleton } from "../ui/skeleton";
 import { Switch } from "../ui/switch";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
+import { UsageCostSection } from "./UsageCostSection";
 import {
   buildUsageTokenBreakdownView,
   formatUsageModelLabel,
@@ -325,6 +326,8 @@ export function UsageStatsPanel() {
           </div>
         )}
       </SettingsSection>
+
+      <UsageCostSection usage={initial} />
 
       <TokenBreakdownSection
         usage={initial?.tokenBreakdown ?? []}

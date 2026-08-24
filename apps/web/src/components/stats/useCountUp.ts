@@ -27,20 +27,33 @@ function usePrefersReducedMotion(): boolean {
  *
  * `timeConstantMs` is the exponential time constant; the value covers ~95% of
  * any gap in ~3× that (so ~660ms by default), independent of jump size.
+ *
+ * `decimals` sets the settle precision. Token counts are whole numbers and
+ * animate at 0; currency needs 2 so a dollar figure does not appear to freeze
+ * while cents are still moving, and so it settles on an exact value rather than
+ * a rounded one.
  */
-export function useCountUp(target: number, timeConstantMs = 220): number {
+export function useCountUp(
+  target: number,
+  { timeConstantMs = 220, decimals = 0 }: { timeConstantMs?: number; decimals?: number } = {},
+): number {
   const reduced = usePrefersReducedMotion();
   const displayRef = useRef(target);
   const [display, setDisplay] = useState(target);
   const rafRef = useRef<number | null>(null);
 
   useEffect(() => {
+    // Derived inside the effect: `decimals` is the real dependency, and
+    // deriving these outside would re-arm the effect on every render.
+    const quantum = 10 ** -decimals;
+    const quantize = (value: number) => Math.round(value / quantum) * quantum;
+
     if (reduced) {
       displayRef.current = target;
       setDisplay(target);
       return;
     }
-    if (Math.round(displayRef.current) === Math.round(target)) {
+    if (quantize(displayRef.current) === quantize(target)) {
       displayRef.current = target;
       return;
     }
@@ -50,14 +63,14 @@ export function useCountUp(target: number, timeConstantMs = 220): number {
       const dt = Math.min(64, now - last);
       last = now;
       const diff = target - displayRef.current;
-      if (Math.abs(diff) < 0.5) {
+      if (Math.abs(diff) < quantum / 2) {
         displayRef.current = target;
-        setDisplay(Math.round(target));
+        setDisplay(quantize(target));
         rafRef.current = null;
         return;
       }
       displayRef.current += diff * (1 - Math.exp(-dt / timeConstantMs));
-      setDisplay(Math.round(displayRef.current));
+      setDisplay(quantize(displayRef.current));
       rafRef.current = requestAnimationFrame(step);
     };
 
@@ -71,7 +84,7 @@ export function useCountUp(target: number, timeConstantMs = 220): number {
         rafRef.current = null;
       }
     };
-  }, [target, reduced, timeConstantMs]);
+  }, [target, reduced, timeConstantMs, decimals]);
 
   return display;
 }
