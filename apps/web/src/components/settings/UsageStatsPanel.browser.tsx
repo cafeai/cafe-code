@@ -100,11 +100,17 @@ describe("UsageStatsPanel", () => {
 
     await expect.element(page.getByText("Tokens by provider and model")).toBeVisible();
     await expect.element(page.getByText("200,000 attributed")).toBeVisible();
-    await expect.element(page.getByText("Codex", { exact: true })).toBeVisible();
-    await expect.element(page.getByText("Claude", { exact: true })).toBeVisible();
-    await expect.element(page.getByText("gpt-5.6-codex", { exact: true })).toBeVisible();
-    await expect.element(page.getByText("gpt-5.6-codex-mini", { exact: true })).toBeVisible();
-    await expect.element(page.getByText("claude-opus-5", { exact: true })).toBeVisible();
+    // Provider and model names now appear in the Cost section as well, so these
+    // match more than once. Both are legitimate renders and the assertion is
+    // only that the name appears; the section-specific strings above and below
+    // are what actually pin this test to the attribution list.
+    await expect.element(page.getByText("Codex", { exact: true }).first()).toBeVisible();
+    await expect.element(page.getByText("Claude", { exact: true }).first()).toBeVisible();
+    await expect.element(page.getByText("gpt-5.6-codex", { exact: true }).first()).toBeVisible();
+    await expect
+      .element(page.getByText("gpt-5.6-codex-mini", { exact: true }).first())
+      .toBeVisible();
+    await expect.element(page.getByText("claude-opus-5", { exact: true }).first()).toBeVisible();
     await expect.element(page.getByText("Earlier usage")).toBeVisible();
     await expect
       .element(page.getByText("Recorded before provider and model attribution"))

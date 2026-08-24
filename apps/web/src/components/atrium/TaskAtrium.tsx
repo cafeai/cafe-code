@@ -10,6 +10,8 @@ import { useStore } from "../../store";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { cn } from "../../lib/utils";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { useCountUp } from "../stats/useCountUp";
+import { useUsageCostSummary } from "../stats/useUsageCostSummary";
 import { createAtriumScene, type AtriumScene } from "./atriumScene";
 import {
   EMPTY_ATRIUM,
@@ -43,6 +45,22 @@ const FALLBACK_TINT = "#48cfff";
 const HOLD_COLOR = "#f5a524";
 const FAULT_COLOR = "#ef4444";
 const SETTLED_COLOR = "#9aa3ad";
+
+const currencyFormat = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+/** `48.0B` / `142M` — matches the Usage page so the two figures read alike. */
+function compactTokens(value: number): string {
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
+  if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(0)}M`;
+  if (abs >= 1_000) return `${(value / 1_000).toFixed(0)}K`;
+  return String(Math.round(value));
+}
 
 const STATE_LABEL: Record<AtriumCardState, string> = {
   holding: "Waiting on you",
@@ -368,6 +386,11 @@ export function TaskAtriumBoard() {
   const [pointer, setPointer] = useState({ x: 0, y: 0 });
   // null = "All work". Cleared automatically if that provider stops running.
   const [providerFilter, setProviderFilter] = useState<string | null>(null);
+  // Lifetime spend, alongside the live work. Same odometer as the Usage page,
+  // so the two never animate differently.
+  const usage = useUsageCostSummary(true);
+  const costDisplay = useCountUp(usage.cost, { decimals: 2 });
+  const tokensDisplay = useCountUp(usage.tokens);
 
   // Derivation allocates fresh arrays, so subscribing to the store directly
   // would re-render this board on every streamed token. Poll on one slow clock
@@ -618,6 +641,34 @@ export function TaskAtriumBoard() {
                   {snapshot.subagentCount}
                 </div>
               </div>
+              {usage.loaded ? (
+                <div>
+                  <div className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", label)}>
+                    Tokens
+                  </div>
+                  <div className={cn("mt-0.5 text-xl tabular-nums", heading)}>
+                    {compactTokens(tokensDisplay)}
+                  </div>
+                </div>
+              ) : null}
+              {usage.loaded && usage.cost > 0 ? (
+                <div>
+                  <div className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", label)}>
+                    Cost{usage.hasUnpriced ? "*" : ""}
+                  </div>
+                  <div
+                    className={cn("mt-0.5 text-xl tabular-nums", heading)}
+                    // Some volume carries no rate, so this covers only part of it.
+                    title={
+                      usage.hasUnpriced
+                        ? "At full API rate. Some models have no rate, so this covers only priced usage."
+                        : "At full API rate."
+                    }
+                  >
+                    {currencyFormat.format(costDisplay)}
+                  </div>
+                </div>
+              ) : null}
               {snapshot.holdingCount > 0 ? (
                 <div>
                   <div className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", label)}>
