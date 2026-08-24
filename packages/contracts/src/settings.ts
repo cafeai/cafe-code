@@ -140,6 +140,20 @@ export const AmbianceIntensity = Schema.Number.check(
   }),
 );
 export type AmbianceIntensity = typeof AmbianceIntensity.Type;
+// Overall opacity of the weather layer, applied to the whole canvas. Intensity
+// controls how *busy* the sky is; this controls how *strong* it reads, which
+// matters because the catalog now ranges from a faint dot lattice to shaders
+// that cover the viewport.
+export const MIN_AMBIANCE_OPACITY = 0.05;
+export const MAX_AMBIANCE_OPACITY = 1;
+export const DEFAULT_AMBIANCE_OPACITY = 1;
+export const AmbianceOpacity = Schema.Number.check(
+  Schema.isBetween({
+    minimum: MIN_AMBIANCE_OPACITY,
+    maximum: MAX_AMBIANCE_OPACITY,
+  }),
+);
+export type AmbianceOpacity = typeof AmbianceOpacity.Type;
 // How much of the thread run the weather is allowed to react to:
 // "off" ignores thread state entirely, "session" follows session lifecycle
 // (starting/running/error/...), and "live" adds activity signals such as tool
@@ -261,6 +275,9 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   ambianceIntensity: AmbianceIntensity.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_INTENSITY)),
+  ),
+  ambianceOpacity: AmbianceOpacity.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_OPACITY)),
   ),
   ambianceReactMode: AmbianceReactMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_AMBIANCE_REACT_MODE)),
@@ -892,6 +909,7 @@ export const ClientSettingsPatch = Schema.Struct({
   ambianceEnabled: Schema.optionalKey(Schema.Boolean),
   ambianceEffect: Schema.optionalKey(AmbianceEffect),
   ambianceIntensity: Schema.optionalKey(AmbianceIntensity),
+  ambianceOpacity: Schema.optionalKey(AmbianceOpacity),
   ambianceReactMode: Schema.optionalKey(AmbianceReactMode),
   ambianceSurfaceSidebar: Schema.optionalKey(Schema.Boolean),
   ambianceSurfaceThread: Schema.optionalKey(Schema.Boolean),

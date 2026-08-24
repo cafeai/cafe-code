@@ -7,11 +7,14 @@ import {
   DEFAULT_AMBIANCE_COLOR,
   DEFAULT_AMBIANCE_EFFECT,
   DEFAULT_AMBIANCE_INTENSITY,
+  DEFAULT_AMBIANCE_OPACITY,
   DEFAULT_AMBIANCE_REACT_MODE,
   MAX_AMBIANCE_ATRIUM_IDLE_MINUTES,
   MAX_AMBIANCE_INTENSITY,
+  MAX_AMBIANCE_OPACITY,
   MIN_AMBIANCE_ATRIUM_IDLE_MINUTES,
   MIN_AMBIANCE_INTENSITY,
+  MIN_AMBIANCE_OPACITY,
   type AmbianceAtriumMode,
   type AmbianceReactMode,
 } from "@cafecode/contracts/settings";
@@ -101,6 +104,7 @@ export function AmbianceSettingsPanel() {
   );
 
   const intensityDirty = settings.ambianceIntensity !== DEFAULT_AMBIANCE_INTENSITY;
+  const opacityDirty = settings.ambianceOpacity !== DEFAULT_AMBIANCE_OPACITY;
 
   return (
     <SettingsPageContainer>
@@ -211,6 +215,41 @@ export function AmbianceSettingsPanel() {
               />
               <span className="w-9 shrink-0 text-right font-mono text-xs text-muted-foreground">
                 {settings.ambianceIntensity.toFixed(2)}
+              </span>
+            </div>
+          }
+        />
+
+        <SettingsRow
+          title="Opacity"
+          description="How strongly the weather reads. Turn it down for the brighter effects without making the sky any less busy."
+          resetAction={
+            opacityDirty ? (
+              <SettingResetButton
+                label="ambiance opacity"
+                onClick={() => updateSettings({ ambianceOpacity: DEFAULT_AMBIANCE_OPACITY })}
+              />
+            ) : null
+          }
+          control={
+            <div className="flex w-full items-center gap-3 sm:w-56">
+              <Slider
+                value={settings.ambianceOpacity}
+                min={MIN_AMBIANCE_OPACITY}
+                max={MAX_AMBIANCE_OPACITY}
+                step={0.05}
+                aria-label="Ambiance opacity"
+                onValueChange={(value) =>
+                  updateSettings({
+                    ambianceOpacity: Math.min(
+                      MAX_AMBIANCE_OPACITY,
+                      Math.max(MIN_AMBIANCE_OPACITY, Math.round(value * 20) / 20),
+                    ),
+                  })
+                }
+              />
+              <span className="w-9 shrink-0 text-right font-mono text-xs text-muted-foreground">
+                {settings.ambianceOpacity.toFixed(2)}
               </span>
             </div>
           }

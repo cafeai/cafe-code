@@ -179,11 +179,21 @@ function AmbianceCanvas() {
   const dark = resolvedTheme !== "light";
 
   const effect = useSettings((settings) => settings.ambianceEffect);
-  // A canvas holds exactly one context type, so switching between a 2D effect
-  // and a shader one must remount the element. Keying the canvas on the backend
-  // does that, and the engine is rebuilt in the same pass.
   const backend = ambianceBackend(effect);
+  // Rebuild key for the canvas element and the engine.
+  //
+  // A canvas holds exactly one context type, so crossing the 2D/WebGL boundary
+  // must remount the element. WebGL effects additionally compile their shader
+  // program once at construction, so switching between two shader effects has
+  // to rebuild as well — keying only on the backend left the canvas running the
+  // previously compiled program and the background never changed.
+  //
+  // The 2D effects all share one engine and swap through `setConfig`, which
+  // keeps their particle pools so the new effect fades in from a believable
+  // mid-state instead of a burst.
+  const engineKey = backend === "webgl" ? `webgl:${effect}` : "2d";
   const intensity = useSettings((settings) => settings.ambianceIntensity);
+  const opacity = useSettings((settings) => settings.ambianceOpacity);
   const reactMode = useSettings((settings) => settings.ambianceReactMode);
   const surfaceSidebar = useSettings((settings) => settings.ambianceSurfaceSidebar);
   const surfaceThread = useSettings((settings) => settings.ambianceSurfaceThread);
@@ -229,7 +239,7 @@ function AmbianceCanvas() {
       engineRef.current = null;
       clearAmbianceCssVariables();
     };
-  }, [backend]);
+  }, [engineKey]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -336,7 +346,7 @@ function AmbianceCanvas() {
       window.clearInterval(interval);
       observer?.disconnect();
     };
-  }, [backend]);
+  }, [engineKey]);
 
   // Run/pause mirroring the CSS background-animation convention: pause when
   // the document is hidden or the window is blurred unless the user opted
@@ -366,7 +376,7 @@ function AmbianceCanvas() {
       window.removeEventListener("blur", syncRunState);
       engine.stop();
     };
-  }, [backend, continueBackgroundAnimations]);
+  }, [engineKey, continueBackgroundAnimations]);
 
   // Focused-thread signals → engine. Pulses fire only on observed
   // transitions, never on initial subscription, so opening an old thread
@@ -506,22 +516,23 @@ function AmbianceCanvas() {
   // fixed canvas explicit viewport dimensions so its CSS and bitmap geometry
   // describe the same surface.
   const canvasStyle = useMemo(
-    () =>
-      ({
-        contain: "strict",
-        height: "100dvh",
-        width: "100vw",
-      }) as const,
-    [],
+    () => ({
+      contain: "strict" as const,
+      height: "100dvh",
+      width: "100vw",
+      opacity,
+    }),
+    [opacity],
   );
 
   return (
     <canvas
-      key={backend}
+      key={engineKey}
       ref={canvasRef}
       aria-hidden="true"
       data-cafe-ambiance-canvas="true"
       data-cafe-ambiance-backend={backend}
+      data-cafe-ambiance-effect={effect}
       className="pointer-events-none fixed inset-0 z-40"
       style={canvasStyle}
     />
