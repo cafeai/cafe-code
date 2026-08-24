@@ -74,9 +74,12 @@ const atriumHarness = vi.hoisted(() => {
   const useStore = Object.assign((selector: (value: typeof state) => unknown) => selector(state), {
     getState: () => state,
   });
+  const theme = { value: "dark" as "light" | "dark" };
   return {
+    theme,
     settings: {
       ambianceAtrium: "empty-state",
+      continueBackgroundAnimations: true,
       ambianceAtriumIdleMinutes: 5,
       ambianceAtriumColor: "",
       ambianceColor: "",
@@ -92,6 +95,14 @@ vi.mock("../../hooks/useSettings", () => ({
     selector(atriumHarness.settings),
 }));
 
+vi.mock("../../hooks/useTheme", () => ({
+  useTheme: () => ({
+    theme: atriumHarness.theme.value,
+    resolvedTheme: atriumHarness.theme.value,
+    setTheme: () => {},
+  }),
+}));
+
 vi.mock("../../store", () => ({
   selectAnyThreadRunning: () => true,
   useStore: atriumHarness.useStore,
@@ -105,9 +116,12 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 import { TaskAtriumBoard } from "./TaskAtrium";
 
 async function renderInTheme(theme: "light" | "dark") {
+  atriumHarness.theme.value = theme;
   document.documentElement.classList.toggle("dark", theme === "dark");
   const host = document.createElement("div");
   host.style.height = "100vh";
+  host.style.display = "flex";
+  host.style.flexDirection = "column";
   document.body.append(host);
   const screen = await render(<TaskAtriumBoard />, { container: host });
   return { host, screen };
@@ -158,7 +172,7 @@ describe("TaskAtriumBoard", () => {
     const { host, screen } = await renderInTheme("dark");
     try {
       await vi.waitFor(() => {
-        expect(host.textContent).toContain("Nothing running");
+        expect(host.textContent).toContain("The garden is quiet");
       });
     } finally {
       environments["env-1"]!.threadIds = previous;

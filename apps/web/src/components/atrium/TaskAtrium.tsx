@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { scopeThreadRef } from "@cafecode/client-runtime";
 
 import { useSettings } from "../../hooks/useSettings";
+import { useTheme } from "../../hooks/useTheme";
 import { normalizeAccentColor } from "../../themeAccent";
 import { useStore } from "../../store";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { cn } from "../../lib/utils";
+import { createAtriumScene, type AtriumScene } from "./atriumScene";
 import {
   EMPTY_ATRIUM,
   formatElapsed,
@@ -16,22 +18,19 @@ import {
 } from "./taskAtriumData";
 
 /**
- * Task Atrium — a read-only view of everything running right now.
+ * Task Atrium — a read-only view of everything running, staged as a scene.
+ *
+ * Cards float at three depths over a canvas cherry-blossom scene and drift with
+ * the pointer; that parallax is where the depth comes from, not from any 3D.
+ * The whole palette — sky, branches, blossoms, petals — is derived from the
+ * Atrium tint, so the colour setting drives the season rather than the scene
+ * being locked to cherry pink.
  *
  * It is a display, not a control surface: no approve, no deny, no stop. A card
  * says a thread is waiting on you because that is information about what is
  * going on, but the decision happens in the thread where the request is
  * visible. Clicking a card opens that thread; that is the whole interaction,
  * which keeps this renderer-only exactly like the ambiance layer above it.
- *
- * The ambiance canvas sits at z-40 over all app content, so when a weather
- * effect is enabled its petals and beads fall in front of these cards for free
- * — the depth in the design comes from that layering, not from a scene graph.
- *
- * Colour: the Atrium tint follows its own setting, then the ambiance weather
- * colour, then the Appearance accent, matching the resolution order the weather
- * layer uses. Everything else is drawn from theme tokens so light and dark both
- * come out right without a second palette.
  */
 
 const FALLBACK_TINT = "#48cfff";
@@ -46,6 +45,22 @@ const STATE_LABEL: Record<AtriumCardState, string> = {
   error: "Error",
   done: "Done",
 };
+
+/**
+ * Card slots, mirroring the staged composition rather than a grid. Each slot
+ * carries a depth: nearer cards sit larger and take more of the parallax.
+ */
+const SLOTS: ReadonlyArray<{ left: string; top: string; depth: 1 | 2 | 3 }> = [
+  { left: "0%", top: "4%", depth: 1 },
+  { left: "50%", top: "0%", depth: 2 },
+  { left: "2%", top: "56%", depth: 2 },
+  { left: "52%", top: "50%", depth: 3 },
+  { left: "24%", top: "28%", depth: 3 },
+  { left: "70%", top: "24%", depth: 3 },
+];
+
+const DEPTH_SCALE: Record<1 | 2 | 3, number> = { 1: 1, 2: 0.94, 3: 0.88 };
+const DEPTH_SHIFT: Record<1 | 2 | 3, number> = { 1: 26, 2: 17, 3: 10 };
 
 function useAtriumTint(): string {
   const atriumColor = useSettings((settings) => settings.ambianceAtriumColor);
@@ -99,47 +114,175 @@ const PROVIDER_DOT: Record<string, string> = {
   opencode: "#4ade80",
 };
 
+/**
+ * The scene canvas. Owns its own RAF loop and inherits the same battery rules
+ * as the ambiance layer: stopped while the document is hidden or the window is
+ * blurred unless background animations are on, and a single static frame under
+ * `prefers-reduced-motion`.
+ */
+function AtriumSceneCanvas({
+  tint,
+  dark,
+  pointer,
+}: {
+  tint: string;
+  dark: boolean;
+  pointer: { x: number; y: number };
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const sceneRef = useRef<AtriumScene | null>(null);
+  const continueBackgroundAnimations = useSettings(
+    (settings) => settings.continueBackgroundAnimations,
+  );
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const scene = createAtriumScene(canvas);
+    if (!scene) return;
+    sceneRef.current = scene;
+
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let frame = 0;
+    let running = false;
+
+    const tick = () => {
+      scene.draw();
+      frame = window.requestAnimationFrame(tick);
+    };
+    const start = () => {
+      if (running || reduced) return;
+      running = true;
+      frame = window.requestAnimationFrame(tick);
+    };
+    const stop = () => {
+      running = false;
+      window.cancelAnimationFrame(frame);
+    };
+    const syncRunState = () => {
+      const hidden = document.visibilityState !== "visible";
+      const blurred = typeof document.hasFocus === "function" && !document.hasFocus();
+      if (!continueBackgroundAnimations && (hidden || blurred)) stop();
+      else start();
+    };
+
+    const onResize = () => {
+      scene.resize();
+      // Repaint immediately when the loop is not running, so a resize while
+      // paused does not leave a stale or blank scene.
+      if (!running) scene.draw();
+    };
+
+    // The canvas is measured from its own box, which is zero until layout has
+    // run and changes again whenever the sidebar opens or the pane is resized.
+    // A window listener alone misses both, leaving the scene stuck at 1x1.
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(onResize);
+    observer?.observe(canvas);
+
+    // Always paint one frame before deciding whether to animate. If the window
+    // is blurred, background animations are off, or motion is reduced, the loop
+    // never starts — and without this the pane would simply render empty.
+    scene.draw();
+    if (!reduced) syncRunState();
+
+    window.addEventListener("resize", onResize);
+    document.addEventListener("visibilitychange", syncRunState);
+    window.addEventListener("focus", syncRunState);
+    window.addEventListener("blur", syncRunState);
+    return () => {
+      stop();
+      window.removeEventListener("resize", onResize);
+      document.removeEventListener("visibilitychange", syncRunState);
+      window.removeEventListener("focus", syncRunState);
+      window.removeEventListener("blur", syncRunState);
+      observer?.disconnect();
+      scene.dispose();
+      sceneRef.current = null;
+    };
+  }, [continueBackgroundAnimations]);
+
+  useEffect(() => {
+    sceneRef.current?.setTint(tint);
+  }, [tint]);
+  useEffect(() => {
+    sceneRef.current?.setDark(dark);
+  }, [dark]);
+  useEffect(() => {
+    sceneRef.current?.setPointer(pointer.x, pointer.y);
+  }, [pointer]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      aria-hidden="true"
+      data-cafe-atrium-scene="true"
+      className="pointer-events-none absolute inset-0 size-full"
+    />
+  );
+}
+
 function TaskAtriumCardView({
   card,
+  slot,
   now,
   tint,
+  pointer,
   onOpen,
 }: {
   card: AtriumCard;
+  slot: (typeof SLOTS)[number];
   now: number;
   tint: string;
+  pointer: { x: number; y: number };
   onOpen: (card: AtriumCard) => void;
 }) {
   const accent = stateColor(card.state, tint);
   const elapsed = formatElapsed(card.startedAt, now);
+  const shift = DEPTH_SHIFT[slot.depth];
+  const scale = DEPTH_SCALE[slot.depth];
 
   return (
     <button
       type="button"
       onClick={() => onOpen(card)}
       aria-label={`Open ${card.title}`}
-      style={{ "--cafe-atrium-accent": accent } as CSSProperties}
+      style={
+        {
+          "--cafe-atrium-accent": accent,
+          // Transform-only parallax keeps the whole field on the compositor.
+          "--cafe-atrium-parallax": `translate3d(${(-pointer.x * shift).toFixed(1)}px, ${(
+            -pointer.y * shift
+          ).toFixed(1)}px, 0) scale(${scale})`,
+          "--cafe-atrium-left": slot.left,
+          "--cafe-atrium-top": slot.top,
+          zIndex: 10 - slot.depth,
+        } as CSSProperties
+      }
       className={cn(
-        "group relative flex w-full flex-col overflow-hidden rounded-2xl border bg-card/85 p-4 text-left",
-        "backdrop-blur-md transition-all duration-200",
-        "border-border/70 shadow-lg shadow-black/5 dark:shadow-black/40",
-        "hover:-translate-y-0.5 hover:border-[var(--cafe-atrium-accent)]/55 hover:shadow-xl",
+        "group overflow-hidden rounded-2xl p-4 text-left will-change-transform",
+        "border backdrop-blur-md transition-shadow duration-200",
+        // Paper stock on a light sky, dark glass on a dusk one — the card has
+        // to belong to the theme, not just to the scene behind it.
+        "border-black/5 bg-[#f5f2ee] text-[#241f22] shadow-2xl shadow-black/40",
+        "dark:border-white/12 dark:bg-[#1b1620]/88 dark:text-[#eee7ec]",
+        "hover:shadow-[0_30px_60px_-18px_rgba(0,0,0,0.6)]",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--cafe-atrium-accent)]",
-        card.state === "done" && "opacity-70",
-        card.state === "holding" && "border-[var(--cafe-atrium-accent)]/45",
+        // Staged slots on wide layouts; a plain stacked column on narrow ones,
+        // where absolute positioning would only overlap.
+        "lg:absolute lg:w-[46%] lg:min-w-[250px]",
+        "lg:left-[var(--cafe-atrium-left)] lg:top-[var(--cafe-atrium-top)]",
+        "lg:[transform:var(--cafe-atrium-parallax)]",
+        card.state === "done" && "opacity-80",
       )}
     >
-      {/* Lit top edge in the state colour — the same vocabulary as the weather. */}
       <span
         aria-hidden="true"
-        className="pointer-events-none absolute inset-x-6 top-0 h-px"
-        style={{
-          background: "linear-gradient(90deg, transparent, var(--cafe-atrium-accent), transparent)",
-        }}
+        className="pointer-events-none absolute inset-x-[8%] top-0 h-0.5 rounded-full"
+        style={{ background: accent }}
       />
 
       <div className="flex items-center gap-2">
-        <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+        <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-[#8a8189] dark:text-white/50">
           <span
             aria-hidden="true"
             className="size-1.5 shrink-0 rounded-full"
@@ -148,41 +291,41 @@ function TaskAtriumCardView({
           {providerLabel(card.provider)}
         </span>
         <span
-          className="ml-auto rounded-full border px-2 py-0.5 text-[10px] font-medium"
-          style={{
-            color: accent,
-            borderColor: `color-mix(in srgb, ${accent} 34%, transparent)`,
-            background: `color-mix(in srgb, ${accent} 12%, transparent)`,
-          }}
+          className="ml-auto text-[10px] font-semibold uppercase tracking-[0.04em]"
+          style={{ color: accent }}
         >
           {STATE_LABEL[card.state]}
         </span>
       </div>
 
-      <div className="mt-2 line-clamp-2 text-sm font-semibold leading-snug text-foreground">
+      <div className="mt-2 line-clamp-2 text-[17px] leading-tight font-medium tracking-tight">
         {card.title}
       </div>
       {card.projectName ? (
-        <div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground/80">
+        <div className="mt-1 truncate font-mono text-[10px] text-[#9a9199] dark:text-white/40">
           {card.projectName}
         </div>
       ) : null}
 
+      {/* The reference's photo window becomes the live subagent list. */}
       {card.subagents.length > 0 ? (
-        <div className="mt-3 flex flex-col gap-1.5 rounded-xl bg-muted/45 p-2.5">
+        <div className="mt-3 flex flex-col gap-1.5 rounded-xl bg-[#ece7e2] p-2.5 dark:bg-white/8">
           {card.subagents.map((subagent) => (
-            <div key={subagent.id} className="flex items-center gap-2 text-[11px]">
+            <div
+              key={subagent.id}
+              className="flex items-center gap-2 text-[11px] text-[#4a4248] dark:text-white/75"
+            >
               <span
                 aria-hidden="true"
                 className="size-1.5 shrink-0 rounded-full"
                 style={{ background: subagent.running ? accent : SETTLED_COLOR }}
               />
-              <span className="shrink-0 font-semibold text-foreground/85">{subagent.label}</span>
-              <span className="truncate text-muted-foreground">{subagent.detail}</span>
+              <span className="shrink-0 font-semibold">{subagent.label}</span>
+              <span className="truncate text-[#6c636a] dark:text-white/50">{subagent.detail}</span>
             </div>
           ))}
           {card.extraSubagents > 0 ? (
-            <div className="pl-3.5 text-[10px] text-muted-foreground/70">
+            <div className="pl-3.5 text-[10px] text-[#948b92] dark:text-white/40">
               and {card.extraSubagents} more
             </div>
           ) : null}
@@ -190,15 +333,15 @@ function TaskAtriumCardView({
       ) : null}
 
       {card.activityLabel ? (
-        <div className="mt-3 flex items-center gap-2 border-t border-border/60 pt-2.5 text-[11px] text-muted-foreground">
+        <div className="mt-3 flex items-center gap-2 border-t border-black/10 pt-2.5 text-[11px] text-[#6c636a] dark:border-white/10 dark:text-white/55">
           <span className="truncate">
             {card.activityLabel}
             {card.activityDetail ? (
-              <span className="text-muted-foreground/70"> · {card.activityDetail}</span>
+              <span className="text-[#948b92] dark:text-white/40"> · {card.activityDetail}</span>
             ) : null}
           </span>
           {elapsed ? (
-            <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground/70">
+            <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-[#948b92] dark:text-white/40">
               {elapsed}
             </span>
           ) : null}
@@ -208,9 +351,13 @@ function TaskAtriumCardView({
   );
 }
 
-export function TaskAtriumBoard({ compact = false }: { compact?: boolean }) {
+export function TaskAtriumBoard() {
   const tint = useAtriumTint();
+  const { resolvedTheme } = useTheme();
+  const dark = resolvedTheme !== "light";
   const navigate = useNavigate();
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const [pointer, setPointer] = useState({ x: 0, y: 0 });
 
   // Derivation allocates fresh arrays, so subscribing to the store directly
   // would re-render this board on every streamed token. Poll on one slow clock
@@ -229,6 +376,20 @@ export function TaskAtriumBoard({ compact = false }: { compact?: boolean }) {
     return () => window.clearInterval(interval);
   }, []);
 
+  // Pointer parallax, quantized so a stationary mouse cannot cause a render and
+  // skipped entirely under reduced motion.
+  const onPointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const host = stageRef.current;
+    if (!host) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const rect = host.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    const x = Math.round(((event.clientX - rect.left) / rect.width - 0.5) * 200) / 100;
+    const y = Math.round(((event.clientY - rect.top) / rect.height - 0.5) * 200) / 100;
+    setPointer((previous) => (previous.x === x && previous.y === y ? previous : { x, y }));
+  }, []);
+  const onPointerLeave = useCallback(() => setPointer({ x: 0, y: 0 }), []);
+
   const providerCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const card of snapshot.cards) {
@@ -244,76 +405,143 @@ export function TaskAtriumBoard({ compact = false }: { compact?: boolean }) {
     });
   };
 
-  if (snapshot.cards.length === 0) {
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 py-16 text-center">
-        <p className="text-base font-medium text-foreground/85">Nothing running</p>
-        <p className="max-w-sm text-sm text-muted-foreground">
-          When threads and their subagents are working, they show up here.
-        </p>
-      </div>
-    );
-  }
-
   const total = snapshot.cards.length + snapshot.overflow;
+  const glass = dark
+    ? "border-white/15 bg-black/35 text-white/85"
+    : "border-black/10 bg-white/60 text-[#3a3038]";
+  const heading = dark ? "text-white" : "text-[#241b23]";
+  const muted = dark ? "text-white/60" : "text-[#5d5460]";
+  const label = dark ? "text-white/45" : "text-[#8a8189]";
 
   return (
-    <div className={cn("flex min-h-0 flex-1 flex-col gap-5", compact ? "p-5" : "p-6 sm:p-8")}>
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="rounded-full bg-foreground px-3 py-1 text-xs font-semibold text-background">
-          All work {total}
-        </span>
-        {providerCounts.map(([provider, count]) => (
+    <div
+      ref={stageRef}
+      onPointerMove={onPointerMove}
+      onPointerLeave={onPointerLeave}
+      className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
+    >
+      <AtriumSceneCanvas tint={tint} dark={dark} pointer={pointer} />
+
+      {/* Glass pill nav, floating over the scene. */}
+      <div className="relative z-20 flex shrink-0 justify-center p-4">
+        <div
+          className={cn("flex items-center gap-1 rounded-full border p-1 backdrop-blur-md", glass)}
+        >
           <span
-            key={provider}
-            className="flex items-center gap-1.5 rounded-full border border-border/70 bg-card/60 px-3 py-1 text-xs text-muted-foreground backdrop-blur-sm"
+            className={cn(
+              "rounded-full px-3 py-1 text-xs font-semibold",
+              dark ? "bg-white text-[#1b1620]" : "bg-[#2b2029] text-white",
+            )}
           >
-            <span
-              aria-hidden="true"
-              className="size-1.5 rounded-full"
-              style={{ background: PROVIDER_DOT[provider] ?? SETTLED_COLOR }}
-            />
-            {providerLabel(provider)}
-            <span className="tabular-nums opacity-60">{count}</span>
+            All work {total}
           </span>
-        ))}
+          {providerCounts.map(([provider, count]) => (
+            <span
+              key={provider}
+              className="flex items-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1 text-xs"
+            >
+              <span
+                aria-hidden="true"
+                className="size-1.5 rounded-full"
+                style={{ background: PROVIDER_DOT[provider] ?? SETTLED_COLOR }}
+              />
+              {providerLabel(provider)}
+              <span className="tabular-nums opacity-60">{count}</span>
+            </span>
+          ))}
+        </div>
       </div>
 
-      {!compact ? (
-        <div className="flex flex-col gap-1">
-          <h2 className="text-2xl font-light tracking-tight text-foreground sm:text-3xl">
-            {snapshot.runningCount === 1 ? "One thread" : `${snapshot.runningCount} threads`}
-            {snapshot.subagentCount > 0 ? (
-              <>
-                ,{" "}
-                <span className="font-semibold">
-                  {snapshot.subagentCount === 1
-                    ? "one subagent"
-                    : `${snapshot.subagentCount} subagents`}
-                </span>
-              </>
-            ) : null}
-            {snapshot.holdingCount > 0 ? (
-              <>
-                {" · "}
-                <span style={{ color: HOLD_COLOR }}>{snapshot.holdingCount} waiting on you</span>
-              </>
-            ) : null}
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            Everything currently in flight. Select a card to open its thread.
+      {snapshot.cards.length === 0 ? (
+        <div className="relative z-10 flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+          <p className={cn("text-2xl font-light tracking-tight", heading)}>The garden is quiet</p>
+          <p className={cn("max-w-sm text-sm", muted)}>
+            When threads and their subagents are working, they appear here.
           </p>
         </div>
-      ) : null}
+      ) : (
+        <div className="relative z-10 grid min-h-0 flex-1 grid-cols-1 items-center gap-4 px-6 pb-6 lg:grid-cols-[1fr_1.2fr] lg:px-10">
+          {/* Lede. Hidden on narrow layouts, where the cards need the room. */}
+          <div
+            className="hidden lg:block"
+            style={{
+              transform: `translate3d(${(-pointer.x * 8).toFixed(1)}px, ${(-pointer.y * 8).toFixed(
+                1,
+              )}px, 0)`,
+            }}
+          >
+            <h2
+              className={cn(
+                "text-4xl leading-[1.06] font-light tracking-tight xl:text-5xl",
+                heading,
+              )}
+            >
+              {snapshot.runningCount === 1 ? "One thread" : `${snapshot.runningCount} threads`},
+              <br />
+              <span className="font-semibold" style={{ color: tint }}>
+                {snapshot.subagentCount === 1
+                  ? "one subagent"
+                  : `${snapshot.subagentCount} subagents`}
+              </span>
+              ,<br />
+              all working.
+            </h2>
+            <p className={cn("mt-3 max-w-xs text-sm", muted)}>
+              {snapshot.holdingCount > 0
+                ? `${snapshot.holdingCount} waiting on you. Everything else is moving on its own.`
+                : "Nothing here needs you. This is just what the garden looks like while it grows."}
+            </p>
+            <div className="mt-6 flex gap-6">
+              <div>
+                <div className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", label)}>
+                  Threads
+                </div>
+                <div className={cn("mt-0.5 text-xl tabular-nums", heading)}>{total}</div>
+              </div>
+              <div>
+                <div className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", label)}>
+                  Subagents
+                </div>
+                <div className={cn("mt-0.5 text-xl tabular-nums", heading)}>
+                  {snapshot.subagentCount}
+                </div>
+              </div>
+              {snapshot.holdingCount > 0 ? (
+                <div>
+                  <div className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", label)}>
+                    Holding
+                  </div>
+                  <div className="mt-0.5 text-xl tabular-nums" style={{ color: HOLD_COLOR }}>
+                    {snapshot.holdingCount}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
 
-      <div className="grid min-h-0 flex-1 auto-rows-min grid-cols-1 gap-3 overflow-y-auto sm:grid-cols-2 xl:grid-cols-3">
-        {snapshot.cards.map((card) => (
-          <TaskAtriumCardView key={card.key} card={card} now={now} tint={tint} onOpen={openCard} />
-        ))}
-      </div>
+          <div className="relative min-h-0 self-stretch max-lg:flex max-lg:flex-col max-lg:gap-3 max-lg:overflow-y-auto max-lg:py-2">
+            {snapshot.cards.map((card, index) => (
+              <TaskAtriumCardView
+                key={card.key}
+                card={card}
+                slot={SLOTS[index % SLOTS.length]!}
+                now={now}
+                tint={tint}
+                pointer={pointer}
+                onOpen={openCard}
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
       {snapshot.overflow > 0 ? (
-        <div className="shrink-0 rounded-xl border border-border/60 bg-card/50 px-4 py-2 text-xs text-muted-foreground">
+        <div
+          className={cn(
+            "relative z-20 mx-6 mb-4 shrink-0 rounded-xl border px-4 py-2 text-xs backdrop-blur-md",
+            glass,
+          )}
+        >
           and {snapshot.overflow} more {snapshot.overflow === 1 ? "thread" : "threads"} running
         </div>
       ) : null}
