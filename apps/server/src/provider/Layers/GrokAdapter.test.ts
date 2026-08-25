@@ -111,7 +111,7 @@ function waitForProcessExit(pid: number, attempts = 80): Effect.Effect<void> {
       yield* Effect.sleep("25 millis");
       return yield* poll(remainingAttempts - 1);
     });
-  return poll(attempts).pipe(TestClock.withLive);
+  return poll(attempts);
 }
 
 function waitForProcessIds(
@@ -137,7 +137,7 @@ function waitForProcessIds(
       yield* Effect.sleep("25 millis");
       return yield* poll(remainingAttempts - 1);
     });
-  return poll(attempts).pipe(TestClock.withLive);
+  return poll(attempts);
 }
 
 async function readJsonLines(filePath: string) {
@@ -663,9 +663,9 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       yield* adapter.stopSession(threadId);
 
       if (process.platform === "win32") {
-        const [fixturePid] = yield* waitForProcessIds(pidLogPath, 1);
+        const [fixturePid] = yield* waitForProcessIds(pidLogPath, 1).pipe(TestClock.withLive);
         assert.isDefined(fixturePid);
-        yield* waitForProcessExit(fixturePid);
+        yield* waitForProcessExit(fixturePid).pipe(TestClock.withLive);
       } else {
         const exitLog = yield* waitForFileContent(exitLogPath);
         assert.include(exitLog, "SIGTERM");
