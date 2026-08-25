@@ -4,64 +4,91 @@ import * as NodeURL from "node:url";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
-import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { GrokSettings } from "@cafecode/contracts";
 
 import {
   buildInitialGrokProviderSnapshot,
-  checkGrokProviderStatus,
+  checkGrokProviderStatus as checkGrokProviderStatusLive,
   grokSlashCommandsFromAcp,
   parseGrokInspectSkills,
 } from "./GrokProvider.ts";
+import {
+  provideGrokTestProcessSpawner,
+  writeGrokAcpMockShim,
+} from "../testUtils/grokProcessFixture.ts";
 
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const mockAgentPath = NodePath.join(__dirname, "../../../scripts/acp-mock-agent.ts");
+
+const makeFakeGrok = Effect.fn(function* (input: {
+  readonly prefix: string;
+  readonly environment?: Readonly<Record<string, string>>;
+  readonly versionResponse?: {
+    readonly stdout?: string;
+    readonly stderr?: string;
+    readonly exitCode?: number;
+  };
+  readonly inspectResponse?: {
+    readonly stdout?: string;
+    readonly stderr?: string;
+    readonly exitCode?: number;
+  };
+  readonly runAgent?: boolean;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const dir = yield* fs.makeTempDirectoryScoped({ prefix: input.prefix });
+  return yield* Effect.promise(() =>
+    writeGrokAcpMockShim({
+      directory: dir,
+      mockAgentPath,
+      ...(input.environment ? { environment: input.environment } : {}),
+      ...(input.versionResponse ? { versionResponse: input.versionResponse } : {}),
+      ...(input.inspectResponse ? { inspectResponse: input.inspectResponse } : {}),
+      ...(input.runAgent === undefined ? {} : { runAgent: input.runAgent }),
+    }),
+  );
+});
 
 const makeQualifiedFakeGrok = Effect.fn(function* (input?: {
   readonly noAuth?: boolean;
   readonly disableInterject?: boolean;
   readonly exposeBilling?: boolean;
 }) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const dir = yield* fs.makeTempDirectoryScoped({ prefix: "cafecode-grok-qualified-" });
-  const grokPath = path.join(dir, "grok");
-  yield* fs.writeFileString(
-    grokPath,
-    [
-      "#!/bin/sh",
-      'if [ "$1" = "--version" ]; then',
-      '  printf "grok 1.0.4\\n"',
-      "  exit 0",
-      "fi",
-      'if [ "$2" = "inspect" ]; then',
-      `  printf '%s\\n' ${JSON.stringify(
-        JSON.stringify({
-          skills: [
-            {
-              name: "repository-review",
-              description: "Review repository changes",
-              source: { type: "user", path: "/tmp/grok/skills/repository-review/SKILL.md" },
-              userInvocable: true,
-            },
-          ],
-        }),
-      )}`,
-      "  exit 0",
-      "fi",
-      "export CAFE_CODE_ACP_EMIT_AVAILABLE_COMMANDS=1",
-      ...(input?.noAuth ? ["export CAFE_CODE_ACP_NO_AUTH=1"] : []),
-      ...(input?.disableInterject ? ["export CAFE_CODE_ACP_DISABLE_INTERJECT=1"] : []),
-      ...(input?.exposeBilling ? ["export CAFE_CODE_ACP_EXPOSE_BILLING=1"] : []),
-      `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(mockAgentPath)} "$@"`,
-      "",
-    ].join("\n"),
-  );
-  yield* fs.chmod(grokPath, 0o755);
-  return grokPath;
+  return yield* makeFakeGrok({
+    prefix: "cafecode-grok-qualified-",
+    environment: {
+      CAFE_CODE_ACP_EMIT_AVAILABLE_COMMANDS: "1",
+      ...(input?.noAuth ? { CAFE_CODE_ACP_NO_AUTH: "1" } : {}),
+      ...(input?.disableInterject ? { CAFE_CODE_ACP_DISABLE_INTERJECT: "1" } : {}),
+      ...(input?.exposeBilling ? { CAFE_CODE_ACP_EXPOSE_BILLING: "1" } : {}),
+    },
+    versionResponse: { stdout: "grok 1.0.4\n" },
+    inspectResponse: {
+      stdout: `${JSON.stringify({
+        skills: [
+          {
+            name: "repository-review",
+            description: "Review repository changes",
+            source: { type: "user", path: "/tmp/grok/skills/repository-review/SKILL.md" },
+            userInvocable: true,
+          },
+        ],
+      })}\n`,
+    },
+  });
 });
+
+const checkGrokProviderStatus = (
+  settings: GrokSettings,
+  cwd: string = process.cwd(),
+  environment: NodeJS.ProcessEnv = process.env,
+) =>
+  provideGrokTestProcessSpawner(
+    settings.binaryPath || "grok",
+    checkGrokProviderStatusLive(settings, cwd, environment),
+  );
 
 describe("buildInitialGrokProviderSnapshot", () => {
   it.effect("returns a disabled snapshot when settings.enabled is false", () =>
@@ -154,15 +181,11 @@ it.layer(NodeServices.layer)("checkGrokProviderStatus", (it) => {
       const secretStderr = "broken grok install: secret-token-value";
       const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
-          const fs = yield* FileSystem.FileSystem;
-          const path = yield* Path.Path;
-          const dir = yield* fs.makeTempDirectoryScoped({ prefix: "cafecode-grok-version-" });
-          const grokPath = path.join(dir, "grok");
-          yield* fs.writeFileString(
-            grokPath,
-            ["#!/bin/sh", `printf "%s\\n" "${secretStderr}" >&2`, "exit 2", ""].join("\n"),
-          );
-          yield* fs.chmod(grokPath, 0o755);
+          const grokPath = yield* makeFakeGrok({
+            prefix: "cafecode-grok-version-",
+            versionResponse: { stderr: `${secretStderr}\n`, exitCode: 2 },
+            runAgent: false,
+          });
 
           return yield* checkGrokProviderStatus(
             decodeGrokSettings({ enabled: true, binaryPath: grokPath }),
@@ -182,15 +205,11 @@ it.layer(NodeServices.layer)("checkGrokProviderStatus", (it) => {
     Effect.gen(function* () {
       const snapshot = yield* Effect.scoped(
         Effect.gen(function* () {
-          const fs = yield* FileSystem.FileSystem;
-          const path = yield* Path.Path;
-          const dir = yield* fs.makeTempDirectoryScoped({ prefix: "cafecode-grok-success-" });
-          const grokPath = path.join(dir, "grok");
-          yield* fs.writeFileString(
-            grokPath,
-            ["#!/bin/sh", 'printf "grok 1.0.4\\n"', "exit 0", ""].join("\n"),
-          );
-          yield* fs.chmod(grokPath, 0o755);
+          const grokPath = yield* makeFakeGrok({
+            prefix: "cafecode-grok-success-",
+            versionResponse: { stdout: "grok 1.0.4\n" },
+            runAgent: false,
+          });
 
           return yield* checkGrokProviderStatus(
             decodeGrokSettings({ enabled: true, binaryPath: grokPath }),

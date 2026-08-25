@@ -39,25 +39,24 @@ import {
   validateGrokImageAttachmentBytes,
 } from "./GrokAdapter.ts";
 import type { GrokAdapterShape } from "../Services/GrokAdapter.ts";
+import {
+  GROK_TEST_CHILD_PID_LOG_PATH_ENV,
+  provideGrokTestProcessSpawner,
+  writeGrokAcpMockShim,
+} from "../testUtils/grokProcessFixture.ts";
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const mockAgentPath = NodePath.join(__dirname, "../../../scripts/acp-mock-agent.ts");
-const mockAgentCommand = process.execPath;
 
 async function makeMockGrokWrapper(extraEnv?: Record<string, string>) {
   const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-acp-mock-"));
-  const wrapperPath = NodePath.join(dir, "fake-grok.sh");
-  const envExports = Object.entries(extraEnv ?? {})
-    .map(([key, value]) => `export ${key}=${JSON.stringify(value)}`)
-    .join("\n");
-  const script = `#!/bin/sh
-${envExports}
-exec ${JSON.stringify(mockAgentCommand)} ${JSON.stringify(mockAgentPath)} "$@"
-`;
-  await NodeFSP.writeFile(wrapperPath, script, "utf8");
-  await NodeFSP.chmod(wrapperPath, 0o755);
-  return wrapperPath;
+  return writeGrokAcpMockShim({
+    directory: dir,
+    mockAgentPath,
+    ...(extraEnv ? { environment: extraEnv } : {}),
+    name: "fake-grok",
+  });
 }
 
 function waitForFileContent(
@@ -83,6 +82,62 @@ function waitForFileContent(
       return yield* readAttempt(remainingAttempts - 1);
     });
   return readAttempt(attempts);
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? String(error.code)
+        : undefined;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    throw error;
+  }
+}
+
+function waitForProcessExit(pid: number, attempts = 80): Effect.Effect<void> {
+  const poll = (remainingAttempts: number): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      if (!isProcessRunning(pid)) return;
+      if (remainingAttempts <= 0) {
+        return yield* Effect.die(
+          new Error(`Timed out waiting for fixture process ${pid} to exit.`),
+        );
+      }
+      yield* Effect.sleep("25 millis");
+      return yield* poll(remainingAttempts - 1);
+    });
+  return poll(attempts).pipe(TestClock.withLive);
+}
+
+function waitForProcessIds(
+  filePath: string,
+  expectedCount: number,
+  attempts = 80,
+): Effect.Effect<ReadonlyArray<number>> {
+  const poll = (remainingAttempts: number): Effect.Effect<ReadonlyArray<number>> =>
+    Effect.gen(function* () {
+      const raw = yield* Effect.tryPromise(() => NodeFSP.readFile(filePath, "utf8")).pipe(
+        Effect.orElseSucceed(() => ""),
+      );
+      const pids = raw
+        .split("\n")
+        .map((line) => Number(line.trim()))
+        .filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+      if (pids.length >= expectedCount) return pids;
+      if (remainingAttempts <= 0) {
+        return yield* Effect.die(
+          new Error(`Timed out waiting for ${expectedCount} fixture process IDs at ${filePath}.`),
+        );
+      }
+      yield* Effect.sleep("25 millis");
+      return yield* poll(remainingAttempts - 1);
+    });
+  return poll(attempts).pipe(TestClock.withLive);
 }
 
 async function readJsonLines(filePath: string) {
@@ -140,11 +195,18 @@ const testSessionCredentials = {
   revoke: () => Effect.succeed(true),
 };
 
-const makeTestAdapter = (binaryPath: string, options?: Parameters<typeof makeGrokAdapter>[1]) =>
-  makeGrokAdapter(decodeGrokSettings({ binaryPath }), {
-    sessionCredentials: testSessionCredentials,
-    ...options,
-  }).pipe(Effect.orDie);
+const makeTestAdapter = (
+  binaryPath: string,
+  options?: Parameters<typeof makeGrokAdapter>[1],
+  settings?: { readonly homePath?: string },
+) =>
+  provideGrokTestProcessSpawner(
+    binaryPath,
+    makeGrokAdapter(decodeGrokSettings({ ...settings, binaryPath }), {
+      sessionCredentials: testSessionCredentials,
+      ...options,
+    }),
+  ).pipe(Effect.orDie);
 
 it("routes Cafe MCP through the main backend when Grok runs in the provider daemon", () => {
   assert.strictEqual(
@@ -407,10 +469,12 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       );
       const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
       const exitLogPath = NodePath.join(tempDir, "exit.log");
+      const pidLogPath = NodePath.join(tempDir, "pids.log");
       const wrapperPath = yield* Effect.promise(() =>
         makeMockGrokWrapper({
           CAFE_CODE_ACP_REQUEST_LOG_PATH: requestLogPath,
           CAFE_CODE_ACP_EXIT_LOG_PATH: exitLogPath,
+          [GROK_TEST_CHILD_PID_LOG_PATH_ENV]: pidLogPath,
         }),
       );
       const adapter = yield* makeTestAdapter(wrapperPath);
@@ -467,8 +531,18 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
             (entry.params as { modelId?: unknown } | undefined)?.modelId === "grok-mock-alt",
         ),
       );
-      const exitLog = yield* waitForFileContent(exitLogPath, 80, "SIGTERM");
-      assert.equal(exitLog.split("\n").filter((line) => line === "SIGTERM").length, 1);
+      if (process.platform === "win32") {
+        // Effect's Windows process-tree cleanup uses taskkill rather than a
+        // POSIX signal. Verify the retired native mock PID instead of asking a
+        // force-terminated process to run a SIGTERM handler it cannot receive.
+        const fixturePids = yield* waitForProcessIds(pidLogPath, 2);
+        assert.lengthOf(fixturePids, 2);
+        yield* waitForProcessExit(fixturePids[0]!);
+        assert.isTrue(isProcessRunning(fixturePids[1]!));
+      } else {
+        const exitLog = yield* waitForFileContent(exitLogPath, 80, "SIGTERM");
+        assert.equal(exitLog.split("\n").filter((line) => line === "SIGTERM").length, 1);
+      }
       assert.isFalse(runtimeEvents.some((event) => event.type === "session.exited"));
 
       yield* Fiber.interrupt(eventsFiber);
@@ -568,10 +642,12 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
         NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-adapter-exit-log-")),
       );
       const exitLogPath = NodePath.join(tempDir, "exit.log");
+      const pidLogPath = NodePath.join(tempDir, "pid.log");
 
       const wrapperPath = yield* Effect.promise(() =>
         makeMockGrokWrapper({
           CAFE_CODE_ACP_EXIT_LOG_PATH: exitLogPath,
+          [GROK_TEST_CHILD_PID_LOG_PATH_ENV]: pidLogPath,
         }),
       );
       const adapter = yield* makeTestAdapter(wrapperPath);
@@ -586,8 +662,14 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
 
       yield* adapter.stopSession(threadId);
 
-      const exitLog = yield* waitForFileContent(exitLogPath);
-      assert.include(exitLog, "SIGTERM");
+      if (process.platform === "win32") {
+        const [fixturePid] = yield* waitForProcessIds(pidLogPath, 1);
+        assert.isDefined(fixturePid);
+        yield* waitForProcessExit(fixturePid);
+      } else {
+        const exitLog = yield* waitForFileContent(exitLogPath);
+        assert.include(exitLog, "SIGTERM");
+      }
     }),
   );
 
@@ -2033,10 +2115,7 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
         NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-goal-home-")),
       );
       const wrapperPath = yield* Effect.promise(() => makeMockGrokWrapper());
-      const adapter = yield* makeGrokAdapter(
-        decodeGrokSettings({ binaryPath: wrapperPath, homePath: grokHome }),
-        { sessionCredentials: testSessionCredentials },
-      ).pipe(Effect.orDie);
+      const adapter = yield* makeTestAdapter(wrapperPath, undefined, { homePath: grokHome });
       yield* adapter.startSession({
         threadId,
         provider: ProviderDriverKind.make("grok"),

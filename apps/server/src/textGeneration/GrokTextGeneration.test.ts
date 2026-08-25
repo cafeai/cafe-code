@@ -16,39 +16,36 @@ import { GrokSettings, ProviderInstanceId } from "@cafecode/contracts";
 import * as ServerConfig from "../config.ts";
 import * as TextGeneration from "./TextGeneration.ts";
 import { makeGrokTextGeneration } from "./GrokTextGeneration.ts";
+import {
+  provideGrokTestProcessSpawner,
+  writeGrokAcpMockShim,
+} from "../provider/testUtils/grokProcessFixture.ts";
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const mockAgentPath = NodePath.join(__dirname, "../../scripts/acp-mock-agent.ts");
 
-function shellSingleQuote(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
 const GrokTextGenerationTestLayer = ServerConfig.ServerConfig.layerTest(process.cwd(), {
   prefix: "cafecode-grok-text-generation-test-",
 }).pipe(Layer.provideMerge(NodeServices.layer));
 
-function makeAcpGrokWrapper(dir: string, env: Record<string, string>): string {
+function makeAcpGrokWrapper(dir: string, env: Record<string, string>): Promise<string> {
   const binDir = NodePath.join(dir, "bin");
-  const grokPath = NodePath.join(binDir, "grok");
-  NodeFS.mkdirSync(binDir, { recursive: true });
-  NodeFS.writeFileSync(
-    grokPath,
-    [
-      "#!/bin/sh",
-      ...Object.entries(env).map(([key, value]) => `export ${key}=${shellSingleQuote(value)}`),
-      'if [ "$1" != "--no-auto-update" ] || [ "$2" != "--sandbox" ] || [ "$3" != "read-only" ] || [ "$4" != "--permission-mode" ] || [ "$5" != "default" ] || [ "$6" != "agent" ] || [ "$7" != "--no-leader" ] || [ "$8" != "stdio" ]; then',
-      '  printf "%s\\n" "unexpected args: $*" >&2',
-      "  exit 11",
-      "fi",
-      `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(mockAgentPath)}`,
-      "",
-    ].join("\n"),
-    "utf8",
-  );
-  NodeFS.chmodSync(grokPath, 0o755);
-  return grokPath;
+  return writeGrokAcpMockShim({
+    directory: binDir,
+    mockAgentPath,
+    environment: env,
+    expectedArgs: [
+      "--no-auto-update",
+      "--sandbox",
+      "read-only",
+      "--permission-mode",
+      "default",
+      "agent",
+      "--no-leader",
+      "stdio",
+    ],
+  });
 }
 
 function withFakeAcpGrok<A, E, R>(
@@ -62,9 +59,12 @@ function withFakeAcpGrok<A, E, R>(
         NodeFS.rmSync(tempDir, { recursive: true, force: true });
       }),
     );
-    const binaryPath = makeAcpGrokWrapper(tempDir, env);
+    const binaryPath = yield* Effect.promise(() => makeAcpGrokWrapper(tempDir, env));
     const config = decodeGrokSettings({ binaryPath });
-    const textGeneration = yield* makeGrokTextGeneration(config);
+    const textGeneration = yield* provideGrokTestProcessSpawner(
+      binaryPath,
+      makeGrokTextGeneration(config),
+    );
     return yield* effectFn(textGeneration);
   }).pipe(Effect.scoped);
 }
