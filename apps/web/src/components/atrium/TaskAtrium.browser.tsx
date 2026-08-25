@@ -815,7 +815,9 @@ describe("TaskAtriumOverlay", () => {
     const { host, screen } = await mountOverlay();
     try {
       await vi.waitFor(() => expect(overlay()).not.toBeNull());
-      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      document.activeElement?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+      );
       await vi.waitFor(() => {
         expect(overlay()).toBeNull();
         expect(useTaskAtriumStore.getState().open).toBe(false);
@@ -824,6 +826,28 @@ describe("TaskAtriumOverlay", () => {
       useTaskAtriumStore.getState().setOpen(false);
       await screen.unmount();
       host.remove();
+    }
+  });
+
+  it("opens as a modal dialog and moves focus into the full-screen surface", async () => {
+    useTaskAtriumStore.getState().setOpen(false);
+    const opener = document.createElement("button");
+    opener.textContent = "Open Atrium";
+    document.body.append(opener);
+    opener.focus();
+    const { host, screen } = await mountOverlay();
+    try {
+      useTaskAtriumStore.getState().setOpen(true);
+      await vi.waitFor(() => {
+        expect(overlay()?.getAttribute("role")).toBe("dialog");
+        expect(overlay()?.getAttribute("aria-modal")).toBe("true");
+        expect(overlay()?.contains(document.activeElement)).toBe(true);
+      });
+    } finally {
+      useTaskAtriumStore.getState().setOpen(false);
+      await screen.unmount();
+      host.remove();
+      opener.remove();
     }
   });
 

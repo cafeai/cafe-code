@@ -5,7 +5,6 @@ import {
   FolderPlusIcon,
   PlusIcon,
   SearchIcon,
-  SettingsIcon,
   SquarePenIcon,
   Trash2Icon,
   TriangleAlertIcon,
@@ -104,6 +103,8 @@ import {
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
+import { SidebarFooterNavigation } from "./SidebarFooterNavigation";
+import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
 import { Kbd } from "./ui/kbd";
 import {
   getArm64IntelBuildWarningDescription,
@@ -3142,7 +3143,16 @@ const SidebarChromeFooter = memo(function SidebarChromeFooter() {
   const navigate = useNavigate();
   const pathname = useLocation({ select: (loc) => loc.pathname });
   const { isMobile, setOpenMobile } = useSidebar();
+  const atriumEnabled = useSettings((settings) => settings.ambianceAtriumEnabled);
+  const atriumOpen = useTaskAtriumStore((state) => state.open);
+  const setAtriumOpen = useTaskAtriumStore((state) => state.setOpen);
   const isOnSettingsFooter = pathname.startsWith("/settings");
+  const handleAtriumClick = useCallback(() => {
+    if (isMobile) {
+      setOpenMobile(false);
+    }
+    setAtriumOpen(true);
+  }, [isMobile, setAtriumOpen, setOpenMobile]);
   const handleSettingsClick = useCallback(() => {
     if (isMobile) {
       setOpenMobile(false);
@@ -3154,21 +3164,13 @@ const SidebarChromeFooter = memo(function SidebarChromeFooter() {
     <SidebarFooter className="p-2">
       <SidebarProviderUpdatePill />
       <SidebarUpdatePill />
-      <SidebarMenu>
-        <SidebarMenuItem className="flex w-full items-center gap-1">
-          <SidebarMenuButton
-            size="sm"
-            className={cn(
-              "min-w-0 flex-1 gap-2 px-2 py-1.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground",
-              isOnSettingsFooter && "bg-accent text-foreground",
-            )}
-            onClick={handleSettingsClick}
-          >
-            <SettingsIcon className="size-3.5" />
-            <span className="text-xs">Settings</span>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-      </SidebarMenu>
+      <SidebarFooterNavigation
+        atriumEnabled={atriumEnabled}
+        atriumOpen={atriumOpen}
+        settingsActive={isOnSettingsFooter}
+        onOpenAtrium={handleAtriumClick}
+        onOpenSettings={handleSettingsClick}
+      />
     </SidebarFooter>
   );
 });

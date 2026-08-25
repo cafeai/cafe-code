@@ -1,5 +1,6 @@
-import { useEffect } from "react";
+import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import { X } from "lucide-react";
+import { useEffect } from "react";
 
 import { useSettings } from "../../hooks/useSettings";
 import { TaskAtriumBoard } from "./TaskAtrium";
@@ -8,9 +9,13 @@ import { useTaskAtriumStore } from "./taskAtriumStore";
 /**
  * The Task Atrium panel.
  *
- * It only ever opens because someone pressed the button in the chat header —
- * there is no idle takeover and it never claims a pane on its own. Escape
- * closes it, as does the close button and opening any thread from a card.
+ * It only ever opens because someone pressed the Atrium action in the sidebar —
+ * there is no idle takeover and it never claims a pane on its own. The modal
+ * dialog primitive moves focus into the full-screen surface, contains keyboard
+ * focus while it is open, and restores focus when its opener still exists.
+ * This matters on mobile because opening Atrium also dismisses the sidebar
+ * sheet that owned the trigger. Escape, the close button, and opening a thread
+ * from a card all close it.
  *
  * It sits at z-30: above the app shell, below dialogs and popovers (z-50), and
  * below the ambiance canvas (z-40) so the weather keeps falling in front of the
@@ -26,35 +31,26 @@ export function TaskAtriumOverlay() {
     if (!enabled && open) setOpen(false);
   }, [enabled, open, setOpen]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented) return;
-      event.preventDefault();
-      setOpen(false);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, setOpen]);
-
-  if (!enabled || !open) return null;
+  if (!enabled) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-30 flex flex-col bg-background"
-      role="region"
-      aria-label="Task Atrium"
-      data-cafe-task-atrium-overlay="true"
-    >
-      <button
-        type="button"
-        onClick={() => setOpen(false)}
-        aria-label="Close Task Atrium"
-        className="absolute right-4 top-4 z-30 flex size-8 items-center justify-center rounded-full border border-white/15 bg-black/35 text-white/80 backdrop-blur-md transition-colors hover:bg-black/50 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white/60 dark:border-white/15"
-      >
-        <X className="size-4" />
-      </button>
-      <TaskAtriumBoard />
-    </div>
+    <DialogPrimitive.Root open={open} onOpenChange={setOpen}>
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Popup
+          className="fixed inset-0 z-30 flex flex-col bg-background outline-none"
+          aria-label="Task Atrium"
+          aria-modal="true"
+          data-cafe-task-atrium-overlay="true"
+        >
+          <DialogPrimitive.Close
+            aria-label="Close Task Atrium"
+            className="absolute right-4 top-4 z-30 flex size-8 items-center justify-center rounded-full border border-white/15 bg-black/35 text-white/80 backdrop-blur-md transition-colors hover:bg-black/50 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white/60 dark:border-white/15"
+          >
+            <X className="size-4" />
+          </DialogPrimitive.Close>
+          <TaskAtriumBoard />
+        </DialogPrimitive.Popup>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
   );
 }
