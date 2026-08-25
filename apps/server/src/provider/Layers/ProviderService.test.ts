@@ -1895,7 +1895,8 @@ routing.layer("ProviderServiceLive routing", (it) => {
           new ProviderAdapterProcessError({
             provider: CODEX_DRIVER,
             threadId: input.threadId,
-            detail: "no rollout found for thread id 019ea1bf-c1d5-7800-9813-0ccf59d77847",
+            detail:
+              "failed to resolve rollout path `/tmp/rollout-019ea1bf-c1d5-7800-9813-0ccf59d77847.jsonl`: file does not exist",
           }),
         ),
       );

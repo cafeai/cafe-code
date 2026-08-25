@@ -77,7 +77,14 @@ import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
-const CODEX_NO_ROLLOUT_FOUND_PATTERN = /\bno rollout found for thread id\b/i;
+// Codex historically rejected missing native threads with "no rollout found".
+// As of rust-v0.149.1, thread-store can instead reject the same stale cursor
+// while resolving its persisted JSONL path. Both errors prove that this known
+// resume cursor is unusable; they do not justify retrying unrelated process
+// failures. The caller additionally requires a persisted cursor and retries
+// exactly once without it, preserving a bounded and fail-closed recovery path.
+const CODEX_REJECTED_RESUME_CURSOR_PATTERN =
+  /\b(?:no rollout found for thread id|failed to resolve rollout path)\b/i;
 const CLAUDE_REJECTED_RESUME_CURSOR_PATTERN =
   /\b(?:no conversation found with session id|no message found with message\.uuid|invalid resume|resume session .*not found|conversation .*not found)\b/i;
 const CLAUDE_PROCESS_EXITED_PATTERN = /\bClaude Code process exited with code\b/i;
@@ -173,7 +180,7 @@ function isRejectedResumeCursorError(input: {
 
   const message = errorMessageChain(input.error);
   if (input.provider === ProviderDriverKind.make("codex")) {
-    return CODEX_NO_ROLLOUT_FOUND_PATTERN.test(message);
+    return CODEX_REJECTED_RESUME_CURSOR_PATTERN.test(message);
   }
 
   if (input.provider === ProviderDriverKind.make("claudeAgent")) {
