@@ -19,9 +19,10 @@ import { useTaskAtriumStore } from "./taskAtriumStore";
  * sheet that owned the trigger. Escape, the close button, and opening a thread
  * from a card all close it.
  *
- * It sits at z-30: above the app shell, below dialogs and popovers (z-50), and
- * below the ambiance canvas (z-40) so the weather keeps falling in front of the
- * cards exactly as it does over the rest of the app.
+ * It sits above every thread-local surface, including the absolute subagent
+ * detail view and any composer popover left in its close transition. Atrium
+ * owns its own scene canvas, so it does not depend on the global ambiance layer
+ * being stacked above this modal.
  */
 export function TaskAtriumOverlay() {
   const enabled = useSettings((settings) => settings.ambianceAtriumEnabled);
@@ -39,7 +40,7 @@ export function TaskAtriumOverlay() {
     <DialogPrimitive.Root open={open} onOpenChange={setOpen}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Popup
-          className="fixed inset-0 z-30 flex flex-col bg-background outline-none [-webkit-app-region:no-drag]"
+          className="fixed inset-0 z-[60] flex flex-col bg-background outline-none [-webkit-app-region:no-drag]"
           aria-label="Task Atrium"
           aria-modal="true"
           data-cafe-task-atrium-overlay="true"

@@ -1750,6 +1750,136 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect(
+    "attributes reverse-root activity to its source child without creating a root task",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 2)).pipe(
+          Effect.forkChild,
+        );
+
+        // An ambiguous root self-edge has no provable child owner and must not
+        // enter the canonical task stream at all.
+        yield* runtime.emit({
+          id: asEventId("evt-subagent-root-self-edge"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "item/completed",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-parent"),
+          itemId: asItemId("subagent-root-self-edge"),
+          payload: {
+            completedAtMs: 1_767_225_600_000,
+            // Control/whitespace aliases must compare equal after the exact
+            // identity canonicalization used by the production presentation.
+            threadId: "\tprovider-thread-root\r",
+            turnId: "turn-parent",
+            item: {
+              type: "subAgentActivity",
+              id: "subagent-root-self-edge",
+              kind: "interacted",
+              agentThreadId: "provider-thread-root",
+              agentPath: "/root/",
+            },
+          },
+        } satisfies ProviderEvent);
+
+        yield* runtime.emit({
+          id: asEventId("evt-subagent-child-start"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:01.000Z",
+          method: "item/started",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-parent"),
+          itemId: asItemId("subagent-child-start"),
+          payload: {
+            startedAtMs: 1_767_225_601_000,
+            threadId: "provider-thread-root",
+            turnId: "turn-parent",
+            item: {
+              type: "subAgentActivity",
+              id: "subagent-child-start",
+              kind: "started",
+              agentThreadId: "provider-thread-child",
+              agentPath: "/root/audit_restart",
+            },
+          },
+        } satisfies ProviderEvent);
+
+        // Codex encodes child -> parent interaction with the child as the source
+        // payload thread and the primary conversation as the `/root` target.
+        yield* runtime.emit({
+          id: asEventId("evt-subagent-child-to-root"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:02.000Z",
+          method: "item/completed",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-parent"),
+          itemId: asItemId("subagent-child-to-root"),
+          payload: {
+            completedAtMs: 1_767_225_602_000,
+            threadId: "provider-thread-child",
+            turnId: "turn-child",
+            item: {
+              type: "subAgentActivity",
+              id: "subagent-child-to-root",
+              kind: "interacted",
+              agentThreadId: "provider-thread-root",
+              agentPath: "/root",
+            },
+          },
+        } satisfies ProviderEvent);
+
+        // A final ordinary child event prevents a regression from hanging this
+        // test: if the reverse-root edge is accidentally suppressed, this event
+        // becomes the second collected row and the identity assertions fail
+        // immediately with useful evidence.
+        yield* runtime.emit({
+          id: asEventId("evt-subagent-sentinel"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:03.000Z",
+          method: "item/started",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-parent"),
+          itemId: asItemId("subagent-sentinel"),
+          payload: {
+            startedAtMs: 1_767_225_603_000,
+            threadId: "provider-thread-root",
+            turnId: "turn-parent",
+            item: {
+              type: "subAgentActivity",
+              id: "subagent-sentinel",
+              kind: "started",
+              agentThreadId: "provider-thread-sentinel",
+              agentPath: "/root/sentinel",
+            },
+          },
+        } satisfies ProviderEvent);
+
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        assert.equal(events.length, 2);
+        assert.equal(events[0]?.type, "task.started");
+        const progress = events[1];
+        assert.equal(progress?.type, "task.progress");
+        if (progress?.type !== "task.progress") return;
+        assert.equal(progress.payload.taskId, "provider-thread-child");
+        assert.equal(progress.payload.description, "Working");
+        assert.deepStrictEqual(progress.payload.subagent, {
+          threadId: "provider-thread-child",
+          label: "Audit restart",
+          path: "/root/audit_restart",
+          status: "active",
+          startedAt: "2026-01-01T00:00:01.000Z",
+        });
+        assert.notEqual(progress.payload.taskId, "provider-thread-root");
+      }),
+  );
+
   it.effect("bounds one hostile collab item without collapsing retained receiver identities", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

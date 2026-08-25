@@ -45,6 +45,7 @@ import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
+import { isCodexRootAgentPath } from "./CodexSubagentPath.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import {
   CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
@@ -1792,10 +1793,8 @@ export function rememberCodexChildConversationTurns(
   // before that child emits `turn/started`. Cafe presents one aggregate thread
   // instead of separate TUI channels, so retain the same relationship here and
   // route descendant output back to the initiating Cafe turn.
-  const normalizedAgentPath =
-    typeof item.agentPath === "string" ? item.agentPath.trim().replace(/\/+$/, "") : undefined;
   const childThreadIds =
-    item.type === "subAgentActivity" && normalizedAgentPath !== "/root"
+    item.type === "subAgentActivity" && !isCodexRootAgentPath(item.agentPath)
       ? [item.agentThreadId]
       : item.type === "collabAgentToolCall" && Array.isArray(item.receiverThreadIds)
         ? item.receiverThreadIds

@@ -144,6 +144,7 @@ import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import type { SubagentDetailSelection } from "./chat/SubagentDetailView";
+import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
 import {
   isTimelineScrolledToEnd,
   shouldPreserveTimelineScrollReviewIntent,
@@ -1902,6 +1903,7 @@ export default function ChatView(props: ChatViewProps) {
   const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
   const [selectedSubagent, setSelectedSubagent] = useState<SubagentDetailSelection | null>(null);
   const selectedSubagentTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const taskAtriumOpen = useTaskAtriumStore((state) => state.open);
   const [threadGoalDialog, setThreadGoalDialog] =
     useState<ThreadGoalDialogRequest>(CLOSED_THREAD_GOAL_DIALOG);
   const [optimisticUserMessages, setOptimisticUserMessages] = useState<ChatMessage[]>([]);
@@ -6465,6 +6467,15 @@ export default function ChatView(props: ChatViewProps) {
     setSelectedSubagent(null);
     selectedSubagentTriggerRef.current = null;
   }, [activeThread?.environmentId, activeThread?.id]);
+  useEffect(() => {
+    if (!taskAtriumOpen) return;
+    // Atrium is a full-screen navigation surface, not a layer within subagent
+    // detail. Clear the thread-local selection without restoring trigger focus
+    // so closing Atrium returns to the ordinary conversation and cannot reveal
+    // a stale detail panel underneath it.
+    setSelectedSubagent(null);
+    selectedSubagentTriggerRef.current = null;
+  }, [taskAtriumOpen]);
   // Both the Map and the revert handler are read from refs at call-time so
   // the callback reference is fully stable and never busts context identity.
   const revertTurnCountRef = useRef(revertTurnCountByUserMessageId);

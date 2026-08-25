@@ -150,6 +150,15 @@ function upsertStructuredSubagent(
 ): boolean {
   const presentation = record(payload.subagent);
   if (!presentation) return false;
+  const normalizedPath = safeLine(presentation.path, 256)?.replace(/\/+$/u, "");
+  // Cafe versions before the reverse-root Codex fix persisted child-to-parent
+  // interactions as a synthetic subagent at the reserved exact `/root` path.
+  // Such a row identifies the primary provider conversation, has no child
+  // history binding, and can never receive a child terminal edge. Consume it
+  // here so existing event ledgers heal immediately without destructive SQL.
+  // Exact matching preserves real children such as `/root/audit` and leaves
+  // Codex/Claude background-lifecycle behavior otherwise unchanged.
+  if (normalizedPath === "/root") return true;
   const id = exactOpaqueIdentity(presentation.threadId) ?? exactOpaqueIdentity(payload.taskId);
   if (!id) return true;
 

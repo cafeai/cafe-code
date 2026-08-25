@@ -986,6 +986,55 @@ describe("deriveWorkLogEntries", () => {
     ]);
   });
 
+  it("heals persisted Codex root pseudo-agents without hiding genuine background children", () => {
+    const olderTurnId = TurnId.make("turn-poisoned-root-older");
+    const runningTurnId = TurnId.make("turn-poisoned-root-current");
+    const structured = (input: {
+      readonly id: string;
+      readonly path: string;
+      readonly label?: string;
+      readonly sequence: number;
+    }) =>
+      makeActivity({
+        id: `started-${input.id}`,
+        createdAt: `2026-02-23T00:01:0${input.sequence}.000Z`,
+        kind: "task.progress",
+        summary: "Subagent update",
+        tone: "info",
+        turnId: olderTurnId,
+        sequence: input.sequence,
+        payload: {
+          taskId: input.id,
+          detail: "Working",
+          subagent: {
+            threadId: input.id,
+            ...(input.label ? { label: input.label } : {}),
+            path: input.path,
+            status: "active",
+          },
+        },
+      });
+
+    const entries = deriveActiveSubagentWorkEntries(
+      [
+        structured({ id: "provider-root-thread", path: "/root/", sequence: 1 }),
+        structured({
+          id: "real-background-child",
+          path: "/root/audit_restart",
+          label: "Audit restart",
+          sequence: 2,
+        }),
+      ],
+      runningTurnId,
+    );
+
+    expect(entries.map((entry) => entry.subagent?.id)).toEqual(["real-background-child"]);
+    expect(entries[0]?.subagent).toMatchObject({
+      label: "Audit restart",
+      status: "active",
+    });
+  });
+
   it("treats task.completed as terminal when repeated presentation state is stale", () => {
     const turnId = TurnId.make("turn-contradictory-subagent-status");
     const completed = makeActivity({

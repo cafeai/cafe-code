@@ -88,6 +88,7 @@ import {
   type CodexThreadSnapshot,
   type CodexTransportPolicy,
 } from "./CodexSessionRuntime.ts";
+import { isCodexRootAgentPath, normalizeCodexAgentPath } from "./CodexSubagentPath.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import type { CodexShadowHomeError } from "../Drivers/CodexHomeLayout.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
@@ -795,6 +796,29 @@ function taskCompletionStatus(
   return status === "failed" ? "failed" : status === "stopped" ? "stopped" : "completed";
 }
 
+/**
+ * Canonicalize a provider-authored child identity exactly once before either
+ * comparing it or placing it on the runtime contract. Performing the same
+ * hostile-control/whitespace normalization on both sides is important for
+ * reverse-root activity: otherwise an alias such as `" root-id\t"` could pass
+ * a raw distinctness check and later collapse back onto the primary thread.
+ */
+function normalizeCodexSubagentThreadId(value: string | undefined): string | undefined {
+  const normalized = value
+    ?.replace(/[\p{Cc}\p{Bidi_Control}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return undefined;
+  }
+  // Provider thread ids are UUID-like in Codex today. Hash an unexpectedly
+  // large value instead of truncating it, which would let two hostile ids with
+  // the same prefix collide into one UI row.
+  return normalized.length <= CODEX_SUBAGENT_THREAD_ID_MAX_CHARS
+    ? normalized
+    : `codex-subagent-${hashTextSha256(normalized)}`;
+}
+
 function makeSubagentPresentation(input: {
   readonly threadId: string;
   readonly path?: string | undefined;
@@ -805,20 +829,10 @@ function makeSubagentPresentation(input: {
   readonly status?: RuntimeSubagentPresentation["status"] | undefined;
   readonly startedAt?: string | undefined;
 }): RuntimeSubagentPresentation | undefined {
-  const normalizedThreadId = input.threadId
-    .replace(/[\p{Cc}\p{Bidi_Control}]+/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!normalizedThreadId) {
+  const threadId = normalizeCodexSubagentThreadId(input.threadId);
+  if (!threadId) {
     return undefined;
   }
-  // Provider thread ids are UUID-like in Codex today. Hash an unexpectedly
-  // large value instead of truncating it, which would let two hostile ids with
-  // the same prefix collide into one UI row.
-  const threadId =
-    normalizedThreadId.length <= CODEX_SUBAGENT_THREAD_ID_MAX_CHARS
-      ? normalizedThreadId
-      : `codex-subagent-${hashTextSha256(normalizedThreadId)}`;
   const path = boundedSingleLine(input.path, CODEX_SUBAGENT_PATH_MAX_CHARS);
   const role = boundedSingleLine(input.role, CODEX_SUBAGENT_ROLE_MAX_CHARS);
   const objective = boundedSingleLine(input.objective, CODEX_SUBAGENT_OBJECTIVE_MAX_CHARS);
@@ -1585,10 +1599,30 @@ function mapCodexSubagentItemLifecycle(
     isoFromUnixTimestamp(payloadRecord?.startedAtMs, "milliseconds") ?? event.createdAt;
 
   if (item.type === "subAgentActivity") {
+    const targetThreadId = normalizeCodexSubagentThreadId(item.agentThreadId);
+    const sourceThreadId = normalizeCodexSubagentThreadId(readStringValue(payloadRecord?.threadId));
+    const reverseRootInteraction = isCodexRootAgentPath(item.agentPath);
+    // In Codex multi_agents_v2, a child speaking back to its parent is encoded
+    // as a subAgentActivity whose target is the primary `/root` conversation.
+    // The old mapper treated that target as a new child, creating a generic
+    // active row for the root thread which could never receive a child terminal
+    // edge. Attribute the interaction to the distinct source child instead.
+    // If the provider omits that source (or reports a self-edge), fail closed:
+    // an ambiguous progress hint is less harmful than a permanent phantom task.
+    const activityThreadId = reverseRootInteraction
+      ? sourceThreadId && sourceThreadId !== targetThreadId
+        ? sourceThreadId
+        : undefined
+      : targetThreadId;
+    if (!activityThreadId) {
+      return [];
+    }
     const status = item.kind === "interrupted" ? "stopped" : "active";
     const presentation = makeSubagentPresentation({
-      threadId: item.agentThreadId,
-      path: item.agentPath,
+      threadId: activityThreadId,
+      // `/root` describes the interaction target, not the source child. Omit
+      // it so the presentation enricher retains the child's known path/label.
+      path: reverseRootInteraction ? undefined : normalizeCodexAgentPath(item.agentPath),
       status,
       startedAt,
     });
@@ -1598,7 +1632,7 @@ function mapCodexSubagentItemLifecycle(
     const rawPayload = {
       source: "codex.subAgentActivity",
       kind: item.kind,
-      childThreadIdHash: hashTextSha256(item.agentThreadId),
+      childThreadIdHash: hashTextSha256(activityThreadId),
     };
 
     // Upstream emits an item started/completed pair immediately around the

@@ -887,6 +887,7 @@ describe("TaskAtriumOverlay", () => {
         expect(overlay()?.getAttribute("role")).toBe("dialog");
         expect(overlay()?.getAttribute("aria-modal")).toBe("true");
         expect(overlay()?.contains(document.activeElement)).toBe(true);
+        expect(Number(getComputedStyle(overlay()!).zIndex)).toBeGreaterThan(40);
       });
     } finally {
       useTaskAtriumStore.getState().setOpen(false);

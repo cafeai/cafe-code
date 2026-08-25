@@ -45,6 +45,7 @@ import { getRouter } from "../router";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import { selectBootstrapCompleteForActiveEnvironment, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
+import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
 import { createAuthenticatedSessionHandlers } from "../../test/authHttpHandlers";
 import { BrowserWsRpcHarness, type NormalizedWsRpcRequestBody } from "../../test/wsRpcHarness";
 
@@ -774,6 +775,62 @@ function createSnapshotWithRuntimeTaskProgress(options?: {
               updatedAt: terminal ? isoAt(1_020) : isoAt(1_005),
             },
             updatedAt: terminal ? isoAt(1_020) : isoAt(1_005),
+          })
+        : thread,
+    ),
+  };
+}
+
+function createSnapshotWithActiveSubagent(): OrchestrationReadModel {
+  const snapshot = createSnapshotForTargetUser({
+    targetMessageId: "msg-user-active-subagent" as MessageId,
+    targetText: "verify subagent and Atrium navigation",
+    sessionStatus: "running",
+  });
+  const turnId = "turn-active-subagent" as TurnId;
+  return {
+    ...snapshot,
+    threads: snapshot.threads.map((thread) =>
+      thread.id === THREAD_ID
+        ? Object.assign({}, thread, {
+            latestTurn: {
+              turnId,
+              state: "running" as const,
+              requestedAt: isoAt(1_000),
+              startedAt: isoAt(1_001),
+              completedAt: null,
+              assistantMessageId: null,
+            },
+            activities: [
+              {
+                id: EventId.make("activity-active-subagent"),
+                tone: "info" as const,
+                kind: "task.started",
+                summary: "Subagent started",
+                payload: {
+                  taskId: "provider-child-browser-audit",
+                  taskType: "subagent",
+                  subagent: {
+                    threadId: "provider-child-browser-audit",
+                    label: "Browser lifecycle audit",
+                    path: "/root/browser_lifecycle_audit",
+                    objective: "Verify Atrium navigation",
+                    status: "active",
+                    startedAt: isoAt(1_001),
+                  },
+                },
+                turnId,
+                sequence: 1,
+                createdAt: isoAt(1_001),
+              },
+            ],
+            session: {
+              ...thread.session,
+              status: "running" as const,
+              activeTurnId: turnId,
+              updatedAt: isoAt(1_001),
+            },
+            updatedAt: isoAt(1_001),
           })
         : thread,
     ),
@@ -1872,6 +1929,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       threadPlanSidebarOpenById: {},
       threadLastVisitedAtById: {},
     });
+    useTaskAtriumStore.getState().setOpen(false);
   });
 
   afterEach(() => {
@@ -4191,6 +4249,51 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
   }
 
   if (chatViewBrowserPart === "navigation") {
+    it("replaces an open subagent detail with Atrium and does not restore it on close", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotWithActiveSubagent(),
+        configureFixture: (nextFixture) => {
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            clientSettings: {
+              ...nextFixture.serverConfig.clientSettings,
+              ambianceAtriumEnabled: true,
+            },
+          };
+        },
+      });
+
+      try {
+        await page.getByRole("button", { name: /^1 active subagent\. Show task list$/i }).click();
+        const subagentRow = page
+          .getByRole("region", { name: "Active subagents" })
+          .getByRole("button", {
+            name: /Browser lifecycle audit, Working\. Verify Atrium navigation\. Open details/i,
+          });
+        await expect.element(subagentRow).toBeInTheDocument();
+        await subagentRow.click();
+        await vi.waitFor(() => {
+          expect(document.querySelector('[data-subagent-detail-view="true"]')).not.toBeNull();
+        });
+
+        useTaskAtriumStore.getState().setOpen(true);
+        await vi.waitFor(() => {
+          expect(document.querySelector('[data-cafe-task-atrium-overlay="true"]')).not.toBeNull();
+          expect(document.querySelector('[data-subagent-detail-view="true"]')).toBeNull();
+        });
+
+        useTaskAtriumStore.getState().setOpen(false);
+        await vi.waitFor(() => {
+          expect(document.querySelector('[data-cafe-task-atrium-overlay="true"]')).toBeNull();
+          expect(document.querySelector('[data-subagent-detail-view="true"]')).toBeNull();
+        });
+      } finally {
+        useTaskAtriumStore.getState().setOpen(false);
+        await mounted.cleanup();
+      }
+    });
+
     it("keeps runtime access in the desktop options menu without a footer mode label", async () => {
       setDraftThreadWithoutWorktree();
 
