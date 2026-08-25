@@ -37,15 +37,18 @@ describe("SidebarFooterNavigation", () => {
       expect(
         buttons[0]?.querySelector('[data-cafe-task-atrium-unicorn-icon="true"]'),
       ).not.toBeNull();
-      const unicorn = buttons[0]?.querySelector<HTMLImageElement>(
+      const unicorn = buttons[0]?.querySelector<HTMLElement>(
         '[data-cafe-task-atrium-unicorn-icon="true"]',
       );
-      expect(unicorn?.getAttribute("data-cafe-task-atrium-unicode-codepoint")).toBe("U+1F984");
-      expect(unicorn?.getBoundingClientRect().width).toBeGreaterThanOrEqual(20);
-      expect(unicorn?.getBoundingClientRect().height).toBeGreaterThanOrEqual(20);
-      expect(unicorn?.complete).toBe(true);
-      expect(unicorn?.naturalWidth).toBeGreaterThan(0);
-      expect(unicorn?.naturalHeight).toBeGreaterThan(0);
+      const settingsIcon = buttons[1]?.querySelector<SVGElement>("svg");
+      expect(unicorn?.getBoundingClientRect().width).toBe(
+        settingsIcon?.getBoundingClientRect().width,
+      );
+      expect(unicorn?.getBoundingClientRect().height).toBe(
+        settingsIcon?.getBoundingClientRect().height,
+      );
+      expect(getComputedStyle(unicorn!).maskImage).not.toBe("none");
+      expect(getComputedStyle(unicorn!).backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
 
       buttons[0]?.click();
       buttons[1]?.click();

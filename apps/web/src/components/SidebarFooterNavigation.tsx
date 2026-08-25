@@ -1,7 +1,7 @@
 import { SettingsIcon } from "lucide-react";
 import { memo } from "react";
 
-import unicornEmojiUrl from "../assets/twemoji-unicorn.svg";
+import unicornSilhouetteUrl from "../assets/twemoji-unicorn.svg";
 import { cn } from "../lib/utils";
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from "./ui/sidebar";
 
@@ -40,18 +40,26 @@ export const SidebarFooterNavigation = memo(function SidebarFooterNavigation({
             data-cafe-task-atrium-sidebar-button="true"
             onClick={onOpenAtrium}
           >
-            <span className="inline-flex min-w-0 items-center gap-2 text-xs">
-              <img
-                alt=""
-                aria-hidden="true"
-                className="size-5 shrink-0"
-                data-cafe-task-atrium-unicode-codepoint="U+1F984"
-                data-cafe-task-atrium-unicorn-icon="true"
-                draggable={false}
-                src={unicornEmojiUrl}
-              />
-              <span className="truncate">Atrium</span>
-            </span>
+            <span
+              aria-hidden="true"
+              className="size-3.5 shrink-0 bg-current"
+              data-cafe-task-atrium-unicorn-icon="true"
+              // The source graphic supplies only the alpha mask. Painting it
+              // with currentColor keeps Atrium visually consistent with the
+              // adjacent Lucide Settings glyph instead of showing a large,
+              // platform-dependent full-color emoji.
+              style={{
+                maskImage: `url("${unicornSilhouetteUrl}")`,
+                maskPosition: "center",
+                maskRepeat: "no-repeat",
+                maskSize: "contain",
+                WebkitMaskImage: `url("${unicornSilhouetteUrl}")`,
+                WebkitMaskPosition: "center",
+                WebkitMaskRepeat: "no-repeat",
+                WebkitMaskSize: "contain",
+              }}
+            />
+            <span className="truncate text-xs">Atrium</span>
           </SidebarMenuButton>
         </SidebarMenuItem>
       )}
