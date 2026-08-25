@@ -14,6 +14,13 @@ import {
 } from "@cafecode/contracts";
 import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
 
+import {
+  deriveSubagentActivities,
+  type DeriveSubagentActivityOptions,
+  type DerivedSubagentActivity,
+  type SubagentRunStatus,
+} from "./subagent-activity";
+
 import type {
   ChatMessage,
   ProposedPlan,
@@ -55,6 +62,16 @@ export interface WorkLogEntry {
   toolTitle?: string;
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
+  subagent?: {
+    /** Stable provider child identity and deterministic avatar seed. */
+    id: string;
+    label: string;
+    objective?: string;
+    description?: string;
+    status: SubagentRunStatus;
+    startedAt: string;
+    completedAt?: string;
+  };
 }
 
 export interface HistoricalWorkLogSummary {
@@ -517,10 +534,22 @@ export function hasActionableProposedPlan(
 export function deriveWorkLogEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   latestTurnId: TurnId | undefined,
+  subagentOptions: DeriveSubagentActivityOptions = {},
 ): WorkLogEntry[] {
-  const ordered = [...activities].toSorted(compareActivitiesByOrder);
+  const ordered = [...activities]
+    .toSorted(compareActivitiesByOrder)
+    .filter((activity) => (latestTurnId ? activity.turnId === latestTurnId : true));
+  const activityOrderById = new Map<string, number>(
+    ordered.map((activity, index) => [activity.id, index]),
+  );
+  const subagentEntries = deriveSubagentActivities(ordered, subagentOptions).map(
+    subagentToWorkLogEntry,
+  );
   const entries = ordered
-    .filter((activity) => (latestTurnId ? activity.turnId === latestTurnId : true))
+    // Structured task lifecycle supersedes the old generic collab tool row.
+    // Removing both here avoids rendering `Subagent task - Started /root/x`
+    // next to the richer, identity-stable subagent row.
+    .filter((activity) => !isSubagentWorkActivity(activity))
     .filter((activity) => activity.kind !== "tool.started" || isContextCompactionActivity(activity))
     .filter(
       (activity) => activity.kind !== "task.started" || isUserVisibleTaskStartedActivity(activity),
@@ -530,9 +559,69 @@ export function deriveWorkLogEntries(
     .filter((activity) => !isPlanBoundaryToolActivity(activity))
     .filter((activity) => !isRetryableSteerDeliveryActivity(activity))
     .map(toDerivedWorkLogEntry);
-  return collapseDerivedWorkLogEntries(entries).map(
+  const collapsed = collapseDerivedWorkLogEntries(entries).map(
     ({ activityKind: _activityKind, collapseKey: _collapseKey, ...entry }) => entry,
   );
+  return [...collapsed, ...subagentEntries].toSorted((left, right) => {
+    // Sequence is the durable provider/orchestration order and can disagree
+    // with wall-clock timestamps after reconnects. Both ordinary collapsed
+    // rows and subagent rows retain a source activity id, so merge the two
+    // lists with that authoritative order instead of re-sorting by time.
+    const leftIndex = activityOrderById.get(left.id);
+    const rightIndex = activityOrderById.get(right.id);
+    if (leftIndex !== undefined && rightIndex !== undefined && leftIndex !== rightIndex) {
+      return leftIndex - rightIndex;
+    }
+    const byTime = left.createdAt.localeCompare(right.createdAt);
+    return byTime !== 0 ? byTime : left.id.localeCompare(right.id);
+  });
+}
+
+function isSubagentWorkActivity(activity: OrchestrationThreadActivity): boolean {
+  const payload =
+    activity.payload && typeof activity.payload === "object" && !Array.isArray(activity.payload)
+      ? (activity.payload as Record<string, unknown>)
+      : null;
+  return (
+    (payload?.subagent !== null && typeof payload?.subagent === "object") ||
+    payload?.itemType === "collab_agent_tool_call"
+  );
+}
+
+function subagentToWorkLogEntry(subagent: DerivedSubagentActivity): WorkLogEntry {
+  const fallback =
+    subagent.status === "waiting"
+      ? "Waiting"
+      : subagent.status === "active"
+        ? "Working"
+        : subagent.status === "failed"
+          ? "Failed"
+          : subagent.status === "stopped"
+            ? "Stopped"
+            : "Completed";
+  return {
+    id: subagent.rowId,
+    turnId: subagent.turnId,
+    createdAt: subagent.startedAt,
+    label: subagent.label,
+    detail: subagent.objective ?? subagent.description ?? fallback,
+    tone:
+      subagent.status === "failed"
+        ? "error"
+        : subagent.status === "active" || subagent.status === "waiting"
+          ? "thinking"
+          : "info",
+    itemType: "collab_agent_tool_call",
+    subagent: {
+      id: subagent.id,
+      label: subagent.label,
+      ...(subagent.objective ? { objective: subagent.objective } : {}),
+      ...(subagent.description ? { description: subagent.description } : {}),
+      status: subagent.status,
+      startedAt: subagent.startedAt,
+      ...(subagent.completedAt ? { completedAt: subagent.completedAt } : {}),
+    },
+  };
 }
 
 export function deriveHistoricalWorkLogSummaries(input: {
@@ -565,7 +654,9 @@ export function deriveHistoricalWorkLogSummaries(input: {
   }
 
   const entriesByTurnId = new Map<TurnId, WorkLogEntry[]>();
-  for (const entry of deriveWorkLogEntries(input.activities, undefined)) {
+  for (const entry of deriveWorkLogEntries(input.activities, undefined, {
+    terminalTurnIds: historicalTurnIds,
+  })) {
     if (
       entry.turnId === null ||
       entry.turnId === undefined ||
@@ -633,7 +724,10 @@ function isUserVisibleTaskStartedActivity(activity: OrchestrationThreadActivity)
   // keeping ordinary internal task starts out of conversation history. Cafe's
   // work log follows the same distinction instead of hiding the review until
   // its terminal notification arrives.
-  return payload?.taskType === "approval-review";
+  return (
+    payload?.taskType === "approval-review" ||
+    (payload?.subagent !== null && typeof payload?.subagent === "object")
+  );
 }
 
 function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWorkLogEntry {

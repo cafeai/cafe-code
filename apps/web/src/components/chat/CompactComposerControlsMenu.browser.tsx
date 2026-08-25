@@ -134,7 +134,7 @@ async function mountMenu(props?: { modelSelection?: ModelSelection; prompt?: str
   ];
   const screen = await render(
     <CompactComposerControlsMenu
-      activePlan={false}
+      showPlanSidebar={false}
       provider={provider}
       interactionMode="default"
       planSidebarLabel="Plan"
@@ -315,7 +315,7 @@ describe("CompactComposerControlsMenu", () => {
     document.body.append(host);
     const screen = await render(
       <CompactComposerControlsMenu
-        activePlan={false}
+        showPlanSidebar={false}
         provider={ProviderDriverKind.make("codex")}
         interactionMode="default"
         planSidebarLabel="Plan"
@@ -352,7 +352,7 @@ describe("CompactComposerControlsMenu", () => {
     const onOpenGoal = vi.fn();
     const screen = await render(
       <CompactComposerControlsMenu
-        activePlan={false}
+        showPlanSidebar={false}
         provider={ProviderDriverKind.make("codex")}
         interactionMode="default"
         planSidebarLabel="Plan"

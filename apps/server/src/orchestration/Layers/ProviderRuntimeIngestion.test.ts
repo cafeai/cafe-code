@@ -4844,6 +4844,85 @@ describe("ProviderRuntimeIngestion", () => {
     ).toBe("# Plan title");
   });
 
+  it("preserves structured subagent presentation across the durable task lifecycle", async () => {
+    const harness = await createHarness();
+    const startedAt = "2026-01-01T00:00:00.000Z";
+    const subagent = {
+      threadId: "provider-child-audit",
+      label: "Audit chat pipeline",
+      objective: "Trace child activity into the parent work log",
+      role: "explorer",
+      status: "active" as const,
+      startedAt,
+    };
+
+    harness.emit({
+      type: "task.started",
+      eventId: asEventId("evt-subagent-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: startedAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-subagent-1"),
+      payload: {
+        taskId: "provider-child-audit",
+        taskType: "subagent",
+        description: subagent.objective,
+        subagent,
+      },
+    });
+    harness.emit({
+      type: "task.progress",
+      eventId: asEventId("evt-subagent-progress"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:05.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-subagent-1"),
+      payload: {
+        taskId: "provider-child-audit",
+        description: "Mapped the ingestion boundary",
+        subagent,
+      },
+    });
+    harness.emit({
+      type: "task.completed",
+      eventId: asEventId("evt-subagent-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:01:05.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-subagent-1"),
+      payload: {
+        taskId: "provider-child-audit",
+        status: "completed",
+        summary: "Audit complete",
+        subagent: { ...subagent, status: "completed" },
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-subagent-completed",
+      ),
+    );
+    const activities = new Map<string, ProviderRuntimeTestActivity>(
+      thread.activities.map((activity: ProviderRuntimeTestActivity) => [activity.id, activity]),
+    );
+    expect(activities.get("evt-subagent-started")).toMatchObject({
+      summary: "Subagent started",
+      payload: { detail: subagent.objective, subagent },
+    });
+    expect(activities.get("evt-subagent-progress")).toMatchObject({
+      summary: "Subagent update",
+      payload: { detail: "Mapped the ingestion boundary", subagent },
+    });
+    expect(activities.get("evt-subagent-completed")).toMatchObject({
+      summary: "Subagent completed",
+      payload: {
+        detail: "Audit complete",
+        subagent: { ...subagent, status: "completed" },
+      },
+    });
+  });
+
   it("projects provider hook lifecycle into bounded work-log activities", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

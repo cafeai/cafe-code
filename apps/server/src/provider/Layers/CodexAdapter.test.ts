@@ -11,6 +11,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderItemId,
+  RuntimeTaskId,
   type ProviderApprovalDecision,
   type ProviderEvent,
   type ProviderSession,
@@ -1224,7 +1225,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
-  it.effect("maps Codex multi-agent-v2 activity into the parent work log", () =>
+  it.effect("maps Codex multi-agent-v2 activity into a structured live subagent task", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
       const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
@@ -1234,12 +1235,12 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         kind: "notification",
         provider: ProviderDriverKind.make("codex"),
         createdAt: "2026-01-01T00:00:00.000Z",
-        method: "item/completed",
+        method: "item/started",
         threadId: asThreadId("thread-1"),
         turnId: asTurnId("turn-parent"),
         itemId: asItemId("subagent-activity-1"),
         payload: {
-          completedAtMs: 1_778_000_000_000,
+          startedAtMs: 1_767_225_600_000,
           threadId: "provider-thread-1",
           turnId: "turn-parent",
           item: {
@@ -1257,14 +1258,230 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       if (firstEvent._tag !== "Some") {
         return;
       }
-      assert.equal(firstEvent.value.type, "item.completed");
-      if (firstEvent.value.type !== "item.completed") {
+      assert.equal(firstEvent.value.type, "task.started");
+      if (firstEvent.value.type !== "task.started") {
         return;
       }
       assert.equal(firstEvent.value.turnId, "turn-parent");
-      assert.equal(firstEvent.value.payload.itemType, "collab_agent_tool_call");
-      assert.equal(firstEvent.value.payload.title, "Subagent task");
-      assert.equal(firstEvent.value.payload.detail, "Started workers/audit");
+      assert.equal(firstEvent.value.payload.taskId, "provider-thread-child");
+      assert.equal(firstEvent.value.payload.taskType, "subagent");
+      assert.deepStrictEqual(firstEvent.value.payload.subagent, {
+        threadId: "provider-thread-child",
+        label: "Audit",
+        path: "workers/audit",
+        status: "active",
+        startedAt: "2026-01-01T00:00:00.000Z",
+      });
+      assert.deepStrictEqual(firstEvent.value.raw?.payload, {
+        source: "codex.subAgentActivity",
+        kind: "started",
+        childThreadIdHash: crypto
+          .createHash("sha256")
+          .update("provider-thread-child", "utf8")
+          .digest("hex"),
+      });
+    }),
+  );
+
+  it.effect("bounds one hostile collab item without collapsing retained receiver identities", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const expectedCount = 256;
+      const eventsFiber = yield* Stream.runCollect(
+        Stream.take(adapter.streamEvents, expectedCount),
+      ).pipe(Effect.forkChild);
+      const receiverThreadIds = Array.from(
+        { length: expectedCount + 1 },
+        (_, index) => `provider-child-${index}`,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-subagent-receiver-bound"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/started",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-parent"),
+        itemId: asItemId("collab-many-receivers"),
+        payload: {
+          startedAtMs: 1_767_225_600_000,
+          threadId: "provider-thread-1",
+          turnId: "turn-parent",
+          item: {
+            type: "collabAgentToolCall",
+            id: "collab-many-receivers",
+            tool: "spawnAgent",
+            status: "inProgress",
+            senderThreadId: "provider-thread-1",
+            receiverThreadIds,
+            prompt: "Audit a bounded receiver set.",
+            agentsStates: {},
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.equal(events.length, expectedCount);
+      const taskIds = events.flatMap((event) =>
+        event.type === "task.started" ? [event.payload.taskId] : [],
+      );
+      assert.equal(new Set(taskIds).size, expectedCount);
+      assert.equal(taskIds.includes(RuntimeTaskId.make("provider-child-256")), false);
+      assert.deepStrictEqual(events[0]?.raw?.payload, {
+        source: "codex.collabAgentToolCall",
+        tool: "spawnAgent",
+        callStatus: "inProgress",
+        agentStatus: null,
+        objectivePresent: true,
+        receiverCount: expectedCount + 1,
+        receiversTruncated: true,
+        childThreadIdHash: crypto
+          .createHash("sha256")
+          .update("provider-child-0", "utf8")
+          .digest("hex"),
+      });
+    }),
+  );
+
+  it.effect("maps routed child reasoning summaries to the matching subagent progress row", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-child-reasoning"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:12.000Z",
+        method: "codex.subagent/itemCompleted",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-parent"),
+        itemId: asItemId("reasoning-child-1"),
+        payload: {
+          completedAtMs: 1_767_225_612_000,
+          threadId: "provider-thread-child",
+          turnId: "provider-turn-child",
+          item: {
+            type: "reasoning",
+            id: "reasoning-child-1",
+            summary: ["**I'm refining trigger label filtering.**"],
+            content: [],
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "task.progress") return;
+      assert.equal(firstEvent.value.payload.taskId, "provider-thread-child");
+      assert.equal(firstEvent.value.payload.description, "refining trigger label filtering");
+      assert.deepStrictEqual(firstEvent.value.payload.subagent, {
+        threadId: "provider-thread-child",
+        status: "active",
+      });
+      assert.deepStrictEqual(firstEvent.value.raw?.payload, {
+        source: "codex.child.itemCompleted",
+        itemType: "reasoning",
+        childThreadIdHash: crypto
+          .createHash("sha256")
+          .update("provider-thread-child", "utf8")
+          .digest("hex"),
+      });
+    }),
+  );
+
+  it.effect("repeats complete Codex subagent presentation on later progress edges", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 3)).pipe(
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-collab-spawn"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/started",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-parent"),
+        itemId: asItemId("collab-spawn-1"),
+        payload: {
+          startedAtMs: 1_767_225_600_000,
+          threadId: "provider-thread-1",
+          turnId: "turn-parent",
+          item: {
+            type: "collabAgentToolCall",
+            id: "collab-spawn-1",
+            tool: "spawnAgent",
+            status: "inProgress",
+            senderThreadId: "provider-thread-1",
+            receiverThreadIds: ["provider-thread-child"],
+            prompt: "Trace child activity into the chat work log.",
+            agentsStates: {
+              "provider-thread-child": { status: "running" },
+            },
+          },
+        },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-subagent-path"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "item/started",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-parent"),
+        itemId: asItemId("subagent-path-1"),
+        payload: {
+          startedAtMs: 1_767_225_601_000,
+          threadId: "provider-thread-1",
+          turnId: "turn-parent",
+          item: {
+            type: "subAgentActivity",
+            id: "subagent-path-1",
+            kind: "started",
+            agentThreadId: "provider-thread-child",
+            agentPath: "/root/audit_chat_pipeline",
+          },
+        },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-child-progress-after-spawn"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:12.000Z",
+        method: "codex.subagent/itemCompleted",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-parent"),
+        itemId: asItemId("reasoning-child-2"),
+        payload: {
+          completedAtMs: 1_767_225_612_000,
+          threadId: "provider-thread-child",
+          turnId: "provider-turn-child",
+          item: {
+            type: "reasoning",
+            id: "reasoning-child-2",
+            summary: ["Checking the durable activity projection."],
+            content: [],
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.equal(events.length, 3);
+      const progress = events[2];
+      assert.equal(progress?.type, "task.progress");
+      if (progress?.type !== "task.progress") return;
+      assert.deepStrictEqual(progress.payload.subagent, {
+        threadId: "provider-thread-child",
+        label: "Audit chat pipeline",
+        path: "/root/audit_chat_pipeline",
+        objective: "Trace child activity into the chat work log.",
+        status: "active",
+        startedAt: "2026-01-01T00:00:00.000Z",
+      });
     }),
   );
 
@@ -3049,7 +3266,9 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
       const runtime = runtimeFactory.lastRuntime;
       assert.ok(runtime);
 
-      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      const mappedEventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 2)).pipe(
+        Effect.forkChild,
+      );
       yield* runtime.emit({
         id: asEventId("evt-native-log"),
         kind: "notification",
@@ -3085,7 +3304,27 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
           },
         },
       } satisfies ProviderEvent);
-      yield* Fiber.join(firstEventFiber);
+      yield* runtime.emit({
+        id: asEventId("evt-native-log-subagent"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-logger"),
+        turnId: asTurnId("turn-native-log-subagent"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "codex.subagent/itemCompleted",
+        payload: {
+          completedAtMs: 1_767_225_601_000,
+          threadId: "provider-child-native-log",
+          turnId: "provider-turn-native-log",
+          item: {
+            type: "reasoning",
+            id: "reasoning-native-log",
+            summary: ["native-log-secret-subagent-reasoning"],
+            content: [],
+          },
+        },
+      } satisfies ProviderEvent);
+      yield* Fiber.join(mappedEventsFiber);
 
       yield* Scope.close(scope, Exit.void);
       scopeClosed = true;
@@ -3094,6 +3333,7 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
       assert.equal(fs.existsSync(threadLogPath), true);
       const contents = fs.readFileSync(threadLogPath, "utf8");
       assert.match(contents, /NTIVE: .*"model":"gpt-5\.4"/);
+      assert.match(contents, /"reason":"subagent-provider-content"/);
       assert.doesNotMatch(contents, /native-log-secret/);
     } finally {
       if (!scopeClosed) {

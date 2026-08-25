@@ -6,6 +6,7 @@
  *
  * @module ClaudeAdapterLive
  */
+import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 
 import {
@@ -57,6 +58,7 @@ import {
   RuntimeItemId,
   RuntimeRequestId,
   RuntimeTaskId,
+  type RuntimeSubagentPresentation,
   ThreadId,
   TurnId,
   type UserInputQuestion,
@@ -111,6 +113,21 @@ const CLAUDE_TASK_BINDING_LIMIT = 4_096;
 const CLAUDE_HIDDEN_TRANSCRIPT_TASK_LIMIT = 4_096;
 const CLAUDE_SUBAGENT_MESSAGE_DEDUPE_LIMIT = 4_096;
 const CLAUDE_SUBAGENT_PROGRESS_TEXT_LIMIT = 4_000;
+const CLAUDE_SUBAGENT_LABEL_LIMIT = 96;
+const CLAUDE_SUBAGENT_OBJECTIVE_LIMIT = 240;
+const CLAUDE_SUBAGENT_ROLE_LIMIT = 80;
+const CLAUDE_SUBAGENT_MAX_INFERRED_DURATION_MS = 365 * 24 * 60 * 60 * 1_000;
+// Claude normally emits short opaque task/tool ids. Bound every retained map
+// key to 512 UTF-8 bytes so a compromised or incompatible provider cannot pin
+// arbitrarily large strings for the lifetime of a multi-week session. Values
+// above the limit are represented by a domain-separated digest of the complete
+// id; hashing the full value (instead of truncating a prefix) preserves stable
+// lifecycle correlation for hostile ids that differ only near their tails.
+const CLAUDE_OPAQUE_ID_MAX_UTF8_BYTES = 512;
+const CLAUDE_TASK_ID_HASH_PREFIX = "claude-task-sha256:";
+const CLAUDE_TOOL_USE_ID_HASH_PREFIX = "claude-tool-use-sha256:";
+const CLAUDE_TASK_ID_HASH_DOMAIN = "cafecode/claude/task-id/v1";
+const CLAUDE_TOOL_USE_ID_HASH_DOMAIN = "cafecode/claude/tool-use-id/v1";
 
 function runtimeModeToClaudePermissionMode(runtimeMode: RuntimeMode): PermissionMode | undefined {
   switch (runtimeMode) {
@@ -335,6 +352,9 @@ interface ClaudeTaskBinding {
   readonly taskId: RuntimeTaskId;
   readonly description?: string;
   readonly subagentType?: string;
+  readonly objective?: string;
+  readonly startedAt?: string;
+  readonly isSubagent: boolean;
 }
 
 type RuntimeFork = <A, E>(effect: Effect.Effect<A, E, never>) => Fiber.Fiber<A, E>;
@@ -367,6 +387,7 @@ interface ClaudeSessionContext {
   readonly inFlightTools: Map<string, ToolInFlight>;
   readonly backgroundTaskIds: Set<string>;
   readonly taskBindingsByToolUseId: Map<string, ClaudeTaskBinding>;
+  readonly taskBindingsByTaskId: Map<string, ClaudeTaskBinding>;
   /**
    * Agent SDK 0.3.228 marks ambient/housekeeping tasks with
    * `skip_transcript`. Keep their ids so every later progress, nested stream,
@@ -468,6 +489,51 @@ function trimmedStringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function canonicalClaudeOpaqueIdentity(
+  value: unknown,
+  input: {
+    readonly digestDomain: string;
+    readonly digestPrefix: string;
+  },
+): string | undefined {
+  const normalized = trimmedStringValue(value);
+  if (!normalized) {
+    return undefined;
+  }
+
+  // Reserve Cafe's digest namespace even for short provider values. Otherwise
+  // a malicious short id could impersonate the canonical id of a different,
+  // oversized value and merge two independent task lifecycles.
+  if (
+    Buffer.byteLength(normalized, "utf8") <= CLAUDE_OPAQUE_ID_MAX_UTF8_BYTES &&
+    !normalized.startsWith(input.digestPrefix)
+  ) {
+    return normalized;
+  }
+
+  const digest = createHash("sha256")
+    .update(input.digestDomain, "utf8")
+    .update("\0", "utf8")
+    .update(normalized, "utf8")
+    .digest("hex");
+  return `${input.digestPrefix}${digest}`;
+}
+
+function canonicalClaudeTaskId(value: unknown): RuntimeTaskId | undefined {
+  const taskId = canonicalClaudeOpaqueIdentity(value, {
+    digestDomain: CLAUDE_TASK_ID_HASH_DOMAIN,
+    digestPrefix: CLAUDE_TASK_ID_HASH_PREFIX,
+  });
+  return taskId ? RuntimeTaskId.make(taskId) : undefined;
+}
+
+function canonicalClaudeToolUseBindingKey(value: unknown): string | undefined {
+  return canonicalClaudeOpaqueIdentity(value, {
+    digestDomain: CLAUDE_TOOL_USE_ID_HASH_DOMAIN,
+    digestPrefix: CLAUDE_TOOL_USE_ID_HASH_PREFIX,
+  });
+}
+
 function claudeParentToolUseId(message: SDKMessage): string | undefined {
   return trimmedStringValue((message as unknown as Record<string, unknown>).parent_tool_use_id);
 }
@@ -495,33 +561,62 @@ function rememberBoundedClaudeKey(keys: Set<string>, key: string, limit: number)
   return true;
 }
 
-function bindClaudeTaskToToolUse(
+function upsertClaudeTaskBinding(
   context: ClaudeSessionContext,
   input: {
-    readonly taskId: string;
-    readonly toolUseId?: string;
-    readonly description?: string;
-    readonly subagentType?: string;
+    readonly taskId: RuntimeTaskId;
+    readonly toolUseKey?: string | undefined;
+    readonly description?: string | undefined;
+    readonly subagentType?: string | undefined;
+    readonly objective?: string | undefined;
+    readonly startedAt?: string | undefined;
+    readonly taskType?: string | undefined;
+    readonly spawnDepth?: number | undefined;
   },
-): void {
-  const toolUseId = trimmedStringValue(input.toolUseId);
-  const taskId = trimmedStringValue(input.taskId);
-  if (!toolUseId || !taskId) {
-    return;
-  }
-
+): ClaudeTaskBinding {
+  const taskMapKey = String(input.taskId);
   // Refresh insertion order when a progress edge carries richer metadata.
-  // The map is bounded because every field is controlled by the provider and
-  // Claude sessions are expected to remain alive for days or weeks.
-  const previous = context.taskBindingsByToolUseId.get(toolUseId);
-  const description = trimmedStringValue(input.description) ?? previous?.description;
-  const subagentType = trimmedStringValue(input.subagentType) ?? previous?.subagentType;
-  context.taskBindingsByToolUseId.delete(toolUseId);
-  context.taskBindingsByToolUseId.set(toolUseId, {
-    taskId: RuntimeTaskId.make(taskId),
+  // Both maps use canonical, size-bounded keys because every field is
+  // provider-controlled and Claude sessions may remain alive for weeks.
+  const previous =
+    context.taskBindingsByTaskId.get(taskMapKey) ??
+    (input.toolUseKey ? context.taskBindingsByToolUseId.get(input.toolUseKey) : undefined);
+  const description =
+    claudeSubagentDisplayLine(input.description, CLAUDE_SUBAGENT_OBJECTIVE_LIMIT) ??
+    previous?.description;
+  const subagentType =
+    claudeSubagentDisplayLine(input.subagentType, CLAUDE_SUBAGENT_ROLE_LIMIT) ??
+    previous?.subagentType;
+  const objective =
+    claudeSubagentDisplayLine(input.objective, CLAUDE_SUBAGENT_OBJECTIVE_LIMIT) ??
+    previous?.objective;
+  // The first observed clock remains authoritative. Progress snapshots repeat
+  // duration metadata and must not make a long-running row jump forward every
+  // time Claude reports another update.
+  const startedAt = previous?.startedAt ?? input.startedAt;
+  const taskType = trimmedStringValue(input.taskType);
+  const isSubagent =
+    previous?.isSubagent === true ||
+    subagentType !== undefined ||
+    input.spawnDepth !== undefined ||
+    taskType === "local_agent" ||
+    taskType === "agent" ||
+    taskType === "subagent";
+  const binding: ClaudeTaskBinding = {
+    taskId: input.taskId,
     ...(description ? { description } : {}),
     ...(subagentType ? { subagentType } : {}),
-  });
+    ...(objective ? { objective } : {}),
+    ...(startedAt ? { startedAt } : {}),
+    isSubagent,
+  };
+
+  context.taskBindingsByTaskId.delete(taskMapKey);
+  context.taskBindingsByTaskId.set(taskMapKey, binding);
+  if (input.toolUseKey) {
+    context.taskBindingsByToolUseId.delete(input.toolUseKey);
+    context.taskBindingsByToolUseId.set(input.toolUseKey, binding);
+  }
   while (context.taskBindingsByToolUseId.size > CLAUDE_TASK_BINDING_LIMIT) {
     const oldest = context.taskBindingsByToolUseId.keys().next().value;
     if (typeof oldest !== "string") {
@@ -529,16 +624,134 @@ function bindClaudeTaskToToolUse(
     }
     context.taskBindingsByToolUseId.delete(oldest);
   }
+  while (context.taskBindingsByTaskId.size > CLAUDE_TASK_BINDING_LIMIT) {
+    const oldest = context.taskBindingsByTaskId.keys().next().value;
+    if (typeof oldest !== "string") {
+      break;
+    }
+    context.taskBindingsByTaskId.delete(oldest);
+  }
+  return binding;
+}
+
+function bindClaudeTaskToToolUse(
+  context: ClaudeSessionContext,
+  input: {
+    readonly taskId: string;
+    readonly toolUseId?: string | undefined;
+    readonly description?: string | undefined;
+    readonly subagentType?: string | undefined;
+    readonly objective?: string | undefined;
+    readonly startedAt?: string | undefined;
+    readonly taskType?: string | undefined;
+    readonly spawnDepth?: number | undefined;
+  },
+): ClaudeTaskBinding | undefined {
+  const taskId = canonicalClaudeTaskId(input.taskId);
+  if (!taskId) {
+    return undefined;
+  }
+  const toolUseKey = canonicalClaudeToolUseBindingKey(input.toolUseId);
+  return upsertClaudeTaskBinding(context, {
+    taskId,
+    ...(toolUseKey ? { toolUseKey } : {}),
+    ...(input.description !== undefined ? { description: input.description } : {}),
+    ...(input.subagentType !== undefined ? { subagentType: input.subagentType } : {}),
+    ...(input.objective !== undefined ? { objective: input.objective } : {}),
+    ...(input.startedAt !== undefined ? { startedAt: input.startedAt } : {}),
+    ...(input.taskType !== undefined ? { taskType: input.taskType } : {}),
+    ...(input.spawnDepth !== undefined ? { spawnDepth: input.spawnDepth } : {}),
+  });
+}
+
+function findClaudeTaskBinding(
+  context: ClaudeSessionContext,
+  input: {
+    readonly taskId?: string | undefined;
+    readonly toolUseId?: string | undefined;
+  },
+): ClaudeTaskBinding | undefined {
+  const taskId = canonicalClaudeTaskId(input.taskId);
+  const toolUseKey = canonicalClaudeToolUseBindingKey(input.toolUseId);
+  return (
+    (taskId ? context.taskBindingsByTaskId.get(String(taskId)) : undefined) ??
+    (toolUseKey ? context.taskBindingsByToolUseId.get(toolUseKey) : undefined)
+  );
+}
+
+function claudeSubagentDisplayLine(value: unknown, limit: number): string | undefined {
+  const text = typeof value === "string" ? sanitizeDiagnosticLine(value) : "";
+  const normalized = text
+    .replace(/[\p{Bidi_Control}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return undefined;
+  return normalized.length > limit ? `${normalized.slice(0, limit - 3)}...` : normalized;
+}
+
+function claudeSubagentStartedAtFromUsage(createdAt: string, usage: unknown): string | undefined {
+  const usageRecord = recordValue(usage);
+  const durationMs = usageRecord?.duration_ms;
+  const completedAtMs = Date.parse(createdAt);
+  if (
+    typeof durationMs !== "number" ||
+    !Number.isFinite(durationMs) ||
+    durationMs < 0 ||
+    !Number.isFinite(completedAtMs)
+  ) {
+    return undefined;
+  }
+  // Provider duration is display metadata, not an authority boundary. Clamp a
+  // malformed value so it cannot manufacture an ancient clock or overflow a
+  // Date while still covering Cafe's multi-week session target comfortably.
+  const boundedDurationMs = Math.min(durationMs, CLAUDE_SUBAGENT_MAX_INFERRED_DURATION_MS);
+  return new Date(Math.max(0, completedAtMs - boundedDurationMs)).toISOString();
+}
+
+function claudeSubagentLabel(binding: ClaudeTaskBinding): string | undefined {
+  const description = claudeSubagentDisplayLine(binding.description, CLAUDE_SUBAGENT_LABEL_LIMIT);
+  if (description) return description;
+  const role = claudeSubagentDisplayLine(binding.subagentType, CLAUDE_SUBAGENT_ROLE_LIMIT);
+  if (!role) return undefined;
+  const normalized = role.replace(/[_-]+/gu, " ").toLocaleLowerCase();
+  return `${normalized.charAt(0).toLocaleUpperCase()}${normalized.slice(1)}`;
+}
+
+function claudeSubagentPresentation(
+  binding: ClaudeTaskBinding | undefined,
+  status: RuntimeSubagentPresentation["status"],
+): RuntimeSubagentPresentation | undefined {
+  if (!binding?.isSubagent) return undefined;
+  const label = claudeSubagentLabel(binding);
+  const role = claudeSubagentDisplayLine(binding.subagentType, CLAUDE_SUBAGENT_ROLE_LIMIT);
+  const objective = claudeSubagentDisplayLine(binding.objective, CLAUDE_SUBAGENT_OBJECTIVE_LIMIT);
+  return {
+    threadId: String(binding.taskId),
+    ...(label ? { label } : {}),
+    ...(role ? { role } : {}),
+    ...(objective ? { objective } : {}),
+    ...(status ? { status } : {}),
+    ...(binding.startedAt ? { startedAt: binding.startedAt } : {}),
+  };
+}
+
+function claudeSubagentStatus(value: unknown): RuntimeSubagentPresentation["status"] {
+  const status = trimmedStringValue(value)?.toLocaleLowerCase();
+  if (status === "pending" || status === "paused") return "waiting";
+  if (status === "failed" || status === "error") return "failed";
+  if (status === "killed" || status === "stopped" || status === "cancelled") return "stopped";
+  if (status === "completed") return "completed";
+  return "active";
 }
 
 function hideClaudeTaskFromTranscript(context: ClaudeSessionContext, taskId: string): void {
-  const normalizedTaskId = trimmedStringValue(taskId);
-  if (!normalizedTaskId) {
+  const canonicalTaskId = canonicalClaudeTaskId(taskId);
+  if (!canonicalTaskId) {
     return;
   }
   rememberBoundedClaudeKey(
     context.hiddenTranscriptTaskIds,
-    normalizedTaskId,
+    String(canonicalTaskId),
     CLAUDE_HIDDEN_TRANSCRIPT_TASK_LIMIT,
   );
 }
@@ -547,7 +760,10 @@ function isClaudeTaskHiddenFromTranscript(
   context: ClaudeSessionContext,
   taskId: string | undefined,
 ): boolean {
-  return taskId !== undefined && context.hiddenTranscriptTaskIds.has(taskId);
+  const canonicalTaskId = canonicalClaudeTaskId(taskId);
+  return (
+    canonicalTaskId !== undefined && context.hiddenTranscriptTaskIds.has(String(canonicalTaskId))
+  );
 }
 
 function isClaudeNestedStreamHidden(
@@ -557,8 +773,11 @@ function isClaudeNestedStreamHidden(
   if (parentToolUseId === undefined) {
     return false;
   }
-  const binding = context.taskBindingsByToolUseId.get(parentToolUseId);
-  return binding !== undefined && isClaudeTaskHiddenFromTranscript(context, binding.taskId);
+  const toolUseKey = canonicalClaudeToolUseBindingKey(parentToolUseId);
+  const binding = toolUseKey ? context.taskBindingsByToolUseId.get(toolUseKey) : undefined;
+  // `binding.taskId` is already canonical. Looking it up directly avoids
+  // re-hashing Cafe's reserved digest namespace as if it came from Claude.
+  return binding !== undefined && context.hiddenTranscriptTaskIds.has(String(binding.taskId));
 }
 
 function isClaudeCommandLifecycleState(value: unknown): value is ClaudeCommandLifecycleState {
@@ -3518,7 +3737,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         return;
       }
 
-      const dedupeKey = `${parentToolUseId.length}:${parentToolUseId}:${message.uuid}`;
+      const toolUseKey = canonicalClaudeToolUseBindingKey(parentToolUseId);
+      if (!toolUseKey) {
+        return;
+      }
+      const dedupeKey = `${toolUseKey.length}:${toolUseKey}:${message.uuid}`;
       if (
         !rememberBoundedClaudeKey(
           context.turnState.reportedSubagentMessageKeys,
@@ -3529,17 +3752,35 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         return;
       }
 
-      const binding = context.taskBindingsByToolUseId.get(parentToolUseId);
-      const subagentType = trimmedStringValue(message.subagent_type) ?? binding?.subagentType;
+      const existingBinding = context.taskBindingsByToolUseId.get(toolUseKey);
+      const subagentType =
+        trimmedStringValue(message.subagent_type) ?? existingBinding?.subagentType;
       const description =
         trimmedStringValue(message.task_description) ??
-        binding?.description ??
+        existingBinding?.description ??
         (subagentType ? `${subagentType} subagent` : "Claude subagent");
+      const binding = existingBinding
+        ? upsertClaudeTaskBinding(context, {
+            taskId: existingBinding.taskId,
+            toolUseKey,
+            description,
+            ...(subagentType ? { subagentType } : {}),
+          })
+        : bindClaudeTaskToToolUse(context, {
+            taskId: parentToolUseId,
+            toolUseId: parentToolUseId,
+            description,
+            ...(subagentType ? { subagentType } : {}),
+          });
+      if (!binding) {
+        return;
+      }
       const summary =
         text.length > CLAUDE_SUBAGENT_PROGRESS_TEXT_LIMIT
           ? `${text.slice(0, CLAUDE_SUBAGENT_PROGRESS_TEXT_LIMIT - 3)}...`
           : text;
       const stamp = yield* makeEventStamp();
+      const subagent = claudeSubagentPresentation(binding, "active");
       yield* offerRuntimeEvent({
         type: "task.progress",
         eventId: stamp.eventId,
@@ -3548,9 +3789,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         threadId: context.session.threadId,
         turnId: context.turnState.turnId,
         payload: {
-          taskId: binding?.taskId ?? RuntimeTaskId.make(parentToolUseId),
+          taskId: binding.taskId,
           description,
           summary,
+          ...(subagent ? { subagent } : {}),
         },
         providerRefs: nativeProviderRefs(context, {
           providerItemId: parentToolUseId,
@@ -3905,24 +4147,42 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           }
           const description = trimmedStringValue(taskRecord.description) ?? "Background task";
           const taskType = trimmedStringValue(taskRecord.task_type);
-          context.backgroundTaskIds.add(taskId);
+          const binding = bindClaudeTaskToToolUse(context, {
+            taskId,
+            description,
+            ...(taskType ? { taskType } : {}),
+            ...(trimmedStringValue(taskRecord.subagent_type)
+              ? { subagentType: trimmedStringValue(taskRecord.subagent_type) }
+              : {}),
+            ...(typeof taskRecord.spawn_depth === "number"
+              ? { spawnDepth: taskRecord.spawn_depth }
+              : {}),
+            startedAt: base.createdAt,
+          });
+          if (!binding) {
+            continue;
+          }
+          const canonicalTaskKey = String(binding.taskId);
+          context.backgroundTaskIds.add(canonicalTaskKey);
           if (isClaudeTaskHiddenFromTranscript(context, taskId)) {
             continue;
           }
-          if (previousBackgroundTaskIds.has(taskId)) {
+          if (previousBackgroundTaskIds.has(canonicalTaskKey)) {
             // Level snapshots repeat every still-live task on each membership
             // change. Re-emitting all of them creates quadratic work-log churn
             // during highly parallel Opus/Fable runs; task edge messages carry
             // the actual progress and terminal updates.
             continue;
           }
+          const subagent = claudeSubagentPresentation(binding, "active");
           yield* offerRuntimeEvent({
             ...base,
             type: "task.progress",
             payload: {
-              taskId: RuntimeTaskId.make(taskId),
+              taskId: binding.taskId,
               description,
               ...(taskType ? { summary: `${taskType} background task is running.` } : {}),
+              ...(subagent ? { subagent } : {}),
             },
           });
         }
@@ -4195,49 +4455,78 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         });
         return;
-      case "task_started":
-        bindClaudeTaskToToolUse(context, {
+      case "task_started": {
+        const taskStartedRecord = message as unknown as Record<string, unknown>;
+        const startedBinding = bindClaudeTaskToToolUse(context, {
           taskId: message.task_id,
           ...(message.tool_use_id ? { toolUseId: message.tool_use_id } : {}),
           description: message.description,
           ...(message.subagent_type ? { subagentType: message.subagent_type } : {}),
+          ...(message.task_type ? { taskType: message.task_type } : {}),
+          ...(trimmedStringValue(taskStartedRecord.prompt)
+            ? { objective: trimmedStringValue(taskStartedRecord.prompt) }
+            : {}),
+          ...(typeof taskStartedRecord.spawn_depth === "number"
+            ? { spawnDepth: taskStartedRecord.spawn_depth }
+            : {}),
+          startedAt: base.createdAt,
         });
+        if (!startedBinding) {
+          yield* emitRuntimeWarning(context, "Claude task start was missing a task id.", message);
+          return;
+        }
         if (message.skip_transcript === true) {
           hideClaudeTaskFromTranscript(context, message.task_id);
           return;
         }
+        const startedSubagent = claudeSubagentPresentation(startedBinding, "active");
         yield* offerRuntimeEvent({
           ...base,
           type: "task.started",
           payload: {
-            taskId: RuntimeTaskId.make(message.task_id),
+            taskId: startedBinding.taskId,
             description: message.description,
             ...(message.task_type ? { taskType: message.task_type } : {}),
+            ...(startedSubagent ? { subagent: startedSubagent } : {}),
           },
         });
         return;
-      case "task_progress":
-        bindClaudeTaskToToolUse(context, {
+      }
+      case "task_progress": {
+        const inferredStartedAt = claudeSubagentStartedAtFromUsage(base.createdAt, message.usage);
+        const progressBinding = bindClaudeTaskToToolUse(context, {
           taskId: message.task_id,
           ...(message.tool_use_id ? { toolUseId: message.tool_use_id } : {}),
           description: message.description,
           ...(message.subagent_type ? { subagentType: message.subagent_type } : {}),
+          ...(inferredStartedAt ? { startedAt: inferredStartedAt } : {}),
         });
+        if (!progressBinding) {
+          yield* emitRuntimeWarning(
+            context,
+            "Claude task progress was missing a task id.",
+            message,
+          );
+          return;
+        }
         if (isClaudeTaskHiddenFromTranscript(context, message.task_id)) {
           return;
         }
+        const progressSubagent = claudeSubagentPresentation(progressBinding, "active");
         yield* offerRuntimeEvent({
           ...base,
           type: "task.progress",
           payload: {
-            taskId: RuntimeTaskId.make(message.task_id),
+            taskId: progressBinding.taskId,
             description: message.description,
             ...(message.summary ? { summary: message.summary } : {}),
             ...(message.usage ? { usage: message.usage } : {}),
             ...(message.last_tool_name ? { lastToolName: message.last_tool_name } : {}),
+            ...(progressSubagent ? { subagent: progressSubagent } : {}),
           },
         });
         return;
+      }
       case "task_updated": {
         // Claude Code 2.1.173 started emitting task_updated as a patch-style
         // lifecycle message for the same background task ids previously
@@ -4258,19 +4547,42 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           return;
         }
 
+        const updatedBinding = bindClaudeTaskToToolUse(context, {
+          taskId,
+          ...(trimmedStringValue(patch.description ?? record.description)
+            ? { description: trimmedStringValue(patch.description ?? record.description) }
+            : {}),
+          ...(trimmedStringValue(patch.subagent_type ?? record.subagent_type)
+            ? { subagentType: trimmedStringValue(patch.subagent_type ?? record.subagent_type) }
+            : {}),
+          ...(trimmedStringValue(patch.task_type ?? record.task_type)
+            ? { taskType: trimmedStringValue(patch.task_type ?? record.task_type) }
+            : {}),
+          ...(typeof (patch.spawn_depth ?? record.spawn_depth) === "number"
+            ? { spawnDepth: (patch.spawn_depth ?? record.spawn_depth) as number }
+            : {}),
+        });
+        if (!updatedBinding) {
+          return;
+        }
         const usage = patch.usage ?? record.usage;
         const terminalStatus = claudeTaskTerminalStatus(patch.status ?? record.status);
         if (terminalStatus) {
+          const terminalSubagent = claudeSubagentPresentation(
+            updatedBinding,
+            claudeSubagentStatus(patch.status ?? record.status),
+          );
           yield* offerRuntimeEvent({
             ...base,
             type: "task.completed",
             payload: {
-              taskId: RuntimeTaskId.make(taskId),
+              taskId: updatedBinding.taskId,
               status: terminalStatus,
               ...(trimmedStringValue(patch.summary ?? record.summary)
                 ? { summary: trimmedStringValue(patch.summary ?? record.summary) }
                 : {}),
               ...(usage !== undefined ? { usage } : {}),
+              ...(terminalSubagent ? { subagent: terminalSubagent } : {}),
             },
           });
           return;
@@ -4281,44 +4593,80 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         const description =
           trimmedStringValue(patch.description ?? record.description) ??
           (rawStatus ? `Task ${rawStatus}` : "Task updated");
+        const updatedSubagent = claudeSubagentPresentation(
+          updatedBinding,
+          claudeSubagentStatus(rawStatus),
+        );
         yield* offerRuntimeEvent({
           ...base,
           type: "task.progress",
           payload: {
-            taskId: RuntimeTaskId.make(taskId),
+            taskId: updatedBinding.taskId,
             description,
             ...(summary ? { summary } : {}),
             ...(usage !== undefined ? { usage } : {}),
             ...(trimmedStringValue(patch.last_tool_name ?? record.last_tool_name)
               ? { lastToolName: trimmedStringValue(patch.last_tool_name ?? record.last_tool_name) }
               : {}),
+            ...(updatedSubagent ? { subagent: updatedSubagent } : {}),
           },
         });
         return;
       }
-      case "task_notification":
-        bindClaudeTaskToToolUse(context, {
+      case "task_notification": {
+        const taskNotificationRecord = message as unknown as Record<string, unknown>;
+        const inferredStartedAt = claudeSubagentStartedAtFromUsage(base.createdAt, message.usage);
+        const existingNotificationBinding = findClaudeTaskBinding(context, {
           taskId: message.task_id,
           ...(message.tool_use_id ? { toolUseId: message.tool_use_id } : {}),
-          ...(message.summary ? { description: message.summary } : {}),
         });
+        const notificationBinding = bindClaudeTaskToToolUse(context, {
+          taskId: message.task_id,
+          ...(message.tool_use_id ? { toolUseId: message.tool_use_id } : {}),
+          // `summary` is the terminal result, not the task title. Only use it
+          // as a label when Cafe missed every earlier lifecycle edge.
+          ...(!existingNotificationBinding && message.summary
+            ? { description: message.summary }
+            : {}),
+          ...(trimmedStringValue(taskNotificationRecord.subagent_type)
+            ? { subagentType: trimmedStringValue(taskNotificationRecord.subagent_type) }
+            : {}),
+          ...(trimmedStringValue(taskNotificationRecord.task_type)
+            ? { taskType: trimmedStringValue(taskNotificationRecord.task_type) }
+            : {}),
+          ...(inferredStartedAt ? { startedAt: inferredStartedAt } : {}),
+        });
+        if (!notificationBinding) {
+          yield* emitRuntimeWarning(
+            context,
+            "Claude task notification was missing a task id.",
+            message,
+          );
+          return;
+        }
         if (message.skip_transcript === true) {
           hideClaudeTaskFromTranscript(context, message.task_id);
         }
         if (isClaudeTaskHiddenFromTranscript(context, message.task_id)) {
           return;
         }
+        const notificationSubagent = claudeSubagentPresentation(
+          notificationBinding,
+          claudeSubagentStatus(message.status),
+        );
         yield* offerRuntimeEvent({
           ...base,
           type: "task.completed",
           payload: {
-            taskId: RuntimeTaskId.make(message.task_id),
+            taskId: notificationBinding.taskId,
             status: message.status,
             ...(message.summary ? { summary: message.summary } : {}),
             ...(message.usage ? { usage: message.usage } : {}),
+            ...(notificationSubagent ? { subagent: notificationSubagent } : {}),
           },
         });
         return;
+      }
       case "files_persisted":
         yield* offerRuntimeEvent({
           ...base,
@@ -4405,15 +4753,27 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           } (retry ${attempt}/${maxRetries}${
             retryDelayMs > 0 ? `, ${retryDelayMs} ms delay` : ""
           }).`;
+          const binding = bindClaudeTaskToToolUse(context, {
+            taskId: message.task_id ?? retry.agent_id,
+            description: retrySummary,
+            ...(subagentType ? { subagentType } : {}),
+            taskType: "subagent",
+            startedAt: base.createdAt,
+          });
+          if (!binding) {
+            return;
+          }
+          const subagent = claudeSubagentPresentation(binding, "active");
 
           yield* offerRuntimeEvent({
             ...base,
             type: "task.progress",
             payload: {
-              taskId: RuntimeTaskId.make(message.task_id ?? retry.agent_id),
+              taskId: binding.taskId,
               description: retrySummary,
               summary: retrySummary,
               lastToolName: message.tool_name,
+              ...(subagent ? { subagent } : {}),
             },
           });
         }
@@ -4511,15 +4871,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         trimmedStringValue(rawMessage.title) ??
         trimmedStringValue(rawMessage.description);
       if (goal) {
+        const goalTaskId = canonicalClaudeTaskId(
+          trimmedStringValue(rawMessage.goal_id) ??
+            trimmedStringValue(rawMessage.id) ??
+            "claude-active-goal",
+        );
+        if (!goalTaskId) {
+          return;
+        }
         yield* offerRuntimeEvent({
           ...base,
           type: "task.progress",
           payload: {
-            taskId: RuntimeTaskId.make(
-              trimmedStringValue(rawMessage.goal_id) ??
-                trimmedStringValue(rawMessage.id) ??
-                "claude-active-goal",
-            ),
+            taskId: goalTaskId,
             description: "Active goal",
             summary: goal,
           },
@@ -5397,6 +5761,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         inFlightTools,
         backgroundTaskIds: new Set(),
         taskBindingsByToolUseId: new Map(),
+        taskBindingsByTaskId: new Map(),
         hiddenTranscriptTaskIds: new Set(),
         promptLifecycleByUuid: new Map(),
         capabilities: new Set(),

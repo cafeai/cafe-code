@@ -2,6 +2,7 @@ import {
   ChatAttachment,
   AdditionalWorkspaceRoots,
   IsoDateTime,
+  MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN,
   MessageId,
   NonNegativeInt,
   OrchestrationCheckpointFile,
@@ -88,6 +89,11 @@ const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
     sequence: Schema.NullOr(NonNegativeInt),
   }),
 );
+const ProjectionThreadDetailActivityDbRowSchema = Schema.Struct({
+  ...ProjectionThreadActivityDbRowSchema.fields,
+  /** One metadata-only warning bit shared by every row in a detail result. */
+  subagentRetentionTruncated: Schema.Number,
+});
 const ProjectionThreadSessionDbRowSchema = ProjectionThreadSession;
 const ProjectionThreadGoalDbRowSchema = ProviderThreadGoal;
 const ProjectionCheckpointDbRowSchema = ProjectionCheckpoint.mapFields(
@@ -409,6 +415,9 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver;
+  // Diagnostics are bounded and keyed only by Cafe thread/turn identity. Never
+  // log provider child ids or presentation text when the safety ceiling trips.
+  const reportedSubagentRetentionLimits = new Map<string, true>();
   const repositoryIdentityResolutionConcurrency = 4;
   const resolveRepositoryIdentitiesForProjects = Effect.fn(
     "ProjectionSnapshotQuery.resolveRepositoryIdentitiesForProjects",
@@ -1095,7 +1104,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 
   const listThreadActivityRowsByThread = SqlSchema.findAll({
     Request: ThreadIdLookupInput,
-    Result: ProjectionThreadActivityDbRowSchema,
+    Result: ProjectionThreadDetailActivityDbRowSchema,
     execute: ({ threadId }) =>
       sql`
         WITH recent_activity_ids AS (
@@ -1121,12 +1130,82 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             activity_id DESC
           LIMIT 1
         ),
+        current_turn_subagent_identities AS (
+          -- Keep the most recently active identities plus one sentinel row so
+          -- the caller can emit a metadata-only truncation diagnostic. The
+          -- output cap is a hard defense against a compromised provider
+          -- manufacturing unique ids to bypass the normal activity window.
+          SELECT
+            activities.turn_id,
+            json_extract(activities.payload_json, '$.subagent.threadId') AS subagent_thread_id
+          FROM projection_thread_activities AS activities
+          WHERE activities.thread_id = ${threadId}
+            AND activities.turn_id = (
+              SELECT latest_turn_id
+              FROM projection_threads
+              WHERE thread_id = ${threadId}
+              LIMIT 1
+            )
+            AND activities.kind IN ('task.started', 'task.progress', 'task.completed')
+            AND json_type(activities.payload_json, '$.subagent.threadId') = 'text'
+          GROUP BY
+            activities.turn_id,
+            json_extract(activities.payload_json, '$.subagent.threadId')
+          ORDER BY
+            MAX(CASE WHEN activities.sequence IS NULL THEN 0 ELSE 1 END) DESC,
+            MAX(activities.sequence) DESC,
+            MAX(activities.created_at) DESC,
+            MAX(activities.activity_id) DESC
+          LIMIT ${MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN + 1}
+        ),
+        retained_current_turn_subagent_identities AS (
+          SELECT turn_id, subagent_thread_id
+          FROM current_turn_subagent_identities
+          LIMIT ${MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN}
+        ),
+        latest_subagent_lifecycle_activity_ids AS (
+          -- The general activity window is intentionally bounded, but a quiet
+          -- child can run for hours while unrelated tool activity continues.
+          -- Retain the latest edge of each lifecycle kind for every subagent
+          -- on the current turn. Three edges (start/progress/completed) are
+          -- sufficient to reconstruct a restart-safe state machine, including
+          -- rejecting a delayed progress replay after a terminal edge, without
+          -- retaining the child's full activity history.
+          SELECT activity_id
+          FROM (
+            SELECT
+              activities.activity_id,
+              ROW_NUMBER() OVER (
+                PARTITION BY
+                  activities.turn_id,
+                  json_extract(activities.payload_json, '$.subagent.threadId'),
+                  activities.kind
+                ORDER BY
+                  CASE WHEN activities.sequence IS NULL THEN 0 ELSE 1 END DESC,
+                  activities.sequence DESC,
+                  activities.created_at DESC,
+                  activities.activity_id DESC
+              ) AS lifecycle_rank
+            FROM projection_thread_activities AS activities
+            INNER JOIN retained_current_turn_subagent_identities AS identities
+              ON identities.turn_id = activities.turn_id
+              AND identities.subagent_thread_id =
+                json_extract(activities.payload_json, '$.subagent.threadId')
+            WHERE activities.thread_id = ${threadId}
+              AND activities.kind IN ('task.started', 'task.progress', 'task.completed')
+              AND json_type(activities.payload_json, '$.subagent.threadId') = 'text'
+          )
+          WHERE lifecycle_rank = 1
+        ),
         retained_activity_ids AS (
           SELECT activity_id
           FROM recent_activity_ids
           UNION
           SELECT activity_id
           FROM latest_task_plan_activity_id
+          UNION
+          SELECT activity_id
+          FROM latest_subagent_lifecycle_activity_ids
         )
         SELECT
           activities.activity_id AS "activityId",
@@ -1137,7 +1216,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           activities.summary,
           activities.payload_json AS "payload",
           activities.sequence,
-          activities.created_at AS "createdAt"
+          activities.created_at AS "createdAt",
+          CASE
+            WHEN (
+              SELECT COUNT(*)
+              FROM current_turn_subagent_identities
+            ) > ${MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN}
+            THEN 1
+            ELSE 0
+          END AS "subagentRetentionTruncated"
         FROM projection_thread_activities activities
         INNER JOIN retained_activity_ids retained
           ON retained.activity_id = activities.activity_id
@@ -2635,6 +2722,24 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           ),
         ),
       ]);
+
+      if (activityRows[0]?.subagentRetentionTruncated === 1) {
+        const latestTurnId = Option.isSome(latestTurnRow) ? latestTurnRow.value.turnId : null;
+        const diagnosticKey = JSON.stringify([threadId, latestTurnId]);
+        if (!reportedSubagentRetentionLimits.has(diagnosticKey)) {
+          reportedSubagentRetentionLimits.set(diagnosticKey, true);
+          while (reportedSubagentRetentionLimits.size > MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN) {
+            const oldest = reportedSubagentRetentionLimits.keys().next().value;
+            if (typeof oldest !== "string") break;
+            reportedSubagentRetentionLimits.delete(oldest);
+          }
+          yield* Effect.logWarning("thread detail subagent retention reached safety limit", {
+            threadId,
+            turnId: latestTurnId,
+            retainedIdentityLimit: MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN,
+          });
+        }
+      }
 
       if (Option.isNone(threadRow)) {
         return Option.none<OrchestrationThread>();

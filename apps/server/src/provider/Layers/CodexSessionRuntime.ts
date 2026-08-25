@@ -1794,6 +1794,54 @@ export function codexAggregateNotificationMethod(
   return isChildConversation && method === "error" ? "codex.subagent/error" : method;
 }
 
+/**
+ * Selects child-thread notifications that carry user-visible subagent state.
+ *
+ * Cafe intentionally suppresses child thread/turn lifecycle so it cannot
+ * mutate the parent Cafe thread. The same notifications are nevertheless the
+ * authoritative source for the Subagents UI in Codex 0.149. Project a narrow
+ * copy under a Cafe-private method name before suppression; CodexAdapter then
+ * converts it into canonical `task.*` activity without confusing it for root
+ * lifecycle. Item deltas are deliberately excluded to avoid an unbounded
+ * per-token task stream. Completed reasoning/tool snapshots are sufficient for
+ * meaningful progress and match the provider UI's snapshot-based status feed.
+ */
+export function codexSubagentProjectionMethod(
+  notification: CodexServerNotification,
+): string | undefined {
+  switch (notification.method) {
+    case "thread/started":
+      return "codex.subagent/threadStarted";
+    case "thread/name/updated":
+      return "codex.subagent/threadNameUpdated";
+    case "thread/status/changed":
+      return "codex.subagent/threadStatusChanged";
+    case "thread/archived":
+    case "thread/deleted":
+    case "thread/closed":
+      return "codex.subagent/threadStopped";
+    case "turn/started":
+      return "codex.subagent/turnStarted";
+    case "turn/completed":
+      return "codex.subagent/turnCompleted";
+    case "item/completed": {
+      const params = readRecord(notification.params);
+      const item = params ? readRecord(params.item) : undefined;
+      const itemType = typeof item?.type === "string" ? item.type : undefined;
+      return itemType === "reasoning" ||
+        itemType === "commandExecution" ||
+        itemType === "fileChange" ||
+        itemType === "mcpToolCall" ||
+        itemType === "dynamicToolCall" ||
+        itemType === "webSearch"
+        ? "codex.subagent/itemCompleted"
+        : undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
 export function resolveCodexChildConversationNotification(
   childConversationTurns: ReadonlyMap<string, TurnId>,
   notification: CodexServerNotification,
@@ -4059,6 +4107,9 @@ export const makeCodexSessionRuntime = (
           notification.method,
           childRoute !== undefined,
         );
+        const subagentProjectionMethod = childRoute
+          ? codexSubagentProjectionMethod(notification)
+          : undefined;
 
         // Use the already-routed parent turn when a subagent creates another
         // subagent. This keeps arbitrary-depth multi-agent output attached to
@@ -4085,6 +4136,24 @@ export const makeCodexSessionRuntime = (
             );
           }),
         );
+
+        if (childRoute && subagentProjectionMethod) {
+          // This event retains the provider child thread id inside the typed
+          // notification payload while keeping Cafe's canonical thread/turn
+          // ownership on the visible parent. CodexAdapter replaces the raw
+          // payload with a bounded descriptor before durable ingestion.
+          yield* emitEvent(
+            {
+              kind: "notification",
+              threadId: options.threadId,
+              method: subagentProjectionMethod,
+              turnId: childRoute.parentTurnId,
+              ...(route.itemId ? { itemId: route.itemId } : {}),
+              ...(payload !== undefined ? { payload } : {}),
+            },
+            observedAt,
+          );
+        }
 
         const aggregateCompletionDeferred =
           childRoute === undefined && notification.method === "turn/completed"

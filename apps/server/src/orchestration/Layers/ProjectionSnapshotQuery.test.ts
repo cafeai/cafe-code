@@ -1,6 +1,7 @@
 import {
   CheckpointRef,
   EventId,
+  MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN,
   MessageId,
   ProjectId,
   ThreadId,
@@ -1940,7 +1941,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
-  it.effect("retains the latest task-plan snapshot beyond the activity tail cap", () =>
+  it.effect("retains task-plan and current-turn subagent state beyond the activity tail cap", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
       const sql = yield* SqlClient.SqlClient;
@@ -2039,6 +2040,50 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             '{"explanation":"Current snapshot","plan":[{"step":"Inspect","status":"completed"},{"step":"Implement","status":"inProgress"}]}',
             2,
             '2026-04-07T00:00:02.000Z'
+          ),
+          (
+            'subagent-start',
+            'thread-task-plan-cap',
+            'turn-task-plan',
+            'info',
+            'task.started',
+            'Subagent started',
+            '{"taskId":"child-1","subagent":{"threadId":"child-1","label":"Audit","status":"active","startedAt":"2026-04-07T00:00:03.000Z"}}',
+            3,
+            '2026-04-07T00:00:03.000Z'
+          ),
+          (
+            'subagent-progress-obsolete',
+            'thread-task-plan-cap',
+            'turn-task-plan',
+            'info',
+            'task.progress',
+            'Subagent update',
+            '{"taskId":"child-1","detail":"Old progress","subagent":{"threadId":"child-1","status":"active"}}',
+            4,
+            '2026-04-07T00:00:04.000Z'
+          ),
+          (
+            'subagent-progress-latest',
+            'thread-task-plan-cap',
+            'turn-task-plan',
+            'info',
+            'task.progress',
+            'Subagent update',
+            '{"taskId":"child-1","detail":"Latest progress","subagent":{"threadId":"child-1","status":"active"}}',
+            5,
+            '2026-04-07T00:00:05.000Z'
+          ),
+          (
+            'subagent-completed',
+            'thread-task-plan-cap',
+            'turn-task-plan',
+            'info',
+            'task.completed',
+            'Subagent completed',
+            '{"taskId":"child-1","status":"completed","subagent":{"threadId":"child-1","status":"completed"}}',
+            6,
+            '2026-04-07T00:00:06.000Z'
           )
       `;
       yield* sql`
@@ -2068,12 +2113,12 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           'tool.completed',
           printf('activity %04d', index_value),
           '{}',
-          index_value + 2,
+          index_value + 6,
           printf(
             '2026-04-07T%02d:%02d:%02d.000Z',
-            (index_value + 2) / 3600,
-            ((index_value + 2) / 60) % 60,
-            (index_value + 2) % 60
+            (index_value + 6) / 3600,
+            ((index_value + 6) / 60) % 60,
+            (index_value + 6) % 60
           )
         FROM activity_numbers
       `;
@@ -2084,7 +2129,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       assert.equal(detail._tag, "Some");
       if (detail._tag === "Some") {
         const activities = detail.value.activities;
-        assert.equal(activities.length, THREAD_DETAIL_ACTIVITY_LIMIT + 1);
+        assert.equal(activities.length, THREAD_DETAIL_ACTIVITY_LIMIT + 4);
         assert.equal(activities[0]?.id, asEventId("task-plan-latest"));
         assert.equal(
           activities.filter((activity) => activity.kind === "turn.plan.updated").length,
@@ -2093,6 +2138,83 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         assert.equal(
           activities.some((activity) => activity.id === asEventId("task-plan-obsolete")),
           false,
+        );
+        assert.equal(
+          activities.some((activity) => activity.id === asEventId("subagent-progress-obsolete")),
+          false,
+        );
+        assert.deepEqual(
+          activities
+            .filter((activity) => activity.kind.startsWith("task."))
+            .map((activity) => activity.id),
+          [
+            asEventId("subagent-start"),
+            asEventId("subagent-progress-latest"),
+            asEventId("subagent-completed"),
+          ],
+        );
+      }
+
+      yield* sql`
+        WITH RECURSIVE subagent_numbers(index_value) AS (
+          SELECT 0
+          UNION ALL
+          SELECT index_value + 1
+          FROM subagent_numbers
+          WHERE index_value < ${MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN}
+        )
+        INSERT INTO projection_thread_activities (
+          activity_id,
+          thread_id,
+          turn_id,
+          tone,
+          kind,
+          summary,
+          payload_json,
+          sequence,
+          created_at
+        )
+        SELECT
+          printf('subagent-cardinality-%05d', index_value),
+          'thread-task-plan-cap',
+          'turn-task-plan',
+          'info',
+          'task.started',
+          'Subagent started',
+          printf(
+            '{"taskId":"cardinality-%05d","subagent":{"threadId":"cardinality-%05d","status":"active"}}',
+            index_value,
+            index_value
+          ),
+          index_value + 10000,
+          '2026-04-07T12:00:00.000Z'
+        FROM subagent_numbers
+      `;
+
+      const cappedDetail = yield* snapshotQuery.getThreadDetailById(
+        ThreadId.make("thread-task-plan-cap"),
+      );
+      assert.equal(cappedDetail._tag, "Some");
+      if (cappedDetail._tag === "Some") {
+        const activities = cappedDetail.value.activities;
+        assert.equal(
+          activities.filter((activity) => activity.kind === "task.started").length,
+          MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN,
+        );
+        assert.equal(activities.length, MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN + 1);
+        assert.equal(
+          activities.some((activity) => activity.id === asEventId("subagent-cardinality-00000")),
+          false,
+        );
+        assert.equal(
+          activities.some(
+            (activity) =>
+              activity.id ===
+              asEventId(
+                `subagent-cardinality-${String(MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN).padStart(5, "0")}`,
+              ),
+          ),
+          true,
         );
       }
     }),

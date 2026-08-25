@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { scopeThreadRef } from "@cafecode/client-runtime";
 import { CircleCheckIcon } from "lucide-react";
@@ -9,14 +18,15 @@ import { normalizeAccentColor } from "../../themeAccent";
 import { useStore } from "../../store";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { cn } from "../../lib/utils";
+import { retainThreadDetailSubscription } from "../../environments/runtime/service";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { SubagentAvatar } from "../subagents/SubagentAvatar";
 import { UsageCostContent } from "../settings/UsageCostSection";
 import { useUsageCostSummary } from "../stats/useUsageCostSummary";
 import { createAtriumScene, type AtriumScene } from "./atriumScene";
 import {
   EMPTY_ATRIUM,
   formatElapsed,
-  MAX_ATRIUM_CARDS,
   mergeTaskAtriumErrorDismissals,
   selectAtriumSnapshot,
   type AtriumCard,
@@ -45,6 +55,14 @@ const FALLBACK_TINT = "#48cfff";
 const HOLD_COLOR = "#f5a524";
 const FAULT_COLOR = "#ef4444";
 const SETTLED_COLOR = "#9aa3ad";
+/**
+ * Detail streams are live backend resources, not free renderer selectors. A
+ * large imported environment must not pin one subscription per shell card.
+ * The observer prefetches nearby cards and rotates this fixed window as the
+ * user scrolls; every card remains in the scroll column and hydrates on demand.
+ */
+const MAX_ATRIUM_DETAIL_SUBSCRIPTIONS = 24;
+const ATRIUM_DETAIL_PREFETCH_MARGIN_PX = 320;
 
 const currencyFormat = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -266,38 +284,57 @@ function Stat({
   );
 }
 
-function TaskAtriumCardView({
-  card,
-  now,
-  tint,
-  onOpen,
-}: {
+interface TaskAtriumCardViewProps {
   card: AtriumCard;
   now: number;
   tint: string;
   onOpen: (card: AtriumCard) => void;
-}) {
+  onCardElement: (key: string, element: HTMLElement | null) => void;
+}
+
+const TaskAtriumCardView = memo(function TaskAtriumCardView({
+  card,
+  now,
+  tint,
+  onOpen,
+  onCardElement,
+}: TaskAtriumCardViewProps) {
   const accent = stateColor(card.state, tint);
   const elapsed = formatElapsed(card.startedAt, now);
+  const titleId = useId();
+  const cardRef = useCallback(
+    (element: HTMLElement | null) => onCardElement(card.key, element),
+    [card.key, onCardElement],
+  );
 
   return (
-    <button
-      type="button"
-      onClick={() => onOpen(card)}
-      aria-label={`Open ${card.title}`}
+    <article
+      ref={cardRef}
+      aria-labelledby={titleId}
+      data-cafe-atrium-card-key={card.key}
+      data-cafe-atrium-task-card="true"
       style={{ "--cafe-atrium-accent": accent } as CSSProperties}
       className={cn(
-        "group w-full overflow-hidden rounded-2xl p-4 text-left",
+        "group relative w-full shrink-0 overflow-hidden rounded-2xl p-4 text-left [contain-intrinsic-size:auto_14rem] [content-visibility:auto]",
         "border backdrop-blur-md transition-shadow duration-200",
         // Paper stock on a light sky, dark glass on a dusk one — the card has
         // to belong to the theme, not just to the scene behind it.
         "border-black/5 bg-[#f5f2ee] text-[#241f22] shadow-2xl shadow-black/40",
         "dark:border-white/12 dark:bg-[#1b1620]/88 dark:text-[#eee7ec]",
         "hover:shadow-[0_30px_60px_-18px_rgba(0,0,0,0.6)]",
-        "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--cafe-atrium-accent)]",
         card.state === "done" && "opacity-80",
       )}
     >
+      {/* Keep the full card clickable without making its status and subagent
+          content children of a labelled button. Screen readers can browse the
+          article normally, while this transparent sibling remains the single
+          keyboard-focusable navigation action. */}
+      <button
+        type="button"
+        onClick={() => onOpen(card)}
+        aria-label={`Open ${card.title}`}
+        className="absolute inset-0 z-10 rounded-2xl outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--cafe-atrium-accent)]"
+      />
       <span
         aria-hidden="true"
         className="pointer-events-none absolute inset-x-[8%] top-0 h-0.5 rounded-full"
@@ -321,7 +358,10 @@ function TaskAtriumCardView({
         </span>
       </div>
 
-      <div className="mt-2 line-clamp-2 text-[17px] leading-tight font-medium tracking-tight">
+      <div
+        id={titleId}
+        className="mt-2 line-clamp-2 text-[17px] leading-tight font-medium tracking-tight"
+      >
         {card.title}
       </div>
       {card.projectName ? (
@@ -332,27 +372,56 @@ function TaskAtriumCardView({
 
       {/* The reference's photo window becomes the live subagent list. */}
       {card.subagents.length > 0 ? (
-        <div className="mt-3 flex flex-col gap-1.5 rounded-xl bg-[#ece7e2] p-2.5 dark:bg-white/8">
+        <ul
+          aria-label={`Subagents for ${card.title}`}
+          className="mt-3 flex flex-col gap-1 rounded-xl bg-[#ece7e2] p-2.5 dark:bg-white/8"
+          data-cafe-atrium-subagent-list="true"
+        >
           {card.subagents.map((subagent) => (
-            <div
-              key={subagent.id}
-              className="flex items-center gap-2 text-[11px] text-[#4a4248] dark:text-white/75"
+            <li
+              key={subagent.rowKey}
+              className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2.5 rounded-lg px-0.5 py-1.5 text-[11px] text-[#4a4248] dark:text-white/75"
+              data-cafe-atrium-subagent-row="true"
             >
-              <span
-                aria-hidden="true"
-                className="size-1.5 shrink-0 rounded-full"
-                style={{ background: subagent.running ? accent : SETTLED_COLOR }}
-              />
-              <span className="shrink-0 font-semibold">{subagent.label}</span>
-              <span className="truncate text-[#6c636a] dark:text-white/50">{subagent.detail}</span>
-            </div>
+              <SubagentAvatar seed={subagent.id} className="size-7" />
+              <span className="min-w-0">
+                <span className="block truncate font-semibold text-[#3c353a] dark:text-white/85">
+                  {subagent.label}
+                </span>
+                <span
+                  className="mt-0.5 block leading-4 text-[#6c636a] break-words dark:text-white/50"
+                  data-cafe-atrium-subagent-detail="true"
+                >
+                  {subagent.detail}
+                </span>
+              </span>
+              <span className="min-w-12 shrink-0 pt-0.5 text-right">
+                <span
+                  className="block text-[9px] font-semibold uppercase tracking-[0.06em]"
+                  style={{ color: subagent.running ? accent : SETTLED_COLOR }}
+                >
+                  {subagent.status === "waiting"
+                    ? "Waiting"
+                    : subagent.status === "active"
+                      ? "Working"
+                      : subagent.status === "failed"
+                        ? "Failed"
+                        : subagent.status === "stopped"
+                          ? "Stopped"
+                          : "Done"}
+                </span>
+                {subagent.startedAt !== null ? (
+                  <span className="mt-0.5 block font-mono text-[10px] tabular-nums text-[#8a8189] dark:text-white/45">
+                    {formatElapsed(
+                      subagent.startedAt,
+                      subagent.running ? now : (subagent.completedAt ?? now),
+                    )}
+                  </span>
+                ) : null}
+              </span>
+            </li>
           ))}
-          {card.extraSubagents > 0 ? (
-            <div className="pl-3.5 text-[10px] text-[#948b92] dark:text-white/40">
-              and {card.extraSubagents} more
-            </div>
-          ) : null}
-        </div>
+        </ul>
       ) : null}
 
       {card.activityLabel ? (
@@ -370,8 +439,39 @@ function TaskAtriumCardView({
           ) : null}
         </div>
       ) : null}
-    </button>
+    </article>
   );
+}, areAtriumCardPropsEqual);
+
+function areAtriumCardPropsEqual(
+  previous: TaskAtriumCardViewProps,
+  next: TaskAtriumCardViewProps,
+): boolean {
+  const cardUnchanged =
+    previous.card.key === next.card.key &&
+    previous.card.title === next.card.title &&
+    previous.card.provider === next.card.provider &&
+    previous.card.projectName === next.card.projectName &&
+    previous.card.state === next.card.state &&
+    previous.card.activityLabel === next.card.activityLabel &&
+    previous.card.activityDetail === next.card.activityDetail &&
+    previous.card.startedAt === next.card.startedAt &&
+    previous.card.subagents === next.card.subagents;
+  if (
+    !cardUnchanged ||
+    previous.tint !== next.tint ||
+    previous.onOpen !== next.onOpen ||
+    previous.onCardElement !== next.onCardElement
+  ) {
+    return false;
+  }
+  // Terminal cards have frozen parent/subagent durations and do not need the
+  // Atrium's one-second clock. Live rows continue to update normally.
+  const hasLiveClock =
+    next.card.state === "running" ||
+    next.card.state === "holding" ||
+    next.card.subagents.some((subagent) => subagent.running);
+  return !hasLiveClock || previous.now === next.now;
 }
 
 export function TaskAtriumBoard() {
@@ -397,15 +497,116 @@ export function TaskAtriumBoard() {
   const [now, setNow] = useState(() => Date.now());
   const [snapshot, setSnapshot] = useState(EMPTY_ATRIUM);
   useEffect(() => {
+    let interval: number | null = null;
     const tick = () => {
       const timestamp = Date.now();
       setNow(timestamp);
       setSnapshot(selectAtriumSnapshot(useStore.getState(), timestamp, dismissedTaskAtriumErrors));
     };
-    tick();
-    const interval = window.setInterval(tick, 1000);
-    return () => window.clearInterval(interval);
+    const stop = () => {
+      if (interval === null) return;
+      window.clearInterval(interval);
+      interval = null;
+    };
+    const syncVisibility = () => {
+      if (document.visibilityState !== "visible") {
+        stop();
+        return;
+      }
+      if (interval !== null) return;
+      tick();
+      interval = window.setInterval(tick, 1000);
+    };
+    syncVisibility();
+    document.addEventListener("visibilitychange", syncVisibility);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", syncVisibility);
+    };
   }, [dismissedTaskAtriumErrors]);
+
+  const retainedDetailsRef = useRef(new Map<string, () => void>());
+  const cardElementsRef = useRef(new Map<string, HTMLElement>());
+  const cardIntersectionObserverRef = useRef<IntersectionObserver | null>(null);
+  const refreshVisibleCardsRef = useRef<(() => void) | null>(null);
+  const [taskScrollerElement, setTaskScrollerElement] = useState<HTMLDivElement | null>(null);
+  const [visibleCardKeys, setVisibleCardKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const onCardElement = useCallback((key: string, element: HTMLElement | null) => {
+    const previous = cardElementsRef.current.get(key);
+    if (previous && previous !== element) {
+      cardIntersectionObserverRef.current?.unobserve(previous);
+    }
+    if (element) {
+      cardElementsRef.current.set(key, element);
+      cardIntersectionObserverRef.current?.observe(element);
+      refreshVisibleCardsRef.current?.();
+      return;
+    }
+    cardElementsRef.current.delete(key);
+    setVisibleCardKeys((current) => {
+      if (!current.has(key)) return current;
+      const next = new Set(current);
+      next.delete(key);
+      return next;
+    });
+  }, []);
+  useEffect(() => {
+    if (!taskScrollerElement) return;
+    let frame: number | null = null;
+    const refreshVisibleCards = () => {
+      frame = null;
+      const root = taskScrollerElement.getBoundingClientRect();
+      const visible = new Set<string>();
+      const top = root.top - ATRIUM_DETAIL_PREFETCH_MARGIN_PX;
+      const bottom = root.bottom + ATRIUM_DETAIL_PREFETCH_MARGIN_PX;
+      for (const [key, element] of cardElementsRef.current) {
+        const bounds = element.getBoundingClientRect();
+        if (bounds.bottom >= top && bounds.top <= bottom) visible.add(key);
+      }
+      setVisibleCardKeys((current) =>
+        current.size === visible.size && [...current].every((key) => visible.has(key))
+          ? current
+          : visible,
+      );
+    };
+    const scheduleVisibleCardsRefresh = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(refreshVisibleCards);
+    };
+    refreshVisibleCardsRef.current = scheduleVisibleCardsRefresh;
+
+    const observer =
+      typeof IntersectionObserver === "undefined"
+        ? null
+        : new IntersectionObserver(scheduleVisibleCardsRefresh, {
+            root: taskScrollerElement,
+            rootMargin: `${ATRIUM_DETAIL_PREFETCH_MARGIN_PX}px 0px`,
+          });
+    cardIntersectionObserverRef.current = observer;
+    for (const element of cardElementsRef.current.values()) observer?.observe(element);
+    taskScrollerElement.addEventListener("scroll", scheduleVisibleCardsRefresh, { passive: true });
+    window.addEventListener("resize", scheduleVisibleCardsRefresh);
+    scheduleVisibleCardsRefresh();
+    return () => {
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      observer?.disconnect();
+      taskScrollerElement.removeEventListener("scroll", scheduleVisibleCardsRefresh);
+      window.removeEventListener("resize", scheduleVisibleCardsRefresh);
+      if (refreshVisibleCardsRef.current === scheduleVisibleCardsRefresh) {
+        refreshVisibleCardsRef.current = null;
+      }
+      if (cardIntersectionObserverRef.current === observer) {
+        cardIntersectionObserverRef.current = null;
+      }
+    };
+  }, [taskScrollerElement]);
+  useEffect(
+    () => () => {
+      for (const release of retainedDetailsRef.current.values()) release();
+      retainedDetailsRef.current.clear();
+    },
+    [],
+  );
 
   // Pointer parallax, quantized so a stationary mouse cannot cause a render and
   // skipped entirely under reduced motion.
@@ -432,8 +633,6 @@ export function TaskAtriumBoard() {
     }
   }, [providerCounts, providerFilter]);
 
-  // Filter first, then cap — capping first would hide threads the filter was
-  // meant to reveal.
   const filtered = useMemo(
     () =>
       providerFilter === null
@@ -441,8 +640,40 @@ export function TaskAtriumBoard() {
         : snapshot.cards.filter((card) => card.provider === providerFilter),
     [snapshot.cards, providerFilter],
   );
-  const visible = filtered.slice(0, MAX_ATRIUM_CARDS);
-  const overflow = Math.max(0, filtered.length - visible.length);
+  const detailHydrationCards = useMemo(() => {
+    const observed = filtered.filter((card) => visibleCardKeys.has(card.key));
+    // Before the first observer callback, hydrate the leading card so a cold
+    // board never sits empty. The fixed slice remains a security boundary even
+    // when an unusually tall viewport intersects many compact cards at once.
+    const candidates = observed.length > 0 ? observed : filtered.slice(0, 1);
+    return candidates.slice(0, MAX_ATRIUM_DETAIL_SUBSCRIPTIONS);
+  }, [filtered, visibleCardKeys]);
+  useEffect(() => {
+    const retained = retainedDetailsRef.current;
+    const desired = new Set(detailHydrationCards.map((card) => card.key));
+
+    for (const [key, release] of retained) {
+      if (desired.has(key)) continue;
+      release();
+      retained.delete(key);
+    }
+    for (const card of detailHydrationCards) {
+      if (retained.has(card.key)) continue;
+      retained.set(card.key, retainThreadDetailSubscription(card.environmentId, card.threadId));
+    }
+  }, [detailHydrationCards]);
+  const filteredMetrics = useMemo(
+    () => ({
+      subagentCount: filtered.reduce(
+        (count, card) => count + card.subagents.filter((subagent) => subagent.running).length,
+        0,
+      ),
+      runningCount: filtered.filter((card) => card.state === "running").length,
+      holdingCount: filtered.filter((card) => card.state === "holding").length,
+      errorCount: filtered.filter((card) => card.state === "error").length,
+    }),
+    [filtered],
+  );
 
   const clearErrors = useCallback(() => {
     const currentErrors = snapshot.cards.flatMap((card) =>
@@ -458,16 +689,19 @@ export function TaskAtriumBoard() {
     });
   }, [dismissedTaskAtriumErrors, snapshot.cards, updateSettings]);
 
-  const openCard = (card: AtriumCard) => {
-    // Close on the way out: the overlay is fixed over the whole window, so
-    // navigating without closing changes the route behind a panel that still
-    // covers it and nothing appears to happen.
-    closeAtrium(false);
-    void navigate({
-      to: "/$environmentId/$threadId",
-      params: buildThreadRouteParams(scopeThreadRef(card.environmentId, card.threadId)),
-    });
-  };
+  const openCard = useCallback(
+    (card: AtriumCard) => {
+      // Close on the way out: the overlay is fixed over the whole window, so
+      // navigating without closing changes the route behind a panel that still
+      // covers it and nothing appears to happen.
+      closeAtrium(false);
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(scopeThreadRef(card.environmentId, card.threadId)),
+      });
+    },
+    [closeAtrium, navigate],
+  );
 
   const total = snapshot.cards.length;
   const glass = dark
@@ -487,13 +721,13 @@ export function TaskAtriumBoard() {
       <AtriumSceneCanvas tint={tint} dark={dark} pointer={pointer} />
 
       {/* Glass pill nav, floating over the scene. */}
-      <div className="relative z-20 flex shrink-0 justify-center p-4">
-        <div className="flex items-center gap-2">
+      <div className="relative z-20 flex min-w-0 shrink-0 justify-center py-4 pr-14 pl-3 sm:pl-4">
+        <div className="flex min-w-0 max-w-full items-center gap-2">
           <div
             role="group"
             aria-label="Filter by provider"
             className={cn(
-              "flex items-center gap-1 rounded-full border p-1 backdrop-blur-md",
+              "flex min-w-0 max-w-full items-center gap-1 overflow-x-auto overscroll-x-contain rounded-full border p-1 backdrop-blur-md [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
               glass,
             )}
           >
@@ -573,7 +807,7 @@ export function TaskAtriumBoard() {
         </div>
       </div>
 
-      {visible.length === 0 ? (
+      {filtered.length === 0 ? (
         <div className="relative z-10 flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
           <p className={cn("text-2xl font-light tracking-tight", heading)}>
             {providerFilter === null ? "The garden is quiet" : "Nothing from this provider"}
@@ -585,7 +819,7 @@ export function TaskAtriumBoard() {
           </p>
         </div>
       ) : (
-        <div className="relative z-10 grid min-h-0 flex-1 grid-cols-1 items-center gap-4 px-6 pb-6 lg:grid-cols-[1fr_1.2fr] lg:px-10">
+        <div className="relative z-10 grid min-h-0 flex-1 grid-cols-1 items-stretch gap-4 overflow-hidden px-3 pb-4 sm:px-6 sm:pb-6 lg:grid-cols-[1fr_1.2fr] lg:px-10">
           {/* Lede. Hidden on narrow layouts, where the cards need the room. */}
           <div className="hidden lg:block">
             <h2
@@ -597,53 +831,53 @@ export function TaskAtriumBoard() {
               {filtered.length === 1 ? "One thread" : `${filtered.length} threads`},
               <br />
               <span className="font-semibold" style={{ color: tint }}>
-                {snapshot.subagentCount === 1
+                {filteredMetrics.subagentCount === 1
                   ? "one subagent"
-                  : `${snapshot.subagentCount} subagents`}
+                  : `${filteredMetrics.subagentCount} subagents`}
               </span>
               ,<br />
-              {snapshot.holdingCount > 0
+              {filteredMetrics.holdingCount > 0
                 ? "one needs you."
-                : snapshot.runningCount > 0
+                : filteredMetrics.runningCount > 0
                   ? "all working."
-                  : snapshot.errorCount > 0
+                  : filteredMetrics.errorCount > 0
                     ? "stopped."
                     : "all done."}
             </h2>
             <p className={cn("mt-3 max-w-xs text-sm", muted)}>
-              {snapshot.holdingCount > 0
-                ? `${snapshot.holdingCount} waiting on you. Everything else is moving on its own.`
-                : snapshot.errorCount > 0 && snapshot.runningCount === 0
-                  ? `${snapshot.errorCount} ${snapshot.errorCount === 1 ? "thread" : "threads"} stopped on an error. Open one to see what happened.`
+              {filteredMetrics.holdingCount > 0
+                ? `${filteredMetrics.holdingCount} waiting on you. Everything else is moving on its own.`
+                : filteredMetrics.errorCount > 0 && filteredMetrics.runningCount === 0
+                  ? `${filteredMetrics.errorCount} ${filteredMetrics.errorCount === 1 ? "thread" : "threads"} stopped on an error. Open one to see what happened.`
                   : "Nothing here asks for you. The garden keeps its own hours."}
             </p>
             <dl className="mt-7 grid max-w-md grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
               <Stat label="Threads" value={String(filtered.length)} tone={heading} muted={label} />
               <Stat
                 label="Subagents"
-                value={String(snapshot.subagentCount)}
+                value={String(filteredMetrics.subagentCount)}
                 tone={heading}
                 muted={label}
               />
               <Stat
                 label="Running"
-                value={String(snapshot.runningCount)}
+                value={String(filteredMetrics.runningCount)}
                 tone={heading}
                 muted={label}
               />
-              {snapshot.holdingCount > 0 ? (
+              {filteredMetrics.holdingCount > 0 ? (
                 <Stat
                   label="Holding"
-                  value={String(snapshot.holdingCount)}
+                  value={String(filteredMetrics.holdingCount)}
                   tone=""
                   muted={label}
                   color={HOLD_COLOR}
                 />
               ) : null}
-              {snapshot.errorCount > 0 ? (
+              {filteredMetrics.errorCount > 0 ? (
                 <Stat
                   label="Errors"
-                  value={String(snapshot.errorCount)}
+                  value={String(filteredMetrics.errorCount)}
                   tone=""
                   muted={label}
                   color={FAULT_COLOR}
@@ -676,14 +910,19 @@ export function TaskAtriumBoard() {
             </dl>
           </div>
 
-          <div className="flex min-h-0 flex-col gap-3 self-stretch overflow-y-auto py-2 lg:ml-auto lg:w-full lg:max-w-md">
-            {visible.map((card) => (
+          <div
+            ref={setTaskScrollerElement}
+            className="ml-auto flex h-full min-h-0 w-full max-w-md flex-col gap-3 self-stretch overflow-y-auto overscroll-contain py-2 pr-1 pb-4 [scrollbar-gutter:stable]"
+            data-cafe-atrium-task-scroll="true"
+          >
+            {filtered.map((card) => (
               <TaskAtriumCardView
                 key={card.key}
                 card={card}
                 now={now}
                 tint={tint}
                 onOpen={openCard}
+                onCardElement={onCardElement}
               />
             ))}
           </div>
@@ -699,7 +938,7 @@ export function TaskAtriumBoard() {
           // Fades at the bottom edge so a clipped panel reads as "scroll for
           // more" rather than as a layout that ran out of room.
           className={cn(
-            "relative z-20 mx-4 mb-4 max-h-[46vh] shrink-0 overflow-y-auto lg:mx-10",
+            "relative z-20 mx-3 mb-3 max-h-[min(28vh,18rem)] shrink-0 overflow-y-auto overscroll-contain sm:mx-4 sm:mb-4 lg:mx-10",
             "[mask-image:linear-gradient(to_bottom,black_calc(100%-2.5rem),transparent)]",
           )}
         >
@@ -711,17 +950,6 @@ export function TaskAtriumBoard() {
             </div>
             <UsageCostContent usage={usage.raw} />
           </div>
-        </div>
-      ) : null}
-
-      {overflow > 0 ? (
-        <div
-          className={cn(
-            "relative z-20 mx-6 mb-4 shrink-0 rounded-xl border px-4 py-2 text-xs backdrop-blur-md",
-            glass,
-          )}
-        >
-          and {overflow} more {overflow === 1 ? "thread" : "threads"}
         </div>
       ) : null}
     </div>

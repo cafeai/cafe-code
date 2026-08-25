@@ -29,7 +29,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { HttpResponse, http, ws } from "msw";
 import { setupWorker } from "msw/browser";
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
@@ -681,6 +681,105 @@ function createSnapshotWithLongProposedPlan(): OrchestrationReadModel {
   };
 }
 
+const RUNTIME_TASK_TURN_ID = "turn-runtime-task-progress" as TurnId;
+const RUNTIME_TASK_DESCRIPTIONS = [
+  "Inspect the current orchestration projection and confirm the running turn owns the latest provider checklist snapshot.",
+  "Trace the composer footer layout across desktop and compact widths without moving provider controls out of their established order.",
+  "Preserve the exact provider-authored task descriptions so long instructions remain available instead of being shortened to a summary.",
+  "Verify completed task styling and progress accounting against the durable statuses supplied by the runtime event.",
+  "Render the current in-progress task in the composer pill and keep its full description available inside the task popover.",
+  "Keep every pending task mounted in document order so assistive technology and browser search can reach the complete checklist.",
+  "Constrain the task popover to the visual viewport while allowing deliberately long descriptions to wrap without horizontal overflow.",
+  "Provide an independently scrollable task list so a large provider checklist never pushes the composer beyond the available screen height.",
+  "Support fine-pointer hover without taking away the ordinary button press used by touch, keyboard, and browser automation clients.",
+  "Return focus to the task progress trigger after Escape closes the popup so keyboard users remain at a predictable composer position.",
+  "Keep runtime task snapshots out of the authored plan sidebar and do not expose a stale Tasks or Plan panel toggle during execution.",
+  "Confirm the task progress control disappears when the current turn settles or the latest provider checklist is explicitly empty.",
+] as const;
+
+type RuntimeTaskStep = {
+  readonly step: string;
+  readonly status: "completed" | "inProgress" | "pending";
+};
+
+const RUNTIME_TASK_STEPS: ReadonlyArray<RuntimeTaskStep> = RUNTIME_TASK_DESCRIPTIONS.map(
+  (step, index) => ({
+    step,
+    status: index < 4 ? "completed" : index === 4 ? "inProgress" : "pending",
+  }),
+);
+
+/**
+ * Build the provider-neutral shape produced after a real runtime `update_plan`
+ * event. Keeping latest-turn and session ownership aligned is important here:
+ * ChatView intentionally suppresses stale or terminal-turn checklists even when
+ * an older `turn.plan.updated` activity remains in the durable thread history.
+ */
+function createSnapshotWithRuntimeTaskProgress(options?: {
+  readonly steps?: ReadonlyArray<RuntimeTaskStep>;
+  readonly terminal?: boolean;
+  readonly withAuthoredPlan?: boolean;
+}): OrchestrationReadModel {
+  const snapshot = options?.withAuthoredPlan
+    ? createSnapshotWithPlanFollowUpPrompt()
+    : createSnapshotForTargetUser({
+        targetMessageId: "msg-user-runtime-task-progress" as MessageId,
+        targetText: "implement the runtime task checklist",
+      });
+  const terminal = options?.terminal ?? false;
+  const steps = options?.steps ?? RUNTIME_TASK_STEPS;
+
+  return {
+    ...snapshot,
+    threads: snapshot.threads.map((thread) =>
+      thread.id === THREAD_ID
+        ? Object.assign({}, thread, {
+            interactionMode: terminal ? thread.interactionMode : ("default" as const),
+            latestTurn: {
+              turnId: RUNTIME_TASK_TURN_ID,
+              state: terminal ? ("completed" as const) : ("running" as const),
+              requestedAt: isoAt(1_000),
+              startedAt: isoAt(1_001),
+              completedAt: terminal ? isoAt(1_020) : null,
+              assistantMessageId: null,
+              ...(options?.withAuthoredPlan
+                ? {
+                    sourceProposedPlan: {
+                      threadId: THREAD_ID,
+                      planId: "plan-follow-up-browser-test",
+                    },
+                  }
+                : {}),
+            },
+            activities: [
+              {
+                id: EventId.make("activity-runtime-task-progress"),
+                tone: "info" as const,
+                kind: "turn.plan.updated",
+                summary: "Runtime task plan updated",
+                payload: {
+                  explanation:
+                    "The provider is working through the complete implementation checklist for the current turn.",
+                  plan: [...steps],
+                },
+                turnId: RUNTIME_TASK_TURN_ID,
+                sequence: 1,
+                createdAt: isoAt(1_005),
+              },
+            ],
+            session: {
+              ...thread.session,
+              status: terminal ? ("ready" as const) : ("running" as const),
+              activeTurnId: terminal ? null : RUNTIME_TASK_TURN_ID,
+              updatedAt: terminal ? isoAt(1_020) : isoAt(1_005),
+            },
+            updatedAt: terminal ? isoAt(1_020) : isoAt(1_005),
+          })
+        : thread,
+    ),
+  };
+}
+
 function createSnapshotWithSecondaryProject(options?: {
   includeSecondaryThread?: boolean;
   includeArchivedSecondaryThread?: boolean;
@@ -1318,6 +1417,22 @@ async function waitForSendButton(): Promise<HTMLButtonElement> {
   );
 }
 
+function findComposerTaskProgressTrigger(): HTMLButtonElement | null {
+  return document.querySelector<HTMLButtonElement>('[data-composer-task-progress-trigger="true"]');
+}
+
+function findComposerTaskProgressPopup(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-composer-task-progress-popup="true"]');
+}
+
+function findComposerTaskProgressList(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-composer-task-progress-list="true"]');
+}
+
+function findComposerTaskProgressScroller(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-task-list-scroll="true"]');
+}
+
 function findComposerProviderModelPicker(): HTMLButtonElement | null {
   return document.querySelector<HTMLButtonElement>('[data-chat-provider-model-picker="true"]');
 }
@@ -1754,6 +1869,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
     useUiStateStore.setState({
       projectExpandedById: {},
       projectOrder: [],
+      threadPlanSidebarOpenById: {},
       threadLastVisitedAtById: {},
     });
   });
@@ -1807,6 +1923,309 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         }
       },
     );
+
+    it("shows the current runtime step and exposes every full task on hover without a side panel", async () => {
+      // Even an old explicit "open" preference must not turn a runtime checklist
+      // into authored plan content. This catches the former Tasks-sidebar path,
+      // not just the default-closed presentation.
+      useUiStateStore.setState({
+        threadPlanSidebarOpenById: {
+          [THREAD_KEY]: true,
+        },
+      });
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotWithRuntimeTaskProgress({ withAuthoredPlan: true }),
+      });
+
+      try {
+        const trigger = page.getByRole("button", {
+          name: /^Task progress: step 5 of 12\b/i,
+        });
+        await expect.element(trigger).toHaveTextContent("Step 5 / 12");
+        expect(findComposerTaskProgressTrigger()).not.toBeNull();
+
+        expect(document.querySelector('button[aria-label="Close plan sidebar"]')).toBeNull();
+        expect(
+          document.querySelector(
+            'button[title="Show plan sidebar"], button[title="Hide plan sidebar"]',
+          ),
+        ).toBeNull();
+        expect(document.querySelector('[data-slot="sheet-popup"]:not([hidden])')).toBeNull();
+
+        await trigger.hover();
+        await vi.waitFor(
+          () => {
+            expect(findComposerTaskProgressPopup()).not.toBeNull();
+            expect(findComposerTaskProgressList()).not.toBeNull();
+            expect(findComposerTaskProgressScroller()).not.toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        const popup = findComposerTaskProgressPopup();
+        const list = findComposerTaskProgressList();
+        const scroller = findComposerTaskProgressScroller();
+        expect(popup).not.toBeNull();
+        expect(list).not.toBeNull();
+        expect(scroller).not.toBeNull();
+        if (!popup || !list || !scroller) {
+          throw new Error("Task progress popup did not finish mounting.");
+        }
+
+        const rows = Array.from(
+          list.querySelectorAll<HTMLElement>("[data-composer-task-progress-step]"),
+        );
+        expect(rows).toHaveLength(RUNTIME_TASK_DESCRIPTIONS.length);
+        for (const description of RUNTIME_TASK_DESCRIPTIONS) {
+          expect(popup.textContent).toContain(description);
+        }
+        expect(popup.textContent).not.toContain("and more");
+
+        expect(getComputedStyle(scroller).overflowY).toBe("auto");
+        expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight);
+        scroller.scrollTop = scroller.scrollHeight;
+        await waitForLayout();
+        const lastRow = rows.at(-1);
+        expect(lastRow).toBeTruthy();
+        expect(lastRow!.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+          scroller.getBoundingClientRect().bottom + 1,
+        );
+
+        // Opening the task popover must not opportunistically open the removed
+        // runtime Tasks panel or make its authored-plan close control appear.
+        expect(document.querySelector('button[aria-label="Close plan sidebar"]')).toBeNull();
+        expect(document.querySelector('[data-slot="sheet-popup"]:not([hidden])')).toBeNull();
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("opens task progress with an ordinary press and restores trigger focus on Escape", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotWithRuntimeTaskProgress(),
+      });
+
+      try {
+        const trigger = page.getByRole("button", {
+          name: /^Task progress: step 5 of 12\b/i,
+        });
+        const triggerElement = await waitForElement(
+          findComposerTaskProgressTrigger,
+          "Unable to find task progress trigger.",
+        );
+        triggerElement.focus();
+
+        // Base UI maps the same press interaction to mouse click, touch tap, and
+        // keyboard activation. Exercising the semantic button keeps this an
+        // integration test of that shared path rather than a hover-only check.
+        await trigger.click();
+        await vi.waitFor(() => {
+          expect(findComposerTaskProgressPopup()).not.toBeNull();
+          expect(triggerElement.getAttribute("aria-expanded")).toBe("true");
+        });
+
+        const scroller = findComposerTaskProgressScroller();
+        expect(scroller).not.toBeNull();
+        scroller?.focus();
+        expect(document.activeElement).toBe(scroller);
+
+        await userEvent.keyboard("{Escape}");
+        await vi.waitFor(() => {
+          expect(findComposerTaskProgressPopup()).toBeNull();
+          expect(triggerElement.getAttribute("aria-expanded")).toBe("false");
+          expect(document.activeElement).toBe(triggerElement);
+        });
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("keeps the pressed task popover contained at 430px and omits the compact plan-sidebar action", async () => {
+      useUiStateStore.setState({
+        threadPlanSidebarOpenById: {
+          [THREAD_KEY]: true,
+        },
+      });
+      const mounted = await mountChatView({
+        viewport: COMPACT_FOOTER_VIEWPORT,
+        snapshot: createSnapshotWithRuntimeTaskProgress(),
+      });
+
+      try {
+        const trigger = page.getByRole("button", {
+          name: /^Task progress: step 5 of 12\b/i,
+        });
+        await trigger.click();
+        await vi.waitFor(() => expect(findComposerTaskProgressPopup()).not.toBeNull());
+
+        const popup = findComposerTaskProgressPopup();
+        const scroller = findComposerTaskProgressScroller();
+        expect(popup).not.toBeNull();
+        expect(scroller).not.toBeNull();
+        if (!popup || !scroller) {
+          throw new Error("Compact task progress popup did not finish mounting.");
+        }
+
+        const popupBounds = popup.getBoundingClientRect();
+        expect(popupBounds.left).toBeGreaterThanOrEqual(-1);
+        expect(popupBounds.right).toBeLessThanOrEqual(window.innerWidth + 1);
+        expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(
+          document.documentElement.clientWidth,
+        );
+        expect(document.body.scrollWidth).toBeLessThanOrEqual(document.body.clientWidth);
+        expect(getComputedStyle(scroller).overflowY).toBe("auto");
+        expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight);
+
+        await userEvent.keyboard("{Escape}");
+        await vi.waitFor(() => expect(findComposerTaskProgressPopup()).toBeNull());
+
+        const moreControls = page.getByRole("button", { name: "More composer controls" });
+        await moreControls.click();
+        await vi.waitFor(() => {
+          expect(document.querySelector('[data-slot="menu-popup"]')).not.toBeNull();
+        });
+        const compactSidebarAction = Array.from(
+          document.querySelectorAll<HTMLElement>('[data-slot="menu-item"]'),
+        ).find((item) => /^(?:Show|Hide) plan sidebar$/i.test(item.textContent?.trim() ?? ""));
+        expect(compactSidebarAction).toBeUndefined();
+        expect(document.querySelector('button[aria-label="Close plan sidebar"]')).toBeNull();
+        expect(document.querySelector('[data-slot="sheet-popup"]:not([hidden])')).toBeNull();
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it.each([
+      ["the latest provider checklist is explicitly empty", { steps: [] }],
+      ["the latest turn is terminal", { terminal: true }],
+    ] as const)("hides task progress when %s", async (_reason, options) => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotWithRuntimeTaskProgress(options),
+      });
+
+      try {
+        await waitForLayout();
+        expect(findComposerTaskProgressTrigger()).toBeNull();
+        expect(findComposerTaskProgressPopup()).toBeNull();
+        expect(document.querySelector('button[aria-label^="Task progress: step"]')).toBeNull();
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("temporarily hides an authored plan during implementation without persisting a closed preference", async () => {
+      useUiStateStore.setState({
+        threadPlanSidebarOpenById: {},
+      });
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotWithPlanFollowUpPrompt(),
+        resolveRpc: (body) => {
+          if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
+            return { sequence: fixture.snapshot.snapshotSequence + 1 };
+          }
+          return undefined;
+        },
+      });
+
+      const publishThreadSnapshot = (nextSnapshot: OrchestrationReadModel): void => {
+        const nextThread = nextSnapshot.threads.find((thread) => thread.id === THREAD_ID);
+        if (!nextThread) {
+          throw new Error("Sequential plan regression fixture is missing its active thread.");
+        }
+        const snapshotSequence = fixture.snapshot.snapshotSequence + 1;
+        fixture.snapshot = {
+          ...nextSnapshot,
+          snapshotSequence,
+        };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: {
+            snapshotSequence,
+            thread: nextThread,
+          },
+        });
+      };
+
+      try {
+        // The completed authored plan still follows the normal auto-open path.
+        await vi.waitFor(
+          () => {
+            expect(
+              document.querySelector('button[aria-label="Close plan sidebar"]'),
+            ).not.toBeNull();
+            expect(document.body.textContent).toContain("Follow-up plan");
+            expect(useUiStateStore.getState().threadPlanSidebarOpenById[THREAD_KEY]).toBe(true);
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        const implementButton = await waitForButtonByText("Implement");
+        implementButton.click();
+        await vi.waitFor(
+          () => {
+            const implementationDispatch = wsRequests.find(
+              (request) =>
+                request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                request.type === "thread.turn.start" &&
+                request.interactionMode === "default",
+            );
+            expect(implementationDispatch).toMatchObject({
+              _tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
+              type: "thread.turn.start",
+              sourceProposedPlan: {
+                threadId: THREAD_ID,
+                planId: "plan-follow-up-browser-test",
+              },
+            });
+            // Local dispatch hides the panel immediately, but that suppression
+            // is not a user preference and must never overwrite the stored true.
+            expect(document.querySelector('button[aria-label="Close plan sidebar"]')).toBeNull();
+            expect(useUiStateStore.getState().threadPlanSidebarOpenById[THREAD_KEY]).toBe(true);
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        publishThreadSnapshot(createSnapshotWithRuntimeTaskProgress({ withAuthoredPlan: true }));
+        await vi.waitFor(
+          () => {
+            expect(findComposerTaskProgressTrigger()).not.toBeNull();
+            expect(document.querySelector('button[aria-label="Close plan sidebar"]')).toBeNull();
+            expect(
+              document.querySelector(
+                'button[title="Show plan sidebar"], button[title="Hide plan sidebar"]',
+              ),
+            ).toBeNull();
+            expect(useUiStateStore.getState().threadPlanSidebarOpenById[THREAD_KEY]).toBe(true);
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        // Once there is no active runtime turn, the next authored plan is
+        // visible again under the unchanged open preference.
+        publishThreadSnapshot(
+          createSnapshotWithPlanFollowUpPrompt({
+            planMarkdown: "# Future authored plan\n\n- Preserve plan auto-open behavior.",
+          }),
+        );
+        await vi.waitFor(
+          () => {
+            expect(
+              document.querySelector('button[aria-label="Close plan sidebar"]'),
+            ).not.toBeNull();
+            expect(document.body.textContent).toContain("Future authored plan");
+            expect(findComposerTaskProgressTrigger()).toBeNull();
+            expect(useUiStateStore.getState().threadPlanSidebarOpenById[THREAD_KEY]).toBe(true);
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
 
     it("renders locked single-environment mobile run context as a static workspace label", async () => {
       const mounted = await mountChatView({
@@ -5882,6 +6301,18 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           planMarkdown:
             "# Imaginary Long-Range Plan: Cafe Code Adaptive Orchestration and Safe-Delay Execution Initiative",
         }),
+        // This case isolates composer-width behavior. Authored plans are
+        // allowed to auto-open their document sidebar, which intentionally
+        // narrows the chat column and is covered by the plan-specific tests.
+        configureFixture: (nextFixture) => {
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            clientSettings: {
+              ...nextFixture.serverConfig.clientSettings,
+              autoOpenPlanSidebar: false,
+            },
+          };
+        },
       });
 
       try {
@@ -5917,6 +6348,15 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           planMarkdown:
             "# Imaginary Long-Range Plan: Cafe Code Adaptive Orchestration and Safe-Delay Execution Initiative",
         }),
+        configureFixture: (nextFixture) => {
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            clientSettings: {
+              ...nextFixture.serverConfig.clientSettings,
+              autoOpenPlanSidebar: false,
+            },
+          };
+        },
       });
 
       try {

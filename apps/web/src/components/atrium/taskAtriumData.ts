@@ -10,6 +10,7 @@ import {
 } from "@cafecode/contracts";
 
 import type { AppState } from "../../store";
+import { deriveSubagentActivities, type SubagentRunStatus } from "../../subagent-activity";
 
 /**
  * Data derivation for the Task Atrium.
@@ -19,25 +20,11 @@ import type { AppState } from "../../store";
  * `projectById`. Like the weather layer this is renderer-only: it never
  * synthesizes lifecycle truth and nothing here feeds back into orchestration.
  *
- * Both first-party providers describe subagent work with the same canonical
- * item type. Claude's `Task` / `*agent*` tools and Codex's `subAgentActivity`
- * and `collab_agent_tool_call` items all arrive as
- * `payload.itemType === "collab_agent_tool_call"`, with the human-readable
- * detail in `payload.detail` — "explore: mapping call sites" from Claude,
- * "Started /root/tests" from Codex. That one field is what the subagent rows
- * render, so both providers are represented without special-casing either.
+ * Codex and Claude now describe subagent work through the same structured
+ * canonical `task.*` lifecycle. The shared derivation retains a bounded legacy
+ * collab-item fallback so threads persisted by an older Cafe release remain
+ * visible after upgrade without keeping prose parsing on the live path.
  */
-
-/** How far back through a thread's activity to look for subagent items. */
-const ACTIVITY_SCAN_LIMIT = 120;
-/** Rows shown per card before the remainder is counted instead. */
-export const MAX_SUBAGENT_ROWS = 3;
-/**
- * Cards floated before the remainder collapses into the overflow strip. The cap
- * is applied by the view, not here, so it lands *after* the provider filter —
- * capping first would hide threads the filter was meant to reveal.
- */
-export const MAX_ATRIUM_CARDS = 6;
 /** A finished thread stays on the wall this long so completions are visible. */
 const RECENTLY_DONE_MS = 3 * 60 * 1000;
 /**
@@ -51,11 +38,17 @@ const RECENTLY_DONE_MS = 3 * 60 * 1000;
 const RECENTLY_ERRORED_MS = 12 * 60 * 60 * 1000;
 
 export type AtriumSubagent = {
+  /** Stable lifecycle-row identity. Unlike `id`, this remains unique when one child is reused. */
+  rowKey: string;
+  /** Provider child identity, shared across turns and used only as the deterministic avatar seed. */
   id: string;
-  /** Subagent type (Claude) or agent path (Codex), when one was reported. */
   label: string;
   detail: string;
+  status: SubagentRunStatus;
   running: boolean;
+  /** Per-agent lifecycle clock, independent of the parent turn. */
+  startedAt: number | null;
+  completedAt: number | null;
 };
 
 export type AtriumCardState = "holding" | "running" | "error" | "done";
@@ -74,13 +67,12 @@ export type AtriumCard = {
   /** Epoch ms the current turn started, for the elapsed readout. */
   startedAt: number | null;
   subagents: AtriumSubagent[];
-  extraSubagents: number;
   /** Exact terminal failure that the presentation-only clear action dismisses. */
   errorDismissal: TaskAtriumErrorDismissal | null;
 };
 
 export type AtriumSnapshot = {
-  /** Every card, sorted. The view filters and caps. */
+  /** Every card, sorted. The view filters but never truncates this list. */
   cards: AtriumCard[];
   runningCount: number;
   holdingCount: number;
@@ -109,63 +101,105 @@ function activityPayloadField(
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-function isSubagentActivity(activity: OrchestrationThreadActivity | undefined): boolean {
-  return activityPayloadField(activity, "itemType") === "collab_agent_tool_call";
-}
-
-/**
- * Split a provider detail line into a short label and the rest.
- * Claude reports "explore: mapping call sites"; Codex reports "Started /root".
- */
-function splitSubagentDetail(detail: string): { label: string; detail: string } {
-  const colon = detail.indexOf(":");
-  if (colon > 0 && colon <= 40) {
-    const label = detail.slice(0, colon).trim();
-    const rest = detail.slice(colon + 1).trim();
-    if (label.length > 0 && rest.length > 0) return { label, detail: rest };
-  }
-  const space = detail.indexOf(" ");
-  if (space > 0 && space <= 14) {
-    return { label: detail.slice(0, space).trim(), detail: detail.slice(space + 1).trim() };
-  }
-  return { label: "subagent", detail };
-}
-
 /** Strip the " started" suffix the ingestion layer appends to live items. */
 function cleanActivityLabel(summary: string): string {
   return summary.replace(/\s+started$/i, "").trim();
 }
 
+type CachedSubagentRows = {
+  /** Activity maps are replaced immutably whenever a projection edge arrives. */
+  activityById: Record<string, OrchestrationThreadActivity>;
+  latestTurnId: TurnId | null;
+  cardTerminal: boolean;
+  rows: AtriumSubagent[];
+};
+
+/**
+ * The Atrium's parent clock rebuilds card elapsed labels once per second. The
+ * activity id arrays and maps are immutable projection values, so a WeakMap
+ * lets those clock-only renders reuse subagent rows without retaining a stale
+ * projection after the store releases it.
+ */
+const SUBAGENT_ROWS_BY_ACTIVITY_IDS = new WeakMap<readonly string[], CachedSubagentRows>();
+
+function isSubagentActivity(activity: OrchestrationThreadActivity): boolean {
+  const payload = activity.payload;
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return false;
+  const fields = payload as Record<string, unknown>;
+  const structuredLifecycle =
+    (activity.kind === "task.started" ||
+      activity.kind === "task.progress" ||
+      activity.kind === "task.completed") &&
+    typeof fields.subagent === "object" &&
+    fields.subagent !== null &&
+    !Array.isArray(fields.subagent);
+  return structuredLifecycle || fields.itemType === "collab_agent_tool_call";
+}
+
 function collectSubagents(
   activityIds: readonly string[] | undefined,
   activityById: Record<string, OrchestrationThreadActivity> | undefined,
-): { rows: AtriumSubagent[]; total: number } {
-  if (!activityIds || !activityById) return { rows: [], total: 0 };
-
-  const scan = activityIds.slice(Math.max(0, activityIds.length - ACTIVITY_SCAN_LIMIT));
-  // Keyed by itemId so a started/completed pair collapses into one row rather
-  // than showing the same subagent twice.
-  const byItem = new Map<string, AtriumSubagent>();
-
-  for (const id of scan) {
-    const activity = activityById[id];
-    if (!isSubagentActivity(activity) || !activity) continue;
-    const itemId = activityPayloadField(activity, "itemId") ?? activity.id;
-    const detailRaw =
-      activityPayloadField(activity, "detail") ?? cleanActivityLabel(activity.summary);
-    const split = splitSubagentDetail(detailRaw);
-    byItem.set(itemId, {
-      id: itemId,
-      label: split.label,
-      detail: split.detail,
-      running: activity.kind === "tool.started",
-    });
+  latestTurnId: TurnId | null,
+  cardTerminal: boolean,
+): AtriumSubagent[] {
+  if (!activityIds || !activityById) return [];
+  const cached = SUBAGENT_ROWS_BY_ACTIVITY_IDS.get(activityIds);
+  if (
+    cached?.activityById === activityById &&
+    cached.latestTurnId === latestTurnId &&
+    cached.cardTerminal === cardTerminal
+  ) {
+    return cached.rows;
   }
 
-  const all = [...byItem.values()];
-  // Live subagents first; a finished one is context, a running one is the point.
-  all.sort((a, b) => Number(b.running) - Number(a.running));
-  return { rows: all.slice(0, MAX_SUBAGENT_ROWS), total: all.length };
+  const activities: OrchestrationThreadActivity[] = [];
+  const terminalTurnIds = new Set<TurnId>();
+  for (const id of activityIds) {
+    const activity = activityById[id];
+    if (!activity || !isSubagentActivity(activity)) continue;
+    activities.push(activity);
+    // Structured lifecycle has explicit terminal truth. This set exists for
+    // persisted legacy `Started /root/...` rows, whose tool completion only
+    // closes the control item. Once the owning turn is historical or the
+    // whole card is terminal, that old row must not claim it is still working.
+    if (
+      activity.turnId !== null &&
+      (cardTerminal || (latestTurnId !== null && activity.turnId !== latestTurnId))
+    ) {
+      terminalTurnIds.add(activity.turnId);
+    }
+  }
+
+  const rows = deriveSubagentActivities(
+    activities,
+    terminalTurnIds.size > 0 ? { terminalTurnIds } : {},
+  ).map((subagent) => ({
+    rowKey: subagent.rowId,
+    id: subagent.id,
+    label: subagent.label,
+    detail:
+      // Keep the live provider description visible in the card. The original
+      // objective remains the fallback before Codex/Claude reports progress;
+      // it must never be relegated to a hover-only affordance.
+      subagent.description ??
+      subagent.objective ??
+      (subagent.status === "waiting"
+        ? "Waiting"
+        : subagent.status === "active"
+          ? "Working"
+          : "Done"),
+    status: subagent.status,
+    running: subagent.status === "active" || subagent.status === "waiting",
+    startedAt: toEpoch(subagent.startedAt),
+    completedAt: toEpoch(subagent.completedAt),
+  }));
+  SUBAGENT_ROWS_BY_ACTIVITY_IDS.set(activityIds, {
+    activityById,
+    latestTurnId,
+    cardTerminal,
+    rows,
+  });
+  return rows;
 }
 
 function toEpoch(value: string | null | undefined): number | null {
@@ -359,13 +393,21 @@ export function selectAtriumSnapshot(
           ? activityById?.[activityIds[activityIds.length - 1]!]
           : undefined;
 
-      const { rows, total } = collectSubagents(activityIds, activityById);
+      const rows = collectSubagents(
+        activityIds,
+        activityById,
+        latestTurn?.turnId ?? null,
+        cardState === "done" || cardState === "error",
+      );
       subagentCount += rows.filter((row) => row.running).length;
 
       const project = environment.projectById[summary.projectId];
 
       cards.push({
-        key: `${environmentId}:${threadId}`,
+        // Environment/thread ids can be imported from another server. Tuple
+        // encoding avoids delimiter collisions in React identity and in the
+        // detail-subscription retention map.
+        key: JSON.stringify([environmentId, threadId]),
         environmentId,
         threadId,
         title: summary.title.trim().length > 0 ? summary.title : "Untitled thread",
@@ -376,7 +418,6 @@ export function selectAtriumSnapshot(
         activityDetail: activityPayloadField(lastActivity, "detail") ?? "",
         startedAt: toEpoch(latestTurn?.startedAt ?? latestTurn?.requestedAt),
         subagents: rows,
-        extraSubagents: Math.max(0, total - rows.length),
         errorDismissal,
       });
     }

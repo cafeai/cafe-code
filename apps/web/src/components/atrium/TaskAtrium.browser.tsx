@@ -129,9 +129,21 @@ const atriumHarness = vi.hoisted(() => {
   });
   const theme = { value: "dark" as "light" | "dark" };
   const updateSettings = vi.fn();
+  const retainedDetails: Array<{
+    environmentId: string;
+    threadId: string;
+    release: ReturnType<typeof vi.fn>;
+  }> = [];
+  const retainThreadDetailSubscription = vi.fn((environmentId: string, threadId: string) => {
+    const release = vi.fn();
+    retainedDetails.push({ environmentId, threadId, release });
+    return release;
+  });
   return {
     theme,
     updateSettings,
+    retainedDetails,
+    retainThreadDetailSubscription,
     settings: {
       ambianceAtriumEnabled: true,
       continueBackgroundAnimations: true,
@@ -167,6 +179,10 @@ vi.mock("../../store", () => ({
   useStore: atriumHarness.useStore,
 }));
 
+vi.mock("../../environments/runtime/service", () => ({
+  retainThreadDetailSubscription: atriumHarness.retainThreadDetailSubscription,
+}));
+
 const navigations: Array<Record<string, unknown>> = [];
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@tanstack/react-router")>()),
@@ -192,6 +208,91 @@ async function renderInTheme(theme: "light" | "dark") {
   return { host, screen };
 }
 
+function addRunningThreads(count: number): () => void {
+  const environment = atriumHarness.useStore.getState().environmentStateById["env-1"]!;
+  const previousThreadIds = [...environment.threadIds];
+  const summaries = environment.sidebarThreadSummaryById as unknown as Record<
+    string,
+    (typeof environment.sidebarThreadSummaryById)["thread-2"]
+  >;
+  const base = summaries["thread-2"]!;
+  const addedIds = Array.from({ length: count }, (_, index) => `thread-scroll-${index + 1}`);
+
+  for (const [index, threadId] of addedIds.entries()) {
+    summaries[threadId] = {
+      ...base,
+      id: threadId,
+      title: `Scrollable task ${index + 1}`,
+      session: { ...base.session },
+      latestTurn: { ...base.latestTurn, turnId: `turn-scroll-${index + 1}` },
+    };
+  }
+  environment.threadIds = [...previousThreadIds, ...addedIds];
+
+  return () => {
+    environment.threadIds = previousThreadIds;
+    for (const threadId of addedIds) delete summaries[threadId];
+  };
+}
+
+function installStructuredSubagents(count: number): () => void {
+  type HarnessActivity = {
+    id: string;
+    tone: string;
+    kind: string;
+    summary: string;
+    payload: Record<string, unknown>;
+    turnId: string | null;
+    createdAt: string;
+  };
+  const environment = atriumHarness.useStore.getState().environmentStateById["env-1"]!;
+  const activityIdsByThreadId = environment.activityIdsByThreadId as Record<string, string[]>;
+  const activityByThreadId = environment.activityByThreadId as unknown as Record<
+    string,
+    Record<string, HarnessActivity>
+  >;
+  const previousIds = activityIdsByThreadId["thread-1"];
+  const previousActivities = activityByThreadId["thread-1"];
+  const ids: string[] = [];
+  const activities: Record<string, HarnessActivity> = {};
+
+  for (let index = 0; index < count; index += 1) {
+    const id = `subagent-${index + 1}`;
+    ids.push(id);
+    activities[id] = {
+      id,
+      tone: "info",
+      kind: "task.progress",
+      summary: "Subagent update",
+      payload: {
+        taskId: `claude-task-${index + 1}`,
+        detail:
+          index === count - 1
+            ? `Visible task description ${index + 1} stays completely readable even when the bounded provider text wraps across several narrow card lines without an inner clip.`
+            : `Visible task description ${index + 1}`,
+        subagent: {
+          threadId: `claude-task-${index + 1}`,
+          label: `Claude worker ${index + 1}`,
+          objective: `Original task objective ${index + 1}`,
+          status: "active",
+          startedAt: new Date(Date.now() - (index + 1) * 1_000).toISOString(),
+        },
+      },
+      turnId: "turn-1",
+      createdAt: new Date(Date.now() - (count - index) * 1_000).toISOString(),
+    };
+  }
+  activityIdsByThreadId["thread-1"] = ids;
+  activityByThreadId["thread-1"] = activities;
+
+  return () => {
+    if (previousIds) activityIdsByThreadId["thread-1"] = previousIds;
+    else delete activityIdsByThreadId["thread-1"];
+    if (previousActivities) activityByThreadId["thread-1"] = previousActivities;
+    else delete activityByThreadId["thread-1"];
+  };
+}
+
 describe("TaskAtriumBoard", () => {
   for (const theme of ["dark", "light"] as const) {
     it(`renders running work, its subagents and legible text in ${theme} mode`, async () => {
@@ -210,7 +311,7 @@ describe("TaskAtriumBoard", () => {
           { timeout: 3_000 },
         );
 
-        const card = host.querySelector("button[aria-label^='Open ']");
+        const card = host.querySelector('[data-cafe-atrium-task-card="true"]');
         expect(card).toBeInstanceOf(HTMLElement);
         if (!(card instanceof HTMLElement)) throw new Error("Atrium card did not mount");
 
@@ -227,6 +328,49 @@ describe("TaskAtriumBoard", () => {
     });
   }
 
+  it("keeps card details browseable beside a separate full-card navigation button", async () => {
+    const { host, screen } = await renderInTheme("dark");
+    try {
+      await vi.waitFor(() => {
+        expect(
+          host.querySelector('button[aria-label="Open Port the ambiance engine to WebGL"]'),
+        ).not.toBeNull();
+      });
+
+      const openButton = host.querySelector<HTMLButtonElement>(
+        'button[aria-label="Open Port the ambiance engine to WebGL"]',
+      );
+      const article = openButton?.closest<HTMLElement>(
+        '[data-cafe-atrium-task-card="true"][aria-labelledby]',
+      );
+      const subagentList = article?.querySelector<HTMLElement>(
+        '[data-cafe-atrium-subagent-list="true"]',
+      );
+      const subagentRow = subagentList?.querySelector<HTMLElement>(
+        '[data-cafe-atrium-subagent-row="true"]',
+      );
+
+      expect(article?.tagName).toBe("ARTICLE");
+      expect(openButton).not.toBeNull();
+      expect(subagentList?.tagName).toBe("UL");
+      expect(subagentList?.getAttribute("aria-label")).toBe(
+        "Subagents for Port the ambiance engine to WebGL",
+      );
+      expect(subagentRow?.tagName).toBe("LI");
+      expect(subagentList?.textContent).toContain("mapping canvas call sites");
+      // The labelled button is a sibling of the descriptive content, so its
+      // accessible name cannot replace the provider/status/subagent text.
+      expect(openButton?.contains(subagentList ?? null)).toBe(false);
+
+      openButton?.focus();
+      expect(document.activeElement).toBe(openButton);
+    } finally {
+      await screen.unmount();
+      host.remove();
+      document.documentElement.classList.remove("dark");
+    }
+  });
+
   it("says so plainly when nothing is running", async () => {
     const environments = atriumHarness.useStore.getState().environmentStateById as Record<
       string,
@@ -241,6 +385,171 @@ describe("TaskAtriumBoard", () => {
       });
     } finally {
       environments["env-1"]!.threadIds = previous;
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("expands a task card for every subagent and delegates scrolling to the cards column", async () => {
+    const restoreSubagents = installStructuredSubagents(8);
+    const { host, screen } = await renderInTheme("dark");
+    host.style.width = "390px";
+    host.style.height = "420px";
+    try {
+      await vi.waitFor(() => {
+        expect(host.querySelectorAll('[data-cafe-atrium-subagent-row="true"]')).toHaveLength(8);
+      });
+      expect(host.textContent).toContain("Visible task description 1");
+      expect(host.textContent).toContain("Visible task description 8");
+      expect(host.textContent).not.toContain("and more");
+      expect(host.querySelectorAll('[data-cafe-subagent-avatar="true"]')).toHaveLength(8);
+
+      const subagentContainer = host.querySelector<HTMLElement>(
+        '[data-cafe-atrium-subagent-list="true"]',
+      );
+      expect(subagentContainer).not.toBeNull();
+      if (!subagentContainer) throw new Error("Subagent container did not mount");
+      expect(getComputedStyle(subagentContainer).overflowY).toBe("visible");
+      expect(subagentContainer.scrollHeight).toBeLessThanOrEqual(
+        subagentContainer.clientHeight + 1,
+      );
+
+      const rows = subagentContainer.querySelectorAll<HTMLElement>(
+        '[data-cafe-atrium-subagent-row="true"]',
+      );
+      const lastRow = rows.item(rows.length - 1);
+      const wrappedDetail = Array.from(
+        subagentContainer.querySelectorAll<HTMLElement>(
+          '[data-cafe-atrium-subagent-detail="true"]',
+        ),
+      ).find((detail) => detail.textContent?.includes("without an inner clip"));
+      expect(wrappedDetail).not.toBeUndefined();
+      if (!wrappedDetail) throw new Error("Wrapped subagent description did not mount");
+      expect(wrappedDetail.scrollHeight).toBeLessThanOrEqual(wrappedDetail.clientHeight + 1);
+      expect(lastRow.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+        subagentContainer.getBoundingClientRect().bottom + 1,
+      );
+
+      const card = subagentContainer.closest<HTMLElement>('[data-cafe-atrium-task-card="true"]');
+      expect(card).not.toBeNull();
+      if (!card) throw new Error("Task card containing subagents did not mount");
+      expect(card.scrollHeight).toBeLessThanOrEqual(card.clientHeight + 1);
+      expect(lastRow.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+        card.getBoundingClientRect().bottom + 1,
+      );
+
+      const taskScroller = host.querySelector<HTMLElement>('[data-cafe-atrium-task-scroll="true"]');
+      expect(taskScroller).not.toBeNull();
+      if (!taskScroller) throw new Error("Task scroll region did not mount");
+      expect(getComputedStyle(taskScroller).overflowY).toBe("auto");
+      expect(taskScroller.scrollHeight).toBeGreaterThan(taskScroller.clientHeight);
+
+      card.scrollIntoView({ block: "end" });
+      expect(card.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+        taskScroller.getBoundingClientRect().bottom + 1,
+      );
+      expect(card.getBoundingClientRect().bottom).toBeGreaterThanOrEqual(
+        taskScroller.getBoundingClientRect().top - 1,
+      );
+    } finally {
+      restoreSubagents();
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("keeps every right-aligned task reachable in a short responsive viewport", async () => {
+    const restoreThreads = addRunningThreads(9);
+    const { host, screen } = await renderInTheme("dark");
+    host.style.width = "390px";
+    host.style.height = "420px";
+    try {
+      await vi.waitFor(() => {
+        expect(host.querySelectorAll('[data-cafe-atrium-task-card="true"]')).toHaveLength(12);
+      });
+      const scroller = host.querySelector<HTMLElement>('[data-cafe-atrium-task-scroll="true"]');
+      expect(scroller).not.toBeNull();
+      if (!scroller) throw new Error("Task scroll region did not mount");
+      expect(getComputedStyle(scroller).overflowY).toBe("auto");
+      expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight);
+
+      const hostRight = host.getBoundingClientRect().right;
+      expect(scroller.getBoundingClientRect().right).toBeLessThanOrEqual(hostRight + 1);
+      scroller.scrollTop = scroller.scrollHeight;
+      const cards = scroller.querySelectorAll<HTMLElement>('[data-cafe-atrium-task-card="true"]');
+      const lastCard = cards.item(cards.length - 1);
+      expect(lastCard.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+        scroller.getBoundingClientRect().bottom + 1,
+      );
+    } finally {
+      restoreThreads();
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("retains detail for the visible card window and releases every subscription on unmount", async () => {
+    atriumHarness.retainThreadDetailSubscription.mockClear();
+    atriumHarness.retainedDetails.length = 0;
+    const { host, screen } = await renderInTheme("dark");
+    let mounted = true;
+    try {
+      await vi.waitFor(() => {
+        expect(atriumHarness.retainThreadDetailSubscription).toHaveBeenCalled();
+      });
+      expect(atriumHarness.retainThreadDetailSubscription.mock.calls.length).toBeLessThanOrEqual(
+        24,
+      );
+      const releases = atriumHarness.retainedDetails.map((entry) => entry.release);
+      await screen.unmount();
+      mounted = false;
+      expect(releases.every((release) => release.mock.calls.length === 1)).toBe(true);
+    } finally {
+      if (mounted) await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("keeps every card reachable while bounding and rotating detail hydration", async () => {
+    atriumHarness.retainThreadDetailSubscription.mockClear();
+    atriumHarness.retainedDetails.length = 0;
+    const restoreThreads = addRunningThreads(40);
+    const { host, screen } = await renderInTheme("dark");
+    host.style.width = "390px";
+    host.style.height = "420px";
+    try {
+      await vi.waitFor(() => {
+        expect(host.querySelectorAll('[data-cafe-atrium-task-card="true"]')).toHaveLength(43);
+        expect(atriumHarness.retainThreadDetailSubscription).toHaveBeenCalled();
+      });
+      expect(host.textContent).not.toContain("and more");
+      const activeSubscriptionCount = () =>
+        atriumHarness.retainedDetails.filter((entry) => entry.release.mock.calls.length === 0)
+          .length;
+      expect(activeSubscriptionCount()).toBeLessThanOrEqual(24);
+
+      const scroller = host.querySelector<HTMLElement>('[data-cafe-atrium-task-scroll="true"]');
+      const cards = scroller?.querySelectorAll<HTMLElement>('[data-cafe-atrium-task-card="true"]');
+      expect(scroller).not.toBeNull();
+      expect(cards).toHaveLength(43);
+      if (!scroller || !cards) throw new Error("Expected complete Atrium card stack");
+      const lastCard = cards.item(cards.length - 1);
+      const lastCardKey = JSON.parse(lastCard.dataset.cafeAtriumCardKey ?? "null") as
+        | [string, string]
+        | null;
+      expect(lastCardKey).not.toBeNull();
+      scroller.scrollTop = scroller.scrollHeight;
+      scroller.dispatchEvent(new Event("scroll"));
+
+      await vi.waitFor(() => {
+        expect(atriumHarness.retainThreadDetailSubscription).toHaveBeenCalledWith(
+          "env-1",
+          lastCardKey?.[1],
+        );
+        expect(activeSubscriptionCount()).toBeLessThanOrEqual(24);
+      });
+    } finally {
+      restoreThreads();
       await screen.unmount();
       host.remove();
     }

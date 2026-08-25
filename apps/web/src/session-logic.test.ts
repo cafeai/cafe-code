@@ -744,6 +744,212 @@ describe("deriveWorkLogEntries", () => {
     expect(entries.map((entry) => entry.id)).toEqual(["task-progress", "task-complete"]);
   });
 
+  it("coalesces structured subagent lifecycle while ordinary task starts stay hidden", () => {
+    const subagent = {
+      threadId: "provider-child-locate-footer",
+      label: "Locate footer label",
+      path: "/root/locate_footer_label",
+      objective: "Find where the footer status label is assembled",
+      startedAt: "2026-02-23T00:00:01.000Z",
+    };
+    const started = makeActivity({
+      id: "subagent-start",
+      createdAt: "2026-02-23T00:00:01.000Z",
+      kind: "task.started",
+      summary: "Subagent started",
+      tone: "info",
+      turnId: "turn-subagents",
+      payload: {
+        taskId: subagent.threadId,
+        taskType: "subagent",
+        detail: subagent.objective,
+        subagent: { ...subagent, status: "waiting" },
+      },
+    });
+    const progress = makeActivity({
+      id: "subagent-progress",
+      createdAt: "2026-02-23T00:00:06.000Z",
+      kind: "task.progress",
+      summary: "Subagent update",
+      tone: "info",
+      turnId: "turn-subagents",
+      payload: {
+        taskId: subagent.threadId,
+        detail: "Refining trigger label filtering",
+        subagent: { ...subagent, status: "active" },
+      },
+    });
+    const completed = makeActivity({
+      id: "subagent-complete",
+      createdAt: "2026-02-23T00:01:06.000Z",
+      kind: "task.completed",
+      summary: "Subagent completed",
+      tone: "info",
+      turnId: "turn-subagents",
+      payload: {
+        taskId: subagent.threadId,
+        status: "completed",
+        detail: "Located the footer label source",
+        subagent: { ...subagent, status: "completed" },
+      },
+    });
+    const ordinaryStart = makeActivity({
+      id: "ordinary-task-start",
+      createdAt: "2026-02-23T00:00:03.000Z",
+      kind: "task.started",
+      summary: "Default task started",
+      tone: "info",
+      turnId: "turn-subagents",
+      payload: {
+        taskId: "ordinary-task",
+        taskType: "background",
+        detail: "Internal bookkeeping",
+      },
+    });
+
+    const activeEntries = deriveWorkLogEntries(
+      [started, ordinaryStart, progress],
+      TurnId.make("turn-subagents"),
+    );
+    expect(activeEntries).toEqual([
+      {
+        id: "subagent-start",
+        turnId: TurnId.make("turn-subagents"),
+        createdAt: "2026-02-23T00:00:01.000Z",
+        label: "Locate footer label",
+        detail: "Find where the footer status label is assembled",
+        tone: "thinking",
+        itemType: "collab_agent_tool_call",
+        subagent: {
+          id: "provider-child-locate-footer",
+          label: "Locate footer label",
+          objective: "Find where the footer status label is assembled",
+          description: "Refining trigger label filtering",
+          status: "active",
+          startedAt: "2026-02-23T00:00:01.000Z",
+        },
+      },
+    ]);
+
+    const completedEntries = deriveWorkLogEntries(
+      [started, ordinaryStart, progress, completed],
+      TurnId.make("turn-subagents"),
+    );
+    expect(completedEntries).toHaveLength(1);
+    expect(completedEntries[0]?.id).toBe("subagent-start");
+    expect(completedEntries[0]?.subagent).toMatchObject({
+      id: "provider-child-locate-footer",
+      label: "Locate footer label",
+      objective: "Find where the footer status label is assembled",
+      description: "Refining trigger label filtering",
+      status: "completed",
+      startedAt: "2026-02-23T00:00:01.000Z",
+      completedAt: "2026-02-23T00:01:06.000Z",
+    });
+    expect(completedEntries.some((entry) => entry.id === "ordinary-task-start")).toBe(false);
+
+    const delayedProgress = makeActivity({
+      id: "subagent-delayed-progress",
+      createdAt: "2026-02-23T00:01:07.000Z",
+      kind: "task.progress",
+      summary: "Subagent update",
+      tone: "info",
+      turnId: "turn-subagents",
+      payload: {
+        taskId: subagent.threadId,
+        detail: "Delayed replay that must not resurrect the worker",
+        subagent: { ...subagent, status: "active" },
+      },
+    });
+    const afterDelayedProgress = deriveWorkLogEntries(
+      [started, progress, completed, delayedProgress],
+      TurnId.make("turn-subagents"),
+    );
+    expect(afterDelayedProgress[0]?.subagent).toMatchObject({
+      status: "completed",
+      description: "Refining trigger label filtering",
+      completedAt: "2026-02-23T00:01:06.000Z",
+    });
+
+    const restarted = makeActivity({
+      id: "subagent-restarted",
+      createdAt: "2026-02-23T00:02:00.000Z",
+      kind: "task.started",
+      summary: "Subagent started",
+      tone: "info",
+      turnId: "turn-subagents",
+      payload: {
+        taskId: subagent.threadId,
+        detail: "Rechecking after an explicit restart",
+        subagent: {
+          ...subagent,
+          status: "active",
+          startedAt: "2026-02-23T00:02:00.000Z",
+        },
+      },
+    });
+    const afterRestart = deriveWorkLogEntries(
+      [started, progress, completed, delayedProgress, restarted],
+      TurnId.make("turn-subagents"),
+    );
+    expect(afterRestart[0]?.subagent).toMatchObject({
+      status: "active",
+      description: "Rechecking after an explicit restart",
+      startedAt: "2026-02-23T00:02:00.000Z",
+    });
+    expect(afterRestart[0]?.subagent?.completedAt).toBeUndefined();
+  });
+
+  it("settles legacy Codex control rows when their parent turn is terminal", () => {
+    const turnId = TurnId.make("turn-legacy-subagent");
+    const legacy = makeActivity({
+      id: "legacy-subagent-started",
+      createdAt: "2026-02-23T00:00:01.000Z",
+      kind: "tool.completed",
+      summary: "Subagent task",
+      tone: "tool",
+      turnId,
+      payload: {
+        itemType: "collab_agent_tool_call",
+        itemId: "legacy-child",
+        detail: "Started /root/audit_history",
+      },
+    });
+
+    expect(deriveWorkLogEntries([legacy], turnId)[0]?.subagent?.status).toBe("active");
+    expect(
+      deriveWorkLogEntries([legacy], turnId, { terminalTurnIds: new Set([turnId]) })[0]?.subagent,
+    ).toMatchObject({ status: "completed", completedAt: legacy.createdAt });
+  });
+
+  it("treats task.completed as terminal when repeated presentation state is stale", () => {
+    const turnId = TurnId.make("turn-contradictory-subagent-status");
+    const completed = makeActivity({
+      id: "subagent-completed-with-stale-presentation",
+      createdAt: "2026-02-23T00:03:00.000Z",
+      kind: "task.completed",
+      summary: "Subagent completed",
+      tone: "info",
+      turnId,
+      payload: {
+        taskId: "provider-child-stale-status",
+        status: "completed",
+        subagent: {
+          threadId: "provider-child-stale-status",
+          label: "Status audit",
+          // Provider presentation is repeated display metadata and may lag the
+          // canonical terminal task edge by one notification.
+          status: "active",
+        },
+      },
+    });
+
+    expect(deriveWorkLogEntries([completed], turnId)[0]?.subagent).toMatchObject({
+      status: "completed",
+      completedAt: completed.createdAt,
+    });
+  });
+
   it("shows Codex guardian approval review starts", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

@@ -2282,6 +2282,401 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect(
+    "preserves structured Claude subagent presentation across task lifecycle events",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const taskEventsFiber = yield* Stream.filter(
+          adapter.streamEvents,
+          (event) =>
+            event.type === "task.started" ||
+            event.type === "task.progress" ||
+            event.type === "task.completed",
+        ).pipe(Stream.take(8), Stream.runCollect, Effect.forkChild);
+
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+
+        // A local_agent task carries the provider's durable task id, human task
+        // description, agent role, and original objective. Every later edge must
+        // repeat that presentation so bounded activity snapshots can render the
+        // subagent without retaining the original task_started event forever.
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "task-structured-subagent",
+          tool_use_id: "tool-structured-subagent",
+          description: "Audit the provider lifecycle",
+          subagent_type: "code-reviewer",
+          task_type: "local_agent",
+          prompt: "Inspect every task event mapping and report exact lifecycle gaps.",
+          spawn_depth: 1,
+          session_id: "sdk-session-structured-subagent",
+          uuid: "task-structured-subagent-started",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_progress",
+          task_id: "task-structured-subagent",
+          tool_use_id: "tool-structured-subagent",
+          description: "Audit the provider lifecycle",
+          subagent_type: "code-reviewer",
+          summary: "Checking terminal task status handling.",
+          usage: {
+            total_tokens: 512,
+            tool_uses: 3,
+            duration_ms: 4_200,
+          },
+          last_tool_name: "Read",
+          session_id: "sdk-session-structured-subagent",
+          uuid: "task-structured-subagent-progress",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_updated",
+          task_id: "task-structured-subagent",
+          patch: {
+            status: "paused",
+          },
+          session_id: "sdk-session-structured-subagent",
+          uuid: "task-structured-subagent-paused",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_notification",
+          task_id: "task-structured-subagent",
+          tool_use_id: "tool-structured-subagent",
+          status: "completed",
+          output_file: "/tmp/structured-subagent-output",
+          summary: "Provider lifecycle audit complete.",
+          usage: {
+            total_tokens: 768,
+            tool_uses: 5,
+            duration_ms: 6_400,
+          },
+          session_id: "sdk-session-structured-subagent",
+          uuid: "task-structured-subagent-completed",
+        } as unknown as SDKMessage);
+
+        // Bash and other generic SDK tasks share task_* lifecycle frames. They
+        // must remain ordinary task activity instead of receiving an avatar or
+        // being counted as a nested agent merely because they have a task id.
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "task-generic-bash",
+          tool_use_id: "tool-generic-bash",
+          description: "Build desktop assets",
+          task_type: "local_bash",
+          session_id: "sdk-session-structured-subagent",
+          uuid: "task-generic-bash-started",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_progress",
+          task_id: "task-generic-bash",
+          tool_use_id: "tool-generic-bash",
+          description: "Build desktop assets",
+          summary: "Compiling renderer chunks.",
+          usage: {
+            total_tokens: 0,
+            tool_uses: 1,
+            duration_ms: 1_200,
+          },
+          last_tool_name: "Bash",
+          session_id: "sdk-session-structured-subagent",
+          uuid: "task-generic-bash-progress",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_updated",
+          task_id: "task-generic-bash",
+          patch: {
+            status: "running",
+          },
+          session_id: "sdk-session-structured-subagent",
+          uuid: "task-generic-bash-updated",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_notification",
+          task_id: "task-generic-bash",
+          tool_use_id: "tool-generic-bash",
+          status: "completed",
+          output_file: "/tmp/generic-bash-output",
+          summary: "Desktop assets built.",
+          session_id: "sdk-session-structured-subagent",
+          uuid: "task-generic-bash-completed",
+        } as unknown as SDKMessage);
+
+        const taskEvents = Array.from(yield* Fiber.join(taskEventsFiber));
+        const structuredEvents = taskEvents.filter(
+          (event) => event.payload.taskId === RuntimeTaskId.make("task-structured-subagent"),
+        );
+        assert.equal(structuredEvents.length, 4);
+
+        const expectedStartedAt = structuredEvents[0]?.payload.subagent?.startedAt;
+        assert.ok(expectedStartedAt);
+        const expectedStatuses = ["active", "active", "waiting", "completed"] as const;
+        for (const [index, event] of structuredEvents.entries()) {
+          assert.deepEqual(event.payload.subagent, {
+            threadId: "task-structured-subagent",
+            label: "Audit the provider lifecycle",
+            role: "code-reviewer",
+            objective: "Inspect every task event mapping and report exact lifecycle gaps.",
+            status: expectedStatuses[index],
+            startedAt: expectedStartedAt,
+          });
+        }
+
+        const genericEvents = taskEvents.filter(
+          (event) => event.payload.taskId === RuntimeTaskId.make("task-generic-bash"),
+        );
+        assert.equal(genericEvents.length, 4);
+        assert.equal(
+          genericEvents.every((event) => event.payload.subagent === undefined),
+          true,
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "cryptographically bounds hostile Claude task and tool identities across the full lifecycle",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const taskEventsFiber = yield* Stream.filter(
+          adapter.streamEvents,
+          (event) =>
+            event.type === "task.started" ||
+            event.type === "task.progress" ||
+            event.type === "task.completed",
+        ).pipe(Stream.take(9), Stream.runCollect, Effect.forkChild);
+
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "delegate hostile identity checks",
+          attachments: [],
+        });
+
+        // Both pairs share substantially more than the 512-byte retention
+        // limit. Their only differences live at the tail, so a truncation-based
+        // implementation would merge the task lifecycles and tool aliases.
+        const sharedTaskPrefix = `task-${"shared-provider-prefix-".repeat(32)}`;
+        const firstRawTaskId = `${sharedTaskPrefix}first-tail`;
+        const secondRawTaskId = `${sharedTaskPrefix}second-tail`;
+        const sharedToolPrefix = `tool-${"shared-provider-prefix-".repeat(32)}`;
+        const firstRawToolUseId = `${sharedToolPrefix}first-tail`;
+        const secondRawToolUseId = `${sharedToolPrefix}second-tail`;
+        assert.ok(Buffer.byteLength(sharedTaskPrefix, "utf8") > 512);
+        assert.ok(Buffer.byteLength(sharedToolPrefix, "utf8") > 512);
+
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: firstRawTaskId,
+          tool_use_id: firstRawToolUseId,
+          description: "Audit the first oversized identity",
+          subagent_type: "identity-auditor",
+          task_type: "local_agent",
+          prompt: "Track the first hostile lifecycle without confusing it with its sibling.",
+          spawn_depth: 1,
+          session_id: "sdk-session-bounded-identities",
+          uuid: "bounded-first-started",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: secondRawTaskId,
+          tool_use_id: secondRawToolUseId,
+          description: "Audit the second oversized identity",
+          subagent_type: "identity-auditor",
+          task_type: "local_agent",
+          prompt: "Track the second hostile lifecycle independently.",
+          spawn_depth: 1,
+          session_id: "sdk-session-bounded-identities",
+          uuid: "bounded-second-started",
+        } as unknown as SDKMessage);
+
+        // Nested assistant frames carry only parent_tool_use_id. This proves
+        // the bounded tool-use map still resolves the first task after another
+        // hostile id with the same long prefix has been registered.
+        harness.query.emit({
+          type: "assistant",
+          parent_tool_use_id: firstRawToolUseId,
+          subagent_type: "identity-auditor",
+          task_description: "Audit the first oversized identity",
+          session_id: "sdk-session-bounded-identities",
+          uuid: "bounded-first-nested-progress",
+          message: {
+            id: "bounded-first-nested-message",
+            role: "assistant",
+            content: [{ type: "text", text: "The first oversized identity remains isolated." }],
+            usage: {
+              input_tokens: 100,
+              output_tokens: 20,
+            },
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_progress",
+          task_id: firstRawTaskId,
+          tool_use_id: firstRawToolUseId,
+          description: "Audit the first oversized identity",
+          summary: "Checking the task-id binding map.",
+          session_id: "sdk-session-bounded-identities",
+          uuid: "bounded-first-progress",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_updated",
+          task_id: firstRawTaskId,
+          patch: { status: "paused" },
+          session_id: "sdk-session-bounded-identities",
+          uuid: "bounded-first-updated",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_notification",
+          task_id: secondRawTaskId,
+          tool_use_id: secondRawToolUseId,
+          status: "failed",
+          summary: "The second lifecycle ended independently.",
+          output_file: "/tmp/bounded-second-output",
+          session_id: "sdk-session-bounded-identities",
+          uuid: "bounded-second-completed",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_notification",
+          task_id: firstRawTaskId,
+          tool_use_id: firstRawToolUseId,
+          status: "completed",
+          summary: "The first lifecycle completed.",
+          output_file: "/tmp/bounded-first-output",
+          session_id: "sdk-session-bounded-identities",
+          uuid: "bounded-first-completed",
+        } as unknown as SDKMessage);
+
+        // Ordinary provider ids retain their exact public identity rather than
+        // paying the readability cost of an unnecessary digest.
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "ordinary-task-id",
+          tool_use_id: "ordinary-tool-use-id",
+          description: "Audit an ordinary identity",
+          subagent_type: "identity-auditor",
+          task_type: "local_agent",
+          session_id: "sdk-session-bounded-identities",
+          uuid: "ordinary-task-started",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_notification",
+          task_id: "ordinary-task-id",
+          tool_use_id: "ordinary-tool-use-id",
+          status: "completed",
+          summary: "The ordinary lifecycle completed.",
+          output_file: "/tmp/ordinary-task-output",
+          session_id: "sdk-session-bounded-identities",
+          uuid: "ordinary-task-completed",
+        } as unknown as SDKMessage);
+
+        const taskEvents = Array.from(yield* Fiber.join(taskEventsFiber));
+        const firstStarted = taskEvents.find(
+          (event) =>
+            event.type === "task.started" &&
+            event.payload.description === "Audit the first oversized identity",
+        );
+        const secondStarted = taskEvents.find(
+          (event) =>
+            event.type === "task.started" &&
+            event.payload.description === "Audit the second oversized identity",
+        );
+        assert.equal(firstStarted?.type, "task.started");
+        assert.equal(secondStarted?.type, "task.started");
+        if (firstStarted?.type !== "task.started" || secondStarted?.type !== "task.started") {
+          return;
+        }
+
+        const firstCanonicalTaskId = String(firstStarted.payload.taskId);
+        const secondCanonicalTaskId = String(secondStarted.payload.taskId);
+        assert.match(firstCanonicalTaskId, /^claude-task-sha256:[0-9a-f]{64}$/u);
+        assert.match(secondCanonicalTaskId, /^claude-task-sha256:[0-9a-f]{64}$/u);
+        assert.notEqual(firstCanonicalTaskId, firstRawTaskId);
+        assert.notEqual(secondCanonicalTaskId, secondRawTaskId);
+        assert.notEqual(firstCanonicalTaskId, secondCanonicalTaskId);
+
+        const firstLifecycle = taskEvents.filter(
+          (event) => String(event.payload.taskId) === firstCanonicalTaskId,
+        );
+        assert.equal(firstLifecycle.length, 5);
+        assert.deepEqual(
+          firstLifecycle.map((event) => event.payload.subagent?.status),
+          ["active", "active", "active", "waiting", "completed"],
+        );
+        assert.equal(
+          firstLifecycle.every(
+            (event) => event.payload.subagent?.threadId === firstCanonicalTaskId,
+          ),
+          true,
+        );
+        const nestedProgress = firstLifecycle.find(
+          (event) =>
+            event.type === "task.progress" &&
+            event.payload.summary === "The first oversized identity remains isolated.",
+        );
+        assert.equal(nestedProgress?.type, "task.progress");
+
+        const secondLifecycle = taskEvents.filter(
+          (event) => String(event.payload.taskId) === secondCanonicalTaskId,
+        );
+        assert.equal(secondLifecycle.length, 2);
+        assert.deepEqual(
+          secondLifecycle.map((event) => event.payload.subagent?.status),
+          ["active", "failed"],
+        );
+        assert.equal(
+          secondLifecycle.every(
+            (event) => event.payload.subagent?.threadId === secondCanonicalTaskId,
+          ),
+          true,
+        );
+
+        const ordinaryLifecycle = taskEvents.filter(
+          (event) => event.payload.taskId === RuntimeTaskId.make("ordinary-task-id"),
+        );
+        assert.equal(ordinaryLifecycle.length, 2);
+        assert.equal(
+          ordinaryLifecycle.every(
+            (event) => event.payload.subagent?.threadId === "ordinary-task-id",
+          ),
+          true,
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("keeps skip_transcript Claude tasks out of inline runtime activity", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

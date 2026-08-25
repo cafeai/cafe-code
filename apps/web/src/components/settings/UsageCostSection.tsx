@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import type { ProviderDriverKind, UsageStatsGetResult } from "@cafecode/contracts";
 import { rollUpCost, resolveModelRate, type ModelRate } from "@cafecode/shared/modelPricing";
 
@@ -33,6 +33,15 @@ const currency = new Intl.NumberFormat("en-US", {
 });
 const integers = new Intl.NumberFormat("en-US");
 
+/** Keep the familiar dollar sign while naming the accounting currency. */
+function formatUsd(value: number): string {
+  return `${currency.format(value)} USD`;
+}
+
+function fullTokens(value: number): string {
+  return integers.format(Math.round(value));
+}
+
 /** `48B` / `46.2B` / `142M` — the compact form the reference uses. */
 function compactTokens(value: number): string {
   const abs = Math.abs(value);
@@ -40,6 +49,17 @@ function compactTokens(value: number): string {
   if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(abs < 10e6 ? 2 : 0)}M`;
   if (abs >= 1_000) return `${(value / 1_000).toFixed(abs < 10e3 ? 1 : 0)}K`;
   return integers.format(Math.round(value));
+}
+
+/**
+ * Never round a non-zero share away. Reporting "0.0% unpriced" while a model
+ * in the table plainly reads "unpriced" makes the figure look wrong and hides
+ * the very thing this panel exists to disclose.
+ */
+function formatShare(percent: number, tokens: number): string {
+  if (tokens > 0 && percent < 0.1) return "<0.1%";
+  if (tokens === 0) return "0.0%";
+  return `${percent.toFixed(1)}%`;
 }
 
 type Mode = "cost" | "tokens";
@@ -66,20 +86,40 @@ const TOKEN_BAND_COLORS = {
 } as const;
 
 function StatTile({
+  id,
   label,
   value,
+  rawTokens,
   detail,
 }: {
+  id: "processed" | "cached" | "uncached" | "output" | "cache-savings";
   label: string;
   value: string;
-  detail?: string | undefined;
+  rawTokens?: number | undefined;
+  detail?: ReactNode;
 }) {
   return (
-    <div className="min-w-0 px-4 py-3">
-      <div className="truncate text-[11px] text-muted-foreground">{label}</div>
-      <div className="mt-1 truncate text-lg font-medium tabular-nums text-foreground">{value}</div>
+    <div className="min-w-0 px-4 py-3" data-usage-composition-tile={id}>
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div
+        className="mt-1 break-words text-lg font-medium tabular-nums text-foreground [overflow-wrap:anywhere]"
+        data-usage-composition-compact={rawTokens === undefined ? undefined : id}
+        data-usage-composition-value={id}
+      >
+        {value}
+      </div>
+      {rawTokens === undefined ? null : (
+        <div
+          className="mt-0.5 break-words text-[11px] tabular-nums text-muted-foreground [overflow-wrap:anywhere]"
+          data-usage-composition-raw={id}
+        >
+          {fullTokens(rawTokens)} tokens exact
+        </div>
+      )}
       {detail ? (
-        <div className="mt-0.5 truncate text-[11px] text-muted-foreground/70">{detail}</div>
+        <div className="mt-0.5 break-words text-[11px] text-muted-foreground/70 [overflow-wrap:anywhere]">
+          {detail}
+        </div>
       ) : null}
     </div>
   );
@@ -120,13 +160,19 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
       byProvider.set(entry.provider, current);
     }
     const providers = [...byProvider.entries()]
-      .map(([provider, value]) => ({ provider, ...value }))
+      .map(([provider, value]) => ({
+        provider,
+        cost: value.cost,
+        tokens: value.tokens,
+        priced: value.priced,
+      }))
       .toSorted((left, right) => right.cost - left.cost || right.tokens - left.tokens);
 
     // Per model, for the breakdown table.
     const models = breakdown
       .map((entry) => ({
-        ...entry,
+        provider: entry.provider,
+        model: entry.model,
         cost: rollUpCost([entry], overrides).cost,
         priced: resolveModelRate(entry.model, overrides) !== undefined,
         tokens: entry.inputTokens + entry.outputTokens,
@@ -157,7 +203,13 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
 
   // Same shared counter as the token odometer; currency just settles on cents.
   const costDisplay = useCountUp(view.rollup.cost, { decimals: 2 });
-  const tokensDisplay = useCountUp(view.processed);
+  // These four hooks are aggregate and cardinality-bounded. They animate the
+  // exact counters alongside their compact forms without creating one RAF loop
+  // per provider or model row.
+  const processedDisplay = useCountUp(view.processed);
+  const cachedDisplay = useCountUp(view.cached);
+  const freshDisplay = useCountUp(view.fresh);
+  const outputDisplay = useCountUp(view.output);
 
   const chart = useMemo(() => {
     const all = usage?.days ?? [];
@@ -192,7 +244,8 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
         labels,
         series,
         rangeTokens,
-        format: (value: number) => `${compactTokens(value)} tokens`,
+        format: (value: number) =>
+          `${compactTokens(value)} tokens (${fullTokens(value)} tokens exact)`,
       };
     }
 
@@ -208,21 +261,11 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
         values: days.map((day) => (day.inputTokens + day.outputTokens) * blended),
       },
     ];
-    return { labels, series, rangeTokens, format: (value: number) => currency.format(value) };
+    return { labels, series, rangeTokens, format: (value: number) => formatUsd(value) };
   }, [usage, mode, range, view.rollup]);
 
   const share = view.rollup.pricedTokens + view.rollup.unpricedTokens;
   const pricedPercent = share === 0 ? null : (view.rollup.pricedTokens / share) * 100;
-  /**
-   * Never round a non-zero share away. Reporting "0.0% unpriced" while a model
-   * in the table plainly reads "unpriced" makes the figure look wrong and hides
-   * the very thing this panel exists to disclose.
-   */
-  const formatShare = (percent: number, tokens: number): string => {
-    if (tokens > 0 && percent < 0.1) return "<0.1%";
-    if (tokens === 0) return "0.0%";
-    return `${percent.toFixed(1)}%`;
-  };
   const maxProviderCost = Math.max(0, ...view.providers.map((entry) => entry.cost));
 
   return (
@@ -251,14 +294,17 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
         {/* Hero + provider split */}
         <div className="min-w-0">
           <div className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
-            Raw token cost
+            Raw token cost (USD)
           </div>
-          <div className="mt-1 text-4xl font-light tracking-tight tabular-nums text-foreground">
-            {currency.format(costDisplay)}
+          <div
+            className="mt-1 max-w-full break-words text-3xl font-light tracking-tight tabular-nums text-foreground [overflow-wrap:anywhere] sm:text-4xl"
+            data-usage-cost-hero-value="true"
+          >
+            {formatUsd(costDisplay)}
             <span className="align-super text-base text-muted-foreground">*</span>
           </div>
           <div className="mt-1 text-[11px] text-muted-foreground/70">
-            * if billed at full API rate
+            * estimated in USD if billed at full API rate
           </div>
 
           <div className="mt-5 flex flex-col gap-3">
@@ -273,13 +319,16 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
                   maxProviderCost > 0 ? Math.max(2, (entry.cost / maxProviderCost) * 100) : 0;
                 return (
                   <div key={entry.provider} className="min-w-0">
-                    <div className="flex items-baseline gap-2">
+                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                       <span className="flex min-w-0 items-center gap-1.5 text-sm text-foreground">
                         {Icon ? <Icon className="size-3.5 shrink-0" /> : null}
                         <span className="truncate">{formatUsageProviderLabel(entry.provider)}</span>
                       </span>
-                      <span className="ml-auto shrink-0 text-sm tabular-nums text-foreground">
-                        {entry.priced ? currency.format(entry.cost) : "unpriced"}
+                      <span
+                        className="ml-auto max-w-full break-words text-right text-sm tabular-nums text-foreground [overflow-wrap:anywhere]"
+                        data-usage-provider-cost-value="true"
+                      >
+                        {entry.priced ? formatUsd(entry.cost) : "unpriced"}
                       </span>
                     </div>
                     <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted">
@@ -288,8 +337,14 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
                         style={{ width: `${width}%` }}
                       />
                     </div>
-                    <div className="mt-1 text-[11px] text-muted-foreground/70">
-                      {compactTokens(entry.tokens)} tokens
+                    <div className="mt-1 flex flex-wrap gap-x-1.5 gap-y-0.5 text-[11px] tabular-nums text-muted-foreground/70">
+                      <span data-usage-provider-token-compact="true">
+                        {compactTokens(entry.tokens)} tokens
+                      </span>
+                      <span aria-hidden="true">·</span>
+                      <span data-usage-provider-token-raw="true">
+                        {fullTokens(entry.tokens)} tokens exact
+                      </span>
                     </div>
                   </div>
                 );
@@ -301,7 +356,9 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
         {/* Chart */}
         <div className="min-w-0">
           <div className="mb-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-            <span>{mode === "cost" ? "Estimated daily cost" : "Daily tokens"}</span>
+            <span data-usage-cost-chart-label="true">
+              {mode === "cost" ? "Estimated daily cost (USD)" : "Daily tokens"}
+            </span>
             <div className="flex overflow-hidden rounded-md border border-border/70">
               {RANGES.map((entry) => (
                 <button
@@ -318,8 +375,14 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
                 </button>
               ))}
             </div>
-            <span className="tabular-nums text-muted-foreground/70">
-              {compactTokens(chart.rangeTokens)} tokens in range
+            <span className="flex flex-wrap gap-x-1.5 tabular-nums text-muted-foreground/70">
+              <span data-usage-range-token-compact="true">
+                {compactTokens(chart.rangeTokens)} tokens in range
+              </span>
+              <span aria-hidden="true">·</span>
+              <span data-usage-range-token-raw="true">
+                {fullTokens(chart.rangeTokens)} tokens exact
+              </span>
             </span>
             {mode === "tokens" ? (
               <span className="ml-auto flex items-center gap-3">
@@ -349,30 +412,53 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
       {/* Composition tiles */}
       <div className="grid grid-cols-2 divide-x divide-y divide-border/60 border-t border-border/60 sm:grid-cols-3 lg:grid-cols-5 lg:divide-y-0">
         <StatTile
+          id="processed"
           label="Processed tokens"
-          value={compactTokens(tokensDisplay)}
+          value={compactTokens(processedDisplay)}
+          rawTokens={processedDisplay}
           detail={view.hasInputDetail ? undefined : "output only before token detail"}
         />
         <StatTile
+          id="cached"
           label="Cached input"
-          value={compactTokens(view.cached)}
+          value={compactTokens(cachedDisplay)}
+          rawTokens={cachedDisplay}
           detail={
             view.cached + view.fresh > 0
               ? `${((view.cached / (view.cached + view.fresh)) * 100).toFixed(1)}% of input`
               : undefined
           }
         />
-        <StatTile label="Uncached input" value={compactTokens(view.fresh)} />
         <StatTile
+          id="uncached"
+          label="Uncached input"
+          value={compactTokens(freshDisplay)}
+          rawTokens={freshDisplay}
+        />
+        <StatTile
+          id="output"
           label="Output"
-          value={compactTokens(view.output)}
+          value={compactTokens(outputDisplay)}
+          rawTokens={outputDisplay}
           detail={
-            view.reasoning > 0 ? `includes ${compactTokens(view.reasoning)} reasoning` : undefined
+            view.reasoning > 0 ? (
+              <>
+                includes{" "}
+                <span className="tabular-nums" data-usage-reasoning-token-compact="true">
+                  {compactTokens(view.reasoning)} reasoning
+                </span>{" "}
+                ·{" "}
+                <span className="tabular-nums" data-usage-reasoning-token-raw="true">
+                  {fullTokens(view.reasoning)} tokens exact
+                </span>
+              </>
+            ) : undefined
           }
         />
         <StatTile
-          label="Cache savings"
-          value={currency.format(view.rollup.cacheSavings)}
+          id="cache-savings"
+          label="Cache savings (USD)"
+          value={formatUsd(view.rollup.cacheSavings)}
           detail={
             view.rollup.cost > 0
               ? `${(view.rollup.cacheSavings / view.rollup.cost).toFixed(1)}x the raw cost`
@@ -388,7 +474,7 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
             <thead>
               <tr className="text-[11px] uppercase tracking-wide text-muted-foreground">
                 <th className="py-1.5 text-left font-medium">Model</th>
-                <th className="py-1.5 text-right font-medium">Cost</th>
+                <th className="py-1.5 text-right font-medium">Cost (USD)</th>
                 <th className="py-1.5 text-right font-medium">Tokens</th>
               </tr>
             </thead>
@@ -413,15 +499,26 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
                           <span className="truncate">{formatUsageModelLabel(entry.model)}</span>
                         </span>
                       </td>
-                      <td className="py-1.5 text-right tabular-nums">
+                      <td
+                        className="py-1.5 text-right tabular-nums"
+                        data-usage-model-cost-value="true"
+                      >
                         {entry.priced ? (
-                          currency.format(entry.cost)
+                          formatUsd(entry.cost)
                         ) : (
                           <span className="text-muted-foreground">unpriced</span>
                         )}
                       </td>
                       <td className="py-1.5 text-right tabular-nums text-muted-foreground">
-                        {compactTokens(entry.tokens)}
+                        <div data-usage-model-token-compact="true">
+                          {compactTokens(entry.tokens)}
+                        </div>
+                        <div
+                          className="text-[10px] text-muted-foreground/70"
+                          data-usage-model-token-raw="true"
+                        >
+                          {fullTokens(entry.tokens)} exact
+                        </div>
                       </td>
                     </tr>
                   );
@@ -433,7 +530,7 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
 
         <div className="min-w-0">
           <div className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
-            Cost quality
+            Cost quality (USD estimates)
           </div>
           <dl className="mt-2 flex flex-col gap-1.5 text-sm">
             <div className="flex items-baseline gap-2">
@@ -453,8 +550,13 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
               </dd>
             </div>
             <div className="flex items-baseline gap-2">
-              <dt className="text-muted-foreground">Cache savings</dt>
-              <dd className="ml-auto tabular-nums">{currency.format(view.rollup.cacheSavings)}</dd>
+              <dt className="text-muted-foreground">Cache savings (USD)</dt>
+              <dd
+                className="ml-auto break-words text-right tabular-nums [overflow-wrap:anywhere]"
+                data-usage-cost-quality-cache-savings="true"
+              >
+                {formatUsd(view.rollup.cacheSavings)}
+              </dd>
             </div>
           </dl>
           <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground/70">
@@ -470,7 +572,7 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
 /** Settings → Usage placement. */
 export function UsageCostSection({ usage }: { usage: UsageStatsGetResult | null }) {
   return (
-    <SettingsSection title="Cost">
+    <SettingsSection title="Cost (USD)">
       <UsageCostContent usage={usage} />
     </SettingsSection>
   );

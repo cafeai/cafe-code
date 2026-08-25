@@ -612,8 +612,9 @@ function runtimeEventToActivities(
           createdAt: event.createdAt,
           tone: "info",
           kind: "task.started",
-          summary:
-            event.payload.taskType === "plan"
+          summary: event.payload.subagent
+            ? "Subagent started"
+            : event.payload.taskType === "plan"
               ? "Plan task started"
               : event.payload.taskType === "approval-review"
                 ? "Approval review started"
@@ -623,6 +624,7 @@ function runtimeEventToActivities(
           payload: {
             taskId: event.payload.taskId,
             ...(event.payload.taskType ? { taskType: event.payload.taskType } : {}),
+            ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
             ...(event.payload.description
               ? { detail: truncateDetail(event.payload.description) }
               : {}),
@@ -640,10 +642,11 @@ function runtimeEventToActivities(
           createdAt: event.createdAt,
           tone: "info",
           kind: "task.progress",
-          summary: "Reasoning update",
+          summary: event.payload.subagent ? "Subagent update" : "Reasoning update",
           payload: {
             taskId: event.payload.taskId,
             detail: truncateDetail(event.payload.summary ?? event.payload.description),
+            ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
             ...(event.payload.summary ? { summary: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.lastToolName ? { lastToolName: event.payload.lastToolName } : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
@@ -663,13 +666,20 @@ function runtimeEventToActivities(
           kind: "task.completed",
           summary:
             event.payload.status === "failed"
-              ? "Task failed"
+              ? event.payload.subagent
+                ? "Subagent failed"
+                : "Task failed"
               : event.payload.status === "stopped"
-                ? "Task stopped"
-                : "Task completed",
+                ? event.payload.subagent
+                  ? "Subagent stopped"
+                  : "Task stopped"
+                : event.payload.subagent
+                  ? "Subagent completed"
+                  : "Task completed",
           payload: {
             taskId: event.payload.taskId,
             status: event.payload.status,
+            ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
             ...(event.payload.summary ? { detail: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
           },

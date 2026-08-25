@@ -267,6 +267,9 @@ export type SidebarThreadPreviewCount = typeof SidebarThreadPreviewCount.Type;
 export const DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT: SidebarThreadPreviewCount = 6;
 
 export const ClientSettingsSchema = Schema.Struct({
+  // The persisted key predates the composer task-progress control. It now
+  // applies only to completed authored-plan documents; runtime checklists are
+  // transient composer UI and never open the side panel.
   autoOpenPlanSidebar: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // Per-device first-run flow. `onboardingCompleted` gates the full-screen
   // onboarding surface so it only appears on a fresh install (and never loops

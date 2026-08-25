@@ -11,7 +11,6 @@ import type {
 import type { AppState } from "../../store";
 import {
   formatElapsed,
-  MAX_SUBAGENT_ROWS,
   mergeTaskAtriumErrorDismissals,
   selectAtriumSnapshot,
 } from "./taskAtriumData";
@@ -23,7 +22,7 @@ const NOW = Date.UTC(2026, 0, 1, 12, 0, 0);
 
 function activity(
   id: string,
-  kind: "tool.started" | "tool.completed",
+  kind: "tool.started" | "tool.completed" | "task.started" | "task.progress" | "task.completed",
   summary: string,
   payload: Record<string, unknown>,
 ): OrchestrationThreadActivity {
@@ -95,7 +94,7 @@ function buildState(options: {
               requestedAt: new Date(NOW - 45_000).toISOString(),
               startedAt: new Date(NOW - 45_000).toISOString(),
               completedAt:
-                latestTurnState === "error"
+                latestTurnState === "error" || latestTurnState === "completed"
                   ? (options.completedAt ?? new Date(NOW - 5_000).toISOString())
                   : null,
               assistantMessageId: null,
@@ -148,9 +147,13 @@ describe("selectAtriumSnapshot", () => {
       NOW,
     );
     const [card] = snapshot.cards;
-    expect(card?.subagents).toEqual([
-      { id: "task-1", label: "explore", detail: "mapping canvas call sites", running: true },
-    ]);
+    expect(card?.subagents[0]).toMatchObject({
+      id: "task-1",
+      label: "explore",
+      detail: "mapping canvas call sites",
+      status: "active",
+      running: true,
+    });
     expect(snapshot.subagentCount).toBe(1);
   });
 
@@ -169,11 +172,66 @@ describe("selectAtriumSnapshot", () => {
       NOW,
     );
     expect(snapshot.cards[0]?.subagents[0]).toEqual({
+      rowKey: "a1",
       id: "sub-1",
-      label: "Started",
-      detail: "/root/tests",
+      label: "Tests",
+      detail: "Working",
+      status: "active",
       running: true,
+      startedAt: NOW - 1_000,
+      completedAt: null,
     });
+  });
+
+  it("coalesces structured Claude lifecycle with stable identity, progress and timing", () => {
+    const startedAt = new Date(NOW - 65_000).toISOString();
+    const snapshot = selectAtriumSnapshot(
+      buildState({
+        provider: "claudeAgent",
+        activities: [
+          {
+            ...activity("task-start", "task.started", "Subagent started", {
+              taskId: "claude-task-1",
+              taskType: "local_agent",
+              detail: "Audit the renderer",
+              subagent: {
+                threadId: "claude-task-1",
+                label: "Audit the renderer",
+                role: "code-reviewer",
+                objective: "Audit the renderer for lifecycle gaps",
+                status: "active",
+                startedAt,
+              },
+            }),
+            createdAt: new Date(NOW - 2_000).toISOString(),
+          },
+          activity("task-progress", "task.progress", "Subagent update", {
+            taskId: "claude-task-1",
+            detail: "Checking activity projection",
+            subagent: {
+              threadId: "claude-task-1",
+              label: "Audit the renderer",
+              status: "active",
+              startedAt,
+            },
+          }),
+        ],
+      }),
+      NOW,
+    );
+
+    expect(snapshot.cards[0]?.subagents).toEqual([
+      {
+        rowKey: "task-start",
+        id: "claude-task-1",
+        label: "Audit the renderer",
+        detail: "Checking activity projection",
+        status: "active",
+        running: true,
+        startedAt: NOW - 65_000,
+        completedAt: null,
+      },
+    ]);
   });
 
   it("collapses a started/completed pair into one row and marks it finished", () => {
@@ -199,8 +257,8 @@ describe("selectAtriumSnapshot", () => {
     expect(snapshot.subagentCount).toBe(0);
   });
 
-  it("caps subagent rows and counts the remainder", () => {
-    const activities = Array.from({ length: MAX_SUBAGENT_ROWS + 2 }, (_, index) =>
+  it("returns every subagent row without an overflow remainder", () => {
+    const activities = Array.from({ length: 8 }, (_, index) =>
       activity(`a${index}`, "tool.started", "Subagent task started", {
         itemType: "collab_agent_tool_call",
         itemId: `task-${index}`,
@@ -208,8 +266,104 @@ describe("selectAtriumSnapshot", () => {
       }),
     );
     const snapshot = selectAtriumSnapshot(buildState({ activities }), NOW);
-    expect(snapshot.cards[0]?.subagents).toHaveLength(MAX_SUBAGENT_ROWS);
-    expect(snapshot.cards[0]?.extraSubagents).toBe(2);
+    expect(snapshot.cards[0]?.subagents).toHaveLength(8);
+    expect(snapshot.cards[0]?.subagents.map((subagent) => subagent.id)).toEqual(
+      Array.from({ length: 8 }, (_, index) => `task-${index}`),
+    );
+  });
+
+  it("retains distinct row keys when one provider child is reused across turns", () => {
+    const childId = "shared-provider-child";
+    const firstTurn = {
+      ...activity("first-turn-start", "task.started", "Subagent started", {
+        taskId: childId,
+        taskType: "subagent",
+        detail: "Inspect the first turn",
+        subagent: {
+          threadId: childId,
+          label: "Shared worker",
+          status: "completed",
+        },
+      }),
+      turnId: "turn-1" as TurnId,
+    };
+    const secondTurn = {
+      ...activity("second-turn-start", "task.started", "Subagent started", {
+        taskId: childId,
+        taskType: "subagent",
+        detail: "Continue in the next turn",
+        subagent: {
+          threadId: childId,
+          label: "Shared worker",
+          status: "active",
+        },
+      }),
+      turnId: "turn-2" as TurnId,
+    };
+
+    const snapshot = selectAtriumSnapshot(buildState({ activities: [firstTurn, secondTurn] }), NOW);
+
+    expect(snapshot.cards[0]?.subagents).toHaveLength(2);
+    expect(snapshot.cards[0]?.subagents.map((subagent) => subagent.id)).toEqual([childId, childId]);
+    expect(snapshot.cards[0]?.subagents.map((subagent) => subagent.rowKey)).toEqual([
+      "second-turn-start",
+      "first-turn-start",
+    ]);
+    expect(new Set(snapshot.cards[0]?.subagents.map((subagent) => subagent.rowKey)).size).toBe(2);
+  });
+
+  it("settles a legacy child row when its owning turn is terminal", () => {
+    const legacy = {
+      ...activity("legacy-child", "tool.completed", "Subagent task", {
+        itemType: "collab_agent_tool_call",
+        itemId: "legacy-child-id",
+        detail: "Started /root/legacy_audit",
+      }),
+      turnId: "turn-1" as TurnId,
+    };
+    const snapshot = selectAtriumSnapshot(
+      buildState({
+        activities: [legacy],
+        latestTurnState: "completed",
+        status: "ready",
+      }),
+      NOW,
+    );
+
+    expect(snapshot.cards[0]?.state).toBe("done");
+    expect(snapshot.cards[0]?.subagents[0]).toMatchObject({
+      id: "legacy-child-id",
+      status: "completed",
+      running: false,
+    });
+    expect(snapshot.subagentCount).toBe(0);
+  });
+
+  it("reuses subagent derivation across clock-only snapshot updates", () => {
+    const state = buildState({
+      activities: [
+        activity("subagent", "task.started", "Subagent started", {
+          taskId: "cached-child",
+          subagent: {
+            threadId: "cached-child",
+            label: "Cached worker",
+            status: "active",
+          },
+        }),
+        ...Array.from({ length: 500 }, (_, index) =>
+          activity(`ordinary-${index}`, "tool.completed", "Command completed", {
+            itemType: "command_execution",
+            itemId: `command-${index}`,
+          }),
+        ),
+      ],
+    });
+
+    const first = selectAtriumSnapshot(state, NOW);
+    const clockOnly = selectAtriumSnapshot(state, NOW + 1_000);
+
+    expect(first.cards[0]?.subagents).toHaveLength(1);
+    expect(clockOnly.cards[0]?.subagents).toBe(first.cards[0]?.subagents);
   });
 
   it("ignores non-subagent tool activity", () => {

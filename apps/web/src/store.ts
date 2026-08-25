@@ -20,7 +20,11 @@ import type {
   ScopedProjectRef,
   ScopedThreadRef,
 } from "@cafecode/contracts";
-import { isProviderDriverKind, ProviderDriverKind } from "@cafecode/contracts";
+import {
+  isProviderDriverKind,
+  MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN,
+  ProviderDriverKind,
+} from "@cafecode/contracts";
 import type { ThreadId, TurnId } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
 import { resolveModelSlugForProvider } from "@cafecode/shared/model";
@@ -1081,6 +1085,85 @@ function compareActivities(
   }
 
   return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+}
+
+function structuredSubagentLifecycleKeys(
+  activity: OrchestrationThreadActivity,
+  currentTurnId: TurnId | null | undefined,
+): { identity: string; lifecycle: string } | undefined {
+  if (
+    activity.turnId === null ||
+    activity.turnId !== currentTurnId ||
+    (activity.kind !== "task.started" &&
+      activity.kind !== "task.progress" &&
+      activity.kind !== "task.completed")
+  ) {
+    return undefined;
+  }
+  const payload =
+    typeof activity.payload === "object" &&
+    activity.payload !== null &&
+    !Array.isArray(activity.payload)
+      ? (activity.payload as Record<string, unknown>)
+      : null;
+  const subagent =
+    typeof payload?.subagent === "object" &&
+    payload.subagent !== null &&
+    !Array.isArray(payload.subagent)
+      ? (payload.subagent as Record<string, unknown>)
+      : null;
+  const identity = typeof subagent?.threadId === "string" ? subagent.threadId.trim() : "";
+  if (identity.length === 0 || identity.length > 512) return undefined;
+  return {
+    identity: JSON.stringify([activity.turnId, identity]),
+    lifecycle: JSON.stringify([activity.turnId, identity, activity.kind]),
+  };
+}
+
+/**
+ * Retain the ordinary bounded tail plus the minimum durable state needed by
+ * compact, current-turn renderer projections.
+ *
+ * A subagent may stay silent while hundreds of unrelated tool rows arrive. If
+ * its lifecycle edges were treated like ordinary history, it would disappear
+ * from chat/Atrium before it finished. Keeping the latest start, progress, and
+ * terminal edge per current-turn identity reconstructs restarts and rejects a
+ * delayed post-terminal progress replay without making the full activity
+ * history unbounded. The latest plan snapshot follows the same established
+ * compact-retention rule.
+ */
+function retainThreadActivityWindow(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  currentTurnId: TurnId | null | undefined,
+): OrchestrationThreadActivity[] {
+  const byId = new Map<string, OrchestrationThreadActivity>();
+  for (const activity of activities) byId.set(activity.id, activity);
+  const ordered = [...byId.values()].toSorted(compareActivities);
+  const retainedIds = new Set(ordered.slice(-MAX_THREAD_ACTIVITIES).map((activity) => activity.id));
+
+  const latestPlan = ordered.findLast((activity) => activity.kind === "turn.plan.updated");
+  if (latestPlan) retainedIds.add(latestPlan.id);
+
+  const retainedSubagentIdentities = new Set<string>();
+  const latestSubagentLifecycleByKey = new Map<string, OrchestrationThreadActivity>();
+  // Walk newest-first so an adversarial stream of unique ids cannot make the
+  // compact exception unbounded. Once the identity ceiling is reached, older
+  // identities fall back to the ordinary 500-row activity tail.
+  for (let index = ordered.length - 1; index >= 0; index -= 1) {
+    const activity = ordered[index]!;
+    const keys = structuredSubagentLifecycleKeys(activity, currentTurnId);
+    if (!keys) continue;
+    if (!retainedSubagentIdentities.has(keys.identity)) {
+      if (retainedSubagentIdentities.size >= MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN) continue;
+      retainedSubagentIdentities.add(keys.identity);
+    }
+    if (!latestSubagentLifecycleByKey.has(keys.lifecycle)) {
+      latestSubagentLifecycleByKey.set(keys.lifecycle, activity);
+    }
+  }
+  for (const activity of latestSubagentLifecycleByKey.values()) retainedIds.add(activity.id);
+
+  return ordered.filter((activity) => retainedIds.has(activity.id));
 }
 
 function buildLatestTurn(params: {
@@ -2175,12 +2258,13 @@ function applyEnvironmentOrchestrationEvent(
 
     case "thread.activity-appended":
       return updateThreadState(state, event.payload.threadId, (thread) => {
-        const activities = [
-          ...thread.activities.filter((activity) => activity.id !== event.payload.activity.id),
-          { ...event.payload.activity },
-        ]
-          .toSorted(compareActivities)
-          .slice(-MAX_THREAD_ACTIVITIES);
+        const activities = retainThreadActivityWindow(
+          [
+            ...thread.activities.filter((activity) => activity.id !== event.payload.activity.id),
+            { ...event.payload.activity },
+          ],
+          thread.latestTurn?.turnId ?? event.payload.activity.turnId,
+        );
         const latestTurn =
           event.payload.activity.turnId !== null &&
           thread.latestTurn?.turnId === event.payload.activity.turnId &&

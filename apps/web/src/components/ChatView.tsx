@@ -1931,9 +1931,6 @@ export default function ChatView(props: ChatViewProps) {
   const planSidebarOpenPreference =
     routeKind === "server" ? persistedPlanSidebarOpen : draftPlanSidebarOpen;
   const planSidebarOpen = planSidebarOpenPreference === true;
-  // When set, the thread-change reset effect will open the sidebar instead of closing it.
-  // Used by "Implement in a new thread" to carry the sidebar-open intent across navigation.
-  const planSidebarOpenOnNextThreadRef = useRef(false);
   const [pullRequestDialogState, setPullRequestDialogState] =
     useState<PullRequestDialogState | null>(null);
   const [attachmentPreviewHandoffByMessageId, setAttachmentPreviewHandoffByMessageId] = useState<
@@ -2723,10 +2720,16 @@ export default function ChatView(props: ChatViewProps) {
   const isProviderConnecting = phase === "connecting";
   const isComposerConnecting = isConnecting || isProviderConnecting;
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
-  const workLogEntries = useMemo(
-    () => deriveWorkLogEntries(threadActivities, activeLatestTurn?.turnId ?? undefined),
-    [activeLatestTurn?.turnId, threadActivities],
-  );
+  const workLogEntries = useMemo(() => {
+    const turnId = activeLatestTurn?.turnId;
+    return deriveWorkLogEntries(
+      threadActivities,
+      turnId,
+      turnId && activeLatestTurn?.state !== "running"
+        ? { terminalTurnIds: new Set([turnId]) }
+        : undefined,
+    );
+  }, [activeLatestTurn?.state, activeLatestTurn?.turnId, threadActivities]);
   const latestTurnHasToolActivity = useMemo(
     () => hasToolActivityForTurn(threadActivities, activeLatestTurn?.turnId),
     [activeLatestTurn?.turnId, threadActivities],
@@ -2810,8 +2813,19 @@ export default function ChatView(props: ChatViewProps) {
     () => deriveActivePlanState(threadActivities, activeLatestTurn?.turnId ?? undefined),
     [activeLatestTurn?.turnId, threadActivities],
   );
-  const hasPlanSidebarContent = Boolean(activePlan || sidebarProposedPlan);
-  const planSidebarLabel = sidebarProposedPlan || interactionMode === "plan" ? "Plan" : "Tasks";
+  // Match the provider's dedicated todo chip semantics: the latest non-empty
+  // checklist is visible only for its currently running turn and yields to
+  // blocking approval/question UI. Completed steps remain visible until the
+  // turn settles, at which point the compact control disappears entirely.
+  const composerActivePlan =
+    phase === "running" &&
+    activeLatestTurn?.turnId != null &&
+    activePlan?.turnId === activeLatestTurn.turnId &&
+    pendingApprovals.length === 0 &&
+    pendingUserInputs.length === 0
+      ? activePlan
+      : null;
+  const planSidebarLabel = "Plan";
   const showPlanFollowUpPrompt =
     pendingUserInputs.length === 0 &&
     interactionMode === "plan" &&
@@ -2833,6 +2847,16 @@ export default function ChatView(props: ChatViewProps) {
     activePendingUserInput: activePendingUserInput?.requestId ?? null,
     threadError: activeThread?.error,
   });
+  // Authored plan documents retain their exportable side panel only while the
+  // thread is idle. Local dispatch covers the projection-acknowledgement gap;
+  // after acknowledgement, the canonical session/latest-turn state keeps an
+  // old or source plan hidden for the entire runtime turn. This is deliberately
+  // presentation-only: it must not persist an explicit `false` preference that
+  // would disable auto-open for a future authored plan.
+  const runtimeTurnBlocksPlanSidebar =
+    isSendBusy || phase === "running" || (activeLatestTurn !== null && !latestTurnSettled);
+  const visibleSidebarProposedPlan = runtimeTurnBlocksPlanSidebar ? null : sidebarProposedPlan;
+  const hasPlanSidebarContent = visibleSidebarProposedPlan !== null;
   useEffect(() => {
     if (serverAcknowledgedLocalDispatch) {
       setSendInFlight(false);
@@ -4487,38 +4511,32 @@ export default function ChatView(props: ChatViewProps) {
     setTimelineAutoFollowTail(true);
     showScrollDebouncer.current.cancel();
     setShowScrollToBottom(false);
-    if (planSidebarOpenOnNextThreadRef.current) {
-      planSidebarOpenOnNextThreadRef.current = false;
-      setPlanSidebarOpenForCurrentThread(true);
-    }
-  }, [
-    activeThread?.id,
-    clearTimelineUserScrollIntentSettle,
-    recordTimelineScrollDebugEvent,
-    setPlanSidebarOpenForCurrentThread,
-  ]);
+  }, [activeThread?.id, clearTimelineUserScrollIntentSettle, recordTimelineScrollDebugEvent]);
 
-  // Auto-open the plan sidebar when plan/todo steps arrive for the current turn.
-  // Don't auto-open for plans carried over from a previous turn (the user can open manually).
+  // The optional side panel is now reserved for a completed, authored plan
+  // document. Runtime todo snapshots stay in the composer progress popover and
+  // must never create a side panel or steal horizontal space from the chat.
   useEffect(() => {
     if (!autoOpenPlanSidebar) return;
-    if (!activePlan) return;
+    if (!visibleSidebarProposedPlan) return;
+    if (!latestTurnSettled) return;
     if (!hasPlanSidebarContent) return;
     if (planSidebarOpen) return;
-    // Once the user has explicitly opened or closed the sidebar for this
-    // thread, that thread-local preference wins over later task updates.
+    // Once the user has explicitly opened or closed the plan panel for this
+    // thread, that thread-local preference wins over later authored plans.
     if (planSidebarOpenPreference !== undefined) return;
     const latestTurnId = activeLatestTurn?.turnId ?? null;
-    if (latestTurnId && activePlan.turnId !== latestTurnId) return;
+    if (!latestTurnId || visibleSidebarProposedPlan.turnId !== latestTurnId) return;
     setPlanSidebarOpenForCurrentThread(true);
   }, [
-    activePlan,
     activeLatestTurn?.turnId,
     autoOpenPlanSidebar,
     hasPlanSidebarContent,
+    latestTurnSettled,
     planSidebarOpen,
     planSidebarOpenPreference,
     setPlanSidebarOpenForCurrentThread,
+    visibleSidebarProposedPlan,
   ]);
 
   useEffect(() => {
@@ -6135,16 +6153,6 @@ export default function ChatView(props: ChatViewProps) {
             : {}),
           createdAt: messageCreatedAt,
         });
-        // Optimistically open the plan sidebar when implementing (not refining).
-        // "default" mode here means the agent is executing the plan, which produces
-        // step-tracking activities that the sidebar will display.
-        if (
-          nextInteractionMode === "default" &&
-          autoOpenPlanSidebar &&
-          planSidebarOpenPreference === undefined
-        ) {
-          setPlanSidebarOpenForCurrentThread(true);
-        }
         setSendInFlight(false);
       } catch (err) {
         setOptimisticUserMessages((existing) =>
@@ -6172,9 +6180,6 @@ export default function ChatView(props: ChatViewProps) {
       setComposerDraftInteractionMode,
       setSendInFlight,
       setThreadError,
-      autoOpenPlanSidebar,
-      planSidebarOpenPreference,
-      setPlanSidebarOpenForCurrentThread,
       composerRef,
       environmentId,
     ],
@@ -6269,8 +6274,6 @@ export default function ChatView(props: ChatViewProps) {
         return waitForStartedServerThread(scopeThreadRef(activeThread.environmentId, nextThreadId));
       })
       .then(() => {
-        // Signal that the plan sidebar should open on the new thread when enabled.
-        planSidebarOpenOnNextThreadRef.current = autoOpenPlanSidebar;
         return navigate({
           to: "/$environmentId/$threadId",
           params: {
@@ -6313,7 +6316,6 @@ export default function ChatView(props: ChatViewProps) {
     resetLocalDispatch,
     runtimeMode,
     setSendInFlight,
-    autoOpenPlanSidebar,
     composerRef,
     environmentId,
   ]);
@@ -6567,8 +6569,8 @@ export default function ChatView(props: ChatViewProps) {
                   respondingRequestIds={respondingRequestIds}
                   showPlanFollowUpPrompt={showPlanFollowUpPrompt}
                   activeProposedPlan={activeProposedPlan}
-                  activePlan={activePlan as { turnId?: TurnId } | null}
-                  sidebarProposedPlan={sidebarProposedPlan as { turnId?: TurnId } | null}
+                  activePlan={composerActivePlan}
+                  sidebarProposedPlan={visibleSidebarProposedPlan}
                   planSidebarLabel={planSidebarLabel}
                   planSidebarOpen={shouldRenderPlanSidebar}
                   goalControlsSupported={goalControlsSupported}
@@ -6668,13 +6670,11 @@ export default function ChatView(props: ChatViewProps) {
         {/* Plan sidebar */}
         {shouldRenderPlanSidebar && !shouldUsePlanSidebarSheet ? (
           <PlanSidebar
-            activePlan={activePlan}
-            activeProposedPlan={sidebarProposedPlan}
+            activeProposedPlan={visibleSidebarProposedPlan}
             label={planSidebarLabel}
             environmentId={environmentId}
             markdownCwd={gitCwd ?? undefined}
             workspaceRoot={activeWorkspaceRoot}
-            timestampFormat={timestampFormat}
             mode="sidebar"
             onClose={closePlanSidebar}
           />
@@ -6685,13 +6685,11 @@ export default function ChatView(props: ChatViewProps) {
       {shouldUsePlanSidebarSheet && hasPlanSidebarContent ? (
         <RightPanelSheet open={shouldRenderPlanSidebar} onClose={closePlanSidebar}>
           <PlanSidebar
-            activePlan={activePlan}
-            activeProposedPlan={sidebarProposedPlan}
+            activeProposedPlan={visibleSidebarProposedPlan}
             label={planSidebarLabel}
             environmentId={environmentId}
             markdownCwd={gitCwd ?? undefined}
             workspaceRoot={activeWorkspaceRoot}
-            timestampFormat={timestampFormat}
             mode="sheet"
             onClose={closePlanSidebar}
           />

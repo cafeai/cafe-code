@@ -10,7 +10,6 @@ import type {
   ScopedThreadRef,
   ServerProvider,
   ThreadId,
-  TurnId,
 } from "@cafecode/contracts";
 import {
   ProviderDriverKind,
@@ -64,6 +63,7 @@ import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
+import { ComposerTaskProgress } from "./ComposerTaskProgress";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { searchSlashCommandItems } from "./composerSlashCommandSearch";
 import {
@@ -110,7 +110,12 @@ import { type AppModelOption, getAppModelOptionsForInstance } from "../../modelS
 import type { UnifiedSettings } from "@cafecode/contracts/settings";
 import type { SessionPhase, Thread } from "../../types";
 import type { PendingUserInputDraftAnswer } from "../../pendingUserInput";
-import type { PendingApproval, PendingUserInput } from "../../session-logic";
+import type {
+  ActivePlanState,
+  LatestProposedPlanState,
+  PendingApproval,
+  PendingUserInput,
+} from "../../session-logic";
 import { deriveLatestContextWindowSnapshot } from "../../lib/contextWindow";
 import { shouldSurfaceProviderAccountRateLimits } from "../../lib/codexRateLimits";
 import { formatProviderSkillDisplayName } from "../../providerSkillPresentation";
@@ -779,8 +784,8 @@ export interface ChatComposerProps {
   // Plan
   showPlanFollowUpPrompt: boolean;
   activeProposedPlan: Thread["proposedPlans"][number] | null;
-  activePlan: { turnId?: TurnId } | null;
-  sidebarProposedPlan: { turnId?: TurnId } | null;
+  activePlan: ActivePlanState | null;
+  sidebarProposedPlan: LatestProposedPlanState | null;
   planSidebarLabel: string;
   planSidebarOpen: boolean;
   goalControlsSupported: boolean;
@@ -1428,8 +1433,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const showCollapsedMobilePromptRow =
     isComposerCollapsedMobile && !isComposerApprovalState && pendingUserInputs.length === 0;
 
-  const composerFooterHasWideActions = showPlanFollowUpPrompt || activePendingProgress !== null;
-  const showPlanSidebarToggle = Boolean(activePlan || sidebarProposedPlan);
+  const composerFooterHasWideActions =
+    showPlanFollowUpPrompt || activePendingProgress !== null || activePlan !== null;
+  // Runtime checklists now live in the compact composer progress popover.
+  // The retained side-panel control is intentionally limited to authored plan
+  // documents so a task update can never reopen the old Tasks panel.
+  const showPlanSidebarToggle = sidebarProposedPlan !== null;
   const composerFooterActionLayoutKey = useMemo(() => {
     if (activePendingProgress) {
       return `pending:${activePendingProgress.questionIndex}:${activePendingProgress.isLastQuestion}:${activePendingIsResponding}`;
@@ -2874,6 +2883,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   data-chat-composer-mobile-pending-actions="true"
                   className="absolute bottom-0 right-0 flex items-center justify-end gap-1.5"
                 >
+                  <ComposerTaskProgress plan={activePlan} />
                   {pendingUserInputs.length === 0 ? (
                     <ComposerAttachImageButton
                       preserveComposerFocusOnPointerDown
@@ -2912,7 +2922,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           {showMobileComposerActionsOverlay ||
           (isComposerCollapsedMobile &&
             !showCollapsedMobilePromptRow) ? null : activePendingApproval ? (
-            <div className="flex items-center justify-end gap-2 px-2.5 pb-2.5 sm:px-3 sm:pb-3">
+            <div className="flex min-w-0 items-center justify-end gap-2 px-2.5 pb-2.5 sm:px-3 sm:pb-3">
+              <ComposerTaskProgress plan={activePlan} />
               <ComposerPendingApprovalActions
                 requestId={activePendingApproval.requestId}
                 isResponding={respondingRequestIds.includes(activePendingApproval.requestId)}
@@ -2957,7 +2968,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
                 {isComposerFooterCompact ? (
                   <CompactComposerControlsMenu
-                    activePlan={showPlanSidebarToggle}
+                    showPlanSidebar={showPlanSidebarToggle}
                     provider={selectedProvider}
                     interactionMode={interactionMode}
                     planSidebarLabel={planSidebarLabel}
@@ -3008,6 +3019,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   </>
                 )}
               </div>
+
+              {/* Keep task progress outside the horizontally scrolling provider
+                  controls so the status remains legible on narrow screens. The
+                  popover itself is portaled and cannot be clipped by the footer. */}
+              <ComposerTaskProgress plan={activePlan} />
 
               {/* Right side: send / stop button */}
               <div

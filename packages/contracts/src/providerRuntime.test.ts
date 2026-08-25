@@ -49,6 +49,48 @@ describe("ProviderRuntimeEvent", () => {
     expect(parsed.payload.plan[1]?.status).toBe("inProgress");
   });
 
+  it("enforces bounded structured subagent presentation text", () => {
+    const baseEvent = {
+      type: "task.started",
+      eventId: "event-bounded-subagent",
+      provider: "codex",
+      createdAt: "2026-02-28T00:00:00.000Z",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      payload: {
+        taskId: "child-1",
+        subagent: {
+          threadId: "x".repeat(512),
+          label: "l".repeat(96),
+          path: "p".repeat(256),
+          role: "r".repeat(80),
+          objective: "o".repeat(240),
+          status: "active",
+        },
+      },
+    };
+
+    expect(decodeRuntimeEvent(baseEvent).type).toBe("task.started");
+    expect(() =>
+      decodeRuntimeEvent({
+        ...baseEvent,
+        payload: {
+          ...baseEvent.payload,
+          subagent: { ...baseEvent.payload.subagent, threadId: "x".repeat(513) },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeRuntimeEvent({
+        ...baseEvent,
+        payload: {
+          ...baseEvent.payload,
+          subagent: { ...baseEvent.payload.subagent, objective: "o".repeat(241) },
+        },
+      }),
+    ).toThrow();
+  });
+
   it("decodes proposed-plan completion events", () => {
     const parsed = decodeRuntimeEvent({
       type: "turn.proposed.completed",

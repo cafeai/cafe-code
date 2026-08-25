@@ -26,7 +26,7 @@ import {
 import { threadGoalStatusLabel } from "./ThreadGoalControl";
 
 export const CompactComposerControlsMenu = memo(function CompactComposerControlsMenu(props: {
-  activePlan: boolean;
+  showPlanSidebar: boolean;
   provider: ProviderDriverKind;
   interactionMode: ProviderInteractionMode;
   planSidebarLabel: string;
@@ -134,7 +134,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             </MenuItem>
           </>
         ) : null}
-        {props.activePlan ? (
+        {props.showPlanSidebar ? (
           <>
             <MenuDivider />
             <MenuItem onClick={props.onTogglePlanSidebar}>

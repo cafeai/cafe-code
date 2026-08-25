@@ -523,10 +523,45 @@ const UserInputResolvedPayload = Schema.Struct({
 });
 export type UserInputResolvedPayload = typeof UserInputResolvedPayload.Type;
 
+/**
+ * Hard safety ceiling for distinct nested-agent identities retained outside
+ * the ordinary bounded activity tail for one turn. Provider adapters use the
+ * same order of magnitude for their live identity maps. This limit protects
+ * snapshots and renderers from an adversarial stream of unique task ids; it is
+ * intentionally far above any legitimate simultaneously visible team.
+ */
+export const MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN = 4_096;
+
+const RuntimeSubagentThreadId = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(512));
+const RuntimeSubagentLabel = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(96));
+const RuntimeSubagentPath = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(256));
+const RuntimeSubagentRole = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(80));
+const RuntimeSubagentObjective = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(240));
+
+/**
+ * Provider-owned identity and display metadata for one nested agent task.
+ *
+ * The opaque child thread id is the durable coalescing key. All user-visible
+ * strings are normalized and bounded by the provider adapter before they enter
+ * this contract; keeping them structured prevents renderers from having to
+ * parse provider-specific prose such as `Started /root/audit_ui`.
+ */
+export const RuntimeSubagentPresentation = Schema.Struct({
+  threadId: RuntimeSubagentThreadId,
+  label: Schema.optional(RuntimeSubagentLabel),
+  path: Schema.optional(RuntimeSubagentPath),
+  role: Schema.optional(RuntimeSubagentRole),
+  objective: Schema.optional(RuntimeSubagentObjective),
+  status: Schema.optional(Schema.Literals(["waiting", "active", "completed", "failed", "stopped"])),
+  startedAt: Schema.optional(IsoDateTime),
+});
+export type RuntimeSubagentPresentation = typeof RuntimeSubagentPresentation.Type;
+
 const TaskStartedPayload = Schema.Struct({
   taskId: RuntimeTaskId,
   description: Schema.optional(TrimmedNonEmptyStringSchema),
   taskType: Schema.optional(TrimmedNonEmptyStringSchema),
+  subagent: Schema.optional(RuntimeSubagentPresentation),
 });
 export type TaskStartedPayload = typeof TaskStartedPayload.Type;
 
@@ -536,6 +571,7 @@ const TaskProgressPayload = Schema.Struct({
   summary: Schema.optional(TrimmedNonEmptyStringSchema),
   usage: Schema.optional(Schema.Unknown),
   lastToolName: Schema.optional(TrimmedNonEmptyStringSchema),
+  subagent: Schema.optional(RuntimeSubagentPresentation),
 });
 export type TaskProgressPayload = typeof TaskProgressPayload.Type;
 
@@ -544,6 +580,7 @@ const TaskCompletedPayload = Schema.Struct({
   status: Schema.Literals(["completed", "failed", "stopped"]),
   summary: Schema.optional(TrimmedNonEmptyStringSchema),
   usage: Schema.optional(Schema.Unknown),
+  subagent: Schema.optional(RuntimeSubagentPresentation),
 });
 export type TaskCompletedPayload = typeof TaskCompletedPayload.Type;
 

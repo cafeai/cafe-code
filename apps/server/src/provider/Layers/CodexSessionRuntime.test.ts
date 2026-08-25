@@ -36,6 +36,7 @@ import {
   codexElapsedDelayMilliseconds,
   codexElapsedDelayRemainingMilliseconds,
   codexTerminalSessionPatch,
+  codexSubagentProjectionMethod,
   isRecoverableThreadResumeError,
   isCodexContextCompactionItemType,
   isCodexChildConversationWorkNotification,
@@ -275,6 +276,33 @@ describe("Codex child conversation routing", () => {
     assert.equal(codexAggregateNotificationMethod("error", true), "codex.subagent/error");
     assert.equal(codexAggregateNotificationMethod("error", false), "error");
     assert.equal(codexAggregateNotificationMethod("item/completed", true), "item/completed");
+  });
+
+  it("projects only bounded child lifecycle snapshots needed by the subagent UI", () => {
+    assert.equal(
+      codexSubagentProjectionMethod({
+        method: "thread/status/changed",
+        params: { threadId: "thread-child", status: { type: "active", activeFlags: [] } },
+      }),
+      "codex.subagent/threadStatusChanged",
+    );
+    assert.equal(
+      codexSubagentProjectionMethod({
+        method: "item/completed",
+        params: {
+          threadId: "thread-child",
+          item: { id: "reasoning-1", type: "reasoning", summary: ["Working"] },
+        },
+      }),
+      "codex.subagent/itemCompleted",
+    );
+    assert.equal(
+      codexSubagentProjectionMethod({
+        method: "item/reasoning/summaryTextDelta",
+        params: { threadId: "thread-child", delta: "token" },
+      }),
+      undefined,
+    );
   });
 
   it("routes multi-agent-v2 child output to the parent without forwarding child lifecycle", () => {

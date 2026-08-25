@@ -25,7 +25,12 @@ import {
   type WheelEvent as ReactWheelEvent,
 } from "react";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
-import { deriveTimelineEntries, deriveWorkLogEntries, formatElapsed } from "../../session-logic";
+import {
+  deriveTimelineEntries,
+  deriveWorkLogEntries,
+  formatDuration,
+  formatElapsed,
+} from "../../session-logic";
 import ChatMarkdown from "../ChatMarkdown";
 import {
   BotIcon,
@@ -93,6 +98,7 @@ import {
   type TimelineScrollDebugListState,
 } from "./timelineScrollDebug";
 import { useHistoricalWorkLogPresence } from "./useHistoricalWorkLogPresence";
+import { SubagentAvatar } from "../subagents/SubagentAvatar";
 
 export {
   extractOpenablePathTokens,
@@ -1478,7 +1484,9 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
 
   const visibleEntries = useMemo(() => {
     if (activityRows.length > 0) {
-      return deriveWorkLogEntries(activityRows, row.turnId);
+      return deriveWorkLogEntries(activityRows, row.turnId, {
+        terminalTurnIds: new Set([row.turnId]),
+      });
     }
     return row.summary.previewEntries.slice(-HISTORICAL_WORK_LOG_PREVIEW_LIMIT);
   }, [activityRows, row.summary.previewEntries, row.turnId]);
@@ -1659,12 +1667,20 @@ const WorkGroupSection = memo(function WorkGroupSection({
 }) {
   const { workspaceRoot } = use(TimelineRowCtx);
   const [isExpanded, setIsExpanded] = useState(false);
-  const hasOverflow = groupedEntries.length > MAX_VISIBLE_WORK_LOG_ENTRIES;
+  const ordinaryEntries = groupedEntries.filter((entry) => !entry.subagent);
+  const subagentCount = groupedEntries.length - ordinaryEntries.length;
+  const hasOverflow = ordinaryEntries.length > MAX_VISIBLE_WORK_LOG_ENTRIES;
+  const collapsedOrdinaryIds = new Set(
+    ordinaryEntries.slice(-MAX_VISIBLE_WORK_LOG_ENTRIES).map((entry) => entry.id),
+  );
   const visibleEntries =
     hasOverflow && !isExpanded
-      ? groupedEntries.slice(-MAX_VISIBLE_WORK_LOG_ENTRIES)
+      ? groupedEntries.filter(
+          (entry) => entry.subagent !== undefined || collapsedOrdinaryIds.has(entry.id),
+        )
       : groupedEntries;
-  const hiddenCount = groupedEntries.length - visibleEntries.length;
+  const hiddenCount =
+    ordinaryEntries.length - Math.min(ordinaryEntries.length, MAX_VISIBLE_WORK_LOG_ENTRIES);
   const onlyToolEntries = groupedEntries.every((entry) => entry.tone === "tool");
   const showHeader = hasOverflow || !onlyToolEntries;
   const groupLabel = onlyToolEntries ? "Tool calls" : "Work log";
@@ -1687,7 +1703,14 @@ const WorkGroupSection = memo(function WorkGroupSection({
           )}
         </div>
       )}
-      <div className="space-y-0.5">
+      <div
+        className={cn(
+          "space-y-0.5",
+          subagentCount > 0 &&
+            "max-h-[min(22rem,45vh)] overflow-y-auto overscroll-contain pr-1 [scrollbar-gutter:stable]",
+        )}
+        data-subagent-work-log={subagentCount > 0 ? "true" : undefined}
+      >
         {visibleEntries.map((workEntry) => (
           <SimpleWorkEntryRow
             key={`work-row:${workEntry.id}`}
@@ -1971,7 +1994,182 @@ function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
   return capitalizePhrase(normalizeCompactToolLabel(workEntry.toolTitle));
 }
 
+function subagentStatusLabel(status: NonNullable<TimelineWorkEntry["subagent"]>["status"]): string {
+  switch (status) {
+    case "waiting":
+      return "Waiting";
+    case "active":
+      return "Working";
+    case "failed":
+      return "Failed";
+    case "stopped":
+      return "Stopped";
+    default:
+      return "Done";
+  }
+}
+
+function liveSubagentElapsed(startedAt: string, now: number): string {
+  const timestamp = Date.parse(startedAt);
+  return Number.isNaN(timestamp) ? "" : formatDuration(Math.max(0, now - timestamp));
+}
+
+const LIVE_SUBAGENT_CLOCK_INTERVAL_MS = 1_000;
+type LiveSubagentClockListener = (now: number) => void;
+const liveSubagentClockListeners = new Set<LiveSubagentClockListener>();
+let liveSubagentClockInterval: number | null = null;
+
+function stopLiveSubagentClock(): void {
+  if (liveSubagentClockInterval === null) return;
+  window.clearInterval(liveSubagentClockInterval);
+  liveSubagentClockInterval = null;
+}
+
+function emitLiveSubagentClockTick(): void {
+  const now = Date.now();
+  for (const listener of liveSubagentClockListeners) listener(now);
+}
+
+/**
+ * Reconcile the one shared elapsed-time clock with document visibility.
+ *
+ * A long chat can retain many completed children alongside several live ones.
+ * Keeping the clock outside the work-group component prevents every group and
+ * terminal row from rerendering once per second. The clock exists only while a
+ * mounted live elapsed label needs it, and a background tab owns no interval.
+ */
+function reconcileLiveSubagentClock(): void {
+  if (liveSubagentClockListeners.size === 0 || document.visibilityState !== "visible") {
+    stopLiveSubagentClock();
+    return;
+  }
+  if (liveSubagentClockInterval !== null) return;
+
+  emitLiveSubagentClockTick();
+  liveSubagentClockInterval = window.setInterval(
+    emitLiveSubagentClockTick,
+    LIVE_SUBAGENT_CLOCK_INTERVAL_MS,
+  );
+}
+
+function onLiveSubagentClockVisibilityChange(): void {
+  reconcileLiveSubagentClock();
+}
+
+function subscribeLiveSubagentClock(listener: LiveSubagentClockListener): () => void {
+  liveSubagentClockListeners.add(listener);
+  if (liveSubagentClockListeners.size === 1) {
+    document.addEventListener("visibilitychange", onLiveSubagentClockVisibilityChange);
+  }
+  reconcileLiveSubagentClock();
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    liveSubagentClockListeners.delete(listener);
+    if (liveSubagentClockListeners.size === 0) {
+      document.removeEventListener("visibilitychange", onLiveSubagentClockVisibilityChange);
+      stopLiveSubagentClock();
+    }
+  };
+}
+
+const LiveSubagentElapsed = memo(function LiveSubagentElapsed({
+  startedAt,
+}: {
+  startedAt: string;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => subscribeLiveSubagentClock(setNow), []);
+  const elapsed = liveSubagentElapsed(startedAt, now);
+  return elapsed ? (
+    <p
+      className="mt-0.5 font-mono text-[10px] text-muted-foreground/65"
+      data-subagent-live-elapsed="true"
+    >
+      {elapsed}
+    </p>
+  ) : null;
+});
+
+const SubagentWorkEntryRow = memo(function SubagentWorkEntryRow({
+  workEntry,
+}: {
+  workEntry: TimelineWorkEntry;
+}) {
+  const subagent = workEntry.subagent;
+  if (!subagent) return null;
+  const statusLabel = subagentStatusLabel(subagent.status);
+  const terminalElapsed = subagent.completedAt
+    ? formatElapsed(subagent.startedAt, subagent.completedAt)
+    : null;
+  const primaryDescription =
+    subagent.description ??
+    subagent.objective ??
+    (subagent.status === "waiting" ? "Waiting" : "Working");
+  const objectiveDescription =
+    subagent.objective &&
+    subagent.description &&
+    subagent.objective.toLocaleLowerCase() !== subagent.description.toLocaleLowerCase() &&
+    !/^working(?:\.{3})?$/iu.test(subagent.objective)
+      ? subagent.objective
+      : null;
+
+  return (
+    <div
+      className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2.5 rounded-lg px-1 py-2"
+      data-subagent-work-row="true"
+      aria-label={`${subagent.label}, ${statusLabel}`}
+    >
+      <SubagentAvatar seed={subagent.id} className="size-7 sm:size-8" />
+      <div className="min-w-0 pt-0.5">
+        <p className="truncate text-xs leading-4 font-medium text-foreground/90">
+          {subagent.label}
+        </p>
+        <p
+          className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground/70 break-words"
+          data-subagent-description="true"
+        >
+          {primaryDescription}
+        </p>
+        {objectiveDescription ? (
+          <p className="mt-0.5 line-clamp-2 text-[10px] leading-4 text-muted-foreground/50 break-words">
+            {objectiveDescription}
+          </p>
+        ) : null}
+      </div>
+      <div className="min-w-14 shrink-0 pt-0.5 text-right tabular-nums">
+        <p className="text-[9px] uppercase tracking-[0.08em] text-muted-foreground/55">
+          {statusLabel}
+        </p>
+        {subagent.status === "active" || subagent.status === "waiting" ? (
+          <LiveSubagentElapsed startedAt={subagent.startedAt} />
+        ) : terminalElapsed ? (
+          <p
+            className="mt-0.5 font-mono text-[10px] text-muted-foreground/55"
+            data-subagent-terminal-elapsed="true"
+          >
+            {terminalElapsed}
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+});
+
 const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
+  workEntry: TimelineWorkEntry;
+  workspaceRoot: string | undefined;
+}) {
+  return props.workEntry.subagent ? (
+    <SubagentWorkEntryRow workEntry={props.workEntry} />
+  ) : (
+    <OrdinaryWorkEntryRow {...props} />
+  );
+});
+
+const OrdinaryWorkEntryRow = memo(function OrdinaryWorkEntryRow(props: {
   workEntry: TimelineWorkEntry;
   workspaceRoot: string | undefined;
 }) {

@@ -167,6 +167,29 @@ function buildAssistantTimelineEntry(input?: {
   };
 }
 
+function buildLiveSubagentWorkEntry(id: string, label: string) {
+  return {
+    id,
+    kind: "work" as const,
+    createdAt: "2026-04-13T12:00:00.000Z",
+    entry: {
+      id,
+      createdAt: "2026-04-13T12:00:00.000Z",
+      label,
+      detail: `${label} objective`,
+      tone: "thinking" as const,
+      itemType: "collab_agent_tool_call" as const,
+      subagent: {
+        id: `provider-${id}`,
+        label,
+        description: `${label} progress`,
+        status: "active" as const,
+        startedAt: "2026-04-13T12:00:00.000Z",
+      },
+    },
+  };
+}
+
 function setNativeContextMenuMock(
   show: (items: readonly unknown[], position?: { x: number; y: number }) => Promise<unknown>,
 ) {
@@ -220,6 +243,95 @@ describe("MessagesTimeline", () => {
       await expect.element(page.getByText("Thinking - Inspecting repository state")).toBeVisible();
     } finally {
       await screen.unmount();
+    }
+  });
+
+  it("shares one visibility-aware clock across live subagents and leaves terminal timing frozen", async () => {
+    let now = Date.parse("2026-04-13T12:01:05.000Z");
+    let visibility: DocumentVisibilityState = "visible";
+    let nextIntervalId = 1;
+    const activeIntervals = new Map<number, () => void>();
+
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    vi.spyOn(window, "setInterval").mockImplementation((handler) => {
+      const intervalId = nextIntervalId;
+      nextIntervalId += 1;
+      activeIntervals.set(intervalId, () => handler(undefined));
+      return intervalId as unknown as ReturnType<typeof window.setInterval>;
+    });
+    vi.spyOn(window, "clearInterval").mockImplementation((intervalId) => {
+      activeIntervals.delete(Number(intervalId));
+    });
+
+    const terminalEntry = {
+      id: "subagent-terminal",
+      kind: "work" as const,
+      createdAt: "2026-04-13T12:00:00.000Z",
+      entry: {
+        id: "subagent-terminal",
+        createdAt: "2026-04-13T12:00:00.000Z",
+        label: "Finished worker",
+        detail: "Finished objective",
+        tone: "info" as const,
+        itemType: "collab_agent_tool_call" as const,
+        subagent: {
+          id: "provider-terminal",
+          label: "Finished worker",
+          description: "Finished progress",
+          status: "completed" as const,
+          startedAt: "2026-04-13T12:00:00.000Z",
+          completedAt: "2026-04-13T12:00:10.000Z",
+        },
+      },
+    };
+
+    const screen = await render(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          buildLiveSubagentWorkEntry("subagent-live-1", "Live worker one"),
+          buildLiveSubagentWorkEntry("subagent-live-2", "Live worker two"),
+          terminalEntry,
+        ]}
+      />,
+    );
+    let mounted = true;
+
+    try {
+      await vi.waitFor(() => {
+        expect(document.querySelectorAll('[data-subagent-live-elapsed="true"]')).toHaveLength(2);
+        expect(activeIntervals.size).toBe(1);
+      });
+      const terminalElapsed = document.querySelector<HTMLElement>(
+        '[data-subagent-terminal-elapsed="true"]',
+      );
+      expect(terminalElapsed?.textContent).toBe("10s");
+
+      now += 1_000;
+      activeIntervals.values().next().value?.();
+      await vi.waitFor(() => {
+        expect(
+          Array.from(
+            document.querySelectorAll<HTMLElement>('[data-subagent-live-elapsed="true"]'),
+          ).map((element) => element.textContent),
+        ).toEqual(["1m 6s", "1m 6s"]);
+      });
+      expect(terminalElapsed?.textContent).toBe("10s");
+
+      visibility = "hidden";
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(activeIntervals.size).toBe(0);
+
+      visibility = "visible";
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(activeIntervals.size).toBe(1);
+
+      await screen.unmount();
+      mounted = false;
+      expect(activeIntervals.size).toBe(0);
+    } finally {
+      if (mounted) await screen.unmount();
     }
   });
 
