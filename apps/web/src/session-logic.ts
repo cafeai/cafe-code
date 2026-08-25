@@ -71,6 +71,12 @@ export interface WorkLogEntry {
     status: SubagentRunStatus;
     startedAt: string;
     completedAt?: string;
+    /** Latest durable lifecycle edge, used to invalidate an open detail view. */
+    updatedAt?: string;
+    /** Activity sequence/id revision; unlike timestamps this cannot collide. */
+    lifecycleRevision?: string;
+    /** Opaque provider history binding; never render or log this value. */
+    historyId?: string;
   };
 }
 
@@ -78,6 +84,8 @@ export interface HistoricalWorkLogSummary {
   turnId: TurnId;
   previewEntries: ReadonlyArray<WorkLogEntry>;
   snapshotEntryCount: number;
+  /** Subagents are conversation history, not command/tool Work Log rows. */
+  subagentEntries?: ReadonlyArray<WorkLogEntry>;
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
@@ -534,17 +542,11 @@ export function hasActionableProposedPlan(
 export function deriveWorkLogEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   latestTurnId: TurnId | undefined,
-  subagentOptions: DeriveSubagentActivityOptions = {},
+  _subagentOptions: DeriveSubagentActivityOptions = {},
 ): WorkLogEntry[] {
   const ordered = [...activities]
     .toSorted(compareActivitiesByOrder)
     .filter((activity) => (latestTurnId ? activity.turnId === latestTurnId : true));
-  const activityOrderById = new Map<string, number>(
-    ordered.map((activity, index) => [activity.id, index]),
-  );
-  const subagentEntries = deriveSubagentActivities(ordered, subagentOptions).map(
-    subagentToWorkLogEntry,
-  );
   const entries = ordered
     // Structured task lifecycle supersedes the old generic collab tool row.
     // Removing both here avoids rendering `Subagent task - Started /root/x`
@@ -562,19 +564,45 @@ export function deriveWorkLogEntries(
   const collapsed = collapseDerivedWorkLogEntries(entries).map(
     ({ activityKind: _activityKind, collapseKey: _collapseKey, ...entry }) => entry,
   );
-  return [...collapsed, ...subagentEntries].toSorted((left, right) => {
-    // Sequence is the durable provider/orchestration order and can disagree
-    // with wall-clock timestamps after reconnects. Both ordinary collapsed
-    // rows and subagent rows retain a source activity id, so merge the two
-    // lists with that authoritative order instead of re-sorting by time.
-    const leftIndex = activityOrderById.get(left.id);
-    const rightIndex = activityOrderById.get(right.id);
-    if (leftIndex !== undefined && rightIndex !== undefined && leftIndex !== rightIndex) {
-      return leftIndex - rightIndex;
-    }
-    const byTime = left.createdAt.localeCompare(right.createdAt);
-    return byTime !== 0 ? byTime : left.id.localeCompare(right.id);
-  });
+  return collapsed;
+}
+
+/**
+ * Derive the provider-neutral child roster independently from command/tool
+ * activity. Keeping this boundary explicit prevents presentation code from
+ * accidentally counting a worker as a Work Log command while retaining the
+ * same durable lifecycle ordering for Codex and Claude.
+ */
+export function deriveSubagentWorkEntries(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  latestTurnId: TurnId | undefined,
+  options: DeriveSubagentActivityOptions = {},
+): WorkLogEntry[] {
+  const ordered = [...activities]
+    .toSorted(compareActivitiesByOrder)
+    .filter((activity) => (latestTurnId ? activity.turnId === latestTurnId : true));
+  return deriveSubagentActivities(ordered, options).map(subagentToWorkLogEntry);
+}
+
+/**
+ * Build the composer roster across every turn while completing only legacy
+ * rows from turns that are no longer running. Structured provider lifecycle
+ * rows remain authoritative, because Codex and Claude children can continue
+ * in the background after the parent turn that spawned them settles.
+ */
+export function deriveActiveSubagentWorkEntries(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  runningTurnId: TurnId | null | undefined,
+): WorkLogEntry[] {
+  const terminalTurnIds = new Set<TurnId>();
+  for (const activity of activities) {
+    if (activity.turnId !== null) terminalTurnIds.add(activity.turnId);
+  }
+  if (runningTurnId) terminalTurnIds.delete(runningTurnId);
+
+  return deriveSubagentWorkEntries(activities, undefined, { terminalTurnIds }).filter(
+    (entry) => entry.subagent?.status === "active" || entry.subagent?.status === "waiting",
+  );
 }
 
 function isSubagentWorkActivity(activity: OrchestrationThreadActivity): boolean {
@@ -619,7 +647,10 @@ function subagentToWorkLogEntry(subagent: DerivedSubagentActivity): WorkLogEntry
       ...(subagent.description ? { description: subagent.description } : {}),
       status: subagent.status,
       startedAt: subagent.startedAt,
+      updatedAt: subagent.updatedAt,
+      lifecycleRevision: subagent.lifecycleRevision,
       ...(subagent.completedAt ? { completedAt: subagent.completedAt } : {}),
+      ...(subagent.historyId ? { historyId: subagent.historyId } : {}),
     },
   };
 }
@@ -671,6 +702,21 @@ export function deriveHistoricalWorkLogSummaries(input: {
       entriesByTurnId.set(entry.turnId, [entry]);
     }
   }
+  const subagentsByTurnId = new Map<TurnId, WorkLogEntry[]>();
+  for (const entry of deriveSubagentWorkEntries(input.activities, undefined, {
+    terminalTurnIds: historicalTurnIds,
+  })) {
+    if (
+      entry.turnId === null ||
+      entry.turnId === undefined ||
+      !historicalTurnIds.has(entry.turnId)
+    ) {
+      continue;
+    }
+    const existing = subagentsByTurnId.get(entry.turnId);
+    if (existing) existing.push(entry);
+    else subagentsByTurnId.set(entry.turnId, [entry]);
+  }
 
   const summaries = new Map<TurnId, HistoricalWorkLogSummary>();
   for (const turnId of historicalTurnIds) {
@@ -679,6 +725,7 @@ export function deriveHistoricalWorkLogSummaries(input: {
       turnId,
       previewEntries: entries.slice(-6),
       snapshotEntryCount: entries.length,
+      subagentEntries: subagentsByTurnId.get(turnId) ?? [],
     });
   }
   return summaries;

@@ -61,6 +61,7 @@ describe("ProviderRuntimeEvent", () => {
         taskId: "child-1",
         subagent: {
           threadId: "x".repeat(512),
+          historyId: "h".repeat(512),
           label: "l".repeat(96),
           path: "p".repeat(256),
           role: "r".repeat(80),
@@ -77,6 +78,15 @@ describe("ProviderRuntimeEvent", () => {
         payload: {
           ...baseEvent.payload,
           subagent: { ...baseEvent.payload.subagent, threadId: "x".repeat(513) },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeRuntimeEvent({
+        ...baseEvent,
+        payload: {
+          ...baseEvent.payload,
+          subagent: { ...baseEvent.payload.subagent, historyId: "h".repeat(513) },
         },
       }),
     ).toThrow();

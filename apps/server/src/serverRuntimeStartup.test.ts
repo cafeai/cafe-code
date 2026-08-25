@@ -137,6 +137,8 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
           Ref.update(dispatchCalls, (calls) => [...calls, command.type]).pipe(
             Effect.as({ sequence: 1 }),
           ),
+        retireThreadForHardDelete: () => Effect.die("unused"),
+        purgeHardDeletedThread: () => Effect.die("unused"),
         diagnosticsSnapshot: Effect.succeed({
           commandQueueDepth: 0,
           acceptedCommandCount: 0,
@@ -191,6 +193,8 @@ it.effect("resolveAutoBootstrapWelcomeTargets creates a project and thread when 
           Ref.update(dispatchCalls, (calls) => [...calls, command.type]).pipe(
             Effect.as({ sequence: 1 }),
           ),
+        retireThreadForHardDelete: () => Effect.die("unused"),
+        purgeHardDeletedThread: () => Effect.die("unused"),
         diagnosticsSnapshot: Effect.succeed({
           commandQueueDepth: 0,
           acceptedCommandCount: 0,

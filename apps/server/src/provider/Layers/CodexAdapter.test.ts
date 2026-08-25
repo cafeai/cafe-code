@@ -20,9 +20,9 @@ import {
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
   ThreadId,
-  THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS,
+  THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES,
   THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES,
-  THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_CHARS,
+  THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_BYTES,
   TurnId,
 } from "@cafecode/contracts";
 import { createModelSelection } from "@cafecode/shared/model";
@@ -40,6 +40,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
 import { ServerConfig } from "../../config.ts";
@@ -67,6 +68,13 @@ const asThreadId = (value: string): ThreadId => ThreadId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
 const asEventId = (value: string): EventId => EventId.make(value);
 const asItemId = (value: string): ProviderItemId => ProviderItemId.make(value);
+const utf8Bytes = (value: string): number => Buffer.byteLength(value, "utf8");
+const retainedDetailBytes = (detail: ReturnType<typeof canonicalizeCodexSubagentDetail>): number =>
+  detail.messages.reduce(
+    (total, message) =>
+      total + utf8Bytes(message.text) + (message.omission ? utf8Bytes(message.omission.tail) : 0),
+    0,
+  );
 
 it("canonicalizes only public subagent chat text and strips unsafe controls", () => {
   const detail = canonicalizeCodexSubagentDetail({
@@ -101,9 +109,10 @@ it("canonicalizes only public subagent chat text and strips unsafe controls", ()
 
   assert.deepStrictEqual(detail, {
     messages: [
-      { role: "user", text: "# Task\n    Auditthe provider" },
-      { role: "assistant", text: "## Result\n    Done safely." },
+      { key: "m0", role: "user", text: "# Task\n    Auditthe provider" },
+      { key: "m1", role: "assistant", text: "## Result\n    Done safely." },
     ],
+    gaps: [],
     truncated: false,
   });
   assert.doesNotMatch(JSON.stringify(detail), /private chain|secret\/skill/);
@@ -119,13 +128,17 @@ it("enforces subagent transcript message, per-message, and total limits", () => 
           {
             id: "oversized-message",
             type: "agentMessage",
-            text: "x".repeat(THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS + 100),
+            text: "x".repeat(THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES + 100),
           },
         ],
       },
     ],
   });
-  assert.equal(oversized.messages[0]?.text.length, THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS);
+  assert.equal(retainedDetailBytes(oversized), THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES);
+  assert.deepEqual(oversized.messages[0]?.omission, {
+    tail: "x".repeat(24_576),
+    omittedUtf8Bytes: 100,
+  });
   assert.equal(oversized.truncated, true);
 
   const manyMessages = canonicalizeCodexSubagentDetail({
@@ -142,7 +155,10 @@ it("enforces subagent transcript message, per-message, and total limits", () => 
     ],
   });
   assert.equal(manyMessages.messages.length, THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES);
-  assert.equal(manyMessages.messages[0]?.text, "message 6");
+  assert.equal(manyMessages.messages[0]?.text, "message 0");
+  assert.deepEqual(manyMessages.gaps, [
+    { afterMessageKey: "m3", omittedMessages: 6, omittedUtf8Bytes: 54 },
+  ]);
   assert.equal(
     manyMessages.messages[THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES - 1]?.text,
     `message ${THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES + 5}`,
@@ -157,15 +173,12 @@ it("enforces subagent transcript message, per-message, and total limits", () => 
         items: Array.from({ length: 5 }, (_, index) => ({
           id: `large-message-${index}`,
           type: "agentMessage" as const,
-          text: "y".repeat(THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS),
+          text: "y".repeat(THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES),
         })),
       },
     ],
   });
-  assert.equal(
-    totalLimited.messages.reduce((total, message) => total + message.text.length, 0),
-    THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_CHARS,
-  );
+  assert.equal(retainedDetailBytes(totalLimited), THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_BYTES);
   assert.equal(totalLimited.truncated, true);
 });
 
@@ -197,11 +210,89 @@ it("keeps the initial assignment and final result around the newest bounded tail
 
   assert.equal(detail.messages.length, THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES);
   assert.deepEqual(detail.messages[0], {
+    key: "m0",
     role: "user",
     text: "Audit the child transcript boundary",
   });
-  assert.deepEqual(detail.messages.at(-1), { role: "assistant", text: finalResult });
+  assert.deepEqual(detail.messages.at(-1), {
+    key: "m20",
+    role: "assistant",
+    text: finalResult,
+  });
+  assert.deepEqual(detail.gaps, [
+    { afterMessageKey: "m3", omittedMessages: 9, omittedUtf8Bytes: 155 },
+  ]);
   assert.equal(detail.truncated, true);
+});
+
+it("retains the final assistant with exact gaps under trailing-user pressure", () => {
+  const detail = canonicalizeCodexSubagentDetail({
+    threadId: "provider-child-final-anchor",
+    turns: [
+      {
+        id: asTurnId("provider-child-turn-final-anchor"),
+        items: [
+          {
+            id: "initial-assignment",
+            type: "userMessage",
+            content: [{ type: "text", text: "Audit the adversarial tail" }],
+          },
+          ...Array.from({ length: 10 }, (_, index) => ({
+            id: `early-assistant-${index}`,
+            type: "agentMessage" as const,
+            text: `early assistant ${index}`,
+          })),
+          {
+            id: "final-assistant-provider-id-must-not-leak",
+            type: "agentMessage",
+            text: "FINAL ASSISTANT RESULT",
+          },
+          ...Array.from({ length: 70 }, (_, index) => ({
+            id: `trailing-user-${index}`,
+            type: "userMessage" as const,
+            content: [{ type: "text" as const, text: `trailing user ${index}` }],
+          })),
+        ],
+      },
+    ],
+  });
+
+  assert.equal(detail.messages.length, THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES);
+  assert.ok(detail.messages.some((message) => message.text === "FINAL ASSISTANT RESULT"));
+  assert.deepEqual(detail.gaps, [
+    { afterMessageKey: "m3", omittedMessages: 7, omittedUtf8Bytes: 119 },
+    { afterMessageKey: "mb", omittedMessages: 11, omittedUtf8Bytes: 166 },
+  ]);
+  assert.doesNotMatch(JSON.stringify(detail), /provider-id-must-not-leak/u);
+});
+
+it("retains scalar-safe UTF-8 head and tail fragments for one oversized message", () => {
+  const detail = canonicalizeCodexSubagentDetail({
+    threadId: "provider-child-unicode",
+    turns: [
+      {
+        id: asTurnId("provider-child-turn-unicode"),
+        items: [
+          {
+            id: "unicode-assignment",
+            type: "userMessage",
+            content: [
+              {
+                type: "text",
+                text: `${"🙂".repeat(10_000)}\ud800\u202eLATEST_SCALAR_TAIL`,
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  const message = detail.messages[0];
+  assert.ok(message?.omission);
+  assert.ok(message.omission.tail.endsWith("�LATEST_SCALAR_TAIL"));
+  assert.equal(retainedDetailBytes(detail) <= THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES, true);
+  assert.doesNotMatch(`${message.text}${message.omission.tail}`, /[\ud800-\udfff]/u);
 });
 
 class FakeCodexRuntime implements CodexSessionRuntimeShape {
@@ -216,6 +307,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
       threadId: this.options.threadId,
       cwd: this.options.cwd,
       ...(this.options.model ? { model: this.options.model } : {}),
+      resumeCursor: this.options.resumeCursor ?? { threadId: "provider-thread-1" },
       createdAt: this.now,
       updatedAt: this.now,
     } satisfies ProviderSession),
@@ -433,6 +525,8 @@ const providerSessionDirectoryTestLayer = Layer.succeed(ProviderSessionDirectory
   getBinding: () => Effect.succeed(Option.none()),
   listThreadIds: () => Effect.succeed([]),
   listBindings: () => Effect.succeed([]),
+  upsertSubagentHistoryBinding: () => Effect.void,
+  getSubagentHistoryBinding: () => Effect.succeed(Option.none()),
 });
 
 const validationRuntimeFactory = makeRuntimeFactory();
@@ -581,7 +675,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         resumeCursor: { threadId: "provider-root-ended" },
       });
 
-      assert.deepEqual(detail, { messages: [], truncated: false });
+      assert.deepEqual(detail, { messages: [], gaps: [], truncated: false });
       assert.equal(sessionRuntimeFactory.factory.mock.calls.length, runtimeCountBefore);
       assert.equal(transientSubagentHistoryRead.mock.calls.length, 1);
       assert.deepEqual(transientSubagentHistoryRead.mock.calls[0]?.[0], {
@@ -615,11 +709,43 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       const readSubagentDetail = adapter.readSubagentDetail;
       assert.ok(readSubagentDetail);
       yield* readSubagentDetail(threadId, childId, {
-        resumeCursor: { threadId: "provider-root-live" },
+        resumeCursor: { threadId: "provider-thread-1" },
       });
 
       assert.equal(transientSubagentHistoryRead.mock.calls.length, 0);
       assert.deepEqual(runtime.readSubagentThreadImpl.mock.calls[0], [childId]);
+    }),
+  );
+
+  it.effect("keeps an ended child pinned to its persisted root when another root is live", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-live-different-root-subagent-detail");
+      const childId = "provider-child-from-ended-root";
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      assert.ok(runtime);
+      transientSubagentHistoryRead.mockClear();
+      runtime.readSubagentThreadImpl.mockClear();
+
+      const readSubagentDetail = adapter.readSubagentDetail;
+      assert.ok(readSubagentDetail);
+      yield* readSubagentDetail(threadId, childId, {
+        resumeCursor: { threadId: "provider-root-that-ended" },
+      });
+
+      assert.equal(runtime.readSubagentThreadImpl.mock.calls.length, 0);
+      assert.equal(transientSubagentHistoryRead.mock.calls.length, 1);
+      assert.deepEqual(transientSubagentHistoryRead.mock.calls[0]?.[0], {
+        binaryPath: "codex",
+        appServerCwd: path.join(process.cwd(), "userdata"),
+        rootProviderThreadId: "provider-root-that-ended",
+        subagentThreadId: childId,
+      });
     }),
   );
 
@@ -654,6 +780,40 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       assert.equal(transientSubagentHistoryRead.mock.calls.length, 1);
       yield* Deferred.succeed(releaseFirst, undefined);
       yield* Effect.all([Fiber.join(first), Fiber.join(retry)]);
+      assert.equal(transientSubagentHistoryRead.mock.calls.length, 2);
+    }),
+  );
+
+  it.effect("times out a wedged transient history read and releases its permit", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      transientSubagentHistoryRead.mockClear();
+      transientSubagentHistoryRead.mockImplementationOnce(() => Effect.never);
+      const readSubagentDetail = adapter.readSubagentDetail;
+      assert.ok(readSubagentDetail);
+
+      const timedOut = yield* readSubagentDetail(
+        asThreadId("sess-ended-history-timeout"),
+        "provider-child-timeout",
+        { resumeCursor: { threadId: "provider-root-timeout" } },
+      ).pipe(Effect.result, Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("15 seconds");
+      const result = yield* Fiber.join(timedOut);
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.equal(result.failure._tag, "ProviderSubagentDetailReadError");
+        if (result.failure._tag === "ProviderSubagentDetailReadError") {
+          assert.equal(result.failure.reason, "provider-request-failed");
+        }
+      }
+
+      const retry = yield* readSubagentDetail(
+        asThreadId("sess-ended-history-after-timeout"),
+        "provider-child-after-timeout",
+        { resumeCursor: { threadId: "provider-root-after-timeout" } },
+      );
+      assert.deepEqual(retry, { messages: [], gaps: [], truncated: false });
       assert.equal(transientSubagentHistoryRead.mock.calls.length, 2);
     }),
   );

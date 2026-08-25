@@ -1640,4 +1640,135 @@ describe("OrchestrationEngine", () => {
 
     await system.dispose();
   });
+
+  it("linearizes hard deletion in the command FIFO and permanently rejects the old identity", async () => {
+    const system = await createOrchestrationSystem();
+    const { engine } = system;
+    const createdAt = now();
+    const projectId = asProjectId("project-hard-delete-engine");
+    const targetThreadId = ThreadId.make("thread-hard-delete-engine");
+    const survivorThreadId = ThreadId.make("thread-hard-delete-survivor");
+
+    await system.run(
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-hard-delete-project-create"),
+        projectId,
+        title: "Hard delete project",
+        workspaceRoot: "/tmp/project-hard-delete-engine",
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        createdAt,
+      }),
+    );
+
+    for (const [threadId, suffix] of [
+      [targetThreadId, "target"],
+      [survivorThreadId, "survivor"],
+    ] as const) {
+      await system.run(
+        engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`cmd-hard-delete-thread-create-${suffix}`),
+          threadId,
+          projectId,
+          title: suffix,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        }),
+      );
+    }
+
+    // This control envelope shares the exact FIFO used by dispatch. Once it
+    // resolves, no later command can decide against the stale in-memory thread.
+    await system.run(engine.retireThreadForHardDelete({ threadId: targetThreadId }));
+
+    await expect(
+      system.run(
+        engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-hard-delete-target-after-fence"),
+          threadId: targetThreadId,
+          title: "must not return",
+        }),
+      ),
+    ).rejects.toThrow("Thread identity is permanently retired");
+
+    // Even an exact replay of a previously accepted command must reject after
+    // the retirement boundary; receipt lookup cannot bypass the fence while
+    // file cleanup is running before the purge envelope.
+    await expect(
+      system.run(
+        engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-hard-delete-thread-create-target"),
+          threadId: targetThreadId,
+          projectId,
+          title: "target",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        }),
+      ),
+    ).rejects.toThrow("permanently retired");
+
+    await system.run(
+      engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-hard-delete-survivor-after-fence"),
+        threadId: survivorThreadId,
+        title: "survivor updated",
+      }),
+    );
+    await system.run(engine.purgeHardDeletedThread({ threadId: targetThreadId }));
+
+    const snapshot = await system.readModel();
+    expect(snapshot.threads.some((thread) => thread.id === targetThreadId)).toBe(false);
+    expect(snapshot.threads.find((thread) => thread.id === survivorThreadId)?.title).toBe(
+      "survivor updated",
+    );
+
+    // The durable tombstone also blocks the only command whose ordinary
+    // missing-thread invariant would otherwise permit same-id recreation.
+    await expect(
+      system.run(
+        engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-hard-delete-recreate"),
+          threadId: targetThreadId,
+          projectId,
+          title: "recreated",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        }),
+      ),
+    ).rejects.toThrow("Failed to execute OrchestrationEventStore.append:insert");
+
+    const events = await system.run(Stream.runCollect(engine.readEvents(0)));
+    expect(Array.from(events).some((event) => event.aggregateId === targetThreadId)).toBe(false);
+
+    await system.dispose();
+  });
 });

@@ -105,6 +105,7 @@ import type {
   LatestProposedPlanState,
   PendingApproval,
   PendingUserInput,
+  WorkLogEntry,
 } from "../../session-logic";
 import { deriveLatestContextWindowSnapshot } from "../../lib/contextWindow";
 import { shouldSurfaceProviderAccountRateLimits } from "../../lib/codexRateLimits";
@@ -651,6 +652,7 @@ export interface ChatComposerProps {
   showPlanFollowUpPrompt: boolean;
   activeProposedPlan: Thread["proposedPlans"][number] | null;
   activePlan: ActivePlanState | null;
+  activeSubagents?: ReadonlyArray<WorkLogEntry>;
   sidebarProposedPlan: LatestProposedPlanState | null;
   planSidebarLabel: string;
   planSidebarOpen: boolean;
@@ -719,6 +721,7 @@ export interface ChatComposerProps {
   handleInteractionModeChange: (mode: ProviderInteractionMode) => void;
   togglePlanSidebar: () => void;
   onOpenGoalDialog: () => void;
+  onOpenSubagentDetail?: (workEntry: WorkLogEntry, trigger: HTMLButtonElement) => void;
 
   focusComposer: () => void;
   scheduleComposerFocus: () => void;
@@ -760,6 +763,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     showPlanFollowUpPrompt,
     activeProposedPlan,
     activePlan,
+    activeSubagents = [],
     sidebarProposedPlan,
     planSidebarLabel,
     planSidebarOpen,
@@ -804,6 +808,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     handleInteractionModeChange,
     togglePlanSidebar,
     onOpenGoalDialog,
+    onOpenSubagentDetail,
     focusComposer,
     scheduleComposerFocus,
     setThreadError,
@@ -1302,7 +1307,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isComposerCollapsedMobile && !isComposerApprovalState && pendingUserInputs.length === 0;
 
   const composerFooterHasWideActions =
-    showPlanFollowUpPrompt || activePendingProgress !== null || activePlan !== null;
+    showPlanFollowUpPrompt ||
+    activePendingProgress !== null ||
+    activePlan !== null ||
+    activeSubagents.length > 0;
   // Runtime checklists now live in the compact composer progress popover.
   // The retained side-panel control is intentionally limited to authored plan
   // documents so a task update can never reopen the old Tasks panel.
@@ -2740,7 +2748,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   data-chat-composer-mobile-pending-actions="true"
                   className="absolute bottom-0 right-0 flex items-center justify-end gap-1.5"
                 >
-                  <ComposerTaskProgress plan={activePlan} />
+                  <ComposerTaskProgress
+                    plan={activePlan}
+                    subagents={activeSubagents}
+                    onOpenSubagentDetail={onOpenSubagentDetail}
+                  />
                   {pendingUserInputs.length === 0 ? (
                     <ComposerAttachImageButton
                       preserveComposerFocusOnPointerDown
@@ -2780,7 +2792,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           (isComposerCollapsedMobile &&
             !showCollapsedMobilePromptRow) ? null : activePendingApproval ? (
             <div className="flex min-w-0 items-center justify-end gap-2 px-2.5 pb-2.5 sm:px-3 sm:pb-3">
-              <ComposerTaskProgress plan={activePlan} />
+              <ComposerTaskProgress
+                plan={activePlan}
+                subagents={activeSubagents}
+                onOpenSubagentDetail={onOpenSubagentDetail}
+              />
               <ComposerPendingApprovalActions
                 requestId={activePendingApproval.requestId}
                 isResponding={respondingRequestIds.includes(activePendingApproval.requestId)}
@@ -2895,7 +2911,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               {/* Keep task progress outside the horizontally scrolling provider
                   controls so the status remains legible on narrow screens. The
                   popover itself is portaled and cannot be clipped by the footer. */}
-              <ComposerTaskProgress plan={activePlan} />
+              <ComposerTaskProgress
+                plan={activePlan}
+                subagents={activeSubagents}
+                onOpenSubagentDetail={onOpenSubagentDetail}
+              />
 
               {/* Right side: send / stop button */}
               <div

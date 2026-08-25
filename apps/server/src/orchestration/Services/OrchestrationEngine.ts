@@ -10,12 +10,13 @@
  *
  * @module OrchestrationEngineService
  */
-import type { OrchestrationCommand, OrchestrationEvent } from "@cafecode/contracts";
+import type { OrchestrationCommand, OrchestrationEvent, ThreadId } from "@cafecode/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 
 import type { OrchestrationDispatchError } from "../Errors.ts";
+import type { OrchestrationThreadHardDeleteError } from "../Errors.ts";
 import type { OrchestrationEventStoreError } from "../../persistence/Errors.ts";
 
 /**
@@ -44,6 +45,23 @@ export interface OrchestrationEngineShape {
   readonly dispatch: (
     command: OrchestrationCommand,
   ) => Effect.Effect<{ sequence: number }, OrchestrationDispatchError, never>;
+
+  /**
+   * Serialize a permanent thread-identity fence behind all commands already
+   * accepted by this engine. Once this resolves, later commands observe the
+   * thread as absent and the database rejects stale cross-process writes.
+   */
+  readonly retireThreadForHardDelete: (input: {
+    readonly threadId: ThreadId;
+  }) => Effect.Effect<void, OrchestrationThreadHardDeleteError, never>;
+
+  /**
+   * Purge the retired thread's durable rows through the same FIFO as normal
+   * commands. The durable tombstone is intentionally retained.
+   */
+  readonly purgeHardDeletedThread: (input: {
+    readonly threadId: ThreadId;
+  }) => Effect.Effect<{ readonly deleted: true }, OrchestrationThreadHardDeleteError, never>;
 
   /**
    * Read the small in-memory command-processing counters used by diagnostics.

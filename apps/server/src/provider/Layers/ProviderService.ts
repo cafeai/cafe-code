@@ -30,10 +30,11 @@ import {
   ServerProviderRuntimeRestartInput,
   ProviderSteerTurnInput,
   ProviderStopSessionInput,
-  type TurnId,
+  TurnId,
   type ProviderSessionRuntimeStatus,
   type ProviderInstanceId,
   ProviderDriverKind,
+  OrchestrationThreadTurnSubagentDetailBody,
   THREAD_TURN_SUBAGENT_ID_MAX_LENGTH,
   TrimmedNonEmptyString,
   type ProviderRuntimeEvent,
@@ -45,6 +46,7 @@ import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -68,6 +70,7 @@ import {
   ProviderAdapterProcessError,
   type ProviderAdapterError,
   ProviderValidationError,
+  makeProviderSubagentDetailReadError,
 } from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import { ProviderAdapterRegistry } from "../Services/ProviderAdapterRegistry.ts";
@@ -117,13 +120,50 @@ const ProviderReadThreadInput = Schema.Struct({
 
 const ProviderReadSubagentDetailInput = Schema.Struct({
   threadId: ThreadId,
+  turnId: TurnId,
   subagentId: TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_TURN_SUBAGENT_ID_MAX_LENGTH)),
+  historyId: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_TURN_SUBAGENT_ID_MAX_LENGTH)),
+  ),
 });
 
 const ProviderRuntimeRestartInput = ServerProviderRuntimeRestartInput;
 const ProviderForkSessionInput = ProviderSessionForkInput;
 const ProviderDiscardSessionForkInput = ProviderSessionForkDiscardInput;
 const PROVIDER_ADAPTER_EVENT_STREAM_RESTART_DELAY = Duration.millis(500);
+const PROVIDER_SUBAGENT_HISTORY_CURSOR_MAX_UTF8_BYTES = 64 * 1024;
+const PROVIDER_SUBAGENT_HISTORY_CWD_MAX_CODE_UNITS = 32 * 1024;
+const THREAD_LIFECYCLE_LOCK_STRIPE_COUNT = 256;
+
+/**
+ * Freeze a finite JSON-only copy before the provider root scope is retained
+ * beyond the mutable live session. This prevents adapter-owned prototypes,
+ * accessors, or an adversarially large cursor from entering the durable
+ * history-binding table.
+ */
+function freezeSubagentHistoryResumeCursor(value: unknown | null | undefined): unknown | null {
+  if (value === null || value === undefined) return null;
+  try {
+    const encoded = JSON.stringify(value);
+    if (
+      encoded === undefined ||
+      new TextEncoder().encode(encoded).byteLength > PROVIDER_SUBAGENT_HISTORY_CURSOR_MAX_UTF8_BYTES
+    ) {
+      return null;
+    }
+    return JSON.parse(encoded) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function boundedSubagentHistoryCwd(value: string | undefined): string | null {
+  return value !== undefined &&
+    value.length <= PROVIDER_SUBAGENT_HISTORY_CWD_MAX_CODE_UNITS &&
+    !value.includes("\0")
+    ? value
+    : null;
+}
 
 function toValidationError(
   operation: string,
@@ -154,6 +194,47 @@ const decodeInputOrValidationError = <S extends Schema.Top>(input: {
     ),
   );
 };
+
+const decodeProviderSubagentDetailBody = Schema.decodeUnknownEffect(
+  OrchestrationThreadTurnSubagentDetailBody,
+);
+
+/**
+ * Decode provider-owned detail through the public schema and then construct a
+ * fresh field-by-field value. The second step is intentional even though
+ * Effect Schema currently reconstructs structs: it keeps this security
+ * boundary independent of decoder implementation details and ensures custom
+ * prototypes, accessors, extra private fields, and `toJSON` hooks cannot cross
+ * into daemon or renderer serialization.
+ */
+const makePublicProviderSubagentDetailBody = (input: unknown) =>
+  decodeProviderSubagentDetailBody(input).pipe(
+    Effect.mapError(() => makeProviderSubagentDetailReadError("provider-response-invalid")),
+    Effect.catchDefect(() =>
+      Effect.fail(makeProviderSubagentDetailReadError("provider-response-invalid")),
+    ),
+    Effect.map((detail) => ({
+      messages: detail.messages.map((message) => ({
+        key: message.key,
+        role: message.role,
+        text: message.text,
+        ...(message.omission === undefined
+          ? {}
+          : {
+              omission: {
+                tail: message.omission.tail,
+                omittedUtf8Bytes: message.omission.omittedUtf8Bytes,
+              },
+            }),
+      })),
+      gaps: detail.gaps.map((gap) => ({
+        afterMessageKey: gap.afterMessageKey,
+        omittedMessages: gap.omittedMessages,
+        omittedUtf8Bytes: gap.omittedUtf8Bytes,
+      })),
+      truncated: detail.truncated,
+    })),
+  );
 
 function toRuntimeStatus(session: ProviderSession): "starting" | "running" | "stopped" | "error" {
   switch (session.status) {
@@ -437,6 +518,61 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   // native branches before one wins the durable upsert.
   const sessionForkMutationSemaphore = yield* Semaphore.make(1);
 
+  // Hard deletion is a permanent lifecycle boundary, not merely another
+  // session status. A per-thread semaphore serializes short provider mutation
+  // acknowledgements and canonical event persistence with that boundary. Once
+  // retired, the thread id remains fenced for this process incarnation; Cafe
+  // thread ids are immutable and are never validly reused after hard delete.
+  // The durable database foreign key on provider history roots is the second,
+  // cross-process fence if a stale daemon record is replayed after restart.
+  const hardDeleteRetiredThreadIds = yield* Ref.make<ReadonlySet<ThreadId>>(new Set());
+  // Fixed stripes bound memory even if a compromised provider emits events
+  // carrying many adversarial thread ids. Hash collisions only serialize two
+  // short control-plane operations; they cannot weaken the delete fence.
+  const threadLifecycleSemaphores = yield* Effect.forEach(
+    Array.from({ length: THREAD_LIFECYCLE_LOCK_STRIPE_COUNT }),
+    () => Semaphore.make(1),
+  );
+
+  const threadLifecycleSemaphoreIndex = (threadId: ThreadId): number => {
+    // FNV-1a via Math.imul keeps the index deterministic without retaining the
+    // provider-controlled id in another process-lifetime map.
+    let hash = 0x811c9dc5;
+    const value = String(threadId);
+    for (let index = 0; index < value.length; index += 1) {
+      hash ^= value.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return (hash >>> 0) % THREAD_LIFECYCLE_LOCK_STRIPE_COUNT;
+  };
+
+  const withThreadLifecycleLocks = <A, E, R>(
+    threadIds: ReadonlyArray<ThreadId>,
+    effect: Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E, R> => {
+    // Fork is the only provider mutation spanning two immutable Cafe thread
+    // identities. Acquire the fixed lock stripes in one deterministic order
+    // so opposite-direction forks cannot deadlock. Two distinct ids can hash
+    // to the same stripe; de-duplicating indexes is therefore required rather
+    // than an optimization, because a semaphore permit is not re-entrant.
+    const stripeIndexes = Array.from(
+      new Set(threadIds.map(threadLifecycleSemaphoreIndex)),
+    ).toSorted((left, right) => left - right);
+    return stripeIndexes.reduceRight<Effect.Effect<A, E, R>>((guarded, stripeIndex) => {
+      const semaphore = threadLifecycleSemaphores[stripeIndex];
+      // Every index was produced modulo the fixed non-zero stripe count, so a
+      // missing entry is a construction defect rather than provider input.
+      return semaphore === undefined
+        ? Effect.die("Missing provider lifecycle lock stripe")
+        : semaphore.withPermit(guarded);
+    }, effect);
+  };
+
+  const withThreadLifecycleLock = <A, E, R>(
+    threadId: ThreadId,
+    effect: Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E, R> => withThreadLifecycleLocks([threadId], effect);
+
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Effect.succeed(event).pipe(
       Effect.tap((canonicalEvent) =>
@@ -590,14 +726,22 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   ): Effect.Effect<void> =>
     Effect.sync(() => correlateRuntimeEventWithInstance(source, event)).pipe(
       Effect.flatMap((canonicalEvent) =>
-        persistRuntimeLifecycleEvent(canonicalEvent).pipe(
-          Effect.andThen(
-            increment(providerRuntimeEventsTotal, {
+        withThreadLifecycleLock(
+          canonicalEvent.threadId,
+          Effect.gen(function* () {
+            const retiredThreadIds = yield* Ref.get(hardDeleteRetiredThreadIds);
+            if (retiredThreadIds.has(canonicalEvent.threadId)) {
+              return;
+            }
+
+            yield* persistSubagentHistoryBindingEvent(canonicalEvent);
+            yield* persistRuntimeLifecycleEvent(canonicalEvent);
+            yield* increment(providerRuntimeEventsTotal, {
               provider: canonicalEvent.provider,
               eventType: canonicalEvent.type,
-            }),
-          ),
-          Effect.andThen(publishRuntimeEvent(canonicalEvent)),
+            });
+            yield* publishRuntimeEvent(canonicalEvent);
+          }),
         ),
       ),
     );
@@ -678,6 +822,107 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   };
 
+  const persistSubagentHistoryBindingEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> => {
+    const subagent =
+      event.type === "task.started" ||
+      event.type === "task.progress" ||
+      event.type === "task.completed"
+        ? event.payload.subagent
+        : undefined;
+    const providerInstanceId = event.providerInstanceId;
+    if (subagent === undefined || event.turnId === undefined || providerInstanceId === undefined) {
+      return Effect.void;
+    }
+    const turnId = event.turnId;
+
+    return Effect.gen(function* () {
+      const bindingOption = yield* directory.getBinding(event.threadId);
+      const binding = Option.getOrUndefined(bindingOption);
+      // Late events from a retired adapter must never overwrite or borrow the
+      // new provider's root history scope. Correlation proves the emitting
+      // instance; this exact comparison proves the still-current root binding.
+      if (
+        binding === undefined ||
+        binding.provider !== event.provider ||
+        binding.providerInstanceId !== providerInstanceId
+      ) {
+        return;
+      }
+
+      const cwd = boundedSubagentHistoryCwd(readPersistedCwd(binding.runtimePayload));
+      const persistedAt = yield* nowIso;
+      yield* directory.upsertSubagentHistoryBinding({
+        threadId: event.threadId,
+        turnId,
+        subagentId: subagent.threadId,
+        historyId: subagent.historyId ?? null,
+        providerName: event.provider,
+        providerInstanceId,
+        resumeCursor: freezeSubagentHistoryResumeCursor(binding.resumeCursor),
+        cwd,
+        createdAt: persistedAt,
+        updatedAt: persistedAt,
+      });
+    }).pipe(
+      // Detail routing is supplemental history metadata. A storage failure
+      // must not drop the lifecycle event itself, but it is logged without the
+      // provider-native child/history ids or private resume/cwd values.
+      Effect.catchCause(() =>
+        Effect.logWarning("provider.subagent.history-binding-persist-failed", {
+          threadId: event.threadId,
+          turnId: event.turnId,
+          provider: event.provider,
+          providerInstanceId,
+          eventType: event.type,
+        }),
+      ),
+    );
+  };
+
+  const persistTurnSubagentHistoryRoot = (input: {
+    readonly binding: ProviderRuntimeBinding;
+    readonly provider: ProviderDriverKind;
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+    readonly resumeCursor?: unknown;
+  }): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      const persistedAt = yield* nowIso;
+      const cwd = boundedSubagentHistoryCwd(readPersistedCwd(input.binding.runtimePayload));
+      yield* directory.upsertSubagentHistoryBinding({
+        threadId: input.threadId,
+        turnId: input.turnId,
+        // The empty child id is an internal write-only signal telling the
+        // normalized repository to retain the immutable per-turn provider
+        // root before an exact child lifecycle event arrives. Detail reads
+        // never select this value and never fall back from an exact child.
+        subagentId: "",
+        historyId: null,
+        providerName: input.provider,
+        providerInstanceId: input.providerInstanceId,
+        resumeCursor: freezeSubagentHistoryResumeCursor(
+          input.resumeCursor !== undefined ? input.resumeCursor : input.binding.resumeCursor,
+        ),
+        cwd,
+        createdAt: persistedAt,
+        updatedAt: persistedAt,
+      });
+    }).pipe(
+      // The provider turn may already be running when its acknowledgement
+      // arrives. Failing the public send boundary here would invite a duplicate
+      // retry, so degrade only the supplemental history surface and redact the
+      // private binding/error values from logs.
+      Effect.catchCause(() =>
+        Effect.logWarning("provider.subagent.turn-history-binding-persist-failed", {
+          threadId: input.threadId,
+          turnId: input.turnId,
+          provider: input.provider,
+          providerInstanceId: input.providerInstanceId,
+        }),
+      ),
+    );
+
   // `subscribedAdapters` is our source-of-truth for "which instance adapters
   // are currently wired into the runtime event bus". It both tracks the set
   // of live subscriptions (so `reconcileInstanceSubscriptions` can diff and
@@ -693,6 +938,113 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const getAdapterEntries = Ref.get(subscribedAdapters).pipe(
     Effect.map((map) => Array.from(map.entries())),
   );
+
+  const quiesceThreadForHardDelete: ProviderServiceShape["quiesceThreadForHardDelete"] = Effect.fn(
+    "quiesceThreadForHardDelete",
+  )(function* (rawInput) {
+    const input = yield* decodeInputOrValidationError({
+      operation: "ProviderService.quiesceThreadForHardDelete",
+      schema: ProviderStopSessionInput,
+      payload: rawInput,
+    });
+
+    yield* withThreadLifecycleLock(
+      input.threadId,
+      Effect.gen(function* () {
+        // Fence first. Adapter Stop is allowed to publish terminal events, and
+        // those events intentionally wait behind this permit before observing
+        // the fence and becoming no-ops. Therefore returning from this method
+        // proves every event persistence operation that started before the
+        // fence has drained, while later events cannot recreate deleted state.
+        yield* Ref.update(hardDeleteRetiredThreadIds, (current) => {
+          if (current.has(input.threadId)) {
+            return current;
+          }
+          const next = new Set(current);
+          next.add(input.threadId);
+          return next;
+        });
+
+        const adapters = yield* getAdapterEntries;
+        const stopExits = yield* Effect.forEach(
+          adapters,
+          ([, adapter]) =>
+            Effect.gen(function* () {
+              if (yield* adapter.hasSession(input.threadId)) {
+                yield* adapter.stopSession(input.threadId);
+              }
+            }).pipe(Effect.exit),
+          // A stale session on one provider must not prevent Cafe from trying
+          // to retire the same immutable thread id on every other adapter.
+          { concurrency: "unbounded" },
+        );
+        runtimeOwnerHeartbeatWrittenAt.delete(input.threadId);
+
+        const failedStop = stopExits.find(Exit.isFailure);
+        if (failedStop !== undefined && Exit.isFailure(failedStop)) {
+          return yield* Effect.failCause(failedStop.cause);
+        }
+      }),
+    );
+  });
+
+  const whileThreadAcceptsProviderWork = <A, E, R>(input: {
+    readonly operation: string;
+    readonly threadId: ThreadId;
+    readonly effect: Effect.Effect<A, E, R>;
+  }): Effect.Effect<A, E | ProviderValidationError, R> =>
+    withThreadLifecycleLock(
+      input.threadId,
+      Effect.gen(function* () {
+        const retiredThreadIds = yield* Ref.get(hardDeleteRetiredThreadIds);
+        if (retiredThreadIds.has(input.threadId)) {
+          return yield* Effect.fail(
+            toValidationError(
+              input.operation,
+              `Thread '${input.threadId}' is permanently retired and cannot accept provider work.`,
+            ),
+          );
+        }
+        return yield* input.effect;
+      }),
+    );
+
+  const whileThreadsAcceptProviderWork = <A, E, R>(input: {
+    readonly operation: string;
+    readonly threadIds: ReadonlyArray<ThreadId>;
+    readonly effect: Effect.Effect<A, E, R>;
+  }): Effect.Effect<A, E | ProviderValidationError, R> =>
+    withThreadLifecycleLocks(
+      input.threadIds,
+      Effect.gen(function* () {
+        const retiredThreadIds = yield* Ref.get(hardDeleteRetiredThreadIds);
+        const retiredThreadId = input.threadIds.find((threadId) => retiredThreadIds.has(threadId));
+        if (retiredThreadId !== undefined) {
+          return yield* Effect.fail(
+            toValidationError(
+              input.operation,
+              `Thread '${retiredThreadId}' is permanently retired and cannot accept provider work.`,
+            ),
+          );
+        }
+        return yield* input.effect;
+      }),
+    );
+
+  const persistUnlessThreadRetired = <E, R>(
+    threadId: ThreadId,
+    effect: Effect.Effect<void, E, R>,
+  ): Effect.Effect<void, E, R> =>
+    withThreadLifecycleLock(
+      threadId,
+      Effect.gen(function* () {
+        const retiredThreadIds = yield* Ref.get(hardDeleteRetiredThreadIds);
+        if (retiredThreadIds.has(threadId)) {
+          return;
+        }
+        yield* effect;
+      }),
+    );
 
   const runAdapterEventSubscription = (
     id: ProviderInstanceId,
@@ -1408,6 +1760,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             ...(input.input !== undefined ? { input: input.input } : {}),
             ...(input.attachments.length > 0 ? { attachments: input.attachments } : {}),
           });
+          yield* persistTurnSubagentHistoryRoot({
+            binding: routed.binding,
+            provider: routed.adapter.provider,
+            providerInstanceId: routed.instanceId,
+            threadId: input.threadId,
+            turnId: turn.turnId,
+            ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
+          });
           yield* upsertRunningTurnBinding({
             threadId: input.threadId,
             provider: routed.adapter.provider,
@@ -1420,6 +1780,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }
       }
       const turn = yield* routed.adapter.sendTurn(input);
+      yield* persistTurnSubagentHistoryRoot({
+        binding: routed.binding,
+        provider: routed.adapter.provider,
+        providerInstanceId: routed.instanceId,
+        threadId: input.threadId,
+        turnId: turn.turnId,
+        ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
+      });
       yield* upsertRunningTurnBinding({
         threadId: input.threadId,
         provider: routed.adapter.provider,
@@ -1488,6 +1856,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.kind": routed.adapter.provider,
       });
       const turn = yield* routed.adapter.steerTurn(input);
+      yield* persistTurnSubagentHistoryRoot({
+        binding: routed.binding,
+        provider: routed.adapter.provider,
+        providerInstanceId: routed.instanceId,
+        threadId: input.threadId,
+        turnId: turn.turnId,
+        ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
+      });
       yield* upsertRunningTurnBinding({
         threadId: input.threadId,
         provider: routed.adapter.provider,
@@ -1717,23 +2093,26 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       // using durable resume state, rather than steering a runtime Cafe no
       // longer owns.
       yield* Effect.forEach(activeSessions, (session) =>
-        directory.upsert({
-          threadId: session.threadId,
-          provider: adapter.provider,
-          providerInstanceId: input.instanceId,
-          runtimeMode: session.runtimeMode,
-          status: "stopped",
-          ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),
-          runtimePayload: {
-            cwd: session.cwd ?? null,
-            additionalDirectories: session.additionalDirectories ?? [],
-            model: session.model ?? null,
-            activeTurnId: null,
-            lastError: session.lastError ?? null,
-            lastRuntimeEvent: "provider.runtime.restart",
-            lastRuntimeEventAt: restartedAt,
-          },
-        }),
+        persistUnlessThreadRetired(
+          session.threadId,
+          directory.upsert({
+            threadId: session.threadId,
+            provider: adapter.provider,
+            providerInstanceId: input.instanceId,
+            runtimeMode: session.runtimeMode,
+            status: "stopped",
+            ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),
+            runtimePayload: {
+              cwd: session.cwd ?? null,
+              additionalDirectories: session.additionalDirectories ?? [],
+              model: session.model ?? null,
+              activeTurnId: null,
+              lastError: session.lastError ?? null,
+              lastRuntimeEvent: "provider.runtime.restart",
+              lastRuntimeEventAt: restartedAt,
+            },
+          }),
+        ),
       ).pipe(Effect.asVoid);
 
       const bindings = yield* directory.listBindings().pipe(Effect.orElseSucceed(() => []));
@@ -1745,17 +2124,20 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         if (bindingInstanceId !== input.instanceId || activeThreadIds.has(binding.threadId)) {
           return Effect.void;
         }
-        return directory.upsert({
-          threadId: binding.threadId,
-          provider: binding.provider,
-          providerInstanceId: bindingInstanceId,
-          status: "stopped",
-          runtimePayload: {
-            activeTurnId: null,
-            lastRuntimeEvent: "provider.runtime.restart",
-            lastRuntimeEventAt: restartedAt,
-          },
-        });
+        return persistUnlessThreadRetired(
+          binding.threadId,
+          directory.upsert({
+            threadId: binding.threadId,
+            provider: binding.provider,
+            providerInstanceId: bindingInstanceId,
+            status: "stopped",
+            runtimePayload: {
+              activeTurnId: null,
+              lastRuntimeEvent: "provider.runtime.restart",
+              lastRuntimeEventAt: restartedAt,
+            },
+          }),
+        );
       }).pipe(Effect.asVoid);
 
       yield* adapter.stopAll();
@@ -1812,7 +2194,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         yield* Effect.forEach(
           dueSessions,
           (session) =>
-            upsertSessionBinding(session, session.threadId).pipe(
+            persistUnlessThreadRetired(
+              session.threadId,
+              upsertSessionBinding(session, session.threadId),
+            ).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("provider.runtime.owner-heartbeat-write-failed", {
                   threadId: session.threadId,
@@ -2065,16 +2450,27 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       schema: ProviderReadSubagentDetailInput,
       payload: rawInput,
     });
-    const routed = yield* resolveRoutableSession({
+    const historyBindingOption = yield* directory.getSubagentHistoryBinding({
       threadId: input.threadId,
-      operation: "ProviderService.readSubagentDetail",
-      allowRecovery: false,
-      requiredProvider: ProviderDriverKind.make("codex"),
+      turnId: input.turnId,
+      subagentId: input.subagentId,
+      historyId: input.historyId ?? null,
     });
-    if (
-      routed.adapter.provider !== ProviderDriverKind.make("codex") ||
-      routed.adapter.readSubagentDetail === undefined
-    ) {
+    const historyBinding = Option.getOrUndefined(historyBindingOption);
+    if (historyBinding === undefined) {
+      return yield* toValidationError(
+        "ProviderService.readSubagentDetail",
+        "No immutable provider history binding exists for the selected subagent.",
+      );
+    }
+    const adapter = yield* registry.getByInstance(historyBinding.providerInstanceId);
+    if (adapter.provider !== historyBinding.providerName) {
+      return yield* toValidationError(
+        "ProviderService.readSubagentDetail",
+        "The configured provider instance does not match the persisted subagent history binding.",
+      );
+    }
+    if (adapter.readSubagentDetail === undefined) {
       return yield* toValidationError(
         "ProviderService.readSubagentDetail",
         "The selected provider does not expose verified subagent transcript history.",
@@ -2086,17 +2482,21 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     // safe diagnostics for this operation.
     yield* Effect.annotateCurrentSpan({
       "provider.operation": "read-subagent-detail",
-      "provider.kind": routed.adapter.provider,
+      "provider.kind": historyBinding.providerName,
       "provider.thread_id": input.threadId,
     });
-    const detail = yield* routed.adapter.readSubagentDetail(routed.threadId, input.subagentId, {
-      resumeCursor: routed.binding.resumeCursor,
+    const detail = yield* adapter.readSubagentDetail(input.threadId, input.subagentId, {
+      resumeCursor: historyBinding.resumeCursor,
+      ...(historyBinding.cwd ? { cwd: historyBinding.cwd } : {}),
+      ...(input.historyId ? { historyId: input.historyId } : {}),
     });
+    const publicDetail = yield* makePublicProviderSubagentDetailBody(detail);
     return {
-      provider: routed.adapter.provider,
-      providerInstanceId: routed.instanceId,
-      messages: detail.messages,
-      truncated: detail.truncated,
+      provider: historyBinding.providerName,
+      providerInstanceId: historyBinding.providerInstanceId,
+      messages: publicDetail.messages,
+      gaps: publicDetail.gaps,
+      truncated: publicDetail.truncated,
     };
   });
 
@@ -2158,23 +2558,26 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     // Codex/Claude process Cafe no longer owns; the durable resume cursor still
     // lets the next user message reopen the provider thread in a fresh runtime.
     yield* Effect.forEach(activeSessions, (session) =>
-      directory.upsert({
-        threadId: session.threadId,
-        provider: session.provider,
-        providerInstanceId: session.providerInstanceId,
-        runtimeMode: session.runtimeMode,
-        status: "stopped",
-        ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),
-        runtimePayload: {
-          cwd: session.cwd ?? null,
-          additionalDirectories: session.additionalDirectories ?? [],
-          model: session.model ?? null,
-          activeTurnId: null,
-          lastError: session.lastError ?? null,
-          lastRuntimeEvent: "provider.stopAll",
-          lastRuntimeEventAt: stopAllTimestamp,
-        },
-      }),
+      persistUnlessThreadRetired(
+        session.threadId,
+        directory.upsert({
+          threadId: session.threadId,
+          provider: session.provider,
+          providerInstanceId: session.providerInstanceId,
+          runtimeMode: session.runtimeMode,
+          status: "stopped",
+          ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),
+          runtimePayload: {
+            cwd: session.cwd ?? null,
+            additionalDirectories: session.additionalDirectories ?? [],
+            model: session.model ?? null,
+            activeTurnId: null,
+            lastError: session.lastError ?? null,
+            lastRuntimeEvent: "provider.stopAll",
+            lastRuntimeEventAt: stopAllTimestamp,
+          },
+        }),
+      ),
     ).pipe(Effect.asVoid);
     const bindings = yield* directory.listBindings().pipe(Effect.orElseSucceed(() => []));
     yield* Effect.forEach(bindings, (binding) =>
@@ -2183,17 +2586,20 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "ProviderService.stopAll",
           binding,
         );
-        return yield* directory.upsert({
-          threadId: binding.threadId,
-          provider: binding.provider,
-          providerInstanceId,
-          status: "stopped",
-          runtimePayload: {
-            activeTurnId: null,
-            lastRuntimeEvent: "provider.stopAll",
-            lastRuntimeEventAt: stopAllTimestamp,
-          },
-        });
+        return yield* persistUnlessThreadRetired(
+          binding.threadId,
+          directory.upsert({
+            threadId: binding.threadId,
+            provider: binding.provider,
+            providerInstanceId,
+            status: "stopped",
+            runtimePayload: {
+              activeTurnId: null,
+              lastRuntimeEvent: "provider.stopAll",
+              lastRuntimeEventAt: stopAllTimestamp,
+            },
+          }),
+        );
       }),
     ).pipe(Effect.asVoid);
     yield* Effect.forEach(
@@ -2221,26 +2627,107 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   );
 
   return {
-    startSession,
-    forkSession,
-    discardSessionFork,
-    sendTurn,
-    steerTurn,
-    interruptTurn,
-    respondToRequest,
-    respondToUserInput,
-    snoozeUserInput,
-    stopSession,
+    startSession: (threadId, input) =>
+      whileThreadAcceptsProviderWork({
+        operation: "ProviderService.startSession",
+        threadId,
+        effect: startSession(threadId, input),
+      }),
+    forkSession: (input) =>
+      whileThreadsAcceptProviderWork({
+        operation: "ProviderService.forkSession",
+        threadIds: [input.sourceThreadId, input.targetThreadId],
+        effect: forkSession(input),
+      }),
+    discardSessionFork: (input) =>
+      whileThreadAcceptsProviderWork({
+        operation: "ProviderService.discardSessionFork",
+        threadId: input.fork.targetThreadId,
+        effect: discardSessionFork(input),
+      }),
+    sendTurn: (input) =>
+      whileThreadAcceptsProviderWork({
+        operation: "ProviderService.sendTurn",
+        threadId: input.threadId,
+        effect: sendTurn(input),
+      }),
+    steerTurn: (input) =>
+      whileThreadAcceptsProviderWork({
+        operation: "ProviderService.steerTurn",
+        threadId: input.threadId,
+        effect: steerTurn(input),
+      }),
+    interruptTurn: (input) =>
+      whileThreadAcceptsProviderWork({
+        operation: "ProviderService.interruptTurn",
+        threadId: input.threadId,
+        effect: interruptTurn(input),
+      }),
+    respondToRequest: (input) =>
+      whileThreadAcceptsProviderWork({
+        operation: "ProviderService.respondToRequest",
+        threadId: input.threadId,
+        effect: respondToRequest(input),
+      }),
+    respondToUserInput: (input) =>
+      whileThreadAcceptsProviderWork({
+        operation: "ProviderService.respondToUserInput",
+        threadId: input.threadId,
+        effect: respondToUserInput(input),
+      }),
+    snoozeUserInput: (input) =>
+      whileThreadAcceptsProviderWork({
+        operation: "ProviderService.snoozeUserInput",
+        threadId: input.threadId,
+        effect: snoozeUserInput(input),
+      }),
+    stopSession: (input) =>
+      whileThreadAcceptsProviderWork({
+        operation: "ProviderService.stopSession",
+        threadId: input.threadId,
+        effect: stopSession(input),
+      }),
+    quiesceThreadForHardDelete,
     restartProviderRuntime,
     listSessions,
     getCapabilities,
     getInstanceInfo,
-    getGoal,
-    setGoal,
-    clearGoal,
-    readThread,
-    readSubagentDetail,
-    rollbackConversation,
+    getGoal: (input) =>
+      whileThreadAcceptsProviderWork({
+        operation: "ProviderService.getGoal",
+        threadId: input.threadId,
+        effect: getGoal(input),
+      }),
+    setGoal: (input) =>
+      whileThreadAcceptsProviderWork({
+        operation: "ProviderService.setGoal",
+        threadId: input.threadId,
+        effect: setGoal(input),
+      }),
+    clearGoal: (input) =>
+      whileThreadAcceptsProviderWork({
+        operation: "ProviderService.clearGoal",
+        threadId: input.threadId,
+        effect: clearGoal(input),
+      }),
+    readThread: (input) =>
+      whileThreadAcceptsProviderWork({
+        operation: "ProviderService.readThread",
+        threadId: input.threadId,
+        effect: readThread(input),
+      }),
+    readSubagentDetail: (input) =>
+      whileThreadAcceptsProviderWork({
+        operation: "ProviderService.readSubagentDetail",
+        threadId: input.threadId,
+        effect: readSubagentDetail(input),
+      }),
+    rollbackConversation: (input) =>
+      whileThreadAcceptsProviderWork({
+        operation: "ProviderService.rollbackConversation",
+        threadId: input.threadId,
+        effect: rollbackConversation(input),
+      }),
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each
     // independently receive all runtime events.

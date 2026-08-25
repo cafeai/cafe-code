@@ -5,7 +5,7 @@ import * as http from "node:http";
 import type { ProviderDaemonClientConfig } from "@cafecode/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { streamProviderDaemonNdjson } from "./providerDaemonHttp.ts";
+import { requestProviderDaemonJson, streamProviderDaemonNdjson } from "./providerDaemonHttp.ts";
 
 const servers: http.Server[] = [];
 
@@ -45,7 +45,68 @@ afterEach(async () => {
   );
 });
 
+describe("requestProviderDaemonJson", () => {
+  it("rejects an oversized response before buffering it without bound", async () => {
+    const fixture = await serve((response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ value: "x".repeat(128) }));
+    });
+
+    await expect(
+      requestProviderDaemonJson(fixture.endpoint, "/rpc", { maxResponseBytes: 64 }),
+    ).rejects.toThrow("exceeds 64 bytes");
+  });
+
+  it("keeps split UTF-8 response bytes intact below the cap", async () => {
+    const encoded = Buffer.from('{"text":"🙂"}', "utf8");
+    const emojiStart = encoded.indexOf(Buffer.from("🙂", "utf8"));
+    const fixture = await serve((response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write(encoded.subarray(0, emojiStart + 2));
+      response.end(encoded.subarray(emojiStart + 2));
+    });
+
+    const result = await requestProviderDaemonJson(fixture.endpoint, "/rpc", {
+      maxResponseBytes: encoded.byteLength,
+    });
+    expect(result.body).toBe('{"text":"🙂"}');
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, -1, 1.5])(
+    "rejects an invalid response cap before opening a connection: %s",
+    async (maxResponseBytes) => {
+      const fixture = await serve((response) => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end('{"ok":true}');
+      });
+
+      await expect(
+        requestProviderDaemonJson(fixture.endpoint, "/rpc", { maxResponseBytes }),
+      ).rejects.toThrow("maxResponseBytes must be a positive finite safe integer");
+    },
+  );
+});
+
 describe("streamProviderDaemonNdjson", () => {
+  it.each([
+    { maxLineBytes: Number.NaN },
+    { maxLineBytes: Number.POSITIVE_INFINITY },
+    { maxPendingBytes: Number.NaN },
+    { maxPendingBytes: Number.POSITIVE_INFINITY },
+  ])("rejects invalid finite-buffer configuration: %j", async (invalidLimits) => {
+    const fixture = await serve((response) => {
+      response.writeHead(200, { "content-type": "application/x-ndjson" });
+      response.end('{"cursor":1}\n');
+    });
+
+    await expect(
+      streamProviderDaemonNdjson(fixture.endpoint, "/events", {
+        ...invalidLimits,
+        onLine: () => {},
+      }),
+    ).rejects.toThrow("must be a positive finite safe integer");
+  });
+
   it("serializes async record handling and preserves order", async () => {
     const fixture = await serve((response) => {
       response.writeHead(200, { "content-type": "application/x-ndjson" });

@@ -7,10 +7,12 @@
  */
 import {
   IsoDateTime,
+  ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionRuntimeStatus,
   RuntimeMode,
   ThreadId,
+  TurnId,
 } from "@cafecode/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -38,6 +40,37 @@ export const ProviderSessionRuntime = Schema.Struct({
   runtimePayload: Schema.NullOr(Schema.Unknown),
 });
 export type ProviderSessionRuntime = typeof ProviderSessionRuntime.Type;
+
+/**
+ * Immutable routing provenance for one provider-owned nested-agent history.
+ *
+ * This state deliberately lives beside, rather than inside, the mutable root
+ * session row. Switching a Cafe thread to another provider must not cause an
+ * ended Codex child to be sent to Claude (or vice versa). The resume cursor and
+ * cwd are server-private and never enter renderer-visible activity payloads.
+ */
+export const ProviderSubagentHistoryBinding = Schema.Struct({
+  threadId: ThreadId,
+  turnId: TurnId,
+  subagentId: Schema.String,
+  historyId: Schema.NullOr(Schema.String),
+  providerName: ProviderDriverKind,
+  providerInstanceId: ProviderInstanceId,
+  resumeCursor: Schema.NullOr(Schema.Unknown),
+  cwd: Schema.NullOr(Schema.String),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type ProviderSubagentHistoryBinding = typeof ProviderSubagentHistoryBinding.Type;
+
+export const GetProviderSubagentHistoryBindingInput = Schema.Struct({
+  threadId: ThreadId,
+  turnId: TurnId,
+  subagentId: Schema.String,
+  historyId: Schema.NullOr(Schema.String),
+});
+export type GetProviderSubagentHistoryBindingInput =
+  typeof GetProviderSubagentHistoryBindingInput.Type;
 
 export const GetProviderSessionRuntimeInput = Schema.Struct({ threadId: ThreadId });
 export type GetProviderSessionRuntimeInput = typeof GetProviderSessionRuntimeInput.Type;
@@ -81,6 +114,19 @@ export interface ProviderSessionRuntimeRepositoryShape {
   readonly deleteByThreadId: (
     input: DeleteProviderSessionRuntimeInput,
   ) => Effect.Effect<void, ProviderSessionRuntimeRepositoryError>;
+
+  /** Idempotently capture immutable provider history routing for one child. */
+  readonly upsertSubagentHistoryBinding: (
+    binding: ProviderSubagentHistoryBinding,
+  ) => Effect.Effect<void, ProviderSessionRuntimeRepositoryError>;
+
+  /** Resolve the exact persisted child/turn/history tuple, if retained. */
+  readonly getSubagentHistoryBinding: (
+    input: GetProviderSubagentHistoryBindingInput,
+  ) => Effect.Effect<
+    Option.Option<ProviderSubagentHistoryBinding>,
+    ProviderSessionRuntimeRepositoryError
+  >;
 }
 
 /**

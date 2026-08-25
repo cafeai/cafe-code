@@ -153,6 +153,7 @@ function createProviderServiceHarness(
     respondToUserInput: () => unsupported(),
     snoozeUserInput: () => unsupported(),
     stopSession: () => unsupported(),
+    quiesceThreadForHardDelete: () => unsupported(),
     restartProviderRuntime: () => unsupported(),
     listSessions,
     getCapabilities: () =>

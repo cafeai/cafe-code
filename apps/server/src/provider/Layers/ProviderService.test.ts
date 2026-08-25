@@ -51,7 +51,7 @@ import {
   makeProviderSubagentDetailReadError,
   type ProviderAdapterError,
 } from "../Errors.ts";
-import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
+import type { ProviderAdapterShape, ProviderSubagentDetail } from "../Services/ProviderAdapter.ts";
 import {
   ProviderAdapterRegistry,
   type ProviderAdapterRegistryShape,
@@ -250,15 +250,13 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     (
       _threadId: ThreadId,
       subagentId: string,
-    ): Effect.Effect<
-      { messages: ReadonlyArray<{ role: "user" | "assistant"; text: string }>; truncated: boolean },
-      ProviderAdapterError
-    > =>
+    ): Effect.Effect<ProviderSubagentDetail, ProviderAdapterError> =>
       Effect.succeed({
         messages: [
-          { role: "user", text: `Assignment for ${subagentId}` },
-          { role: "assistant", text: "Completed safely." },
+          { key: "m0", role: "user", text: `Assignment for ${subagentId}` },
+          { key: "m1", role: "assistant", text: "Completed safely." },
         ],
+        gaps: [],
         truncated: false,
       }),
   );
@@ -299,7 +297,9 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     listSessions,
     hasSession,
     readThread,
-    ...(provider === CODEX_DRIVER ? { readSubagentDetail } : {}),
+    ...(provider === CODEX_DRIVER || provider === CLAUDE_AGENT_DRIVER
+      ? { readSubagentDetail }
+      : {}),
     rollbackThread,
     stopAll,
     get streamEvents() {
@@ -394,6 +394,10 @@ function makeProviderServiceLayer() {
     directoryLayer,
 
     runtimeRepositoryLayer,
+    // Expose the same memoized in-memory SQL client so history-provenance
+    // tests can create the projection-thread parent required by migration 64's
+    // fail-closed foreign-key fence.
+    SqlitePersistenceMemory,
     NodeServices.layer,
   ).pipe(
     Layer.tap((context) =>
@@ -550,6 +554,69 @@ it.effect("ProviderServiceLive persists stopped runtime state before adapter sto
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.effect("ProviderServiceLive stopAll cannot recreate a concurrently retired binding", () =>
+  Effect.gen(function* () {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-provider-stopall-delete-race-"));
+    const dbPath = path.join(tempDir, "orchestration.sqlite");
+    const codex = makeFakeCodexAdapter();
+    const registry = makeAdapterRegistryMock({
+      [CODEX_DRIVER]: codex.adapter,
+    });
+    const providerAdapterLayer = Layer.succeed(ProviderAdapterRegistry, registry);
+    const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+      Layer.provide(makeSqlitePersistenceLive(dbPath)),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+    const providerLayer = Layer.mergeAll(
+      makeProviderServiceLive().pipe(
+        Layer.provide(providerAdapterLayer),
+        Layer.provide(directoryLayer),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+      ),
+      directoryLayer,
+      runtimeRepositoryLayer,
+    );
+    const scope = yield* Scope.make();
+    const runtimeServices = yield* Layer.build(providerLayer).pipe(Scope.provide(scope));
+    const threadId = asThreadId("thread-stopall-hard-delete-race");
+    const { provider, directory } = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      return { provider, directory };
+    }).pipe(Effect.provide(runtimeServices));
+    const staleSessions = yield* codex.listSessions();
+    const listStarted = yield* Deferred.make<void>();
+    const releaseList = yield* Deferred.make<void>();
+    codex.listSessions.mockImplementationOnce(() =>
+      Deferred.succeed(listStarted, undefined).pipe(
+        Effect.andThen(Deferred.await(releaseList)),
+        Effect.as(staleSessions),
+      ),
+    );
+
+    const closeFiber = yield* Scope.close(scope, Exit.void).pipe(Effect.forkChild);
+    yield* Deferred.await(listStarted);
+    yield* provider.quiesceThreadForHardDelete({ threadId });
+    yield* directory.remove(threadId);
+    yield* Deferred.succeed(releaseList, undefined);
+    yield* Fiber.join(closeFiber);
+
+    const persisted = yield* Effect.gen(function* () {
+      const repository = yield* ProviderSessionRuntimeRepository;
+      return yield* repository.getByThreadId({ threadId });
+    }).pipe(Effect.provide(runtimeRepositoryLayer));
+    assert.isTrue(Option.isNone(persisted));
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 const nativeFork = makeProviderServiceLayer();
 nativeFork.layer("ProviderServiceLive native session forks", (it) => {
   beforeEach(nativeFork.reset);
@@ -684,6 +751,92 @@ nativeFork.layer("ProviderServiceLive native session forks", (it) => {
       yield* provider.discardSessionFork({ fork: first });
     }),
   );
+
+  it.effect("holds the target lifecycle fence through native fork persistence", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const sourceThreadId = asThreadId("thread-fork-delete-race-source");
+      const targetThreadId = asThreadId("thread-fork-delete-race-target");
+      yield* provider.startSession(sourceThreadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId: sourceThreadId,
+        runtimeMode: "full-access",
+      });
+
+      const nativeForkStarted = yield* Deferred.make<void>();
+      const releaseNativeFork = yield* Deferred.make<void>();
+      nativeFork.codex.forkSession.mockImplementationOnce((input) =>
+        Deferred.succeed(nativeForkStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseNativeFork)),
+          Effect.as({
+            operationId: input.operationId,
+            sourceThreadId: input.sourceThreadId,
+            targetThreadId: input.targetThreadId,
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            runtimeMode: "full-access",
+            resumeCursor: { opaque: "fork-delete-race" },
+          }),
+        ),
+      );
+
+      const forkFiber = yield* provider
+        .forkSession({
+          operationId: "cmd-fork-delete-race",
+          sourceThreadId,
+          targetThreadId,
+          title: "Fork racing hard delete",
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(nativeForkStarted);
+
+      const quiesceFinished = yield* Deferred.make<void>();
+      const quiesceFiber = yield* provider
+        .quiesceThreadForHardDelete({ threadId: targetThreadId })
+        .pipe(
+          Effect.tap(() => Deferred.succeed(quiesceFinished, undefined)),
+          Effect.forkChild,
+        );
+      yield* Effect.yieldNow;
+      // The target fence cannot pass the in-flight native allocation; if it
+      // did, the delayed target upsert below could resurrect a deleted row.
+      assert.isTrue(Option.isNone(yield* Deferred.poll(quiesceFinished)));
+
+      yield* Deferred.succeed(releaseNativeFork, undefined);
+      yield* Fiber.join(forkFiber);
+      yield* Fiber.join(quiesceFiber);
+      yield* directory.remove(targetThreadId);
+      assert.isTrue(Option.isNone(yield* directory.getBinding(targetThreadId)));
+    }),
+  );
+
+  it.effect("deduplicates colliding lifecycle stripes for two-thread forks", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      // These ids collide under ProviderService's bounded FNV-1a stripe map.
+      // A two-lock helper that acquired the same semaphore twice would hang.
+      const sourceThreadId = asThreadId("thread-stripe-19");
+      const targetThreadId = asThreadId("thread-stripe-82");
+      yield* provider.startSession(sourceThreadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId: sourceThreadId,
+        runtimeMode: "full-access",
+      });
+
+      const fork = yield* provider.forkSession({
+        operationId: "cmd-colliding-lifecycle-stripes",
+        sourceThreadId,
+        targetThreadId,
+        title: "Colliding lifecycle stripes",
+      });
+
+      assert.equal(fork.targetThreadId, targetThreadId);
+      assert.equal(nativeFork.codex.forkSession.mock.calls.length, 1);
+    }),
+  );
 });
 
 const restart = makeProviderServiceLayer();
@@ -742,6 +895,42 @@ restart.layer("ProviderServiceLive runtime restart", (it) => {
 
       const claudeBinding = Option.getOrThrow(yield* directory.getBinding(claudeThreadId));
       assert.equal(claudeBinding.status, "running");
+    }),
+  );
+
+  it.effect("does not recreate a retired binding from a stale restart snapshot", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId("thread-restart-hard-delete-race");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const staleSessions = yield* restart.codex.listSessions();
+      const listStarted = yield* Deferred.make<void>();
+      const releaseList = yield* Deferred.make<void>();
+      restart.codex.listSessions.mockImplementationOnce(() =>
+        Deferred.succeed(listStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseList)),
+          Effect.as(staleSessions),
+        ),
+      );
+
+      const restartFiber = yield* provider
+        .restartProviderRuntime({ instanceId: codexInstanceId })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(listStarted);
+      yield* provider.quiesceThreadForHardDelete({ threadId });
+      yield* directory.remove(threadId);
+
+      // The restart observed the session before retirement, but every delayed
+      // binding write must re-check the lifecycle fence under its permit.
+      yield* Deferred.succeed(releaseList, undefined);
+      yield* Fiber.join(restartFiber);
+      assert.isTrue(Option.isNone(yield* directory.getBinding(threadId)));
     }),
   );
 });
@@ -1389,41 +1578,141 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
-  it.effect("reads ended Codex subagent detail without materializing the root Cafe session", () =>
+  it.effect("reads ended Codex detail through immutable provenance after a Claude switch", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
       const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+      const sql = yield* SqlClient.SqlClient;
       const threadId = asThreadId("thread-subagent-detail-recovery");
-      yield* provider.startSession(threadId, {
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, branch, worktree_path,
+          latest_turn_id, created_at, updated_at
+        ) VALUES (
+          ${threadId}, 'project-subagent-detail-recovery', 'Subagent detail recovery',
+          NULL, NULL, NULL,
+          '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+        )
+      `;
+      const codexSession = yield* provider.startSession(threadId, {
         provider: CODEX_DRIVER,
         providerInstanceId: codexInstanceId,
         threadId,
         cwd: "/tmp/project-subagent-detail",
         runtimeMode: "full-access",
       });
+      const { turnId } = yield* provider.sendTurn({
+        threadId,
+        input: "Run completed child",
+        attachments: [],
+      });
+      routing.codex.emit({
+        type: "task.started",
+        eventId: asEventId("event-subagent-detail-recovery"),
+        provider: CODEX_DRIVER,
+        createdAt: "2026-01-01T00:00:01.000Z",
+        threadId,
+        turnId,
+        payload: {
+          taskId: "provider-child-completed",
+          taskType: "subagent",
+          description: "Read completed child history",
+          subagent: { threadId: "provider-child-completed", status: "completed" },
+        },
+      });
+      yield* advanceTestClock(50);
       yield* provider.stopSession({ threadId });
+      // Replace the mutable root binding before reading the ended child. The
+      // detail call must still route through the immutable Codex provenance
+      // captured with the lifecycle event, never through current Claude state.
+      yield* provider.startSession(threadId, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId,
+        cwd: "/tmp/project-after-provider-switch",
+        runtimeMode: "full-access",
+      });
       const persistedBeforeRead = yield* runtimeRepository.getByThreadId({ threadId });
       routing.codex.startSession.mockClear();
       routing.codex.readSubagentDetail.mockClear();
+      routing.claude.readSubagentDetail.mockClear();
+      const rootToJsonSentinel = "provider-service-root-to-json-must-not-cross";
+      const nestedToJsonSentinel = "provider-service-message-to-json-must-not-cross";
+      const privateFieldSentinel = "provider-service-private-field-must-not-cross";
+      const providerOwnedDetail = {
+        messages: [
+          {
+            key: "m0",
+            role: "user" as const,
+            text: "Assignment for provider-child-completed",
+            privateProviderField: privateFieldSentinel,
+            toJSON: () => ({ leaked: nestedToJsonSentinel }),
+          },
+          { key: "m1", role: "assistant" as const, text: "Completed safely." },
+        ],
+        gaps: [],
+        truncated: false,
+        privateProviderField: privateFieldSentinel,
+        toJSON: () => ({ leaked: rootToJsonSentinel }),
+      };
+      routing.codex.readSubagentDetail.mockImplementationOnce(() =>
+        Effect.succeed(providerOwnedDetail),
+      );
 
       const detail = yield* provider.readSubagentDetail({
         threadId,
+        turnId,
         subagentId: "provider-child-completed",
       });
 
       assert.equal(detail.provider, CODEX_DRIVER);
       assert.equal(detail.providerInstanceId, codexInstanceId);
       assert.deepEqual(detail.messages, [
-        { role: "user", text: "Assignment for provider-child-completed" },
-        { role: "assistant", text: "Completed safely." },
+        { key: "m0", role: "user", text: "Assignment for provider-child-completed" },
+        { key: "m1", role: "assistant", text: "Completed safely." },
       ]);
+      assert.deepEqual(detail.gaps, []);
       assert.equal(detail.truncated, false);
+      const serializedDetail = JSON.stringify(detail);
+      assert.notInclude(serializedDetail, rootToJsonSentinel);
+      assert.notInclude(serializedDetail, nestedToJsonSentinel);
+      assert.notInclude(serializedDetail, privateFieldSentinel);
+      assert.equal("toJSON" in detail, false);
+      assert.equal(detail.messages[0] === undefined || "toJSON" in detail.messages[0], false);
       assert.equal(routing.codex.startSession.mock.calls.length, 0);
       assert.deepEqual(routing.codex.readSubagentDetail.mock.calls[0], [
         threadId,
         "provider-child-completed",
-        { resumeCursor: Option.getOrUndefined(persistedBeforeRead)?.resumeCursor },
+        {
+          resumeCursor: codexSession.resumeCursor,
+          cwd: "/tmp/project-subagent-detail",
+        },
       ]);
+      assert.equal(routing.claude.readSubagentDetail.mock.calls.length, 0);
+
+      const invalidDetailSentinel = "invalid-provider-detail-must-not-cross-service";
+      routing.codex.readSubagentDetail.mockImplementationOnce(() =>
+        Effect.succeed({
+          messages: [
+            { key: "duplicate", role: "user", text: invalidDetailSentinel },
+            { key: "duplicate", role: "assistant", text: "duplicate key" },
+          ],
+          gaps: [],
+          truncated: false,
+        }),
+      );
+      const invalidDetailError = yield* provider
+        .readSubagentDetail({
+          threadId,
+          turnId,
+          subagentId: "provider-child-completed",
+        })
+        .pipe(Effect.flip);
+      assert.equal(invalidDetailError._tag, "ProviderSubagentDetailReadError");
+      if (invalidDetailError._tag === "ProviderSubagentDetailReadError") {
+        assert.equal(invalidDetailError.reason, "provider-response-invalid");
+      }
+      assert.notInclude(JSON.stringify(invalidDetailError), invalidDetailSentinel);
       assert.deepEqual(yield* runtimeRepository.getByThreadId({ threadId }), persistedBeforeRead);
     }),
   );
@@ -1432,7 +1721,18 @@ routing.layer("ProviderServiceLive routing", (it) => {
     Effect.gen(function* () {
       const provider = yield* ProviderService;
       const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+      const sql = yield* SqlClient.SqlClient;
       const threadId = asThreadId("thread-subagent-detail-rejected-resume");
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, branch, worktree_path,
+          latest_turn_id, created_at, updated_at
+        ) VALUES (
+          ${threadId}, 'project-subagent-detail-rejected-resume', 'Rejected subagent detail',
+          NULL, NULL, NULL,
+          '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+        )
+      `;
       yield* provider.startSession(threadId, {
         provider: CODEX_DRIVER,
         providerInstanceId: codexInstanceId,
@@ -1440,6 +1740,26 @@ routing.layer("ProviderServiceLive routing", (it) => {
         cwd: "/tmp/project-subagent-detail-rejected-resume",
         runtimeMode: "full-access",
       });
+      const { turnId } = yield* provider.sendTurn({
+        threadId,
+        input: "Run child with rejected history",
+        attachments: [],
+      });
+      routing.codex.emit({
+        type: "task.started",
+        eventId: asEventId("event-subagent-detail-rejected-resume"),
+        provider: CODEX_DRIVER,
+        createdAt: "2026-01-01T00:00:02.000Z",
+        threadId,
+        turnId,
+        payload: {
+          taskId: "provider-child-ended",
+          taskType: "subagent",
+          description: "Read rejected child history",
+          subagent: { threadId: "provider-child-ended", status: "completed" },
+        },
+      });
+      yield* advanceTestClock(50);
       yield* provider.stopSession({ threadId });
       const persistedBeforeRead = yield* runtimeRepository.getByThreadId({ threadId });
       routing.codex.startSession.mockClear();
@@ -1451,6 +1771,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
       const exit = yield* provider
         .readSubagentDetail({
           threadId,
+          turnId,
           subagentId: "provider-child-ended",
         })
         .pipe(Effect.exit);
@@ -1462,20 +1783,221 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
-  it.effect("rejects subagent detail reads for adapters without a verified child protocol", () =>
+  it.effect("fails closed when one turn reports conflicting immutable history roots", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = asThreadId("thread-conflicting-subagent-history-root");
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, branch, worktree_path,
+          latest_turn_id, created_at, updated_at
+        ) VALUES (
+          ${threadId}, 'project-conflicting-subagent-history-root',
+          'Conflicting subagent history root', NULL, NULL, NULL,
+          '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+        )
+      `;
+      const session = yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/original-history-root",
+        runtimeMode: "full-access",
+      });
+      const { turnId } = yield* provider.sendTurn({
+        threadId,
+        input: "run children from one immutable root",
+        attachments: [],
+      });
+      routing.codex.emit({
+        type: "task.started",
+        eventId: asEventId("event-original-subagent-history-root"),
+        provider: CODEX_DRIVER,
+        createdAt: "2026-01-01T00:00:01.000Z",
+        threadId,
+        turnId,
+        payload: {
+          taskId: "child-original-root",
+          taskType: "subagent",
+          description: "Original rooted child",
+          subagent: { threadId: "child-original-root", status: "active" },
+        },
+      });
+      yield* advanceTestClock(50);
+
+      assert.equal(
+        Option.isSome(
+          yield* runtimeRepository.getSubagentHistoryBinding({
+            threadId,
+            turnId,
+            subagentId: "child-original-root",
+            historyId: null,
+          }),
+        ),
+        true,
+      );
+
+      // Simulate a corrupted/replaced live binding without changing the Cafe
+      // turn. The lifecycle event remains observable, but its child must not
+      // inherit or replace the first root's private routing provenance.
+      yield* directory.upsert({
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        resumeCursor: { threadId: "provider-root-conflict" },
+        runtimePayload: { cwd: "/tmp/conflicting-history-root" },
+      });
+      routing.codex.emit({
+        type: "task.started",
+        eventId: asEventId("event-conflicting-subagent-history-root"),
+        provider: CODEX_DRIVER,
+        createdAt: "2026-01-01T00:00:02.000Z",
+        threadId,
+        turnId,
+        payload: {
+          taskId: "child-conflicting-root",
+          taskType: "subagent",
+          description: "Conflicting rooted child",
+          subagent: { threadId: "child-conflicting-root", status: "active" },
+        },
+      });
+      yield* advanceTestClock(50);
+
+      assert.equal(
+        Option.isNone(
+          yield* runtimeRepository.getSubagentHistoryBinding({
+            threadId,
+            turnId,
+            subagentId: "child-conflicting-root",
+            historyId: null,
+          }),
+        ),
+        true,
+      );
+      const original = yield* runtimeRepository.getSubagentHistoryBinding({
+        threadId,
+        turnId,
+        subagentId: "child-original-root",
+        historyId: null,
+      });
+      assert.equal(Option.isSome(original), true);
+      if (Option.isSome(original)) {
+        assert.deepEqual(original.value.resumeCursor, session.resumeCursor);
+        assert.equal(original.value.cwd, "/tmp/original-history-root");
+      }
+    }),
+  );
+
+  it.effect("routes provider-neutral Claude detail with exact history identity and cwd", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const sql = yield* SqlClient.SqlClient;
       const threadId = asThreadId("thread-claude-subagent-detail");
-      yield* provider.startSession(threadId, {
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, branch, worktree_path,
+          latest_turn_id, created_at, updated_at
+        ) VALUES (
+          ${threadId}, 'project-claude-subagent-detail', 'Claude subagent detail',
+          NULL, NULL, NULL,
+          '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+        )
+      `;
+      const session = yield* provider.startSession(threadId, {
         provider: CLAUDE_AGENT_DRIVER,
         providerInstanceId: claudeAgentInstanceId,
         threadId,
         cwd: "/tmp/project-claude-detail",
         runtimeMode: "full-access",
       });
+      const { turnId } = yield* provider.sendTurn({
+        threadId,
+        input: "Run Claude child",
+        attachments: [],
+      });
+      routing.claude.emit({
+        type: "task.progress",
+        eventId: asEventId("event-claude-subagent-detail"),
+        provider: CLAUDE_AGENT_DRIVER,
+        createdAt: "2026-01-01T00:00:03.000Z",
+        threadId,
+        turnId,
+        payload: {
+          taskId: "claude-task-1",
+          description: "Reading Claude child history",
+          subagent: {
+            threadId: "claude-task-1",
+            historyId: "claude-agent-1",
+            status: "active",
+          },
+        },
+      });
+      yield* advanceTestClock(50);
+      routing.claude.readSubagentDetail.mockClear();
+
+      const detail = yield* provider.readSubagentDetail({
+        threadId,
+        turnId,
+        subagentId: "claude-task-1",
+        historyId: "claude-agent-1",
+      });
+      assert.equal(detail.provider, CLAUDE_AGENT_DRIVER);
+      assert.equal(detail.providerInstanceId, claudeAgentInstanceId);
+      assert.deepEqual(detail.messages, [
+        { key: "m0", role: "user", text: "Assignment for claude-task-1" },
+        { key: "m1", role: "assistant", text: "Completed safely." },
+      ]);
+      assert.deepEqual(detail.gaps, []);
+      assert.deepEqual(routing.claude.readSubagentDetail.mock.calls[0], [
+        threadId,
+        "claude-task-1",
+        {
+          resumeCursor: session.resumeCursor,
+          cwd: "/tmp/project-claude-detail",
+          historyId: "claude-agent-1",
+        },
+      ]);
+    }),
+  );
+
+  it.effect("rejects subagent detail reads for adapters without a verified child protocol", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("thread-unsupported-subagent-detail");
+      yield* provider.startSession(threadId, {
+        provider: TEST_DRIVER,
+        providerInstanceId: ProviderInstanceId.make("testDriver"),
+        threadId,
+        cwd: "/tmp/project-unsupported-detail",
+        runtimeMode: "full-access",
+      });
+
+      const { turnId } = yield* provider.sendTurn({
+        threadId,
+        input: "Run unsupported child",
+        attachments: [],
+      });
+      routing.testDriver.emit({
+        type: "task.started",
+        eventId: asEventId("event-unsupported-subagent-detail"),
+        provider: TEST_DRIVER,
+        createdAt: "2026-01-01T00:00:04.000Z",
+        threadId,
+        turnId,
+        payload: {
+          taskId: "opaque-child",
+          taskType: "subagent",
+          description: "Unsupported child",
+          subagent: { threadId: "opaque-child", status: "active" },
+        },
+      });
+      yield* advanceTestClock(50);
 
       const result = yield* provider
-        .readSubagentDetail({ threadId, subagentId: "opaque-child" })
+        .readSubagentDetail({ threadId, turnId, subagentId: "opaque-child" })
         .pipe(Effect.exit);
       assert.equal(Exit.isFailure(result), true);
     }),
@@ -2315,6 +2837,150 @@ routing.layer("ProviderServiceLive routing", (it) => {
 const fanout = makeProviderServiceLayer();
 fanout.layer("ProviderServiceLive fanout", (it) => {
   beforeEach(fanout.reset);
+
+  it.effect("fences late lifecycle events while quiescing every adapter for hard delete", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId("thread-hard-delete-event-fence");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      // A stale adapter instance can still own the immutable Cafe thread id
+      // after a provider switch. Permanent deletion must stop it too.
+      yield* fanout.claude.startSession({
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const received: Array<ProviderRuntimeEvent> = [];
+      const consumer = yield* Stream.runForEach(provider.streamEvents, (event) =>
+        Effect.sync(() => {
+          received.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+      yield* advanceTestClock(50);
+
+      yield* provider.quiesceThreadForHardDelete({ threadId });
+      yield* directory.remove(threadId);
+      fanout.codex.emit({
+        type: "session.exited",
+        eventId: asEventId("evt-late-after-hard-delete"),
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        createdAt: "2026-01-01T00:00:10.000Z",
+        threadId,
+        payload: { reason: "late provider shutdown event" },
+      });
+      yield* advanceTestClock(50);
+
+      assert.equal(fanout.codex.stopSession.mock.calls.length, 1);
+      assert.equal(fanout.claude.stopSession.mock.calls.length, 1);
+      assert.isFalse(received.some((event) => event.eventId === "evt-late-after-hard-delete"));
+      assert.isTrue(Option.isNone(yield* directory.getBinding(threadId)));
+      yield* Fiber.interrupt(consumer);
+    }),
+  );
+
+  it.effect("waits for an acknowledged turn mutation before permanently retiring the thread", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("thread-hard-delete-concurrent-send");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const sendStarted = yield* Deferred.make<void>();
+      const releaseSend = yield* Deferred.make<void>();
+      fanout.codex.sendTurn.mockImplementationOnce((input) =>
+        Deferred.succeed(sendStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseSend)),
+          Effect.as({
+            threadId: input.threadId,
+            turnId: asTurnId("turn-concurrent-hard-delete"),
+          }),
+        ),
+      );
+
+      const sendFiber = yield* provider
+        .sendTurn({ threadId, input: "work racing permanent deletion", attachments: [] })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(sendStarted);
+
+      const quiesceFiber = yield* provider
+        .quiesceThreadForHardDelete({ threadId })
+        .pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      assert.equal(fanout.codex.stopSession.mock.calls.length, 0);
+
+      yield* Deferred.succeed(releaseSend, undefined);
+      yield* Fiber.join(sendFiber);
+      yield* Fiber.join(quiesceFiber);
+      assert.equal(fanout.codex.stopSession.mock.calls.length, 1);
+
+      const rejected = yield* provider
+        .sendTurn({ threadId, input: "must remain retired", attachments: [] })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(rejected));
+      assert.equal(fanout.codex.sendTurn.mock.calls.length, 1);
+    }),
+  );
+
+  it.effect("drops a stale owner-heartbeat write after permanent retirement", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId("thread-heartbeat-hard-delete-race");
+      // Seed adapter and durable state directly so ProviderService's heartbeat
+      // cache has no prior write for this live session and the next inventory
+      // refresh is immediately due.
+      yield* fanout.codex.startSession({
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const turnId = asTurnId("turn-heartbeat-hard-delete-race");
+      fanout.codex.updateSession(threadId, (session) => ({
+        ...session,
+        status: "running",
+        activeTurnId: turnId,
+      }));
+      yield* directory.upsert({
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        status: "running",
+        runtimePayload: { activeTurnId: turnId },
+      });
+      const staleSessions = yield* fanout.codex.listSessions();
+      const listStarted = yield* Deferred.make<void>();
+      const releaseList = yield* Deferred.make<void>();
+      fanout.codex.listSessions.mockImplementationOnce(() =>
+        Deferred.succeed(listStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseList)),
+          Effect.as(staleSessions),
+        ),
+      );
+
+      const listFiber = yield* provider.listSessions().pipe(Effect.forkChild);
+      yield* Deferred.await(listStarted);
+      yield* provider.quiesceThreadForHardDelete({ threadId });
+      yield* directory.remove(threadId);
+      yield* Deferred.succeed(releaseList, undefined);
+      yield* Fiber.join(listFiber);
+
+      assert.isTrue(Option.isNone(yield* directory.getBinding(threadId)));
+    }),
+  );
 
   it.effect("persists stopped runtime state when an adapter session exits", () =>
     Effect.gen(function* () {

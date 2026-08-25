@@ -10,6 +10,7 @@ import {
   ProviderDaemonRpcEnvelope,
   ProviderDaemonRpcRequest,
   ProviderDaemonRpcResultByMethod,
+  type ThreadId,
   type ProviderRuntimeEvent,
   type ProviderDaemonClientConfig,
 } from "@cafecode/contracts";
@@ -67,6 +68,7 @@ const VOID_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "respondToUserInput",
   "snoozeUserInput",
   "stopSession",
+  "quiesceThreadForHardDelete",
   "rollbackConversation",
 ]);
 const MUTATING_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
@@ -80,6 +82,7 @@ const MUTATING_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "respondToUserInput",
   "snoozeUserInput",
   "stopSession",
+  "quiesceThreadForHardDelete",
   "restartProviderRuntime",
   "setGoal",
   "clearGoal",
@@ -146,6 +149,69 @@ export const attachCommandIdToMutatingProviderDaemonRequest = <
 export const isVoidProviderDaemonRpcMethod = (
   method: ProviderDaemonRpcRequest["method"],
 ): boolean => VOID_RPC_METHODS.has(method);
+
+/**
+ * Identify every immutable Cafe thread that one daemon RPC can mutate or
+ * inspect. Keeping this exhaustive and next to the transport means a future
+ * thread-scoped RPC cannot silently bypass the backend's permanent-delete
+ * fence. Forks deliberately include both identities: the native allocation
+ * reads the source while its durable binding is written under the target.
+ */
+export const providerDaemonRequestThreadIds = (
+  request: ProviderDaemonRpcRequest,
+): ReadonlyArray<ThreadId> => {
+  switch (request.method) {
+    case "startSession":
+    case "sendTurn":
+    case "steerTurn":
+    case "interruptTurn":
+    case "respondToRequest":
+    case "respondToUserInput":
+    case "snoozeUserInput":
+    case "stopSession":
+    case "quiesceThreadForHardDelete":
+    case "getGoal":
+    case "setGoal":
+    case "clearGoal":
+    case "rollbackConversation":
+    case "readSubagentDetail":
+      return [request.payload.threadId];
+    case "forkSession":
+      return [request.payload.sourceThreadId, request.payload.targetThreadId];
+    case "discardSessionFork":
+      return [request.payload.fork.targetThreadId];
+    case "restartProviderRuntime":
+    case "listSessions":
+    case "getCapabilities":
+    case "getInstanceInfo":
+      return [];
+    default: {
+      const unreachable: never = request;
+      return unreachable;
+    }
+  }
+};
+
+/** Reject locally retired identities before evaluating the HTTP request. */
+export const guardRemoteProviderThreadOperation = <A, E, R>(input: {
+  readonly retiredThreadIds: ReadonlySet<string>;
+  readonly operation: string;
+  readonly threadIds: ReadonlyArray<ThreadId>;
+  readonly effect: Effect.Effect<A, E, R>;
+}): Effect.Effect<A, E | ProviderValidationError, R> =>
+  Effect.suspend((): Effect.Effect<A, E | ProviderValidationError, R> => {
+    const retiredThreadId = input.threadIds.find((threadId) =>
+      input.retiredThreadIds.has(String(threadId)),
+    );
+    return retiredThreadId === undefined
+      ? input.effect
+      : Effect.fail(
+          new ProviderValidationError({
+            operation: input.operation,
+            issue: `Thread '${retiredThreadId}' is permanently retired and cannot accept provider work.`,
+          }),
+        );
+  });
 
 const rpc = <M extends ProviderDaemonRpcRequest["method"]>(
   daemonConfig: ProviderDaemonClientConfig,
@@ -245,6 +311,20 @@ const makeRemoteProviderService = Effect.gen(function* () {
     ),
   );
   const runtimeEventPubSub = yield* PubSub.bounded<ProviderRuntimeEvent>(bridgeQueueCapacity);
+  // The daemon owns provider processes, but this bridge owns delivery into the
+  // backend ingestion worker. Fence locally before sending the daemon RPC so
+  // a journal record already in flight cannot arrive after the backend has
+  // drained ingestion and committed permanent deletion.
+  const hardDeleteRetiredThreadIds = new Set<string>();
+  const guardedRpc = <M extends ProviderDaemonRpcRequest["method"]>(
+    request: Extract<ProviderDaemonRpcRequest, { readonly method: M }>,
+  ) =>
+    guardRemoteProviderThreadOperation({
+      retiredThreadIds: hardDeleteRetiredThreadIds,
+      operation: `ProviderDaemonRemoteProviderService.${request.method}`,
+      threadIds: providerDaemonRequestThreadIds(request),
+      effect: rpc(daemonConfig, request),
+    });
   const publishContext = yield* Effect.context<never>();
   const publishRuntimeEvent = Effect.runPromiseWith(publishContext);
   const initialProjectionState = yield* projectionStateRepository
@@ -338,6 +418,10 @@ const makeRemoteProviderService = Effect.gen(function* () {
               eventCursor = Math.max(eventCursor, record.cursor);
               return;
             }
+            if (hardDeleteRetiredThreadIds.has(String(record.event.threadId))) {
+              eventCursor = Math.max(eventCursor, record.cursor);
+              return;
+            }
             await publishRuntimeEvent(
               PubSub.publish(
                 runtimeEventPubSub,
@@ -364,25 +448,32 @@ const makeRemoteProviderService = Effect.gen(function* () {
 
   const service: ProviderServiceShape = {
     startSession: (threadId, input) =>
-      rpc(daemonConfig, {
+      guardedRpc({
         method: "startSession",
         payload: { ...input, threadId },
       }),
-    forkSession: (input) => rpc(daemonConfig, { method: "forkSession", payload: input }),
-    discardSessionFork: (input) =>
-      rpc(daemonConfig, { method: "discardSessionFork", payload: input }),
-    sendTurn: (input) => rpc(daemonConfig, { method: "sendTurn", payload: input }),
-    steerTurn: (input) => rpc(daemonConfig, { method: "steerTurn", payload: input }),
-    interruptTurn: (input) => rpc(daemonConfig, { method: "interruptTurn", payload: input }),
-    respondToRequest: (input) => rpc(daemonConfig, { method: "respondToRequest", payload: input }),
-    respondToUserInput: (input) =>
-      rpc(daemonConfig, { method: "respondToUserInput", payload: input }),
-    snoozeUserInput: (input) => rpc(daemonConfig, { method: "snoozeUserInput", payload: input }),
-    stopSession: (input) => rpc(daemonConfig, { method: "stopSession", payload: input }),
+    forkSession: (input) => guardedRpc({ method: "forkSession", payload: input }),
+    discardSessionFork: (input) => guardedRpc({ method: "discardSessionFork", payload: input }),
+    sendTurn: (input) => guardedRpc({ method: "sendTurn", payload: input }),
+    steerTurn: (input) => guardedRpc({ method: "steerTurn", payload: input }),
+    interruptTurn: (input) => guardedRpc({ method: "interruptTurn", payload: input }),
+    respondToRequest: (input) => guardedRpc({ method: "respondToRequest", payload: input }),
+    respondToUserInput: (input) => guardedRpc({ method: "respondToUserInput", payload: input }),
+    snoozeUserInput: (input) => guardedRpc({ method: "snoozeUserInput", payload: input }),
+    stopSession: (input) => guardedRpc({ method: "stopSession", payload: input }),
+    quiesceThreadForHardDelete: (input) =>
+      Effect.sync(() => {
+        hardDeleteRetiredThreadIds.add(String(input.threadId));
+      }).pipe(
+        Effect.andThen(rpc(daemonConfig, { method: "quiesceThreadForHardDelete", payload: input })),
+      ),
     restartProviderRuntime: (input) =>
-      rpc(daemonConfig, { method: "restartProviderRuntime", payload: input }),
+      guardedRpc({ method: "restartProviderRuntime", payload: input }),
     listSessions: () =>
-      rpc(daemonConfig, { method: "listSessions", payload: {} }).pipe(
+      guardedRpc({ method: "listSessions", payload: {} }).pipe(
+        Effect.map((sessions) =>
+          sessions.filter((session) => !hardDeleteRetiredThreadIds.has(String(session.threadId))),
+        ),
         Effect.catch((error) =>
           Effect.logWarning("provider daemon listSessions failed", {
             detail: error.message,
@@ -390,22 +481,20 @@ const makeRemoteProviderService = Effect.gen(function* () {
         ),
       ),
     getCapabilities: (instanceId) =>
-      rpc(daemonConfig, { method: "getCapabilities", payload: { instanceId } }).pipe(
+      guardedRpc({ method: "getCapabilities", payload: { instanceId } }).pipe(
         Effect.map(
           (capabilities) => decodeAdapterCapabilities(capabilities) as ProviderAdapterCapabilities,
         ),
       ),
     getInstanceInfo: (instanceId) =>
-      rpc(daemonConfig, { method: "getInstanceInfo", payload: { instanceId } }).pipe(
+      guardedRpc({ method: "getInstanceInfo", payload: { instanceId } }).pipe(
         Effect.map((info) => decodeInstanceRoutingInfo(info) as ProviderInstanceRoutingInfo),
       ),
-    getGoal: (input) => rpc(daemonConfig, { method: "getGoal", payload: input }),
-    setGoal: (input) => rpc(daemonConfig, { method: "setGoal", payload: input }),
-    clearGoal: (input) => rpc(daemonConfig, { method: "clearGoal", payload: input }),
-    rollbackConversation: (input) =>
-      rpc(daemonConfig, { method: "rollbackConversation", payload: input }),
-    readSubagentDetail: (input) =>
-      rpc(daemonConfig, { method: "readSubagentDetail", payload: input }),
+    getGoal: (input) => guardedRpc({ method: "getGoal", payload: input }),
+    setGoal: (input) => guardedRpc({ method: "setGoal", payload: input }),
+    clearGoal: (input) => guardedRpc({ method: "clearGoal", payload: input }),
+    rollbackConversation: (input) => guardedRpc({ method: "rollbackConversation", payload: input }),
+    readSubagentDetail: (input) => guardedRpc({ method: "readSubagentDetail", payload: input }),
     get streamEvents(): ProviderServiceShape["streamEvents"] {
       return Stream.fromPubSub(runtimeEventPubSub);
     },

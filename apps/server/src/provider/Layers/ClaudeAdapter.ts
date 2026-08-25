@@ -7,11 +7,14 @@
  * @module ClaudeAdapterLive
  */
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { constants as fsConstants, realpathSync } from "node:fs";
+import { lstat, mkdir, open, opendir, readFile, rm, writeFile } from "node:fs/promises";
 
 import {
   deleteSession,
   forkSession,
+  getSubagentMessages,
+  listSubagents,
   type ForkSessionOptions,
   type ForkSessionResult,
   type CanUseTool,
@@ -30,6 +33,7 @@ import {
   type ModelUsage,
   type SessionStore,
   type SessionStoreEntry,
+  type SessionMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@cafecode/shared/cliArgs";
 import {
@@ -101,9 +105,12 @@ import {
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
+  makeProviderSubagentDetailReadError,
   type ProviderAdapterError,
 } from "../Errors.ts";
 import { type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
+import type { ProviderSubagentDetail } from "../Services/ProviderAdapter.ts";
+import { canonicalizeProviderSubagentDetail } from "../subagentDetail.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJsonString);
 const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.UnknownFromJsonString);
@@ -128,6 +135,16 @@ const CLAUDE_TASK_ID_HASH_PREFIX = "claude-task-sha256:";
 const CLAUDE_TOOL_USE_ID_HASH_PREFIX = "claude-tool-use-sha256:";
 const CLAUDE_TASK_ID_HASH_DOMAIN = "cafecode/claude/task-id/v1";
 const CLAUDE_TOOL_USE_ID_HASH_DOMAIN = "cafecode/claude/tool-use-id/v1";
+// Transcript discovery is deliberately bounded even though the SDK's
+// `listSubagents()` result itself has no limit parameter. A hostile provider
+// home must not turn one authenticated detail click into thousands of history
+// reads. Real Claude sessions are comfortably below this ceiling.
+const CLAUDE_SUBAGENT_DISCOVERY_MAX_AGENTS = 256;
+const CLAUDE_SUBAGENT_DISCOVERY_MAX_DIRECTORY_ENTRIES = 4_096;
+const CLAUDE_SUBAGENT_DISCOVERY_MAX_DEPTH = 32;
+const CLAUDE_SUBAGENT_HISTORY_READ_TIMEOUT_MS = 15_000;
+const CLAUDE_SUBAGENT_HISTORY_FILE_MAX_BYTES = 256 * 1024 * 1024;
+const CLAUDE_SUBAGENT_HISTORY_METADATA_MAX_BYTES = 64 * 1024;
 
 function runtimeModeToClaudePermissionMode(runtimeMode: RuntimeMode): PermissionMode | undefined {
   switch (runtimeMode) {
@@ -350,6 +367,10 @@ interface ToolInFlight {
 
 interface ClaudeTaskBinding {
   readonly taskId: RuntimeTaskId;
+  /** Exact spawning tool id. It is never used as a substitute for taskId. */
+  readonly toolUseId?: string;
+  /** Exact SDK transcript identity returned by a structured Agent result. */
+  readonly historyId?: string;
   readonly description?: string;
   readonly subagentType?: string;
   readonly objective?: string;
@@ -437,6 +458,9 @@ export interface ClaudeAdapterLiveOptions {
     options: ForkSessionOptions,
   ) => Promise<ForkSessionResult>;
   readonly deleteNativeSession?: (sessionId: string, options: ForkSessionOptions) => Promise<void>;
+  /** Test seam around the official SDK history APIs; production uses the SDK exports directly. */
+  readonly listNativeSubagents?: typeof listSubagents;
+  readonly getNativeSubagentMessages?: typeof getSubagentMessages;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   /**
@@ -534,6 +558,43 @@ function canonicalClaudeToolUseBindingKey(value: unknown): string | undefined {
   });
 }
 
+function exactClaudeProviderIdentity(
+  value: unknown,
+  options?: { readonly pathSegment?: boolean },
+): string | undefined {
+  const normalized = trimmedStringValue(value);
+  if (
+    !normalized ||
+    Buffer.byteLength(normalized, "utf8") > CLAUDE_OPAQUE_ID_MAX_UTF8_BYTES ||
+    Array.from(normalized).some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return (
+        codePoint <= 0x1f ||
+        (codePoint >= 0x7f && codePoint <= 0x9f) ||
+        codePoint === 0x061c ||
+        (codePoint >= 0x200e && codePoint <= 0x200f) ||
+        (codePoint >= 0x202a && codePoint <= 0x202e) ||
+        (codePoint >= 0x2066 && codePoint <= 0x2069)
+      );
+    })
+  ) {
+    return undefined;
+  }
+  // `getSubagentMessages()` ultimately treats agentId as a transcript key.
+  // Accept only one inert key segment even when the value came from the SDK;
+  // membership in `listSubagents()` is checked separately before every read.
+  if (
+    options?.pathSegment === true &&
+    (normalized === "." ||
+      normalized === ".." ||
+      normalized.includes("/") ||
+      normalized.includes("\\"))
+  ) {
+    return undefined;
+  }
+  return normalized;
+}
+
 function claudeParentToolUseId(message: SDKMessage): string | undefined {
   return trimmedStringValue((message as unknown as Record<string, unknown>).parent_tool_use_id);
 }
@@ -566,6 +627,8 @@ function upsertClaudeTaskBinding(
   input: {
     readonly taskId: RuntimeTaskId;
     readonly toolUseKey?: string | undefined;
+    readonly toolUseId?: string | undefined;
+    readonly historyId?: string | undefined;
     readonly description?: string | undefined;
     readonly subagentType?: string | undefined;
     readonly objective?: string | undefined;
@@ -594,6 +657,11 @@ function upsertClaudeTaskBinding(
   // duration metadata and must not make a long-running row jump forward every
   // time Claude reports another update.
   const startedAt = previous?.startedAt ?? input.startedAt;
+  // These identities come from different SDK fields and stay distinct. In
+  // particular, never infer an Agent transcript id from a task/tool id.
+  const toolUseId = exactClaudeProviderIdentity(input.toolUseId) ?? previous?.toolUseId;
+  const historyId =
+    exactClaudeProviderIdentity(input.historyId, { pathSegment: true }) ?? previous?.historyId;
   const taskType = trimmedStringValue(input.taskType);
   const isSubagent =
     previous?.isSubagent === true ||
@@ -604,6 +672,8 @@ function upsertClaudeTaskBinding(
     taskType === "subagent";
   const binding: ClaudeTaskBinding = {
     taskId: input.taskId,
+    ...(toolUseId ? { toolUseId } : {}),
+    ...(historyId ? { historyId } : {}),
     ...(description ? { description } : {}),
     ...(subagentType ? { subagentType } : {}),
     ...(objective ? { objective } : {}),
@@ -639,6 +709,7 @@ function bindClaudeTaskToToolUse(
   input: {
     readonly taskId: string;
     readonly toolUseId?: string | undefined;
+    readonly historyId?: string | undefined;
     readonly description?: string | undefined;
     readonly subagentType?: string | undefined;
     readonly objective?: string | undefined;
@@ -655,6 +726,8 @@ function bindClaudeTaskToToolUse(
   return upsertClaudeTaskBinding(context, {
     taskId,
     ...(toolUseKey ? { toolUseKey } : {}),
+    ...(input.toolUseId !== undefined ? { toolUseId: input.toolUseId } : {}),
+    ...(input.historyId !== undefined ? { historyId: input.historyId } : {}),
     ...(input.description !== undefined ? { description: input.description } : {}),
     ...(input.subagentType !== undefined ? { subagentType: input.subagentType } : {}),
     ...(input.objective !== undefined ? { objective: input.objective } : {}),
@@ -727,6 +800,7 @@ function claudeSubagentPresentation(
   const objective = claudeSubagentDisplayLine(binding.objective, CLAUDE_SUBAGENT_OBJECTIVE_LIMIT);
   return {
     threadId: String(binding.taskId),
+    ...(binding.historyId ? { historyId: binding.historyId } : {}),
     ...(label ? { label } : {}),
     ...(role ? { role } : {}),
     ...(objective ? { objective } : {}),
@@ -1385,6 +1459,24 @@ export function claudeProjectDirectoryName(path: Pick<Path.Path, "resolve">, cwd
   return encodeClaudeProjectDirectoryName(path.resolve(cwd));
 }
 
+function claudeSessionStoreProjectKey(path: Pick<Path.Path, "resolve">, cwd: string): string {
+  const resolvedCwd = path.resolve(cwd);
+  let canonicalCwd = resolvedCwd;
+  try {
+    // Agent SDK 0.3.228 canonicalizes an existing cwd through realpath before
+    // deriving SessionStore.projectKey. This matters on macOS (`/var` aliases
+    // `/private/var`) and for Windows path aliases/casing. Match that exact
+    // identity while retaining the resolved fallback used by the SDK when the
+    // workspace no longer exists.
+    canonicalCwd = realpathSync(resolvedCwd);
+  } catch {
+    // Ended sessions can outlive a deleted workspace. The SDK uses the same
+    // resolved spelling when realpath fails, so history can still fail closed
+    // against its supplied cwd without performing an all-project search.
+  }
+  return encodeClaudeProjectDirectoryName(canonicalCwd);
+}
+
 function resolveClaudeConfigDirectory(path: Path.Path, env: NodeJS.ProcessEnv): string {
   const configDir = env.CLAUDE_CONFIG_DIR?.trim();
   if (configDir) {
@@ -1394,12 +1486,53 @@ function resolveClaudeConfigDirectory(path: Path.Path, env: NodeJS.ProcessEnv): 
   return homePath ? path.join(path.resolve(homePath), ".claude") : path.resolve(".claude");
 }
 
+async function readBoundedClaudeHistoryRegularFile(
+  filePath: string,
+  maxBytes: number,
+): Promise<string> {
+  // Check the directory entry itself before opening. O_NOFOLLOW below closes
+  // the remaining leaf replacement race on POSIX; this lstat is also the
+  // explicit fail-closed guard on Windows, where O_NOFOLLOW is unavailable.
+  const pathInfo = await lstat(filePath);
+  if (!pathInfo.isFile() || pathInfo.isSymbolicLink()) {
+    throw new Error("Claude subagent history is not a private regular file.");
+  }
+  // O_NOFOLLOW closes the lstat/open replacement race on POSIX. Windows does
+  // not implement the flag, so the FileHandle stat below remains the final
+  // regular-file and size authority there.
+  const flags =
+    fsConstants.O_RDONLY | (process.platform === "win32" ? 0 : (fsConstants.O_NOFOLLOW ?? 0));
+  const handle = await open(filePath, flags);
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > maxBytes) {
+      throw new Error("Claude subagent history is not a bounded regular file.");
+    }
+    const contents = await handle.readFile({ encoding: "utf8" });
+    // A same-user writer can append after stat(). Recheck the bytes actually
+    // read so an actively growing transcript cannot bypass the memory cap.
+    if (Buffer.byteLength(contents, "utf8") > maxBytes) {
+      throw new Error("Claude subagent history exceeded its read bound.");
+    }
+    return contents;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function assertPrivateClaudeHistoryDirectory(directory: string): Promise<void> {
+  const info = await lstat(directory);
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new Error("Claude subagent history ancestor is not a private directory.");
+  }
+}
+
 function makeClaudeForkSessionStore(input: {
   readonly path: Path.Path;
   readonly env: NodeJS.ProcessEnv;
   readonly cwd: string;
 }): SessionStore {
-  const projectKey = claudeProjectDirectoryName(input.path, input.cwd);
+  const projectKey = claudeSessionStoreProjectKey(input.path, input.cwd);
   const projectDirectory = input.path.join(
     resolveClaudeConfigDirectory(input.path, input.env),
     "projects",
@@ -1454,6 +1587,210 @@ function makeClaudeForkSessionStore(input: {
         recursive: true,
         force: true,
       });
+    },
+  };
+}
+
+/**
+ * Build a read-only Agent SDK SessionStore over the exact configured Claude
+ * home and cwd. The SDK remains responsible for interpreting transcript
+ * chains and producing SessionMessage values; this adapter only supplies the
+ * JSON-safe entries required by the official SessionStore contract.
+ */
+function makeClaudeSubagentHistorySessionStore(input: {
+  readonly path: Path.Path;
+  readonly env: NodeJS.ProcessEnv;
+  readonly cwd: string;
+  readonly sessionId: string;
+}): SessionStore {
+  const projectKey = claudeSessionStoreProjectKey(input.path, input.cwd);
+  const projectDirectory = input.path.join(
+    resolveClaudeConfigDirectory(input.path, input.env),
+    "projects",
+    projectKey,
+  );
+  const sessionDirectory = input.path.join(projectDirectory, input.sessionId);
+
+  const assertSessionDirectoryChain = async (): Promise<void> => {
+    // Refuse a symlink at either provider-owned identity boundary. Without
+    // these checks an attacker could redirect an authorized session id into a
+    // different project or arbitrary local directory before the leaf-level
+    // O_NOFOLLOW check runs.
+    await assertPrivateClaudeHistoryDirectory(projectDirectory);
+    await assertPrivateClaudeHistoryDirectory(sessionDirectory);
+  };
+
+  const validateRootKey = (key: {
+    readonly projectKey: string;
+    readonly sessionId: string;
+  }): void => {
+    if (
+      key.projectKey !== projectKey ||
+      key.sessionId !== input.sessionId ||
+      !isUuid(key.sessionId)
+    ) {
+      throw new Error("Claude history store received an invalid project/session key.");
+    }
+  };
+
+  const safeSubpathSegments = (subpath: string | undefined): ReadonlyArray<string> => {
+    if (subpath === undefined) {
+      throw new Error("Claude history store only exposes verified subagent transcripts.");
+    }
+    const segments = subpath.split("/");
+    if (
+      segments.length < 2 ||
+      segments.length % 2 !== 0 ||
+      segments.some(
+        (segment, index) =>
+          segment.length === 0 ||
+          segment === "." ||
+          segment === ".." ||
+          segment.includes("\\") ||
+          (index % 2 === 0
+            ? segment !== "subagents"
+            : !segment.startsWith("agent-") ||
+              exactClaudeProviderIdentity(segment.slice("agent-".length), {
+                pathSegment: true,
+              }) === undefined),
+      )
+    ) {
+      throw new Error("Claude history store received an unsafe subagent key.");
+    }
+    return segments;
+  };
+
+  const readEntries = async (filePath: string): Promise<SessionStoreEntry[] | null> => {
+    const contents = await readBoundedClaudeHistoryRegularFile(
+      filePath,
+      CLAUDE_SUBAGENT_HISTORY_FILE_MAX_BYTES,
+    );
+    const entries: SessionStoreEntry[] = [];
+    for (const line of contents.split(/\r?\n/u)) {
+      if (line.trim().length === 0) continue;
+      const entry = JSON.parse(line) as unknown;
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        throw new Error("Claude subagent transcript contained an invalid JSON entry.");
+      }
+      const record = entry as Record<string, unknown>;
+      if (typeof record.type !== "string" || record.type.length === 0) {
+        throw new Error("Claude subagent transcript entry was missing its type.");
+      }
+      entries.push(record as SessionStoreEntry);
+    }
+
+    // Claude stores the exact spawning tool id in a bounded sidecar rather
+    // than the JSONL itself. `importSessionToStore()` in Agent SDK 0.3.228
+    // materializes this as an `agent_metadata` store entry; reproduce only
+    // that official storage bridge so getSubagentMessages() can attach
+    // `parent_tool_use_id` without Cafe interpreting transcript internals.
+    const metadataPath = filePath.replace(/\.jsonl$/u, ".meta.json");
+    try {
+      const metadataText = await readBoundedClaudeHistoryRegularFile(
+        metadataPath,
+        CLAUDE_SUBAGENT_HISTORY_METADATA_MAX_BYTES,
+      );
+      const metadata = JSON.parse(metadataText) as unknown;
+      if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+        throw new Error("Claude subagent metadata was not a JSON object.");
+      }
+      entries.push({
+        ...(metadata as Record<string, unknown>),
+        // Keep an adversarial sidecar from overriding the SDK discriminator.
+        type: "agent_metadata",
+      });
+    } catch (cause) {
+      if (!(cause instanceof Error && "code" in cause && cause.code === "ENOENT")) {
+        throw cause;
+      }
+      // Older Claude sessions may legitimately predate metadata sidecars.
+      // They remain readable only when Cafe already holds an exact historyId;
+      // the active task/tool resolver therefore fails closed for those rows.
+    }
+
+    return entries.length > 0 ? entries : null;
+  };
+
+  return {
+    append: async () => {
+      throw new Error("Claude history store is read-only.");
+    },
+    load: async (key) => {
+      validateRootKey(key);
+      const segments = safeSubpathSegments(key.subpath);
+      await assertSessionDirectoryChain();
+      let ancestor = sessionDirectory;
+      for (const segment of segments.slice(0, -1)) {
+        ancestor = input.path.join(ancestor, segment);
+        await assertPrivateClaudeHistoryDirectory(ancestor);
+      }
+      const filePath = input.path.join(sessionDirectory, ...segments) + ".jsonl";
+      return readEntries(filePath);
+    },
+    listSubkeys: async (key) => {
+      validateRootKey(key);
+      await assertSessionDirectoryChain();
+      const subagentRoot = input.path.join(sessionDirectory, "subagents");
+      await assertPrivateClaudeHistoryDirectory(subagentRoot);
+
+      const subkeys: string[] = [];
+      let scannedEntries = 0;
+      const scan = async (directory: string, prefix: ReadonlyArray<string>): Promise<void> => {
+        if (prefix.length / 2 > CLAUDE_SUBAGENT_DISCOVERY_MAX_DEPTH) {
+          throw new Error("Claude subagent history exceeded its nesting bound.");
+        }
+        // Stream directory entries instead of allocating an attacker-sized
+        // array. The independent scan cap also bounds directories containing
+        // thousands of irrelevant files rather than valid agent histories.
+        for await (const entry of await opendir(directory)) {
+          scannedEntries += 1;
+          if (scannedEntries > CLAUDE_SUBAGENT_DISCOVERY_MAX_DIRECTORY_ENTRIES) {
+            throw new Error("Claude subagent history exceeded its directory-entry bound.");
+          }
+          if (subkeys.length > CLAUDE_SUBAGENT_DISCOVERY_MAX_AGENTS) return;
+          const entryPath = input.path.join(directory, entry.name);
+          if (entry.isSymbolicLink()) continue;
+          if (entry.isDirectory()) {
+            if (!entry.name.startsWith("agent-")) continue;
+            const agentId = exactClaudeProviderIdentity(entry.name.slice("agent-".length), {
+              pathSegment: true,
+            });
+            if (!agentId) continue;
+            await assertPrivateClaudeHistoryDirectory(entryPath);
+            const nestedRoot = input.path.join(entryPath, "subagents");
+            let nestedInfo: Awaited<ReturnType<typeof lstat>>;
+            try {
+              nestedInfo = await lstat(nestedRoot);
+            } catch (cause) {
+              if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") {
+                // A leaf agent normally has no nested subagent directory.
+                continue;
+              }
+              throw cause;
+            }
+            if (!nestedInfo.isDirectory() || nestedInfo.isSymbolicLink()) {
+              throw new Error("Claude nested subagent history is not a private directory.");
+            }
+            await scan(nestedRoot, [...prefix, entry.name, "subagents"]);
+            continue;
+          }
+          if (
+            !entry.isFile() ||
+            !entry.name.startsWith("agent-") ||
+            !entry.name.endsWith(".jsonl")
+          ) {
+            continue;
+          }
+          const keyName = entry.name.slice(0, -".jsonl".length);
+          const agentId = exactClaudeProviderIdentity(keyName.slice("agent-".length), {
+            pathSegment: true,
+          });
+          if (!agentId) continue;
+          subkeys.push([...prefix, keyName].join("/"));
+        }
+      };
+      await scan(subagentRoot, ["subagents"]);
+      return subkeys;
     },
   };
 }
@@ -2178,6 +2515,30 @@ function extractTextContent(value: unknown): string {
   return extractTextContent(record.content);
 }
 
+function extractClaudeSubagentSessionMessageText(message: SessionMessage): string | undefined {
+  if (message.type !== "user" && message.type !== "assistant") {
+    return undefined;
+  }
+  const envelope = recordValue(message.message);
+  const content = envelope?.content;
+  if (typeof content === "string") {
+    return content.trim().length > 0 ? content : undefined;
+  }
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+  // Only explicit public text blocks cross this boundary. Thinking/reasoning,
+  // tool use, tool results, images, documents, and provider metadata are
+  // intentionally discarded even if they happen to contain a `text` field.
+  const text = content
+    .flatMap((entry) => {
+      const block = recordValue(entry);
+      return block?.type === "text" && typeof block.text === "string" ? [block.text] : [];
+    })
+    .join("\n\n");
+  return text.trim().length > 0 ? text : undefined;
+}
+
 function extractExitPlanModePlan(value: unknown): string | undefined {
   if (!value || typeof value !== "object") {
     return undefined;
@@ -2272,6 +2633,28 @@ function toolResultBlocksFromUserMessage(message: SDKMessage): Array<{
   }
 
   return blocks;
+}
+
+function claudeAgentOutputHistoryIdentity(
+  message: SDKMessage,
+): { readonly historyId: string; readonly status: "active" | "completed" } | undefined {
+  if (message.type !== "user") {
+    return undefined;
+  }
+  const result = recordValue(message.tool_use_result);
+  const status = trimmedStringValue(result?.status);
+  if (status !== "completed" && status !== "async_launched") {
+    // `remote_launched` is not a local Claude subagent transcript and has no
+    // `agentId`; other tool outputs must not be duck-typed as Agent results.
+    return undefined;
+  }
+  const historyId = exactClaudeProviderIdentity(result?.agentId, { pathSegment: true });
+  return historyId
+    ? {
+        historyId,
+        status: status === "completed" ? "completed" : "active",
+      }
+    : undefined;
 }
 
 function toSessionError(
@@ -2412,6 +2795,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }) as ClaudeQueryRuntime);
   const forkNativeSession = options?.forkNativeSession ?? forkSession;
   const deleteNativeSession = options?.deleteNativeSession ?? deleteSession;
+  const listNativeSubagents = options?.listNativeSubagents ?? listSubagents;
+  const getNativeSubagentMessages = options?.getNativeSubagentMessages ?? getSubagentMessages;
 
   const sessions = new Map<ThreadId, ClaudeSessionContext>();
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
@@ -3505,7 +3890,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       context.turnState.items.push(message.message);
     }
 
-    for (const toolResult of toolResultBlocksFromUserMessage(message)) {
+    const toolResults = toolResultBlocksFromUserMessage(message);
+    const agentHistoryIdentity =
+      toolResults.length === 1 ? claudeAgentOutputHistoryIdentity(message) : undefined;
+    for (const toolResult of toolResults) {
       const toolEntry = Array.from(context.inFlightTools.entries()).find(
         ([, tool]) => tool.itemId === toolResult.toolUseId,
       );
@@ -3598,6 +3986,71 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           payload: message,
         },
       });
+
+      if (tool.itemType === "collab_agent_tool_call" && agentHistoryIdentity !== undefined) {
+        const toolUseKey = canonicalClaudeToolUseBindingKey(toolResult.toolUseId);
+        const existingBinding = toolUseKey
+          ? context.taskBindingsByToolUseId.get(toolUseKey)
+          : undefined;
+        if (existingBinding !== undefined) {
+          // Agent SDK `task_id`, spawning `tool_use_id`, and AgentOutput
+          // `agentId` are independent identifiers. This edge durably repeats
+          // the exact association after the structured Agent result reveals
+          // it, allowing ended sessions to authorize history without parsing
+          // prose or guessing that any ids are equal.
+          const historyBinding = upsertClaudeTaskBinding(context, {
+            taskId: existingBinding.taskId,
+            toolUseKey,
+            toolUseId: toolResult.toolUseId,
+            historyId: agentHistoryIdentity.historyId,
+            taskType: "agent",
+          });
+          const subagent = claudeSubagentPresentation(historyBinding, agentHistoryIdentity.status);
+          const historyStamp = yield* makeEventStamp();
+          yield* offerRuntimeEvent(
+            agentHistoryIdentity.status === "completed"
+              ? {
+                  type: "task.completed",
+                  eventId: historyStamp.eventId,
+                  provider: PROVIDER,
+                  createdAt: historyStamp.createdAt,
+                  threadId: context.session.threadId,
+                  ...(context.turnState
+                    ? { turnId: asCanonicalTurnId(context.turnState.turnId) }
+                    : {}),
+                  payload: {
+                    taskId: historyBinding.taskId,
+                    status: "completed",
+                    summary: "Claude subagent completed.",
+                    ...(subagent ? { subagent } : {}),
+                  },
+                  providerRefs: nativeProviderRefs(context, {
+                    providerItemId: toolResult.toolUseId,
+                  }),
+                }
+              : {
+                  type: "task.progress",
+                  eventId: historyStamp.eventId,
+                  provider: PROVIDER,
+                  createdAt: historyStamp.createdAt,
+                  threadId: context.session.threadId,
+                  ...(context.turnState
+                    ? { turnId: asCanonicalTurnId(context.turnState.turnId) }
+                    : {}),
+                  payload: {
+                    taskId: historyBinding.taskId,
+                    description:
+                      historyBinding.description ?? "Claude subagent is working in the background.",
+                    summary: "Claude subagent history is available.",
+                    ...(subagent ? { subagent } : {}),
+                  },
+                  providerRefs: nativeProviderRefs(context, {
+                    providerItemId: toolResult.toolUseId,
+                  }),
+                },
+          );
+        }
+      }
 
       context.inFlightTools.delete(blockKey);
     }
@@ -6247,6 +6700,208 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     },
   );
 
+  const readSubagentDetail: NonNullable<ClaudeAdapterShape["readSubagentDetail"]> = (
+    threadId,
+    subagentId,
+    readContext,
+  ) =>
+    Effect.gen(function* () {
+      // The caller already authorizes this Cafe task identity against durable
+      // activity, but the adapter still rejects normalization ambiguities and
+      // control characters before using it as an in-memory lookup key.
+      if (exactClaudeProviderIdentity(subagentId) !== subagentId) {
+        return yield* makeProviderSubagentDetailReadError("invalid-request");
+      }
+
+      const currentLiveSession = sessions.get(threadId);
+      const persistedResumeSessionId = readClaudeResumeState(readContext?.resumeCursor)?.resume;
+      const hasPersistedRootConstraint = readContext !== undefined && "resumeCursor" in readContext;
+      const persistedCwd =
+        typeof readContext?.cwd === "string" && readContext.cwd.length > 0
+          ? readContext.cwd
+          : undefined;
+      // A Cafe thread can later return to this same Claude instance while a
+      // different native session owns the live slot. Reusing that slot for an
+      // ended child would silently discard the immutable history provenance and
+      // could expose a colliding agent id from the new root. Only retain the live
+      // optimization when every persisted root discriminator we have still
+      // matches; otherwise the official history APIs read the old root directly.
+      const liveSession =
+        currentLiveSession !== undefined &&
+        (!hasPersistedRootConstraint ||
+          (persistedResumeSessionId !== undefined &&
+            currentLiveSession.resumeSessionId === persistedResumeSessionId &&
+            (persistedCwd === undefined || currentLiveSession.session.cwd === persistedCwd)))
+          ? currentLiveSession
+          : undefined;
+      const liveBinding = liveSession?.taskBindingsByTaskId.get(subagentId);
+      const resumeSessionId = liveSession?.resumeSessionId ?? persistedResumeSessionId;
+      const cwd = liveSession?.session.cwd ?? persistedCwd;
+      if (!resumeSessionId || !isUuid(resumeSessionId) || !cwd || cwd.trim().length === 0) {
+        return yield* makeProviderSubagentDetailReadError("session-unavailable");
+      }
+      const historySessionStore = makeClaudeSubagentHistorySessionStore({
+        path,
+        env: claudeEnvironment,
+        cwd,
+        sessionId: resumeSessionId,
+      });
+
+      const authorizedHistoryId = exactClaudeProviderIdentity(readContext?.historyId, {
+        pathSegment: true,
+      });
+      if (readContext?.historyId !== undefined && authorizedHistoryId === undefined) {
+        return yield* makeProviderSubagentDetailReadError("invalid-request");
+      }
+      if (
+        liveBinding?.historyId !== undefined &&
+        authorizedHistoryId !== undefined &&
+        liveBinding.historyId !== authorizedHistoryId
+      ) {
+        return yield* makeProviderSubagentDetailReadError("child-identity-mismatch");
+      }
+
+      const runHistoryRequest = <A>(request: () => Promise<A>) =>
+        Effect.tryPromise({
+          try: request,
+          catch: () => makeProviderSubagentDetailReadError("provider-request-failed"),
+        }).pipe(
+          Effect.timeout(CLAUDE_SUBAGENT_HISTORY_READ_TIMEOUT_MS),
+          Effect.mapError(() => makeProviderSubagentDetailReadError("provider-request-failed")),
+          // Keep the complete provider exception/stack out of defects as well
+          // as the typed error channel. Transcript APIs can mention local paths.
+          Effect.catchDefect(() =>
+            Effect.fail(makeProviderSubagentDetailReadError("provider-request-failed")),
+          ),
+        );
+
+      const listedHistoryIds = yield* runHistoryRequest(() =>
+        listNativeSubagents(resumeSessionId, {
+          dir: cwd,
+          sessionStore: historySessionStore,
+        }),
+      );
+      if (listedHistoryIds.length > CLAUDE_SUBAGENT_DISCOVERY_MAX_AGENTS) {
+        return yield* makeProviderSubagentDetailReadError("provider-response-invalid");
+      }
+      const historyIds: string[] = [];
+      for (const value of listedHistoryIds) {
+        const historyId = exactClaudeProviderIdentity(value, { pathSegment: true });
+        if (historyId === undefined) {
+          return yield* makeProviderSubagentDetailReadError("provider-response-invalid");
+        }
+        if (!historyIds.includes(historyId)) {
+          historyIds.push(historyId);
+        }
+      }
+
+      let historyId = authorizedHistoryId ?? liveBinding?.historyId;
+      if (historyId !== undefined && !historyIds.includes(historyId)) {
+        return yield* makeProviderSubagentDetailReadError("child-identity-mismatch");
+      }
+
+      if (historyId === undefined) {
+        // A live pre-result task may not have exposed AgentOutput.agentId yet.
+        // Resolve it only through the SDK's transcript metadata: the first
+        // message carries the exact spawning parent_tool_use_id. This is a
+        // bounded compatibility path, never a taskId===agentId guess.
+        if (liveBinding?.toolUseId === undefined) {
+          return yield* makeProviderSubagentDetailReadError("missing-subagent-metadata");
+        }
+        const matches = yield* Effect.forEach(
+          historyIds,
+          (candidate) =>
+            runHistoryRequest(() =>
+              getNativeSubagentMessages(resumeSessionId, candidate, {
+                dir: cwd,
+                limit: 1,
+                sessionStore: historySessionStore,
+              }),
+            ).pipe(
+              Effect.map((messages) =>
+                messages.some((message) => message.parent_tool_use_id === liveBinding.toolUseId)
+                  ? candidate
+                  : undefined,
+              ),
+            ),
+          { concurrency: 4 },
+        ).pipe(
+          Effect.map((values) => values.filter((value): value is string => value !== undefined)),
+        );
+        if (matches.length !== 1) {
+          return yield* makeProviderSubagentDetailReadError(
+            matches.length === 0 ? "missing-subagent-metadata" : "parent-metadata-mismatch",
+          );
+        }
+        historyId = matches[0];
+        if (liveSession !== undefined && liveBinding !== undefined && historyId !== undefined) {
+          const toolUseKey = canonicalClaudeToolUseBindingKey(liveBinding.toolUseId);
+          const resolvedBinding = upsertClaudeTaskBinding(liveSession, {
+            taskId: liveBinding.taskId,
+            ...(toolUseKey ? { toolUseKey } : {}),
+            ...(liveBinding.toolUseId ? { toolUseId: liveBinding.toolUseId } : {}),
+            historyId,
+            taskType: "agent",
+          });
+          // Persist the just-verified relationship immediately rather than
+          // waiting for the Agent tool's terminal result. This also gives an
+          // already-open detail view a canonical task-progress invalidation;
+          // subsequent nested assistant snapshots repeat the same historyId.
+          const historyStamp = yield* makeEventStamp();
+          const subagent = claudeSubagentPresentation(resolvedBinding, "active");
+          yield* offerRuntimeEvent({
+            type: "task.progress",
+            eventId: historyStamp.eventId,
+            provider: PROVIDER,
+            createdAt: historyStamp.createdAt,
+            threadId: liveSession.session.threadId,
+            ...(liveSession.turnState
+              ? { turnId: asCanonicalTurnId(liveSession.turnState.turnId) }
+              : {}),
+            payload: {
+              taskId: resolvedBinding.taskId,
+              description:
+                resolvedBinding.description ?? "Claude subagent is working in the background.",
+              summary: "Claude subagent history is available.",
+              ...(subagent ? { subagent } : {}),
+            },
+            providerRefs: nativeProviderRefs(
+              liveSession,
+              liveBinding.toolUseId ? { providerItemId: liveBinding.toolUseId } : undefined,
+            ),
+          });
+        }
+      }
+
+      if (historyId === undefined) {
+        return yield* makeProviderSubagentDetailReadError("missing-subagent-metadata");
+      }
+      const messages = yield* runHistoryRequest(() =>
+        getNativeSubagentMessages(resumeSessionId, historyId, {
+          dir: cwd,
+          sessionStore: historySessionStore,
+        }),
+      );
+      const publicMessages = messages.flatMap((message) => {
+        const text = extractClaudeSubagentSessionMessageText(message);
+        return text === undefined || (message.type !== "user" && message.type !== "assistant")
+          ? []
+          : [{ role: message.type, text } as const];
+      });
+      return canonicalizeProviderSubagentDetail(publicMessages) satisfies ProviderSubagentDetail;
+    }).pipe(
+      // One authenticated UI read has one wall-clock budget. Per-request
+      // timeouts redact individual SDK failures, but without this outer cap a
+      // hostile 256-agent listing could consume the per-call budget in waves.
+      Effect.timeoutOrElse({
+        duration: CLAUDE_SUBAGENT_HISTORY_READ_TIMEOUT_MS,
+        orElse: () => Effect.fail(makeProviderSubagentDetailReadError("provider-request-failed")),
+      }),
+      Effect.catchDefect(() =>
+        Effect.fail(makeProviderSubagentDetailReadError("provider-request-failed")),
+      ),
+    );
+
   const rollbackThread: ClaudeAdapterShape["rollbackThread"] = Effect.fn("rollbackThread")(
     function* (threadId, numTurns) {
       const context = yield* requireSession(threadId);
@@ -6411,6 +7066,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     steerTurn,
     interruptTurn,
     readThread,
+    readSubagentDetail,
     rollbackThread,
     respondToRequest,
     respondToUserInput,

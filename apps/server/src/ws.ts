@@ -38,6 +38,7 @@ import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
 import { dispatchProviderNativeThreadFork } from "./orchestration/threadFork.ts";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine.ts";
+import { ProviderRuntimeIngestionService } from "./orchestration/Services/ProviderRuntimeIngestion.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProviderJournalMessageRepairLive } from "./orchestration/Layers/ProviderJournalMessageRepair.ts";
 import { ProviderJournalMessageRepair } from "./orchestration/Services/ProviderJournalMessageRepair.ts";
@@ -177,6 +178,7 @@ const makeWsRpcLayer = (
     Effect.gen(function* () {
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
       const orchestrationEngine = yield* OrchestrationEngineService;
+      const providerRuntimeIngestion = yield* ProviderRuntimeIngestionService;
       const providerJournalMessageRepair = yield* ProviderJournalMessageRepair;
       const threadDetailSubscriptionRegistry = yield* ThreadDetailSubscriptionRegistry;
       const keybindings = yield* Keybindings;
@@ -743,15 +745,38 @@ const makeWsRpcLayer = (
         [ORCHESTRATION_WS_METHODS.hardDeleteThread]: (input) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.hardDeleteThread,
-            hardDeleteThreadLocalData(input).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new OrchestrationGetSnapshotError({
-                    message: "Failed to permanently delete thread",
-                    cause,
+            providerService
+              .quiesceThreadForHardDelete(input)
+              .pipe(
+                // ProviderService releases its per-thread lifecycle permit
+                // before this resolves. Only then do we fence the independent
+                // ingestion worker and drain items that raced with adapter
+                // shutdown, avoiding a lock inversion between provider and
+                // orchestration queues.
+                Effect.andThen(providerRuntimeIngestion.retireThreadForHardDelete(input)),
+                Effect.andThen(hardDeleteThreadLocalData(input)),
+                Effect.tap(() => providerRuntimeIngestion.completeThreadHardDelete(input)),
+              )
+              .pipe(
+                Effect.tapError((cause) =>
+                  Effect.logWarning("thread hard delete failed", {
+                    threadId: input.threadId,
+                    failureTag:
+                      typeof cause === "object" && cause !== null && "_tag" in cause
+                        ? String(cause._tag)
+                        : "unknown",
                   }),
+                ),
+                // Filesystem and SQL failures can carry local paths or raw
+                // statement details. Keep those diagnostics server-side and
+                // expose a fixed RPC error to every authenticated client.
+                Effect.mapError(
+                  () =>
+                    new OrchestrationGetSnapshotError({
+                      message: "Failed to permanently delete thread",
+                    }),
+                ),
               ),
-            ),
             { "rpc.aggregate": "orchestration" },
           ),
         [ORCHESTRATION_WS_METHODS.repairAssistantMessageFromProviderJournal]: (input) =>
@@ -832,7 +857,9 @@ const makeWsRpcLayer = (
               const detail = yield* providerService
                 .readSubagentDetail({
                   threadId: input.threadId,
+                  turnId: input.turnId,
                   subagentId: input.subagentId,
+                  ...(input.historyId ? { historyId: input.historyId } : {}),
                 })
                 .pipe(
                   // Provider exceptions can contain rollout data. Collapse
@@ -845,14 +872,10 @@ const makeWsRpcLayer = (
                       }),
                   ),
                 );
-              if (detail.provider !== "codex") {
-                return yield* new OrchestrationGetSnapshotError({
-                  message: "Subagent details are unavailable for this provider",
-                });
-              }
               return {
-                provider: "codex" as const,
+                provider: detail.provider,
                 messages: detail.messages,
+                gaps: detail.gaps,
                 truncated: detail.truncated,
               };
             }),

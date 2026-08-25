@@ -9,6 +9,7 @@
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
+import type { ThreadId } from "@cafecode/contracts";
 
 /**
  * ProviderRuntimeIngestionShape - Service API for runtime ingestion lifecycle.
@@ -30,6 +31,23 @@ export interface ProviderRuntimeIngestionShape {
    * Intended for test use to replace timing-sensitive sleeps.
    */
   readonly drain: Effect.Effect<void>;
+
+  /**
+   * Permanently fence one thread from provider/domain ingestion in this
+   * process, then wait for every item already accepted by the worker to
+   * settle. Tombstone lookup keeps the fence effective across restarts.
+   */
+  readonly retireThreadForHardDelete: (input: {
+    readonly threadId: ThreadId;
+  }) => Effect.Effect<void>;
+
+  /**
+   * Release the short-lived in-process retirement set after the engine has
+   * durably installed and purged the tombstoned identity.
+   */
+  readonly completeThreadHardDelete: (input: {
+    readonly threadId: ThreadId;
+  }) => Effect.Effect<void>;
 }
 
 /**

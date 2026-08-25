@@ -50,6 +50,7 @@ const cliTestProviderService = {
   respondToUserInput: () => Effect.die("unexpected respondToUserInput"),
   snoozeUserInput: () => Effect.die("unexpected snoozeUserInput"),
   stopSession: () => Effect.die("unexpected stopSession"),
+  quiesceThreadForHardDelete: () => Effect.die("unexpected quiesceThreadForHardDelete"),
   restartProviderRuntime: () => Effect.die("unexpected restartProviderRuntime"),
   listSessions: () => Effect.succeed([]),
   getCapabilities: () => Effect.die("unexpected getCapabilities"),

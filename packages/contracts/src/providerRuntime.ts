@@ -533,6 +533,7 @@ export type UserInputResolvedPayload = typeof UserInputResolvedPayload.Type;
 export const MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN = 4_096;
 
 const RuntimeSubagentThreadId = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(512));
+const RuntimeSubagentHistoryId = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(512));
 const RuntimeSubagentLabel = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(96));
 const RuntimeSubagentPath = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(256));
 const RuntimeSubagentRole = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(80));
@@ -548,6 +549,17 @@ const RuntimeSubagentObjective = TrimmedNonEmptyStringSchema.check(Schema.isMaxL
  */
 export const RuntimeSubagentPresentation = Schema.Struct({
   threadId: RuntimeSubagentThreadId,
+  /**
+   * Provider-owned history identity for the nested agent transcript.
+   *
+   * This is deliberately separate from `threadId`: providers such as Claude
+   * expose a task id, spawning tool-use id, and transcript agent id as three
+   * distinct identities. Renderers must never display or interpret this value,
+   * and servers must still authorize the exact persisted thread/turn/activity
+   * tuple before using it. Keeping the binding structured prevents an unsafe
+   * assumption that any two of those provider identities are interchangeable.
+   */
+  historyId: Schema.optional(RuntimeSubagentHistoryId),
   label: Schema.optional(RuntimeSubagentLabel),
   path: Schema.optional(RuntimeSubagentPath),
   role: Schema.optional(RuntimeSubagentRole),

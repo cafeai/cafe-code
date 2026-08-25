@@ -6,6 +6,7 @@ import { performance } from "node:perf_hooks";
 import { setImmediate as waitForEventLoopTurn } from "node:timers/promises";
 
 import {
+  type OrchestrationCommand,
   OrchestrationReadModel,
   ProviderDriverKind,
   ProviderRuntimeEvent,
@@ -25,7 +26,9 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as PubSub from "effect/PubSub";
@@ -46,7 +49,10 @@ import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import { ProviderRuntimeIngestionLive } from "./ProviderRuntimeIngestion.ts";
 import { RuntimeReceiptBusLive } from "./RuntimeReceiptBus.ts";
-import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import {
+  OrchestrationEngineService,
+  type OrchestrationEngineShape,
+} from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
@@ -128,6 +134,7 @@ function createProviderServiceHarness() {
     respondToUserInput: () => unsupported(),
     snoozeUserInput: () => unsupported(),
     stopSession: () => unsupported(),
+    quiesceThreadForHardDelete: () => unsupported(),
     restartProviderRuntime: () => unsupported(),
     listSessions: () => Effect.succeed([...runtimeSessions]),
     getCapabilities: () =>
@@ -247,7 +254,13 @@ describe("ProviderRuntimeIngestion", () => {
     }
   });
 
-  async function createHarness(options?: { serverSettings?: Partial<ServerSettings> }) {
+  async function createHarness(options?: {
+    serverSettings?: Partial<ServerSettings>;
+    dispatchGate?: (
+      command: OrchestrationCommand,
+      dispatch: OrchestrationEngineShape["dispatch"],
+    ) => ReturnType<OrchestrationEngineShape["dispatch"]>;
+  }) {
     const workspaceRoot = makeTempDir("t3-provider-project-");
     fs.mkdirSync(path.join(workspaceRoot, ".git"));
     const provider = createProviderServiceHarness();
@@ -259,12 +272,24 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provide(RepositoryIdentityResolverTest),
       Layer.provide(SqlitePersistenceMemory),
     );
+    const orchestrationEngineLayer = options?.dispatchGate
+      ? Layer.effect(
+          OrchestrationEngineService,
+          Effect.gen(function* () {
+            const engine = yield* OrchestrationEngineService;
+            return {
+              ...engine,
+              dispatch: (command) => options.dispatchGate!(command, engine.dispatch),
+            } satisfies OrchestrationEngineShape;
+          }),
+        ).pipe(Layer.provide(orchestrationLayer))
+      : orchestrationLayer;
     const projectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
       Layer.provide(RepositoryIdentityResolverTest),
       Layer.provide(SqlitePersistenceMemory),
     );
     const layer = ProviderRuntimeIngestionLive.pipe(
-      Layer.provideMerge(orchestrationLayer),
+      Layer.provideMerge(orchestrationEngineLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(RuntimeReceiptBusLive),
@@ -348,8 +373,98 @@ describe("ProviderRuntimeIngestion", () => {
       setProviderSession: provider.setSession,
       receiptBus,
       drain,
+      retireThreadForHardDelete: ingestion.retireThreadForHardDelete,
     };
   }
+
+  it("drops an event queued behind in-flight work when hard-delete retirement fences ingestion", async () => {
+    const firstDispatchStarted = Effect.runSync(Deferred.make<void>());
+    const releaseFirstDispatch = Effect.runSync(Deferred.make<void>());
+    let gated = false;
+    const harness = await createHarness({
+      dispatchGate: (command, dispatch) => {
+        if (command.type !== "thread.activity.append" || gated) {
+          return dispatch(command);
+        }
+        gated = true;
+        return Deferred.succeed(firstDispatchStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseFirstDispatch)),
+          Effect.andThen(dispatch(command)),
+        );
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "task.started",
+      eventId: asEventId("evt-hard-delete-ingestion-in-flight"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-hard-delete-ingestion"),
+      payload: {
+        taskId: "task-in-flight",
+        taskType: "plan",
+      },
+    });
+    await Effect.runPromise(Deferred.await(firstDispatchStarted));
+
+    // The worker is blocked on the first dispatch, so this provider event is
+    // necessarily pending when retirement begins.
+    harness.emit({
+      type: "task.started",
+      eventId: asEventId("evt-hard-delete-ingestion-queued"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-hard-delete-ingestion"),
+      payload: {
+        taskId: "task-queued",
+        taskType: "plan",
+      },
+    });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const retirement = yield* harness
+          .retireThreadForHardDelete({ threadId: asThreadId("thread-1") })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        // Cache.set precedes drain in the retirement fiber. Yielding once lets
+        // it establish the fence while the first worker item remains blocked.
+        yield* Effect.yieldNow;
+        yield* Deferred.succeed(releaseFirstDispatch, undefined);
+        yield* Fiber.join(retirement);
+      }),
+    );
+
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === asThreadId("thread-1"),
+    );
+    expect(thread?.activities.map((activity) => activity.id)).toEqual([
+      asEventId("evt-hard-delete-ingestion-in-flight"),
+    ]);
+
+    // Events arriving after the fence remain ignored as well.
+    harness.emit({
+      type: "task.started",
+      eventId: asEventId("evt-hard-delete-ingestion-late"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-hard-delete-ingestion"),
+      payload: {
+        taskId: "task-late",
+        taskType: "plan",
+      },
+    });
+    await harness.drain();
+    const afterLateEvent = (await harness.readModel()).threads.find(
+      (entry) => entry.id === asThreadId("thread-1"),
+    );
+    expect(afterLateEvent?.activities.map((activity) => activity.id)).toEqual([
+      asEventId("evt-hard-delete-ingestion-in-flight"),
+    ]);
+  });
 
   it("maps turn started/completed events into thread session updates", async () => {
     const harness = await createHarness();

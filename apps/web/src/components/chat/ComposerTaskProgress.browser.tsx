@@ -4,18 +4,32 @@ import { page, userEvent } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
+import type { WorkLogEntry } from "../../session-logic";
 import { ComposerTaskProgress, type ComposerTaskProgressPlan } from "./ComposerTaskProgress";
 
 async function mountProgress(
   plan: ComposerTaskProgressPlan | null,
-  options?: { readonly composerBottom?: boolean },
+  options?: {
+    readonly composerBottom?: boolean;
+    readonly subagents?: ReadonlyArray<WorkLogEntry>;
+    readonly onOpenSubagentDetail?: (entry: WorkLogEntry, trigger: HTMLButtonElement) => void;
+  },
 ) {
   const host = document.createElement("div");
   if (options?.composerBottom) {
     host.className = "fixed bottom-2 left-2";
   }
   document.body.append(host);
-  const screen = await render(<ComposerTaskProgress plan={plan} />, { container: host });
+  const screen = await render(
+    <ComposerTaskProgress
+      plan={plan}
+      {...(options?.subagents ? { subagents: options.subagents } : {})}
+      {...(options?.onOpenSubagentDetail
+        ? { onOpenSubagentDetail: options.onOpenSubagentDetail }
+        : {})}
+    />,
+    { container: host },
+  );
 
   const cleanup = async () => {
     await screen.unmount();
@@ -105,6 +119,90 @@ describe("ComposerTaskProgress", () => {
       expect(rows[1]?.textContent).toContain("Current");
       expect(rows[1]?.getAttribute("aria-current")).toBe("step");
       expect(rows[2]?.textContent).toContain("Pending");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("supports an agents-only state and opens every live worker from the shared popup", async () => {
+    const onOpenSubagentDetail = vi.fn();
+    const subagents: WorkLogEntry[] = [
+      {
+        id: "agent-row-1",
+        createdAt: "2026-08-25T10:00:00.000Z",
+        label: "Audit Claude history",
+        tone: "thinking",
+        subagent: {
+          id: "provider-child-1",
+          label: "Audit Claude history",
+          description: "Checking the latest provider update",
+          status: "active",
+          startedAt: "2026-08-25T10:00:00.000Z",
+          updatedAt: "2026-08-25T10:00:05.000Z",
+        },
+      },
+      {
+        id: "agent-row-2",
+        createdAt: "2026-08-25T10:00:01.000Z",
+        label: "Review Codex output",
+        tone: "thinking",
+        subagent: {
+          id: "provider-child-2",
+          label: "Review Codex output",
+          description: "Waiting for a worker slot",
+          status: "waiting",
+          startedAt: "2026-08-25T10:00:01.000Z",
+          updatedAt: "2026-08-25T10:00:01.000Z",
+        },
+      },
+    ];
+    const mounted = await mountProgress(null, { subagents, onOpenSubagentDetail });
+
+    try {
+      const trigger = page.getByRole("button", {
+        name: "2 active subagents. Show task list",
+      });
+      await expect.element(trigger).toHaveTextContent("2 agents");
+      expect(document.querySelector('[data-task-progress-ring="true"]')).toBeNull();
+
+      await trigger.click();
+      await vi.waitFor(() => expect(progressPopup()).not.toBeNull());
+      expect(document.querySelectorAll('[data-composer-subagent-list="true"] button')).toHaveLength(
+        2,
+      );
+      await page.getByRole("button", { name: /^Audit Claude history, Working\./ }).click();
+      expect(onOpenSubagentDetail).toHaveBeenCalledWith(subagents[0], progressTrigger());
+      await vi.waitFor(() => expect(progressPopup()).toBeNull());
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("shows plan progress and active-agent count together", async () => {
+    const mounted = await mountProgress(
+      { steps: [{ step: "Implement the shared detail view", status: "inProgress" }] },
+      {
+        subagents: [
+          {
+            id: "agent-row",
+            createdAt: "2026-08-25T10:00:00.000Z",
+            label: "Implement detail",
+            tone: "thinking",
+            subagent: {
+              id: "provider-child",
+              label: "Implement detail",
+              status: "active",
+              startedAt: "2026-08-25T10:00:00.000Z",
+              updatedAt: "2026-08-25T10:00:00.000Z",
+            },
+          },
+        ],
+      },
+    );
+    try {
+      await expect
+        .element(page.getByRole("button", { name: /1 active subagent/ }))
+        .toHaveTextContent("Step 1 / 1 · 1 agent");
     } finally {
       await mounted.cleanup();
     }

@@ -554,8 +554,21 @@ export type OrchestrationThreadTurnActivityPage = typeof OrchestrationThreadTurn
  */
 export const THREAD_TURN_SUBAGENT_ID_MAX_LENGTH = 512;
 export const THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES = 64;
-export const THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS = 32_768;
-export const THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_CHARS = 131_072;
+export const THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES = 32_768;
+export const THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_BYTES = 131_072;
+export const THREAD_TURN_SUBAGENT_DETAIL_MAX_ENCODED_BYTES = 1_048_576;
+export const THREAD_TURN_SUBAGENT_DETAIL_MESSAGE_KEY_MAX_LENGTH = 64;
+export const THREAD_TURN_SUBAGENT_DETAIL_MAX_GAPS = 2;
+
+/**
+ * Compatibility aliases for callers which compiled against the first detail
+ * contract. The limits are now enforced as UTF-8 bytes rather than UTF-16 code
+ * units; new code should use the `*_BYTES` names above.
+ */
+export const THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS =
+  THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES;
+export const THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_CHARS =
+  THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_BYTES;
 
 const ThreadTurnSubagentId = TrimmedNonEmptyString.check(
   Schema.isMaxLength(THREAD_TURN_SUBAGENT_ID_MAX_LENGTH),
@@ -565,29 +578,199 @@ export const OrchestrationThreadTurnSubagentDetailInput = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
   subagentId: ThreadTurnSubagentId,
+  /**
+   * Optional provider transcript identity carried by the same durable
+   * subagent presentation. It is never authority by itself: the server must
+   * prove the exact `(threadId, turnId, subagentId, historyId)` activity tuple
+   * before forwarding it to a provider adapter.
+   */
+  historyId: Schema.optional(ThreadTurnSubagentId),
 });
 export type OrchestrationThreadTurnSubagentDetailInput =
   typeof OrchestrationThreadTurnSubagentDetailInput.Type;
 
+const ThreadTurnSubagentDetailMessageKey = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(THREAD_TURN_SUBAGENT_DETAIL_MESSAGE_KEY_MAX_LENGTH),
+);
+
+const threadTurnSubagentUtf8ByteLength = (value: string): number =>
+  new TextEncoder().encode(value).byteLength;
+
+const ThreadTurnSubagentDetailText = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.makeFilter(
+    (text) =>
+      threadTurnSubagentUtf8ByteLength(text) <= THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES,
+    {
+      expected: `public subagent text with at most ${THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES} UTF-8 bytes`,
+    },
+  ),
+);
+
+/**
+ * Metadata for a single provider message whose middle was removed.
+ *
+ * `text` on the containing message is the retained head and `tail` is the
+ * retained suffix. Keeping the marker typed (rather than synthesizing a
+ * provider-authored Markdown message) prevents malformed code fences and
+ * makes the discontinuity unambiguous to every renderer.
+ */
+export const OrchestrationThreadTurnSubagentDetailContentOmission = Schema.Struct({
+  tail: ThreadTurnSubagentDetailText,
+  omittedUtf8Bytes: PositiveInt,
+});
+export type OrchestrationThreadTurnSubagentDetailContentOmission =
+  typeof OrchestrationThreadTurnSubagentDetailContentOmission.Type;
+
 export const OrchestrationThreadTurnSubagentDetailMessage = Schema.Struct({
+  key: ThreadTurnSubagentDetailMessageKey,
   role: Schema.Literals(["user", "assistant"]),
   // Deliberately use a non-trimming string schema: Markdown indentation and
   // newlines are public assistant content and must survive the wire boundary.
-  text: Schema.String.check(
-    Schema.isMinLength(1),
-    Schema.isMaxLength(THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS),
+  text: ThreadTurnSubagentDetailText,
+  omission: Schema.optional(OrchestrationThreadTurnSubagentDetailContentOmission),
+}).check(
+  Schema.makeFilter(
+    (message) =>
+      threadTurnSubagentUtf8ByteLength(message.text) +
+        (message.omission === undefined
+          ? 0
+          : threadTurnSubagentUtf8ByteLength(message.omission.tail)) <=
+      THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES,
+    {
+      expected: `a public subagent message with at most ${THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES} retained UTF-8 bytes`,
+    },
   ),
-});
+);
 export type OrchestrationThreadTurnSubagentDetailMessage =
   typeof OrchestrationThreadTurnSubagentDetailMessage.Type;
 
-export const OrchestrationThreadTurnSubagentDetail = Schema.Struct({
-  provider: Schema.Literal("codex"),
+/** The one chronological discontinuity between the retained head and tail. */
+export const OrchestrationThreadTurnSubagentDetailGap = Schema.Struct({
+  // `null` means that all retained messages follow the omitted prefix. In the
+  // normal head+tail policy this is a retained message key instead.
+  afterMessageKey: Schema.NullOr(ThreadTurnSubagentDetailMessageKey),
+  omittedMessages: PositiveInt,
+  omittedUtf8Bytes: NonNegativeInt,
+});
+export type OrchestrationThreadTurnSubagentDetailGap =
+  typeof OrchestrationThreadTurnSubagentDetailGap.Type;
+
+/**
+ * Shared flat body fields for both the public orchestration response and the
+ * provider-daemon response. Keeping one field set prevents the two authenticated
+ * transports from silently accepting different message or omission shapes.
+ */
+export const OrchestrationThreadTurnSubagentDetailBodyFields = {
   messages: Schema.Array(OrchestrationThreadTurnSubagentDetailMessage).check(
     Schema.isMaxLength(THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES),
   ),
+  gaps: Schema.Array(OrchestrationThreadTurnSubagentDetailGap).check(
+    Schema.isMaxLength(THREAD_TURN_SUBAGENT_DETAIL_MAX_GAPS),
+  ),
   truncated: Schema.Boolean,
-});
+} as const;
+
+const OrchestrationThreadTurnSubagentDetailBodyStruct = Schema.Struct(
+  OrchestrationThreadTurnSubagentDetailBodyFields,
+);
+export type OrchestrationThreadTurnSubagentDetailBody =
+  typeof OrchestrationThreadTurnSubagentDetailBodyStruct.Type;
+
+/**
+ * Validate cross-field transcript invariants shared by every detail transport.
+ *
+ * In particular, a gap may identify an omitted prefix or a middle range, but it
+ * may never follow the final retained message. That rule makes "latest" a wire
+ * contract instead of a renderer convention: every accepted shortened history
+ * still ends with the newest retained provider message.
+ */
+export function orchestrationThreadTurnSubagentDetailBodyIssues(
+  detail: OrchestrationThreadTurnSubagentDetailBody,
+): Array<Schema.FilterIssue> {
+  const issues: Array<Schema.FilterIssue> = [];
+  const keys = new Set<string>();
+  const keyIndexes = new Map<string, number>();
+  let retainedBytes = 0;
+  for (let index = 0; index < detail.messages.length; index += 1) {
+    const message = detail.messages[index];
+    if (!message) continue;
+    if (keys.has(message.key)) {
+      issues.push({ path: ["messages", index, "key"], issue: "message keys must be unique" });
+    }
+    keys.add(message.key);
+    keyIndexes.set(message.key, index);
+    retainedBytes += threadTurnSubagentUtf8ByteLength(message.text);
+    if (message.omission !== undefined) {
+      retainedBytes += threadTurnSubagentUtf8ByteLength(message.omission.tail);
+    }
+  }
+  if (retainedBytes > THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_BYTES) {
+    issues.push({
+      path: ["messages"],
+      issue: `retained public transcript exceeds ${THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_BYTES} UTF-8 bytes`,
+    });
+  }
+  const gapAnchors = new Set<string | null>();
+  let previousGapAnchorIndex = -2;
+  for (let index = 0; index < detail.gaps.length; index += 1) {
+    const gap = detail.gaps[index];
+    if (!gap) continue;
+    if (gapAnchors.has(gap.afterMessageKey)) {
+      issues.push({ path: ["gaps", index], issue: "gap anchors must be unique" });
+    }
+    gapAnchors.add(gap.afterMessageKey);
+    const anchorIndex = gap.afterMessageKey === null ? -1 : keyIndexes.get(gap.afterMessageKey);
+    if (anchorIndex === undefined) {
+      issues.push({
+        path: ["gaps", index, "afterMessageKey"],
+        issue: "gap anchor must reference a retained public message key",
+      });
+      continue;
+    }
+    if (anchorIndex <= previousGapAnchorIndex) {
+      issues.push({
+        path: ["gaps", index, "afterMessageKey"],
+        issue: "gap anchors must follow retained transcript chronology",
+      });
+    }
+    previousGapAnchorIndex = Math.max(previousGapAnchorIndex, anchorIndex);
+    if (anchorIndex >= detail.messages.length - 1) {
+      issues.push({
+        path: ["gaps", index, "afterMessageKey"],
+        issue: "a shortened transcript must retain a message after every gap",
+      });
+    }
+  }
+  const hasOmission =
+    detail.gaps.length > 0 || detail.messages.some((message) => message.omission !== undefined);
+  if (detail.truncated !== hasOmission) {
+    issues.push({
+      path: ["truncated"],
+      issue: "truncated must exactly reflect typed message or transcript omissions",
+    });
+  }
+  if (
+    threadTurnSubagentUtf8ByteLength(JSON.stringify(detail)) >
+    THREAD_TURN_SUBAGENT_DETAIL_MAX_ENCODED_BYTES
+  ) {
+    issues.push({
+      path: [],
+      issue: `encoded public subagent detail exceeds ${THREAD_TURN_SUBAGENT_DETAIL_MAX_ENCODED_BYTES} UTF-8 bytes`,
+    });
+  }
+  return issues;
+}
+
+export const OrchestrationThreadTurnSubagentDetailBody =
+  OrchestrationThreadTurnSubagentDetailBodyStruct.check(
+    Schema.makeFilter(orchestrationThreadTurnSubagentDetailBodyIssues),
+  );
+
+export const OrchestrationThreadTurnSubagentDetail = Schema.Struct({
+  provider: ProviderDriverKind,
+  ...OrchestrationThreadTurnSubagentDetailBodyFields,
+}).check(Schema.makeFilter(orchestrationThreadTurnSubagentDetailBodyIssues));
 export type OrchestrationThreadTurnSubagentDetail =
   typeof OrchestrationThreadTurnSubagentDetail.Type;
 

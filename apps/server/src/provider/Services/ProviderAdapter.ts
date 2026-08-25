@@ -72,8 +72,26 @@ export interface ProviderThreadSnapshot {
 
 /** Public transcript material extracted from a provider-owned child thread. */
 export interface ProviderSubagentDetailMessage {
+  /** Stable Cafe-owned sequence key; never a provider-native item id. */
+  readonly key: string;
   readonly role: "user" | "assistant";
+  /** Complete public text, or the retained head when `omission` is present. */
   readonly text: string;
+  readonly omission?:
+    | {
+        /** Retained public suffix rendered after a typed content-gap marker. */
+        readonly tail: string;
+        /** Sanitized UTF-8 bytes removed between `text` and `tail`. */
+        readonly omittedUtf8Bytes: number;
+      }
+    | undefined;
+}
+
+export interface ProviderSubagentDetailGap {
+  /** `null` identifies an omitted prefix; otherwise the retained head anchor. */
+  readonly afterMessageKey: string | null;
+  readonly omittedMessages: number;
+  readonly omittedUtf8Bytes: number;
 }
 
 /**
@@ -85,6 +103,8 @@ export interface ProviderSubagentDetailMessage {
  */
 export interface ProviderSubagentDetail {
   readonly messages: ReadonlyArray<ProviderSubagentDetailMessage>;
+  /** Ordered discontinuities between retained chronological message blocks. */
+  readonly gaps: ReadonlyArray<ProviderSubagentDetailGap>;
   readonly truncated: boolean;
 }
 
@@ -219,6 +239,13 @@ export interface ProviderAdapterShape<TError> {
        * provider conversation or replace the durable binding.
        */
       readonly resumeCursor?: unknown | null;
+      /** Exact persisted workspace used to scope provider-native history discovery. */
+      readonly cwd?: string | null;
+      /**
+       * Exact provider-owned transcript identity authorized from the durable
+       * subagent activity. It is not accepted as authority on its own.
+       */
+      readonly historyId?: string;
     },
   ) => Effect.Effect<ProviderSubagentDetail, TError>;
 

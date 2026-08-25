@@ -12,6 +12,7 @@ import {
   PROVIDER_DAEMON_RPC_PATH,
   ProviderDaemonEventRecord,
   ProviderDaemonLeaseRequest,
+  ProviderDaemonSubagentDetail,
   type ProviderDaemonProcessDiagnostic,
   ProviderDaemonRpcRequest,
   type ProviderDaemonCapability,
@@ -80,7 +81,41 @@ const PROVIDER_SUPERVISOR_BRIDGE_CURSOR_PERSIST_INTERVAL = 100;
 
 const decodeRpcRequest = Schema.decodeUnknownEffect(ProviderDaemonRpcRequest);
 const decodeLeaseRequest = Schema.decodeUnknownEffect(ProviderDaemonLeaseRequest);
+const decodeProviderDaemonSubagentDetail = Schema.decodeUnknownEffect(ProviderDaemonSubagentDetail);
 const encodeEventRecordJson = Schema.encodeSync(Schema.fromJsonString(ProviderDaemonEventRecord));
+
+/**
+ * Revalidate and freshly reconstruct every nested public field before a
+ * provider-owned detail crosses the daemon boundary. Schema decoding rejects
+ * invalid shape/invariants; explicit reconstruction additionally prevents a
+ * hostile object prototype or `toJSON` method from influencing JSON output.
+ */
+const makePublicProviderDaemonSubagentDetail = (input: unknown) =>
+  decodeProviderDaemonSubagentDetail(input).pipe(
+    Effect.map((detail) => ({
+      provider: detail.provider,
+      providerInstanceId: detail.providerInstanceId,
+      messages: detail.messages.map((message) => ({
+        key: message.key,
+        role: message.role,
+        text: message.text,
+        ...(message.omission === undefined
+          ? {}
+          : {
+              omission: {
+                tail: message.omission.tail,
+                omittedUtf8Bytes: message.omission.omittedUtf8Bytes,
+              },
+            }),
+      })),
+      gaps: detail.gaps.map((gap) => ({
+        afterMessageKey: gap.afterMessageKey,
+        omittedMessages: gap.omittedMessages,
+        omittedUtf8Bytes: gap.omittedUtf8Bytes,
+      })),
+      truncated: detail.truncated,
+    })),
+  );
 
 class ProviderDaemonListenError extends Data.TaggedError("ProviderDaemonListenError")<{
   readonly cause: unknown;
@@ -794,6 +829,8 @@ const executeRpcRequest = (
       return providerService.snoozeUserInput(request.payload);
     case "stopSession":
       return providerService.stopSession(request.payload);
+    case "quiesceThreadForHardDelete":
+      return providerService.quiesceThreadForHardDelete(request.payload);
     case "restartProviderRuntime":
       return providerService.restartProviderRuntime(request.payload);
     case "listSessions":
@@ -817,14 +854,22 @@ const executeRpcRequest = (
     case "rollbackConversation":
       return providerService.rollbackConversation(request.payload);
     case "readSubagentDetail":
-      return providerService.readSubagentDetail(request.payload).pipe(
-        Effect.mapError(redactProviderSubagentDetailReadError),
-        // Defects do not pass through mapError. Collapse them separately while
-        // preserving interruption so daemon shutdown remains cooperative.
-        Effect.catchDefect(() =>
-          Effect.fail(makeProviderSubagentDetailReadError("provider-request-failed")),
-        ),
-      );
+      return providerService
+        .readSubagentDetail({
+          threadId: request.payload.threadId,
+          turnId: request.payload.turnId,
+          subagentId: request.payload.subagentId,
+          ...(request.payload.historyId ? { historyId: request.payload.historyId } : {}),
+        })
+        .pipe(
+          Effect.flatMap(makePublicProviderDaemonSubagentDetail),
+          Effect.mapError(redactProviderSubagentDetailReadError),
+          // Defects do not pass through mapError. Collapse them separately while
+          // preserving interruption so daemon shutdown remains cooperative.
+          Effect.catchDefect(() =>
+            Effect.fail(makeProviderSubagentDetailReadError("provider-request-failed")),
+          ),
+        );
     default:
       request satisfies never;
       return Effect.void;

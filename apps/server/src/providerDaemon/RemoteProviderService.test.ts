@@ -1,10 +1,14 @@
-import { ProviderInstanceId, ThreadId } from "@cafecode/contracts";
+import { ProviderInstanceId, ThreadId, TurnId } from "@cafecode/contracts";
 import { assert, describe, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 
 import {
   attachCommandIdToMutatingProviderDaemonRequest,
+  guardRemoteProviderThreadOperation,
   isVoidProviderDaemonRpcMethod,
   ProviderDaemonRpcResponseError,
+  providerDaemonRequestThreadIds,
   remoteProviderCursorProjectorForConfig,
   toRemoteRequestError,
 } from "./RemoteProviderService.ts";
@@ -76,6 +80,7 @@ describe("RemoteProviderService", () => {
       method: "readSubagentDetail",
       payload: {
         threadId: ThreadId.make("thread-1"),
+        turnId: TurnId.make("turn-1"),
         subagentId: "provider-child-1",
       },
     });
@@ -87,8 +92,65 @@ describe("RemoteProviderService", () => {
   it("does not treat restartProviderRuntime as a void daemon RPC", () => {
     assert.isFalse(isVoidProviderDaemonRpcMethod("restartProviderRuntime"));
     assert.isTrue(isVoidProviderDaemonRpcMethod("stopSession"));
+    assert.isTrue(isVoidProviderDaemonRpcMethod("quiesceThreadForHardDelete"));
     assert.isTrue(isVoidProviderDaemonRpcMethod("rollbackConversation"));
   });
+
+  it("makes hard-delete quiescence an idempotent daemon mutation", () => {
+    const request = attachCommandIdToMutatingProviderDaemonRequest({
+      method: "quiesceThreadForHardDelete",
+      payload: { threadId: ThreadId.make("thread-permanent-delete") },
+    });
+
+    assert.equal(request.method, "quiesceThreadForHardDelete");
+    assert.equal(typeof request.commandId, "string");
+  });
+
+  it.effect("rejects a retired fork source or target before evaluating the remote mutation", () =>
+    Effect.gen(function* () {
+      const sourceThreadId = ThreadId.make("thread-remote-fork-source");
+      const targetThreadId = ThreadId.make("thread-remote-fork-target");
+      const request = {
+        method: "forkSession",
+        payload: {
+          operationId: "cmd-remote-retired-fork",
+          sourceThreadId,
+          targetThreadId,
+          title: "Retired target",
+        },
+      } as const;
+      assert.deepEqual(providerDaemonRequestThreadIds(request), [sourceThreadId, targetThreadId]);
+
+      let evaluatedMutationCount = 0;
+      const mutation = Effect.sync(() => {
+        evaluatedMutationCount += 1;
+      });
+      const targetRetiredExit = yield* guardRemoteProviderThreadOperation({
+        retiredThreadIds: new Set([String(targetThreadId)]),
+        operation: "ProviderDaemonRemoteProviderService.forkSession",
+        threadIds: providerDaemonRequestThreadIds(request),
+        effect: mutation,
+      }).pipe(Effect.exit);
+      const sourceRetiredExit = yield* guardRemoteProviderThreadOperation({
+        retiredThreadIds: new Set([String(sourceThreadId)]),
+        operation: "ProviderDaemonRemoteProviderService.forkSession",
+        threadIds: providerDaemonRequestThreadIds(request),
+        effect: mutation,
+      }).pipe(Effect.exit);
+
+      assert.isTrue(Exit.isFailure(targetRetiredExit));
+      assert.isTrue(Exit.isFailure(sourceRetiredExit));
+      assert.equal(evaluatedMutationCount, 0);
+
+      yield* guardRemoteProviderThreadOperation({
+        retiredThreadIds: new Set(),
+        operation: "ProviderDaemonRemoteProviderService.forkSession",
+        threadIds: providerDaemonRequestThreadIds(request),
+        effect: mutation,
+      });
+      assert.equal(evaluatedMutationCount, 1);
+    }),
+  );
 
   it("uses a separate cursor for daemon to supervisor event bridging", () => {
     assert.equal(

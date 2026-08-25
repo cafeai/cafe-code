@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -20,6 +21,7 @@ import type {
   SDKControlInterruptResponse,
   SDKMessage,
   SDKUserMessage,
+  SessionMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
   ApprovalRequestId,
@@ -185,10 +187,13 @@ function makeHarness(config?: {
   readonly cwd?: string;
   readonly baseDir?: string;
   readonly claudeConfig?: Partial<ClaudeSettings>;
+  readonly environment?: NodeJS.ProcessEnv;
   readonly instanceId?: ProviderInstanceId;
   readonly onAuthStatusChanged?: ClaudeAdapterLiveOptions["onAuthStatusChanged"];
   readonly forkNativeSession?: ClaudeAdapterLiveOptions["forkNativeSession"];
   readonly deleteNativeSession?: ClaudeAdapterLiveOptions["deleteNativeSession"];
+  readonly listNativeSubagents?: ClaudeAdapterLiveOptions["listNativeSubagents"];
+  readonly getNativeSubagentMessages?: ClaudeAdapterLiveOptions["getNativeSubagentMessages"];
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -200,6 +205,7 @@ function makeHarness(config?: {
 
   const adapterOptions: ClaudeAdapterLiveOptions = {
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
+    ...(config?.environment ? { environment: config.environment } : {}),
     createQuery: (input) => {
       createInput = input;
       return query;
@@ -221,6 +227,10 @@ function makeHarness(config?: {
       : {}),
     ...(config?.forkNativeSession ? { forkNativeSession: config.forkNativeSession } : {}),
     ...(config?.deleteNativeSession ? { deleteNativeSession: config.deleteNativeSession } : {}),
+    ...(config?.listNativeSubagents ? { listNativeSubagents: config.listNativeSubagents } : {}),
+    ...(config?.getNativeSubagentMessages
+      ? { getNativeSubagentMessages: config.getNativeSubagentMessages }
+      : {}),
   };
 
   return {
@@ -2510,6 +2520,669 @@ describe("ClaudeAdapterLive", () => {
       );
     },
   );
+
+  it.effect("binds Claude task, tool, and history identities without assuming equality", () => {
+    const sessionId = "00000000-0000-4000-8000-000000000901";
+    const taskId = "task-public-901";
+    const toolUseId = "tool-parent-901";
+    const historyId = "agent-history-901";
+    const historyCalls: Array<{
+      readonly sessionId: string;
+      readonly historyId: string;
+      readonly dir?: string;
+    }> = [];
+    const historyMessages: SessionMessage[] = [
+      {
+        type: "user",
+        uuid: "00000000-0000-4000-8000-000000000902",
+        session_id: sessionId,
+        parent_tool_use_id: toolUseId,
+        parent_agent_id: null,
+        message: {
+          role: "user",
+          content: [
+            { type: "text", text: "Audit the public lifecycle." },
+            {
+              type: "tool_result",
+              tool_use_id: "private-tool",
+              content: "PRIVATE TOOL RESULT",
+            },
+          ],
+        },
+      },
+      {
+        type: "assistant",
+        uuid: "00000000-0000-4000-8000-000000000903",
+        session_id: sessionId,
+        parent_tool_use_id: toolUseId,
+        parent_agent_id: null,
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "PRIVATE REASONING" },
+            { type: "text", text: "The lifecycle audit is complete." },
+            { type: "tool_use", id: "private-call", name: "Read", input: {} },
+          ],
+        },
+      },
+      {
+        type: "system",
+        uuid: "00000000-0000-4000-8000-000000000904",
+        session_id: sessionId,
+        parent_tool_use_id: toolUseId,
+        parent_agent_id: null,
+        message: { content: "PRIVATE SYSTEM CONTENT" },
+      },
+    ];
+    const harness = makeHarness({
+      listNativeSubagents: async (requestedSessionId, options) => {
+        assert.equal(requestedSessionId, sessionId);
+        assert.equal(options?.dir, "/tmp/public-project");
+        return [historyId];
+      },
+      getNativeSubagentMessages: async (requestedSessionId, requestedHistoryId, options) => {
+        historyCalls.push({
+          sessionId: requestedSessionId,
+          historyId: requestedHistoryId,
+          ...(options?.dir ? { dir: options.dir } : {}),
+        });
+        return historyMessages;
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const historyBindingFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) =>
+          event.type === "task.completed" && event.payload.subagent?.historyId === historyId,
+      ).pipe(Stream.take(1), Stream.runCollect, Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        cwd: "/tmp/public-project",
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "delegate exact work",
+        attachments: [],
+      });
+      harness.query.emit({
+        type: "stream_event",
+        session_id: sessionId,
+        uuid: "00000000-0000-4000-8000-000000000905",
+        parent_tool_use_id: null,
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "tool_use",
+            id: toolUseId,
+            name: "Agent",
+            input: { description: "Audit lifecycle", prompt: "Inspect exact ids" },
+          },
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: taskId,
+        tool_use_id: toolUseId,
+        description: "Audit lifecycle",
+        subagent_type: "code-reviewer",
+        task_type: "local_agent",
+        spawn_depth: 1,
+        session_id: sessionId,
+        uuid: "00000000-0000-4000-8000-000000000906",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "user",
+        session_id: sessionId,
+        uuid: "00000000-0000-4000-8000-000000000907",
+        parent_tool_use_id: null,
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: toolUseId,
+              content: "Subagent completed.",
+            },
+          ],
+        },
+        tool_use_result: {
+          status: "completed",
+          agentId: historyId,
+          prompt: "Inspect exact ids",
+          content: [{ type: "text", text: "Subagent completed." }],
+          totalToolUseCount: 1,
+          totalDurationMs: 5,
+          totalTokens: 10,
+          usage: {},
+        },
+      } as unknown as SDKMessage);
+
+      const bindingEvent = Array.from(yield* Fiber.join(historyBindingFiber))[0];
+      assert.equal(bindingEvent?.type, "task.completed");
+      if (bindingEvent?.type === "task.completed") {
+        assert.equal(bindingEvent.payload.taskId, RuntimeTaskId.make(taskId));
+        assert.equal(bindingEvent.payload.subagent?.threadId, taskId);
+        assert.equal(bindingEvent.payload.subagent?.historyId, historyId);
+      }
+      assert.notEqual(taskId, toolUseId);
+      assert.notEqual(toolUseId, historyId);
+
+      const readSubagentDetail = adapter.readSubagentDetail;
+      assert.ok(readSubagentDetail);
+      const detail = yield* readSubagentDetail(THREAD_ID, taskId, {
+        historyId,
+        cwd: "/tmp/public-project",
+      });
+      assert.deepEqual(
+        detail.messages.map(({ role, text }) => ({ role, text })),
+        [
+          { role: "user", text: "Audit the public lifecycle." },
+          { role: "assistant", text: "The lifecycle audit is complete." },
+        ],
+      );
+      assert.deepEqual(detail.gaps, []);
+      assert.equal(detail.truncated, false);
+      assert.deepEqual(historyCalls, [{ sessionId, historyId, dir: "/tmp/public-project" }]);
+      assert.equal(JSON.stringify(detail).includes("PRIVATE"), false);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("resolves a live Claude history id only by exact parent tool metadata", () => {
+    const sessionId = "00000000-0000-4000-8000-000000000911";
+    const taskId = "task-live-911";
+    const toolUseId = "tool-live-911";
+    const matchingHistoryId = "agent-live-911";
+    const historyCalls: Array<{ readonly id: string; readonly limit?: number }> = [];
+    const historyMessage = (id: string, parentToolUseId: string, text: string): SessionMessage => ({
+      type: "assistant",
+      uuid: `00000000-0000-4000-8000-${id === matchingHistoryId ? "000000000912" : "000000000913"}`,
+      session_id: sessionId,
+      parent_tool_use_id: parentToolUseId,
+      parent_agent_id: null,
+      message: { role: "assistant", content: [{ type: "text", text }] },
+    });
+    const harness = makeHarness({
+      listNativeSubagents: async () => ["agent-unrelated-911", matchingHistoryId],
+      getNativeSubagentMessages: async (_sessionId, id, options) => {
+        historyCalls.push({
+          id,
+          ...(options?.limit !== undefined ? { limit: options.limit } : {}),
+        });
+        if (id === matchingHistoryId) {
+          return [historyMessage(id, toolUseId, "Latest verified activity")];
+        }
+        return [historyMessage(id, "different-parent-tool", "Unrelated private activity")];
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const taskStartedFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "task.started" && String(event.payload.taskId) === taskId,
+      ).pipe(Stream.take(1), Stream.runDrain, Effect.forkChild);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        cwd: "/tmp/live-history-project",
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "delegate live history work",
+        attachments: [],
+      });
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: taskId,
+        tool_use_id: toolUseId,
+        description: "Live metadata resolution",
+        task_type: "local_agent",
+        spawn_depth: 1,
+        session_id: sessionId,
+        uuid: "00000000-0000-4000-8000-000000000914",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(taskStartedFiber);
+
+      const readSubagentDetail = adapter.readSubagentDetail;
+      assert.ok(readSubagentDetail);
+      const resolvedProgressFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) =>
+          event.type === "task.progress" &&
+          String(event.payload.taskId) === taskId &&
+          event.payload.subagent?.historyId === matchingHistoryId,
+      ).pipe(Stream.take(1), Stream.runCollect, Effect.forkChild);
+      const detail = yield* readSubagentDetail(THREAD_ID, taskId, {
+        cwd: "/tmp/live-history-project",
+      });
+      assert.equal(detail.messages.at(-1)?.text, "Latest verified activity");
+      const resolvedProgress = Array.from(yield* Fiber.join(resolvedProgressFiber))[0];
+      assert.equal(resolvedProgress?.type, "task.progress");
+      if (resolvedProgress?.type === "task.progress") {
+        assert.equal(resolvedProgress.payload.subagent?.historyId, matchingHistoryId);
+      }
+
+      const forwardedProgressFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) =>
+          event.type === "task.progress" && event.payload.summary === "Forwarded latest activity",
+      ).pipe(Stream.take(1), Stream.runCollect, Effect.forkChild);
+      harness.query.emit({
+        type: "assistant",
+        uuid: "00000000-0000-4000-8000-000000000915",
+        session_id: sessionId,
+        parent_tool_use_id: toolUseId,
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Forwarded latest activity" }],
+        },
+      } as unknown as SDKMessage);
+      const forwardedProgress = Array.from(yield* Fiber.join(forwardedProgressFiber))[0];
+      assert.equal(forwardedProgress?.type, "task.progress");
+      if (forwardedProgress?.type === "task.progress") {
+        assert.equal(forwardedProgress.payload.subagent?.historyId, matchingHistoryId);
+      }
+      assert.deepEqual(historyCalls, [
+        { id: "agent-unrelated-911", limit: 1 },
+        { id: matchingHistoryId, limit: 1 },
+        { id: matchingHistoryId },
+      ]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("reads ended Claude history only with an exact persisted history binding", () => {
+    const sessionId = "00000000-0000-4000-8000-000000000921";
+    const historyId = "agent-ended-921";
+    let messageReadCount = 0;
+    const harness = makeHarness({
+      listNativeSubagents: async (_sessionId, options) => {
+        assert.equal(options?.dir, "/tmp/ended-history-project");
+        return [historyId];
+      },
+      getNativeSubagentMessages: async () => {
+        messageReadCount += 1;
+        return [
+          {
+            type: "assistant",
+            uuid: "00000000-0000-4000-8000-000000000922",
+            session_id: sessionId,
+            parent_tool_use_id: "tool-ended-921",
+            parent_agent_id: null,
+            message: { role: "assistant", content: "Ended result remains available." },
+          },
+        ];
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const readSubagentDetail = adapter.readSubagentDetail;
+      assert.ok(readSubagentDetail);
+      const detail = yield* readSubagentDetail(THREAD_ID, "task-ended-921", {
+        resumeCursor: { resume: sessionId, turnCount: 1 },
+        cwd: "/tmp/ended-history-project",
+        historyId,
+      });
+      assert.equal(detail.messages[0]?.text, "Ended result remains available.");
+      assert.equal(messageReadCount, 1);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect(
+    "keeps an ended Claude child pinned to its persisted root when another root is live",
+    () => {
+      const liveSessionId = "00000000-0000-4000-8000-000000000923";
+      const persistedSessionId = "00000000-0000-4000-8000-000000000924";
+      const historyId = "agent-ended-root-923";
+      const historyReads: Array<{
+        readonly operation: "list" | "messages";
+        readonly sessionId: string;
+        readonly dir?: string;
+      }> = [];
+      const harness = makeHarness({
+        listNativeSubagents: async (sessionId, options) => {
+          historyReads.push({
+            operation: "list",
+            sessionId,
+            ...(options?.dir ? { dir: options.dir } : {}),
+          });
+          return [historyId];
+        },
+        getNativeSubagentMessages: async (sessionId, requestedHistoryId, options) => {
+          assert.equal(requestedHistoryId, historyId);
+          historyReads.push({
+            operation: "messages",
+            sessionId,
+            ...(options?.dir ? { dir: options.dir } : {}),
+          });
+          return [
+            {
+              type: "assistant",
+              uuid: "00000000-0000-4000-8000-000000000925",
+              session_id: persistedSessionId,
+              parent_tool_use_id: "tool-ended-root-923",
+              parent_agent_id: null,
+              message: { role: "assistant", content: "Persisted-root result." },
+            },
+          ];
+        },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const liveRootStarted = yield* Stream.filter(
+          adapter.streamEvents,
+          (event) =>
+            event.type === "thread.started" && event.payload.providerThreadId === liveSessionId,
+        ).pipe(Stream.take(1), Stream.runDrain, Effect.forkChild);
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          cwd: "/tmp/live-history-root",
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "keep the replacement native root active",
+          attachments: [],
+        });
+        harness.query.emit({
+          type: "system",
+          subtype: "init",
+          capabilities: [],
+          session_id: liveSessionId,
+          uuid: "00000000-0000-4000-8000-000000000926",
+        } as unknown as SDKMessage);
+        yield* Fiber.join(liveRootStarted);
+
+        const readSubagentDetail = adapter.readSubagentDetail;
+        assert.ok(readSubagentDetail);
+        const detail = yield* readSubagentDetail(THREAD_ID, "task-ended-root-923", {
+          resumeCursor: { resume: persistedSessionId, turnCount: 1 },
+          cwd: "/tmp/persisted-history-root",
+          historyId,
+        });
+
+        assert.equal(detail.messages[0]?.text, "Persisted-root result.");
+        assert.deepEqual(historyReads, [
+          {
+            operation: "list",
+            sessionId: persistedSessionId,
+            dir: "/tmp/persisted-history-root",
+          },
+          {
+            operation: "messages",
+            sessionId: persistedSessionId,
+            dir: "/tmp/persisted-history-root",
+          },
+        ]);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "reads an active subagent from the configured Claude home through the official SDK store",
+    () => {
+      const tempRoot = mkdtempSync(path.join(os.tmpdir(), "cafe-claude-detail-home-"));
+      const customHome = path.join(tempRoot, "custom-home");
+      const cwd = path.join(tempRoot, "workspace");
+      const sessionId = "00000000-0000-4000-8000-000000000941";
+      const taskId = "task-custom-home-941";
+      const toolUseId = "tool-custom-home-941";
+      const historyId = "agent-custom-home-941";
+      mkdirSync(cwd, { recursive: true, mode: 0o700 });
+      const projectKey = encodeClaudeProjectDirectoryName(realpathSync(cwd));
+      const subagentDirectory = path.join(
+        customHome,
+        ".claude",
+        "projects",
+        projectKey,
+        sessionId,
+        "subagents",
+      );
+      mkdirSync(subagentDirectory, { recursive: true, mode: 0o700 });
+      writeFileSync(
+        path.join(subagentDirectory, `agent-${historyId}.jsonl`),
+        `${[
+          {
+            type: "user",
+            uuid: "00000000-0000-4000-8000-000000000942",
+            parentUuid: null,
+            sessionId,
+            timestamp: "2026-08-25T00:00:00.000Z",
+            message: {
+              role: "user",
+              content: [{ type: "text", text: "Inspect the configured-home path." }],
+            },
+          },
+          {
+            type: "assistant",
+            uuid: "00000000-0000-4000-8000-000000000943",
+            parentUuid: "00000000-0000-4000-8000-000000000942",
+            sessionId,
+            timestamp: "2026-08-25T00:00:01.000Z",
+            message: {
+              role: "assistant",
+              content: [
+                { type: "thinking", thinking: "PRIVATE CUSTOM-HOME REASONING" },
+                { type: "text", text: "Configured-home history is live." },
+              ],
+            },
+          },
+        ]
+          .map((entry) => JSON.stringify(entry))
+          .join("\n")}\n`,
+        { encoding: "utf8", mode: 0o600 },
+      );
+      writeFileSync(
+        path.join(subagentDirectory, `agent-${historyId}.meta.json`),
+        JSON.stringify({
+          // Keep this deliberately different from taskId/historyId. The
+          // official SDK projects it onto SessionMessage.parent_tool_use_id,
+          // which is the only active discovery relationship Cafe accepts.
+          toolUseId,
+          type: "attacker-controlled-discriminator",
+        }),
+        { encoding: "utf8", mode: 0o600 },
+      );
+
+      const harness = makeHarness({
+        cwd,
+        claudeConfig: { homePath: customHome },
+        // Explicitly mask any developer-machine CLAUDE_CONFIG_DIR. The read
+        // must follow this adapter instance's configured home, never ambient
+        // process-global Claude state.
+        environment: { ...process.env, CLAUDE_CONFIG_DIR: undefined },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const taskStartedFiber = yield* Stream.filter(
+          adapter.streamEvents,
+          (event) => event.type === "task.started" && String(event.payload.taskId) === taskId,
+        ).pipe(Stream.take(1), Stream.runDrain, Effect.forkChild);
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          cwd,
+          runtimeMode: "full-access",
+        });
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: taskId,
+          tool_use_id: toolUseId,
+          description: "Configured-home SDK history",
+          task_type: "local_agent",
+          spawn_depth: 1,
+          session_id: sessionId,
+          uuid: "00000000-0000-4000-8000-000000000944",
+        } as unknown as SDKMessage);
+        yield* Fiber.join(taskStartedFiber);
+
+        const readSubagentDetail = adapter.readSubagentDetail;
+        assert.ok(readSubagentDetail);
+        const detail = yield* readSubagentDetail(THREAD_ID, taskId, { cwd });
+        assert.deepEqual(
+          detail.messages.map(({ role, text }) => ({ role, text })),
+          [
+            { role: "user", text: "Inspect the configured-home path." },
+            { role: "assistant", text: "Configured-home history is live." },
+          ],
+        );
+        assert.equal(JSON.stringify(detail).includes("PRIVATE"), false);
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            rmSync(tempRoot, { recursive: true, force: true });
+          }),
+        ),
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect("rejects a symlinked Claude history session before reading its transcript", () => {
+    const tempRoot = mkdtempSync(path.join(os.tmpdir(), "cafe-claude-detail-symlink-"));
+    const customHome = path.join(tempRoot, "custom-home");
+    const cwd = path.join(tempRoot, "workspace");
+    const sessionId = "00000000-0000-4000-8000-000000000951";
+    const historyId = "agent-symlink-951";
+    mkdirSync(cwd, { recursive: true, mode: 0o700 });
+    const projectKey = encodeClaudeProjectDirectoryName(realpathSync(cwd));
+    const projectDirectory = path.join(customHome, ".claude", "projects", projectKey);
+    const decoySession = path.join(tempRoot, "decoy-session");
+    const decoySubagents = path.join(decoySession, "subagents");
+    mkdirSync(projectDirectory, { recursive: true, mode: 0o700 });
+    mkdirSync(decoySubagents, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      path.join(decoySubagents, `agent-${historyId}.jsonl`),
+      `${JSON.stringify({
+        type: "assistant",
+        uuid: "00000000-0000-4000-8000-000000000952",
+        parentUuid: null,
+        sessionId,
+        message: { role: "assistant", content: "PRIVATE SYMLINK TARGET" },
+      })}\n`,
+      { encoding: "utf8", mode: 0o600 },
+    );
+    try {
+      symlinkSync(
+        decoySession,
+        path.join(projectDirectory, sessionId),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    } catch (cause) {
+      if (
+        process.platform === "win32" &&
+        cause instanceof Error &&
+        "code" in cause &&
+        cause.code === "EPERM"
+      ) {
+        rmSync(tempRoot, { recursive: true, force: true });
+        return Effect.void;
+      }
+      throw cause;
+    }
+
+    const harness = makeHarness({
+      cwd,
+      claudeConfig: { homePath: customHome },
+      environment: { ...process.env, CLAUDE_CONFIG_DIR: undefined },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const readSubagentDetail = adapter.readSubagentDetail;
+      assert.ok(readSubagentDetail);
+      const result = yield* readSubagentDetail(THREAD_ID, "task-symlink-951", {
+        resumeCursor: { resume: sessionId, turnCount: 1 },
+        cwd,
+        historyId,
+      }).pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.equal(result.failure._tag, "ProviderSubagentDetailReadError");
+        if (result.failure._tag === "ProviderSubagentDetailReadError") {
+          assert.equal(result.failure.reason, "provider-request-failed");
+        }
+        assert.equal(JSON.stringify(result.failure).includes("PRIVATE SYMLINK TARGET"), false);
+      }
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          rmSync(tempRoot, { recursive: true, force: true });
+        }),
+      ),
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("rejects mismatched or unsafe Claude history ids before reading content", () => {
+    let messageReadCount = 0;
+    const harness = makeHarness({
+      listNativeSubagents: async () => ["agent-authorized-931"],
+      getNativeSubagentMessages: async () => {
+        messageReadCount += 1;
+        return [];
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const readSubagentDetail = adapter.readSubagentDetail;
+      assert.ok(readSubagentDetail);
+      const mismatched = yield* readSubagentDetail(THREAD_ID, "task-ended-931", {
+        resumeCursor: {
+          resume: "00000000-0000-4000-8000-000000000931",
+          turnCount: 1,
+        },
+        cwd: "/tmp/mismatched-history-project",
+        historyId: "agent-attacker-931",
+      }).pipe(Effect.result);
+      assert.equal(mismatched._tag, "Failure");
+      if (mismatched._tag === "Failure") {
+        assert.equal(mismatched.failure._tag, "ProviderSubagentDetailReadError");
+        if (mismatched.failure._tag === "ProviderSubagentDetailReadError") {
+          assert.equal(mismatched.failure.reason, "child-identity-mismatch");
+          assert.equal("stack" in mismatched.failure, false);
+        }
+      }
+
+      const unsafe = yield* readSubagentDetail(THREAD_ID, "task-ended-931", {
+        resumeCursor: {
+          resume: "00000000-0000-4000-8000-000000000931",
+          turnCount: 1,
+        },
+        cwd: "/tmp/mismatched-history-project",
+        historyId: "../private-agent",
+      }).pipe(Effect.result);
+      assert.equal(unsafe._tag, "Failure");
+      if (unsafe._tag === "Failure" && unsafe.failure._tag === "ProviderSubagentDetailReadError") {
+        assert.equal(unsafe.failure.reason, "invalid-request");
+      }
+      assert.equal(messageReadCount, 0);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 
   it.effect(
     "cryptographically bounds hostile Claude task and tool identities across the full lifecycle",

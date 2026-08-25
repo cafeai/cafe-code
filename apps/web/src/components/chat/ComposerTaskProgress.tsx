@@ -1,7 +1,9 @@
-import { CircleCheckIcon, CircleIcon, LoaderCircleIcon } from "lucide-react";
+import { BotIcon, CircleCheckIcon, CircleIcon, LoaderCircleIcon } from "lucide-react";
 import { memo, useRef, useState } from "react";
 
+import type { WorkLogEntry } from "../../session-logic";
 import { cn } from "~/lib/utils";
+import { SubagentRosterRow, type SubagentRosterEntry } from "../subagents/SubagentRosterRow";
 import { Button } from "../ui/button";
 import {
   Popover,
@@ -82,11 +84,20 @@ function sanitizePlanText(value: string): string {
  */
 export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
   readonly plan: ComposerTaskProgressPlan | null | undefined;
+  readonly subagents?: ReadonlyArray<WorkLogEntry>;
+  readonly onOpenSubagentDetail?:
+    | ((workEntry: WorkLogEntry, trigger: HTMLButtonElement) => void)
+    | undefined;
 }) {
   const { plan } = props;
   const [open, setOpen] = useState(false);
   const openModeRef = useRef<"hover" | "press" | null>(null);
-  if (!plan || plan.steps.length === 0) return null;
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const subagents = (props.subagents ?? []).filter(
+    (entry): entry is SubagentRosterEntry => entry.subagent !== undefined,
+  );
+  const hasPlan = Boolean(plan && plan.steps.length > 0);
+  if (!hasPlan && subagents.length === 0) return null;
 
   const handleOpenChange = (nextOpen: boolean, details: { readonly reason: string }) => {
     if (details.reason === "trigger-press") {
@@ -114,11 +125,13 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
     setOpen(nextOpen);
   };
 
-  const total = plan.steps.length;
-  const { completedCount, currentIndex, currentStepIndex } = deriveStepPresentation(plan);
-  const completionPercentage = (completedCount / total) * 100;
+  const total = plan?.steps.length ?? 0;
+  const { completedCount, currentIndex, currentStepIndex } = plan
+    ? deriveStepPresentation(plan)
+    : { completedCount: 0, currentIndex: 0, currentStepIndex: null };
+  const completionPercentage = total > 0 ? (completedCount / total) * 100 : 0;
   const keyOccurrences = new Map<string, number>();
-  const displaySteps = plan.steps.map((step, index) => {
+  const displaySteps = (plan?.steps ?? []).map((step, index) => {
     const text = sanitizePlanText(step.step);
     const occurrence = (keyOccurrences.get(text) ?? 0) + 1;
     keyOccurrences.set(text, occurrence);
@@ -137,47 +150,60 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
         closeDelay={100}
         render={
           <Button
+            ref={triggerRef}
             type="button"
             size="xs"
             variant="ghost"
             className="h-6 shrink-0 gap-1.5 rounded-full border-border/60 bg-muted/35 px-2 text-muted-foreground text-xs before:rounded-full hover:bg-muted/60 hover:text-foreground"
-            aria-label={`Task progress: step ${currentIndex} of ${total}. Show task list`}
+            aria-label={
+              hasPlan
+                ? `Task progress: step ${currentIndex} of ${total}${subagents.length > 0 ? `, ${subagents.length} active ${subagents.length === 1 ? "subagent" : "subagents"}` : ""}. Show task list`
+                : `${subagents.length} active ${subagents.length === 1 ? "subagent" : "subagents"}. Show task list`
+            }
             data-composer-task-progress="true"
             data-composer-task-progress-trigger="true"
           />
         }
       >
-        <span className="relative size-3 shrink-0" aria-hidden="true">
-          <svg className="-rotate-90 size-full" viewBox="0 0 12 12">
-            <circle
-              cx="6"
-              cy="6"
-              r="4.5"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              className="opacity-20"
-            />
-            <circle
-              cx="6"
-              cy="6"
-              r="4.5"
-              fill="none"
-              pathLength="100"
-              stroke="currentColor"
-              strokeDasharray="100"
-              strokeDashoffset={100 - completionPercentage}
-              strokeLinecap="round"
-              strokeWidth="2"
-              className="transition-[stroke-dashoffset] duration-300 motion-reduce:transition-none"
-              data-completed={completedCount}
-              data-task-progress-ring="true"
-              data-total={total}
-            />
-          </svg>
-        </span>
+        {hasPlan ? (
+          <span className="relative size-3 shrink-0" aria-hidden="true">
+            <svg className="-rotate-90 size-full" viewBox="0 0 12 12">
+              <circle
+                cx="6"
+                cy="6"
+                r="4.5"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                className="opacity-20"
+              />
+              <circle
+                cx="6"
+                cy="6"
+                r="4.5"
+                fill="none"
+                pathLength="100"
+                stroke="currentColor"
+                strokeDasharray="100"
+                strokeDashoffset={100 - completionPercentage}
+                strokeLinecap="round"
+                strokeWidth="2"
+                className="transition-[stroke-dashoffset] duration-300 motion-reduce:transition-none"
+                data-completed={completedCount}
+                data-task-progress-ring="true"
+                data-total={total}
+              />
+            </svg>
+          </span>
+        ) : (
+          <BotIcon className="size-3.5 shrink-0" aria-hidden="true" />
+        )}
         <span aria-live="polite">
-          Step {currentIndex} / {total}
+          {hasPlan ? `Step ${currentIndex} / ${total}` : null}
+          {hasPlan && subagents.length > 0 ? " · " : null}
+          {subagents.length > 0
+            ? `${subagents.length} ${subagents.length === 1 ? "agent" : "agents"}`
+            : null}
         </span>
       </PopoverTrigger>
 
@@ -195,7 +221,9 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
             <div className="flex items-baseline justify-between gap-3">
               <PopoverTitle className="text-sm leading-5">Tasks</PopoverTitle>
               <span className="shrink-0 text-muted-foreground text-xs">
-                {completedCount} of {total} completed
+                {hasPlan ? `${completedCount} of ${total} completed` : null}
+                {hasPlan && subagents.length > 0 ? " · " : null}
+                {subagents.length > 0 ? `${subagents.length} active` : null}
               </span>
             </div>
           </div>
@@ -207,68 +235,99 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
             role="region"
             tabIndex={0}
           >
-            {plan.explanation ? (
+            {subagents.length > 0 ? (
+              <section
+                aria-label="Active subagents"
+                className={cn(hasPlan && "mb-3 border-border/55 border-b pb-3")}
+                data-composer-subagent-list="true"
+              >
+                <p className="mb-1 text-[9px] font-medium uppercase tracking-[0.16em] text-muted-foreground/55">
+                  Active subagents
+                </p>
+                <div className="space-y-0.5">
+                  {subagents.map((entry) => (
+                    <SubagentRosterRow
+                      key={`composer-subagent:${entry.id}`}
+                      entry={entry}
+                      compact
+                      onOpen={(selectedEntry, rowTrigger) => {
+                        openModeRef.current = null;
+                        setOpen(false);
+                        props.onOpenSubagentDetail?.(
+                          selectedEntry,
+                          triggerRef.current ?? rowTrigger,
+                        );
+                      }}
+                    />
+                  ))}
+                </div>
+              </section>
+            ) : null}
+
+            {plan?.explanation ? (
               <PopoverDescription className="mb-3 whitespace-pre-wrap break-words text-sm [overflow-wrap:anywhere]">
                 {sanitizePlanText(plan.explanation)}
               </PopoverDescription>
             ) : null}
 
-            <ol
-              aria-label="Task list"
-              className="space-y-3"
-              data-composer-task-progress-list="true"
-            >
-              {displaySteps.map((step) => {
-                const { status } = step;
-                const label = statusLabels[status];
+            {hasPlan ? (
+              <ol
+                aria-label="Task list"
+                className="space-y-3"
+                data-composer-task-progress-list="true"
+              >
+                {displaySteps.map((step) => {
+                  const { status } = step;
+                  const label = statusLabels[status];
 
-                return (
-                  <li
-                    // Provider plans do not currently carry durable step ids. The
-                    // printable description plus its duplicate occurrence stays
-                    // stable across status updates and remains unique when a plan
-                    // intentionally repeats the same task.
-                    key={step.key}
-                    aria-current={status === "current" ? "step" : undefined}
-                    className="flex min-w-0 items-start gap-2.5"
-                    data-composer-task-progress-step="true"
-                    data-task-status={status}
-                  >
-                    <span
-                      className={cn(
-                        "mt-0.5 inline-flex size-4 shrink-0 items-center justify-center",
-                        status === "completed" && "text-emerald-600 dark:text-emerald-400",
-                        status === "current" && "text-primary",
-                        status === "pending" && "text-muted-foreground/65",
-                      )}
-                      aria-hidden="true"
+                  return (
+                    <li
+                      // Provider plans do not currently carry durable step ids. The
+                      // printable description plus its duplicate occurrence stays
+                      // stable across status updates and remains unique when a plan
+                      // intentionally repeats the same task.
+                      key={step.key}
+                      aria-current={status === "current" ? "step" : undefined}
+                      className="flex min-w-0 items-start gap-2.5"
+                      data-composer-task-progress-step="true"
+                      data-task-status={status}
                     >
-                      {status === "completed" ? (
-                        <CircleCheckIcon className="size-4" strokeWidth={2} />
-                      ) : status === "current" ? (
-                        <LoaderCircleIcon
-                          className="size-4 animate-spin motion-reduce:animate-none"
-                          strokeWidth={2}
-                        />
-                      ) : (
-                        <CircleIcon className="size-4" strokeWidth={1.75} />
-                      )}
-                    </span>
+                      <span
+                        className={cn(
+                          "mt-0.5 inline-flex size-4 shrink-0 items-center justify-center",
+                          status === "completed" && "text-emerald-600 dark:text-emerald-400",
+                          status === "current" && "text-primary",
+                          status === "pending" && "text-muted-foreground/65",
+                        )}
+                        aria-hidden="true"
+                      >
+                        {status === "completed" ? (
+                          <CircleCheckIcon className="size-4" strokeWidth={2} />
+                        ) : status === "current" ? (
+                          <LoaderCircleIcon
+                            className="size-4 animate-spin motion-reduce:animate-none"
+                            strokeWidth={2}
+                          />
+                        ) : (
+                          <CircleIcon className="size-4" strokeWidth={1.75} />
+                        )}
+                      </span>
 
-                    <div
-                      className={cn(
-                        "min-w-0 flex-1 whitespace-pre-wrap break-words text-sm leading-5 [overflow-wrap:anywhere]",
-                        status === "current" && "font-medium text-foreground",
-                        status !== "current" && "text-muted-foreground",
-                      )}
-                    >
-                      <span className="sr-only">{label}: </span>
-                      {step.text}
-                    </div>
-                  </li>
-                );
-              })}
-            </ol>
+                      <div
+                        className={cn(
+                          "min-w-0 flex-1 whitespace-pre-wrap break-words text-sm leading-5 [overflow-wrap:anywhere]",
+                          status === "current" && "font-medium text-foreground",
+                          status !== "current" && "text-muted-foreground",
+                        )}
+                      >
+                        <span className="sr-only">{label}: </span>
+                        {step.text}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+            ) : null}
           </div>
         </div>
       </PopoverPopup>

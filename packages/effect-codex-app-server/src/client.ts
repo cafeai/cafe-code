@@ -31,6 +31,11 @@ function truncateDiagnostic(input: string): string {
 export interface CodexAppServerClientOptions {
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
+  /**
+   * Maximum UTF-8 byte length of one newline-delimited app-server message.
+   * The protocol always applies a finite default when this is omitted.
+   */
+  readonly maxIncomingLineBytes?: number;
   readonly logger?: (
     event: CodexProtocol.CodexAppServerProtocolLogEvent,
   ) => Effect.Effect<void, never>;
@@ -251,6 +256,9 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     ...(terminationError ? { terminationError } : {}),
     ...(options.logIncoming !== undefined ? { logIncoming: options.logIncoming } : {}),
     ...(options.logOutgoing !== undefined ? { logOutgoing: options.logOutgoing } : {}),
+    ...(options.maxIncomingLineBytes !== undefined
+      ? { maxIncomingLineBytes: options.maxIncomingLineBytes }
+      : {}),
     ...(options.logger ? { logger: options.logger } : {}),
     onNotification: dispatchNotification,
     onRequest: dispatchRequest,

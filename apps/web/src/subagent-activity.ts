@@ -14,7 +14,19 @@ export interface DerivedSubagentActivity {
   status: SubagentRunStatus;
   startedAt: string;
   updatedAt: string;
+  /**
+   * Durable provider-neutral invalidation token for the latest lifecycle edge.
+   * Timestamps are display metadata and can collide; the activity sequence/id
+   * pair is the authoritative revision used by an open detail view.
+   */
+  lifecycleRevision: string;
   completedAt?: string;
+  /**
+   * Opaque provider history binding used only when requesting this child's
+   * transcript. It is deliberately never presented as text or used as a DOM
+   * identity: Claude task ids and transcript ids are separate namespaces.
+   */
+  historyId?: string;
 }
 
 const DISPLAY_TEXT_LIMIT = 240;
@@ -41,13 +53,29 @@ function safeLine(value: unknown, limit = DISPLAY_TEXT_LIMIT): string | undefine
   return normalized.length > limit ? `${normalized.slice(0, limit - 3)}...` : normalized;
 }
 
-function safeIdentity(value: unknown): string | undefined {
+function exactOpaqueIdentity(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
-  const identity = value
-    .replace(/[\p{Cc}\p{Bidi_Control}]+/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return identity.length > 0 && identity.length <= ID_TEXT_LIMIT ? identity : undefined;
+  // Provider identities are authorization material, not display text. Never
+  // normalize an accepted identity: even collapsing two spaces would turn the
+  // persisted exact binding into a different provider key. Control characters
+  // fail closed, but ordinary leading/trailing whitespace remains byte-exact:
+  // this value is never rendered, used as a DOM id, or written to a log.
+  return value.length > 0 &&
+    value.length <= ID_TEXT_LIMIT &&
+    !/[\p{Cc}\p{Bidi_Control}]/u.test(value)
+    ? value
+    : undefined;
+}
+
+function lifecycleRevision(activity: OrchestrationThreadActivity): string {
+  // A length prefix keeps the fallback unambiguous even when an imported
+  // activity id contains punctuation. Sequence is preferred because it is the
+  // durable provider/orchestration order; id disambiguates defensive fixtures
+  // that reuse a sequence.
+  const id = String(activity.id);
+  return activity.sequence === undefined
+    ? `id:${id.length}:${id}`
+    : `sequence:${activity.sequence}:${id.length}:${id}`;
 }
 
 function pathLabel(path: string | undefined): string | undefined {
@@ -122,7 +150,7 @@ function upsertStructuredSubagent(
 ): boolean {
   const presentation = record(payload.subagent);
   if (!presentation) return false;
-  const id = safeIdentity(presentation.threadId) ?? safeIdentity(payload.taskId);
+  const id = exactOpaqueIdentity(presentation.threadId) ?? exactOpaqueIdentity(payload.taskId);
   if (!id) return true;
 
   const key = subagentMapKey(activity, id);
@@ -142,6 +170,7 @@ function upsertStructuredSubagent(
     structuredStatus(presentation.status, activity.kind),
   );
   const objective = safeLine(presentation.objective) ?? previous?.objective;
+  const historyId = exactOpaqueIdentity(presentation.historyId) ?? previous?.historyId;
   const detail = safeLine(payload.detail);
   const meaningfulDetail = detail && !/^working(?:\.{3})?$/iu.test(detail) ? detail : undefined;
   const nextDescription = isRestart
@@ -174,6 +203,8 @@ function upsertStructuredSubagent(
     status,
     startedAt,
     updatedAt: activity.createdAt,
+    lifecycleRevision: lifecycleRevision(activity),
+    ...(historyId ? { historyId } : {}),
     ...(terminal
       ? { completedAt: activity.createdAt }
       : previous?.completedAt && !isRestart
@@ -227,7 +258,9 @@ function upsertLegacySubagent(
   const data = record(payload.data);
   const item = record(data?.item);
   const id =
-    safeIdentity(item?.agentThreadId) ?? safeIdentity(payload.itemId) ?? safeIdentity(activity.id);
+    exactOpaqueIdentity(item?.agentThreadId) ??
+    exactOpaqueIdentity(payload.itemId) ??
+    exactOpaqueIdentity(activity.id);
   if (!id) return;
   const key = subagentMapKey(activity, id);
   const previous = byId.get(key);
@@ -244,6 +277,7 @@ function upsertLegacySubagent(
     status,
     startedAt: previous?.startedAt ?? activity.createdAt,
     updatedAt: activity.createdAt,
+    lifecycleRevision: lifecycleRevision(activity),
     ...(terminal ? { completedAt: activity.createdAt } : {}),
   });
 }

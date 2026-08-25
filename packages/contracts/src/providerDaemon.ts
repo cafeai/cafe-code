@@ -5,12 +5,13 @@ import {
   NonNegativeInt,
   PortSchema,
   ThreadId,
+  TurnId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import {
-  OrchestrationThreadTurnSubagentDetailMessage,
-  THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES,
+  OrchestrationThreadTurnSubagentDetailBodyFields,
   THREAD_TURN_SUBAGENT_ID_MAX_LENGTH,
+  orchestrationThreadTurnSubagentDetailBodyIssues,
 } from "./orchestration.ts";
 import {
   ProviderInterruptTurnInput,
@@ -473,17 +474,18 @@ const RollbackConversationPayload = Schema.Struct({
 
 const ReadSubagentDetailPayload = Schema.Struct({
   threadId: ThreadId,
+  turnId: TurnId,
   subagentId: TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_TURN_SUBAGENT_ID_MAX_LENGTH)),
+  historyId: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_TURN_SUBAGENT_ID_MAX_LENGTH)),
+  ),
 });
 
 export const ProviderDaemonSubagentDetail = Schema.Struct({
   provider: ProviderDriverKind,
   providerInstanceId: ProviderInstanceId,
-  messages: Schema.Array(OrchestrationThreadTurnSubagentDetailMessage).check(
-    Schema.isMaxLength(THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES),
-  ),
-  truncated: Schema.Boolean,
-});
+  ...OrchestrationThreadTurnSubagentDetailBodyFields,
+}).check(Schema.makeFilter(orchestrationThreadTurnSubagentDetailBodyIssues));
 export type ProviderDaemonSubagentDetail = typeof ProviderDaemonSubagentDetail.Type;
 
 export const ProviderDaemonRpcRequest = Schema.Union([
@@ -534,6 +536,11 @@ export const ProviderDaemonRpcRequest = Schema.Union([
   }),
   Schema.Struct({
     method: Schema.Literal("stopSession"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: ProviderStopSessionInput,
+  }),
+  Schema.Struct({
+    method: Schema.Literal("quiesceThreadForHardDelete"),
     commandId: Schema.optional(ProviderDaemonCommandId),
     payload: ProviderStopSessionInput,
   }),
@@ -591,6 +598,7 @@ export const ProviderDaemonRpcResultByMethod = {
   respondToUserInput: Schema.Void,
   snoozeUserInput: Schema.Void,
   stopSession: Schema.Void,
+  quiesceThreadForHardDelete: Schema.Void,
   restartProviderRuntime: ProviderDaemonRuntimeRestartResult,
   listSessions: Schema.Array(ProviderSession),
   getCapabilities: ProviderDaemonAdapterCapabilities,

@@ -357,6 +357,58 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
     }),
   );
 
+  it.effect("fails pending requests when one fragmented incoming line exceeds the byte cap", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        maxIncomingLineBytes: 32,
+      });
+
+      const pending = yield* transport.request("x/read").pipe(Effect.forkScoped);
+      yield* Queue.take(output);
+
+      // Neither source chunk is individually large. The reader must account
+      // for the retained prefix incrementally instead of waiting for a newline
+      // and building an attacker-controlled string without a bound.
+      yield* Queue.offer(input, encoder.encode('{"id":1,"result":"'));
+      yield* Queue.offer(input, encoder.encode("private-wire-sentinel-that-must-not-leak"));
+
+      const error = yield* Fiber.join(pending).pipe(Effect.flip);
+      assert.instanceOf(error, CodexError.CodexAppServerIncomingMessageTooLargeError);
+      if (error instanceof CodexError.CodexAppServerIncomingMessageTooLargeError) {
+        assert.equal(error.maxBytes, 32);
+      }
+      assert.equal(String(error).includes("private-wire-sentinel"), false);
+      assert.equal(JSON.stringify(error).includes("private-wire-sentinel"), false);
+    }),
+  );
+
+  it.effect("counts fragmented multibyte input in UTF-8 bytes and accepts the exact cap", () =>
+    Effect.gen(function* () {
+      const wire = encodeJsonl({ id: 1, result: "🙂" });
+      const lineBytes = wire.byteLength - 1;
+      const emojiStart = wire.findIndex((byte) => byte === 0xf0);
+      assert.notEqual(emojiStart, -1);
+
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        maxIncomingLineBytes: lineBytes,
+      });
+      const pending = yield* transport.request("x/read").pipe(Effect.forkScoped);
+      yield* Queue.take(output);
+
+      // Split inside the four-byte scalar. Stream.decodeText must preserve it,
+      // while the protocol cap must measure the reconstructed UTF-8 line.
+      const splitAt = emojiStart + 2;
+      yield* Queue.offer(input, wire.slice(0, splitAt));
+      yield* Queue.offer(input, wire.slice(splitAt));
+
+      assert.equal(yield* Fiber.join(pending), "🙂");
+    }),
+  );
+
   it.effect("keeps reading notifications after onNotification defects", () =>
     Effect.gen(function* () {
       const { stdio, input } = yield* makeInMemoryStdio();

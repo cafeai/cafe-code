@@ -347,7 +347,8 @@ describe("MessagesTimeline", () => {
         />,
       );
 
-      expect(markup).toContain('data-subagent-work-log="true"');
+      expect(markup).toContain('data-subagent-turn-group="true"');
+      expect(markup).not.toContain('data-work-log="true"');
       expect(markup).toContain('data-subagent-work-row="true"');
       expect(markup).toContain('data-subagent-description="true"');
       expect(markup).toContain('<button type="button"');
@@ -367,7 +368,7 @@ describe("MessagesTimeline", () => {
       expect(markup).toContain("1m 5s");
       expect(markup).toContain("<svg");
       expect(markup).toContain("data-palette=");
-      expect(markup).toContain("overflow-y-auto");
+      expect(markup).not.toContain('data-work-log-scroll="true"');
       expect(markup).toContain("sm:size-8");
       expect(markup).not.toContain("Subagent task");
       expect(markup).not.toContain("provider-child-locate-footer");

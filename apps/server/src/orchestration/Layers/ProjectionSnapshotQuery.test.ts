@@ -2311,7 +2311,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             'info',
             'task.completed',
             'Subagent completed',
-            '{"taskId":"task-a","subagent":{"threadId":"child-a","status":"completed"}}',
+            '{"taskId":"task-a","subagent":{"threadId":"child-a","historyId":"history-a","status":"completed"}}',
             1,
             '2026-04-06T00:00:01.000Z'
           ),
@@ -2322,9 +2322,31 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             'info',
             'task.progress',
             'Subagent working',
-            '{"taskId":"task-b","subagent":{"threadId":"child-a","status":"active"}}',
+            '{"taskId":"task-b","subagent":{"threadId":"child-a","historyId":"history-b","status":"active"}}',
             2,
             '2026-04-06T00:00:02.000Z'
+          ),
+          (
+            'subagent-binding-sibling',
+            'thread-a',
+            'turn-a',
+            'info',
+            'task.progress',
+            'Sibling subagent working',
+            '{"taskId":"task-sibling","subagent":{"threadId":"child-sibling","historyId":"history-sibling","status":"active"}}',
+            3,
+            '2026-04-06T00:00:03.000Z'
+          ),
+          (
+            'subagent-binding-legacy',
+            'thread-a',
+            'turn-a',
+            'info',
+            'task.completed',
+            'Legacy subagent completed',
+            '{"taskId":"task-legacy","subagent":{"threadId":"child-legacy","status":"completed"}}',
+            4,
+            '2026-04-06T00:00:04.000Z'
           ),
           (
             'non-task-payload',
@@ -2334,8 +2356,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             'tool.completed',
             'Unrelated tool',
             '{"subagent":{"threadId":"tool-only-child"}}',
-            3,
-            '2026-04-06T00:00:03.000Z'
+            5,
+            '2026-04-06T00:00:05.000Z'
           )
       `;
 
@@ -2345,6 +2367,21 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         subagentId: "child-a",
       });
       assert.equal(hasExactBinding, true);
+
+      const hasExactHistoryBinding = yield* snapshotQuery.hasThreadTurnSubagentActivity({
+        threadId: ThreadId.make("thread-a"),
+        turnId: TurnId.make("turn-a"),
+        subagentId: "child-a",
+        historyId: "history-a",
+      });
+      assert.equal(hasExactHistoryBinding, true);
+
+      const hasLegacyBindingWithoutHistory = yield* snapshotQuery.hasThreadTurnSubagentActivity({
+        threadId: ThreadId.make("thread-a"),
+        turnId: TurnId.make("turn-a"),
+        subagentId: "child-legacy",
+      });
+      assert.equal(hasLegacyBindingWithoutHistory, true);
 
       for (const input of [
         { threadId: "thread-a", turnId: "turn-b", subagentId: "child-a" },
@@ -2356,6 +2393,33 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           threadId: ThreadId.make(input.threadId),
           turnId: TurnId.make(input.turnId),
           subagentId: input.subagentId,
+        });
+        assert.equal(authorized, false);
+      }
+
+      for (const input of [
+        {
+          subagentId: "child-a",
+          historyId: "history-sibling",
+        },
+        {
+          subagentId: "child-sibling",
+          historyId: "history-a",
+        },
+        {
+          subagentId: "child-legacy",
+          historyId: "history-a",
+        },
+        {
+          subagentId: "child-a",
+          historyId: "history-a' OR 1=1 --",
+        },
+      ] as const) {
+        const authorized = yield* snapshotQuery.hasThreadTurnSubagentActivity({
+          threadId: ThreadId.make("thread-a"),
+          turnId: TurnId.make("turn-a"),
+          subagentId: input.subagentId,
+          historyId: input.historyId,
         });
         assert.equal(authorized, false);
       }
@@ -2508,6 +2572,182 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
 
       assert.deepStrictEqual(presence.turnIdsWithWorkLog, [TurnId.make("turn-visible-page")]);
     }),
+  );
+
+  it.effect(
+    "keeps structured subagents out of historical Work Log pages, counts, and presence",
+    () =>
+      Effect.gen(function* () {
+        const snapshotQuery = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+
+        yield* sql`DELETE FROM projection_thread_activities`;
+
+        yield* sql`
+          INSERT INTO projection_thread_activities (
+            activity_id,
+            thread_id,
+            turn_id,
+            tone,
+            kind,
+            summary,
+            payload_json,
+            sequence,
+            created_at
+          )
+          VALUES
+            (
+              'subagent-only-started',
+              'thread-work-log-subagents',
+              'turn-subagent-only',
+              'info',
+              'task.started',
+              'Subagent started',
+              '{"subagent":{"threadId":"child-only","status":"active"}}',
+              1,
+              '2026-04-06T01:00:01.000Z'
+            ),
+            (
+              'subagent-only-progress',
+              'thread-work-log-subagents',
+              'turn-subagent-only',
+              'info',
+              'task.progress',
+              'Subagent working',
+              '{"subagent":{"threadId":"child-only","status":"active"}}',
+              2,
+              '2026-04-06T01:00:02.000Z'
+            ),
+            (
+              'subagent-only-completed',
+              'thread-work-log-subagents',
+              'turn-subagent-only',
+              'info',
+              'task.completed',
+              'Subagent completed',
+              '{"subagent":{"threadId":"child-only","status":"completed"}}',
+              3,
+              '2026-04-06T01:00:03.000Z'
+            ),
+            (
+              'mixed-ordinary-progress',
+              'thread-work-log-subagents',
+              'turn-mixed-work',
+              'info',
+              'task.progress',
+              'Ordinary task progress',
+              '{"taskId":"ordinary-task"}',
+              1,
+              '2026-04-06T02:00:01.000Z'
+            ),
+            (
+              'mixed-subagent-progress',
+              'thread-work-log-subagents',
+              'turn-mixed-work',
+              'info',
+              'task.progress',
+              'Subagent progress',
+              '{"subagent":{"threadId":"child-mixed","status":"active"}}',
+              2,
+              '2026-04-06T02:00:02.000Z'
+            ),
+            (
+              'mixed-ordinary-tool',
+              'thread-work-log-subagents',
+              'turn-mixed-work',
+              'tool',
+              'tool.completed',
+              'Read file',
+              '{"detail":"Read src/index.ts"}',
+              3,
+              '2026-04-06T02:00:03.000Z'
+            ),
+            (
+              'mixed-subagent-completed',
+              'thread-work-log-subagents',
+              'turn-mixed-work',
+              'info',
+              'task.completed',
+              'Subagent completed',
+              '{"subagent":{"threadId":"child-mixed","status":"completed"}}',
+              4,
+              '2026-04-06T02:00:04.000Z'
+            ),
+            (
+              'mixed-ordinary-completed',
+              'thread-work-log-subagents',
+              'turn-mixed-work',
+              'info',
+              'task.completed',
+              'Ordinary task completed',
+              '{"taskId":"ordinary-task","status":"completed"}',
+              5,
+              '2026-04-06T02:00:05.000Z'
+            ),
+            (
+              'mixed-subagent-started',
+              'thread-work-log-subagents',
+              'turn-mixed-work',
+              'info',
+              'task.started',
+              'Subagent started',
+              '{"subagent":{"threadId":"child-second","status":"active"}}',
+              6,
+              '2026-04-06T02:00:06.000Z'
+            ),
+            (
+              'mixed-context-compaction',
+              'thread-work-log-subagents',
+              'turn-mixed-work',
+              'tool',
+              'tool.started',
+              'Context compaction started',
+              '{"itemType":"context_compaction"}',
+              7,
+              '2026-04-06T02:00:07.000Z'
+            ),
+            (
+              'mixed-ordinary-started',
+              'thread-work-log-subagents',
+              'turn-mixed-work',
+              'info',
+              'task.started',
+              'Ordinary task started',
+              '{"taskId":"ordinary-task"}',
+              8,
+              '2026-04-06T02:00:08.000Z'
+            )
+        `;
+
+        const subagentOnlyPage = yield* snapshotQuery.getThreadTurnActivityPage({
+          threadId: ThreadId.make("thread-work-log-subagents"),
+          turnId: TurnId.make("turn-subagent-only"),
+          offset: 0,
+          limit: 10,
+        });
+        assert.equal(subagentOnlyPage.totalCount, 0);
+        assert.deepStrictEqual(subagentOnlyPage.activities, []);
+
+        // Offset and limit are applied after the common display predicate, so
+        // hidden subagent lifecycle rows cannot create sparse or empty pages.
+        const mixedPage = yield* snapshotQuery.getThreadTurnActivityPage({
+          threadId: ThreadId.make("thread-work-log-subagents"),
+          turnId: TurnId.make("turn-mixed-work"),
+          offset: 1,
+          limit: 2,
+        });
+        assert.equal(mixedPage.totalCount, 4);
+        assert.deepStrictEqual(
+          mixedPage.activities.map((activity) => activity.id),
+          ["mixed-ordinary-tool", "mixed-ordinary-completed"],
+        );
+
+        const presence = yield* snapshotQuery.getThreadTurnWorkLogPresence({
+          threadId: ThreadId.make("thread-work-log-subagents"),
+          turnIds: [TurnId.make("turn-subagent-only"), TurnId.make("turn-mixed-work")],
+        });
+        assert.deepStrictEqual(presence.turnIdsWithWorkLog, [TurnId.make("turn-mixed-work")]);
+      }),
   );
 
   it.effect("keeps deleted project and thread tombstones in the command read model", () =>

@@ -265,10 +265,16 @@ it.effect("bounds subagent detail identities and public transcript payloads", ()
     const detail = yield* decodeThreadTurnSubagentDetail({
       provider: "codex",
       messages: [
-        { role: "user", text: "Audit the provider" },
-        { role: "assistant", text: "## Result\n\nComplete." },
+        { key: "m0", role: "user", text: "Audit the provider" },
+        {
+          key: "m1",
+          role: "assistant",
+          text: "## Result\n\nComplete.",
+          omission: { tail: "Latest conclusion.", omittedUtf8Bytes: 128 },
+        },
       ],
-      truncated: false,
+      gaps: [],
+      truncated: true,
     });
     assert.strictEqual(detail.messages[1]?.text, "## Result\n\nComplete.");
 
@@ -284,11 +290,85 @@ it.effect("bounds subagent detail identities and public transcript payloads", ()
     const oversizedMessage = yield* Effect.exit(
       decodeThreadTurnSubagentDetail({
         provider: "codex",
-        messages: [{ role: "assistant", text: "x".repeat(32_769) }],
+        messages: [{ key: "m0", role: "assistant", text: "x".repeat(32_769) }],
+        gaps: [],
         truncated: true,
       }),
     );
     assert.strictEqual(oversizedMessage._tag, "Failure");
+
+    const aggregateOverflow = yield* Effect.exit(
+      decodeThreadTurnSubagentDetail({
+        provider: "claude",
+        messages: Array.from({ length: 5 }, (_, index) => ({
+          key: `m${index}`,
+          role: "assistant",
+          text: "🙂".repeat(8_192),
+        })),
+        gaps: [],
+        truncated: true,
+      }),
+    );
+    assert.strictEqual(aggregateOverflow._tag, "Failure");
+
+    const invalidGapAnchor = yield* Effect.exit(
+      decodeThreadTurnSubagentDetail({
+        provider: "codex",
+        messages: [{ key: "m0", role: "assistant", text: "Latest" }],
+        gaps: [
+          { afterMessageKey: "provider-native-item-id", omittedMessages: 3, omittedUtf8Bytes: 42 },
+        ],
+        truncated: true,
+      }),
+    );
+    assert.strictEqual(invalidGapAnchor._tag, "Failure");
+
+    const falseTruncationClaim = yield* Effect.exit(
+      decodeThreadTurnSubagentDetail({
+        provider: "codex",
+        messages: [
+          {
+            key: "m0",
+            role: "assistant",
+            text: "Retained head",
+            omission: { tail: "retained tail", omittedUtf8Bytes: 10 },
+          },
+        ],
+        gaps: [],
+        truncated: false,
+      }),
+    );
+    assert.strictEqual(falseTruncationClaim._tag, "Failure");
+
+    const suffixGap = yield* Effect.exit(
+      decodeThreadTurnSubagentDetail({
+        provider: "codex",
+        messages: [
+          { key: "m0", role: "user", text: "Assignment" },
+          { key: "m1", role: "assistant", text: "Stale progress" },
+        ],
+        gaps: [{ afterMessageKey: "m1", omittedMessages: 2, omittedUtf8Bytes: 20 }],
+        truncated: true,
+      }),
+    );
+    assert.strictEqual(suffixGap._tag, "Failure");
+
+    const reverseOrderedGaps = yield* Effect.exit(
+      decodeThreadTurnSubagentDetail({
+        provider: "codex",
+        messages: [
+          { key: "m0", role: "user", text: "Assignment" },
+          { key: "m1", role: "assistant", text: "Early progress" },
+          { key: "m2", role: "assistant", text: "Latest progress" },
+        ],
+        gaps: [
+          { afterMessageKey: "m1", omittedMessages: 2, omittedUtf8Bytes: 20 },
+          { afterMessageKey: "m0", omittedMessages: 2, omittedUtf8Bytes: 20 },
+        ],
+        truncated: true,
+      }),
+    );
+    assert.strictEqual(reverseOrderedGaps._tag, "Failure");
   }),
 );
 

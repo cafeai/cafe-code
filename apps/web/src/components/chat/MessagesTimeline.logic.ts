@@ -61,6 +61,94 @@ export interface StableMessagesTimelineRowsState {
   result: MessagesTimelineRow[];
 }
 
+type SubagentWorkEntry = WorkLogEntry & {
+  readonly subagent: NonNullable<WorkLogEntry["subagent"]>;
+};
+
+function subagentWorkEntryKey(entry: SubagentWorkEntry): string {
+  return JSON.stringify([entry.turnId ?? null, entry.subagent.id]);
+}
+
+function isSubagentWorkEntry(entry: WorkLogEntry): entry is SubagentWorkEntry {
+  return entry.subagent !== undefined;
+}
+
+function subagentRevisionSequence(entry: SubagentWorkEntry): number | null {
+  const match = /^sequence:(\d+):/.exec(entry.subagent.lifecycleRevision ?? "");
+  if (!match?.[1]) return null;
+  const sequence = Number(match[1]);
+  return Number.isSafeInteger(sequence) ? sequence : null;
+}
+
+function mergeOneSubagentWorkEntry(
+  snapshot: SubagentWorkEntry,
+  hydrated: SubagentWorkEntry,
+): SubagentWorkEntry {
+  const snapshotSequence = subagentRevisionSequence(snapshot);
+  const hydratedSequence = subagentRevisionSequence(hydrated);
+  const snapshotUpdatedAt = snapshot.subagent.updatedAt ?? snapshot.createdAt;
+  const hydratedUpdatedAt = hydrated.subagent.updatedAt ?? hydrated.createdAt;
+  let hydratedIsNewer =
+    snapshotSequence !== null && hydratedSequence !== null && snapshotSequence !== hydratedSequence
+      ? hydratedSequence > snapshotSequence
+      : hydratedUpdatedAt.localeCompare(snapshotUpdatedAt) > 0;
+  const snapshotTerminal =
+    snapshot.subagent.status === "completed" ||
+    snapshot.subagent.status === "failed" ||
+    snapshot.subagent.status === "stopped";
+  const hydratedLive =
+    hydrated.subagent.status === "active" || hydrated.subagent.status === "waiting";
+  if (hydratedIsNewer && snapshotTerminal && hydratedLive) {
+    // An independently paged, delayed progress edge must not resurrect a
+    // terminal snapshot. Only a demonstrably later start represents an
+    // explicit restart of the same provider child identity.
+    hydratedIsNewer =
+      snapshot.subagent.completedAt !== undefined &&
+      hydrated.subagent.startedAt.localeCompare(snapshot.subagent.completedAt) > 0;
+  }
+  const older = hydratedIsNewer ? snapshot : hydrated;
+  const newer = hydratedIsNewer ? hydrated : snapshot;
+
+  // A bounded historical page can begin at progress/completion and therefore
+  // omit the richer spawn descriptor. Merge optional fields from the older
+  // entry while allowing only the newer lifecycle edge to own status/timing.
+  return {
+    ...older,
+    ...newer,
+    subagent: {
+      ...older.subagent,
+      ...newer.subagent,
+    },
+  };
+}
+
+/**
+ * Merge a complete snapshot roster with any independently paged lifecycle
+ * rows. Paging the command log must never make a worker disappear merely
+ * because its spawn edge was outside the current raw activity page.
+ */
+export function mergeHistoricalSubagentEntries(
+  snapshotEntries: ReadonlyArray<WorkLogEntry>,
+  hydratedEntries: ReadonlyArray<WorkLogEntry>,
+): SubagentWorkEntry[] {
+  const orderedKeys: string[] = [];
+  const byKey = new Map<string, SubagentWorkEntry>();
+  const add = (entry: WorkLogEntry) => {
+    if (!isSubagentWorkEntry(entry)) return;
+    const key = subagentWorkEntryKey(entry);
+    const current = byKey.get(key);
+    if (!current) orderedKeys.push(key);
+    byKey.set(key, current ? mergeOneSubagentWorkEntry(current, entry) : entry);
+  };
+
+  for (const entry of snapshotEntries) add(entry);
+  for (const entry of hydratedEntries) add(entry);
+  return orderedKeys.flatMap((key) => {
+    const entry = byKey.get(key);
+    return entry ? [entry] : [];
+  });
+}
+
 export function computeMessageDurationStart(
   messages: ReadonlyArray<TimelineDurationMessage>,
 ): Map<string, string> {
@@ -126,6 +214,7 @@ export function filterHistoricalWorkLogSummariesByPresence(input: {
     if (
       summary.snapshotEntryCount > 0 ||
       summary.previewEntries.length > 0 ||
+      (summary.subagentEntries?.length ?? 0) > 0 ||
       input.presenceByTurnId.get(turnId) === true
     ) {
       visible.set(turnId, summary);
@@ -143,6 +232,7 @@ export function findHistoricalWorkLogPresenceCandidates(input: {
     if (
       summary.snapshotEntryCount === 0 &&
       summary.previewEntries.length === 0 &&
+      (summary.subagentEntries?.length ?? 0) === 0 &&
       !input.presenceByTurnId.has(turnId)
     ) {
       candidates.push(turnId);
@@ -204,7 +294,10 @@ export function deriveMessagesTimelineRows(input: {
     nextRows.push({
       kind: "historical-work",
       id: `historical-work:${turnId}`,
-      createdAt: summary.previewEntries.at(-1)?.createdAt ?? anchorCreatedAt,
+      createdAt:
+        summary.previewEntries.at(-1)?.createdAt ??
+        summary.subagentEntries?.at(-1)?.createdAt ??
+        anchorCreatedAt,
       turnId,
       summary,
     });

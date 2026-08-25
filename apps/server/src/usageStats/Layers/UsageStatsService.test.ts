@@ -85,6 +85,8 @@ const withHarness = <A, E>(body: (harness: Harness) => Effect.Effect<A, E, Scope
       const engineService = {
         readEvents: () => Stream.empty,
         dispatch: () => unsupported(),
+        retireThreadForHardDelete: () => unsupported(),
+        purgeHardDeletedThread: () => unsupported(),
         diagnosticsSnapshot: unsupported(),
         get streamDomainEvents() {
           return Stream.fromPubSub(domainPubSub) as Stream.Stream<OrchestrationEvent>;

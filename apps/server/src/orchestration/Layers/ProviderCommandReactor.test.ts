@@ -399,6 +399,7 @@ describe("ProviderCommandReactor", () => {
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
       snoozeUserInput,
       stopSession: stopSession as ProviderServiceShape["stopSession"],
+      quiesceThreadForHardDelete: () => unsupported(),
       restartProviderRuntime: () => unsupported(),
       listSessions: () => Effect.succeed(runtimeSessions),
       getCapabilities: (_provider) =>

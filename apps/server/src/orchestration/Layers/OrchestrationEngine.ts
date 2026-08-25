@@ -36,9 +36,11 @@ import {
   OrchestrationCommandPreviouslyRejectedError,
   type OrchestrationDispatchError,
   type OrchestrationProjectorDecodeError,
+  OrchestrationThreadHardDeleteError,
 } from "../Errors.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
 import { createEmptyReadModel, projectEvent } from "../projector.ts";
+import { purgeHardDeletedThreadPersistence } from "../threadHardDelete.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
@@ -51,10 +53,31 @@ const isOrchestrationCommandPreviouslyRejectedError = Schema.is(
 const isOrchestrationCommandInvariantError = Schema.is(OrchestrationCommandInvariantError);
 
 interface CommandEnvelope {
+  readonly kind: "command";
   command: OrchestrationCommand;
   result: Deferred.Deferred<{ sequence: number }, OrchestrationDispatchError>;
   startedAtMs: number;
 }
+
+interface RetireThreadForHardDeleteEnvelope {
+  readonly kind: "retire-thread-for-hard-delete";
+  readonly threadId: ThreadId;
+  readonly result: Deferred.Deferred<void, OrchestrationThreadHardDeleteError>;
+}
+
+interface PurgeHardDeletedThreadEnvelope {
+  readonly kind: "purge-hard-deleted-thread";
+  readonly threadId: ThreadId;
+  readonly result: Deferred.Deferred<
+    { readonly deleted: true },
+    OrchestrationThreadHardDeleteError
+  >;
+}
+
+type EngineEnvelope =
+  | CommandEnvelope
+  | RetireThreadForHardDeleteEnvelope
+  | PurgeHardDeletedThreadEnvelope;
 
 function commandToAggregateRef(command: OrchestrationCommand): {
   readonly aggregateKind: "project" | "thread";
@@ -93,8 +116,13 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   let commandReadModel = createEmptyReadModel(yield* nowIso);
 
-  const commandQueue = yield* Queue.unbounded<CommandEnvelope>();
+  const commandQueue = yield* Queue.unbounded<EngineEnvelope>();
   const eventPubSub = yield* PubSub.unbounded<OrchestrationEvent>();
+  // Contains only hard deletes whose projection rows have not yet been
+  // purged (including a crash between retire and purge). This bounded-by-live-
+  // projections set prevents receipt replay from reporting an old accepted
+  // command after the retirement envelope has linearized.
+  const hardDeleteRetiringThreadIds = new Set<string>();
   const commandCounters = yield* Ref.make({
     acceptedCommandCount: 0,
     rejectedCommandCount: 0,
@@ -145,6 +173,16 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           "orchestration.aggregate_kind": aggregateRef.aggregateKind,
           "orchestration.aggregate_id": aggregateRef.aggregateId,
         });
+
+        if (
+          aggregateRef.aggregateKind === "thread" &&
+          hardDeleteRetiringThreadIds.has(String(aggregateRef.aggregateId))
+        ) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: envelope.command.type,
+            detail: "Thread identity is permanently retired.",
+          });
+        }
 
         const existingReceipt = yield* commandReceiptRepository.getByCommandId({
           commandId: envelope.command.commandId,
@@ -313,10 +351,102 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     );
   };
 
+  const processRetireThreadForHardDeleteEnvelope = (
+    envelope: RetireThreadForHardDeleteEnvelope,
+  ): Effect.Effect<void> =>
+    Effect.exit(
+      Effect.gen(function* () {
+        const deletedAt = yield* nowIso;
+        yield* sql`
+          INSERT INTO hard_deleted_threads (thread_id, deleted_at)
+          VALUES (${envelope.threadId}, ${deletedAt})
+          ON CONFLICT (thread_id) DO NOTHING
+        `;
+        hardDeleteRetiringThreadIds.add(String(envelope.threadId));
+
+        // This mutation is deliberately performed by the same single worker
+        // that decides commands. Commands queued before this envelope see the
+        // old thread; commands queued after it see an absent, permanently
+        // retired identity. No timing assumption or external mutex is needed.
+        commandReadModel = {
+          ...commandReadModel,
+          threads: commandReadModel.threads.filter((thread) => thread.id !== envelope.threadId),
+          updatedAt: deletedAt,
+        };
+      }),
+    ).pipe(
+      Effect.flatMap((exit) => {
+        if (Exit.isSuccess(exit)) {
+          return Deferred.succeed(envelope.result, undefined).pipe(Effect.asVoid);
+        }
+        return Deferred.fail(
+          envelope.result,
+          new OrchestrationThreadHardDeleteError({
+            operation: "retire",
+            detail: "hard-delete-persistence-failed",
+          }),
+        ).pipe(Effect.asVoid);
+      }),
+    );
+
+  const processPurgeHardDeletedThreadEnvelope = (
+    envelope: PurgeHardDeletedThreadEnvelope,
+  ): Effect.Effect<void> =>
+    Effect.exit(
+      purgeHardDeletedThreadPersistence({ threadId: envelope.threadId }).pipe(
+        Effect.provideService(SqlClient.SqlClient, sql),
+      ),
+    ).pipe(
+      Effect.flatMap((exit) => {
+        if (Exit.isSuccess(exit)) {
+          hardDeleteRetiringThreadIds.delete(String(envelope.threadId));
+          return Deferred.succeed(envelope.result, exit.value).pipe(Effect.asVoid);
+        }
+        return Deferred.fail(
+          envelope.result,
+          new OrchestrationThreadHardDeleteError({
+            operation: "purge",
+            detail: "hard-delete-persistence-failed",
+          }),
+        ).pipe(Effect.asVoid);
+      }),
+    );
+
+  const processEngineEnvelope = (envelope: EngineEnvelope): Effect.Effect<void> => {
+    switch (envelope.kind) {
+      case "command":
+        return processEnvelope(envelope);
+      case "retire-thread-for-hard-delete":
+        return processRetireThreadForHardDeleteEnvelope(envelope);
+      case "purge-hard-deleted-thread":
+        return processPurgeHardDeletedThreadEnvelope(envelope);
+    }
+  };
+
   yield* projectionPipeline.bootstrap;
   commandReadModel = yield* projectionSnapshotQuery.getCommandReadModel();
+  const hardDeletedThreadRows = yield* sql<{ readonly threadId: string }>`
+    SELECT tombstone.thread_id AS "threadId"
+    FROM hard_deleted_threads AS tombstone
+    INNER JOIN projection_threads AS thread
+      ON thread.thread_id = tombstone.thread_id
+  `;
+  if (hardDeletedThreadRows.length > 0) {
+    const hardDeletedThreadIds = new Set(hardDeletedThreadRows.map((row) => row.threadId));
+    for (const threadId of hardDeletedThreadIds) {
+      hardDeleteRetiringThreadIds.add(threadId);
+    }
+    commandReadModel = {
+      ...commandReadModel,
+      threads: commandReadModel.threads.filter(
+        (thread) => !hardDeletedThreadIds.has(String(thread.id)),
+      ),
+    };
+  }
 
-  const worker = Effect.forever(Queue.take(commandQueue).pipe(Effect.flatMap(processEnvelope)));
+  const worker = Effect.forever(
+    Queue.take(commandQueue).pipe(Effect.flatMap(processEngineEnvelope)),
+  );
   yield* Effect.forkScoped(worker);
   yield* Effect.logDebug("orchestration engine started").pipe(
     Effect.annotateLogs({ sequence: commandReadModel.snapshotSequence }),
@@ -329,9 +459,37 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     Effect.gen(function* () {
       const result = yield* Deferred.make<{ sequence: number }, OrchestrationDispatchError>();
       yield* Queue.offer(commandQueue, {
+        kind: "command",
         command,
         result,
         startedAtMs: yield* Clock.currentTimeMillis,
+      });
+      return yield* Deferred.await(result);
+    });
+
+  const retireThreadForHardDelete: OrchestrationEngineShape["retireThreadForHardDelete"] = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      const result = yield* Deferred.make<void, OrchestrationThreadHardDeleteError>();
+      yield* Queue.offer(commandQueue, {
+        kind: "retire-thread-for-hard-delete",
+        threadId: input.threadId,
+        result,
+      });
+      return yield* Deferred.await(result);
+    });
+
+  const purgeHardDeletedThread: OrchestrationEngineShape["purgeHardDeletedThread"] = (input) =>
+    Effect.gen(function* () {
+      const result = yield* Deferred.make<
+        { readonly deleted: true },
+        OrchestrationThreadHardDeleteError
+      >();
+      yield* Queue.offer(commandQueue, {
+        kind: "purge-hard-deleted-thread",
+        threadId: input.threadId,
+        result,
       });
       return yield* Deferred.await(result);
     });
@@ -351,6 +509,8 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   return {
     readEvents,
     dispatch,
+    retireThreadForHardDelete,
+    purgeHardDeletedThread,
     diagnosticsSnapshot,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (wsServer, ProviderRuntimeIngestion, CheckpointReactor, etc.)

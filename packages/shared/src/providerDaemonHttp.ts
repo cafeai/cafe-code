@@ -20,6 +20,7 @@ export interface ProviderDaemonJsonRequestOptions {
   readonly body?: string;
   readonly headers?: Record<string, string>;
   readonly timeoutMs?: number;
+  readonly maxResponseBytes?: number;
 }
 
 export interface ProviderDaemonNdjsonRequestOptions {
@@ -31,6 +32,13 @@ export interface ProviderDaemonNdjsonRequestOptions {
 
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
+}
+
+function requirePositiveSafeInteger(value: number, optionName: string): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new RangeError(`${optionName} must be a positive finite safe integer`);
+  }
+  return value;
 }
 
 function requestOptions(
@@ -84,13 +92,42 @@ export function requestProviderDaemonJson(
   };
 
   return new Promise((resolve, reject) => {
+    const configuredMaxResponseBytes =
+      options.maxResponseBytes ?? PROVIDER_PIPELINE_POLICY.jsonResponseMaxBytes;
+    // A comparison against NaN or Infinity never trips, which would silently
+    // turn a caller's malformed override into an unbounded response buffer.
+    // Treat limits as configuration contracts and reject invalid values before
+    // opening the authenticated daemon connection.
+    const maxResponseBytes = requirePositiveSafeInteger(
+      configuredMaxResponseBytes,
+      "maxResponseBytes",
+    );
+    let settled = false;
+    const settleReject = (cause: unknown): void => {
+      if (settled) return;
+      settled = true;
+      reject(cause);
+    };
     const request = http.request(requestOptions(endpoint, path, method, headers), (response) => {
       const chunks: Buffer[] = [];
+      let responseBytes = 0;
       response.on("data", (chunk: Buffer) => {
+        if (settled) return;
+        responseBytes += chunk.byteLength;
+        if (responseBytes > maxResponseBytes) {
+          const cause = new RangeError(
+            `provider daemon JSON response exceeds ${maxResponseBytes} bytes`,
+          );
+          settleReject(cause);
+          response.destroy(cause);
+          return;
+        }
         chunks.push(chunk);
       });
-      response.on("error", reject);
+      response.on("error", settleReject);
       response.on("end", () => {
+        if (settled) return;
+        settled = true;
         resolve({
           statusCode: response.statusCode ?? 0,
           body: Buffer.concat(chunks).toString("utf8"),
@@ -98,7 +135,7 @@ export function requestProviderDaemonJson(
       });
     });
 
-    request.on("error", reject);
+    request.on("error", settleReject);
     request.setTimeout(options.timeoutMs ?? 30_000, () => {
       request.destroy(new Error("provider daemon request timed out"));
     });
@@ -115,14 +152,15 @@ export function streamProviderDaemonNdjson(
   options: ProviderDaemonNdjsonRequestOptions,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const maxLineBytes = Math.max(
-      1,
-      Math.trunc(options.maxLineBytes ?? PROVIDER_PIPELINE_POLICY.ndjsonMaxLineBytes),
+    const maxLineBytes = requirePositiveSafeInteger(
+      options.maxLineBytes ?? PROVIDER_PIPELINE_POLICY.ndjsonMaxLineBytes,
+      "maxLineBytes",
     );
-    const maxPendingBytes = Math.max(
-      maxLineBytes,
-      Math.trunc(options.maxPendingBytes ?? PROVIDER_PIPELINE_POLICY.ndjsonMaxPendingBytes),
+    const configuredMaxPendingBytes = requirePositiveSafeInteger(
+      options.maxPendingBytes ?? PROVIDER_PIPELINE_POLICY.ndjsonMaxPendingBytes,
+      "maxPendingBytes",
     );
+    const maxPendingBytes = Math.max(maxLineBytes, configuredMaxPendingBytes);
     let settled = false;
     const settleReject = (cause: unknown): void => {
       if (settled) return;

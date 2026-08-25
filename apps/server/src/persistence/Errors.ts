@@ -30,6 +30,26 @@ export class PersistenceDecodeError extends Schema.TaggedErrorClass<PersistenceD
     return `Decode error in ${this.operation}: ${this.issue}`;
   }
 }
+
+/**
+ * An existing nested-agent history root disagreed with a later write.
+ *
+ * Deliberately carries no provider ids, resume cursor, cwd, or conflicting
+ * values. Those fields are server-private provenance and can contain local
+ * filesystem or provider-session data; callers only need the typed integrity
+ * signal to fail closed and emit a redacted diagnostic.
+ */
+export class ProviderSubagentHistoryBindingConflictError extends Schema.TaggedErrorClass<ProviderSubagentHistoryBindingConflictError>()(
+  "ProviderSubagentHistoryBindingConflictError",
+  {
+    operation: Schema.String,
+    issue: Schema.Literal("immutable-provenance-conflict"),
+  },
+) {
+  override get message(): string {
+    return `Provider subagent history integrity error in ${this.operation}: immutable provenance conflict`;
+  }
+}
 const isPersistenceSqlError = Schema.is(PersistenceSqlError);
 const isPersistenceDecodeError = Schema.is(PersistenceDecodeError);
 
@@ -103,7 +123,10 @@ export type OrchestrationCommandReceiptRepositoryError =
   | PersistenceSqlError
   | PersistenceDecodeError;
 
-export type ProviderSessionRuntimeRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type ProviderSessionRuntimeRepositoryError =
+  | PersistenceSqlError
+  | PersistenceDecodeError
+  | ProviderSubagentHistoryBindingConflictError;
 export type AuthPairingLinkRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type AuthSessionRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 

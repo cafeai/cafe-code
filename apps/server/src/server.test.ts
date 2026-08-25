@@ -79,6 +79,10 @@ import {
   ProviderJournalMessageRepair,
   type ProviderJournalMessageRepairShape,
 } from "./orchestration/Services/ProviderJournalMessageRepair.ts";
+import {
+  ProviderRuntimeIngestionService,
+  type ProviderRuntimeIngestionShape,
+} from "./orchestration/Services/ProviderRuntimeIngestion.ts";
 import { OrchestrationListenerCallbackError } from "./orchestration/Errors.ts";
 import {
   ProjectionSnapshotQuery,
@@ -457,6 +461,7 @@ const buildAppUnderTest = (options?: {
     vcsStatusBroadcaster?: Partial<VcsStatusBroadcaster.VcsStatusBroadcasterShape>;
     projectSetupScriptRunner?: Partial<ProjectSetupScriptRunnerShape>;
     orchestrationEngine?: Partial<OrchestrationEngineShape>;
+    providerRuntimeIngestion?: Partial<ProviderRuntimeIngestionShape>;
     providerJournalMessageRepair?: Partial<ProviderJournalMessageRepairShape>;
     projectionSnapshotQuery?: Partial<ProjectionSnapshotQueryShape>;
     checkpointStore?: Partial<CheckpointStoreShape>;
@@ -669,6 +674,7 @@ const buildAppUnderTest = (options?: {
           respondToRequest: () => Effect.die("unexpected respondToRequest"),
           respondToUserInput: () => Effect.die("unexpected respondToUserInput"),
           stopSession: () => Effect.die("unexpected stopSession"),
+          quiesceThreadForHardDelete: () => Effect.die("unexpected quiesceThreadForHardDelete"),
           restartProviderRuntime: (input) =>
             Effect.succeed({
               instanceId: input.instanceId,
@@ -863,8 +869,17 @@ const buildAppUnderTest = (options?: {
           Layer.mock(OrchestrationEngineService)({
             readEvents: () => Stream.empty,
             dispatch: () => Effect.succeed({ sequence: 0 }),
+            retireThreadForHardDelete: () => Effect.void,
+            purgeHardDeletedThread: () => Effect.succeed({ deleted: true as const }),
             streamDomainEvents: Stream.empty,
             ...options?.layers?.orchestrationEngine,
+          }),
+          Layer.mock(ProviderRuntimeIngestionService)({
+            start: () => Effect.void,
+            drain: Effect.void,
+            retireThreadForHardDelete: () => Effect.void,
+            completeThreadHardDelete: () => Effect.void,
+            ...options?.layers?.providerRuntimeIngestion,
           }),
           Layer.mock(ProviderJournalMessageRepair)({
             repairAssistantMessage: (input) =>
@@ -2589,17 +2604,74 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 
+  it.effect("orders the hard-delete RPC across provider, ingestion, and engine barriers", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      yield* buildAppUnderTest({
+        layers: {
+          providerService: {
+            quiesceThreadForHardDelete: () =>
+              Effect.sync(() => {
+                calls.push("provider-quiesced");
+              }),
+          },
+          providerRuntimeIngestion: {
+            retireThreadForHardDelete: () =>
+              Effect.sync(() => {
+                calls.push("ingestion-retired-and-drained");
+              }),
+            completeThreadHardDelete: () =>
+              Effect.sync(() => {
+                calls.push("ingestion-confirmed");
+              }),
+          },
+          orchestrationEngine: {
+            retireThreadForHardDelete: () =>
+              Effect.sync(() => {
+                calls.push("engine-tombstoned");
+              }),
+            purgeHardDeletedThread: () =>
+              Effect.sync(() => {
+                calls.push("engine-purged");
+                return { deleted: true as const };
+              }),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.hardDeleteThread]({
+            threadId: ThreadId.make("thread-hard-delete-order"),
+          }),
+        ),
+      );
+
+      assert.deepEqual(result, { deleted: true });
+      assert.deepEqual(calls, [
+        "provider-quiesced",
+        "ingestion-retired-and-drained",
+        "engine-tombstoned",
+        "engine-purged",
+        "ingestion-confirmed",
+      ]);
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
   it.effect(
     "does not read provider subagent history without an exact durable activity binding",
     () =>
       Effect.gen(function* () {
-        const readSubagentDetail = vi.fn((_input: { threadId: ThreadId; subagentId: string }) =>
-          Effect.succeed({
-            provider: ProviderDriverKind.make("codex"),
-            providerInstanceId: ProviderInstanceId.make("codex"),
-            messages: [{ role: "assistant" as const, text: "must not be returned" }],
-            truncated: false,
-          }),
+        const readSubagentDetail = vi.fn(
+          (_input: { threadId: ThreadId; turnId: TurnId; subagentId: string }) =>
+            Effect.succeed({
+              provider: ProviderDriverKind.make("codex"),
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              messages: [{ key: "m0", role: "assistant" as const, text: "must not be returned" }],
+              gaps: [],
+              truncated: false,
+            }),
         );
         yield* buildAppUnderTest({
           layers: {
@@ -2628,16 +2700,86 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
   it.effect("returns only canonical verified subagent text over the authenticated RPC", () =>
     Effect.gen(function* () {
-      const readSubagentDetail = vi.fn((_input: { threadId: ThreadId; subagentId: string }) =>
-        Effect.succeed({
-          provider: ProviderDriverKind.make("codex"),
-          providerInstanceId: ProviderInstanceId.make("codex"),
-          messages: [
-            { role: "user" as const, text: "Audit the provider" },
-            { role: "assistant" as const, text: "## Result\n\nComplete." },
-          ],
-          truncated: false,
-        }),
+      const readSubagentDetail = vi.fn(
+        (_input: { threadId: ThreadId; turnId: TurnId; subagentId: string; historyId?: string }) =>
+          Effect.succeed({
+            provider: ProviderDriverKind.make("codex"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            messages: [
+              { key: "m0", role: "user" as const, text: "Audit the provider" },
+              { key: "m8", role: "assistant" as const, text: "## Result\n\nComplete." },
+            ],
+            gaps: [{ afterMessageKey: "m0", omittedMessages: 7, omittedUtf8Bytes: 1_024 }],
+            truncated: true,
+          }),
+      );
+      const hasThreadTurnSubagentActivity = vi.fn(
+        (input: {
+          threadId: ThreadId;
+          turnId: TurnId;
+          subagentId: string;
+          historyId?: string | undefined;
+        }) => Effect.succeed(input.historyId === "history-bound"),
+      );
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            hasThreadTurnSubagentActivity,
+          },
+          providerService: { readSubagentDetail },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const detail = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail]({
+            threadId: ThreadId.make("thread-1"),
+            turnId: TurnId.make("turn-1"),
+            subagentId: "provider-child-bound",
+            historyId: "history-bound",
+          }),
+        ),
+      );
+
+      assert.deepEqual(detail, {
+        provider: ProviderDriverKind.make("codex"),
+        messages: [
+          { key: "m0", role: "user", text: "Audit the provider" },
+          { key: "m8", role: "assistant", text: "## Result\n\nComplete." },
+        ],
+        gaps: [{ afterMessageKey: "m0", omittedMessages: 7, omittedUtf8Bytes: 1_024 }],
+        truncated: true,
+      });
+      assert.deepEqual(hasThreadTurnSubagentActivity.mock.calls[0]?.[0], {
+        threadId: ThreadId.make("thread-1"),
+        turnId: TurnId.make("turn-1"),
+        subagentId: "provider-child-bound",
+        historyId: "history-bound",
+      });
+      assert.deepEqual(readSubagentDetail.mock.calls[0]?.[0], {
+        threadId: ThreadId.make("thread-1"),
+        turnId: TurnId.make("turn-1"),
+        subagentId: "provider-child-bound",
+        historyId: "history-bound",
+      });
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect("returns canonical Claude subagent detail over the provider-neutral RPC", () =>
+    Effect.gen(function* () {
+      const readSubagentDetail = vi.fn(
+        (_input: { threadId: ThreadId; turnId: TurnId; subagentId: string; historyId?: string }) =>
+          Effect.succeed({
+            provider: ProviderDriverKind.make("claudeAgent"),
+            providerInstanceId: ProviderInstanceId.make("claude-primary"),
+            messages: [
+              { key: "m0", role: "user" as const, text: "Review the Claude child" },
+              { key: "m1", role: "assistant" as const, text: "Review complete." },
+            ],
+            gaps: [],
+            truncated: false,
+          }),
       );
       yield* buildAppUnderTest({
         layers: {
@@ -2652,24 +2794,28 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const detail = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail]({
-            threadId: ThreadId.make("thread-1"),
-            turnId: TurnId.make("turn-1"),
-            subagentId: "provider-child-bound",
+            threadId: ThreadId.make("thread-claude"),
+            turnId: TurnId.make("turn-claude"),
+            subagentId: "claude-task-1",
+            historyId: "claude-agent-1",
           }),
         ),
       );
 
       assert.deepEqual(detail, {
-        provider: "codex",
+        provider: ProviderDriverKind.make("claudeAgent"),
         messages: [
-          { role: "user", text: "Audit the provider" },
-          { role: "assistant", text: "## Result\n\nComplete." },
+          { key: "m0", role: "user", text: "Review the Claude child" },
+          { key: "m1", role: "assistant", text: "Review complete." },
         ],
+        gaps: [],
         truncated: false,
       });
       assert.deepEqual(readSubagentDetail.mock.calls[0]?.[0], {
-        threadId: "thread-1",
-        subagentId: "provider-child-bound",
+        threadId: ThreadId.make("thread-claude"),
+        turnId: TurnId.make("turn-claude"),
+        subagentId: "claude-task-1",
+        historyId: "claude-agent-1",
       });
     }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );

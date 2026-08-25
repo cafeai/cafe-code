@@ -34,6 +34,7 @@ import type {
   ProviderSteerTurnInput,
   ProviderStopSessionInput,
   ThreadId,
+  TurnId,
   ProviderTurnSteerResult,
   ProviderTurnStartResult,
 } from "@cafecode/contracts";
@@ -130,6 +131,20 @@ export interface ProviderServiceShape {
   ) => Effect.Effect<void, ProviderServiceError>;
 
   /**
+   * Permanently retire every provider session for one Cafe thread.
+   *
+   * This is stronger than a normal Stop. The implementation first fences the
+   * thread against new provider mutations and runtime-event persistence, then
+   * stops every configured adapter that still owns the thread. The hard-delete
+   * transport must await this boundary (and downstream runtime ingestion)
+   * before removing persistence so a delayed lifecycle event cannot resurrect
+   * rows after the delete transaction commits.
+   */
+  readonly quiesceThreadForHardDelete: (
+    input: ProviderStopSessionInput,
+  ) => Effect.Effect<void, ProviderServiceError>;
+
+  /**
    * Stop all live sessions owned by one configured provider instance.
    *
    * This intentionally does not start a replacement session immediately:
@@ -203,7 +218,9 @@ export interface ProviderServiceShape {
    */
   readonly readSubagentDetail: (input: {
     readonly threadId: ThreadId;
+    readonly turnId: TurnId;
     readonly subagentId: string;
+    readonly historyId?: string;
   }) => Effect.Effect<ProviderSubagentDetailReadResult, ProviderServiceError>;
 
   /**

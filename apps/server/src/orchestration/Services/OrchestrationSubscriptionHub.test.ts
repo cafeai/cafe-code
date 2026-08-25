@@ -91,6 +91,8 @@ describe("OrchestrationSubscriptionHub", () => {
               return Stream.empty;
             },
             dispatch: () => Effect.die("unused"),
+            retireThreadForHardDelete: () => Effect.die("unused"),
+            purgeHardDeletedThread: () => Effect.die("unused"),
             diagnosticsSnapshot: Effect.die("unused"),
             streamDomainEvents: Stream.fromPubSub(live),
           };
@@ -133,6 +135,8 @@ describe("OrchestrationSubscriptionHub", () => {
               return Stream.empty;
             },
             dispatch: () => Effect.die("unused"),
+            retireThreadForHardDelete: () => Effect.die("unused"),
+            purgeHardDeletedThread: () => Effect.die("unused"),
             diagnosticsSnapshot: Effect.die("unused"),
             streamDomainEvents: Stream.fromPubSub(live),
           };
@@ -171,6 +175,8 @@ describe("OrchestrationSubscriptionHub", () => {
           const engine: OrchestrationEngineShape = {
             readEvents: () => Stream.empty,
             dispatch: () => Effect.die("unused"),
+            retireThreadForHardDelete: () => Effect.die("unused"),
+            purgeHardDeletedThread: () => Effect.die("unused"),
             diagnosticsSnapshot: Effect.die("unused"),
             streamDomainEvents: Stream.fromPubSub(live),
           };
@@ -268,6 +274,8 @@ describe("OrchestrationSubscriptionHub", () => {
           const engine: OrchestrationEngineShape = {
             readEvents: () => Stream.empty,
             dispatch: () => Effect.die("unused"),
+            retireThreadForHardDelete: () => Effect.die("unused"),
+            purgeHardDeletedThread: () => Effect.die("unused"),
             diagnosticsSnapshot: Effect.die("unused"),
             streamDomainEvents: Stream.fromPubSub(live),
           };

@@ -420,6 +420,29 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver;
+  /**
+   * The historical Work Log count, page, and presence queries must agree on
+   * exactly which persisted activities can produce a Work Log row. Keeping
+   * this as one trusted, static SQL fragment prevents the three queries from
+   * drifting and, importantly, ensures provider subagent lifecycle events do
+   * not consume command-log pages after subagents moved to their own roster.
+   *
+   * Thread and turn identities remain separately bound SQL parameters at each
+   * call site. The strings below are application-owned SQL, never provider or
+   * user input. `payload.subagent` is a reserved structured-lifecycle marker;
+   * fail closed for every non-null JSON value so malformed provider metadata
+   * cannot make a subagent row leak back into the ordinary Work Log.
+   */
+  const historicalWorkLogActivityPredicate = sql.and([
+    "kind != 'context-window.updated'",
+    "kind != 'checkpoint.captured'",
+    "kind != 'task.started'",
+    "summary != 'Checkpoint captured'",
+    "(kind != 'tool.started' OR json_extract(payload_json, '$.itemType') = 'context_compaction')",
+    "NOT (kind IN ('task.started', 'task.progress', 'task.completed') AND json_type(payload_json, '$.subagent') IS NOT NULL)",
+    "NOT (kind IN ('tool.updated', 'tool.completed') AND COALESCE(json_extract(payload_json, '$.detail'), '') LIKE 'ExitPlanMode:%')",
+    "NOT (kind = 'provider.turn.steer.failed' AND json_extract(payload_json, '$.retryableFollowUp') = 1)",
+  ]);
   // Diagnostics are bounded and keyed only by Cafe thread/turn identity. Never
   // log provider child ids or presentation text when the safety ceiling trips.
   const reportedSubagentRetentionLimits = new Map<string, true>();
@@ -1250,22 +1273,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         FROM projection_thread_activities
         WHERE thread_id = ${threadId}
           AND turn_id = ${turnId}
-          AND kind != 'context-window.updated'
-          AND kind != 'checkpoint.captured'
-          AND kind != 'task.started'
-          AND summary != 'Checkpoint captured'
-          AND (
-            kind != 'tool.started'
-            OR json_extract(payload_json, '$.itemType') = 'context_compaction'
-          )
-          AND NOT (
-            kind IN ('tool.updated', 'tool.completed')
-            AND COALESCE(json_extract(payload_json, '$.detail'), '') LIKE 'ExitPlanMode:%'
-          )
-          AND NOT (
-            kind = 'provider.turn.steer.failed'
-            AND json_extract(payload_json, '$.retryableFollowUp') = 1
-          )
+          AND ${historicalWorkLogActivityPredicate}
       `,
   });
 
@@ -1279,22 +1287,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           FROM projection_thread_activities
           WHERE thread_id = ${threadId}
             AND turn_id = ${turnId}
-            AND kind != 'context-window.updated'
-            AND kind != 'checkpoint.captured'
-            AND kind != 'task.started'
-            AND summary != 'Checkpoint captured'
-            AND (
-              kind != 'tool.started'
-              OR json_extract(payload_json, '$.itemType') = 'context_compaction'
-            )
-            AND NOT (
-              kind IN ('tool.updated', 'tool.completed')
-              AND COALESCE(json_extract(payload_json, '$.detail'), '') LIKE 'ExitPlanMode:%'
-            )
-            AND NOT (
-              kind = 'provider.turn.steer.failed'
-              AND json_extract(payload_json, '$.retryableFollowUp') = 1
-            )
+            AND ${historicalWorkLogActivityPredicate}
           LIMIT 1
         ) AS "hasWorkLog"
       `,
@@ -1303,7 +1296,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const findThreadTurnSubagentActivityPresence = SqlSchema.findOne({
     Request: ThreadTurnSubagentLookupInput,
     Result: SubagentActivityPresenceRowSchema,
-    execute: ({ threadId, turnId, subagentId }) =>
+    execute: ({ threadId, turnId, subagentId, historyId }) =>
       sql`
         SELECT EXISTS(
           SELECT 1
@@ -1313,6 +1306,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             AND kind IN ('task.started', 'task.progress', 'task.completed')
             AND json_type(payload_json, '$.subagent.threadId') = 'text'
             AND json_extract(payload_json, '$.subagent.threadId') = ${subagentId}
+            AND (
+              ${historyId ?? null} IS NULL
+              OR (
+                json_type(payload_json, '$.subagent.historyId') = 'text'
+                AND json_extract(payload_json, '$.subagent.historyId') = ${historyId ?? null}
+              )
+            )
           LIMIT 1
         ) AS "hasSubagentActivity"
       `,
@@ -1336,22 +1336,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         FROM projection_thread_activities
         WHERE thread_id = ${threadId}
           AND turn_id = ${turnId}
-          AND kind != 'context-window.updated'
-          AND kind != 'checkpoint.captured'
-          AND kind != 'task.started'
-          AND summary != 'Checkpoint captured'
-          AND (
-            kind != 'tool.started'
-            OR json_extract(payload_json, '$.itemType') = 'context_compaction'
-          )
-          AND NOT (
-            kind IN ('tool.updated', 'tool.completed')
-            AND COALESCE(json_extract(payload_json, '$.detail'), '') LIKE 'ExitPlanMode:%'
-          )
-          AND NOT (
-            kind = 'provider.turn.steer.failed'
-            AND json_extract(payload_json, '$.retryableFollowUp') = 1
-          )
+          AND ${historicalWorkLogActivityPredicate}
         ORDER BY
           CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,
           sequence ASC,

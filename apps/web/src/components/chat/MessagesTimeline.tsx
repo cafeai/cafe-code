@@ -14,6 +14,7 @@ import {
   use,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -27,8 +28,8 @@ import {
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import {
   deriveTimelineEntries,
+  deriveSubagentWorkEntries,
   deriveWorkLogEntries,
-  formatDuration,
   formatElapsed,
   type WorkLogEntry,
 } from "../../session-logic";
@@ -60,6 +61,7 @@ import {
   MAX_VISIBLE_WORK_LOG_ENTRIES,
   deriveHistoricalWorkLogDisplayState,
   deriveMessagesTimelineRows,
+  mergeHistoricalSubagentEntries,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
   type StableMessagesTimelineRowsState,
@@ -99,7 +101,7 @@ import {
   type TimelineScrollDebugListState,
 } from "./timelineScrollDebug";
 import { useHistoricalWorkLogPresence } from "./useHistoricalWorkLogPresence";
-import { SubagentAvatar } from "../subagents/SubagentAvatar";
+import { SubagentRosterRow, type SubagentRosterEntry } from "../subagents/SubagentRosterRow";
 import { SubagentDetailView, type SubagentDetailSelection } from "./SubagentDetailView";
 
 export {
@@ -199,6 +201,9 @@ interface MessagesTimelineProps {
   onIsAtEndChange: (isAtEnd: boolean) => void;
   onUserScrollIntent: () => void;
   onDebugScrollEvent?: (event: TimelineScrollDebugEventInput) => void;
+  selectedSubagent?: SubagentDetailSelection | null;
+  onOpenSubagentDetail?: (workEntry: WorkLogEntry, trigger: HTMLButtonElement) => void;
+  onCloseSubagentDetail?: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +237,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onIsAtEndChange,
   onUserScrollIntent,
   onDebugScrollEvent,
+  selectedSubagent: controlledSelectedSubagent,
+  onOpenSubagentDetail: controlledOpenSubagentDetail,
+  onCloseSubagentDetail: controlledCloseSubagentDetail,
 }: MessagesTimelineProps) {
   const activeThreadId = activeThreadIdProp ?? null;
   const chatCopyFormat = useSettings((settings) => settings.chatCopyFormat);
@@ -271,14 +279,23 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     ],
   );
   const rows = useStableRows(rawRows);
-  const [selectedSubagent, setSelectedSubagent] = useState<SubagentDetailSelection | null>(null);
+  const [internalSelectedSubagent, setInternalSelectedSubagent] =
+    useState<SubagentDetailSelection | null>(null);
+  const selectedSubagent =
+    controlledSelectedSubagent === undefined
+      ? internalSelectedSubagent
+      : controlledSelectedSubagent;
   const selectedSubagentTriggerRef = useRef<HTMLButtonElement | null>(null);
   const subagentDetailBackButtonRef = useRef<HTMLButtonElement | null>(null);
   const openSubagentDetail = useCallback(
     (workEntry: WorkLogEntry, trigger: HTMLButtonElement) => {
       if (!workEntry.subagent) return;
+      if (controlledOpenSubagentDetail) {
+        controlledOpenSubagentDetail(workEntry, trigger);
+        return;
+      }
       selectedSubagentTriggerRef.current = trigger;
-      setSelectedSubagent({
+      setInternalSelectedSubagent({
         environmentId: activeThreadEnvironmentId,
         threadId: activeThreadId,
         rowId: workEntry.id,
@@ -286,22 +303,26 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         workEntry: { ...workEntry, subagent: workEntry.subagent },
       });
     },
-    [activeThreadEnvironmentId, activeThreadId],
+    [activeThreadEnvironmentId, activeThreadId, controlledOpenSubagentDetail],
   );
   const closeSubagentDetail = useCallback(() => {
+    if (controlledCloseSubagentDetail) {
+      controlledCloseSubagentDetail();
+      return;
+    }
     const trigger = selectedSubagentTriggerRef.current;
-    setSelectedSubagent(null);
+    setInternalSelectedSubagent(null);
     selectedSubagentTriggerRef.current = null;
     window.requestAnimationFrame(() => {
       if (trigger?.isConnected) trigger.focus();
     });
-  }, []);
+  }, [controlledCloseSubagentDetail]);
   useEffect(() => {
     // A timeline instance can survive navigation while its thread/environment
     // props change. Never carry a child selection into a different Cafe scope:
     // besides showing stale detail, that would issue a guaranteed-denied RPC
     // using the new thread id and the prior turn/child identity.
-    setSelectedSubagent(null);
+    setInternalSelectedSubagent(null);
     selectedSubagentTriggerRef.current = null;
   }, [activeThreadEnvironmentId, activeThreadId]);
   const resolvedSelectedSubagent = useMemo(() => {
@@ -316,17 +337,26 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     // rows own their paged activity locally, so their immutable terminal
     // snapshot remains the fallback when it is not present in the root rows.
     for (const row of rows) {
-      if (row.kind !== "work") continue;
-      const current = row.groupedEntries.find(
+      const candidates =
+        row.kind === "work"
+          ? row.groupedEntries
+          : row.kind === "historical-work"
+            ? (row.summary.subagentEntries ?? [])
+            : [];
+      const current = candidates.find(
         (entry) =>
           entry.subagent?.id === selectedSubagent.workEntry.subagent.id &&
           (entry.turnId ?? null) === selectedSubagent.turnId,
       );
       if (current?.subagent) {
+        const [reconciled] = mergeHistoricalSubagentEntries(
+          [selectedSubagent.workEntry],
+          [current],
+        );
         return {
           ...selectedSubagent,
-          rowId: current.id,
-          workEntry: { ...current, subagent: current.subagent },
+          rowId: reconciled?.id ?? current.id,
+          workEntry: reconciled ?? { ...current, subagent: current.subagent },
         };
       }
     }
@@ -950,6 +980,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       </TimelineRowCtx>
       {resolvedSelectedSubagent ? (
         <SubagentDetailView
+          key={JSON.stringify([
+            activeThreadEnvironmentId,
+            activeThreadId,
+            activeProvider,
+            resolvedSelectedSubagent.turnId,
+            resolvedSelectedSubagent.workEntry.subagent.id,
+            resolvedSelectedSubagent.workEntry.subagent.historyId ?? null,
+          ])}
           selection={resolvedSelectedSubagent}
           environmentId={activeThreadEnvironmentId}
           threadId={activeThreadId}
@@ -1518,19 +1556,16 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
       setIsLoading(true);
       setLoadError(null);
       try {
-        const knownTotal =
-          totalCount ??
-          (
-            await api.orchestration.getThreadTurnActivityPage({
-              threadId: activeThreadId,
-              turnId: row.turnId,
-              offset: 0,
-              limit: 1,
-            })
-          ).totalCount;
+        const knownTotal = (
+          await api.orchestration.getThreadTurnActivityPage({
+            threadId: activeThreadId,
+            turnId: row.turnId,
+            offset: 0,
+            limit: 1,
+          })
+        ).totalCount;
         if (cancelled) return;
         setTotalCount(knownTotal);
-        onHistoricalWorkLogPresenceResolved(row.turnId, knownTotal > 0);
         if (knownTotal <= 0) {
           setActivityRows([]);
           setLoadedOffset(0);
@@ -1572,7 +1607,6 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
     isExpanded,
     onHistoricalWorkLogPresenceResolved,
     row.turnId,
-    totalCount,
   ]);
 
   const visibleEntries = useMemo(() => {
@@ -1583,6 +1617,12 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
     }
     return row.summary.previewEntries.slice(-HISTORICAL_WORK_LOG_PREVIEW_LIMIT);
   }, [activityRows, row.summary.previewEntries, row.turnId]);
+  const subagentEntries = useMemo(() => {
+    const hydratedEntries = deriveSubagentWorkEntries(activityRows, row.turnId, {
+      terminalTurnIds: new Set([row.turnId]),
+    });
+    return mergeHistoricalSubagentEntries(row.summary.subagentEntries ?? [], hydratedEntries);
+  }, [activityRows, row.summary.subagentEntries, row.turnId]);
   const historicalWorkLogDisplayState = deriveHistoricalWorkLogDisplayState({
     snapshotEntryCount: row.summary.snapshotEntryCount,
     previewEntryCount: row.summary.previewEntries.length,
@@ -1604,6 +1644,20 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
         : false;
   const canShowAll =
     hasOlder && totalCount !== null && totalCount <= HISTORICAL_WORK_LOG_SHOW_ALL_LIMIT;
+
+  useEffect(() => {
+    if (!initialPageLoaded || loadedOffset !== 0) return;
+    // The activity page also contains subagent lifecycle rows. Once every raw
+    // row is present, publish presence from the derived command/tool list—not
+    // from raw totalCount—so a child-only turn never masquerades as Work Log.
+    onHistoricalWorkLogPresenceResolved(row.turnId, visibleEntries.length > 0);
+  }, [
+    initialPageLoaded,
+    loadedOffset,
+    onHistoricalWorkLogPresenceResolved,
+    row.turnId,
+    visibleEntries.length,
+  ]);
 
   const loadOlderPage = useCallback(async () => {
     if (loadedOffset === null || loadedOffset <= 0 || isLoadingOlder) {
@@ -1665,89 +1719,208 @@ const HistoricalWorkLogSection = memo(function HistoricalWorkLogSection({
     }
   }, [ctx.activeThreadEnvironmentId, ctx.activeThreadId, row.turnId, totalCount]);
 
-  const knownEmpty =
-    totalCount === 0 &&
-    row.summary.snapshotEntryCount === 0 &&
-    row.summary.previewEntries.length === 0;
+  // `totalCount` and `loadedOffset` describe raw activities, including the
+  // independently rendered subagent lifecycle. Only a complete scan plus an
+  // empty derived command/tool list proves that the Work Log itself is empty.
+  const workKnownEmpty = initialPageLoaded && loadedOffset === 0 && visibleEntries.length === 0;
 
-  if (knownEmpty) {
-    return null;
+  if (workKnownEmpty) {
+    return <SubagentGroupSection entries={subagentEntries} />;
   }
 
   if (!isExpanded) {
     return (
-      <button
-        type="button"
-        className="flex w-full items-center justify-between gap-2 rounded-lg border border-border/35 bg-card/15 px-2.5 py-1.5 text-left text-[11px] text-muted-foreground/70 transition-colors hover:border-border/60 hover:bg-card/25 hover:text-foreground/80"
-        data-historical-work-log-row="collapsed"
-        onClick={() => setIsExpanded(true)}
-      >
-        <span className="inline-flex min-w-0 items-center gap-1.5">
-          <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground/45" />
-          <span className="shrink-0 font-medium text-muted-foreground/75">
-            Work log{countLabel}
+      <div className="space-y-2">
+        <SubagentGroupSection entries={subagentEntries} />
+        <button
+          type="button"
+          className="flex w-full items-center justify-between gap-2 rounded-lg border border-border/35 bg-card/15 px-2.5 py-1.5 text-left text-[11px] text-muted-foreground/70 transition-colors hover:border-border/60 hover:bg-card/25 hover:text-foreground/80"
+          data-historical-work-log-row="collapsed"
+          onClick={() => setIsExpanded(true)}
+        >
+          <span className="inline-flex min-w-0 items-center gap-1.5">
+            <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground/45" />
+            <span className="shrink-0 font-medium text-muted-foreground/75">
+              Work log{countLabel}
+            </span>
+            <span className="truncate text-muted-foreground/45">{compactSummary}</span>
           </span>
-          <span className="truncate text-muted-foreground/45">{compactSummary}</span>
-        </span>
-        <span className="shrink-0 text-[10px] uppercase tracking-[0.12em] text-muted-foreground/45">
-          Expand
-        </span>
-      </button>
+          <span className="shrink-0 text-[10px] uppercase tracking-[0.12em] text-muted-foreground/45">
+            Expand
+          </span>
+        </button>
+      </div>
     );
   }
 
   return (
-    <div
-      className="rounded-xl border border-border/45 bg-card/20 px-2 py-1.5"
-      data-historical-work-log-row="expanded"
+    <div className="space-y-2">
+      <SubagentGroupSection entries={subagentEntries} />
+      <div
+        className="rounded-xl border border-border/45 bg-card/20 px-2 py-1.5"
+        data-historical-work-log-row="expanded"
+      >
+        <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
+          <button
+            type="button"
+            className="inline-flex min-w-0 items-center gap-1.5 text-[9px] uppercase tracking-[0.16em] text-muted-foreground/60 transition-colors hover:text-foreground/75"
+            onClick={() => setIsExpanded(false)}
+          >
+            <ChevronDownIcon className="size-3 shrink-0" />
+            <span>Work log{countLabel}</span>
+          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            {canShowAll ? (
+              <button
+                type="button"
+                className="text-[9px] uppercase tracking-[0.12em] text-muted-foreground/55 transition-colors duration-150 hover:text-foreground/75 disabled:opacity-45"
+                disabled={isLoadingOlder}
+                onClick={loadAllPages}
+              >
+                Show all
+              </button>
+            ) : null}
+            {hasOlder ? (
+              <button
+                type="button"
+                className="text-[9px] uppercase tracking-[0.12em] text-muted-foreground/55 transition-colors duration-150 hover:text-foreground/75 disabled:opacity-45"
+                disabled={isLoadingOlder}
+                onClick={loadOlderPage}
+              >
+                {isLoadingOlder ? "Loading..." : "Show older"}
+              </button>
+            ) : null}
+          </div>
+        </div>
+        {isLoading && visibleEntries.length === 0 ? (
+          <p className="px-0.5 py-1 text-[11px] text-muted-foreground/50">Loading work log...</p>
+        ) : visibleEntries.length === 0 ? (
+          <p className="px-0.5 py-1 text-[11px] text-muted-foreground/50">
+            No command or tool entries in this loaded activity page.
+          </p>
+        ) : (
+          <div className="space-y-0.5">
+            {visibleEntries.map((workEntry) => (
+              <SimpleWorkEntryRow
+                key={`historical-work-row:${workEntry.id}`}
+                workEntry={workEntry}
+                workspaceRoot={workspaceRoot}
+              />
+            ))}
+          </div>
+        )}
+        {loadError ? (
+          <p className="mt-1 px-0.5 text-[10px] text-destructive/75">{loadError}</p>
+        ) : null}
+      </div>
+    </div>
+  );
+});
+
+const SubagentGroupSection = memo(function SubagentGroupSection(props: {
+  readonly entries: ReadonlyArray<SubagentRosterEntry>;
+}) {
+  const { onOpenSubagentDetail } = use(TimelineRowCtx);
+  const { subagentDetailOpen } = use(TimelineRowActivityCtx);
+  if (props.entries.length === 0) return null;
+
+  return (
+    <section
+      aria-label={`${props.entries.length} ${props.entries.length === 1 ? "subagent" : "subagents"}`}
+      className="rounded-xl border border-border/45 bg-card/25 px-2 py-1.5"
+      data-subagent-turn-group="true"
     >
-      <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
+      <p className="mb-1 px-0.5 text-[9px] uppercase tracking-[0.16em] text-muted-foreground/55">
+        Subagents ({props.entries.length})
+      </p>
+      <div className="space-y-0.5">
+        {props.entries.map((entry) => (
+          <SubagentRosterRow
+            key={`subagent-row:${entry.id}`}
+            entry={entry}
+            paused={subagentDetailOpen}
+            onOpen={onOpenSubagentDetail}
+          />
+        ))}
+      </div>
+    </section>
+  );
+});
+
+const WORK_LOG_FOLLOW_THRESHOLD_PX = 32;
+
+/**
+ * A long expanded Work Log is the only inner scroller in the turn row. It
+ * follows its tail while the reader stays at the bottom, but never steals the
+ * viewport after they scroll upward to inspect an older command.
+ */
+const IntentAwareWorkLogList = memo(function IntentAwareWorkLogList(props: {
+  readonly entries: ReadonlyArray<WorkLogEntry>;
+  readonly scrollable: boolean;
+  readonly workspaceRoot: string | undefined;
+}) {
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const [following, setFollowing] = useState(true);
+  const [newEntries, setNewEntries] = useState(0);
+  const priorLastIdRef = useRef<string | null>(null);
+  const lastId = props.entries.at(-1)?.id ?? null;
+
+  useLayoutEffect(() => {
+    const scroller = scrollerRef.current;
+    const changed = priorLastIdRef.current !== null && priorLastIdRef.current !== lastId;
+    priorLastIdRef.current = lastId;
+    if (!scroller || !props.scrollable) return;
+    if (following) {
+      scroller.scrollTop = scroller.scrollHeight;
+      setNewEntries(0);
+    } else if (changed) {
+      setNewEntries((count) => count + 1);
+    }
+  }, [following, lastId, props.entries.length, props.scrollable]);
+
+  const jumpToLatest = () => {
+    const scroller = scrollerRef.current;
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    setFollowing(true);
+    setNewEntries(0);
+  };
+
+  return (
+    <div className="relative min-h-0">
+      <div
+        ref={scrollerRef}
+        className={cn(
+          "space-y-0.5",
+          props.scrollable &&
+            "max-h-[min(22rem,45vh)] overflow-y-auto overscroll-contain pr-1 [scrollbar-gutter:stable]",
+        )}
+        data-work-log-scroll={props.scrollable ? "true" : undefined}
+        onScroll={(event) => {
+          if (!props.scrollable) return;
+          const node = event.currentTarget;
+          const atBottom =
+            node.scrollHeight - node.scrollTop - node.clientHeight <= WORK_LOG_FOLLOW_THRESHOLD_PX;
+          setFollowing(atBottom);
+          if (atBottom) setNewEntries(0);
+        }}
+      >
+        {props.entries.map((workEntry) => (
+          <OrdinaryWorkEntryRow
+            key={`work-row:${workEntry.id}`}
+            workEntry={workEntry}
+            workspaceRoot={props.workspaceRoot}
+          />
+        ))}
+      </div>
+      {newEntries > 0 ? (
         <button
           type="button"
-          className="inline-flex min-w-0 items-center gap-1.5 text-[9px] uppercase tracking-[0.16em] text-muted-foreground/60 transition-colors hover:text-foreground/75"
-          onClick={() => setIsExpanded(false)}
+          className="absolute bottom-1 left-1/2 -translate-x-1/2 rounded-full border border-border/60 bg-card/95 px-2.5 py-1 text-[10px] text-foreground shadow-sm"
+          data-work-log-jump-to-latest="true"
+          onClick={jumpToLatest}
         >
-          <ChevronDownIcon className="size-3 shrink-0" />
-          <span>Work log{countLabel}</span>
+          {newEntries} new · Jump to latest
         </button>
-        <div className="flex shrink-0 items-center gap-2">
-          {canShowAll ? (
-            <button
-              type="button"
-              className="text-[9px] uppercase tracking-[0.12em] text-muted-foreground/55 transition-colors duration-150 hover:text-foreground/75 disabled:opacity-45"
-              disabled={isLoadingOlder}
-              onClick={loadAllPages}
-            >
-              Show all
-            </button>
-          ) : null}
-          {hasOlder ? (
-            <button
-              type="button"
-              className="text-[9px] uppercase tracking-[0.12em] text-muted-foreground/55 transition-colors duration-150 hover:text-foreground/75 disabled:opacity-45"
-              disabled={isLoadingOlder}
-              onClick={loadOlderPage}
-            >
-              {isLoadingOlder ? "Loading..." : "Show older"}
-            </button>
-          ) : null}
-        </div>
-      </div>
-      {isLoading && visibleEntries.length === 0 ? (
-        <p className="px-0.5 py-1 text-[11px] text-muted-foreground/50">Loading work log...</p>
-      ) : (
-        <div className="space-y-0.5">
-          {visibleEntries.map((workEntry) => (
-            <SimpleWorkEntryRow
-              key={`historical-work-row:${workEntry.id}`}
-              workEntry={workEntry}
-              workspaceRoot={workspaceRoot}
-            />
-          ))}
-        </div>
-      )}
-      {loadError ? (
-        <p className="mt-1 px-0.5 text-[10px] text-destructive/75">{loadError}</p>
       ) : null}
     </div>
   );
@@ -1761,57 +1934,50 @@ const WorkGroupSection = memo(function WorkGroupSection({
   const { workspaceRoot } = use(TimelineRowCtx);
   const [isExpanded, setIsExpanded] = useState(false);
   const ordinaryEntries = groupedEntries.filter((entry) => !entry.subagent);
-  const subagentCount = groupedEntries.length - ordinaryEntries.length;
-  const hasOverflow = ordinaryEntries.length > MAX_VISIBLE_WORK_LOG_ENTRIES;
-  const collapsedOrdinaryIds = new Set(
-    ordinaryEntries.slice(-MAX_VISIBLE_WORK_LOG_ENTRIES).map((entry) => entry.id),
+  const subagentEntries = groupedEntries.filter(
+    (entry): entry is SubagentRosterEntry => entry.subagent !== undefined,
   );
+  const hasOverflow = ordinaryEntries.length > MAX_VISIBLE_WORK_LOG_ENTRIES;
   const visibleEntries =
     hasOverflow && !isExpanded
-      ? groupedEntries.filter(
-          (entry) => entry.subagent !== undefined || collapsedOrdinaryIds.has(entry.id),
-        )
-      : groupedEntries;
-  const hiddenCount =
-    ordinaryEntries.length - Math.min(ordinaryEntries.length, MAX_VISIBLE_WORK_LOG_ENTRIES);
-  const onlyToolEntries = groupedEntries.every((entry) => entry.tone === "tool");
+      ? ordinaryEntries.slice(-MAX_VISIBLE_WORK_LOG_ENTRIES)
+      : ordinaryEntries;
+  const hiddenCount = ordinaryEntries.length - visibleEntries.length;
+  const onlyToolEntries = ordinaryEntries.every((entry) => entry.tone === "tool");
   const showHeader = hasOverflow || !onlyToolEntries;
   const groupLabel = onlyToolEntries ? "Tool calls" : "Work log";
 
   return (
-    <div className="rounded-xl border border-border/45 bg-card/25 px-2 py-1.5">
-      {showHeader && (
-        <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
-          <p className="text-[9px] uppercase tracking-[0.16em] text-muted-foreground/55">
-            {groupLabel} ({groupedEntries.length})
-          </p>
-          {hasOverflow && (
-            <button
-              type="button"
-              className="text-[9px] uppercase tracking-[0.12em] text-muted-foreground/55 transition-colors duration-150 hover:text-foreground/75"
-              onClick={() => setIsExpanded((v) => !v)}
-            >
-              {isExpanded ? "Show less" : `Show ${hiddenCount} more`}
-            </button>
-          )}
-        </div>
-      )}
-      <div
-        className={cn(
-          "space-y-0.5",
-          subagentCount > 0 &&
-            "max-h-[min(22rem,45vh)] overflow-y-auto overscroll-contain pr-1 [scrollbar-gutter:stable]",
-        )}
-        data-subagent-work-log={subagentCount > 0 ? "true" : undefined}
-      >
-        {visibleEntries.map((workEntry) => (
-          <SimpleWorkEntryRow
-            key={`work-row:${workEntry.id}`}
-            workEntry={workEntry}
+    <div className="space-y-2" data-turn-activity-groups="true">
+      <SubagentGroupSection entries={subagentEntries} />
+      {ordinaryEntries.length > 0 ? (
+        <section
+          className="rounded-xl border border-border/45 bg-card/25 px-2 py-1.5"
+          data-work-log="true"
+        >
+          {showHeader ? (
+            <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
+              <p className="text-[9px] uppercase tracking-[0.16em] text-muted-foreground/55">
+                {groupLabel} ({ordinaryEntries.length})
+              </p>
+              {hasOverflow ? (
+                <button
+                  type="button"
+                  className="text-[9px] uppercase tracking-[0.12em] text-muted-foreground/55 transition-colors duration-150 hover:text-foreground/75"
+                  onClick={() => setIsExpanded((value) => !value)}
+                >
+                  {isExpanded ? "Show less" : `Show ${hiddenCount} more`}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          <IntentAwareWorkLogList
+            entries={visibleEntries}
+            scrollable={hasOverflow && isExpanded}
             workspaceRoot={workspaceRoot}
           />
-        ))}
-      </div>
+        </section>
+      ) : null}
     </div>
   );
 });
@@ -2087,188 +2253,11 @@ function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
   return capitalizePhrase(normalizeCompactToolLabel(workEntry.toolTitle));
 }
 
-function subagentStatusLabel(status: NonNullable<TimelineWorkEntry["subagent"]>["status"]): string {
-  switch (status) {
-    case "waiting":
-      return "Waiting";
-    case "active":
-      return "Working";
-    case "failed":
-      return "Failed";
-    case "stopped":
-      return "Stopped";
-    default:
-      return "Done";
-  }
-}
-
-function liveSubagentElapsed(startedAt: string, now: number): string {
-  const timestamp = Date.parse(startedAt);
-  return Number.isNaN(timestamp) ? "" : formatDuration(Math.max(0, now - timestamp));
-}
-
-const LIVE_SUBAGENT_CLOCK_INTERVAL_MS = 1_000;
-type LiveSubagentClockListener = (now: number) => void;
-const liveSubagentClockListeners = new Set<LiveSubagentClockListener>();
-let liveSubagentClockInterval: number | null = null;
-
-function stopLiveSubagentClock(): void {
-  if (liveSubagentClockInterval === null) return;
-  window.clearInterval(liveSubagentClockInterval);
-  liveSubagentClockInterval = null;
-}
-
-function emitLiveSubagentClockTick(): void {
-  const now = Date.now();
-  for (const listener of liveSubagentClockListeners) listener(now);
-}
-
-/**
- * Reconcile the one shared elapsed-time clock with document visibility.
- *
- * A long chat can retain many completed children alongside several live ones.
- * Keeping the clock outside the work-group component prevents every group and
- * terminal row from rerendering once per second. The clock exists only while a
- * mounted live elapsed label needs it, and a background tab owns no interval.
- */
-function reconcileLiveSubagentClock(): void {
-  if (liveSubagentClockListeners.size === 0 || document.visibilityState !== "visible") {
-    stopLiveSubagentClock();
-    return;
-  }
-  if (liveSubagentClockInterval !== null) return;
-
-  emitLiveSubagentClockTick();
-  liveSubagentClockInterval = window.setInterval(
-    emitLiveSubagentClockTick,
-    LIVE_SUBAGENT_CLOCK_INTERVAL_MS,
-  );
-}
-
-function onLiveSubagentClockVisibilityChange(): void {
-  reconcileLiveSubagentClock();
-}
-
-function subscribeLiveSubagentClock(listener: LiveSubagentClockListener): () => void {
-  liveSubagentClockListeners.add(listener);
-  if (liveSubagentClockListeners.size === 1) {
-    document.addEventListener("visibilitychange", onLiveSubagentClockVisibilityChange);
-  }
-  reconcileLiveSubagentClock();
-
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    liveSubagentClockListeners.delete(listener);
-    if (liveSubagentClockListeners.size === 0) {
-      document.removeEventListener("visibilitychange", onLiveSubagentClockVisibilityChange);
-      stopLiveSubagentClock();
-    }
-  };
-}
-
-const LiveSubagentElapsed = memo(function LiveSubagentElapsed({
-  startedAt,
-  paused,
-}: {
-  startedAt: string;
-  paused: boolean;
-}) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => (paused ? undefined : subscribeLiveSubagentClock(setNow)), [paused]);
-  const elapsed = liveSubagentElapsed(startedAt, now);
-  return elapsed ? (
-    <p
-      className="mt-0.5 font-mono text-[10px] text-muted-foreground/65"
-      data-subagent-live-elapsed="true"
-    >
-      {elapsed}
-    </p>
-  ) : null;
-});
-
-const SubagentWorkEntryRow = memo(function SubagentWorkEntryRow({
-  workEntry,
-}: {
-  workEntry: TimelineWorkEntry;
-}) {
-  const { onOpenSubagentDetail } = use(TimelineRowCtx);
-  const { subagentDetailOpen } = use(TimelineRowActivityCtx);
-  const subagent = workEntry.subagent;
-  if (!subagent) return null;
-  const statusLabel = subagentStatusLabel(subagent.status);
-  const terminalElapsed = subagent.completedAt
-    ? formatElapsed(subagent.startedAt, subagent.completedAt)
-    : null;
-  const primaryDescription =
-    subagent.description ??
-    subagent.objective ??
-    (subagent.status === "waiting" ? "Waiting" : "Working");
-  const objectiveDescription =
-    subagent.objective &&
-    subagent.description &&
-    subagent.objective.toLocaleLowerCase() !== subagent.description.toLocaleLowerCase() &&
-    !/^working(?:\.{3})?$/iu.test(subagent.objective)
-      ? subagent.objective
-      : null;
-
-  return (
-    <button
-      type="button"
-      className="grid min-h-11 w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2.5 rounded-lg px-1 py-2 text-left transition-colors hover:bg-muted/35 focus-visible:bg-muted/35 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-      data-subagent-work-row="true"
-      aria-label={`${subagent.label}, ${statusLabel}. ${primaryDescription}. Open details`}
-      onClick={(event) => onOpenSubagentDetail(workEntry, event.currentTarget)}
-    >
-      <SubagentAvatar seed={subagent.id} className="size-7 sm:size-8" />
-      <div className="min-w-0 pt-0.5">
-        <p className="truncate text-xs leading-4 font-medium text-foreground/90">
-          {subagent.label}
-        </p>
-        <p
-          className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground/70 break-words"
-          data-subagent-description="true"
-        >
-          {primaryDescription}
-        </p>
-        {objectiveDescription ? (
-          <p className="mt-0.5 line-clamp-2 text-[10px] leading-4 text-muted-foreground/50 break-words">
-            {objectiveDescription}
-          </p>
-        ) : null}
-      </div>
-      <div className="flex shrink-0 items-start gap-1 pt-0.5">
-        <div className="min-w-14 text-right tabular-nums">
-          <p className="text-[9px] uppercase tracking-[0.08em] text-muted-foreground/55">
-            {statusLabel}
-          </p>
-          {subagent.status === "active" || subagent.status === "waiting" ? (
-            <LiveSubagentElapsed startedAt={subagent.startedAt} paused={subagentDetailOpen} />
-          ) : terminalElapsed ? (
-            <p
-              className="mt-0.5 font-mono text-[10px] text-muted-foreground/55"
-              data-subagent-terminal-elapsed="true"
-            >
-              {terminalElapsed}
-            </p>
-          ) : null}
-        </div>
-        <ChevronRightIcon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground/35" />
-      </div>
-    </button>
-  );
-});
-
 const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   workEntry: TimelineWorkEntry;
   workspaceRoot: string | undefined;
 }) {
-  return props.workEntry.subagent ? (
-    <SubagentWorkEntryRow workEntry={props.workEntry} />
-  ) : (
-    <OrdinaryWorkEntryRow {...props} />
-  );
+  return <OrdinaryWorkEntryRow {...props} />;
 });
 
 const OrdinaryWorkEntryRow = memo(function OrdinaryWorkEntryRow(props: {

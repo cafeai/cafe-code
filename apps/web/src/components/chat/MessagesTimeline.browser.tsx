@@ -2,6 +2,7 @@ import "../../index.css";
 
 import {
   EnvironmentId,
+  EventId,
   MessageId,
   ProviderDriverKind,
   ThreadId,
@@ -101,6 +102,7 @@ vi.mock("@legendapp/list/react", async () => {
 });
 
 import { MessagesTimeline } from "./MessagesTimeline";
+import type { SubagentDetailSelection } from "./SubagentDetailView";
 
 const MESSAGE_CREATED_AT = "2026-04-13T12:00:00.000Z";
 
@@ -202,6 +204,9 @@ function buildSubagentWorkEntry(input: {
   status: "active" | "waiting" | "completed" | "failed" | "stopped";
   startedAt?: string;
   completedAt?: string;
+  updatedAt?: string;
+  lifecycleRevision?: string;
+  historyId?: string;
   description?: string;
   objective?: string;
 }) {
@@ -231,6 +236,9 @@ function buildSubagentWorkEntry(input: {
         description: input.description ?? `${input.label} progress`,
         status: input.status,
         startedAt,
+        updatedAt: input.updatedAt ?? startedAt,
+        lifecycleRevision: input.lifecycleRevision ?? `revision:${input.id}`,
+        ...(input.historyId ? { historyId: input.historyId } : {}),
         ...(input.completedAt ? { completedAt: input.completedAt } : {}),
       },
     },
@@ -396,19 +404,33 @@ describe("MessagesTimeline", () => {
     const terminalTurnId = TurnId.make("cafe-turn-terminal-1");
     const getThreadTurnSubagentDetail = vi.fn(
       async (_input: { threadId: ThreadId; turnId: TurnId; subagentId: string }) => ({
-        provider: "codex" as const,
+        provider: ProviderDriverKind.make("codex"),
         messages: [
           {
+            key: "assignment",
             role: "user" as const,
             text: "Audit **scoped input** and preserve `safe.md`.",
           },
           {
+            key: "progress",
             role: "assistant" as const,
             text: "Progress: the bounded provider transcript is available.",
+            omission: {
+              tail: "Newest progress remains visible after the middle omission.",
+              omittedUtf8Bytes: 2_048,
+            },
           },
           {
+            key: "result",
             role: "assistant" as const,
             text: "## Result\n\nCompleted **safely** with bounded output.",
+          },
+        ],
+        gaps: [
+          {
+            afterMessageKey: "assignment",
+            omittedMessages: 7,
+            omittedUtf8Bytes: 4_096,
           },
         ],
         truncated: true,
@@ -419,10 +441,11 @@ describe("MessagesTimeline", () => {
     const activeEntry = buildSubagentWorkEntry({
       id: "subagent-active-detail",
       label: "Active detail worker",
-      subagentId: "codex-child-active-exact",
+      subagentId: " codex-child-active-exact ",
       turnId: activeTurnId,
       status: "active",
       description: "Indexing the scoped provider transcript",
+      historyId: " history  id-preserved-exactly ",
     });
     const terminalEntry = buildSubagentWorkEntry({
       id: "subagent-terminal-detail",
@@ -460,7 +483,8 @@ describe("MessagesTimeline", () => {
         expect(getThreadTurnSubagentDetail).toHaveBeenCalledWith({
           threadId,
           turnId: activeTurnId,
-          subagentId: "codex-child-active-exact",
+          subagentId: " codex-child-active-exact ",
+          historyId: " history  id-preserved-exactly ",
         });
       });
 
@@ -475,11 +499,9 @@ describe("MessagesTimeline", () => {
       await expect.element(page.getByText("safe.md", { exact: true })).toBeVisible();
       await expect.element(page.getByRole("heading", { name: "Result" })).toBeVisible();
       await expect.element(page.getByText("safely", { exact: true })).toBeVisible();
-      await expect
-        .element(
-          page.getByText("This long subagent history was shortened to keep the chat responsive."),
-        )
-        .toBeVisible();
+      await expect.element(page.getByText(/7 intermediate updates omitted/)).toBeVisible();
+      await expect.element(page.getByText(/2,048 bytes omitted from the middle/)).toBeVisible();
+      await expect.element(page.getByText(/Newest progress remains visible/)).toBeVisible();
 
       const backButton = document.querySelector<HTMLButtonElement>(
         'button[aria-label="Back to conversation"]',
@@ -506,13 +528,315 @@ describe("MessagesTimeline", () => {
     }
   });
 
+  it("refreshes an open live detail on provider lifecycle revisions", async () => {
+    const threadId = ThreadId.make("cafe-thread-live-detail");
+    const turnId = TurnId.make("cafe-turn-live-detail");
+    const getThreadTurnSubagentDetail = vi.fn(async () => {
+      const revision = getThreadTurnSubagentDetail.mock.calls.length;
+      return {
+        provider: ProviderDriverKind.make("codex"),
+        messages: [
+          {
+            key: `update-${revision}`,
+            role: "assistant" as const,
+            text: revision === 1 ? "Initial live update" : "Latest live update",
+          },
+        ],
+        gaps: [],
+        truncated: false,
+      };
+    });
+    setSubagentDetailApi(getThreadTurnSubagentDetail);
+    const props = buildProps();
+    const first = buildSubagentWorkEntry({
+      id: "subagent-live-detail",
+      label: "Live detail worker",
+      subagentId: "codex-child-live-detail",
+      turnId,
+      status: "active",
+      updatedAt: "2026-04-13T12:00:01.000Z",
+      lifecycleRevision: "sequence:1:first",
+    });
+    const screen = await render(
+      <MessagesTimeline {...props} activeThreadId={threadId} timelineEntries={[first]} />,
+    );
+
+    try {
+      await page.getByRole("button", { name: /^Live detail worker, Working\./ }).click();
+      await expect.element(page.getByText("Initial live update", { exact: true })).toBeVisible();
+
+      const revised = buildSubagentWorkEntry({
+        id: "subagent-live-detail",
+        label: "Live detail worker",
+        subagentId: "codex-child-live-detail",
+        turnId,
+        status: "active",
+        // Wall-clock timestamps can collide across a burst; the durable
+        // lifecycle revision must still invalidate the open transcript.
+        updatedAt: "2026-04-13T12:00:01.000Z",
+        lifecycleRevision: "sequence:2:second",
+      });
+      await screen.rerender(
+        <MessagesTimeline {...props} activeThreadId={threadId} timelineEntries={[revised]} />,
+      );
+      const coalesced = buildSubagentWorkEntry({
+        id: "subagent-live-detail",
+        label: "Live detail worker",
+        subagentId: "codex-child-live-detail",
+        turnId,
+        status: "active",
+        updatedAt: "2026-04-13T12:00:01.000Z",
+        lifecycleRevision: "sequence:3:third",
+      });
+      await screen.rerender(
+        <MessagesTimeline {...props} activeThreadId={threadId} timelineEntries={[coalesced]} />,
+      );
+      await vi.waitFor(() => expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(2), {
+        timeout: 2_500,
+      });
+      await expect.element(page.getByText("Latest live update", { exact: true })).toBeVisible();
+      expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(2);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("remounts detail state when a controlled selection changes between equal-timestamp workers", async () => {
+    const environmentId = EnvironmentId.make("environment-local");
+    const threadId = ThreadId.make("cafe-thread-switch-detail");
+    const turnId = TurnId.make("cafe-turn-switch-detail");
+    const first = buildSubagentWorkEntry({
+      id: "subagent-switch-first",
+      label: "First detail worker",
+      subagentId: "child-switch-first",
+      turnId,
+      status: "completed",
+      completedAt: "2026-04-13T12:00:10.000Z",
+    });
+    const second = buildSubagentWorkEntry({
+      id: "subagent-switch-second",
+      label: "Second detail worker",
+      subagentId: "child-switch-second",
+      turnId,
+      status: "completed",
+      completedAt: "2026-04-13T12:00:10.000Z",
+    });
+    const selection = (
+      entry: ReturnType<typeof buildSubagentWorkEntry>,
+    ): SubagentDetailSelection => ({
+      environmentId,
+      threadId,
+      rowId: entry.entry.id,
+      turnId,
+      workEntry: entry.entry,
+    });
+    const getThreadTurnSubagentDetail = vi.fn(async (request: { readonly subagentId: string }) => {
+      if (request.subagentId === "child-switch-second") {
+        throw new Error("second history is transiently unavailable");
+      }
+      return {
+        provider: ProviderDriverKind.make("codex"),
+        messages: [
+          {
+            key: "first-private-result",
+            role: "assistant" as const,
+            text: "First worker transcript must not leak into the second selection",
+          },
+        ],
+        gaps: [],
+        truncated: false,
+      };
+    });
+    setSubagentDetailApi(getThreadTurnSubagentDetail);
+    const props = buildProps();
+    const screen = await render(
+      <MessagesTimeline
+        {...props}
+        activeThreadId={threadId}
+        timelineEntries={[first, second]}
+        selectedSubagent={selection(first)}
+        onCloseSubagentDetail={vi.fn()}
+      />,
+    );
+
+    try {
+      await expect
+        .element(
+          page.getByText("First worker transcript must not leak into the second selection", {
+            exact: true,
+          }),
+        )
+        .toBeVisible();
+
+      await screen.rerender(
+        <MessagesTimeline
+          {...props}
+          activeThreadId={threadId}
+          timelineEntries={[first, second]}
+          selectedSubagent={selection(second)}
+          onCloseSubagentDetail={vi.fn()}
+        />,
+      );
+
+      await vi.waitFor(() => {
+        expect(document.querySelector('[data-subagent-detail-unavailable="true"]')).not.toBeNull();
+      });
+      expect(document.body.textContent).not.toContain(
+        "First worker transcript must not leak into the second selection",
+      );
+      expect(
+        document.querySelector('[aria-label="Subagent detail: Second detail worker"]'),
+      ).not.toBeNull();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("does not reinterpret Claude private-use text as Codex citations", async () => {
+    const threadId = ThreadId.make("cafe-thread-claude-citations");
+    const turnId = TurnId.make("cafe-turn-claude-citations");
+    const markerText = "Claude literal \uE200cite\uE202turn4search3\uE201 remains provider text.";
+    setSubagentDetailApi(async () => ({
+      provider: ProviderDriverKind.make("claudeAgent"),
+      messages: [{ key: "claude-private-use", role: "assistant", text: markerText }],
+      gaps: [],
+      truncated: false,
+    }));
+    const entry = buildSubagentWorkEntry({
+      id: "subagent-claude-citations",
+      label: "Claude citation worker",
+      subagentId: "claude-child-citation",
+      turnId,
+      status: "completed",
+      completedAt: "2026-04-13T12:00:10.000Z",
+    });
+    const props = buildProps();
+    const screen = await render(
+      <MessagesTimeline
+        {...props}
+        activeProvider={ProviderDriverKind.make("claudeAgent")}
+        activeThreadId={threadId}
+        timelineEntries={[entry]}
+      />,
+    );
+
+    try {
+      await page.getByRole("button", { name: /^Claude citation worker, Done\./ }).click();
+      await vi.waitFor(() => {
+        const message = document.querySelector<HTMLElement>(
+          '[data-subagent-detail-message="assistant"]',
+        );
+        expect(message?.textContent).toContain(markerText);
+        expect(message?.textContent).not.toContain("Claude literal [1]");
+      });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps the snapshot subagent roster while excluding lifecycle rows from historical Work Log", async () => {
+    const threadId = ThreadId.make("cafe-thread-historical-subagents");
+    const turnId = TurnId.make("cafe-turn-historical-subagents");
+    const snapshotEntry = buildSubagentWorkEntry({
+      id: "snapshot-historical-worker",
+      label: "Historical roster worker",
+      subagentId: "historical-child-exact",
+      turnId,
+      status: "completed",
+      updatedAt: "2026-04-13T12:00:20.000Z",
+      completedAt: "2026-04-13T12:00:20.000Z",
+      description: "Complete snapshot description survives bounded paging",
+    }).entry;
+    const rawLifecycleActivity = {
+      id: EventId.make("raw-historical-subagent-start"),
+      sequence: 1,
+      turnId,
+      createdAt: "2026-04-13T12:00:01.000Z",
+      kind: "task.started",
+      summary: "Subagent started",
+      tone: "info" as const,
+      payload: {
+        taskId: "historical-child-exact",
+        taskType: "subagent",
+        detail: "Older partial lifecycle page",
+        subagent: {
+          threadId: "historical-child-exact",
+          label: "Historical roster worker",
+          status: "active",
+          startedAt: "2026-04-13T12:00:01.000Z",
+        },
+      },
+    };
+    const getThreadTurnActivityPage = vi.fn(async (input: { offset: number; limit: number }) => ({
+      threadId,
+      turnId,
+      offset: input.offset,
+      limit: input.limit,
+      totalCount: 1,
+      activities: [rawLifecycleActivity],
+    }));
+    __setEnvironmentApiOverrideForTests(EnvironmentId.make("environment-local"), {
+      orchestration: { getThreadTurnActivityPage },
+    } as unknown as EnvironmentApi);
+    const screen = await render(
+      <MessagesTimeline
+        {...buildProps()}
+        activeThreadId={threadId}
+        timelineEntries={[buildAssistantTimelineEntry({ turnId })]}
+        historicalWorkLogSummariesByTurnId={
+          new Map([
+            [
+              turnId,
+              {
+                turnId,
+                previewEntries: [],
+                snapshotEntryCount: 0,
+                subagentEntries: [snapshotEntry],
+              },
+            ],
+          ])
+        }
+      />,
+    );
+
+    try {
+      await expect
+        .element(
+          page.getByText("Complete snapshot description survives bounded paging", {
+            exact: true,
+          }),
+        )
+        .toBeVisible();
+      await page.getByRole("button", { name: /Work log/ }).click();
+      await vi.waitFor(() => expect(getThreadTurnActivityPage).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => {
+        expect(document.querySelector("[data-historical-work-log-row]")).toBeNull();
+      });
+      expect(
+        page.getByText("Complete snapshot description survives bounded paging", { exact: true }),
+      ).toBeDefined();
+      expect(
+        document.body.textContent?.match(/Complete snapshot description survives bounded paging/g),
+      ).toHaveLength(1);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("closes subagent history when the owning conversation changes without reusing provider ids", async () => {
     const sourceThreadId = ThreadId.make("cafe-thread-detail-source");
     const destinationThreadId = ThreadId.make("cafe-thread-detail-destination");
     const turnId = TurnId.make("cafe-turn-detail-source");
     const getThreadTurnSubagentDetail = vi.fn(async () => ({
-      provider: "codex" as const,
-      messages: [{ role: "assistant" as const, text: "Scoped source-thread result." }],
+      provider: ProviderDriverKind.make("codex"),
+      messages: [
+        {
+          key: "scoped-result",
+          role: "assistant" as const,
+          text: "Scoped source-thread result.",
+        },
+      ],
+      gaps: [],
       truncated: false,
     }));
     setSubagentDetailApi(getThreadTurnSubagentDetail);
@@ -559,7 +883,21 @@ describe("MessagesTimeline", () => {
     const threadId = ThreadId.make("cafe-thread-unavailable-1");
     const turnId = TurnId.make("cafe-turn-unavailable-1");
     const getThreadTurnSubagentDetail = vi.fn(async () => {
-      throw new Error("private provider transport detail");
+      if (getThreadTurnSubagentDetail.mock.calls.length === 1) {
+        throw new Error("private provider transport detail");
+      }
+      return {
+        provider: ProviderDriverKind.make("codex"),
+        messages: [
+          {
+            key: "retried-result",
+            role: "assistant" as const,
+            text: "Recovered bounded transcript",
+          },
+        ],
+        gaps: [],
+        truncated: false,
+      };
     });
     setSubagentDetailApi(getThreadTurnSubagentDetail);
     const terminalEntry = buildSubagentWorkEntry({
@@ -597,9 +935,14 @@ describe("MessagesTimeline", () => {
       expect(detail?.textContent).toContain("The durable objective remains visible");
       const elapsed = document.querySelector<HTMLElement>('[data-subagent-detail-elapsed="true"]');
       expect(elapsed?.textContent).toBe("Worked for 10s");
-      document.dispatchEvent(new Event("visibilitychange"));
       expect(elapsed?.textContent).toBe("Worked for 10s");
       expect(document.body.textContent).not.toContain("private provider transport detail");
+
+      await page.getByRole("button", { name: "Retry" }).click();
+      await expect
+        .element(page.getByText("Recovered bounded transcript", { exact: true }))
+        .toBeVisible();
+      expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(2);
     } finally {
       await screen.unmount();
     }
@@ -611,12 +954,14 @@ describe("MessagesTimeline", () => {
     const threadId = ThreadId.make("cafe-thread-mobile-1");
     const turnId = TurnId.make("cafe-turn-mobile-1");
     const longMessages = Array.from({ length: 18 }, (_, index) => ({
+      key: `message-${index}`,
       role: index === 0 ? ("user" as const) : ("assistant" as const),
       text: `### ${index === 0 ? "Assignment" : `Update ${index}`}\n\n${`Bounded responsive detail ${index} stays readable and wraps inside the chat pane. `.repeat(12)}`,
     }));
     setSubagentDetailApi(async () => ({
-      provider: "codex",
+      provider: ProviderDriverKind.make("codex"),
       messages: longMessages,
+      gaps: [],
       truncated: false,
     }));
     const entry = buildSubagentWorkEntry({

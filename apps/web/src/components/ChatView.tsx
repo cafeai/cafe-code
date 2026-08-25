@@ -54,11 +54,14 @@ import {
   deriveActivePlanState,
   findSidebarProposedPlan,
   findLatestProposedPlan,
+  deriveActiveSubagentWorkEntries,
   deriveWorkLogEntries,
+  deriveSubagentWorkEntries,
   hasActionableProposedPlan,
   hasToolActivityForTurn,
   isLatestTurnSettled,
   formatElapsed,
+  type WorkLogEntry,
 } from "../session-logic";
 import { type LegendListRef } from "@legendapp/list/react";
 import {
@@ -140,6 +143,7 @@ import {
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import type { SubagentDetailSelection } from "./chat/SubagentDetailView";
 import {
   isTimelineScrolledToEnd,
   shouldPreserveTimelineScrollReviewIntent,
@@ -1896,6 +1900,8 @@ export default function ChatView(props: ChatViewProps) {
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [timelineAutoFollowTail, setTimelineAutoFollowTail] = useState(true);
   const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
+  const [selectedSubagent, setSelectedSubagent] = useState<SubagentDetailSelection | null>(null);
+  const selectedSubagentTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [threadGoalDialog, setThreadGoalDialog] =
     useState<ThreadGoalDialogRequest>(CLOSED_THREAD_GOAL_DIALOG);
   const [optimisticUserMessages, setOptimisticUserMessages] = useState<ChatMessage[]>([]);
@@ -2730,6 +2736,24 @@ export default function ChatView(props: ChatViewProps) {
         : undefined,
     );
   }, [activeLatestTurn?.state, activeLatestTurn?.turnId, threadActivities]);
+  const subagentEntries = useMemo(() => {
+    const turnId = activeLatestTurn?.turnId;
+    return deriveSubagentWorkEntries(
+      threadActivities,
+      turnId,
+      turnId && activeLatestTurn?.state !== "running"
+        ? { terminalTurnIds: new Set([turnId]) }
+        : undefined,
+    );
+  }, [activeLatestTurn?.state, activeLatestTurn?.turnId, threadActivities]);
+  const activeSubagentEntries = useMemo(
+    () =>
+      deriveActiveSubagentWorkEntries(
+        threadActivities,
+        activeLatestTurn?.state === "running" ? activeLatestTurn.turnId : null,
+      ),
+    [activeLatestTurn?.state, activeLatestTurn?.turnId, threadActivities],
+  );
   const latestTurnHasToolActivity = useMemo(
     () => hasToolActivityForTurn(threadActivities, activeLatestTurn?.turnId),
     [activeLatestTurn?.turnId, threadActivities],
@@ -3080,8 +3104,11 @@ export default function ChatView(props: ChatViewProps) {
   );
   const timelineEntries = useMemo(
     () =>
-      deriveTimelineEntries(timelineMessages, activeThread?.proposedPlans ?? [], workLogEntries),
-    [activeThread?.proposedPlans, timelineMessages, workLogEntries],
+      deriveTimelineEntries(timelineMessages, activeThread?.proposedPlans ?? [], [
+        ...workLogEntries,
+        ...subagentEntries,
+      ]),
+    [activeThread?.proposedPlans, timelineMessages, workLogEntries, subagentEntries],
   );
   const { turnDiffSummaries, inferredCheckpointTurnCountByTurnId } =
     useTurnDiffSummaries(activeThread);
@@ -6409,6 +6436,35 @@ export default function ChatView(props: ChatViewProps) {
   const onExpandTimelineImage = useCallback((preview: ExpandedImagePreview) => {
     setExpandedImage(preview);
   }, []);
+  const openSubagentDetail = useCallback(
+    (workEntry: WorkLogEntry, trigger: HTMLButtonElement) => {
+      if (!workEntry.subagent || !activeThread) return;
+      selectedSubagentTriggerRef.current = trigger;
+      setSelectedSubagent({
+        environmentId: activeThread.environmentId,
+        threadId: activeThread.id,
+        rowId: workEntry.id,
+        turnId: workEntry.turnId ?? null,
+        workEntry: { ...workEntry, subagent: workEntry.subagent },
+      });
+    },
+    [activeThread],
+  );
+  const closeSubagentDetail = useCallback(() => {
+    const trigger = selectedSubagentTriggerRef.current;
+    setSelectedSubagent(null);
+    selectedSubagentTriggerRef.current = null;
+    window.requestAnimationFrame(() => {
+      if (trigger?.isConnected) trigger.focus();
+    });
+  }, []);
+  useEffect(() => {
+    // The selected provider child is authorized within one exact Cafe thread.
+    // Clear it across navigation before another environment can reuse a
+    // provider-native id with unrelated history.
+    setSelectedSubagent(null);
+    selectedSubagentTriggerRef.current = null;
+  }, [activeThread?.environmentId, activeThread?.id]);
   // Both the Map and the revert handler are read from refs at call-time so
   // the callback reference is fully stable and never busts context identity.
   const revertTurnCountRef = useRef(revertTurnCountByUserMessageId);
@@ -6504,6 +6560,9 @@ export default function ChatView(props: ChatViewProps) {
               autoFollowTail={timelineAutoFollowTail}
               onIsAtEndChange={onIsAtEndChange}
               onUserScrollIntent={onTimelineUserScrollIntent}
+              selectedSubagent={selectedSubagent}
+              onOpenSubagentDetail={openSubagentDetail}
+              onCloseSubagentDetail={closeSubagentDetail}
               {...(desktopDebugEnabled
                 ? { onDebugScrollEvent: recordTimelineScrollDebugEvent }
                 : {})}
@@ -6570,6 +6629,8 @@ export default function ChatView(props: ChatViewProps) {
                   showPlanFollowUpPrompt={showPlanFollowUpPrompt}
                   activeProposedPlan={activeProposedPlan}
                   activePlan={composerActivePlan}
+                  activeSubagents={activeSubagentEntries}
+                  onOpenSubagentDetail={openSubagentDetail}
                   sidebarProposedPlan={visibleSidebarProposedPlan}
                   planSidebarLabel={planSidebarLabel}
                   planSidebarOpen={shouldRenderPlanSidebar}

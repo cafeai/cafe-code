@@ -26,7 +26,9 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { makeDrainableWorker } from "@cafecode/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -93,6 +95,8 @@ const BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY = 10_000;
 const BUFFERED_PROPOSED_PLAN_BY_ID_TTL = Duration.minutes(120);
 const PROCESSED_RUNTIME_EVENT_IDS_CACHE_CAPACITY = 100_000;
 const PROCESSED_RUNTIME_EVENT_IDS_TTL = Duration.minutes(120);
+const HARD_DELETED_THREAD_CACHE_CAPACITY = 10_000;
+const HARD_DELETED_THREAD_CACHE_TTL = Duration.minutes(30);
 const PROVIDER_DAEMON_RUNTIME_CURSOR_PERSIST_INTERVAL = 1_000;
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const STREAMED_MESSAGE_IDS_CACHE_CAPACITY = 20_000;
@@ -125,6 +129,10 @@ type RuntimeIngestionInput =
       source: "domain";
       event: RuntimeIngestionDomainEvent;
     };
+
+function runtimeIngestionInputThreadId(input: RuntimeIngestionInput): ThreadId {
+  return input.source === "runtime" ? input.event.threadId : input.event.payload.threadId;
+}
 
 function toTurnId(value: TurnId | string | undefined): TurnId | undefined {
   return value === undefined ? undefined : TurnId.make(String(value));
@@ -880,6 +888,7 @@ function runtimeEventToActivities(
 }
 
 const make = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
@@ -1012,6 +1021,36 @@ const make = Effect.gen(function* () {
     timeToLive: PROCESSED_RUNTIME_EVENT_IDS_TTL,
     lookup: () => Effect.succeed(true),
   });
+  const hardDeletedThreadCache = yield* Cache.make<ThreadId, boolean>({
+    capacity: HARD_DELETED_THREAD_CACHE_CAPACITY,
+    timeToLive: HARD_DELETED_THREAD_CACHE_TTL,
+    lookup: (threadId) =>
+      Effect.gen(function* () {
+        const [row] = yield* sql<{ readonly retired: number }>`
+          SELECT EXISTS (
+            SELECT 1
+            FROM hard_deleted_threads
+            WHERE thread_id = ${threadId}
+          ) AS retired
+        `;
+        // Fail closed if SQLite returns an unexpected row shape. A false
+        // negative here could let a replay mutate in-memory buffers before the
+        // database trigger rejects its eventual command.
+        return row?.retired === 1;
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("hard-delete tombstone lookup failed closed", {
+            threadId,
+            cause: Cause.pretty(cause),
+          }).pipe(Effect.as(true)),
+        ),
+      ),
+  });
+  // This set contains only deletions currently executing in this process and
+  // is removed after the engine's durable tombstone/purge succeeds. It closes
+  // the narrow race where an already-running cache lookup could otherwise
+  // publish `false` after retirement called Cache.set(true).
+  const hardDeleteRetiringThreadIds = yield* Ref.make<ReadonlySet<ThreadId>>(new Set());
 
   const resolveThreadDetail = Effect.fn("resolveThreadDetail")(function* (threadId: ThreadId) {
     return yield* projectionSnapshotQuery
@@ -2661,9 +2700,25 @@ const make = Effect.gen(function* () {
     });
 
   const processInput = (input: RuntimeIngestionInput) =>
-    input.source === "runtime"
-      ? processRuntimeEventOnce(input.event)
-      : processDomainEvent(input.event);
+    Ref.get(hardDeleteRetiringThreadIds).pipe(
+      Effect.flatMap((retiringThreadIds) =>
+        retiringThreadIds.has(runtimeIngestionInputThreadId(input))
+          ? Effect.succeed(true)
+          : Cache.get(hardDeletedThreadCache, runtimeIngestionInputThreadId(input)),
+      ),
+      Effect.flatMap((retired) => {
+        if (retired) {
+          return Effect.logDebug("skipping provider ingestion for hard-deleted thread", {
+            source: input.source,
+            threadId: runtimeIngestionInputThreadId(input),
+            eventType: input.event.type,
+          });
+        }
+        return input.source === "runtime"
+          ? processRuntimeEventOnce(input.event)
+          : processDomainEvent(input.event);
+      }),
+    );
 
   const processInputSafely = (input: RuntimeIngestionInput) =>
     processInput(input).pipe(
@@ -2681,6 +2736,40 @@ const make = Effect.gen(function* () {
     );
 
   const worker = yield* makeDrainableWorker(processInputSafely);
+
+  const retireThreadForHardDelete: ProviderRuntimeIngestionShape["retireThreadForHardDelete"] = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      // Cache.set is the ingress linearization point. The worker independently
+      // checks this cache, so an event that raced past the stream subscriber
+      // before this call is still dropped when dequeued. drain then waits for
+      // an event whose processing began before the fence.
+      yield* Ref.update(hardDeleteRetiringThreadIds, (current) => {
+        const next = new Set(current);
+        next.add(input.threadId);
+        return next;
+      });
+      yield* Cache.set(hardDeletedThreadCache, input.threadId, true);
+      activeGoalThreadIds.delete(input.threadId);
+      interruptedGoalThreadIds.delete(input.threadId);
+      goalLifecycleByThreadId.delete(input.threadId);
+      yield* worker.drain;
+    });
+
+  const completeThreadHardDelete: ProviderRuntimeIngestionShape["completeThreadHardDelete"] = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      // Cache remains the bounded steady-state index. The migration-65
+      // tombstone backs it after eviction and across process restarts.
+      yield* Cache.set(hardDeletedThreadCache, input.threadId, true);
+      yield* Ref.update(hardDeleteRetiringThreadIds, (current) => {
+        const next = new Set(current);
+        next.delete(input.threadId);
+        return next;
+      });
+    });
 
   const start: ProviderRuntimeIngestionShape["start"] = () =>
     Effect.gen(function* () {
@@ -2732,6 +2821,8 @@ const make = Effect.gen(function* () {
   return {
     start,
     drain: worker.drain,
+    retireThreadForHardDelete,
+    completeThreadHardDelete,
   } satisfies ProviderRuntimeIngestionShape;
 });
 

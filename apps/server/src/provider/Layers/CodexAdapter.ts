@@ -33,9 +33,6 @@ import {
   type ProviderSessionForkResult,
   RuntimeTaskId,
   type RuntimeSubagentPresentation,
-  THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS,
-  THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES,
-  THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_CHARS,
 } from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
@@ -73,6 +70,10 @@ import {
 } from "../Errors.ts";
 import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import type { ProviderSubagentDetail } from "../Services/ProviderAdapter.ts";
+import {
+  canonicalizeProviderSubagentDetail,
+  type ProviderSubagentPublicMessageInput,
+} from "../subagentDetail.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import {
@@ -84,13 +85,13 @@ import {
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeShape,
   type CodexTransientSubagentHistoryReadOptions,
-  type CodexThreadItem,
   type CodexThreadSnapshot,
   type CodexTransportPolicy,
 } from "./CodexSessionRuntime.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import type { CodexShadowHomeError } from "../Drivers/CodexHomeLayout.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
+const CODEX_SUBAGENT_HISTORY_READ_TIMEOUT_MS = 15_000;
 const isCodexAppServerTransportError = Schema.is(CodexErrors.CodexAppServerTransportError);
 const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
   CodexSessionRuntimeThreadIdMissingError,
@@ -210,6 +211,7 @@ function redactCodexSubagentDetailReadError(
       reason = "provider-transport-unavailable";
       break;
     case "CodexAppServerProtocolParseError":
+    case "CodexAppServerIncomingMessageTooLargeError":
       reason = "provider-response-invalid";
       break;
     case "CodexSessionRuntimeThreadIdMissingError":
@@ -253,81 +255,6 @@ function trimText(value: string | undefined | null): string | undefined {
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
 }
 
-function stripCodexSubagentUnsafeControls(value: string): string {
-  let sanitized = "";
-  for (const character of value) {
-    const codePoint = character.codePointAt(0) ?? 0;
-    const isControl =
-      (codePoint <= 0x1f && codePoint !== 0x0a) || (codePoint >= 0x7f && codePoint <= 0x9f);
-    const isBidiControl =
-      codePoint === 0x061c ||
-      codePoint === 0x200e ||
-      codePoint === 0x200f ||
-      (codePoint >= 0x202a && codePoint <= 0x202e) ||
-      (codePoint >= 0x2066 && codePoint <= 0x2069);
-    if (!isControl && !isBidiControl) sanitized += character;
-  }
-  return sanitized;
-}
-
-function sliceWithoutDanglingSurrogate(value: string, maxChars: number): string {
-  if (value.length <= maxChars) return value;
-  const sliced = value.slice(0, maxChars);
-  const finalCodeUnit = sliced.charCodeAt(sliced.length - 1);
-  return finalCodeUnit >= 0xd800 && finalCodeUnit <= 0xdbff ? sliced.slice(0, -1) : sliced;
-}
-
-/**
- * Sanitize one public transcript fragment without flattening Markdown.
- *
- * Newlines are normalized and tabs become spaces so headings, lists, and code
- * indentation remain readable. All other C0/C1 controls and Unicode bidi
- * controls are removed before the text crosses the renderer boundary. The
- * source is sliced before replacements to prevent an adversarial rollout item
- * from causing an additional unbounded allocation during canonicalization.
- */
-function sanitizeCodexSubagentPublicText(
-  value: string,
-  maxChars: number,
-): { readonly text: string; readonly truncated: boolean } {
-  if (maxChars <= 0) {
-    return { text: "", truncated: value.length > 0 };
-  }
-  const sourceCap = Math.min(value.length, maxChars + 1);
-  const boundedSource = sliceWithoutDanglingSurrogate(value, sourceCap);
-  const sanitized = stripCodexSubagentUnsafeControls(
-    boundedSource.replace(/\r\n?/g, "\n").replace(/\t/g, "    "),
-  );
-  const text = sliceWithoutDanglingSurrogate(sanitized, maxChars);
-  return {
-    text,
-    truncated: value.length > sourceCap || sanitized.length > text.length,
-  };
-}
-
-function readCodexPublicUserMessage(
-  item: Extract<CodexThreadItem, { readonly type: "userMessage" }>,
-): { readonly text: string; readonly truncated: boolean } {
-  let text = "";
-  let truncated = false;
-  for (const content of item.content) {
-    // Images, audio, skills, and mentions can carry URLs or local paths. Only
-    // explicit text input is public transcript material for this endpoint.
-    if (content.type !== "text") continue;
-    const separator = text.length > 0 ? "\n" : "";
-    const remaining = THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS - text.length;
-    if (remaining <= separator.length) {
-      truncated = true;
-      break;
-    }
-    const sanitized = sanitizeCodexSubagentPublicText(content.text, remaining - separator.length);
-    text += separator + sanitized.text;
-    truncated ||= sanitized.truncated;
-    if (truncated) break;
-  }
-  return { text, truncated };
-}
-
 /**
  * Reduce a verified Codex child rollout to the only fields allowed on the
  * public detail RPC: ordered user and assistant text.
@@ -335,143 +262,22 @@ function readCodexPublicUserMessage(
 export function canonicalizeCodexSubagentDetail(
   snapshot: CodexThreadSnapshot,
 ): ProviderSubagentDetail {
-  type LocatedCandidate = ProviderSubagentDetail["messages"][number] & {
-    readonly turnIndex: number;
-    readonly itemIndex: number;
-    readonly truncated: boolean;
-  };
-
-  const readCandidate = (turnIndex: number, itemIndex: number): LocatedCandidate | undefined => {
-    const item = snapshot.turns[turnIndex]?.items[itemIndex];
-    if (!item) return undefined;
-    if (item.type === "userMessage") {
-      return {
-        role: "user",
-        ...readCodexPublicUserMessage(item),
-        turnIndex,
-        itemIndex,
-      };
-    }
-    if (item.type === "agentMessage") {
-      return {
-        role: "assistant",
-        ...sanitizeCodexSubagentPublicText(
-          item.text,
-          THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS,
-        ),
-        turnIndex,
-        itemIndex,
-      };
-    }
-    return undefined;
-  };
-
-  let initialAssignment: LocatedCandidate | undefined;
-  for (
-    let turnIndex = 0;
-    turnIndex < snapshot.turns.length && initialAssignment === undefined;
-    turnIndex += 1
-  ) {
-    const turn = snapshot.turns[turnIndex];
-    if (!turn) continue;
-    for (let itemIndex = 0; itemIndex < turn.items.length; itemIndex += 1) {
-      const candidate = readCandidate(turnIndex, itemIndex);
-      if (candidate?.role === "user" && candidate.text.trim().length > 0) {
-        initialAssignment = candidate;
-        break;
+  const publicMessages: ProviderSubagentPublicMessageInput[] = [];
+  for (const turn of snapshot.turns) {
+    for (const item of turn.items) {
+      if (item.type === "userMessage") {
+        // Images, audio, skills, and mentions can carry URLs or local paths.
+        // Only explicit text input enters the provider-neutral sanitizer.
+        publicMessages.push({
+          role: "user",
+          text: item.content.flatMap((content) => (content.type === "text" ? [content.text] : [])),
+        });
+      } else if (item.type === "agentMessage") {
+        publicMessages.push({ role: "assistant", text: item.text });
       }
     }
   }
-
-  let finalAssistant: LocatedCandidate | undefined;
-  for (
-    let turnIndex = snapshot.turns.length - 1;
-    turnIndex >= 0 && finalAssistant === undefined;
-    turnIndex -= 1
-  ) {
-    const turn = snapshot.turns[turnIndex];
-    if (!turn) continue;
-    for (let itemIndex = turn.items.length - 1; itemIndex >= 0; itemIndex -= 1) {
-      const candidate = readCandidate(turnIndex, itemIndex);
-      if (candidate?.role === "assistant" && candidate.text.trim().length > 0) {
-        finalAssistant = candidate;
-        break;
-      }
-    }
-  }
-
-  const selected: LocatedCandidate[] = [];
-  const selectedCoordinates = new Set<string>();
-  let totalChars = 0;
-  let truncated = false;
-
-  const reserveCandidate = (candidate: LocatedCandidate | undefined): void => {
-    if (!candidate) return;
-    const key = `${candidate.turnIndex}:${candidate.itemIndex}`;
-    if (selectedCoordinates.has(key)) return;
-    if (candidate.text.trim().length === 0) {
-      truncated ||= candidate.truncated;
-      return;
-    }
-    if (
-      selected.length >= THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES ||
-      totalChars >= THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_CHARS
-    ) {
-      truncated = true;
-      return;
-    }
-
-    const remainingTotal = THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_CHARS - totalChars;
-    const text = sliceWithoutDanglingSurrogate(candidate.text, remainingTotal);
-    if (text.length === 0) {
-      truncated = true;
-      return;
-    }
-    selected.push({ ...candidate, text });
-    selectedCoordinates.add(key);
-    totalChars += text.length;
-    truncated ||= candidate.truncated || text.length < candidate.text.length;
-  };
-
-  // Reserve the two pieces that give a completed child transcript meaning:
-  // the provider's final assistant report and the user's initial assignment.
-  // Both fit at their per-message maxima under the aggregate contract limit.
-  // The newest-tail pass below then spends the remaining budget on progress.
-  reserveCandidate(finalAssistant);
-  reserveCandidate(initialAssignment);
-
-  // Walk backward so a long rollout keeps its newest public updates. Anchors
-  // already reserved above are skipped, and the bounded result is sorted back
-  // into provider chronology before crossing the transport boundary.
-  outer: for (let turnIndex = snapshot.turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
-    const turn = snapshot.turns[turnIndex];
-    if (!turn) continue;
-    for (let itemIndex = turn.items.length - 1; itemIndex >= 0; itemIndex -= 1) {
-      const candidate = readCandidate(turnIndex, itemIndex);
-      if (!candidate) continue;
-      if (selectedCoordinates.has(`${candidate.turnIndex}:${candidate.itemIndex}`)) continue;
-      if (candidate.text.trim().length === 0) {
-        truncated ||= candidate.truncated;
-        continue;
-      }
-      if (
-        selected.length >= THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES ||
-        totalChars >= THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_CHARS
-      ) {
-        truncated = true;
-        break outer;
-      }
-      reserveCandidate(candidate);
-    }
-  }
-
-  selected.sort(
-    (left, right) => left.turnIndex - right.turnIndex || left.itemIndex - right.itemIndex,
-  );
-  return {
-    messages: selected.map(({ role, text }) => ({ role, text })),
-    truncated,
-  };
+  return canonicalizeProviderSubagentDetail(publicMessages);
 }
 
 interface CodexTransportPolicyEntry {
@@ -4333,12 +4139,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       return Effect.fail(makeProviderSubagentDetailReadError("invalid-request"));
     }
 
-    const readSnapshot = Effect.suspend(() => {
-      const liveSession = sessions.get(threadId);
-      if (liveSession !== undefined && !liveSession.stopped) {
-        return liveSession.runtime.readSubagentThread(subagentId);
-      }
-
+    const readPersistedSnapshot = () => {
       const resumeCursor = context?.resumeCursor;
       if (!isCodexResumeCursorSchema(resumeCursor)) {
         return Effect.fail(makeProviderSubagentDetailReadError("session-unavailable"));
@@ -4376,9 +4177,46 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ),
         ),
       );
+    };
+
+    const readSnapshot = Effect.suspend(() => {
+      const liveSession = sessions.get(threadId);
+      if (liveSession === undefined || liveSession.stopped) {
+        return readPersistedSnapshot();
+      }
+
+      // Calls without durable history context are internal live-session reads
+      // and retain the direct fast path. ProviderService always supplies the
+      // `resumeCursor` property (including an explicit null), so an ended-child
+      // read can only use the live runtime after proving that it is still the
+      // exact same native root. This matters after Codex -> Claude -> Codex or
+      // rejected-resume recovery: the Cafe thread id is reused, but the native
+      // Codex root is not.
+      if (context === undefined || !("resumeCursor" in context)) {
+        return liveSession.runtime.readSubagentThread(subagentId);
+      }
+
+      const persistedResumeCursor = context.resumeCursor;
+      return liveSession.runtime.getSession.pipe(
+        Effect.flatMap((liveProviderSession) => {
+          const liveResumeCursor = liveProviderSession.resumeCursor;
+          return isCodexResumeCursorSchema(persistedResumeCursor) &&
+            isCodexResumeCursorSchema(liveResumeCursor) &&
+            persistedResumeCursor.threadId === liveResumeCursor.threadId
+            ? liveSession.runtime.readSubagentThread(subagentId)
+            : readPersistedSnapshot();
+        }),
+      );
     });
 
     return readSnapshot.pipe(
+      // Provider history is a read-only convenience surface, not a model turn.
+      // A wedged app-server read must release the transient-reader semaphore
+      // and its scoped child instead of blocking every later detail request.
+      Effect.timeoutOrElse({
+        duration: CODEX_SUBAGENT_HISTORY_READ_TIMEOUT_MS,
+        orElse: () => Effect.fail(makeProviderSubagentDetailReadError("provider-request-failed")),
+      }),
       Effect.map(canonicalizeCodexSubagentDetail),
       Effect.mapError((error) =>
         error._tag === "ProviderSubagentDetailReadError"
