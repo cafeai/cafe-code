@@ -56,6 +56,14 @@ const FALLBACK_TINT = "#48cfff";
 const HOLD_COLOR = "#f5a524";
 const FAULT_COLOR = "#ef4444";
 const SETTLED_COLOR = "#9aa3ad";
+/** Compact supporting estimate for the restored Atrium metrics grid. */
+const compactUsdFormat = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  notation: "compact",
+  minimumFractionDigits: 1,
+  maximumFractionDigits: 1,
+});
 /**
  * Detail streams are live backend resources, not free renderer selectors. A
  * large imported environment must not pin one subscription per shell card.
@@ -242,17 +250,20 @@ function Stat({
 }: {
   label: string;
   value: string;
-  detail?: string;
+  detail?: string | undefined;
   detailAriaHidden?: boolean;
   tone: string;
   muted: string;
   color?: string;
 }) {
   return (
-    <div className="min-w-0 rounded-xl border border-black/5 bg-black/[0.025] px-3 py-2 dark:border-white/8 dark:bg-white/[0.045]">
+    <div className="min-w-0 py-1">
       <dt className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", muted)}>{label}</dt>
       <dd
-        className={cn("mt-0.5 break-words text-xl tabular-nums [overflow-wrap:anywhere]", tone)}
+        className={cn(
+          "mt-1 break-words text-xl leading-none font-medium tracking-tight tabular-nums [overflow-wrap:anywhere] sm:text-2xl",
+          tone,
+        )}
         style={color ? { color } : undefined}
       >
         {value}
@@ -267,6 +278,20 @@ function Stat({
       ) : null}
     </div>
   );
+}
+
+function pluralizedCount(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function formatCachedShare(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "—";
+  return `${(Math.min(1, Math.max(0, value)) * 100).toFixed(1)}%`;
+}
+
+function formatCacheSavings(value: number, loaded: boolean): string {
+  if (!loaded || !Number.isFinite(value)) return "—";
+  return compactUsdFormat.format(Math.max(0, value));
 }
 
 interface TaskAtriumCardViewProps {
@@ -461,6 +486,7 @@ function areAtriumCardPropsEqual(
 
 export function TaskAtriumBoard() {
   const tint = useAtriumTint();
+  const overviewTitleId = useId();
   const dismissedTaskAtriumErrors = useSettings((settings) => settings.dismissedTaskAtriumErrors);
   const { updateSettings } = useUpdateSettings();
   const { resolvedTheme } = useTheme();
@@ -659,6 +685,22 @@ export function TaskAtriumBoard() {
     }),
     [filtered],
   );
+  const overviewStatus =
+    filteredMetrics.holdingCount > 0
+      ? filteredMetrics.holdingCount === 1
+        ? "one needs you."
+        : `${filteredMetrics.holdingCount} need you.`
+      : filteredMetrics.runningCount > 0
+        ? "all working."
+        : filteredMetrics.errorCount > 0
+          ? "stopped."
+          : "all done.";
+  const overviewDescription =
+    filteredMetrics.holdingCount > 0
+      ? `${filteredMetrics.holdingCount} waiting on you. Everything else is moving on its own.`
+      : filteredMetrics.errorCount > 0 && filteredMetrics.runningCount === 0
+        ? `${pluralizedCount(filteredMetrics.errorCount, "thread")} stopped on an error. Open one to see what happened.`
+        : "Nothing here asks for you. The garden keeps its own hours.";
 
   const clearErrors = useCallback(() => {
     const currentErrors = snapshot.cards.flatMap((card) =>
@@ -822,32 +864,34 @@ export function TaskAtriumBoard() {
             </section>
           ) : (
             <section data-cafe-atrium-work-section="true">
-              <div
-                className={cn(
-                  "mb-4 flex flex-col gap-4 rounded-2xl border p-4 backdrop-blur-md sm:p-5 xl:flex-row xl:items-end xl:justify-between",
-                  glass,
-                )}
+              <section
+                aria-labelledby={overviewTitleId}
+                className="mb-5 grid min-w-0 gap-7 px-2 py-6 sm:px-4 sm:py-8 lg:grid-cols-[minmax(18rem,0.9fr)_minmax(28rem,1.1fr)] lg:items-end lg:gap-12 xl:px-6 xl:py-10"
+                data-cafe-atrium-overview="true"
               >
                 <div className="min-w-0">
-                  <p className={cn("font-mono text-[10px] uppercase tracking-[0.14em]", label)}>
-                    Live work
-                  </p>
                   <h2
-                    className={cn("mt-1 text-2xl font-light tracking-tight sm:text-3xl", heading)}
+                    id={overviewTitleId}
+                    className={cn(
+                      "max-w-[13ch] text-[clamp(2.5rem,10vw,5.25rem)] leading-[0.9] font-light tracking-[-0.055em]",
+                      heading,
+                    )}
+                    data-cafe-atrium-overview-headline="true"
                   >
-                    {filtered.length === 1
-                      ? "One thread in motion"
-                      : `${filtered.length} threads in motion`}
+                    <span className="block">{pluralizedCount(filtered.length, "thread")},</span>
+                    <span className="block font-semibold" style={{ color: tint }}>
+                      {pluralizedCount(filteredMetrics.subagentCount, "subagent")},
+                    </span>
+                    <span className="block">{overviewStatus}</span>
                   </h2>
-                  <p className={cn("mt-1 max-w-2xl text-sm", muted)}>
-                    {filteredMetrics.holdingCount > 0
-                      ? `${filteredMetrics.holdingCount} waiting on you; the rest keep moving.`
-                      : filteredMetrics.errorCount > 0 && filteredMetrics.runningCount === 0
-                        ? `${filteredMetrics.errorCount} ${filteredMetrics.errorCount === 1 ? "thread has" : "threads have"} stopped. Open a card to inspect the last activity.`
-                        : `${filteredMetrics.subagentCount} ${filteredMetrics.subagentCount === 1 ? "subagent is" : "subagents are"} working across the active threads.`}
+                  <p className={cn("mt-5 max-w-md text-sm leading-relaxed sm:text-base", muted)}>
+                    {overviewDescription}
                   </p>
                 </div>
-                <dl className="grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-4 xl:min-w-[34rem]">
+                <dl
+                  className="grid min-w-0 grid-cols-2 gap-x-5 gap-y-6 sm:grid-cols-3 sm:gap-x-8 lg:pb-1"
+                  data-cafe-atrium-overview-metrics="true"
+                >
                   <Stat
                     label="Threads"
                     value={String(filtered.length)}
@@ -866,34 +910,32 @@ export function TaskAtriumBoard() {
                     tone={heading}
                     muted={label}
                   />
-                  {filteredMetrics.holdingCount > 0 ? (
-                    <Stat
-                      label="Needs you"
-                      value={String(filteredMetrics.holdingCount)}
-                      tone=""
-                      muted={label}
-                      color={HOLD_COLOR}
-                    />
-                  ) : filteredMetrics.errorCount > 0 ? (
-                    <Stat
-                      label="Errors"
-                      value={String(filteredMetrics.errorCount)}
-                      tone=""
-                      muted={label}
-                      color={FAULT_COLOR}
-                    />
-                  ) : usage.outputTokens > 0 ? (
-                    <Stat
-                      label="Output"
-                      value={formatFullTokenCount(usage.outputTokens)}
-                      detail={formatCompactTokenCount(usage.outputTokens)}
-                      detailAriaHidden
-                      tone={heading}
-                      muted={label}
-                    />
-                  ) : null}
+                  <Stat
+                    label="Cache hits"
+                    value={formatCachedShare(usage.cachedShare)}
+                    tone={heading}
+                    muted={label}
+                  />
+                  <Stat
+                    label="Cache saved (USD)"
+                    value={formatCacheSavings(usage.cacheSavings, usage.loaded)}
+                    tone={heading}
+                    muted={label}
+                  />
+                  <Stat
+                    label="Output"
+                    value={usage.loaded ? formatFullTokenCount(usage.outputTokens) : "—"}
+                    detail={
+                      usage.loaded && usage.outputTokens > 0
+                        ? formatCompactTokenCount(usage.outputTokens)
+                        : undefined
+                    }
+                    detailAriaHidden
+                    tone={heading}
+                    muted={label}
+                  />
                 </dl>
-              </div>
+              </section>
 
               <div
                 className={cn(

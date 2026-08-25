@@ -1460,13 +1460,13 @@ async function waitForButtonContainingText(text: string): Promise<HTMLButtonElem
   );
 }
 
-async function waitForSelectItemContainingText(text: string): Promise<HTMLElement> {
+async function waitForMenuRadioItemContainingText(text: string): Promise<HTMLElement> {
   return waitForElement(
     () =>
-      Array.from(document.querySelectorAll<HTMLElement>('[data-slot="select-item"]')).find((item) =>
-        item.textContent?.includes(text),
+      Array.from(document.querySelectorAll<HTMLElement>('[data-slot="menu-radio-item"]')).find(
+        (item) => item.textContent?.includes(text),
       ) ?? null,
-    `Unable to find select item containing "${text}".`,
+    `Unable to find menu radio item containing "${text}".`,
   );
 }
 
@@ -1500,7 +1500,7 @@ async function expectComposerActionsContained(): Promise<void> {
 }
 
 async function waitForInteractionModeButton(
-  expectedLabel: "Build" | "Plan" | "Manual" | "Accept edits" | "Auto",
+  expectedLabel: "Build" | "Plan",
 ): Promise<HTMLButtonElement> {
   return waitForElement(
     () =>
@@ -2885,6 +2885,20 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       });
 
       try {
+        await mounted.setContainerSize(WIDE_FOOTER_VIEWPORT);
+        await vi.waitFor(() => {
+          const footer = document.querySelector<HTMLElement>('[data-chat-composer-footer="true"]');
+          const optionsButton = footer?.querySelector<HTMLButtonElement>(
+            'button[aria-label="More composer controls"]',
+          );
+          const traitsLabel = optionsButton?.querySelector<HTMLElement>(
+            '[data-compact-composer-controls-label="true"]',
+          );
+          expect(footer?.dataset.chatComposerFooterCompact).toBe("false");
+          expect(traitsLabel?.textContent).toBe("Ultra");
+          expect(optionsButton?.textContent).not.toContain("Full access");
+        });
+
         await mounted.setContainerSize(COMPACT_FOOTER_VIEWPORT);
         await vi.waitFor(() => {
           const footer = document.querySelector<HTMLElement>('[data-chat-composer-footer="true"]');
@@ -3651,7 +3665,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       }
     });
 
-    it("cycles Claude's four normal permission modes with Shift+Tab", async () => {
+    it("keeps Claude permission modes in options and cycles them with Shift+Tab", async () => {
       const mounted = await mountChatView({
         viewport: DEFAULT_VIEWPORT,
         snapshot: createSnapshotForTargetUser({
@@ -3691,11 +3705,60 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       });
 
       try {
-        await waitForInteractionModeButton("Manual");
-        const composerEditor = await waitForComposerEditor();
-        composerEditor.focus();
+        const footer = await waitForElement(
+          () => document.querySelector<HTMLElement>('[data-chat-composer-footer="true"]'),
+          "Unable to find composer footer.",
+        );
+        const optionsButton = await waitForElement(
+          () =>
+            footer.querySelector<HTMLButtonElement>('button[aria-label="More composer controls"]'),
+          "Unable to find the combined composer options button.",
+        );
+        expect(
+          Array.from(footer.querySelectorAll("button")).some((button) =>
+            ["Manual", "Accept edits", "Plan", "Auto", "Bypass permissions"].includes(
+              button.textContent?.trim() ?? "",
+            ),
+          ),
+        ).toBe(false);
 
-        for (const expectedLabel of ["Accept edits", "Plan", "Auto", "Manual"] as const) {
+        optionsButton.click();
+        expect((await waitForMenuRadioItemContainingText("Manual")).textContent).toContain(
+          "Ask before edits and commands",
+        );
+        expect((await waitForMenuRadioItemContainingText("Accept edits")).textContent).toContain(
+          "Apply edits automatically",
+        );
+        expect(
+          (await waitForMenuRadioItemContainingText("Bypass permissions")).textContent,
+        ).toContain("Run without permission checks");
+        await userEvent.keyboard("{Escape}");
+        await vi.waitFor(() => {
+          expect(document.querySelector('[data-slot="menu-popup"]')).toBeNull();
+        });
+
+        const composerEditor = await waitForComposerEditor();
+        const expectedModes = [
+          {
+            runtimeMode: "auto-accept-edits",
+            interactionMode: "default",
+          },
+          {
+            runtimeMode: "auto-accept-edits",
+            interactionMode: "plan",
+          },
+          {
+            runtimeMode: "auto-accept-edits",
+            interactionMode: "auto",
+          },
+          {
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+          },
+        ] as const;
+
+        for (const expected of expectedModes) {
+          composerEditor.focus();
           composerEditor.dispatchEvent(
             new KeyboardEvent("keydown", {
               key: "Tab",
@@ -3704,7 +3767,11 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
               cancelable: true,
             }),
           );
-          await waitForInteractionModeButton(expectedLabel);
+          await vi.waitFor(() => {
+            const draft = useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY];
+            expect(draft?.runtimeMode ?? "approval-required").toBe(expected.runtimeMode);
+            expect(draft?.interactionMode ?? "default").toBe(expected.interactionMode);
+          });
         }
       } finally {
         await mounted.cleanup();
@@ -4124,7 +4191,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
   }
 
   if (chatViewBrowserPart === "navigation") {
-    it("shows runtime mode descriptions in the desktop composer access select", async () => {
+    it("keeps runtime access in the desktop options menu without a footer mode label", async () => {
       setDraftThreadWithoutWorktree();
 
       const mounted = await mountChatView({
@@ -4133,18 +4200,51 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       });
 
       try {
-        const runtimeModeSelect = await waitForButtonByText("Full access");
-        runtimeModeSelect.click();
+        const footer = await waitForElement(
+          () => document.querySelector<HTMLElement>('[data-chat-composer-footer="true"]'),
+          "Unable to find composer footer.",
+        );
+        const optionsButton = await waitForElement(
+          () =>
+            footer.querySelector<HTMLButtonElement>('button[aria-label="More composer controls"]'),
+          "Unable to find the combined composer options button.",
+        );
+        const footerShowsAccessMode = () =>
+          Array.from(footer.querySelectorAll("button")).some((button) =>
+            ["Supervised", "Auto-accept edits", "Full access"].includes(
+              button.textContent?.trim() ?? "",
+            ),
+          );
 
-        expect((await waitForSelectItemContainingText("Supervised")).textContent).toContain(
+        // The provider fixture intentionally has no option descriptors. Access
+        // still needs a fallback options trigger, but the selected access label
+        // must not consume permanent footer space.
+        expect(optionsButton.textContent?.trim()).toBe("");
+        expect(footerShowsAccessMode()).toBe(false);
+        optionsButton.click();
+
+        expect((await waitForMenuRadioItemContainingText("Supervised")).textContent).toContain(
           "Ask before commands and file changes",
         );
 
-        const autoAcceptItem = await waitForSelectItemContainingText("Auto-accept edits");
+        const autoAcceptItem = await waitForMenuRadioItemContainingText("Auto-accept edits");
         expect(autoAcceptItem.textContent).toContain("Auto-approve edits");
-        expect((await waitForSelectItemContainingText("Full access")).textContent).toContain(
+        expect((await waitForMenuRadioItemContainingText("Full access")).textContent).toContain(
           "Allow commands and edits without prompts",
         );
+
+        autoAcceptItem.click();
+        await vi.waitFor(() => {
+          expect(useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.runtimeMode).toBe(
+            "auto-accept-edits",
+          );
+          expect(
+            Array.from(
+              document.querySelectorAll<HTMLElement>('[data-slot="menu-radio-item"]'),
+            ).find((item) => item.textContent?.includes("Auto-accept edits")),
+          ).toHaveAttribute("aria-checked", "true");
+        });
+        expect(footerShowsAccessMode()).toBe(false);
       } finally {
         await mounted.cleanup();
       }

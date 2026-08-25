@@ -325,18 +325,21 @@ describe("CompactComposerControlsMenu", () => {
     await vi.waitFor(() => {
       const text = document.body.textContent ?? "";
       expect(text).toContain("Manual");
+      expect(text).toContain("Ask before edits and commands");
       expect(text).toContain("Accept edits");
       expect(text).toContain("Plan");
       expect(text).toContain("Auto");
       expect(text).toContain("Bypass permissions");
+      expect(text).toContain("Run without permission checks");
       expect(text).not.toContain("Access");
       expect(text).not.toContain("Supervised");
     });
   });
 
-  it("can hide the interaction mode section", async () => {
+  it("keeps access selectable without traits or an interaction-mode section", async () => {
     const host = document.createElement("div");
     document.body.append(host);
+    const onRuntimeModeChange = vi.fn();
     const screen = await render(
       <CompactComposerControlsMenu
         showPlanSidebar={false}
@@ -349,7 +352,7 @@ describe("CompactComposerControlsMenu", () => {
         onToggleInteractionMode={vi.fn()}
         onNativePermissionModeChange={vi.fn()}
         onTogglePlanSidebar={vi.fn()}
-        onRuntimeModeChange={vi.fn()}
+        onRuntimeModeChange={onRuntimeModeChange}
       />,
       { container: host },
     );
@@ -363,8 +366,17 @@ describe("CompactComposerControlsMenu", () => {
       expect(text).not.toContain("Plan");
       expect(text).toContain("Access");
       expect(text).toContain("Supervised");
+      expect(text).toContain("Ask before commands and file changes");
+      expect(text).toContain("Auto-approve edits");
       expect(text).toContain("Full access");
     });
+
+    const autoAcceptItem = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-slot="menu-radio-item"]'),
+    ).find((item) => item.textContent?.includes("Auto-accept edits"));
+    expect(autoAcceptItem).toBeDefined();
+    autoAcceptItem?.click();
+    expect(onRuntimeModeChange).toHaveBeenCalledExactlyOnceWith("auto-accept-edits");
 
     await screen.unmount();
     host.remove();

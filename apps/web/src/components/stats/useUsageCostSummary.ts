@@ -3,6 +3,7 @@ import type { UsageStatsGetResult } from "@cafecode/contracts";
 import { rollUpCost, type ModelRate } from "@cafecode/shared/modelPricing";
 
 import { useSettings } from "../../hooks/useSettings";
+import { useCountUp } from "./useCountUp";
 
 /**
  * Lifetime token and cost totals, for surfaces that want the headline figure
@@ -11,10 +12,10 @@ import { useSettings } from "../../hooks/useSettings";
  * Deliberately does not subscribe to the 10 Hz snapshot stream: this exists for
  * ambient readouts, and a decorative counter has no business re-rendering its
  * host ten times a second. It polls the same detail endpoint the Usage page
- * uses, slowly, and stops entirely while the document is hidden.
+ * uses every five seconds and stops entirely while the document is hidden.
  */
 
-const REFRESH_INTERVAL_MS = 30_000;
+const REFRESH_INTERVAL_MS = 5_000;
 
 export interface UsageCostSummary {
   readonly cost: number;
@@ -62,9 +63,10 @@ export function useUsageCostSummary(enabled: boolean, dayWindow = 30): UsageCost
     if (!enabled) return;
     let cancelled = false;
     let inFlight = false;
+    let interval: number | null = null;
 
     const load = async () => {
-      if (inFlight || document.visibilityState !== "visible") return;
+      if (cancelled || inFlight || document.visibilityState !== "visible") return;
       inFlight = true;
       try {
         // Imported on demand: this hook hangs off decorative surfaces, and a
@@ -81,17 +83,34 @@ export function useUsageCostSummary(enabled: boolean, dayWindow = 30): UsageCost
       }
     };
 
-    void load();
-    const interval = window.setInterval(() => void load(), REFRESH_INTERVAL_MS);
-    document.addEventListener("visibilitychange", load);
+    const stop = () => {
+      if (interval === null) return;
+      window.clearInterval(interval);
+      interval = null;
+    };
+    const syncVisibility = () => {
+      if (document.visibilityState !== "visible") {
+        stop();
+        return;
+      }
+      // Repeated visibility events must not create parallel timers or eager
+      // duplicate requests. A newly visible surface catches up immediately,
+      // then owns exactly one bounded polling interval until it hides again.
+      if (interval !== null) return;
+      void load();
+      interval = window.setInterval(() => void load(), REFRESH_INTERVAL_MS);
+    };
+
+    syncVisibility();
+    document.addEventListener("visibilitychange", syncVisibility);
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
-      document.removeEventListener("visibilitychange", load);
+      stop();
+      document.removeEventListener("visibilitychange", syncVisibility);
     };
   }, [enabled]);
 
-  return useMemo(() => {
+  const summary = useMemo(() => {
     if (usage === null) return EMPTY;
     const rollup = rollUpCost(usage.tokenBreakdown, overrides);
     // Daily rows carry no model dimension, so per-day cost uses the blended
@@ -121,4 +140,13 @@ export function useUsageCostSummary(enabled: boolean, dayWindow = 30): UsageCost
       raw: usage,
     };
   }, [usage, overrides, dayWindow]);
+
+  // The Atrium's exact output counter uses the same odometer as the detailed
+  // Usage composition. The raw response remains exact and unanimated so every
+  // graph series is recalculated atomically from one server snapshot.
+  const displayedOutputTokens = useCountUp(summary.outputTokens);
+  return useMemo(
+    () => ({ ...summary, outputTokens: displayedOutputTokens }),
+    [displayedOutputTokens, summary],
+  );
 }

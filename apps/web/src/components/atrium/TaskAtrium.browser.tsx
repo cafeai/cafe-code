@@ -469,6 +469,65 @@ describe("TaskAtriumBoard", () => {
     }
   });
 
+  it("restores the narrative work overview and keeps its metrics responsive", async () => {
+    const originalViewport = { height: window.innerHeight, width: window.innerWidth };
+    const environment = atriumHarness.useStore.getState().environmentStateById["env-1"]!;
+    const previousThreadIds = environment.threadIds;
+    const previousUsage = { ...atriumHarness.usage };
+    const restoreSubagents = installStructuredSubagents(3);
+    environment.threadIds = ["thread-1", "thread-2"];
+    Object.assign(atriumHarness.usage, atriumHarness.loadedUsage);
+    await page.viewport(390, 720);
+    const { host, screen } = await renderInTheme("dark");
+    try {
+      await vi.waitFor(() => {
+        expect(host.querySelector('[data-cafe-atrium-overview="true"]')).not.toBeNull();
+        expect(host.textContent).toContain("Nothing here asks for you");
+      });
+
+      const overview = host.querySelector<HTMLElement>('[data-cafe-atrium-overview="true"]');
+      const headline = host.querySelector<HTMLElement>(
+        '[data-cafe-atrium-overview-headline="true"]',
+      );
+      const metrics = host.querySelector<HTMLElement>('[data-cafe-atrium-overview-metrics="true"]');
+      expect(overview).not.toBeNull();
+      expect(headline).not.toBeNull();
+      expect(metrics).not.toBeNull();
+      if (!overview || !headline || !metrics) throw new Error("Atrium overview did not mount");
+
+      expect(Array.from(headline.children, (line) => line.textContent)).toEqual([
+        "2 threads,",
+        "3 subagents,",
+        "all working.",
+      ]);
+      expect(overview.textContent).toContain(
+        "Nothing here asks for you. The garden keeps its own hours.",
+      );
+      expect(overview.textContent).not.toContain("Live work");
+      expect(overview.textContent).not.toContain("in motion");
+      expect(metrics.textContent).toContain("Cache hits");
+      expect(metrics.textContent).toContain("50.0%");
+      expect(metrics.textContent).toContain("Cache saved (USD)");
+      expect(metrics.textContent).toContain("Output");
+      expect(metrics.textContent).toContain("539,966,200");
+      expect(metrics.textContent).toContain("540M");
+
+      // The restored large type remains part of the pane on phone-sized
+      // layouts instead of being hidden or forcing a horizontal page scroll.
+      expect(overview.scrollWidth).toBeLessThanOrEqual(overview.clientWidth + 1);
+      expect(overview.getBoundingClientRect().right).toBeLessThanOrEqual(
+        host.getBoundingClientRect().right + 1,
+      );
+    } finally {
+      environment.threadIds = previousThreadIds;
+      Object.assign(atriumHarness.usage, previousUsage);
+      restoreSubagents();
+      await page.viewport(originalViewport.width, originalViewport.height);
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
   it("expands a task card for every subagent and delegates scrolling to the Atrium pane", async () => {
     const restoreSubagents = installStructuredSubagents(8);
     const { host, screen } = await renderInTheme("dark");
@@ -575,9 +634,11 @@ describe("TaskAtriumBoard", () => {
       await vi.waitFor(() => {
         expect(host.querySelectorAll('[data-cafe-atrium-task-card="true"]')).toHaveLength(3);
       });
-      expect(host.textContent).toContain("3 threads in motion");
-      expect(host.textContent).toMatch(
-        /\d+ subagents? (?:is|are) working across the active threads\./,
+      expect(host.textContent).toContain("3 threads,");
+      expect(host.textContent).toContain("1 subagent,");
+      expect(host.textContent).toContain("all working.");
+      expect(host.textContent).toContain(
+        "Nothing here asks for you. The garden keeps its own hours.",
       );
       expect(host.textContent).toContain("mapping canvas call sites");
       const cardBounds = () =>
@@ -602,7 +663,8 @@ describe("TaskAtriumBoard", () => {
         expect(Math.abs(next[0]!.top - next[1]!.top)).toBeLessThanOrEqual(1);
         expect(Math.abs(next[0]!.top - next[2]!.top)).toBeLessThanOrEqual(1);
       });
-      expect(host.textContent).toContain("3 threads in motion");
+      expect(host.textContent).toContain("3 threads,");
+      expect(host.textContent).toContain("all working.");
       expect(host.textContent).toContain("mapping canvas call sites");
     } finally {
       await page.viewport(originalViewport.width, originalViewport.height);

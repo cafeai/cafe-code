@@ -66,11 +66,7 @@ import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
 import { ComposerTaskProgress } from "./ComposerTaskProgress";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { searchSlashCommandItems } from "./composerSlashCommandSearch";
-import {
-  getComposerProviderState,
-  renderProviderTraitsMenuContent,
-  renderProviderTraitsPicker,
-} from "./composerProviderState";
+import { getComposerProviderState, renderProviderTraitsMenuContent } from "./composerProviderState";
 import { ContextWindowMeter } from "./ContextWindowMeter";
 import { ThreadGoalFooterButton } from "./ThreadGoalControl";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
@@ -79,7 +75,6 @@ import { cn, randomUUID } from "~/lib/utils";
 import { resolveShortcutCommand } from "../../keybindings";
 import { Separator } from "../ui/separator";
 import { Button } from "../ui/button";
-import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import {
@@ -90,11 +85,6 @@ import {
   ImageIcon,
   LoaderCircleIcon,
   ListTodoIcon,
-  type LucideIcon,
-  LockIcon,
-  LockOpenIcon,
-  PenLineIcon,
-  ShieldCheckIcon,
   Trash2Icon,
   XIcon,
 } from "lucide-react";
@@ -125,46 +115,13 @@ import { useSettings } from "../../hooks/useSettings";
 import { domSnapshot, mobileDebugLog } from "../../lib/mobileDebugLog";
 import {
   applyClaudePermissionMode,
-  CLAUDE_PERMISSION_MODE_OPTIONS,
-  GROK_PERMISSION_MODE_OPTIONS,
   type ClaudePermissionMode,
   deriveClaudePermissionMode,
-  getClaudePermissionModeOption,
   getNextClaudePermissionMode,
-  isClaudePermissionMode,
 } from "./claudePermissionMode";
 
 const IMAGE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024))}MB`;
 
-const runtimeModeConfig: Record<
-  RuntimeMode,
-  { label: string; description: string; icon: LucideIcon }
-> = {
-  "approval-required": {
-    label: "Supervised",
-    description: "Ask before commands and file changes.",
-    icon: LockIcon,
-  },
-  "auto-accept-edits": {
-    label: "Auto-accept edits",
-    description: "Auto-approve edits, ask before other actions.",
-    icon: PenLineIcon,
-  },
-  "full-access": {
-    label: "Full access",
-    description: "Allow commands and edits without prompts.",
-    icon: LockOpenIcon,
-  },
-};
-
-const runtimeModeOptions = Object.keys(runtimeModeConfig) as RuntimeMode[];
-const claudePermissionModeIcons: Record<ClaudePermissionMode, LucideIcon> = {
-  default: LockIcon,
-  acceptEdits: PenLineIcon,
-  plan: BotIcon,
-  auto: ShieldCheckIcon,
-  bypassPermissions: LockOpenIcon,
-};
 const COMPOSER_PATH_QUERY_DEBOUNCE_MS = 120;
 const EMPTY_PROJECT_ENTRIES: ProjectEntry[] = [];
 const COMPOSER_FLOATING_LAYER_SELECTOR = [
@@ -194,77 +151,25 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   provider: ProviderDriverKind;
   showInteractionModeToggle: boolean;
   interactionMode: ProviderInteractionMode;
-  runtimeMode: RuntimeMode;
   showPlanToggle: boolean;
   planSidebarLabel: string;
   planSidebarOpen: boolean;
   onToggleInteractionMode: () => void;
-  onNativePermissionModeChange: (mode: ClaudePermissionMode) => void;
-  onRuntimeModeChange: (mode: RuntimeMode) => void;
   onTogglePlanSidebar: () => void;
 }) {
-  const isClaude = props.provider === "claudeAgent";
-  const usesNativePermissionModes = isClaude || props.provider === "grok";
-  const permissionModeOptions = isClaude
-    ? CLAUDE_PERMISSION_MODE_OPTIONS
-    : GROK_PERMISSION_MODE_OPTIONS;
-  const runtimeModeOption = runtimeModeConfig[props.runtimeMode];
-  const RuntimeModeIcon = runtimeModeOption.icon;
-  const claudePermissionMode = deriveClaudePermissionMode({
-    interactionMode: props.interactionMode,
-    runtimeMode: props.runtimeMode,
-  });
-  const claudePermissionModeOption = getClaudePermissionModeOption(claudePermissionMode);
-  const ClaudePermissionModeIcon = claudePermissionModeIcons[claudePermissionMode];
+  const usesNativePermissionModes = props.provider === "claudeAgent" || props.provider === "grok";
+  const showStandaloneInteractionMode =
+    props.showInteractionModeToggle && !usesNativePermissionModes;
+
+  if (!showStandaloneInteractionMode && !props.showPlanToggle) {
+    return null;
+  }
 
   return (
     <>
-      <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
-
-      {props.showInteractionModeToggle && usesNativePermissionModes ? (
+      {showStandaloneInteractionMode ? (
         <>
-          <Select
-            value={claudePermissionMode}
-            onValueChange={(value) => {
-              if (isClaudePermissionMode(value)) {
-                props.onNativePermissionModeChange(value);
-              }
-            }}
-          >
-            <SelectTrigger
-              variant="ghost"
-              size="sm"
-              className="font-medium"
-              aria-label={`${isClaude ? "Claude" : "Grok"} permission mode`}
-              title={claudePermissionModeOption.description}
-            >
-              <ClaudePermissionModeIcon className="size-4" />
-              <SelectValue>{claudePermissionModeOption.label}</SelectValue>
-            </SelectTrigger>
-            <SelectPopup alignItemWithTrigger={false}>
-              {permissionModeOptions.map((option) => {
-                const OptionIcon = claudePermissionModeIcons[option.id];
-                return (
-                  <SelectItem key={option.id} value={option.id} className="min-w-72 py-2">
-                    <div className="grid min-w-0 gap-0.5">
-                      <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
-                        <OptionIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                        {option.label}
-                      </span>
-                      <span className="text-muted-foreground text-xs leading-4">
-                        {option.description}
-                      </span>
-                    </div>
-                  </SelectItem>
-                );
-              })}
-            </SelectPopup>
-          </Select>
-
           <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
-        </>
-      ) : props.showInteractionModeToggle ? (
-        <>
           <Button
             variant="ghost"
             className="shrink-0 whitespace-nowrap px-2 text-muted-foreground/70 hover:text-foreground/80 sm:px-3"
@@ -282,46 +187,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
               {props.interactionMode === "plan" ? "Plan" : "Build"}
             </span>
           </Button>
-
-          <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
         </>
-      ) : null}
-
-      {!usesNativePermissionModes ? (
-        <Select
-          value={props.runtimeMode}
-          onValueChange={(value) => props.onRuntimeModeChange(value!)}
-        >
-          <SelectTrigger
-            variant="ghost"
-            size="sm"
-            className="font-medium"
-            aria-label="Runtime mode"
-            title={runtimeModeOption.description}
-          >
-            <RuntimeModeIcon className="size-4" />
-            <SelectValue>{runtimeModeOption.label}</SelectValue>
-          </SelectTrigger>
-          <SelectPopup alignItemWithTrigger={false}>
-            {runtimeModeOptions.map((mode) => {
-              const option = runtimeModeConfig[mode];
-              const OptionIcon = option.icon;
-              return (
-                <SelectItem key={mode} value={mode} className="min-w-64 py-2">
-                  <div className="grid min-w-0 gap-0.5">
-                    <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
-                      <OptionIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                      {option.label}
-                    </span>
-                    <span className="text-muted-foreground text-xs leading-4">
-                      {option.description}
-                    </span>
-                  </div>
-                </SelectItem>
-              );
-            })}
-          </SelectPopup>
-        </Select>
       ) : null}
 
       {props.showPlanToggle ? (
@@ -1122,6 +988,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const selectedPromptEffort = composerProviderState.promptEffort;
   const selectedModelOptionsForDispatch = composerProviderState.modelOptionsForDispatch;
+  const selectedProviderUsesNativePermissionModes =
+    selectedProvider === "claudeAgent" || selectedProvider === "grok";
   // Ambiance composer surface: tint the frame ring with the current weather
   // state color (via CSS variables owned by AmbianceLayer). Ultrathink's
   // rainbow frame intentionally wins when both want the frame.
@@ -1496,17 +1364,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
 
   const providerTraitsMenuContent = renderProviderTraitsMenuContent({
-    provider: selectedProvider,
-    providerInstanceId: selectedInstanceId,
-    ...(routeKind === "server" ? { threadRef: routeThreadRef } : {}),
-    ...(routeKind === "draft" && draftId ? { draftId } : {}),
-    model: selectedModel,
-    models: selectedProviderModels,
-    modelOptions: selectedComposerModelOptions,
-    prompt,
-    onPromptChange: setPromptFromTraits,
-  });
-  const providerTraitsPicker = renderProviderTraitsPicker({
     provider: selectedProvider,
     providerInstanceId: selectedInstanceId,
     ...(routeKind === "server" ? { threadRef: routeThreadRef } : {}),
@@ -2974,7 +2831,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     planSidebarLabel={planSidebarLabel}
                     planSidebarOpen={planSidebarOpen}
                     runtimeMode={runtimeMode}
-                    showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
+                    showInteractionModeToggle={
+                      composerProviderControls.showInteractionModeToggle ||
+                      selectedProviderUsesNativePermissionModes
+                    }
                     showGoalControl={goalControlsSupported}
                     goalStatus={activeThread?.goal?.status ?? null}
                     traitsMenuContent={providerTraitsMenuContent}
@@ -2989,23 +2849,32 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   />
                 ) : (
                   <>
-                    {providerTraitsPicker ? (
-                      <>
-                        <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
-                        {providerTraitsPicker}
-                      </>
-                    ) : null}
+                    <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
+                    <CompactComposerControlsMenu
+                      showPlanSidebar={false}
+                      provider={selectedProvider}
+                      interactionMode={interactionMode}
+                      planSidebarLabel={planSidebarLabel}
+                      planSidebarOpen={planSidebarOpen}
+                      runtimeMode={runtimeMode}
+                      showInteractionModeToggle={selectedProviderUsesNativePermissionModes}
+                      traitsMenuContent={providerTraitsMenuContent}
+                      traitsTriggerLabel={
+                        providerTraitsMenuContent ? composerProviderState.traitsTriggerLabel : null
+                      }
+                      onToggleInteractionMode={cycleComposerInteractionMode}
+                      onNativePermissionModeChange={handleClaudePermissionModeChange}
+                      onTogglePlanSidebar={togglePlanSidebar}
+                      onRuntimeModeChange={handleRuntimeModeChange}
+                    />
                     <ComposerFooterModeControls
                       provider={selectedProvider}
                       showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
                       interactionMode={interactionMode}
-                      runtimeMode={runtimeMode}
                       showPlanToggle={showPlanSidebarToggle}
                       planSidebarLabel={planSidebarLabel}
                       planSidebarOpen={planSidebarOpen}
                       onToggleInteractionMode={cycleComposerInteractionMode}
-                      onNativePermissionModeChange={handleClaudePermissionModeChange}
-                      onRuntimeModeChange={handleRuntimeModeChange}
                       onTogglePlanSidebar={togglePlanSidebar}
                     />
                     {goalControlsSupported && interactionMode !== "plan" ? (
