@@ -56,6 +56,12 @@ const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
 );
 const mockPeerArgs = (path: string) => [path];
 
+// A process-backed assertion includes cold Node/TypeScript/Effect startup. Under
+// the repository's parallel Turbo CI load that startup can exceed Vitest's
+// 5-second default without indicating a protocol deadlock. In-memory transport
+// tests retain the default; only child-process tests opt into this bounded budget.
+const CHILD_PROCESS_TEST_TIMEOUT_MS = process.platform === "win32" ? 30_000 : 15_000;
+
 const makeHandle = (env?: Record<string, string>) =>
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -68,6 +74,9 @@ const makeHandle = (env?: Record<string, string>) =>
   });
 
 it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
+  const childProcessTest = (name: string, self: Parameters<typeof it.effect>[1]): void =>
+    it.effect(name, self, CHILD_PROCESS_TEST_TIMEOUT_MS);
+
   it.effect(
     "emits exact JSON-RPC notifications and decodes inbound session/update and elicitation completion",
     () =>
@@ -614,7 +623,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     }),
   );
 
-  it.effect("propagates the real child exit code when the input stream ends", () =>
+  childProcessTest("propagates the real child exit code when the input stream ends", () =>
     Effect.gen(function* () {
       const handle = yield* makeHandle({ ACP_MOCK_EXIT_IMMEDIATELY_CODE: "7" });
       const firstMessage = yield* Deferred.make<unknown>();
@@ -666,7 +675,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     }),
   );
 
-  it.effect("does not emit a second process-exit error after a decode failure", () =>
+  childProcessTest("does not emit a second process-exit error after a decode failure", () =>
     Effect.gen(function* () {
       const handle = yield* makeHandle({
         ACP_MOCK_MALFORMED_OUTPUT: "1",

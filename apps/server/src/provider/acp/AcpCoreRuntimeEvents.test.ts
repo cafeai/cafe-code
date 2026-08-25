@@ -143,8 +143,8 @@ describe("AcpCoreRuntimeEvents", () => {
           kind: "execute",
           status: "completed",
           title: "Terminal",
-          detail: "bun run test",
-          data: { command: "bun run test" },
+          detail: "yarn test",
+          data: { command: "yarn test" },
         },
         rawPayload: { sessionId: "session-1" },
       }),
@@ -153,7 +153,7 @@ describe("AcpCoreRuntimeEvents", () => {
       payload: {
         itemType: "command_execution",
         status: "completed",
-        data: { command: "bun run test" },
+        data: { command: "yarn test" },
       },
     });
 

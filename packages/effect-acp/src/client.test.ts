@@ -60,6 +60,13 @@ const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
 );
 const mockPeerArgs = (path: string) => [path];
 
+// These integration tests start a fresh Node process that imports the TypeScript
+// ACP fixture and Effect runtime. GitHub's fully parallel Turbo run can starve
+// that startup past Vitest's 5-second default even though the protocol exchange
+// itself remains fast. Keep the larger allowance local to process-backed tests;
+// Windows receives extra headroom for its consistently slower process startup.
+const CHILD_PROCESS_TEST_TIMEOUT_MS = process.platform === "win32" ? 30_000 : 15_000;
+
 function concatBytes(chunks: ReadonlyArray<Uint8Array>): Uint8Array {
   const batch = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
   let offset = 0;
@@ -71,6 +78,9 @@ function concatBytes(chunks: ReadonlyArray<Uint8Array>): Uint8Array {
 }
 
 it.layer(NodeServices.layer)("effect-acp client", (it) => {
+  const childProcessTest = (name: string, self: Parameters<typeof it.effect>[1]): void =>
+    it.effect(name, self, CHILD_PROCESS_TEST_TIMEOUT_MS);
+
   const makeHandle = (env?: Record<string, string>) =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -82,7 +92,7 @@ it.layer(NodeServices.layer)("effect-acp client", (it) => {
       return yield* spawner.spawn(command);
     });
 
-  it.effect("initializes, prompts, receives updates, and handles permission requests", () =>
+  childProcessTest("initializes, prompts, receives updates, and handles permission requests", () =>
     Effect.gen(function* () {
       const updates = yield* Ref.make<Array<unknown>>([]);
       const elicitationCompletions = yield* Ref.make<Array<unknown>>([]);
@@ -187,7 +197,7 @@ it.layer(NodeServices.layer)("effect-acp client", (it) => {
     }),
   );
 
-  it.effect(
+  childProcessTest(
     "returns structured invalid params without exposing values from typed extension request payloads",
     () =>
       Effect.gen(function* () {
@@ -260,7 +270,7 @@ it.layer(NodeServices.layer)("effect-acp client", (it) => {
       }),
   );
 
-  it.effect("replays buffered notifications to handlers registered after they arrive", () =>
+  childProcessTest("replays buffered notifications to handlers registered after they arrive", () =>
     Effect.gen(function* () {
       const updates = yield* Ref.make<Array<unknown>>([]);
       const elicitationCompletions = yield* Ref.make<Array<unknown>>([]);
@@ -346,7 +356,7 @@ it.layer(NodeServices.layer)("effect-acp client", (it) => {
     }),
   );
 
-  it.effect("continues dispatching session updates after one handler fails", () =>
+  childProcessTest("continues dispatching session updates after one handler fails", () =>
     Effect.gen(function* () {
       const successfulHandlers = yield* Ref.make(0);
       const handle = yield* makeHandle();

@@ -160,7 +160,7 @@ describe("AcpRuntimeModel", () => {
         kind: "execute",
         status: "pending",
         rawInput: {
-          executable: "bun",
+          executable: "yarn",
           args: ["run", "typecheck"],
         },
         content: [
@@ -183,14 +183,14 @@ describe("AcpRuntimeModel", () => {
           kind: "execute",
           title: "Ran command",
           status: "pending",
-          command: "bun run typecheck",
-          detail: "bun run typecheck",
+          command: "yarn run typecheck",
+          detail: "yarn run typecheck",
           data: {
             toolCallId: "tool-1",
             kind: "execute",
-            command: "bun run typecheck",
+            command: "yarn run typecheck",
             rawInput: {
-              executable: "bun",
+              executable: "yarn",
               args: ["run", "typecheck"],
             },
             content: [
@@ -213,7 +213,7 @@ describe("AcpRuntimeModel", () => {
             kind: "execute",
             status: "pending",
             rawInput: {
-              executable: "bun",
+              executable: "yarn",
               args: ["run", "typecheck"],
             },
             content: [
@@ -249,8 +249,8 @@ describe("AcpRuntimeModel", () => {
         toolCallId: "tool-1",
         status: "completed",
         title: "Ran command",
-        detail: "bun run typecheck",
-        command: "bun run typecheck",
+        detail: "yarn run typecheck",
+        command: "yarn run typecheck",
       });
     }
   });

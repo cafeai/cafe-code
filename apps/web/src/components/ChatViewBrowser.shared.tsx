@@ -4180,7 +4180,12 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           archiveAction,
           "Archive button should render inside a visibility wrapper.",
         ).not.toBeNull();
-        expect(getComputedStyle(archiveAction!).opacity).toBe("0");
+        await vi.waitFor(
+          () => {
+            expect(getComputedStyle(archiveAction!).opacity).toBe("0");
+          },
+          { timeout: 4_000, interval: 16 },
+        );
 
         await threadRow.hover();
         await vi.waitFor(
