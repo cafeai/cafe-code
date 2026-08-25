@@ -12,9 +12,9 @@ import { useTaskAtriumStore } from "./taskAtriumStore";
  * It only ever opens because someone pressed the Atrium action in the sidebar —
  * there is no idle takeover and it never claims a pane on its own. The modal
  * dialog primitive moves focus into the full-screen surface, contains keyboard
- * focus while it is open, and restores focus for keyboard dismissals when its
- * opener still exists. Pointer dismissals intentionally do not restore focus:
- * doing so makes the sidebar action look selected after the overlay is gone.
+ * focus while it is open, but deliberately never restores focus to its opener.
+ * The Atrium action is a transient launcher rather than a selected destination,
+ * so returning focus there makes it look selected after the overlay is gone.
  * This matters on mobile because opening Atrium also dismisses the sidebar
  * sheet that owned the trigger. Escape, the close button, and opening a thread
  * from a card all close it.
@@ -47,10 +47,9 @@ export function TaskAtriumOverlay() {
           // otherwise treats the visible filter and close controls as window
           // chrome instead of sending their pointer events to the renderer.
           data-cafe-window-no-drag="true"
-          // Mouse/touch users already moved focus by clicking the dismissal
-          // target, so returning it to Atrium produces a stale selected ring.
-          // Keyboard users still need a predictable return destination.
-          finalFocus={(closeType) => closeType === "keyboard"}
+          // Escape remains a supported dismissal, but no close path returns
+          // focus to the transient Atrium launcher and leaves a stale ring.
+          finalFocus={false}
         >
           <DialogPrimitive.Close
             aria-label="Close Task Atrium"

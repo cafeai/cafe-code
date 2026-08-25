@@ -1,6 +1,7 @@
 import { SettingsIcon } from "lucide-react";
 import { memo } from "react";
 
+import unicornEmojiUrl from "../assets/twemoji-unicorn.svg";
 import { cn } from "../lib/utils";
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from "./ui/sidebar";
 
@@ -39,14 +40,18 @@ export const SidebarFooterNavigation = memo(function SidebarFooterNavigation({
             data-cafe-task-atrium-sidebar-button="true"
             onClick={onOpenAtrium}
           >
-            <span
-              aria-hidden="true"
-              className='inline-flex h-5 w-5 shrink-0 items-center justify-center text-base leading-none [font-family:"Apple_Color_Emoji","Segoe_UI_Emoji","Noto_Color_Emoji",sans-serif]'
-              data-cafe-task-atrium-unicorn-icon="true"
-            >
-              🦄
+            <span className="inline-flex min-w-0 items-center gap-2 text-xs">
+              <img
+                alt=""
+                aria-hidden="true"
+                className="size-5 shrink-0"
+                data-cafe-task-atrium-unicode-codepoint="U+1F984"
+                data-cafe-task-atrium-unicorn-icon="true"
+                draggable={false}
+                src={unicornEmojiUrl}
+              />
+              <span className="truncate">Atrium</span>
             </span>
-            <span className="text-xs">Atrium</span>
           </SidebarMenuButton>
         </SidebarMenuItem>
       )}

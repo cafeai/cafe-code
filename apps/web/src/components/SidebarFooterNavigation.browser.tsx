@@ -31,21 +31,21 @@ describe("SidebarFooterNavigation", () => {
     const { host, onOpenAtrium, onOpenSettings, screen } = await renderFooter();
     try {
       const buttons = [...host.querySelectorAll<HTMLButtonElement>('[data-sidebar="menu-button"]')];
-      expect(buttons.map((button) => button.textContent?.trim())).toEqual(["🦄Atrium", "Settings"]);
+      expect(buttons.map((button) => button.textContent?.trim())).toEqual(["Atrium", "Settings"]);
       expect(buttons[0]?.getAttribute("aria-haspopup")).toBe("dialog");
       expect(buttons[0]?.getAttribute("aria-expanded")).toBe("false");
       expect(
         buttons[0]?.querySelector('[data-cafe-task-atrium-unicorn-icon="true"]'),
       ).not.toBeNull();
-      const unicorn = buttons[0]?.querySelector<HTMLElement>(
+      const unicorn = buttons[0]?.querySelector<HTMLImageElement>(
         '[data-cafe-task-atrium-unicorn-icon="true"]',
       );
-      expect(unicorn?.textContent).toBe("🦄");
-      expect(unicorn?.className).toContain("text-base");
-      expect(unicorn?.className).toContain("Apple_Color_Emoji");
-      expect(unicorn?.getBoundingClientRect().width).toBeGreaterThanOrEqual(16);
-      expect(unicorn?.getBoundingClientRect().height).toBeGreaterThanOrEqual(16);
-      expect(getComputedStyle(unicorn!).fontFamily).toContain("Apple Color Emoji");
+      expect(unicorn?.getAttribute("data-cafe-task-atrium-unicode-codepoint")).toBe("U+1F984");
+      expect(unicorn?.getBoundingClientRect().width).toBeGreaterThanOrEqual(20);
+      expect(unicorn?.getBoundingClientRect().height).toBeGreaterThanOrEqual(20);
+      expect(unicorn?.complete).toBe(true);
+      expect(unicorn?.naturalWidth).toBeGreaterThan(0);
+      expect(unicorn?.naturalHeight).toBeGreaterThan(0);
 
       buttons[0]?.click();
       buttons[1]?.click();

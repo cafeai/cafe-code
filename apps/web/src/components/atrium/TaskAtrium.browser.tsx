@@ -810,7 +810,7 @@ describe("TaskAtriumOverlay", () => {
     }
   });
 
-  it("closes on Escape and restores keyboard focus to the opener", async () => {
+  it("closes on Escape without reselecting the Atrium opener", async () => {
     useTaskAtriumStore.getState().setOpen(false);
     const opener = document.createElement("button");
     opener.textContent = "Open Atrium";
@@ -826,7 +826,7 @@ describe("TaskAtriumOverlay", () => {
       await vi.waitFor(() => {
         expect(overlay()).toBeNull();
         expect(useTaskAtriumStore.getState().open).toBe(false);
-        expect(document.activeElement).toBe(opener);
+        expect(document.activeElement).not.toBe(opener);
       });
     } finally {
       useTaskAtriumStore.getState().setOpen(false);
