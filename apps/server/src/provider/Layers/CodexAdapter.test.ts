@@ -20,6 +20,9 @@ import {
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
   ThreadId,
+  THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS,
+  THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES,
+  THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_CHARS,
   TurnId,
 } from "@cafecode/contracts";
 import { createModelSelection } from "@cafecode/shared/model";
@@ -27,6 +30,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, vi } from "@effect/vitest";
 
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -45,12 +49,13 @@ import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
   type CodexSessionRuntimeOptions,
+  type CodexSessionRuntimeError,
   type CodexSessionRuntimeSendTurnInput,
   type CodexSessionRuntimeSteerTurnInput,
   type CodexSessionRuntimeShape,
   type CodexThreadSnapshot,
 } from "./CodexSessionRuntime.ts";
-import { makeCodexAdapter } from "./CodexAdapter.ts";
+import { canonicalizeCodexSubagentDetail, makeCodexAdapter } from "./CodexAdapter.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 // Test-local service tag so the rest of the file can keep using `yield* CodexAdapter`.
@@ -62,6 +67,142 @@ const asThreadId = (value: string): ThreadId => ThreadId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
 const asEventId = (value: string): EventId => EventId.make(value);
 const asItemId = (value: string): ProviderItemId => ProviderItemId.make(value);
+
+it("canonicalizes only public subagent chat text and strips unsafe controls", () => {
+  const detail = canonicalizeCodexSubagentDetail({
+    threadId: "provider-child-1",
+    turns: [
+      {
+        id: asTurnId("provider-child-turn-1"),
+        items: [
+          {
+            id: "user-message-1",
+            type: "userMessage",
+            content: [
+              { type: "text", text: "# Task\r\n\tAudit\u202ethe provider\u0000" },
+              { type: "skill", name: "private", path: "/secret/skill/path" },
+            ],
+          },
+          {
+            id: "reasoning-1",
+            type: "reasoning",
+            summary: ["private chain of thought"],
+            content: ["private reasoning content"],
+          },
+          {
+            id: "assistant-message-1",
+            type: "agentMessage",
+            text: "## Result\r\n\tDone\u2066 safely.\u0007",
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.deepStrictEqual(detail, {
+    messages: [
+      { role: "user", text: "# Task\n    Auditthe provider" },
+      { role: "assistant", text: "## Result\n    Done safely." },
+    ],
+    truncated: false,
+  });
+  assert.doesNotMatch(JSON.stringify(detail), /private chain|secret\/skill/);
+});
+
+it("enforces subagent transcript message, per-message, and total limits", () => {
+  const oversized = canonicalizeCodexSubagentDetail({
+    threadId: "provider-child-oversized",
+    turns: [
+      {
+        id: asTurnId("provider-child-turn-oversized"),
+        items: [
+          {
+            id: "oversized-message",
+            type: "agentMessage",
+            text: "x".repeat(THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS + 100),
+          },
+        ],
+      },
+    ],
+  });
+  assert.equal(oversized.messages[0]?.text.length, THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS);
+  assert.equal(oversized.truncated, true);
+
+  const manyMessages = canonicalizeCodexSubagentDetail({
+    threadId: "provider-child-many",
+    turns: [
+      {
+        id: asTurnId("provider-child-turn-many"),
+        items: Array.from({ length: THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES + 6 }, (_, index) => ({
+          id: `message-${index}`,
+          type: "agentMessage" as const,
+          text: `message ${index}`,
+        })),
+      },
+    ],
+  });
+  assert.equal(manyMessages.messages.length, THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES);
+  assert.equal(manyMessages.messages[0]?.text, "message 6");
+  assert.equal(
+    manyMessages.messages[THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES - 1]?.text,
+    `message ${THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES + 5}`,
+  );
+  assert.equal(manyMessages.truncated, true);
+
+  const totalLimited = canonicalizeCodexSubagentDetail({
+    threadId: "provider-child-total",
+    turns: [
+      {
+        id: asTurnId("provider-child-turn-total"),
+        items: Array.from({ length: 5 }, (_, index) => ({
+          id: `large-message-${index}`,
+          type: "agentMessage" as const,
+          text: "y".repeat(THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS),
+        })),
+      },
+    ],
+  });
+  assert.equal(
+    totalLimited.messages.reduce((total, message) => total + message.text.length, 0),
+    THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_CHARS,
+  );
+  assert.equal(totalLimited.truncated, true);
+});
+
+it("keeps the initial assignment and final result around the newest bounded tail", () => {
+  const finalResult = "FINAL_ASSISTANT_RESULT_SENTINEL";
+  const detail = canonicalizeCodexSubagentDetail({
+    threadId: "provider-child-anchored-tail",
+    turns: [
+      {
+        id: asTurnId("provider-child-turn-anchored-tail"),
+        items: [
+          {
+            id: "initial-assignment",
+            type: "userMessage",
+            content: [{ type: "text", text: "Audit the child transcript boundary" }],
+          },
+          ...Array.from({ length: THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES + 8 }, (_, index) => ({
+            id: `assistant-update-${index}`,
+            type: "agentMessage" as const,
+            text:
+              index === THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES + 7
+                ? finalResult
+                : `progress update ${index}`,
+          })),
+        ],
+      },
+    ],
+  });
+
+  assert.equal(detail.messages.length, THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES);
+  assert.deepEqual(detail.messages[0], {
+    role: "user",
+    text: "Audit the child transcript boundary",
+  });
+  assert.deepEqual(detail.messages.at(-1), { role: "assistant", text: finalResult });
+  assert.equal(detail.truncated, true);
+});
 
 class FakeCodexRuntime implements CodexSessionRuntimeShape {
   private readonly eventQueue = Effect.runSync(Queue.unbounded<ProviderEvent>());
@@ -110,6 +251,14 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     (): Promise<CodexThreadSnapshot> =>
       Promise.resolve({
         threadId: "provider-thread-1",
+        turns: [],
+      }),
+  );
+
+  public readonly readSubagentThreadImpl = vi.fn(
+    (subagentThreadId: string): Promise<CodexThreadSnapshot> =>
+      Promise.resolve({
+        threadId: subagentThreadId,
         turns: [],
       }),
   );
@@ -192,6 +341,13 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   clearGoal = Effect.succeed({ cleared: true });
 
   readThread = Effect.promise(() => this.readThreadImpl());
+
+  readSubagentThread(subagentThreadId: string) {
+    return Effect.tryPromise({
+      try: () => this.readSubagentThreadImpl(subagentThreadId),
+      catch: (error) => error as CodexSessionRuntimeError,
+    });
+  }
 
   rollbackThread(numTurns: number) {
     return Effect.promise(() => this.rollbackThreadImpl(numTurns));
@@ -385,6 +541,13 @@ validationLayer("CodexAdapterLive validation", (it) => {
 });
 
 const sessionRuntimeFactory = makeRuntimeFactory();
+const transientSubagentHistoryRead = vi.fn(
+  (options: { readonly subagentThreadId: string }): Effect.Effect<CodexThreadSnapshot> =>
+    Effect.succeed({
+      threadId: options.subagentThreadId,
+      turns: [],
+    }),
+);
 const sessionErrorLayer = it.layer(
   Layer.effect(
     CodexAdapter,
@@ -392,6 +555,7 @@ const sessionErrorLayer = it.layer(
       const codexConfig = decodeCodexSettings({});
       return yield* makeCodexAdapter(codexConfig, {
         makeRuntime: sessionRuntimeFactory.factory,
+        readTransientSubagentThread: transientSubagentHistoryRead,
       });
     }),
   ).pipe(
@@ -403,6 +567,97 @@ const sessionErrorLayer = it.layer(
 );
 
 sessionErrorLayer("CodexAdapterLive session errors", (it) => {
+  it.effect("uses a transient reader without materializing a session or runtime events", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-ended-subagent-detail");
+      const childId = "provider-child-ended";
+      const runtimeCountBefore = sessionRuntimeFactory.factory.mock.calls.length;
+      transientSubagentHistoryRead.mockClear();
+
+      const readSubagentDetail = adapter.readSubagentDetail;
+      assert.ok(readSubagentDetail);
+      const detail = yield* readSubagentDetail(threadId, childId, {
+        resumeCursor: { threadId: "provider-root-ended" },
+      });
+
+      assert.deepEqual(detail, { messages: [], truncated: false });
+      assert.equal(sessionRuntimeFactory.factory.mock.calls.length, runtimeCountBefore);
+      assert.equal(transientSubagentHistoryRead.mock.calls.length, 1);
+      assert.deepEqual(transientSubagentHistoryRead.mock.calls[0]?.[0], {
+        binaryPath: "codex",
+        appServerCwd: path.join(process.cwd(), "userdata"),
+        rootProviderThreadId: "provider-root-ended",
+        subagentThreadId: childId,
+      });
+      assert.equal(
+        (yield* adapter.listSessions()).some((session) => session.threadId === threadId),
+        false,
+      );
+    }),
+  );
+
+  it.effect("reuses a live root without invoking the transient reader", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-live-subagent-detail");
+      const childId = "provider-child-live";
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      assert.ok(runtime);
+      transientSubagentHistoryRead.mockClear();
+      runtime.readSubagentThreadImpl.mockClear();
+
+      const readSubagentDetail = adapter.readSubagentDetail;
+      assert.ok(readSubagentDetail);
+      yield* readSubagentDetail(threadId, childId, {
+        resumeCursor: { threadId: "provider-root-live" },
+      });
+
+      assert.equal(transientSubagentHistoryRead.mock.calls.length, 0);
+      assert.deepEqual(runtime.readSubagentThreadImpl.mock.calls[0], [childId]);
+    }),
+  );
+
+  it.effect("bounds concurrent transient history spawns to one per adapter", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const firstStarted = yield* Deferred.make<void>();
+      const releaseFirst = yield* Deferred.make<void>();
+      transientSubagentHistoryRead.mockClear();
+      transientSubagentHistoryRead.mockImplementationOnce((options) =>
+        Deferred.succeed(firstStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseFirst)),
+          Effect.as({ threadId: options.subagentThreadId, turns: [] }),
+        ),
+      );
+      const readSubagentDetail = adapter.readSubagentDetail;
+      assert.ok(readSubagentDetail);
+
+      const first = yield* readSubagentDetail(
+        asThreadId("sess-ended-history-first"),
+        "provider-child-first",
+        { resumeCursor: { threadId: "provider-root-first" } },
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(firstStarted);
+      const retry = yield* readSubagentDetail(
+        asThreadId("sess-ended-history-retry"),
+        "provider-child-retry",
+        { resumeCursor: { threadId: "provider-root-retry" } },
+      ).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+
+      assert.equal(transientSubagentHistoryRead.mock.calls.length, 1);
+      yield* Deferred.succeed(releaseFirst, undefined);
+      yield* Effect.all([Fiber.join(first), Fiber.join(retry)]);
+      assert.equal(transientSubagentHistoryRead.mock.calls.length, 2);
+    }),
+  );
+
   it.effect("maps missing adapter sessions to ProviderAdapterSessionNotFoundError", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;
@@ -418,6 +673,58 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       assert.equal(result.failure._tag, "ProviderAdapterSessionNotFoundError");
       assert.equal(result.failure.provider, "codex");
       assert.equal(result.failure.threadId, "sess-never-started");
+    }),
+  );
+
+  it.effect("redacts provider child-read messages, causes, ids, and stacks", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-subagent-detail-redaction");
+      const childId = "sentinel-child-id-do-not-log";
+      const sentinels = [
+        childId,
+        "/Users/private-account/.codex/rollouts/secret.jsonl",
+        "account-owner@example.invalid",
+        "raw-response-body-secret",
+        "upstream-stack-secret",
+      ];
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      assert.ok(runtime);
+
+      const upstreamCause = new Error(`${sentinels[1]} ${sentinels[2]} ${sentinels[3]}`);
+      upstreamCause.stack = `Error: ${sentinels[4]}\n    at ${sentinels[1]}:1:1`;
+      runtime.readSubagentThreadImpl.mockRejectedValueOnce(
+        new CodexErrors.CodexAppServerTransportError({
+          detail: `transport rejected ${childId}: ${sentinels[3]}`,
+          cause: upstreamCause,
+        }),
+      );
+
+      const readSubagentDetail = adapter.readSubagentDetail;
+      assert.ok(readSubagentDetail);
+      const result = yield* readSubagentDetail(threadId, childId).pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      assert.equal(result.failure._tag, "ProviderSubagentDetailReadError");
+      if (result.failure._tag !== "ProviderSubagentDetailReadError") return;
+      assert.equal(result.failure.reason, "provider-transport-unavailable");
+      assert.equal(result.failure.stack, undefined);
+
+      const serialized = JSON.stringify({
+        error: result.failure,
+        message: result.failure.message,
+        stack: result.failure.stack,
+      });
+      for (const sentinel of sentinels) {
+        assert.doesNotMatch(
+          serialized,
+          new RegExp(sentinel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+        );
+      }
     }),
   );
 

@@ -33,6 +33,7 @@ export const ORCHESTRATION_WS_METHODS = {
   getDeletedShellSnapshot: "orchestration.getDeletedShellSnapshot",
   getThreadTurnWorkLogPresence: "orchestration.getThreadTurnWorkLogPresence",
   getThreadTurnActivityPage: "orchestration.getThreadTurnActivityPage",
+  getThreadTurnSubagentDetail: "orchestration.getThreadTurnSubagentDetail",
   hardDeleteThread: "orchestration.hardDeleteThread",
   repairAssistantMessageFromProviderJournal:
     "orchestration.repairAssistantMessageFromProviderJournal",
@@ -542,6 +543,53 @@ export const OrchestrationThreadTurnActivityPage = Schema.Struct({
   activities: Schema.Array(OrchestrationThreadActivity),
 });
 export type OrchestrationThreadTurnActivityPage = typeof OrchestrationThreadTurnActivityPage.Type;
+
+/**
+ * Hard wire limits for provider-owned subagent history returned to a renderer.
+ *
+ * Provider rollouts may contain hours of private reasoning, command output,
+ * and tool payloads. The detail RPC canonicalizes that history to public chat
+ * text only, and these limits keep both the server response and authenticated
+ * remote renderer allocation finite.
+ */
+export const THREAD_TURN_SUBAGENT_ID_MAX_LENGTH = 512;
+export const THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES = 64;
+export const THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS = 32_768;
+export const THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_CHARS = 131_072;
+
+const ThreadTurnSubagentId = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(THREAD_TURN_SUBAGENT_ID_MAX_LENGTH),
+);
+
+export const OrchestrationThreadTurnSubagentDetailInput = Schema.Struct({
+  threadId: ThreadId,
+  turnId: TurnId,
+  subagentId: ThreadTurnSubagentId,
+});
+export type OrchestrationThreadTurnSubagentDetailInput =
+  typeof OrchestrationThreadTurnSubagentDetailInput.Type;
+
+export const OrchestrationThreadTurnSubagentDetailMessage = Schema.Struct({
+  role: Schema.Literals(["user", "assistant"]),
+  // Deliberately use a non-trimming string schema: Markdown indentation and
+  // newlines are public assistant content and must survive the wire boundary.
+  text: Schema.String.check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS),
+  ),
+});
+export type OrchestrationThreadTurnSubagentDetailMessage =
+  typeof OrchestrationThreadTurnSubagentDetailMessage.Type;
+
+export const OrchestrationThreadTurnSubagentDetail = Schema.Struct({
+  provider: Schema.Literal("codex"),
+  messages: Schema.Array(OrchestrationThreadTurnSubagentDetailMessage).check(
+    Schema.isMaxLength(THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES),
+  ),
+  truncated: Schema.Boolean,
+});
+export type OrchestrationThreadTurnSubagentDetail =
+  typeof OrchestrationThreadTurnSubagentDetail.Type;
 
 export const THREAD_TURN_WORK_LOG_PRESENCE_MAX_TURNS = 256;
 
@@ -1658,6 +1706,10 @@ export const OrchestrationRpcSchemas = {
   getThreadTurnWorkLogPresence: {
     input: OrchestrationThreadTurnWorkLogPresenceInput,
     output: OrchestrationThreadTurnWorkLogPresenceResult,
+  },
+  getThreadTurnSubagentDetail: {
+    input: OrchestrationThreadTurnSubagentDetailInput,
+    output: OrchestrationThreadTurnSubagentDetail,
   },
   subscribeThread: {
     input: OrchestrationSubscribeThreadInput,

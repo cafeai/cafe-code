@@ -30,6 +30,7 @@ import {
   deriveWorkLogEntries,
   formatDuration,
   formatElapsed,
+  type WorkLogEntry,
 } from "../../session-logic";
 import ChatMarkdown from "../ChatMarkdown";
 import {
@@ -99,6 +100,7 @@ import {
 } from "./timelineScrollDebug";
 import { useHistoricalWorkLogPresence } from "./useHistoricalWorkLogPresence";
 import { SubagentAvatar } from "../subagents/SubagentAvatar";
+import { SubagentDetailView, type SubagentDetailSelection } from "./SubagentDetailView";
 
 export {
   extractOpenablePathTokens,
@@ -126,11 +128,13 @@ interface TimelineRowSharedState {
   onHistoricalWorkLogPresenceResolved: (turnId: TurnId, hasWorkLog: boolean) => void;
   onRevertUserMessage: (messageId: MessageId) => void;
   onImageExpand: (preview: ExpandedImagePreview) => void;
+  onOpenSubagentDetail: (workEntry: WorkLogEntry, trigger: HTMLButtonElement) => void;
 }
 
 interface TimelineRowActivityState {
   isWorking: boolean;
   isRevertingCheckpoint: boolean;
+  subagentDetailOpen: boolean;
 }
 
 const TimelineRowCtx = createContext<TimelineRowSharedState>(null!);
@@ -267,6 +271,68 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     ],
   );
   const rows = useStableRows(rawRows);
+  const [selectedSubagent, setSelectedSubagent] = useState<SubagentDetailSelection | null>(null);
+  const selectedSubagentTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const subagentDetailBackButtonRef = useRef<HTMLButtonElement | null>(null);
+  const openSubagentDetail = useCallback(
+    (workEntry: WorkLogEntry, trigger: HTMLButtonElement) => {
+      if (!workEntry.subagent) return;
+      selectedSubagentTriggerRef.current = trigger;
+      setSelectedSubagent({
+        environmentId: activeThreadEnvironmentId,
+        threadId: activeThreadId,
+        rowId: workEntry.id,
+        turnId: workEntry.turnId ?? null,
+        workEntry: { ...workEntry, subagent: workEntry.subagent },
+      });
+    },
+    [activeThreadEnvironmentId, activeThreadId],
+  );
+  const closeSubagentDetail = useCallback(() => {
+    const trigger = selectedSubagentTriggerRef.current;
+    setSelectedSubagent(null);
+    selectedSubagentTriggerRef.current = null;
+    window.requestAnimationFrame(() => {
+      if (trigger?.isConnected) trigger.focus();
+    });
+  }, []);
+  useEffect(() => {
+    // A timeline instance can survive navigation while its thread/environment
+    // props change. Never carry a child selection into a different Cafe scope:
+    // besides showing stale detail, that would issue a guaranteed-denied RPC
+    // using the new thread id and the prior turn/child identity.
+    setSelectedSubagent(null);
+    selectedSubagentTriggerRef.current = null;
+  }, [activeThreadEnvironmentId, activeThreadId]);
+  const resolvedSelectedSubagent = useMemo(() => {
+    if (!selectedSubagent) return null;
+    if (
+      selectedSubagent.environmentId !== activeThreadEnvironmentId ||
+      selectedSubagent.threadId !== activeThreadId
+    ) {
+      return null;
+    }
+    // Live child progress continues to update the selected screen. Historical
+    // rows own their paged activity locally, so their immutable terminal
+    // snapshot remains the fallback when it is not present in the root rows.
+    for (const row of rows) {
+      if (row.kind !== "work") continue;
+      const current = row.groupedEntries.find(
+        (entry) =>
+          entry.subagent?.id === selectedSubagent.workEntry.subagent.id &&
+          (entry.turnId ?? null) === selectedSubagent.turnId,
+      );
+      if (current?.subagent) {
+        return {
+          ...selectedSubagent,
+          rowId: current.id,
+          workEntry: { ...current, subagent: current.subagent },
+        };
+      }
+    }
+    return selectedSubagent;
+  }, [activeThreadEnvironmentId, activeThreadId, rows, selectedSubagent]);
+  const isSubagentDetailOpen = resolvedSelectedSubagent !== null;
   const stickToEndDeadlineMsRef = useRef(0);
   const submitStickScrollEventRepinFrameRef = useRef<number | null>(null);
   const tailFollowItemLayoutRepinFrameRef = useRef<number | null>(null);
@@ -791,6 +857,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeProvider,
       onRevertUserMessage,
       onImageExpand,
+      onOpenSubagentDetail: openSubagentDetail,
     }),
     [
       timestampFormat,
@@ -804,14 +871,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeProvider,
       onRevertUserMessage,
       onImageExpand,
+      openSubagentDetail,
     ],
   );
   const activityState = useMemo<TimelineRowActivityState>(
     () => ({
       isWorking,
       isRevertingCheckpoint,
+      subagentDetailOpen: isSubagentDetailOpen,
     }),
-    [isRevertingCheckpoint, isWorking],
+    [isRevertingCheckpoint, isSubagentDetailOpen, isWorking],
   );
 
   // Stable renderItem — no closure deps. Row components read shared state
@@ -825,7 +894,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [],
   );
 
-  if (rows.length === 0 && !isWorking) {
+  if (rows.length === 0 && !isWorking && resolvedSelectedSubagent === null) {
     return (
       <div className="flex h-full items-center justify-center">
         <p className="text-sm text-muted-foreground/30">
@@ -836,39 +905,63 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   }
 
   return (
-    <TimelineRowCtx value={sharedState}>
-      <TimelineRowActivityCtx value={activityState}>
-        <LegendList<MessagesTimelineRow>
-          ref={listRef}
-          data={rows}
-          keyExtractor={keyExtractor}
-          renderItem={renderItem}
-          estimatedItemSize={90}
-          initialScrollAtEnd
-          maintainScrollAtEnd={autoFollowTail}
-          maintainScrollAtEndThreshold={TIMELINE_MAINTAIN_SCROLL_AT_END_THRESHOLD}
-          maintainVisibleContentPosition={
-            autoFollowTail
-              ? TIMELINE_FOLLOW_VISIBLE_CONTENT_POSITION
-              : TIMELINE_REVIEW_VISIBLE_CONTENT_POSITION
-          }
-          onItemSizeChanged={handleItemSizeChanged}
-          onScroll={handleScroll}
-          onWheel={handleWheel}
-          onTouchStart={handleTouchStart}
-          onTouchMove={handleTouchMove}
-          onTouchEnd={handleTouchEnd}
-          onTouchCancel={handleTouchEnd}
-          onPointerDown={handlePointerDown}
-          onPointerUp={handlePointerEnd}
-          onPointerCancel={handlePointerEnd}
-          onKeyDown={handleKeyDown}
-          className="h-full overflow-x-hidden overscroll-y-contain px-3 sm:px-5"
-          ListHeaderComponent={TIMELINE_LIST_HEADER}
-          ListFooterComponent={TIMELINE_LIST_FOOTER}
+    <div className="relative h-full min-h-0 min-w-0 overflow-hidden">
+      <TimelineRowCtx value={sharedState}>
+        <TimelineRowActivityCtx value={activityState}>
+          <div
+            className={cn(
+              "h-full min-h-0",
+              isSubagentDetailOpen && "pointer-events-none invisible",
+            )}
+            aria-hidden={isSubagentDetailOpen ? true : undefined}
+            inert={isSubagentDetailOpen ? true : undefined}
+          >
+            <LegendList<MessagesTimelineRow>
+              ref={listRef}
+              data={rows}
+              keyExtractor={keyExtractor}
+              renderItem={renderItem}
+              estimatedItemSize={90}
+              initialScrollAtEnd
+              maintainScrollAtEnd={autoFollowTail}
+              maintainScrollAtEndThreshold={TIMELINE_MAINTAIN_SCROLL_AT_END_THRESHOLD}
+              maintainVisibleContentPosition={
+                autoFollowTail
+                  ? TIMELINE_FOLLOW_VISIBLE_CONTENT_POSITION
+                  : TIMELINE_REVIEW_VISIBLE_CONTENT_POSITION
+              }
+              onItemSizeChanged={handleItemSizeChanged}
+              onScroll={handleScroll}
+              onWheel={handleWheel}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              onTouchCancel={handleTouchEnd}
+              onPointerDown={handlePointerDown}
+              onPointerUp={handlePointerEnd}
+              onPointerCancel={handlePointerEnd}
+              onKeyDown={handleKeyDown}
+              className="h-full overflow-x-hidden overscroll-y-contain px-3 sm:px-5"
+              ListHeaderComponent={TIMELINE_LIST_HEADER}
+              ListFooterComponent={TIMELINE_LIST_FOOTER}
+            />
+          </div>
+        </TimelineRowActivityCtx>
+      </TimelineRowCtx>
+      {resolvedSelectedSubagent ? (
+        <SubagentDetailView
+          selection={resolvedSelectedSubagent}
+          environmentId={activeThreadEnvironmentId}
+          threadId={activeThreadId}
+          provider={activeProvider}
+          markdownCwd={markdownCwd}
+          additionalWorkspaceRoots={additionalWorkspaceRoots}
+          skills={skills}
+          backButtonRef={subagentDetailBackButtonRef}
+          onBack={closeSubagentDetail}
         />
-      </TimelineRowActivityCtx>
-    </TimelineRowCtx>
+      ) : null}
+    </div>
   );
 });
 
@@ -2077,11 +2170,13 @@ function subscribeLiveSubagentClock(listener: LiveSubagentClockListener): () => 
 
 const LiveSubagentElapsed = memo(function LiveSubagentElapsed({
   startedAt,
+  paused,
 }: {
   startedAt: string;
+  paused: boolean;
 }) {
   const [now, setNow] = useState(() => Date.now());
-  useEffect(() => subscribeLiveSubagentClock(setNow), []);
+  useEffect(() => (paused ? undefined : subscribeLiveSubagentClock(setNow)), [paused]);
   const elapsed = liveSubagentElapsed(startedAt, now);
   return elapsed ? (
     <p
@@ -2098,6 +2193,8 @@ const SubagentWorkEntryRow = memo(function SubagentWorkEntryRow({
 }: {
   workEntry: TimelineWorkEntry;
 }) {
+  const { onOpenSubagentDetail } = use(TimelineRowCtx);
+  const { subagentDetailOpen } = use(TimelineRowActivityCtx);
   const subagent = workEntry.subagent;
   if (!subagent) return null;
   const statusLabel = subagentStatusLabel(subagent.status);
@@ -2117,10 +2214,12 @@ const SubagentWorkEntryRow = memo(function SubagentWorkEntryRow({
       : null;
 
   return (
-    <div
-      className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2.5 rounded-lg px-1 py-2"
+    <button
+      type="button"
+      className="grid min-h-11 w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2.5 rounded-lg px-1 py-2 text-left transition-colors hover:bg-muted/35 focus-visible:bg-muted/35 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
       data-subagent-work-row="true"
-      aria-label={`${subagent.label}, ${statusLabel}`}
+      aria-label={`${subagent.label}, ${statusLabel}. ${primaryDescription}. Open details`}
+      onClick={(event) => onOpenSubagentDetail(workEntry, event.currentTarget)}
     >
       <SubagentAvatar seed={subagent.id} className="size-7 sm:size-8" />
       <div className="min-w-0 pt-0.5">
@@ -2139,22 +2238,25 @@ const SubagentWorkEntryRow = memo(function SubagentWorkEntryRow({
           </p>
         ) : null}
       </div>
-      <div className="min-w-14 shrink-0 pt-0.5 text-right tabular-nums">
-        <p className="text-[9px] uppercase tracking-[0.08em] text-muted-foreground/55">
-          {statusLabel}
-        </p>
-        {subagent.status === "active" || subagent.status === "waiting" ? (
-          <LiveSubagentElapsed startedAt={subagent.startedAt} />
-        ) : terminalElapsed ? (
-          <p
-            className="mt-0.5 font-mono text-[10px] text-muted-foreground/55"
-            data-subagent-terminal-elapsed="true"
-          >
-            {terminalElapsed}
+      <div className="flex shrink-0 items-start gap-1 pt-0.5">
+        <div className="min-w-14 text-right tabular-nums">
+          <p className="text-[9px] uppercase tracking-[0.08em] text-muted-foreground/55">
+            {statusLabel}
           </p>
-        ) : null}
+          {subagent.status === "active" || subagent.status === "waiting" ? (
+            <LiveSubagentElapsed startedAt={subagent.startedAt} paused={subagentDetailOpen} />
+          ) : terminalElapsed ? (
+            <p
+              className="mt-0.5 font-mono text-[10px] text-muted-foreground/55"
+              data-subagent-terminal-elapsed="true"
+            >
+              {terminalElapsed}
+            </p>
+          ) : null}
+        </div>
+        <ChevronRightIcon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground/35" />
       </div>
-    </div>
+    </button>
   );
 });
 

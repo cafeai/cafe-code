@@ -126,10 +126,20 @@ function requiredElement(selector: string): HTMLElement {
 }
 
 function displayedRawCount(id: string): number {
-  const text = requiredElement(`[data-usage-composition-raw="${id}"]`).textContent ?? "";
+  const text = requiredElement(`[data-usage-token-full="composition-${id}"]`).textContent ?? "";
   const numeric = text.match(/[\d,]+/)?.[0];
   expect(numeric).toBeDefined();
   return Number(numeric!.replaceAll(",", ""));
+}
+
+function expectFullBeforeCompact(context: string): void {
+  const full = requiredElement(`[data-usage-token-full="${context}"]`);
+  const compact = requiredElement(`[data-usage-token-compact="${context}"]`);
+  expect(full.compareDocumentPosition(compact) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  expect(Number.parseFloat(getComputedStyle(full).fontSize)).toBeGreaterThan(
+    Number.parseFloat(getComputedStyle(compact).fontSize),
+  );
+  expect(compact.getAttribute("aria-hidden")).toBe("true");
 }
 
 describe("UsageStatsPanel", () => {
@@ -197,7 +207,7 @@ describe("UsageStatsPanel", () => {
       .toBeVisible();
   });
 
-  it("labels every monetary estimate as USD and pairs compact tokens with exact counts", async () => {
+  it("labels monetary estimates as USD and makes full token counts primary", async () => {
     mounted = await render(<UsageCostContent usage={createUsageDetail()} />);
 
     const hero = requiredElement('[data-usage-cost-hero-value="true"]');
@@ -224,61 +234,90 @@ describe("UsageStatsPanel", () => {
     expect(modelCosts).toHaveLength(3);
     expect(modelCosts.every((entry) => /\$[\d,.]+ USD/.test(entry.textContent ?? ""))).toBe(true);
 
-    expect(requiredElement('[data-usage-range-token-compact="true"]').textContent).toContain(
-      "350K tokens in range",
+    expect(requiredElement('[data-usage-token-full="range"]').textContent).toContain(
+      "350,000 tokens in range",
     );
-    expect(requiredElement('[data-usage-range-token-raw="true"]').textContent).toContain(
-      "350,000 tokens exact",
-    );
+    expect(requiredElement('[data-usage-token-compact="range"]').textContent).toBe("350K");
+    expectFullBeforeCompact("range");
 
+    const providerFullCounts = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-usage-token-full="provider"]'),
+    );
     const providerCompacts = Array.from(
-      document.querySelectorAll<HTMLElement>('[data-usage-provider-token-compact="true"]'),
+      document.querySelectorAll<HTMLElement>('[data-usage-token-compact="provider"]'),
     );
-    const providerRaws = Array.from(
-      document.querySelectorAll<HTMLElement>('[data-usage-provider-token-raw="true"]'),
-    );
+    expect(providerFullCounts).toHaveLength(2);
     expect(providerCompacts).toHaveLength(2);
-    expect(providerRaws).toHaveLength(2);
-    expect(providerCompacts.every((entry) => /[KM] tokens/.test(entry.textContent ?? ""))).toBe(
-      true,
-    );
     expect(
-      providerRaws.every((entry) => /\d{1,3}(,\d{3})+ tokens exact/.test(entry.textContent ?? "")),
+      providerFullCounts.every((entry) => /\d{1,3}(,\d{3})+ tokens/.test(entry.textContent ?? "")),
     ).toBe(true);
-
-    const aggregateExpectations = {
-      processed: ["3.00M", "3,000,000 tokens exact"],
-      cached: ["1.25M", "1,250,000 tokens exact"],
-      uncached: ["1.25M", "1,250,000 tokens exact"],
-      output: ["250K", "250,000 tokens exact"],
-    } as const;
-    for (const [id, [compact, raw]] of Object.entries(aggregateExpectations)) {
-      expect(requiredElement(`[data-usage-composition-compact="${id}"]`).textContent).toBe(compact);
-      expect(requiredElement(`[data-usage-composition-raw="${id}"]`).textContent).toBe(raw);
+    expect(providerCompacts.every((entry) => /[KM]/.test(entry.textContent ?? ""))).toBe(true);
+    for (const figure of document.querySelectorAll<HTMLElement>(
+      '[data-usage-token-figure="provider"]',
+    )) {
+      const children = figure.querySelectorAll<HTMLElement>(
+        "[data-usage-token-full], [data-usage-token-compact]",
+      );
+      expect(children[0]?.dataset.usageTokenFull).toBe("provider");
+      expect(children[1]?.dataset.usageTokenCompact).toBe("provider");
     }
 
-    expect(requiredElement('[data-usage-reasoning-token-compact="true"]').textContent).toContain(
-      "50K reasoning",
-    );
-    expect(requiredElement('[data-usage-reasoning-token-raw="true"]').textContent).toContain(
-      "50,000 tokens exact",
-    );
+    const aggregateExpectations = {
+      processed: ["3,000,000 tokens", "3.00M"],
+      cached: ["1,250,000 tokens", "1.25M"],
+      uncached: ["1,250,000 tokens", "1.25M"],
+      output: ["250,000 tokens", "250K"],
+    } as const;
+    for (const [id, [full, compact]] of Object.entries(aggregateExpectations)) {
+      const context = `composition-${id}`;
+      expect(requiredElement(`[data-usage-token-full="${context}"]`).textContent).toBe(full);
+      expect(requiredElement(`[data-usage-token-compact="${context}"]`).textContent).toBe(compact);
+      expectFullBeforeCompact(context);
+    }
 
+    expect(requiredElement('[data-usage-token-full="reasoning"]').textContent).toContain(
+      "50,000 reasoning tokens",
+    );
+    expect(requiredElement('[data-usage-token-compact="reasoning"]').textContent).toBe("50K");
+    expectFullBeforeCompact("reasoning");
+
+    const modelFullCounts = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-usage-token-full="model"]'),
+    );
     const modelCompacts = Array.from(
-      document.querySelectorAll<HTMLElement>('[data-usage-model-token-compact="true"]'),
+      document.querySelectorAll<HTMLElement>('[data-usage-token-compact="model"]'),
     );
-    const modelRaws = Array.from(
-      document.querySelectorAll<HTMLElement>('[data-usage-model-token-raw="true"]'),
-    );
+    expect(modelFullCounts).toHaveLength(3);
     expect(modelCompacts).toHaveLength(3);
-    expect(modelRaws).toHaveLength(3);
     expect(modelCompacts.every((entry) => /[KM]/.test(entry.textContent ?? ""))).toBe(true);
-    expect(modelRaws.every((entry) => /\d{1,3}(,\d{3})+ exact/.test(entry.textContent ?? ""))).toBe(
+    expect(modelFullCounts.every((entry) => /\d{1,3}(,\d{3})+/.test(entry.textContent ?? ""))).toBe(
       true,
     );
+    expect(document.body.textContent).not.toMatch(/\btokens? exact\b/i);
   });
 
-  it("animates the exact aggregate count through a small increment", async () => {
+  it("renders the billion-scale shorthand beneath the full counter", async () => {
+    const baseline = createUsageDetail();
+    const usage = {
+      ...baseline,
+      totals: {
+        ...baseline.totals,
+        inputTokens: 3_500_000_000,
+        outputTokens: 39_966_200,
+      },
+    };
+    mounted = await render(<UsageCostContent usage={usage} />);
+
+    expect(requiredElement('[data-usage-token-full="composition-processed"]').textContent).toBe(
+      "3,539,966,200 tokens",
+    );
+    expect(requiredElement('[data-usage-token-compact="composition-processed"]').textContent).toBe(
+      "3.54B",
+    );
+    expectFullBeforeCompact("composition-processed");
+  });
+
+  it("animates the full aggregate count through a small increment", async () => {
     const initialUsage = createUsageDetail();
     mounted = await render(<UsageCostContent usage={initialUsage} />);
     expect(displayedRawCount("processed")).toBe(3_000_000);
@@ -310,7 +349,7 @@ describe("UsageStatsPanel", () => {
     try {
       mounted = await render(<UsageCostContent usage={createUsageDetail()} />);
       expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
-      expect(requiredElement('[data-usage-composition-raw="processed"]')).toBeVisible();
+      expect(requiredElement('[data-usage-token-full="composition-processed"]')).toBeVisible();
     } finally {
       await page.viewport(originalViewport.width, originalViewport.height);
     }

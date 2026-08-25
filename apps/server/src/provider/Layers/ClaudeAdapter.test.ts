@@ -1049,6 +1049,68 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("keeps the turn active when Claude reports another queued turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "first prompt",
+        attachments: [],
+      });
+      const [firstMessage] = yield* Effect.promise(() =>
+        readPromptMessages(harness.getLastCreateQueryInput(), 1),
+      );
+      if (firstMessage?.uuid === undefined) {
+        throw new Error("Expected a UUID-stamped Claude prompt.");
+      }
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        queued_turn_count: 1,
+        user_message_uuid: firstMessage.uuid,
+        session_id: "claude-session-provider-queued-turn",
+        uuid: "result-before-provider-queued-turn",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      const activeSession = (yield* adapter.listSessions())[0];
+      assert.equal(activeSession?.status, "running");
+      assert.equal(activeSession?.activeTurnId, turn.turnId);
+      assert.equal((yield* adapter.readThread(session.threadId)).turns.length, 0);
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        queued_turn_count: 0,
+        session_id: "claude-session-provider-queued-turn",
+        uuid: "result-provider-queue-drained",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      const completedSession = (yield* adapter.listSessions())[0];
+      assert.equal(completedSession?.status, "ready");
+      assert.equal(completedSession?.activeTurnId, undefined);
+      assert.equal((yield* adapter.readThread(session.threadId)).turns.length, 1);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("completes one Cafe turn for a coalesced Claude follow-up batch", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -3553,8 +3615,12 @@ describe("ClaudeAdapterLive", () => {
         uuid: "prompt-suggestion-1",
       } as unknown as SDKMessage);
       harness.query.emit({
-        type: "control_request_progress",
-        summary: "Refreshing Claude workspace metadata.",
+        type: "system",
+        subtype: "control_request_progress",
+        status: "api_retry",
+        attempt: 2,
+        max_retries: 3,
+        retry_delay_ms: 500,
         request_id: "control-progress-198",
         session_id: "sdk-session-198",
         uuid: "control-progress-1",
@@ -3662,7 +3728,6 @@ describe("ClaudeAdapterLive", () => {
         ),
         false,
       );
-
       const runningState = runtimeEvents.find(
         (event) =>
           event.type === "session.state.changed" &&
@@ -3703,7 +3768,7 @@ describe("ClaudeAdapterLive", () => {
         runtimeEvents.some(
           (event) =>
             event.type === "tool.progress" &&
-            event.payload.summary === "Refreshing Claude workspace metadata.",
+            event.payload.summary === "Claude control request retry 2/3 in 500 ms.",
         ),
         true,
       );

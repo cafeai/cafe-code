@@ -94,6 +94,69 @@ export class ProviderAdapterProcessError extends Schema.TaggedErrorClass<Provide
 }
 
 /**
+ * Finite failure reasons for the read-only provider subagent transcript path.
+ *
+ * Provider-native thread ids, account details, filesystem paths, response
+ * bodies, and exception causes are intentionally absent. This error crosses
+ * the adapter/service boundary and can subsequently be recorded by provider
+ * daemon diagnostics, so allowing an arbitrary message or cause here would
+ * turn an upstream provider failure into a local information disclosure.
+ */
+export const ProviderSubagentDetailReadFailureReason = Schema.Literals([
+  "invalid-request",
+  "session-unavailable",
+  "provider-unavailable",
+  "provider-process-exited",
+  "provider-transport-unavailable",
+  "provider-response-invalid",
+  "root-thread-unavailable",
+  "root-identity-mismatch",
+  "child-identity-mismatch",
+  "missing-subagent-metadata",
+  "parent-metadata-mismatch",
+  "session-tree-mismatch",
+  "provider-request-failed",
+]);
+export type ProviderSubagentDetailReadFailureReason =
+  typeof ProviderSubagentDetailReadFailureReason.Type;
+const isProviderSubagentDetailReadFailureReasonSchema = Schema.is(
+  ProviderSubagentDetailReadFailureReason,
+);
+
+export function isProviderSubagentDetailReadFailureReason(
+  value: unknown,
+): value is ProviderSubagentDetailReadFailureReason {
+  return isProviderSubagentDetailReadFailureReasonSchema(value);
+}
+
+export class ProviderSubagentDetailReadError extends Schema.TaggedErrorClass<ProviderSubagentDetailReadError>()(
+  "ProviderSubagentDetailReadError",
+  {
+    reason: ProviderSubagentDetailReadFailureReason,
+  },
+) {
+  override get message(): string {
+    return `Subagent detail read failed: ${this.reason}`;
+  }
+}
+
+/**
+ * Construct the diagnostic-safe subagent error without an Error stack.
+ *
+ * Even a newly-created stack contains local source paths. The provider daemon
+ * intentionally retains stacks for ordinary operational failures, so this
+ * privacy-sensitive operation clears its stack at construction instead of
+ * relying on every future transport or logger to remember a special case.
+ */
+export function makeProviderSubagentDetailReadError(
+  reason: ProviderSubagentDetailReadFailureReason,
+): ProviderSubagentDetailReadError {
+  const error = new ProviderSubagentDetailReadError({ reason });
+  Reflect.deleteProperty(error, "stack");
+  return error;
+}
+
+/**
  * ProviderValidationError - Invalid provider API input.
  */
 export class ProviderValidationError extends Schema.TaggedErrorClass<ProviderValidationError>()(
@@ -200,7 +263,8 @@ export type ProviderAdapterError =
   | ProviderAdapterSessionNotFoundError
   | ProviderAdapterSessionClosedError
   | ProviderAdapterRequestError
-  | ProviderAdapterProcessError;
+  | ProviderAdapterProcessError
+  | ProviderSubagentDetailReadError;
 
 export type ProviderServiceError =
   | ProviderValidationError

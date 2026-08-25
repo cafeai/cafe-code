@@ -2285,6 +2285,83 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("binds subagent detail authorization to the exact persisted thread and turn", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_thread_activities`;
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id,
+          thread_id,
+          turn_id,
+          tone,
+          kind,
+          summary,
+          payload_json,
+          sequence,
+          created_at
+        )
+        VALUES
+          (
+            'subagent-binding-a',
+            'thread-a',
+            'turn-a',
+            'info',
+            'task.completed',
+            'Subagent completed',
+            '{"taskId":"task-a","subagent":{"threadId":"child-a","status":"completed"}}',
+            1,
+            '2026-04-06T00:00:01.000Z'
+          ),
+          (
+            'subagent-binding-b',
+            'thread-b',
+            'turn-b',
+            'info',
+            'task.progress',
+            'Subagent working',
+            '{"taskId":"task-b","subagent":{"threadId":"child-a","status":"active"}}',
+            2,
+            '2026-04-06T00:00:02.000Z'
+          ),
+          (
+            'non-task-payload',
+            'thread-a',
+            'turn-a',
+            'tool',
+            'tool.completed',
+            'Unrelated tool',
+            '{"subagent":{"threadId":"tool-only-child"}}',
+            3,
+            '2026-04-06T00:00:03.000Z'
+          )
+      `;
+
+      const hasExactBinding = yield* snapshotQuery.hasThreadTurnSubagentActivity({
+        threadId: ThreadId.make("thread-a"),
+        turnId: TurnId.make("turn-a"),
+        subagentId: "child-a",
+      });
+      assert.equal(hasExactBinding, true);
+
+      for (const input of [
+        { threadId: "thread-a", turnId: "turn-b", subagentId: "child-a" },
+        { threadId: "thread-b", turnId: "turn-a", subagentId: "child-a" },
+        { threadId: "thread-a", turnId: "turn-a", subagentId: "tool-only-child" },
+        { threadId: "thread-a", turnId: "turn-a", subagentId: "child-a' OR 1=1 --" },
+      ] as const) {
+        const authorized = yield* snapshotQuery.hasThreadTurnSubagentActivity({
+          threadId: ThreadId.make(input.threadId),
+          turnId: TurnId.make(input.turnId),
+          subagentId: input.subagentId,
+        });
+        assert.equal(authorized, false);
+      }
+    }),
+  );
+
   it.effect("excludes non-rendered work-log activity from turn activity pages", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

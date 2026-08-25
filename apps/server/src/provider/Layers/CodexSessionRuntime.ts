@@ -193,7 +193,7 @@ const CODEX_HTTP_FALLBACK_PROVIDER_ID = "cafecode-openai-http";
 
 export type CodexResumeCursor = typeof CodexResumeCursorSchema.Type;
 type CodexServiceTier = NonNullable<EffectCodexSchema.V2ThreadStartParams["serviceTier"]>;
-type CodexThreadItem =
+export type CodexThreadItem =
   | EffectCodexSchema.V2ThreadReadResponse["thread"]["turns"][number]["items"][number]
   | EffectCodexSchema.V2ThreadRollbackResponse["thread"]["turns"][number]["items"][number];
 type CodexSnapshotThreadItem = CodexThreadItem;
@@ -316,6 +316,56 @@ export interface CodexThreadSnapshot {
   readonly turns: ReadonlyArray<CodexThreadTurnSnapshot>;
 }
 
+export type CodexSubagentThreadValidationFailure =
+  | "root-identity-mismatch"
+  | "child-identity-mismatch"
+  | "missing-subagent-metadata"
+  | "parent-metadata-mismatch"
+  | "session-tree-mismatch";
+
+type CodexThreadReadMetadata = Pick<
+  EffectCodexSchema.V2ThreadReadResponse["thread"],
+  "id" | "parentThreadId" | "sessionId" | "source"
+>;
+
+/**
+ * Verify that an opaque child id resolves inside the recovered root session
+ * tree before its transcript is canonicalized. Nested descendants are valid:
+ * their immediate parent need not equal the root, but Codex's duplicate parent
+ * metadata must agree and both threads must share one provider session id.
+ */
+export function validateCodexSubagentThreadReadMetadata(input: {
+  readonly expectedRootThreadId: string;
+  readonly expectedChildThreadId: string;
+  readonly root: CodexThreadReadMetadata;
+  readonly child: CodexThreadReadMetadata;
+}): CodexSubagentThreadValidationFailure | undefined {
+  if (input.root.id !== input.expectedRootThreadId) return "root-identity-mismatch";
+  if (input.child.id !== input.expectedChildThreadId) return "child-identity-mismatch";
+
+  const source = input.child.source;
+  if (
+    typeof source !== "object" ||
+    source === null ||
+    !("subAgent" in source) ||
+    typeof input.child.parentThreadId !== "string" ||
+    input.child.parentThreadId.length === 0
+  ) {
+    return "missing-subagent-metadata";
+  }
+
+  const subagentSource = source.subAgent;
+  if (
+    typeof subagentSource === "object" &&
+    subagentSource !== null &&
+    "thread_spawn" in subagentSource &&
+    subagentSource.thread_spawn.parent_thread_id !== input.child.parentThreadId
+  ) {
+    return "parent-metadata-mismatch";
+  }
+  return input.child.sessionId === input.root.sessionId ? undefined : "session-tree-mismatch";
+}
+
 export interface CodexSessionRuntimeShape {
   readonly start: () => Effect.Effect<ProviderSession, CodexSessionRuntimeError>;
   readonly getSession: Effect.Effect<ProviderSession>;
@@ -336,6 +386,9 @@ export interface CodexSessionRuntimeShape {
   ) => Effect.Effect<ProviderThreadGoal, CodexSessionRuntimeError>;
   readonly clearGoal: Effect.Effect<ProviderThreadGoalClearResult, CodexSessionRuntimeError>;
   readonly readThread: Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
+  readonly readSubagentThread: (
+    subagentThreadId: string,
+  ) => Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
   readonly rollbackThread: (
     numTurns: number,
   ) => Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
@@ -359,7 +412,8 @@ export type CodexSessionRuntimeError =
   | CodexSessionRuntimePendingApprovalNotFoundError
   | CodexSessionRuntimePendingUserInputNotFoundError
   | CodexSessionRuntimeInvalidUserInputAnswersError
-  | CodexSessionRuntimeThreadIdMissingError;
+  | CodexSessionRuntimeThreadIdMissingError
+  | CodexSessionRuntimeInvalidSubagentThreadError;
 
 export class CodexSessionRuntimePendingApprovalNotFoundError extends Schema.TaggedErrorClass<CodexSessionRuntimePendingApprovalNotFoundError>()(
   "CodexSessionRuntimePendingApprovalNotFoundError",
@@ -402,6 +456,30 @@ export class CodexSessionRuntimeThreadIdMissingError extends Schema.TaggedErrorC
 ) {
   override get message(): string {
     return `Codex session is missing a provider thread id for ${this.threadId}`;
+  }
+}
+
+/**
+ * A child-thread read failed Cafe's ownership/shape checks.
+ *
+ * The error deliberately carries only a finite reason code. Provider ids and
+ * rollout text are user-private data and must not enter logs, RPC errors, or
+ * raw diagnostics through an exception message.
+ */
+export class CodexSessionRuntimeInvalidSubagentThreadError extends Schema.TaggedErrorClass<CodexSessionRuntimeInvalidSubagentThreadError>()(
+  "CodexSessionRuntimeInvalidSubagentThreadError",
+  {
+    reason: Schema.Literals([
+      "root-identity-mismatch",
+      "child-identity-mismatch",
+      "missing-subagent-metadata",
+      "parent-metadata-mismatch",
+      "session-tree-mismatch",
+    ]),
+  },
+) {
+  override get message(): string {
+    return `Codex subagent thread validation failed: ${this.reason}`;
   }
 }
 
@@ -2570,6 +2648,114 @@ export function buildCodexThreadSnapshotBackfillEvents(input: {
 
   return events;
 }
+
+export interface CodexSubagentHistoryReadClient {
+  readonly request: CodexClient.CodexAppServerClientShape["request"];
+}
+
+/**
+ * Execute the exact read sequence shared by live and transient Codex clients.
+ * Root metadata is intentionally fetched first: a missing or inaccessible root
+ * short-circuits before Cafe sends the browser-supplied child id upstream.
+ */
+export const readCodexSubagentThreadWithClient = Effect.fn(
+  "CodexSessionRuntime.readSubagentThreadWithClient",
+)(function* (input: {
+  readonly client: CodexSubagentHistoryReadClient;
+  readonly rootProviderThreadId: string;
+  readonly subagentThreadId: string;
+}) {
+  const rootResponse = yield* input.client.request("thread/read", {
+    threadId: input.rootProviderThreadId,
+    includeTurns: false,
+  });
+  if (rootResponse.thread.id !== input.rootProviderThreadId) {
+    return yield* new CodexSessionRuntimeInvalidSubagentThreadError({
+      reason: "root-identity-mismatch",
+    });
+  }
+  const childResponse = yield* input.client.request("thread/read", {
+    threadId: input.subagentThreadId,
+    includeTurns: true,
+  });
+  const validationFailure = validateCodexSubagentThreadReadMetadata({
+    expectedRootThreadId: input.rootProviderThreadId,
+    expectedChildThreadId: input.subagentThreadId,
+    root: rootResponse.thread,
+    child: childResponse.thread,
+  });
+  if (validationFailure !== undefined) {
+    return yield* new CodexSessionRuntimeInvalidSubagentThreadError({
+      reason: validationFailure,
+    });
+  }
+
+  return parseThreadSnapshot(childResponse);
+});
+
+export interface CodexInitializedSubagentHistoryReadClient extends CodexSubagentHistoryReadClient {
+  readonly notify: CodexClient.CodexAppServerClientShape["notify"];
+}
+
+/** Initialize one isolated app-server client, then perform only verified reads. */
+export const readCodexSubagentThreadWithInitializedClient = Effect.fn(
+  "CodexSessionRuntime.readSubagentThreadWithInitializedClient",
+)(function* (input: {
+  readonly client: CodexInitializedSubagentHistoryReadClient;
+  readonly rootProviderThreadId: string;
+  readonly subagentThreadId: string;
+}) {
+  yield* input.client.request("initialize", buildCodexInitializeParams());
+  yield* input.client.notify("initialized", undefined);
+  return yield* readCodexSubagentThreadWithClient(input);
+});
+
+export interface CodexTransientSubagentHistoryReadOptions {
+  readonly binaryPath: string;
+  readonly appServerCwd: string;
+  readonly rootProviderThreadId: string;
+  readonly subagentThreadId: string;
+  readonly environment?: NodeJS.ProcessEnv;
+  readonly homePath?: string;
+  readonly transportPolicy?: CodexTransportPolicy;
+}
+
+/**
+ * Spawn a short-lived app-server for provider history only. This deliberately
+ * does not construct a CodexSessionRuntime: there is no adapter session map,
+ * event queue/bridge, `thread/resume`, snapshot backfill, or canonical runtime
+ * event. Closing the scoped command layer always retires the child process.
+ */
+export const readCodexSubagentThreadTransient = Effect.fn(
+  "CodexSessionRuntime.readCodexSubagentThreadTransient",
+)(function* (options: CodexTransientSubagentHistoryReadOptions) {
+  const resolvedHomePath = options.homePath ? expandHomePath(options.homePath) : undefined;
+  return yield* Effect.scoped(
+    Effect.gen(function* () {
+      const clientContext = yield* Layer.build(
+        CodexClient.layerCommand({
+          command: options.binaryPath,
+          args: buildCodexAppServerArgs(options.transportPolicy),
+          cwd: options.appServerCwd,
+          env: {
+            ...(options.environment ?? process.env),
+            ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+          },
+          // Do not install a protocol logger for this privacy-sensitive read.
+          // The finite adapter error mapping is the only diagnostic boundary.
+        }),
+      );
+      const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+        Effect.provide(clientContext),
+      );
+      return yield* readCodexSubagentThreadWithInitializedClient({
+        client,
+        rootProviderThreadId: options.rootProviderThreadId,
+        subagentThreadId: options.subagentThreadId,
+      });
+    }),
+  );
+});
 
 export const makeCodexSessionRuntime = (
   options: CodexSessionRuntimeOptions,
@@ -5216,6 +5402,15 @@ export const makeCodexSessionRuntime = (
         });
         return parseThreadSnapshot(response);
       }),
+      readSubagentThread: (subagentThreadId) =>
+        Effect.gen(function* () {
+          const rootProviderThreadId = yield* readProviderThreadId;
+          return yield* readCodexSubagentThreadWithClient({
+            client,
+            rootProviderThreadId,
+            subagentThreadId,
+          });
+        }),
       rollbackThread: (numTurns) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;

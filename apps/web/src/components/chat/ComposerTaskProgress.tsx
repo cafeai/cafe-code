@@ -187,9 +187,10 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
         sideOffset={8}
         initialFocus={false}
         className="w-[min(22rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] p-0"
+        viewportClassName="overflow-y-hidden p-0 [--viewport-inline-padding:0] not-data-transitioning:overflow-y-hidden"
         data-composer-task-progress-popup="true"
       >
-        <div className="flex max-h-[min(28rem,calc(100dvh-2rem))] min-h-0 w-full flex-col">
+        <div className="flex max-h-[min(28rem,var(--available-height))] min-h-0 w-full flex-col">
           <div className="shrink-0 border-border/70 border-b px-4 py-3">
             <div className="flex items-baseline justify-between gap-3">
               <PopoverTitle className="text-sm leading-5">Tasks</PopoverTitle>

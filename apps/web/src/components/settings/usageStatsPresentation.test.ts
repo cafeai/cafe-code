@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildUsageTokenBreakdownView,
+  formatCompactTokenCount,
+  formatFullTokenCount,
   formatUsageModelLabel,
   formatUsagePercentage,
   formatUsageProviderLabel,
@@ -96,5 +98,18 @@ describe("usageStatsPresentation", () => {
     expect(formatUsagePercentage(1, 2_000)).toBe("<0.1%");
     expect(formatUsagePercentage(5, 100)).toBe("5.0%");
     expect(formatUsagePercentage(1, 0)).toBe("0%");
+  });
+
+  it("formats full token counts and their compact companion consistently", () => {
+    expect(formatFullTokenCount(3_539_966_200)).toBe("3,539,966,200");
+    expect(formatCompactTokenCount(3_539_966_200)).toBe("3.54B");
+    expect(formatCompactTokenCount(3_000_000)).toBe("3.00M");
+    expect(formatCompactTokenCount(9_500)).toBe("9.5K");
+    expect(formatCompactTokenCount(999_999)).toBe("1.00M");
+    expect(formatCompactTokenCount(9_999_999)).toBe("10M");
+    expect(formatCompactTokenCount(999_999_999)).toBe("1.00B");
+    expect(formatCompactTokenCount(9_999_999_999)).toBe("10.0B");
+    expect(formatFullTokenCount(Number.NaN)).toBe("0");
+    expect(formatCompactTokenCount(Number.POSITIVE_INFINITY)).toBe("0");
   });
 });

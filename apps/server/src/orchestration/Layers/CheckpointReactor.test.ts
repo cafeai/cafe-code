@@ -169,6 +169,7 @@ function createProviderServiceHarness(
         },
       }),
     rollbackConversation,
+    readSubagentDetail: () => unsupported(),
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
     },

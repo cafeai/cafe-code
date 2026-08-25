@@ -472,6 +472,15 @@ export const WsOrchestrationGetThreadTurnWorkLogPresenceRpc = Rpc.make(
   },
 );
 
+export const WsOrchestrationGetThreadTurnSubagentDetailRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail,
+  {
+    payload: OrchestrationRpcSchemas.getThreadTurnSubagentDetail.input,
+    success: OrchestrationRpcSchemas.getThreadTurnSubagentDetail.output,
+    error: OrchestrationGetSnapshotError,
+  },
+);
+
 export const WsOrchestrationSubscribeShellRpc = Rpc.make(ORCHESTRATION_WS_METHODS.subscribeShell, {
   payload: OrchestrationRpcSchemas.subscribeShell.input,
   success: OrchestrationRpcSchemas.subscribeShell.output,
@@ -571,6 +580,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationRepairThreadAssistantMessagesRpc,
   WsOrchestrationGetThreadTurnActivityPageRpc,
   WsOrchestrationGetThreadTurnWorkLogPresenceRpc,
+  WsOrchestrationGetThreadTurnSubagentDetailRpc,
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,
 );

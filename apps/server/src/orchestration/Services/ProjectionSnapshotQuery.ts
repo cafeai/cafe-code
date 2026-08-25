@@ -16,6 +16,7 @@ import type {
   OrchestrationThreadDetailSnapshot,
   OrchestrationThreadTurnActivityPage,
   OrchestrationThreadTurnActivityPageInput,
+  OrchestrationThreadTurnSubagentDetailInput,
   OrchestrationThreadTurnWorkLogPresenceInput,
   OrchestrationThreadTurnWorkLogPresenceResult,
   OrchestrationThreadShell,
@@ -203,6 +204,14 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadTurnWorkLogPresence: (
     input: OrchestrationThreadTurnWorkLogPresenceInput,
   ) => Effect.Effect<OrchestrationThreadTurnWorkLogPresenceResult, ProjectionRepositoryError>;
+
+  /**
+   * Prove that a provider child id was durably associated with one exact Cafe
+   * thread and turn before a provider-native transcript read is attempted.
+   */
+  readonly hasThreadTurnSubagentActivity: (
+    input: OrchestrationThreadTurnSubagentDetailInput,
+  ) => Effect.Effect<boolean, ProjectionRepositoryError>;
 }
 
 /**

@@ -71,6 +71,17 @@ describe("RemoteProviderService", () => {
 
     assert.equal(request.method, "listSessions");
     assert.isFalse("commandId" in request);
+
+    const subagentDetailRequest = attachCommandIdToMutatingProviderDaemonRequest({
+      method: "readSubagentDetail",
+      payload: {
+        threadId: ThreadId.make("thread-1"),
+        subagentId: "provider-child-1",
+      },
+    });
+    assert.equal(subagentDetailRequest.method, "readSubagentDetail");
+    assert.isFalse("commandId" in subagentDetailRequest);
+    assert.isFalse(isVoidProviderDaemonRpcMethod("readSubagentDetail"));
   });
 
   it("does not treat restartProviderRuntime as a void daemon RPC", () => {

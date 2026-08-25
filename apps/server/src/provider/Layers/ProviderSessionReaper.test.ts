@@ -156,6 +156,7 @@ describe("ProviderSessionReaper", () => {
         });
       },
       rollbackConversation: () => unsupported(),
+      readSubagentDetail: () => unsupported(),
       streamEvents: Stream.empty,
     };
     const threadDetailSubscriptionRegistry = {
@@ -210,6 +211,7 @@ describe("ProviderSessionReaper", () => {
           getPostTerminalStaleSteerCandidateThreadIds: () => Effect.die("unused"),
           getThreadTurnActivityPage: () => Effect.die("unused"),
           getThreadTurnWorkLogPresence: () => Effect.die("unused"),
+          hasThreadTurnSubagentActivity: () => Effect.die("unused"),
           getThreadDetailById: () => Effect.die("unused"),
           getThreadDetailSnapshotById: () => Effect.die("unused"),
         }),

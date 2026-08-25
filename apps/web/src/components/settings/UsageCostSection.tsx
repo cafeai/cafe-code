@@ -8,7 +8,12 @@ import { PROVIDER_ICON_BY_PROVIDER } from "../chat/providerIconUtils";
 import { UsageAreaChart, type UsageChartSeries } from "../stats/UsageAreaChart";
 import { useCountUp } from "../stats/useCountUp";
 import { SettingsSection } from "./settingsLayout";
-import { formatUsageModelLabel, formatUsageProviderLabel } from "./usageStatsPresentation";
+import {
+  formatCompactTokenCount,
+  formatFullTokenCount,
+  formatUsageModelLabel,
+  formatUsageProviderLabel,
+} from "./usageStatsPresentation";
 
 /**
  * Cost and token composition for the Usage page.
@@ -31,24 +36,9 @@ const currency = new Intl.NumberFormat("en-US", {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
 });
-const integers = new Intl.NumberFormat("en-US");
-
 /** Keep the familiar dollar sign while naming the accounting currency. */
 function formatUsd(value: number): string {
   return `${currency.format(value)} USD`;
-}
-
-function fullTokens(value: number): string {
-  return integers.format(Math.round(value));
-}
-
-/** `48B` / `46.2B` / `142M` — the compact form the reference uses. */
-function compactTokens(value: number): string {
-  const abs = Math.abs(value);
-  if (abs >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(abs < 10e9 ? 2 : 1)}B`;
-  if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(abs < 10e6 ? 2 : 0)}M`;
-  if (abs >= 1_000) return `${(value / 1_000).toFixed(abs < 10e3 ? 1 : 0)}K`;
-  return integers.format(Math.round(value));
 }
 
 /**
@@ -85,40 +75,100 @@ const TOKEN_BAND_COLORS = {
   output: "#4ade80",
 } as const;
 
-function StatTile({
-  id,
-  label,
+type TokenFigureContext =
+  | "provider"
+  | "range"
+  | "model"
+  | "reasoning"
+  | `composition-${"processed" | "cached" | "uncached" | "output"}`;
+
+/**
+ * Every usage surface follows one hierarchy: the complete counter is the
+ * readable, animated value; the abbreviated figure is supporting context.
+ * Keeping the order here prevents the Settings and Atrium copies from drifting
+ * back into different visual conventions.
+ */
+function TokenCountFigure({
   value,
-  rawTokens,
-  detail,
+  context,
+  primarySuffix = " tokens",
+  className,
+  primaryClassName,
+  compactClassName,
+  align = "left",
 }: {
-  id: "processed" | "cached" | "uncached" | "output" | "cache-savings";
-  label: string;
-  value: string;
-  rawTokens?: number | undefined;
-  detail?: ReactNode;
+  value: number;
+  context: TokenFigureContext;
+  primarySuffix?: ReactNode;
+  className?: string;
+  primaryClassName?: string;
+  compactClassName?: string;
+  align?: "left" | "right";
 }) {
   return (
-    <div className="min-w-0 px-4 py-3" data-usage-composition-tile={id}>
-      <div className="text-[11px] text-muted-foreground">{label}</div>
+    <div
+      className={cn("min-w-0", align === "right" && "text-right", className)}
+      data-usage-token-figure={context}
+    >
       <div
-        className="mt-1 break-words text-lg font-medium tabular-nums text-foreground [overflow-wrap:anywhere]"
-        data-usage-composition-compact={rawTokens === undefined ? undefined : id}
-        data-usage-composition-value={id}
+        className={cn(
+          "break-words text-sm font-medium tabular-nums text-foreground [overflow-wrap:anywhere]",
+          primaryClassName,
+        )}
+        data-usage-token-full={context}
       >
-        {value}
+        {formatFullTokenCount(value)}
+        {primarySuffix}
       </div>
-      {rawTokens === undefined ? null : (
+      <div
+        className={cn("mt-0.5 text-[10px] tabular-nums text-muted-foreground/70", compactClassName)}
+        aria-hidden="true"
+        data-usage-token-compact={context}
+      >
+        {formatCompactTokenCount(value)}
+      </div>
+    </div>
+  );
+}
+
+type TokenCompositionId = "processed" | "cached" | "uncached" | "output";
+type StatTileProps =
+  | {
+      id: TokenCompositionId;
+      label: string;
+      rawTokens: number;
+      detail?: ReactNode;
+    }
+  | {
+      id: "cache-savings";
+      label: string;
+      value: string;
+      detail?: ReactNode;
+    };
+
+function StatTile(props: StatTileProps) {
+  return (
+    <div className="min-w-0 px-4 py-3" data-usage-composition-tile={props.id}>
+      <div className="text-[11px] text-muted-foreground">{props.label}</div>
+      {"rawTokens" in props ? (
+        <TokenCountFigure
+          value={props.rawTokens}
+          context={`composition-${props.id}`}
+          className="mt-1"
+          primaryClassName="text-lg sm:text-xl"
+          compactClassName="text-[11px]"
+        />
+      ) : (
         <div
-          className="mt-0.5 break-words text-[11px] tabular-nums text-muted-foreground [overflow-wrap:anywhere]"
-          data-usage-composition-raw={id}
+          className="mt-1 break-words text-lg font-medium tabular-nums text-foreground [overflow-wrap:anywhere]"
+          data-usage-composition-value={props.id}
         >
-          {fullTokens(rawTokens)} tokens exact
+          {props.value}
         </div>
       )}
-      {detail ? (
+      {props.detail ? (
         <div className="mt-0.5 break-words text-[11px] text-muted-foreground/70 [overflow-wrap:anywhere]">
-          {detail}
+          {props.detail}
         </div>
       ) : null}
     </div>
@@ -204,7 +254,7 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
   // Same shared counter as the token odometer; currency just settles on cents.
   const costDisplay = useCountUp(view.rollup.cost, { decimals: 2 });
   // These four hooks are aggregate and cardinality-bounded. They animate the
-  // exact counters alongside their compact forms without creating one RAF loop
+  // full counters alongside their compact forms without creating one RAF loop
   // per provider or model row.
   const processedDisplay = useCountUp(view.processed);
   const cachedDisplay = useCountUp(view.cached);
@@ -245,7 +295,7 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
         series,
         rangeTokens,
         format: (value: number) =>
-          `${compactTokens(value)} tokens (${fullTokens(value)} tokens exact)`,
+          `${formatFullTokenCount(value)} tokens (${formatCompactTokenCount(value)})`,
       };
     }
 
@@ -337,15 +387,7 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
                         style={{ width: `${width}%` }}
                       />
                     </div>
-                    <div className="mt-1 flex flex-wrap gap-x-1.5 gap-y-0.5 text-[11px] tabular-nums text-muted-foreground/70">
-                      <span data-usage-provider-token-compact="true">
-                        {compactTokens(entry.tokens)} tokens
-                      </span>
-                      <span aria-hidden="true">·</span>
-                      <span data-usage-provider-token-raw="true">
-                        {fullTokens(entry.tokens)} tokens exact
-                      </span>
-                    </div>
+                    <TokenCountFigure value={entry.tokens} context="provider" className="mt-1" />
                   </div>
                 );
               })
@@ -375,15 +417,13 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
                 </button>
               ))}
             </div>
-            <span className="flex flex-wrap gap-x-1.5 tabular-nums text-muted-foreground/70">
-              <span data-usage-range-token-compact="true">
-                {compactTokens(chart.rangeTokens)} tokens in range
-              </span>
-              <span aria-hidden="true">·</span>
-              <span data-usage-range-token-raw="true">
-                {fullTokens(chart.rangeTokens)} tokens exact
-              </span>
-            </span>
+            <TokenCountFigure
+              value={chart.rangeTokens}
+              context="range"
+              primarySuffix=" tokens in range"
+              className="min-w-[9rem]"
+              primaryClassName="text-xs"
+            />
             {mode === "tokens" ? (
               <span className="ml-auto flex items-center gap-3">
                 {(
@@ -414,14 +454,12 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
         <StatTile
           id="processed"
           label="Processed tokens"
-          value={compactTokens(processedDisplay)}
           rawTokens={processedDisplay}
           detail={view.hasInputDetail ? undefined : "output only before token detail"}
         />
         <StatTile
           id="cached"
           label="Cached input"
-          value={compactTokens(cachedDisplay)}
           rawTokens={cachedDisplay}
           detail={
             view.cached + view.fresh > 0
@@ -429,29 +467,19 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
               : undefined
           }
         />
-        <StatTile
-          id="uncached"
-          label="Uncached input"
-          value={compactTokens(freshDisplay)}
-          rawTokens={freshDisplay}
-        />
+        <StatTile id="uncached" label="Uncached input" rawTokens={freshDisplay} />
         <StatTile
           id="output"
           label="Output"
-          value={compactTokens(outputDisplay)}
           rawTokens={outputDisplay}
           detail={
             view.reasoning > 0 ? (
-              <>
-                includes{" "}
-                <span className="tabular-nums" data-usage-reasoning-token-compact="true">
-                  {compactTokens(view.reasoning)} reasoning
-                </span>{" "}
-                ·{" "}
-                <span className="tabular-nums" data-usage-reasoning-token-raw="true">
-                  {fullTokens(view.reasoning)} tokens exact
-                </span>
-              </>
+              <TokenCountFigure
+                value={view.reasoning}
+                context="reasoning"
+                primarySuffix=" reasoning tokens"
+                primaryClassName="text-[11px] font-normal text-muted-foreground/70"
+              />
             ) : undefined
           }
         />
@@ -510,15 +538,12 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
                         )}
                       </td>
                       <td className="py-1.5 text-right tabular-nums text-muted-foreground">
-                        <div data-usage-model-token-compact="true">
-                          {compactTokens(entry.tokens)}
-                        </div>
-                        <div
-                          className="text-[10px] text-muted-foreground/70"
-                          data-usage-model-token-raw="true"
-                        >
-                          {fullTokens(entry.tokens)} exact
-                        </div>
+                        <TokenCountFigure
+                          value={entry.tokens}
+                          context="model"
+                          primarySuffix=""
+                          align="right"
+                        />
                       </td>
                     </tr>
                   );

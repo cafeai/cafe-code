@@ -151,6 +151,9 @@ export interface WsRpcClient {
     readonly getThreadTurnActivityPage: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.getThreadTurnActivityPage
     >;
+    readonly getThreadTurnSubagentDetail: RpcUnaryMethod<
+      typeof ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail
+    >;
     readonly getThreadTurnWorkLogPresence: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.getThreadTurnWorkLogPresence
     >;
@@ -316,6 +319,10 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
       getThreadTurnActivityPage: (input) =>
         transport.request((client) =>
           client[ORCHESTRATION_WS_METHODS.getThreadTurnActivityPage](input),
+        ),
+      getThreadTurnSubagentDetail: (input) =>
+        transport.request((client) =>
+          client[ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail](input),
         ),
       getThreadTurnWorkLogPresence: (input) =>
         transport.request((client) =>

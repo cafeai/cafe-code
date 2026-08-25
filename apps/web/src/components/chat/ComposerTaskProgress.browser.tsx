@@ -232,11 +232,30 @@ describe("ComposerTaskProgress", () => {
 
       const popup = progressPopup();
       const scrollRegion = document.querySelector<HTMLElement>('[data-task-list-scroll="true"]');
+      const outerViewport = popup?.querySelector<HTMLElement>('[data-slot="popover-viewport"]');
       expect(popup).not.toBeNull();
       expect(scrollRegion).not.toBeNull();
+      expect(outerViewport).not.toBeNull();
+      expect(getComputedStyle(outerViewport!).overflowY).toBe("hidden");
       expect(getComputedStyle(scrollRegion!).overflowY).toBe("auto");
       expect(scrollRegion!.scrollHeight).toBeGreaterThan(scrollRegion!.clientHeight);
-      expect(document.querySelectorAll('ol[aria-label="Task list"] > li')).toHaveLength(24);
+      const rows = Array.from(
+        document.querySelectorAll<HTMLElement>('ol[aria-label="Task list"] > li'),
+      );
+      expect(rows).toHaveLength(24);
+
+      scrollRegion!.scrollTop = scrollRegion!.scrollHeight;
+      await vi.waitFor(() => {
+        const lastRow = rows.at(-1);
+        expect(lastRow).toBeTruthy();
+        expect(lastRow!.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+          scrollRegion!.getBoundingClientRect().bottom + 1,
+        );
+        expect(lastRow!.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+          outerViewport!.getBoundingClientRect().bottom + 1,
+        );
+        expect(outerViewport!.scrollTop).toBe(0);
+      });
 
       const bounds = popup!.getBoundingClientRect();
       expect(bounds.left).toBeGreaterThanOrEqual(0);

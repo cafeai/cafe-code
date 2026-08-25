@@ -42,13 +42,22 @@ import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 
 import type { ProviderServiceError } from "../Errors.ts";
-import type { ProviderAdapterCapabilities, ProviderThreadSnapshot } from "./ProviderAdapter.ts";
+import type {
+  ProviderAdapterCapabilities,
+  ProviderSubagentDetail,
+  ProviderThreadSnapshot,
+} from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
 
 export interface ProviderThreadReadResult {
   readonly provider: ProviderDriverKind;
   readonly providerInstanceId: ProviderInstanceId;
   readonly snapshot: ProviderThreadSnapshot;
+}
+
+export interface ProviderSubagentDetailReadResult extends ProviderSubagentDetail {
+  readonly provider: ProviderDriverKind;
+  readonly providerInstanceId: ProviderInstanceId;
 }
 
 /**
@@ -186,6 +195,16 @@ export interface ProviderServiceShape {
   readonly readThread?: (input: {
     readonly threadId: ThreadId;
   }) => Effect.Effect<ProviderThreadReadResult, ProviderServiceError>;
+
+  /**
+   * Read a provider-verified child thread through its root Cafe session.
+   * The adapter returns public conversation text only; provider-native rollout
+   * objects are never exposed by this service.
+   */
+  readonly readSubagentDetail: (input: {
+    readonly threadId: ThreadId;
+    readonly subagentId: string;
+  }) => Effect.Effect<ProviderSubagentDetailReadResult, ProviderServiceError>;
 
   /**
    * Roll back provider conversation state by a number of turns.

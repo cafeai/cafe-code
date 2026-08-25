@@ -48,6 +48,7 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderUnsupportedError,
   ProviderValidationError,
+  makeProviderSubagentDetailReadError,
   type ProviderAdapterError,
 } from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
@@ -245,6 +246,23 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
       }),
   );
 
+  const readSubagentDetail = vi.fn(
+    (
+      _threadId: ThreadId,
+      subagentId: string,
+    ): Effect.Effect<
+      { messages: ReadonlyArray<{ role: "user" | "assistant"; text: string }>; truncated: boolean },
+      ProviderAdapterError
+    > =>
+      Effect.succeed({
+        messages: [
+          { role: "user", text: `Assignment for ${subagentId}` },
+          { role: "assistant", text: "Completed safely." },
+        ],
+        truncated: false,
+      }),
+  );
+
   const rollbackThread = vi.fn(
     (
       threadId: ThreadId,
@@ -281,6 +299,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     listSessions,
     hasSession,
     readThread,
+    ...(provider === CODEX_DRIVER ? { readSubagentDetail } : {}),
     rollbackThread,
     stopAll,
     get streamEvents() {
@@ -325,6 +344,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     listSessions,
     hasSession,
     readThread,
+    readSubagentDetail,
     rollbackThread,
     stopAll,
     replaceEventStream,
@@ -1369,6 +1389,98 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect("reads ended Codex subagent detail without materializing the root Cafe session", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+      const threadId = asThreadId("thread-subagent-detail-recovery");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-subagent-detail",
+        runtimeMode: "full-access",
+      });
+      yield* provider.stopSession({ threadId });
+      const persistedBeforeRead = yield* runtimeRepository.getByThreadId({ threadId });
+      routing.codex.startSession.mockClear();
+      routing.codex.readSubagentDetail.mockClear();
+
+      const detail = yield* provider.readSubagentDetail({
+        threadId,
+        subagentId: "provider-child-completed",
+      });
+
+      assert.equal(detail.provider, CODEX_DRIVER);
+      assert.equal(detail.providerInstanceId, codexInstanceId);
+      assert.deepEqual(detail.messages, [
+        { role: "user", text: "Assignment for provider-child-completed" },
+        { role: "assistant", text: "Completed safely." },
+      ]);
+      assert.equal(detail.truncated, false);
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
+      assert.deepEqual(routing.codex.readSubagentDetail.mock.calls[0], [
+        threadId,
+        "provider-child-completed",
+        { resumeCursor: Option.getOrUndefined(persistedBeforeRead)?.resumeCursor },
+      ]);
+      assert.deepEqual(yield* runtimeRepository.getByThreadId({ threadId }), persistedBeforeRead);
+    }),
+  );
+
+  it.effect("never starts a root session or overwrites its binding when history read fails", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+      const threadId = asThreadId("thread-subagent-detail-rejected-resume");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-subagent-detail-rejected-resume",
+        runtimeMode: "full-access",
+      });
+      yield* provider.stopSession({ threadId });
+      const persistedBeforeRead = yield* runtimeRepository.getByThreadId({ threadId });
+      routing.codex.startSession.mockClear();
+      routing.codex.readSubagentDetail.mockClear();
+      routing.codex.readSubagentDetail.mockImplementationOnce(() =>
+        Effect.fail(makeProviderSubagentDetailReadError("root-thread-unavailable")),
+      );
+
+      const exit = yield* provider
+        .readSubagentDetail({
+          threadId,
+          subagentId: "provider-child-ended",
+        })
+        .pipe(Effect.exit);
+
+      assert.equal(Exit.isFailure(exit), true);
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
+      assert.equal(routing.codex.readSubagentDetail.mock.calls.length, 1);
+      assert.deepEqual(yield* runtimeRepository.getByThreadId({ threadId }), persistedBeforeRead);
+    }),
+  );
+
+  it.effect("rejects subagent detail reads for adapters without a verified child protocol", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("thread-claude-subagent-detail");
+      yield* provider.startSession(threadId, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId,
+        cwd: "/tmp/project-claude-detail",
+        runtimeMode: "full-access",
+      });
+
+      const result = yield* provider
+        .readSubagentDetail({ threadId, subagentId: "opaque-child" })
+        .pipe(Effect.exit);
+      assert.equal(Exit.isFailure(result), true);
+    }),
+  );
+
   it.effect("preserves the persisted binding when stopping a session", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
@@ -1673,12 +1785,20 @@ routing.layer("ProviderServiceLive routing", (it) => {
             activeTurnId: string | null;
             lastError: string | null;
             lastRuntimeEvent: string | null;
+            runtimeOwnerId: string;
+            runtimeOwnerPid: number;
+            runtimeOwnerStartedAt: string;
+            runtimeOwnerHeartbeatAt: string;
           };
           assert.equal(runtimePayload.cwd, session.cwd);
           assert.equal(runtimePayload.model, null);
           assert.equal(runtimePayload.activeTurnId, `turn-${String(session.threadId)}`);
           assert.equal(runtimePayload.lastError, null);
           assert.equal(runtimePayload.lastRuntimeEvent, "provider.sendTurn");
+          assert.match(runtimePayload.runtimeOwnerId, /^[0-9a-f-]{36}$/u);
+          assert.equal(runtimePayload.runtimeOwnerPid, process.pid);
+          assert.equal(Number.isNaN(Date.parse(runtimePayload.runtimeOwnerStartedAt)), false);
+          assert.equal(Number.isNaN(Date.parse(runtimePayload.runtimeOwnerHeartbeatAt)), false);
         }
       }
     }),

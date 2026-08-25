@@ -55,6 +55,7 @@ const cliTestProviderService = {
   getCapabilities: () => Effect.die("unexpected getCapabilities"),
   getInstanceInfo: () => Effect.die("unexpected getInstanceInfo"),
   rollbackConversation: () => Effect.die("unexpected rollbackConversation"),
+  readSubagentDetail: () => Effect.die("unexpected readSubagentDetail"),
   streamEvents: Stream.empty,
 } satisfies ProviderServiceShape;
 

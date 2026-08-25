@@ -44,6 +44,10 @@ import {
   ProviderService,
   type ProviderServiceShape,
 } from "../../provider/Services/ProviderService.ts";
+import {
+  ProviderSessionDirectory,
+  type ProviderRuntimeBindingWithMetadata,
+} from "../../provider/Services/ProviderSessionDirectory.ts";
 import { TextGeneration, type TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
 import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
@@ -67,6 +71,16 @@ const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
+
+const liveDurableRuntimeOwnerPayload = () => {
+  const now = new Date().toISOString();
+  return {
+    runtimeOwnerId: "00000000-0000-4000-8000-000000000001",
+    runtimeOwnerPid: process.pid,
+    runtimeOwnerStartedAt: now,
+    runtimeOwnerHeartbeatAt: now,
+  };
+};
 
 const deriveServerPathsSync = (baseDir: string, devUrl: URL | undefined) =>
   Effect.runSync(deriveServerPaths(baseDir, devUrl).pipe(Effect.provide(NodeServices.layer)));
@@ -180,6 +194,7 @@ describe("ProviderCommandReactor", () => {
     let nextSessionIndex = 1;
     let nextGoalRevision = 1;
     const runtimeSessions: Array<ProviderSession> = [];
+    const durableProviderBindings: Array<ProviderRuntimeBindingWithMetadata> = [];
     let providerGoal: ProviderThreadGoal | null = null;
     const goalOperations: string[] = [];
     const modelSelection = input?.threadModelSelection ?? {
@@ -421,6 +436,7 @@ describe("ProviderCommandReactor", () => {
         });
       },
       rollbackConversation: () => unsupported(),
+      readSubagentDetail: () => unsupported(),
       getGoal,
       setGoal,
       clearGoal,
@@ -444,7 +460,13 @@ describe("ProviderCommandReactor", () => {
     const layer = ProviderCommandReactorLive.pipe(
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
+      Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
+      Layer.provideMerge(
+        Layer.mock(ProviderSessionDirectory)({
+          listBindings: () => Effect.succeed([...durableProviderBindings]),
+        }),
+      ),
       Layer.provideMerge(
         Layer.mock(GitWorkflowService)({
           renameBranch,
@@ -554,6 +576,7 @@ describe("ProviderCommandReactor", () => {
       generateBranchName,
       generateThreadTitle,
       runtimeSessions,
+      durableProviderBindings,
       stateDir,
       systemPromptPath,
       startReactor,
@@ -709,6 +732,210 @@ describe("ProviderCommandReactor", () => {
         (activity) =>
           activity.kind === "runtime.warning" &&
           activity.summary === "Provider turn interrupted by restart",
+      ),
+    ).toBe(true);
+    expect(harness.interruptTurn).not.toHaveBeenCalled();
+  });
+
+  it("preserves a running turn owned by a detached provider's durable binding", async () => {
+    const harness = await createHarness({ startReactor: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-owned-by-detached-daemon");
+    const startedAt = "2026-01-01T00:00:01.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-running-detached-provider"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: startedAt,
+        },
+        createdAt: startedAt,
+      }),
+    );
+    harness.durableProviderBindings.push({
+      threadId,
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      runtimePayload: { activeTurnId: turnId, ...liveDurableRuntimeOwnerPayload() },
+      resumeCursor: { opaque: "resume-detached-codex" },
+      lastSeenAt: startedAt,
+    });
+
+    await harness.startReactor();
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === threadId);
+    expect(thread?.session?.status).toBe("running");
+    expect(thread?.session?.activeTurnId).toBe(turnId);
+    expect(thread?.latestTurn?.state).toBe("running");
+    expect(
+      thread?.activities.some(
+        (activity) => activity.summary === "Provider turn interrupted by restart",
+      ),
+    ).toBe(false);
+    expect(harness.interruptTurn).not.toHaveBeenCalled();
+  });
+
+  it("rejects a stale durable running binding as provider liveness", async () => {
+    const harness = await createHarness({ startReactor: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-owned-by-stale-provider-process");
+    const startedAt = "2026-01-01T00:00:01.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-running-stale-provider"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: startedAt,
+        },
+        createdAt: startedAt,
+      }),
+    );
+    harness.durableProviderBindings.push({
+      threadId,
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      runtimePayload: {
+        activeTurnId: turnId,
+        runtimeOwnerId: "00000000-0000-4000-8000-000000000002",
+        runtimeOwnerPid: process.pid,
+        runtimeOwnerStartedAt: startedAt,
+        runtimeOwnerHeartbeatAt: startedAt,
+      },
+      resumeCursor: { opaque: "resume-stale-codex" },
+      lastSeenAt: new Date().toISOString(),
+    });
+
+    await harness.startReactor();
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === threadId);
+      return (
+        thread?.session?.status === "interrupted" &&
+        thread.session.activeTurnId === null &&
+        thread.latestTurn?.state === "interrupted"
+      );
+    });
+    expect(harness.interruptTurn).not.toHaveBeenCalled();
+  });
+
+  it("restores a falsely orphaned terminal projection when durable ownership remains live", async () => {
+    const harness = await createHarness({ startReactor: false });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("turn-falsely-closed-by-auxiliary-backend");
+    const startedAt = "2026-01-01T00:00:01.000Z";
+    const falselyInterruptedAt = "2026-01-01T00:00:02.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-running-before-false-orphan-repair"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: startedAt,
+        },
+        createdAt: startedAt,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("server:test:false-orphan-session-terminal"),
+        threadId,
+        session: {
+          threadId,
+          status: "interrupted",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: "Incorrect orphan repair",
+          updatedAt: falselyInterruptedAt,
+        },
+        createdAt: falselyInterruptedAt,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("server:test:false-orphan-marker"),
+        threadId,
+        activity: {
+          id: EventId.make("activity-false-orphan-marker"),
+          tone: "error",
+          kind: "runtime.warning",
+          summary: "Provider turn interrupted by restart",
+          payload: {
+            message: "Provider turn interrupted by restart",
+            detail: "Incorrect orphan repair",
+            recovery: "orphaned-active-turn",
+          },
+          turnId,
+          createdAt: falselyInterruptedAt,
+        },
+        createdAt: falselyInterruptedAt,
+      }),
+    );
+    harness.durableProviderBindings.push({
+      threadId,
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      runtimePayload: { activeTurnId: turnId, ...liveDurableRuntimeOwnerPayload() },
+      resumeCursor: { opaque: "resume-still-live" },
+      lastSeenAt: falselyInterruptedAt,
+    });
+
+    await harness.startReactor();
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const candidate = readModel.threads.find((entry) => entry.id === threadId);
+      return (
+        candidate?.session?.status === "running" &&
+        candidate.session.activeTurnId === turnId &&
+        candidate.latestTurn?.state === "running"
+      );
+    });
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === threadId);
+    expect(thread?.session?.lastError).toBeNull();
+    expect(thread?.latestTurn?.completedAt).toBeNull();
+    expect(
+      thread?.activities.some(
+        (activity) =>
+          activity.summary === "Live provider turn restored after restart reconciliation",
       ),
     ).toBe(true);
     expect(harness.interruptTurn).not.toHaveBeenCalled();

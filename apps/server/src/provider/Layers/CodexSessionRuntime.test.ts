@@ -6,7 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
-import { describe, it } from "vitest";
+import { describe, it, vi } from "vitest";
 import {
   ProviderInstanceId,
   ProviderItemId,
@@ -44,6 +44,7 @@ import {
   isTerminalCodexChildThreadReadError,
   openCodexThread,
   readCodexExpectedActiveTurnMismatchActualTurnId,
+  readCodexSubagentThreadWithInitializedClient,
   readCodexNotificationEmittedAtIso,
   readCodexNotificationRouteFields,
   readCodexSteerExpectedTurnMismatchActualTurnId,
@@ -56,6 +57,9 @@ import {
   updateCodexChildConversationLiveness,
   updateCodexActiveContextCompactions,
   updateCodexPendingSteerProcessingFromNotification,
+  validateCodexSubagentThreadReadMetadata,
+  type CodexInitializedSubagentHistoryReadClient,
+  type CodexSubagentHistoryReadClient,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
@@ -100,6 +104,186 @@ describe("Codex non-blocking user input", () => {
         answers: { choice: "continue" },
         source: "explicit",
       });
+    }),
+  );
+});
+
+describe("Codex subagent thread ownership validation", () => {
+  const root = {
+    id: "root-provider-thread",
+    parentThreadId: null,
+    sessionId: "session-tree-1",
+    source: "appServer" as const,
+  };
+  const nestedChild = {
+    id: "nested-provider-child",
+    parentThreadId: "intermediate-provider-child",
+    sessionId: "session-tree-1",
+    source: {
+      subAgent: {
+        thread_spawn: {
+          depth: 2,
+          parent_thread_id: "intermediate-provider-child",
+        },
+      },
+    } as const,
+  };
+
+  it("accepts a nested child in the recovered root session tree", () => {
+    assert.equal(
+      validateCodexSubagentThreadReadMetadata({
+        expectedRootThreadId: "root-provider-thread",
+        expectedChildThreadId: "nested-provider-child",
+        root,
+        child: nestedChild,
+      }),
+      undefined,
+    );
+  });
+
+  it("rejects mismatched ids, provider session trees, and parent metadata", () => {
+    assert.equal(
+      validateCodexSubagentThreadReadMetadata({
+        expectedRootThreadId: "different-root",
+        expectedChildThreadId: "nested-provider-child",
+        root,
+        child: nestedChild,
+      }),
+      "root-identity-mismatch",
+    );
+    assert.equal(
+      validateCodexSubagentThreadReadMetadata({
+        expectedRootThreadId: "root-provider-thread",
+        expectedChildThreadId: "different-child",
+        root,
+        child: nestedChild,
+      }),
+      "child-identity-mismatch",
+    );
+    assert.equal(
+      validateCodexSubagentThreadReadMetadata({
+        expectedRootThreadId: "root-provider-thread",
+        expectedChildThreadId: "nested-provider-child",
+        root,
+        child: { ...nestedChild, sessionId: "other-session-tree" },
+      }),
+      "session-tree-mismatch",
+    );
+    assert.equal(
+      validateCodexSubagentThreadReadMetadata({
+        expectedRootThreadId: "root-provider-thread",
+        expectedChildThreadId: "nested-provider-child",
+        root,
+        child: {
+          ...nestedChild,
+          source: {
+            subAgent: {
+              thread_spawn: {
+                depth: 2,
+                parent_thread_id: "wrong-immediate-parent",
+              },
+            },
+          },
+        },
+      }),
+      "parent-metadata-mismatch",
+    );
+    assert.equal(
+      validateCodexSubagentThreadReadMetadata({
+        expectedRootThreadId: "root-provider-thread",
+        expectedChildThreadId: "nested-provider-child",
+        root,
+        child: { ...nestedChild, source: "appServer" },
+      }),
+      "missing-subagent-metadata",
+    );
+  });
+
+  effectIt.effect("reads exact root metadata before the child without opening a thread", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: string; payload: unknown }> = [];
+      const request = ((method: string, payload: unknown) =>
+        Effect.sync(() => {
+          calls.push({ method, payload });
+          if (method === "initialize") {
+            return { userAgent: "codex-test" };
+          }
+          const requestedThreadId = (payload as { threadId: string }).threadId;
+          return {
+            thread:
+              requestedThreadId === root.id
+                ? { ...root, turns: [] }
+                : {
+                    ...nestedChild,
+                    turns: [
+                      {
+                        id: "child-turn-1",
+                        items: [],
+                      },
+                    ],
+                  },
+          };
+        })) as CodexSubagentHistoryReadClient["request"];
+      const notify = ((method: string, payload: unknown) =>
+        Effect.sync(() => {
+          calls.push({ method, payload });
+        })) as CodexInitializedSubagentHistoryReadClient["notify"];
+
+      const snapshot = yield* readCodexSubagentThreadWithInitializedClient({
+        client: { request, notify },
+        rootProviderThreadId: root.id,
+        subagentThreadId: nestedChild.id,
+      });
+
+      assert.equal(snapshot.threadId, nestedChild.id);
+      assert.deepEqual(
+        calls.map((call) => call.method),
+        ["initialize", "initialized", "thread/read", "thread/read"],
+      );
+      assert.deepEqual(calls.slice(2), [
+        { method: "thread/read", payload: { threadId: root.id, includeTurns: false } },
+        { method: "thread/read", payload: { threadId: nestedChild.id, includeTurns: true } },
+      ]);
+      assert.equal(
+        calls.some((call) => call.method === "thread/resume"),
+        false,
+      );
+      assert.equal(
+        calls.some((call) => call.method === "thread/start"),
+        false,
+      );
+    }),
+  );
+
+  effectIt.effect("does not disclose the child id upstream when the exact root read fails", () =>
+    Effect.gen(function* () {
+      const requestMock = vi.fn((method: string, _payload: unknown) =>
+        method === "initialize"
+          ? Effect.succeed({ userAgent: "codex-test" })
+          : Effect.fail(
+              new CodexErrors.CodexAppServerTransportError({
+                detail: "root history unavailable",
+                cause: new Error("closed"),
+              }),
+            ),
+      );
+      const request = requestMock as unknown as CodexSubagentHistoryReadClient["request"];
+      const notifyMock = vi.fn((_method: string, _payload: unknown) => Effect.void);
+      const notify = notifyMock as unknown as CodexInitializedSubagentHistoryReadClient["notify"];
+
+      const exit = yield* readCodexSubagentThreadWithInitializedClient({
+        client: { request, notify },
+        rootProviderThreadId: root.id,
+        subagentThreadId: nestedChild.id,
+      }).pipe(Effect.exit);
+
+      assert.equal(exit._tag, "Failure");
+      assert.equal(requestMock.mock.calls.length, 2);
+      assert.equal(notifyMock.mock.calls.length, 1);
+      assert.deepEqual(requestMock.mock.calls[1], [
+        "thread/read",
+        { threadId: root.id, includeTurns: false },
+      ]);
     }),
   );
 });

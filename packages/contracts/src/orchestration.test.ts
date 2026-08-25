@@ -15,6 +15,8 @@ import {
   ProjectMetaUpdatedPayload,
   OrchestrationProposedPlan,
   OrchestrationSession,
+  OrchestrationThreadTurnSubagentDetail,
+  OrchestrationThreadTurnSubagentDetailInput,
   ProjectCreateCommand,
   ThreadMetaUpdatedPayload,
   ThreadDuplicatedPayload,
@@ -57,6 +59,12 @@ const decodeProviderJournalMessageRepairResult = Schema.decodeUnknownEffect(
 );
 const decodeProviderThreadAssistantMessagesRepairResult = Schema.decodeUnknownEffect(
   ProviderThreadAssistantMessagesRepairResult,
+);
+const decodeThreadTurnSubagentDetailInput = Schema.decodeUnknownEffect(
+  OrchestrationThreadTurnSubagentDetailInput,
+);
+const decodeThreadTurnSubagentDetail = Schema.decodeUnknownEffect(
+  OrchestrationThreadTurnSubagentDetail,
 );
 
 it.effect("trims branded ids and command string fields at decode boundaries", () =>
@@ -238,6 +246,49 @@ it.effect("rejects command fields that become empty after trim", () =>
       }),
     );
     assert.strictEqual(result._tag, "Failure");
+  }),
+);
+
+it.effect("bounds subagent detail identities and public transcript payloads", () =>
+  Effect.gen(function* () {
+    const input = yield* decodeThreadTurnSubagentDetailInput({
+      threadId: " thread-1 ",
+      turnId: " turn-1 ",
+      subagentId: " child-1 ",
+    });
+    assert.deepStrictEqual(input, {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      subagentId: "child-1",
+    });
+
+    const detail = yield* decodeThreadTurnSubagentDetail({
+      provider: "codex",
+      messages: [
+        { role: "user", text: "Audit the provider" },
+        { role: "assistant", text: "## Result\n\nComplete." },
+      ],
+      truncated: false,
+    });
+    assert.strictEqual(detail.messages[1]?.text, "## Result\n\nComplete.");
+
+    const oversizedId = yield* Effect.exit(
+      decodeThreadTurnSubagentDetailInput({
+        threadId: "thread-1",
+        turnId: "turn-1",
+        subagentId: "x".repeat(513),
+      }),
+    );
+    assert.strictEqual(oversizedId._tag, "Failure");
+
+    const oversizedMessage = yield* Effect.exit(
+      decodeThreadTurnSubagentDetail({
+        provider: "codex",
+        messages: [{ role: "assistant", text: "x".repeat(32_769) }],
+        truncated: true,
+      }),
+    );
+    assert.strictEqual(oversizedMessage._tag, "Failure");
   }),
 );
 

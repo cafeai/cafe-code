@@ -70,6 +70,24 @@ export interface ProviderThreadSnapshot {
   readonly turns: ReadonlyArray<ProviderThreadTurnSnapshot>;
 }
 
+/** Public transcript material extracted from a provider-owned child thread. */
+export interface ProviderSubagentDetailMessage {
+  readonly role: "user" | "assistant";
+  readonly text: string;
+}
+
+/**
+ * Canonical subagent detail returned by an adapter.
+ *
+ * This intentionally has no escape hatch for provider-native items. Reasoning,
+ * commands, tool calls, paths, and raw payloads must be discarded inside the
+ * trusted adapter boundary before the value reaches orchestration transports.
+ */
+export interface ProviderSubagentDetail {
+  readonly messages: ReadonlyArray<ProviderSubagentDetailMessage>;
+  readonly truncated: boolean;
+}
+
 export interface ProviderAdapterShape<TError> {
   /**
    * Provider kind implemented by this adapter.
@@ -185,6 +203,24 @@ export interface ProviderAdapterShape<TError> {
    * Read a provider thread snapshot.
    */
   readonly readThread: (threadId: ThreadId) => Effect.Effect<ProviderThreadSnapshot, TError>;
+
+  /**
+   * Read the public user/assistant transcript for one provider-owned child.
+   * Only adapters with a securely verifiable child-thread protocol expose it.
+   */
+  readonly readSubagentDetail?: (
+    threadId: ThreadId,
+    subagentId: string,
+    context?: {
+      /**
+       * Exact provider-owned root identity persisted for this Cafe thread.
+       * Adapters may use it for a transient read-only history connection, but
+       * must never treat a failed history lookup as authority to start a fresh
+       * provider conversation or replace the durable binding.
+       */
+      readonly resumeCursor?: unknown | null;
+    },
+  ) => Effect.Effect<ProviderSubagentDetail, TError>;
 
   /**
    * Roll back a provider thread by N turns.

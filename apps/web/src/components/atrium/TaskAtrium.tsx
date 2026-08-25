@@ -22,6 +22,7 @@ import { retainThreadDetailSubscription } from "../../environments/runtime/servi
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SubagentAvatar } from "../subagents/SubagentAvatar";
 import { UsageCostContent } from "../settings/UsageCostSection";
+import { formatCompactTokenCount, formatFullTokenCount } from "../settings/usageStatsPresentation";
 import { useUsageCostSummary } from "../stats/useUsageCostSummary";
 import { createAtriumScene, type AtriumScene } from "./atriumScene";
 import {
@@ -63,34 +64,6 @@ const SETTLED_COLOR = "#9aa3ad";
  */
 const MAX_ATRIUM_DETAIL_SUBSCRIPTIONS = 24;
 const ATRIUM_DETAIL_PREFETCH_MARGIN_PX = 320;
-
-const currencyFormat = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
-/**
- * Compact currency for the stat grid. Full precision overflows a narrow column
- * and truncates to something like "$140,83…", which is worse than rounding.
- */
-function compactCurrency(value: number): string {
-  const abs = Math.abs(value);
-  if (abs >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
-  if (abs >= 10_000) return `$${(value / 1_000).toFixed(0)}K`;
-  if (abs >= 1_000) return `$${(value / 1_000).toFixed(1)}K`;
-  return currencyFormat.format(value);
-}
-
-/** `48.0B` / `142M` — matches the Usage page so the two figures read alike. */
-function compactTokens(value: number): string {
-  const abs = Math.abs(value);
-  if (abs >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
-  if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(0)}M`;
-  if (abs >= 1_000) return `${(value / 1_000).toFixed(0)}K`;
-  return String(Math.round(value));
-}
 
 const STATE_LABEL: Record<AtriumCardState, string> = {
   holding: "Waiting on you",
@@ -261,25 +234,37 @@ function AtriumSceneCanvas({
 function Stat({
   label,
   value,
+  detail,
+  detailAriaHidden,
   tone,
   muted,
   color,
 }: {
   label: string;
   value: string;
+  detail?: string;
+  detailAriaHidden?: boolean;
   tone: string;
   muted: string;
   color?: string;
 }) {
   return (
-    <div className="min-w-0">
+    <div className="min-w-0 rounded-xl border border-black/5 bg-black/[0.025] px-3 py-2 dark:border-white/8 dark:bg-white/[0.045]">
       <dt className={cn("font-mono text-[10px] uppercase tracking-[0.1em]", muted)}>{label}</dt>
       <dd
-        className={cn("mt-0.5 truncate text-xl tabular-nums", tone)}
+        className={cn("mt-0.5 break-words text-xl tabular-nums [overflow-wrap:anywhere]", tone)}
         style={color ? { color } : undefined}
       >
         {value}
       </dd>
+      {detail ? (
+        <dd
+          className={cn("mt-0.5 text-[10px] tabular-nums", muted)}
+          aria-hidden={detailAriaHidden || undefined}
+        >
+          {detail}
+        </dd>
+      ) : null}
     </div>
   );
 }
@@ -529,7 +514,7 @@ export function TaskAtriumBoard() {
   const cardElementsRef = useRef(new Map<string, HTMLElement>());
   const cardIntersectionObserverRef = useRef<IntersectionObserver | null>(null);
   const refreshVisibleCardsRef = useRef<(() => void) | null>(null);
-  const [taskScrollerElement, setTaskScrollerElement] = useState<HTMLDivElement | null>(null);
+  const [paneScrollerElement, setPaneScrollerElement] = useState<HTMLDivElement | null>(null);
   const [visibleCardKeys, setVisibleCardKeys] = useState<ReadonlySet<string>>(() => new Set());
   const onCardElement = useCallback((key: string, element: HTMLElement | null) => {
     const previous = cardElementsRef.current.get(key);
@@ -551,11 +536,11 @@ export function TaskAtriumBoard() {
     });
   }, []);
   useEffect(() => {
-    if (!taskScrollerElement) return;
+    if (!paneScrollerElement) return;
     let frame: number | null = null;
     const refreshVisibleCards = () => {
       frame = null;
-      const root = taskScrollerElement.getBoundingClientRect();
+      const root = paneScrollerElement.getBoundingClientRect();
       const visible = new Set<string>();
       const top = root.top - ATRIUM_DETAIL_PREFETCH_MARGIN_PX;
       const bottom = root.bottom + ATRIUM_DETAIL_PREFETCH_MARGIN_PX;
@@ -579,18 +564,18 @@ export function TaskAtriumBoard() {
       typeof IntersectionObserver === "undefined"
         ? null
         : new IntersectionObserver(scheduleVisibleCardsRefresh, {
-            root: taskScrollerElement,
+            root: paneScrollerElement,
             rootMargin: `${ATRIUM_DETAIL_PREFETCH_MARGIN_PX}px 0px`,
           });
     cardIntersectionObserverRef.current = observer;
     for (const element of cardElementsRef.current.values()) observer?.observe(element);
-    taskScrollerElement.addEventListener("scroll", scheduleVisibleCardsRefresh, { passive: true });
+    paneScrollerElement.addEventListener("scroll", scheduleVisibleCardsRefresh, { passive: true });
     window.addEventListener("resize", scheduleVisibleCardsRefresh);
     scheduleVisibleCardsRefresh();
     return () => {
       if (frame !== null) window.cancelAnimationFrame(frame);
       observer?.disconnect();
-      taskScrollerElement.removeEventListener("scroll", scheduleVisibleCardsRefresh);
+      paneScrollerElement.removeEventListener("scroll", scheduleVisibleCardsRefresh);
       window.removeEventListener("resize", scheduleVisibleCardsRefresh);
       if (refreshVisibleCardsRef.current === scheduleVisibleCardsRefresh) {
         refreshVisibleCardsRef.current = null;
@@ -599,7 +584,7 @@ export function TaskAtriumBoard() {
         cardIntersectionObserverRef.current = null;
       }
     };
-  }, [taskScrollerElement]);
+  }, [paneScrollerElement]);
   useEffect(
     () => () => {
       for (const release of retainedDetailsRef.current.values()) release();
@@ -720,238 +705,237 @@ export function TaskAtriumBoard() {
     >
       <AtriumSceneCanvas tint={tint} dark={dark} pointer={pointer} />
 
-      {/* Glass pill nav, floating over the scene. */}
-      <div className="relative z-20 flex min-w-0 shrink-0 justify-center py-4 pr-14 pl-3 sm:pl-4">
-        <div className="flex min-w-0 max-w-full items-center gap-2">
-          <div
-            role="group"
-            aria-label="Filter by provider"
-            className={cn(
-              "flex min-w-0 max-w-full items-center gap-1 overflow-x-auto overscroll-x-contain rounded-full border p-1 backdrop-blur-md [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
-              glass,
-            )}
-          >
-            <button
-              type="button"
-              onClick={() => setProviderFilter(null)}
-              aria-pressed={providerFilter === null}
+      {/* The provider nav stays visible while one pane owns every vertical
+          surface below it. Cards, the quiet state, and Usage therefore move as
+          one document instead of competing for height in nested scrollers. */}
+      <div
+        ref={setPaneScrollerElement}
+        className="relative z-10 min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
+        data-cafe-atrium-pane-scroll="true"
+        data-cafe-atrium-task-scroll="true"
+        aria-label="Task Atrium content"
+        tabIndex={0}
+      >
+        <div className="sticky top-0 z-30 flex min-w-0 justify-center bg-gradient-to-b from-background/65 via-background/25 to-transparent py-4 pr-14 pl-3 sm:pl-4">
+          <div className="flex min-w-0 max-w-full items-center gap-2">
+            <div
+              role="group"
+              aria-label="Filter by provider"
               className={cn(
-                "rounded-full px-3 py-1 text-xs whitespace-nowrap transition-colors",
-                "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current",
-                providerFilter === null
-                  ? cn(
-                      "font-semibold",
-                      dark ? "bg-white text-[#1b1620]" : "bg-[#2b2029] text-white",
-                    )
-                  : "opacity-70 hover:opacity-100",
+                "flex min-w-0 max-w-full items-center gap-1 overflow-x-auto overscroll-x-contain rounded-full border p-1 backdrop-blur-md [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+                glass,
               )}
             >
-              All work {total}
-            </button>
-            {providerCounts.map(([provider, count]) => {
-              const active = providerFilter === provider;
-              return (
-                <button
-                  key={provider}
-                  type="button"
-                  onClick={() => setProviderFilter(active ? null : provider)}
-                  aria-pressed={active}
-                  className={cn(
-                    "flex items-center gap-1.5 rounded-full px-3 py-1 text-xs whitespace-nowrap transition-colors",
-                    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current",
-                    active
-                      ? cn(
-                          "font-semibold",
-                          dark ? "bg-white text-[#1b1620]" : "bg-[#2b2029] text-white",
-                        )
-                      : "opacity-70 hover:opacity-100",
-                  )}
-                >
-                  <span
-                    aria-hidden="true"
-                    className="size-1.5 rounded-full"
-                    style={{ background: PROVIDER_DOT[provider] ?? SETTLED_COLOR }}
-                  />
-                  {providerLabel(provider)}
-                  <span className="tabular-nums opacity-60">{count}</span>
-                </button>
-              );
-            })}
-          </div>
-
-          {snapshot.errorCount > 0 ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <button
-                    type="button"
-                    onClick={clearErrors}
-                    aria-label="Clear Task Atrium errors"
-                    className={cn(
-                      "flex size-8 items-center justify-center rounded-full border backdrop-blur-md",
-                      "transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current",
-                      "hover:bg-white/75 dark:hover:bg-black/55",
-                      glass,
-                    )}
-                  />
-                }
+              <button
+                type="button"
+                onClick={() => setProviderFilter(null)}
+                aria-pressed={providerFilter === null}
+                className={cn(
+                  "rounded-full px-3 py-1 text-xs whitespace-nowrap transition-colors",
+                  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current",
+                  providerFilter === null
+                    ? cn(
+                        "font-semibold",
+                        dark ? "bg-white text-[#1b1620]" : "bg-[#2b2029] text-white",
+                      )
+                    : "opacity-70 hover:opacity-100",
+                )}
               >
-                <CircleCheckIcon className="size-4" />
-              </TooltipTrigger>
-              <TooltipPopup side="bottom">
-                Clear {snapshot.errorCount} historical{" "}
-                {snapshot.errorCount === 1 ? "error" : "errors"}
-              </TooltipPopup>
-            </Tooltip>
+                All work {total}
+              </button>
+              {providerCounts.map(([provider, count]) => {
+                const active = providerFilter === provider;
+                return (
+                  <button
+                    key={provider}
+                    type="button"
+                    onClick={() => setProviderFilter(active ? null : provider)}
+                    aria-pressed={active}
+                    className={cn(
+                      "flex items-center gap-1.5 rounded-full px-3 py-1 text-xs whitespace-nowrap transition-colors",
+                      "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current",
+                      active
+                        ? cn(
+                            "font-semibold",
+                            dark ? "bg-white text-[#1b1620]" : "bg-[#2b2029] text-white",
+                          )
+                        : "opacity-70 hover:opacity-100",
+                    )}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="size-1.5 rounded-full"
+                      style={{ background: PROVIDER_DOT[provider] ?? SETTLED_COLOR }}
+                    />
+                    {providerLabel(provider)}
+                    <span className="tabular-nums opacity-60">{count}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {snapshot.errorCount > 0 ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <button
+                      type="button"
+                      onClick={clearErrors}
+                      aria-label="Clear Task Atrium errors"
+                      className={cn(
+                        "flex size-8 items-center justify-center rounded-full border backdrop-blur-md",
+                        "transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current",
+                        "hover:bg-white/75 dark:hover:bg-black/55",
+                        glass,
+                      )}
+                    />
+                  }
+                >
+                  <CircleCheckIcon className="size-4" />
+                </TooltipTrigger>
+                <TooltipPopup side="bottom">
+                  Clear {snapshot.errorCount} historical{" "}
+                  {snapshot.errorCount === 1 ? "error" : "errors"}
+                </TooltipPopup>
+              </Tooltip>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="mx-auto flex w-full max-w-[100rem] flex-col gap-5 px-3 pb-5 sm:px-6 sm:pb-7 lg:px-10">
+          {filtered.length === 0 ? (
+            <section
+              className={cn(
+                "flex min-h-[clamp(15rem,32vh,22rem)] flex-col items-center justify-center gap-2 rounded-3xl border px-6 text-center backdrop-blur-sm",
+                glass,
+              )}
+              data-cafe-atrium-empty-state="true"
+            >
+              <p className={cn("text-2xl font-light tracking-tight", heading)}>
+                {providerFilter === null ? "The garden is quiet" : "Nothing from this provider"}
+              </p>
+              <p className={cn("max-w-sm text-sm", muted)}>
+                {providerFilter === null
+                  ? "When threads and their subagents are working, they appear here."
+                  : `No ${providerLabel(providerFilter)} threads are running right now.`}
+              </p>
+            </section>
+          ) : (
+            <section data-cafe-atrium-work-section="true">
+              <div
+                className={cn(
+                  "mb-4 flex flex-col gap-4 rounded-2xl border p-4 backdrop-blur-md sm:p-5 xl:flex-row xl:items-end xl:justify-between",
+                  glass,
+                )}
+              >
+                <div className="min-w-0">
+                  <p className={cn("font-mono text-[10px] uppercase tracking-[0.14em]", label)}>
+                    Live work
+                  </p>
+                  <h2
+                    className={cn("mt-1 text-2xl font-light tracking-tight sm:text-3xl", heading)}
+                  >
+                    {filtered.length === 1
+                      ? "One thread in motion"
+                      : `${filtered.length} threads in motion`}
+                  </h2>
+                  <p className={cn("mt-1 max-w-2xl text-sm", muted)}>
+                    {filteredMetrics.holdingCount > 0
+                      ? `${filteredMetrics.holdingCount} waiting on you; the rest keep moving.`
+                      : filteredMetrics.errorCount > 0 && filteredMetrics.runningCount === 0
+                        ? `${filteredMetrics.errorCount} ${filteredMetrics.errorCount === 1 ? "thread has" : "threads have"} stopped. Open a card to inspect the last activity.`
+                        : `${filteredMetrics.subagentCount} ${filteredMetrics.subagentCount === 1 ? "subagent is" : "subagents are"} working across the active threads.`}
+                  </p>
+                </div>
+                <dl className="grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-4 xl:min-w-[34rem]">
+                  <Stat
+                    label="Threads"
+                    value={String(filtered.length)}
+                    tone={heading}
+                    muted={label}
+                  />
+                  <Stat
+                    label="Subagents"
+                    value={String(filteredMetrics.subagentCount)}
+                    tone={heading}
+                    muted={label}
+                  />
+                  <Stat
+                    label="Running"
+                    value={String(filteredMetrics.runningCount)}
+                    tone={heading}
+                    muted={label}
+                  />
+                  {filteredMetrics.holdingCount > 0 ? (
+                    <Stat
+                      label="Needs you"
+                      value={String(filteredMetrics.holdingCount)}
+                      tone=""
+                      muted={label}
+                      color={HOLD_COLOR}
+                    />
+                  ) : filteredMetrics.errorCount > 0 ? (
+                    <Stat
+                      label="Errors"
+                      value={String(filteredMetrics.errorCount)}
+                      tone=""
+                      muted={label}
+                      color={FAULT_COLOR}
+                    />
+                  ) : usage.outputTokens > 0 ? (
+                    <Stat
+                      label="Output"
+                      value={formatFullTokenCount(usage.outputTokens)}
+                      detail={formatCompactTokenCount(usage.outputTokens)}
+                      detailAriaHidden
+                      tone={heading}
+                      muted={label}
+                    />
+                  ) : null}
+                </dl>
+              </div>
+
+              <div
+                className={cn(
+                  "grid items-start gap-3 sm:gap-4",
+                  filtered.length === 1 && "md:ml-auto md:max-w-2xl",
+                  filtered.length === 2 && "md:grid-cols-2 xl:ml-auto xl:max-w-5xl",
+                  filtered.length > 2 && "md:grid-cols-2 2xl:grid-cols-3",
+                )}
+                data-cafe-atrium-task-grid="true"
+              >
+                {filtered.map((card) => (
+                  <TaskAtriumCardView
+                    key={card.key}
+                    card={card}
+                    now={now}
+                    tint={tint}
+                    onOpen={openCard}
+                    onCardElement={onCardElement}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* This is the Settings → Usage implementation in normal document
+              flow. The pane above owns scrolling, so the complete graph and
+              breakdown stay visible without a second scrollbar or fade mask. */}
+          {usage.loaded && usage.raw ? (
+            <section
+              className={cn("rounded-2xl border backdrop-blur-md", glass)}
+              data-cafe-atrium-usage-panel="true"
+            >
+              <div className="flex items-center gap-3 px-4 pt-3 sm:px-5">
+                <span className={cn("font-mono text-[10px] uppercase tracking-[0.14em]", label)}>
+                  Summary &middot; all threads
+                </span>
+              </div>
+              <UsageCostContent usage={usage.raw} />
+            </section>
           ) : null}
         </div>
       </div>
-
-      {filtered.length === 0 ? (
-        <div className="relative z-10 flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-          <p className={cn("text-2xl font-light tracking-tight", heading)}>
-            {providerFilter === null ? "The garden is quiet" : "Nothing from this provider"}
-          </p>
-          <p className={cn("max-w-sm text-sm", muted)}>
-            {providerFilter === null
-              ? "When threads and their subagents are working, they appear here."
-              : `No ${providerLabel(providerFilter)} threads are running right now.`}
-          </p>
-        </div>
-      ) : (
-        <div className="relative z-10 grid min-h-0 flex-1 grid-cols-1 items-stretch gap-4 overflow-hidden px-3 pb-4 sm:px-6 sm:pb-6 lg:grid-cols-[1fr_1.2fr] lg:px-10">
-          {/* Lede. Hidden on narrow layouts, where the cards need the room. */}
-          <div className="hidden lg:block">
-            <h2
-              className={cn(
-                "text-4xl leading-[1.06] font-light tracking-tight xl:text-5xl",
-                heading,
-              )}
-            >
-              {filtered.length === 1 ? "One thread" : `${filtered.length} threads`},
-              <br />
-              <span className="font-semibold" style={{ color: tint }}>
-                {filteredMetrics.subagentCount === 1
-                  ? "one subagent"
-                  : `${filteredMetrics.subagentCount} subagents`}
-              </span>
-              ,<br />
-              {filteredMetrics.holdingCount > 0
-                ? "one needs you."
-                : filteredMetrics.runningCount > 0
-                  ? "all working."
-                  : filteredMetrics.errorCount > 0
-                    ? "stopped."
-                    : "all done."}
-            </h2>
-            <p className={cn("mt-3 max-w-xs text-sm", muted)}>
-              {filteredMetrics.holdingCount > 0
-                ? `${filteredMetrics.holdingCount} waiting on you. Everything else is moving on its own.`
-                : filteredMetrics.errorCount > 0 && filteredMetrics.runningCount === 0
-                  ? `${filteredMetrics.errorCount} ${filteredMetrics.errorCount === 1 ? "thread" : "threads"} stopped on an error. Open one to see what happened.`
-                  : "Nothing here asks for you. The garden keeps its own hours."}
-            </p>
-            <dl className="mt-7 grid max-w-md grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
-              <Stat label="Threads" value={String(filtered.length)} tone={heading} muted={label} />
-              <Stat
-                label="Subagents"
-                value={String(filteredMetrics.subagentCount)}
-                tone={heading}
-                muted={label}
-              />
-              <Stat
-                label="Running"
-                value={String(filteredMetrics.runningCount)}
-                tone={heading}
-                muted={label}
-              />
-              {filteredMetrics.holdingCount > 0 ? (
-                <Stat
-                  label="Holding"
-                  value={String(filteredMetrics.holdingCount)}
-                  tone=""
-                  muted={label}
-                  color={HOLD_COLOR}
-                />
-              ) : null}
-              {filteredMetrics.errorCount > 0 ? (
-                <Stat
-                  label="Errors"
-                  value={String(filteredMetrics.errorCount)}
-                  tone=""
-                  muted={label}
-                  color={FAULT_COLOR}
-                />
-              ) : null}
-              {usage.cachedShare !== null ? (
-                <Stat
-                  label="Cache hits"
-                  value={`${(usage.cachedShare * 100).toFixed(1)}%`}
-                  tone={heading}
-                  muted={label}
-                />
-              ) : null}
-              {usage.cacheSavings > 0 ? (
-                <Stat
-                  label="Cache saved"
-                  value={compactCurrency(usage.cacheSavings)}
-                  tone={heading}
-                  muted={label}
-                />
-              ) : null}
-              {usage.outputTokens > 0 ? (
-                <Stat
-                  label="Output"
-                  value={compactTokens(usage.outputTokens)}
-                  tone={heading}
-                  muted={label}
-                />
-              ) : null}
-            </dl>
-          </div>
-
-          <div
-            ref={setTaskScrollerElement}
-            className="ml-auto flex h-full min-h-0 w-full max-w-md flex-col gap-3 self-stretch overflow-y-auto overscroll-contain py-2 pr-1 pb-4 [scrollbar-gutter:stable]"
-            data-cafe-atrium-task-scroll="true"
-          >
-            {filtered.map((card) => (
-              <TaskAtriumCardView
-                key={card.key}
-                card={card}
-                now={now}
-                tint={tint}
-                onOpen={openCard}
-                onCardElement={onCardElement}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* The same cost panels as Settings → Usage, not a second implementation.
-          Always rendered: it describes every thread ever run, so an idle Atrium
-          still has something worth reading. Scrolls on its own and collapses to
-          one column on narrow layouts, where the panels stack. */}
-      {usage.loaded && usage.raw ? (
-        <div
-          // Fades at the bottom edge so a clipped panel reads as "scroll for
-          // more" rather than as a layout that ran out of room.
-          className={cn(
-            "relative z-20 mx-3 mb-3 max-h-[min(28vh,18rem)] shrink-0 overflow-y-auto overscroll-contain sm:mx-4 sm:mb-4 lg:mx-10",
-            "[mask-image:linear-gradient(to_bottom,black_calc(100%-2.5rem),transparent)]",
-          )}
-        >
-          <div className={cn("rounded-2xl border backdrop-blur-md", glass)}>
-            <div className="flex items-center gap-3 px-4 pt-3 sm:px-5">
-              <span className={cn("font-mono text-[10px] uppercase tracking-[0.14em]", label)}>
-                Summary &middot; all threads
-              </span>
-            </div>
-            <UsageCostContent usage={usage.raw} />
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 }

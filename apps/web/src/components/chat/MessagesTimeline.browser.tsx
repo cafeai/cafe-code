@@ -6,14 +6,18 @@ import {
   ProviderDriverKind,
   ThreadId,
   TurnId,
+  type EnvironmentApi,
   type LocalApi,
 } from "@cafecode/contracts";
 import { createRef } from "react";
 import type { LegendListRef } from "@legendapp/list/react";
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
-import { __resetEnvironmentApiOverridesForTests } from "../../environmentApi";
+import {
+  __resetEnvironmentApiOverridesForTests,
+  __setEnvironmentApiOverrideForTests,
+} from "../../environmentApi";
 import { __resetLocalApiForTests } from "../../localApi";
 
 const scrollToEndSpy = vi.fn();
@@ -190,6 +194,57 @@ function buildLiveSubagentWorkEntry(id: string, label: string) {
   };
 }
 
+function buildSubagentWorkEntry(input: {
+  id: string;
+  label: string;
+  subagentId: string;
+  turnId: TurnId;
+  status: "active" | "waiting" | "completed" | "failed" | "stopped";
+  startedAt?: string;
+  completedAt?: string;
+  description?: string;
+  objective?: string;
+}) {
+  const startedAt = input.startedAt ?? "2026-04-13T12:00:00.000Z";
+  const objective = input.objective ?? `${input.label} objective`;
+  return {
+    id: input.id,
+    kind: "work" as const,
+    createdAt: startedAt,
+    entry: {
+      id: input.id,
+      turnId: input.turnId,
+      createdAt: startedAt,
+      label: input.label,
+      detail: objective,
+      tone:
+        input.status === "active" || input.status === "waiting"
+          ? ("thinking" as const)
+          : input.status === "failed"
+            ? ("error" as const)
+            : ("info" as const),
+      itemType: "collab_agent_tool_call" as const,
+      subagent: {
+        id: input.subagentId,
+        label: input.label,
+        objective,
+        description: input.description ?? `${input.label} progress`,
+        status: input.status,
+        startedAt,
+        ...(input.completedAt ? { completedAt: input.completedAt } : {}),
+      },
+    },
+  };
+}
+
+function setSubagentDetailApi(
+  getThreadTurnSubagentDetail: EnvironmentApi["orchestration"]["getThreadTurnSubagentDetail"],
+) {
+  __setEnvironmentApiOverrideForTests(EnvironmentId.make("environment-local"), {
+    orchestration: { getThreadTurnSubagentDetail },
+  } as unknown as EnvironmentApi);
+}
+
 function setNativeContextMenuMock(
   show: (items: readonly unknown[], position?: { x: number; y: number }) => Promise<unknown>,
 ) {
@@ -332,6 +387,303 @@ describe("MessagesTimeline", () => {
       expect(activeIntervals.size).toBe(0);
     } finally {
       if (mounted) await screen.unmount();
+    }
+  });
+
+  it("opens scoped subagent history from semantic active and terminal rows and restores focus", async () => {
+    const threadId = ThreadId.make("cafe-thread-detail-1");
+    const activeTurnId = TurnId.make("cafe-turn-active-1");
+    const terminalTurnId = TurnId.make("cafe-turn-terminal-1");
+    const getThreadTurnSubagentDetail = vi.fn(
+      async (_input: { threadId: ThreadId; turnId: TurnId; subagentId: string }) => ({
+        provider: "codex" as const,
+        messages: [
+          {
+            role: "user" as const,
+            text: "Audit **scoped input** and preserve `safe.md`.",
+          },
+          {
+            role: "assistant" as const,
+            text: "Progress: the bounded provider transcript is available.",
+          },
+          {
+            role: "assistant" as const,
+            text: "## Result\n\nCompleted **safely** with bounded output.",
+          },
+        ],
+        truncated: true,
+      }),
+    );
+    setSubagentDetailApi(getThreadTurnSubagentDetail);
+
+    const activeEntry = buildSubagentWorkEntry({
+      id: "subagent-active-detail",
+      label: "Active detail worker",
+      subagentId: "codex-child-active-exact",
+      turnId: activeTurnId,
+      status: "active",
+      description: "Indexing the scoped provider transcript",
+    });
+    const terminalEntry = buildSubagentWorkEntry({
+      id: "subagent-terminal-detail",
+      label: "Terminal detail worker",
+      subagentId: "codex-child-terminal-exact",
+      turnId: terminalTurnId,
+      status: "completed",
+      completedAt: "2026-04-13T12:00:10.000Z",
+      description: "Saved terminal lifecycle detail",
+    });
+    const screen = await render(
+      <MessagesTimeline
+        {...buildProps()}
+        activeThreadId={threadId}
+        timelineEntries={[activeEntry, terminalEntry]}
+      />,
+    );
+
+    try {
+      const activeButton = document.querySelector<HTMLButtonElement>(
+        'button[data-subagent-work-row="true"][aria-label^="Active detail worker,"]',
+      );
+      const terminalButton = document.querySelector<HTMLButtonElement>(
+        'button[data-subagent-work-row="true"][aria-label^="Terminal detail worker,"]',
+      );
+      expect(activeButton).not.toBeNull();
+      expect(terminalButton).not.toBeNull();
+      expect(activeButton?.type).toBe("button");
+      expect(terminalButton?.type).toBe("button");
+      expect(activeButton?.getAttribute("aria-label")).toContain("Working");
+      expect(terminalButton?.getAttribute("aria-label")).toContain("Done");
+
+      await page.getByRole("button", { name: /^Active detail worker, Working\./ }).click();
+      await vi.waitFor(() => {
+        expect(getThreadTurnSubagentDetail).toHaveBeenCalledWith({
+          threadId,
+          turnId: activeTurnId,
+          subagentId: "codex-child-active-exact",
+        });
+      });
+
+      await expect
+        .element(page.getByRole("region", { name: "Subagent detail: Active detail worker" }))
+        .toBeVisible();
+      expect(document.querySelectorAll('[data-subagent-detail-message="user"]')).toHaveLength(1);
+      expect(document.querySelectorAll('[data-subagent-detail-message="assistant"]')).toHaveLength(
+        2,
+      );
+      await expect.element(page.getByText("scoped input", { exact: true })).toBeVisible();
+      await expect.element(page.getByText("safe.md", { exact: true })).toBeVisible();
+      await expect.element(page.getByRole("heading", { name: "Result" })).toBeVisible();
+      await expect.element(page.getByText("safely", { exact: true })).toBeVisible();
+      await expect
+        .element(
+          page.getByText("This long subagent history was shortened to keep the chat responsive."),
+        )
+        .toBeVisible();
+
+      const backButton = document.querySelector<HTMLButtonElement>(
+        'button[aria-label="Back to conversation"]',
+      );
+      await vi.waitFor(() => expect(document.activeElement).toBe(backButton));
+      await userEvent.keyboard("{Escape}");
+      await vi.waitFor(() => {
+        expect(document.querySelector('[data-subagent-detail-view="true"]')).toBeNull();
+        expect(document.activeElement).toBe(activeButton);
+      });
+
+      await activeButton!.click();
+      await vi.waitFor(() => {
+        expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(2);
+        expect(document.querySelector('[data-subagent-detail-view="true"]')).not.toBeNull();
+      });
+      await page.getByRole("button", { name: "Back to conversation" }).click();
+      await vi.waitFor(() => {
+        expect(document.querySelector('[data-subagent-detail-view="true"]')).toBeNull();
+        expect(document.activeElement).toBe(activeButton);
+      });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("closes subagent history when the owning conversation changes without reusing provider ids", async () => {
+    const sourceThreadId = ThreadId.make("cafe-thread-detail-source");
+    const destinationThreadId = ThreadId.make("cafe-thread-detail-destination");
+    const turnId = TurnId.make("cafe-turn-detail-source");
+    const getThreadTurnSubagentDetail = vi.fn(async () => ({
+      provider: "codex" as const,
+      messages: [{ role: "assistant" as const, text: "Scoped source-thread result." }],
+      truncated: false,
+    }));
+    setSubagentDetailApi(getThreadTurnSubagentDetail);
+
+    const sourceEntry = buildSubagentWorkEntry({
+      id: "subagent-scoped-detail",
+      label: "Scoped detail worker",
+      subagentId: "codex-child-scoped-exact",
+      turnId,
+      status: "completed",
+      completedAt: "2026-04-13T12:00:10.000Z",
+    });
+    const props = buildProps();
+    const screen = await render(
+      <MessagesTimeline
+        {...props}
+        activeThreadId={sourceThreadId}
+        timelineEntries={[sourceEntry]}
+      />,
+    );
+
+    try {
+      await page.getByRole("button", { name: /^Scoped detail worker, Done\./ }).click();
+      await vi.waitFor(() => {
+        expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(1);
+        expect(document.querySelector('[data-subagent-detail-view="true"]')).not.toBeNull();
+      });
+
+      await screen.rerender(
+        <MessagesTimeline {...props} activeThreadId={destinationThreadId} timelineEntries={[]} />,
+      );
+
+      expect(document.querySelector('[data-subagent-detail-view="true"]')).toBeNull();
+      await vi.waitFor(() => expect(getThreadTurnSubagentDetail).toHaveBeenCalledTimes(1));
+      expect(getThreadTurnSubagentDetail).not.toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: destinationThreadId }),
+      );
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps completed lifecycle detail and frozen timing when provider history is unavailable", async () => {
+    const threadId = ThreadId.make("cafe-thread-unavailable-1");
+    const turnId = TurnId.make("cafe-turn-unavailable-1");
+    const getThreadTurnSubagentDetail = vi.fn(async () => {
+      throw new Error("private provider transport detail");
+    });
+    setSubagentDetailApi(getThreadTurnSubagentDetail);
+    const terminalEntry = buildSubagentWorkEntry({
+      id: "subagent-unavailable-detail",
+      label: "Unavailable history worker",
+      subagentId: "codex-child-unavailable-exact",
+      turnId,
+      status: "completed",
+      startedAt: "2026-04-13T12:00:00.000Z",
+      completedAt: "2026-04-13T12:00:10.000Z",
+      description: "The saved lifecycle progress remains visible",
+      objective: "The durable objective remains visible",
+    });
+    const screen = await render(
+      <MessagesTimeline
+        {...buildProps()}
+        activeThreadId={threadId}
+        timelineEntries={[terminalEntry]}
+      />,
+    );
+
+    try {
+      await page.getByRole("button", { name: /^Unavailable history worker, Done\./ }).click();
+      await vi.waitFor(() => {
+        expect(getThreadTurnSubagentDetail).toHaveBeenCalledWith({
+          threadId,
+          turnId,
+          subagentId: "codex-child-unavailable-exact",
+        });
+        expect(document.querySelector('[data-subagent-detail-unavailable="true"]')).not.toBeNull();
+      });
+
+      const detail = document.querySelector<HTMLElement>('[data-subagent-detail-view="true"]');
+      expect(detail?.textContent).toContain("The saved lifecycle progress remains visible");
+      expect(detail?.textContent).toContain("The durable objective remains visible");
+      const elapsed = document.querySelector<HTMLElement>('[data-subagent-detail-elapsed="true"]');
+      expect(elapsed?.textContent).toBe("Worked for 10s");
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(elapsed?.textContent).toBe("Worked for 10s");
+      expect(document.body.textContent).not.toContain("private provider transport detail");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps long subagent history internally scrollable without horizontal overflow at 390px", async () => {
+    const originalViewport = { height: window.innerHeight, width: window.innerWidth };
+    await page.viewport(390, 520);
+    const threadId = ThreadId.make("cafe-thread-mobile-1");
+    const turnId = TurnId.make("cafe-turn-mobile-1");
+    const longMessages = Array.from({ length: 18 }, (_, index) => ({
+      role: index === 0 ? ("user" as const) : ("assistant" as const),
+      text: `### ${index === 0 ? "Assignment" : `Update ${index}`}\n\n${`Bounded responsive detail ${index} stays readable and wraps inside the chat pane. `.repeat(12)}`,
+    }));
+    setSubagentDetailApi(async () => ({
+      provider: "codex",
+      messages: longMessages,
+      truncated: false,
+    }));
+    const entry = buildSubagentWorkEntry({
+      id: "subagent-mobile-detail",
+      label: "Responsive history worker",
+      subagentId: "codex-child-mobile-exact",
+      turnId,
+      status: "active",
+      description:
+        "A long lifecycle description remains readable while every provider message stays reachable.",
+    });
+    const host = document.createElement("div");
+    Object.assign(host.style, {
+      bottom: "0",
+      height: "100vh",
+      left: "0",
+      overflow: "hidden",
+      position: "fixed",
+      right: "0",
+      top: "0",
+      width: "100vw",
+    });
+    document.body.append(host);
+    const screen = await render(
+      <MessagesTimeline {...buildProps()} activeThreadId={threadId} timelineEntries={[entry]} />,
+      { container: host },
+    );
+
+    try {
+      await page.getByRole("button", { name: /^Responsive history worker, Working\./ }).click();
+      await vi.waitFor(() => {
+        expect(document.querySelectorAll("[data-subagent-detail-message]")).toHaveLength(
+          longMessages.length,
+        );
+      });
+
+      const detail = document.querySelector<HTMLElement>('[data-subagent-detail-view="true"]');
+      const scroller = document.querySelector<HTMLElement>('[data-subagent-detail-scroll="true"]');
+      expect(detail).not.toBeNull();
+      expect(scroller).not.toBeNull();
+      if (!detail || !scroller) throw new Error("Responsive subagent detail did not render");
+
+      expect(getComputedStyle(scroller).overflowY).toBe("auto");
+      expect(getComputedStyle(scroller).overflowX).toBe("hidden");
+      expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight);
+      expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
+      const bounds = detail.getBoundingClientRect();
+      expect(bounds.left).toBeGreaterThanOrEqual(-1);
+      expect(bounds.right).toBeLessThanOrEqual(window.innerWidth + 1);
+      expect(bounds.top).toBeGreaterThanOrEqual(-1);
+      expect(bounds.bottom).toBeLessThanOrEqual(window.innerHeight + 1);
+
+      scroller.scrollTop = scroller.scrollHeight;
+      await vi.waitFor(() => expect(scroller.scrollTop).toBeGreaterThan(0));
+      const lastMessage = document.querySelector<HTMLElement>(
+        '[data-subagent-detail-message="assistant"]:last-of-type',
+      );
+      expect(lastMessage).not.toBeNull();
+      if (lastMessage) {
+        const scrollerBounds = scroller.getBoundingClientRect();
+        const lastMessageBounds = lastMessage.getBoundingClientRect();
+        expect(lastMessageBounds.bottom).toBeLessThanOrEqual(scrollerBounds.bottom + 1);
+      }
+    } finally {
+      await screen.unmount();
+      host.remove();
+      await page.viewport(originalViewport.width, originalViewport.height);
     }
   });
 

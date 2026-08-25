@@ -53,6 +53,7 @@ function PopoverArrow({ className, ...props }: PopoverPrimitive.Arrow.Props) {
 function PopoverPopup({
   children,
   className,
+  viewportClassName,
   side = "bottom",
   align = "center",
   sideOffset = 4,
@@ -69,6 +70,13 @@ function PopoverPopup({
   tooltipStyle?: boolean;
   anchor?: PopoverPrimitive.Positioner.Props["anchor"];
   arrow?: boolean;
+  /**
+   * Lets a composed popover nominate an internal scroll owner without reaching
+   * through the popup with a brittle descendant selector. Most popovers keep
+   * the viewport's default scrolling; complex popovers can opt out when a
+   * purpose-built child region already owns overflow.
+   */
+  viewportClassName?: string;
 }) {
   return (
     <PopoverPrimitive.Portal>
@@ -98,6 +106,7 @@ function PopoverPopup({
               tooltipStyle
                 ? "py-1 [--viewport-inline-padding:--spacing(2)]"
                 : "not-data-transitioning:overflow-y-auto",
+              viewportClassName,
             )}
             data-slot="popover-viewport"
           >

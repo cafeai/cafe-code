@@ -1,6 +1,17 @@
 import * as Schema from "effect/Schema";
 
-import { IsoDateTime, NonNegativeInt, PortSchema, ThreadId } from "./baseSchemas.ts";
+import {
+  IsoDateTime,
+  NonNegativeInt,
+  PortSchema,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
+import {
+  OrchestrationThreadTurnSubagentDetailMessage,
+  THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES,
+  THREAD_TURN_SUBAGENT_ID_MAX_LENGTH,
+} from "./orchestration.ts";
 import {
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
@@ -460,6 +471,21 @@ const RollbackConversationPayload = Schema.Struct({
   numTurns: NonNegativeInt,
 });
 
+const ReadSubagentDetailPayload = Schema.Struct({
+  threadId: ThreadId,
+  subagentId: TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_TURN_SUBAGENT_ID_MAX_LENGTH)),
+});
+
+export const ProviderDaemonSubagentDetail = Schema.Struct({
+  provider: ProviderDriverKind,
+  providerInstanceId: ProviderInstanceId,
+  messages: Schema.Array(OrchestrationThreadTurnSubagentDetailMessage).check(
+    Schema.isMaxLength(THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES),
+  ),
+  truncated: Schema.Boolean,
+});
+export type ProviderDaemonSubagentDetail = typeof ProviderDaemonSubagentDetail.Type;
+
 export const ProviderDaemonRpcRequest = Schema.Union([
   Schema.Struct({
     method: Schema.Literal("startSession"),
@@ -547,6 +573,10 @@ export const ProviderDaemonRpcRequest = Schema.Union([
     commandId: Schema.optional(ProviderDaemonCommandId),
     payload: RollbackConversationPayload,
   }),
+  Schema.Struct({
+    method: Schema.Literal("readSubagentDetail"),
+    payload: ReadSubagentDetailPayload,
+  }),
 ]);
 export type ProviderDaemonRpcRequest = typeof ProviderDaemonRpcRequest.Type;
 
@@ -569,4 +599,5 @@ export const ProviderDaemonRpcResultByMethod = {
   setGoal: ProviderThreadGoal,
   clearGoal: ProviderThreadGoalClearResult,
   rollbackConversation: Schema.Void,
+  readSubagentDetail: ProviderDaemonSubagentDetail,
 } as const;

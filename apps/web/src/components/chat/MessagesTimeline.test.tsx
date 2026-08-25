@@ -350,7 +350,10 @@ describe("MessagesTimeline", () => {
       expect(markup).toContain('data-subagent-work-log="true"');
       expect(markup).toContain('data-subagent-work-row="true"');
       expect(markup).toContain('data-subagent-description="true"');
-      expect(markup).toContain('aria-label="Locate footer label, Working"');
+      expect(markup).toContain('<button type="button"');
+      expect(markup).toContain(
+        'aria-label="Locate footer label, Working. Refining trigger label filtering. Open details"',
+      );
       expect(markup).toContain("Locate footer label");
       // Both strings must be real row text. The provider's latest description
       // is primary while the original objective remains visible beneath it;
@@ -405,7 +408,10 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain('aria-label="Audit chat pipeline, Done"');
+    expect(markup).toContain('<button type="button"');
+    expect(markup).toContain(
+      'aria-label="Audit chat pipeline, Done. Mapped the ingestion boundary. Open details"',
+    );
     expect(markup).toContain("Mapped the ingestion boundary");
     expect(markup).toContain("Done");
     expect(markup).toContain("1m 5s");

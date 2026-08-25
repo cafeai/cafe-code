@@ -324,6 +324,10 @@ export const makeOrchestrationIntegrationHarness = (
     } as unknown as TextGenerationShape);
     const providerCommandReactorLayer = ProviderCommandReactorLive.pipe(
       Layer.provideMerge(runtimeServicesLayer),
+      // Startup reconciliation now reads durable provider ownership directly.
+      // Reuse the persistence-backed directory from ProviderService so the
+      // integration harness exercises the same source of truth as production.
+      Layer.provide(providerSessionDirectoryLayer),
       Layer.provideMerge(gitWorkflowLayer),
       Layer.provideMerge(textGenerationLayer),
       Layer.provideMerge(serverSettingsLayer),

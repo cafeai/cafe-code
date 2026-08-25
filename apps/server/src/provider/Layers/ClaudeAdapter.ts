@@ -813,6 +813,11 @@ function claudeResultUserMessageUuid(result: SDKResultMessage): string | undefin
   return trimmedStringValue((result as Record<string, unknown>).user_message_uuid);
 }
 
+function claudeResultQueuedTurnCount(result: SDKResultMessage): number | undefined {
+  const value = (result as Record<string, unknown>).queued_turn_count;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
 /**
  * Retire the Cafe-owned input represented by a Claude result.
  *
@@ -3874,7 +3879,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ? (resultPrimaryError(message) ?? resultErrors[0] ?? "Claude turn failed.")
         : undefined;
     const completedPromptUuid = consumeClaudeResultPrompt(context, message);
-    const hasQueuedCafeInput = context.promptLifecycleByUuid.size > 0;
+    // Claude Code 2.1.245 / Agent SDK 0.3.245 adds queued_turn_count to the
+    // result boundary. Local UUID lifecycle remains the strongest attribution
+    // signal, while the provider count closes the race where the next command
+    // is already queued but its command_lifecycle frame has not reached Cafe.
+    // A positive count is liveness, not a terminal result for the canonical
+    // Cafe turn; the next result or lifecycle boundary will settle it.
+    const queuedTurnCount = claudeResultQueuedTurnCount(message);
+    const pendingPromptCount = Math.max(context.promptLifecycleByUuid.size, queuedTurnCount ?? 0);
+    const hasQueuedCafeInput = pendingPromptCount > 0;
 
     if (status === "failed") {
       if (isZeroTurnClaudeExecutionFailure(message)) {
@@ -3920,7 +3933,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           "Claude response segment failed; an already-queued follow-up remains active.",
           {
             error: sanitizeDiagnosticLine(errorMessage ?? "Claude turn failed."),
-            pendingPromptCount: context.promptLifecycleByUuid.size,
+            pendingPromptCount,
           },
         );
       } else {
@@ -3954,7 +3967,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         threadId: context.session.threadId,
         providerInstanceId: boundInstanceId,
         completedPromptUuid: completedPromptUuid ?? "",
-        pendingPromptCount: context.promptLifecycleByUuid.size,
+        pendingPromptCount,
+        ...(queuedTurnCount !== undefined ? { providerQueuedTurnCount: queuedTurnCount } : {}),
         messageLifecycleAdvertised: context.capabilities.has("msg_lifecycle_v1"),
       });
       return;
@@ -4074,6 +4088,31 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           payload: message,
         });
         return;
+      case "control_request_progress": {
+        // Agent SDK 0.3.241+ declares this as a system subtype. Older leaked
+        // bridge frames used a top-level type, which remains accepted by the
+        // compatibility guard below. Keep both wire shapes warning-free and
+        // promote only bounded provider-authored progress metadata.
+        const record = message as Record<string, unknown>;
+        const summary =
+          trimmedStringValue(record.summary) ??
+          (message.status === "api_retry"
+            ? `Claude control request retry ${Math.max(1, message.attempt ?? 1)}/${Math.max(
+                message.attempt ?? 1,
+                message.max_retries ?? 1,
+              )}${
+                typeof message.retry_delay_ms === "number" && message.retry_delay_ms > 0
+                  ? ` in ${Math.trunc(message.retry_delay_ms)} ms`
+                  : ""
+              }.`
+            : "Claude control request started.");
+        yield* offerRuntimeEvent({
+          ...base,
+          type: "tool.progress",
+          payload: { summary },
+        });
+        return;
+      }
       case "init":
         context.capabilities.clear();
         for (const capability of message.capabilities ?? []) {

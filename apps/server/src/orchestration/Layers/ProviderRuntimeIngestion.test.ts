@@ -146,6 +146,7 @@ function createProviderServiceHarness() {
       });
     },
     rollbackConversation: () => unsupported(),
+    readSubagentDetail: () => unsupported(),
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
     },
@@ -845,6 +846,166 @@ describe("ProviderRuntimeIngestion", () => {
         (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-late-replay",
       ),
     ).toBe(true);
+  });
+
+  it("reopens a falsely orphaned turn when live provider work proves continued ownership", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-live-after-false-orphan-repair");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-false-orphan-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      createdAt: "2026-01-01T00:00:01.000Z",
+      turnId,
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "running" && thread.session.activeTurnId === turnId,
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("server:test:false-orphan-runtime-terminal"),
+        threadId,
+        session: {
+          threadId,
+          status: "interrupted",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: "Incorrect orphan repair",
+          updatedAt: "2026-01-01T00:00:02.000Z",
+        },
+        createdAt: "2026-01-01T00:00:02.000Z",
+      }),
+    );
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "interrupted" &&
+        thread.session.activeTurnId === null &&
+        thread.latestTurn?.state === "interrupted",
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("server:test:false-orphan-runtime-marker"),
+        threadId,
+        activity: {
+          id: EventId.make("activity-false-orphan-runtime-marker"),
+          tone: "error",
+          kind: "runtime.warning",
+          summary: "Provider turn interrupted by restart",
+          payload: {
+            message: "Provider turn interrupted by restart",
+            detail: "Incorrect orphan repair",
+            recovery: "orphaned-active-turn",
+          },
+          turnId,
+          createdAt: "2026-01-01T00:00:02.000Z",
+        },
+        createdAt: "2026-01-01T00:00:02.000Z",
+      }),
+    );
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId,
+      activeTurnId: turnId,
+      createdAt: "2026-01-01T00:00:01.000Z",
+      updatedAt: "2026-01-01T00:00:03.000Z",
+    });
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-live-work-after-false-orphan"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId,
+      turnId,
+      itemId: asItemId("item-live-after-false-orphan"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "provider work remained live",
+      },
+    });
+
+    const recovered = await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session.activeTurnId === turnId &&
+        thread.latestTurn?.state === "running" &&
+        thread.latestTurn.completedAt === null,
+    );
+    expect(recovered.session?.lastError).toBeNull();
+    expect(recovered.latestTurn?.completedAt).toBeNull();
+  });
+
+  it("does not reopen an explicitly stopped turn when late live work arrives", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-explicit-stop-barrier");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-explicit-stop-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      createdAt: "2026-01-01T00:00:01.000Z",
+      turnId,
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "running" && thread.session.activeTurnId === turnId,
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("cmd-explicit-stop-barrier"),
+        threadId,
+        turnId,
+        createdAt: "2026-01-01T00:00:02.000Z",
+      }),
+    );
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId,
+      activeTurnId: turnId,
+      createdAt: "2026-01-01T00:00:01.000Z",
+      updatedAt: "2026-01-01T00:00:03.000Z",
+    });
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-work-after-explicit-stop"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId,
+      turnId,
+      itemId: asItemId("item-work-after-explicit-stop"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "late provider work",
+      },
+    });
+    await harness.drain();
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === threadId);
+    expect(thread?.session?.status).toBe("interrupted");
+    expect(thread?.session?.activeTurnId).toBeNull();
+    expect(thread?.latestTurn?.state).toBe("interrupted");
   });
 
   it("reopens the same terminal turn only for explicit live Codex aggregate continuation", async () => {

@@ -34,11 +34,14 @@ import {
   type ProviderSessionRuntimeStatus,
   type ProviderInstanceId,
   ProviderDriverKind,
+  THREAD_TURN_SUBAGENT_ID_MAX_LENGTH,
+  TrimmedNonEmptyString,
   type ProviderRuntimeEvent,
   type ProviderSession,
 } from "@cafecode/contracts";
 import { randomUUID } from "node:crypto";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -69,6 +72,11 @@ import {
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import { ProviderAdapterRegistry } from "../Services/ProviderAdapterRegistry.ts";
 import { ProviderService, type ProviderServiceShape } from "../Services/ProviderService.ts";
+import {
+  makeProviderRuntimeOwnerPayload,
+  PROVIDER_RUNTIME_OWNER_HEARTBEAT_INTERVAL_MS,
+  type ProviderRuntimeOwnerEvidence,
+} from "../providerRuntimeOwnerEvidence.ts";
 import {
   ProviderSessionDirectory,
   type ProviderRuntimeBinding,
@@ -105,6 +113,11 @@ const ProviderRollbackConversationInput = Schema.Struct({
 
 const ProviderReadThreadInput = Schema.Struct({
   threadId: ThreadId,
+});
+
+const ProviderReadSubagentDetailInput = Schema.Struct({
+  threadId: ThreadId,
+  subagentId: TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_TURN_SUBAGENT_ID_MAX_LENGTH)),
 });
 
 const ProviderRuntimeRestartInput = ServerProviderRuntimeRestartInput;
@@ -206,6 +219,8 @@ function rejectedResumeCursorRecoveryReason(provider: ProviderDriverKind): strin
 
 function toRuntimePayloadFromSession(
   session: ProviderSession,
+  runtimeOwner: Omit<ProviderRuntimeOwnerEvidence, "runtimeOwnerHeartbeatAt">,
+  runtimeOwnerHeartbeatAt: string,
   extra?: {
     readonly modelSelection?: unknown;
     readonly lastRuntimeEvent?: string;
@@ -223,6 +238,7 @@ function toRuntimePayloadFromSession(
     ...(extra?.lastRuntimeEventAt !== undefined
       ? { lastRuntimeEventAt: extra.lastRuntimeEventAt }
       : {}),
+    ...makeProviderRuntimeOwnerPayload(runtimeOwner, runtimeOwnerHeartbeatAt),
   };
 }
 
@@ -403,6 +419,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const directory = yield* ProviderSessionDirectory;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+  const runtimeOwnerStartedAt = yield* nowIso;
+  const runtimeOwner = {
+    runtimeOwnerId: randomUUID(),
+    runtimeOwnerPid: process.pid,
+    runtimeOwnerStartedAt,
+  } satisfies Omit<ProviderRuntimeOwnerEvidence, "runtimeOwnerHeartbeatAt">;
+  // The detached provider daemon and one or more web/backend processes can
+  // share the same provider_session_runtime table. Persisting this process
+  // incarnation lets startup reconciliation distinguish a live remote owner
+  // from an old `running` row left by a crashed process.
+  const runtimeOwnerHeartbeatWrittenAt = new Map<ThreadId, number>();
+  const runtimeOwnerHeartbeatSemaphore = yield* Semaphore.make(1);
   // Provider fork APIs allocate a fresh native identity and do not accept
   // Cafe's idempotency key. Serialize the short, user-initiated mutation so
   // two transports cannot both observe an empty target binding and create two
@@ -503,6 +531,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "ProviderService.upsertSessionBinding",
         session,
       );
+      const runtimeOwnerHeartbeatAt = yield* nowIso;
       yield* directory.upsert({
         threadId,
         provider: session.provider,
@@ -514,8 +543,42 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           : session.resumeCursor !== undefined
             ? { resumeCursor: session.resumeCursor }
             : {}),
-        runtimePayload: toRuntimePayloadFromSession(session, extra),
+        runtimePayload: toRuntimePayloadFromSession(
+          session,
+          runtimeOwner,
+          runtimeOwnerHeartbeatAt,
+          extra,
+        ),
       });
+      runtimeOwnerHeartbeatWrittenAt.set(session.threadId, Date.parse(runtimeOwnerHeartbeatAt));
+    });
+
+  const upsertRunningTurnBinding = (input: {
+    readonly threadId: ThreadId;
+    readonly provider: ProviderDriverKind;
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly turnId: TurnId;
+    readonly resumeCursor?: unknown;
+    readonly modelSelection?: unknown;
+    readonly lastRuntimeEvent: "provider.sendTurn" | "provider.steerTurn";
+  }) =>
+    Effect.gen(function* () {
+      const runtimeOwnerHeartbeatAt = yield* nowIso;
+      yield* directory.upsert({
+        threadId: input.threadId,
+        provider: input.provider,
+        providerInstanceId: input.providerInstanceId,
+        status: "running",
+        ...(input.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+        runtimePayload: {
+          ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+          activeTurnId: input.turnId,
+          lastRuntimeEvent: input.lastRuntimeEvent,
+          lastRuntimeEventAt: runtimeOwnerHeartbeatAt,
+          ...makeProviderRuntimeOwnerPayload(runtimeOwner, runtimeOwnerHeartbeatAt),
+        },
+      });
+      runtimeOwnerHeartbeatWrittenAt.set(input.threadId, Date.parse(runtimeOwnerHeartbeatAt));
     });
 
   const processRuntimeEvent = (
@@ -567,9 +630,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   const persistRuntimeLifecycleEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> => {
     const status = runtimeStatusFromEvent(event);
-    if (status === undefined || event.providerInstanceId === undefined) {
+    const providerInstanceId = event.providerInstanceId;
+    if (status === undefined || providerInstanceId === undefined) {
       return Effect.void;
     }
+    // Preserve the narrowing across the deferred generator below. Runtime
+    // events are immutable, but TypeScript cannot carry an optional-property
+    // guard through a closure without this exact local capture.
 
     const activeTurnId = runtimeActiveTurnIdFromEvent(event);
     const lastError = runtimeLastErrorFromEvent(event);
@@ -577,11 +644,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       event.payload && typeof event.payload === "object" && "resumeCursor" in event.payload
         ? (event.payload as { readonly resumeCursor?: unknown }).resumeCursor
         : undefined;
-    return directory
-      .upsert({
+    return Effect.gen(function* () {
+      const runtimeOwnerHeartbeatAt = yield* nowIso;
+      yield* directory.upsert({
         threadId: event.threadId,
         provider: event.provider,
-        providerInstanceId: event.providerInstanceId,
+        providerInstanceId,
         status,
         ...(resumeCursor !== undefined ? { resumeCursor } : {}),
         runtimePayload: {
@@ -589,19 +657,25 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ...(lastError !== undefined ? { lastError } : {}),
           lastRuntimeEvent: event.type,
           lastRuntimeEventAt: event.createdAt,
+          ...makeProviderRuntimeOwnerPayload(runtimeOwner, runtimeOwnerHeartbeatAt),
         },
-      })
-      .pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("provider.runtime.lifecycle-persist-failed", {
-            threadId: event.threadId,
-            provider: event.provider,
-            providerInstanceId: event.providerInstanceId,
-            eventType: event.type,
-            cause,
-          }),
-        ),
-      );
+      });
+      if (status === "running" && activeTurnId !== null && activeTurnId !== undefined) {
+        runtimeOwnerHeartbeatWrittenAt.set(event.threadId, Date.parse(runtimeOwnerHeartbeatAt));
+      } else {
+        runtimeOwnerHeartbeatWrittenAt.delete(event.threadId);
+      }
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider.runtime.lifecycle-persist-failed", {
+          threadId: event.threadId,
+          provider: event.provider,
+          providerInstanceId,
+          eventType: event.type,
+          cause,
+        }),
+      ),
+    );
   };
 
   // `subscribedAdapters` is our source-of-truth for "which instance adapters
@@ -825,6 +899,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     readonly threadId: ThreadId;
     readonly operation: string;
     readonly allowRecovery: boolean;
+    readonly requiredProvider?: ProviderDriverKind;
   }) {
     const bindingOption = yield* directory.getBinding(input.threadId);
     const binding = Option.getOrUndefined(bindingOption);
@@ -834,13 +909,26 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         `Cannot route thread '${input.threadId}' because no persisted provider binding exists.`,
       );
     }
+    if (input.requiredProvider !== undefined && binding.provider !== input.requiredProvider) {
+      return yield* toValidationError(
+        input.operation,
+        "The persisted thread binding does not use the provider required by this operation.",
+      );
+    }
     const instanceId = yield* requireBindingInstanceId(input.operation, binding);
     const adapter = yield* registry.getByInstance(instanceId);
+    if (adapter.provider !== binding.provider) {
+      return yield* toValidationError(
+        input.operation,
+        "The configured provider instance does not match the persisted thread binding.",
+      );
+    }
 
     const hasRequestedSession = yield* adapter.hasSession(input.threadId);
     if (hasRequestedSession) {
       return {
         adapter,
+        binding,
         instanceId,
         threadId: input.threadId,
         isActive: true,
@@ -850,6 +938,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     if (!input.allowRecovery) {
       return {
         adapter,
+        binding,
         instanceId,
         threadId: input.threadId,
         isActive: false,
@@ -862,6 +951,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     });
     return {
       adapter: recovered.adapter,
+      binding,
       instanceId,
       threadId: input.threadId,
       isActive: true,
@@ -1318,34 +1408,26 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             ...(input.input !== undefined ? { input: input.input } : {}),
             ...(input.attachments.length > 0 ? { attachments: input.attachments } : {}),
           });
-          yield* directory.upsert({
+          yield* upsertRunningTurnBinding({
             threadId: input.threadId,
             provider: routed.adapter.provider,
             providerInstanceId: routed.instanceId,
-            status: "running",
+            turnId: turn.turnId,
             ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
-            runtimePayload: {
-              activeTurnId: turn.turnId,
-              lastRuntimeEvent: "provider.steerTurn",
-              lastRuntimeEventAt: yield* nowIso,
-            },
+            lastRuntimeEvent: "provider.steerTurn",
           });
           return turn;
         }
       }
       const turn = yield* routed.adapter.sendTurn(input);
-      yield* directory.upsert({
+      yield* upsertRunningTurnBinding({
         threadId: input.threadId,
         provider: routed.adapter.provider,
         providerInstanceId: routed.instanceId,
-        status: "running",
+        turnId: turn.turnId,
         ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
-        runtimePayload: {
-          ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
-          activeTurnId: turn.turnId,
-          lastRuntimeEvent: "provider.sendTurn",
-          lastRuntimeEventAt: yield* nowIso,
-        },
+        ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+        lastRuntimeEvent: "provider.sendTurn",
       });
       return turn;
     }).pipe(
@@ -1406,17 +1488,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.kind": routed.adapter.provider,
       });
       const turn = yield* routed.adapter.steerTurn(input);
-      yield* directory.upsert({
+      yield* upsertRunningTurnBinding({
         threadId: input.threadId,
         provider: routed.adapter.provider,
         providerInstanceId: routed.instanceId,
-        status: "running",
+        turnId: turn.turnId,
         ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
-        runtimePayload: {
-          activeTurnId: turn.turnId,
-          lastRuntimeEvent: "provider.steerTurn",
-          lastRuntimeEventAt: yield* nowIso,
-        },
+        lastRuntimeEvent: "provider.steerTurn",
       });
       return turn;
     }).pipe(
@@ -1698,20 +1776,60 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   });
 
+  const readAdapterSessions = Effect.gen(function* () {
+    const currentAdapters = yield* getAdapterEntries;
+    return yield* Effect.forEach(currentAdapters, ([instanceId, adapter]) =>
+      adapter.listSessions().pipe(
+        Effect.map((sessions) =>
+          sessions.map((session) => ({
+            ...session,
+            providerInstanceId: instanceId,
+          })),
+        ),
+      ),
+    ).pipe(Effect.map((sessionsByProvider) => sessionsByProvider.flatMap((sessions) => sessions)));
+  });
+
+  const refreshRuntimeOwnerHeartbeats = (sessions: ReadonlyArray<ProviderSession>) =>
+    runtimeOwnerHeartbeatSemaphore.withPermit(
+      Effect.gen(function* () {
+        const observedAtMs = yield* Clock.currentTimeMillis;
+        const dueSessions = sessions.filter((session) => {
+          if (session.status !== "running" || session.activeTurnId === undefined) {
+            return false;
+          }
+          const lastWrittenAt = runtimeOwnerHeartbeatWrittenAt.get(session.threadId);
+          return (
+            lastWrittenAt === undefined ||
+            observedAtMs - lastWrittenAt >= PROVIDER_RUNTIME_OWNER_HEARTBEAT_INTERVAL_MS
+          );
+        });
+
+        // Heartbeats update one bounded runtime row per live turn. They never
+        // append orchestration events, provider text, or credentials, and they
+        // are serialized to avoid creating SQLite write contention under a
+        // large set of long-running sessions.
+        yield* Effect.forEach(
+          dueSessions,
+          (session) =>
+            upsertSessionBinding(session, session.threadId).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("provider.runtime.owner-heartbeat-write-failed", {
+                  threadId: session.threadId,
+                  provider: session.provider,
+                  providerInstanceId: session.providerInstanceId,
+                  cause: Cause.pretty(cause),
+                }),
+              ),
+            ),
+          { concurrency: 1, discard: true },
+        );
+      }),
+    );
+
   const listSessions: ProviderServiceShape["listSessions"] = Effect.fn("listSessions")(
     function* () {
-      const currentAdapters = yield* getAdapterEntries;
-      const sessionsByProvider = yield* Effect.forEach(currentAdapters, ([instanceId, adapter]) =>
-        adapter.listSessions().pipe(
-          Effect.map((sessions) =>
-            sessions.map((session) => ({
-              ...session,
-              providerInstanceId: instanceId,
-            })),
-          ),
-        ),
-      );
-      const activeSessions = sessionsByProvider.flatMap((sessions) => sessions);
+      const activeSessions = yield* readAdapterSessions;
       const persistedBindings = yield* directory.listThreadIds().pipe(
         Effect.flatMap((threadIds) =>
           Effect.forEach(
@@ -1772,9 +1890,26 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }
         sessions.push(Object.assign({}, session, overrides));
       }
+      yield* refreshRuntimeOwnerHeartbeats(sessions);
       return sessions;
     },
   );
+
+  yield* Effect.gen(function* () {
+    while (true) {
+      yield* Effect.sleep(Duration.millis(PROVIDER_RUNTIME_OWNER_HEARTBEAT_INTERVAL_MS));
+      yield* Effect.gen(function* () {
+        const sessions = yield* readAdapterSessions;
+        yield* refreshRuntimeOwnerHeartbeats(sessions);
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("provider.runtime.owner-heartbeat-cycle-failed", {
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      );
+    }
+  }).pipe(Effect.forkScoped);
 
   const getCapabilities: ProviderServiceShape["getCapabilities"] = (instanceId) =>
     registry.getByInstance(instanceId).pipe(Effect.map((adapter) => adapter.capabilities));
@@ -1922,6 +2057,49 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const readSubagentDetail: ProviderServiceShape["readSubagentDetail"] = Effect.fn(
+    "readSubagentDetail",
+  )(function* (rawInput) {
+    const input = yield* decodeInputOrValidationError({
+      operation: "ProviderService.readSubagentDetail",
+      schema: ProviderReadSubagentDetailInput,
+      payload: rawInput,
+    });
+    const routed = yield* resolveRoutableSession({
+      threadId: input.threadId,
+      operation: "ProviderService.readSubagentDetail",
+      allowRecovery: false,
+      requiredProvider: ProviderDriverKind.make("codex"),
+    });
+    if (
+      routed.adapter.provider !== ProviderDriverKind.make("codex") ||
+      routed.adapter.readSubagentDetail === undefined
+    ) {
+      return yield* toValidationError(
+        "ProviderService.readSubagentDetail",
+        "The selected provider does not expose verified subagent transcript history.",
+      );
+    }
+
+    // Do not attach the provider child id or returned text to tracing. Both are
+    // provider-owned user data; only stable Cafe identity and finite counts are
+    // safe diagnostics for this operation.
+    yield* Effect.annotateCurrentSpan({
+      "provider.operation": "read-subagent-detail",
+      "provider.kind": routed.adapter.provider,
+      "provider.thread_id": input.threadId,
+    });
+    const detail = yield* routed.adapter.readSubagentDetail(routed.threadId, input.subagentId, {
+      resumeCursor: routed.binding.resumeCursor,
+    });
+    return {
+      provider: routed.adapter.provider,
+      providerInstanceId: routed.instanceId,
+      messages: detail.messages,
+      truncated: detail.truncated,
+    };
+  });
+
   const rollbackConversation: ProviderServiceShape["rollbackConversation"] = Effect.fn(
     "rollbackConversation",
   )(function* (rawInput) {
@@ -2061,6 +2239,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     setGoal,
     clearGoal,
     readThread,
+    readSubagentDetail,
     rollbackConversation,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each

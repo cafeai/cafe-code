@@ -49,7 +49,11 @@ function booleanDescriptor(id: string, label: string) {
   };
 }
 
-async function mountMenu(props?: { modelSelection?: ModelSelection; prompt?: string }) {
+async function mountMenu(props?: {
+  modelSelection?: ModelSelection;
+  prompt?: string;
+  traitsTriggerLabel?: string;
+}) {
   const threadId = ThreadId.make("thread-compact-menu");
   const threadRef = scopeThreadRef(LOCAL_ENVIRONMENT_ID, threadId);
   const threadKey = scopedThreadKey(threadRef);
@@ -141,6 +145,9 @@ async function mountMenu(props?: { modelSelection?: ModelSelection; prompt?: str
       planSidebarOpen={false}
       runtimeMode="approval-required"
       showInteractionModeToggle
+      {...(props?.traitsTriggerLabel !== undefined
+        ? { traitsTriggerLabel: props.traitsTriggerLabel }
+        : {})}
       traitsMenuContent={
         <TraitsMenuContent
           provider={provider}
@@ -179,6 +186,23 @@ describe("CompactComposerControlsMenu", () => {
       draftThreadsByThreadKey: {},
       logicalProjectDraftThreadKeyByLogicalProjectKey: {},
       stickyModelSelectionByProvider: {},
+    });
+  });
+
+  it("keeps the selected reasoning visible on the closed compact trigger", async () => {
+    await using _ = await mountMenu({ traitsTriggerLabel: "Ultra · 1M" });
+
+    const trigger = document.querySelector<HTMLElement>('[aria-label="More composer controls"]');
+    const label = document.querySelector<HTMLElement>(
+      '[data-compact-composer-controls-label="true"]',
+    );
+
+    expect(trigger?.textContent).toContain("Ultra · 1M");
+    expect(label?.textContent).toBe("Ultra · 1M");
+
+    await page.getByLabelText("More composer controls").click();
+    await vi.waitFor(() => {
+      expect(document.body.textContent ?? "").toContain("Mode");
     });
   });
 

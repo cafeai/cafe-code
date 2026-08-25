@@ -2978,6 +2978,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     showGoalControl={goalControlsSupported}
                     goalStatus={activeThread?.goal?.status ?? null}
                     traitsMenuContent={providerTraitsMenuContent}
+                    traitsTriggerLabel={
+                      providerTraitsMenuContent ? composerProviderState.traitsTriggerLabel : null
+                    }
                     onToggleInteractionMode={cycleComposerInteractionMode}
                     onNativePermissionModeChange={handleClaudePermissionModeChange}
                     onTogglePlanSidebar={togglePlanSidebar}

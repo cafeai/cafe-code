@@ -211,6 +211,7 @@ describe("OrchestrationEngine", () => {
           getPostTerminalStaleSteerCandidateThreadIds: () => Effect.succeed([]),
           getThreadTurnActivityPage: () => Effect.die("unused"),
           getThreadTurnWorkLogPresence: () => Effect.die("unused"),
+          hasThreadTurnSubagentActivity: () => Effect.die("unused"),
           getThreadDetailById: () => Effect.succeed(Option.none()),
           getThreadDetailSnapshotById: () => Effect.succeed(Option.none()),
         }),

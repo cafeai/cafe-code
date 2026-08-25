@@ -1,5 +1,6 @@
 import "../../index.css";
 
+import { page } from "vitest/browser";
 import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
@@ -139,11 +140,85 @@ const atriumHarness = vi.hoisted(() => {
     retainedDetails.push({ environmentId, threadId, release });
     return release;
   });
+  const usage = {
+    cost: 0,
+    tokens: 0,
+    loaded: false,
+    hasUnpriced: false,
+    daily: [],
+    rangeTokens: 0,
+    rangeCost: 0,
+    outputTokens: 0,
+    cachedShare: null,
+    cacheSavings: 0,
+    raw: null,
+  };
+  const loadedUsage = {
+    cost: 2.5,
+    tokens: 3_539_966_200,
+    loaded: true,
+    hasUnpriced: false,
+    daily: [{ day: "2026-08-25", tokens: 350_000, cost: 0.25 }],
+    rangeTokens: 350_000,
+    rangeCost: 0.25,
+    outputTokens: 539_966_200,
+    cachedShare: 0.5,
+    cacheSavings: 1.25,
+    raw: {
+      totals: {
+        generatingMs: 1_000,
+        inputTokens: 3_000_000_000,
+        cachedInputTokens: 1_500_000_000,
+        cacheWriteInputTokens: 0,
+        outputTokens: 539_966_200,
+        reasoningOutputTokens: 10_000,
+        userMessages: 1,
+      },
+      today: {
+        day: "2026-08-25",
+        generatingMs: 1_000,
+        inputTokens: 300_000,
+        cachedInputTokens: 150_000,
+        cacheWriteInputTokens: 0,
+        outputTokens: 50_000,
+        reasoningOutputTokens: 1_000,
+        userMessages: 1,
+      },
+      activeSessionCount: 0,
+      collectionEnabled: true,
+      asOfMs: now,
+      days: [
+        {
+          day: "2026-08-25",
+          generatingMs: 1_000,
+          inputTokens: 300_000,
+          cachedInputTokens: 150_000,
+          cacheWriteInputTokens: 0,
+          outputTokens: 50_000,
+          reasoningOutputTokens: 1_000,
+          userMessages: 1,
+        },
+      ],
+      tokenBreakdown: [
+        {
+          provider: "codex",
+          model: "gpt-5.6-codex",
+          inputTokens: 3_000_000_000,
+          cachedInputTokens: 1_500_000_000,
+          cacheWriteInputTokens: 0,
+          outputTokens: 539_966_200,
+          reasoningOutputTokens: 10_000,
+        },
+      ],
+    },
+  };
   return {
     theme,
     updateSettings,
     retainedDetails,
     retainThreadDetailSubscription,
+    usage,
+    loadedUsage,
     settings: {
       ambianceAtriumEnabled: true,
       continueBackgroundAnimations: true,
@@ -181,6 +256,10 @@ vi.mock("../../store", () => ({
 
 vi.mock("../../environments/runtime/service", () => ({
   retainThreadDetailSubscription: atriumHarness.retainThreadDetailSubscription,
+}));
+
+vi.mock("../stats/useUsageCostSummary", () => ({
+  useUsageCostSummary: () => atriumHarness.usage,
 }));
 
 const navigations: Array<Record<string, unknown>> = [];
@@ -390,7 +469,7 @@ describe("TaskAtriumBoard", () => {
     }
   });
 
-  it("expands a task card for every subagent and delegates scrolling to the cards column", async () => {
+  it("expands a task card for every subagent and delegates scrolling to the Atrium pane", async () => {
     const restoreSubagents = installStructuredSubagents(8);
     const { host, screen } = await renderInTheme("dark");
     host.style.width = "390px";
@@ -458,7 +537,7 @@ describe("TaskAtriumBoard", () => {
     }
   });
 
-  it("keeps every right-aligned task reachable in a short responsive viewport", async () => {
+  it("keeps every tiled task reachable in a short responsive viewport", async () => {
     const restoreThreads = addRunningThreads(9);
     const { host, screen } = await renderInTheme("dark");
     host.style.width = "390px";
@@ -483,6 +562,95 @@ describe("TaskAtriumBoard", () => {
       );
     } finally {
       restoreThreads();
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("tiles cards across one, two, and three responsive columns", async () => {
+    const originalViewport = { height: window.innerHeight, width: window.innerWidth };
+    await page.viewport(390, 720);
+    const { host, screen } = await renderInTheme("dark");
+    try {
+      await vi.waitFor(() => {
+        expect(host.querySelectorAll('[data-cafe-atrium-task-card="true"]')).toHaveLength(3);
+      });
+      expect(host.textContent).toContain("3 threads in motion");
+      expect(host.textContent).toMatch(
+        /\d+ subagents? (?:is|are) working across the active threads\./,
+      );
+      expect(host.textContent).toContain("mapping canvas call sites");
+      const cardBounds = () =>
+        Array.from(
+          host.querySelectorAll<HTMLElement>('[data-cafe-atrium-task-card="true"]'),
+          (card) => card.getBoundingClientRect(),
+        );
+
+      let bounds = cardBounds();
+      expect(bounds[1]!.top).toBeGreaterThan(bounds[0]!.top + 1);
+
+      await page.viewport(900, 720);
+      await vi.waitFor(() => {
+        const next = cardBounds();
+        expect(Math.abs(next[0]!.top - next[1]!.top)).toBeLessThanOrEqual(1);
+        expect(next[2]!.top).toBeGreaterThan(next[0]!.top + 1);
+      });
+
+      await page.viewport(1_700, 900);
+      await vi.waitFor(() => {
+        const next = cardBounds();
+        expect(Math.abs(next[0]!.top - next[1]!.top)).toBeLessThanOrEqual(1);
+        expect(Math.abs(next[0]!.top - next[2]!.top)).toBeLessThanOrEqual(1);
+      });
+      expect(host.textContent).toContain("3 threads in motion");
+      expect(host.textContent).toContain("mapping canvas call sites");
+    } finally {
+      await page.viewport(originalViewport.width, originalViewport.height);
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("keeps quiet work and the complete usage graph in one scrollable pane", async () => {
+    const originalViewport = { height: window.innerHeight, width: window.innerWidth };
+    const environments = atriumHarness.useStore.getState().environmentStateById as Record<
+      string,
+      { threadIds: string[] }
+    >;
+    const previousThreadIds = environments["env-1"]!.threadIds;
+    const previousUsage = { ...atriumHarness.usage };
+    environments["env-1"]!.threadIds = [];
+    Object.assign(atriumHarness.usage, atriumHarness.loadedUsage);
+    await page.viewport(390, 420);
+    const { host, screen } = await renderInTheme("dark");
+    try {
+      await vi.waitFor(() => {
+        expect(host.querySelector('[data-cafe-atrium-usage-panel="true"]')).not.toBeNull();
+      });
+      const pane = host.querySelector<HTMLElement>('[data-cafe-atrium-pane-scroll="true"]');
+      const usagePanel = host.querySelector<HTMLElement>('[data-cafe-atrium-usage-panel="true"]');
+      const chart = usagePanel?.querySelector<SVGElement>('svg[aria-label^="Daily usage"]');
+      expect(pane).not.toBeNull();
+      expect(usagePanel).not.toBeNull();
+      expect(chart).not.toBeNull();
+      if (!pane || !usagePanel || !chart) throw new Error("Complete Atrium usage layout missing");
+
+      expect(getComputedStyle(pane).overflowY).toBe("auto");
+      expect(["auto", "scroll"]).not.toContain(getComputedStyle(usagePanel).overflowY);
+      expect(usagePanel.scrollHeight).toBeLessThanOrEqual(usagePanel.clientHeight + 1);
+      expect(pane.scrollHeight).toBeGreaterThan(pane.clientHeight);
+
+      chart.scrollIntoView({ block: "center" });
+      expect(chart.getBoundingClientRect().top).toBeGreaterThanOrEqual(
+        pane.getBoundingClientRect().top - 1,
+      );
+      expect(chart.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+        pane.getBoundingClientRect().bottom + 1,
+      );
+    } finally {
+      environments["env-1"]!.threadIds = previousThreadIds;
+      Object.assign(atriumHarness.usage, previousUsage);
+      await page.viewport(originalViewport.width, originalViewport.height);
       await screen.unmount();
       host.remove();
     }

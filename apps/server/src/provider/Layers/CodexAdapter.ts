@@ -33,6 +33,9 @@ import {
   type ProviderSessionForkResult,
   RuntimeTaskId,
   type RuntimeSubagentPresentation,
+  THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS,
+  THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES,
+  THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_CHARS,
 } from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
@@ -45,6 +48,7 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -63,18 +67,25 @@ import {
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
+  makeProviderSubagentDetailReadError,
   type ProviderAdapterError,
+  type ProviderSubagentDetailReadFailureReason,
 } from "../Errors.ts";
 import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
+import type { ProviderSubagentDetail } from "../Services/ProviderAdapter.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import {
   CodexResumeCursorSchema,
   CodexSessionRuntimeThreadIdMissingError,
   makeCodexSessionRuntime,
+  readCodexSubagentThreadTransient,
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeShape,
+  type CodexTransientSubagentHistoryReadOptions,
+  type CodexThreadItem,
+  type CodexThreadSnapshot,
   type CodexTransportPolicy,
 } from "./CodexSessionRuntime.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -123,6 +134,10 @@ export interface CodexAdapterLiveOptions {
     CodexSessionRuntimeError,
     ChildProcessSpawner.ChildProcessSpawner | Scope.Scope
   >;
+  /** Test seam for the otherwise process-backed, scoped history reader. */
+  readonly readTransientSubagentThread?: (
+    options: CodexTransientSubagentHistoryReadOptions,
+  ) => Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
 }
@@ -170,6 +185,49 @@ function mapCodexRuntimeError(
   });
 }
 
+/**
+ * Collapse a privacy-sensitive child read failure before it can cross the
+ * adapter/service boundary. Ordinary Codex request errors retain provider
+ * messages and causes for operational diagnostics, but thread/read responses
+ * can echo opaque child ids, account details, response bodies, and local paths.
+ * Only this finite classification is safe for daemon health and logging.
+ */
+function redactCodexSubagentDetailReadError(
+  error: ProviderAdapterSessionNotFoundError | CodexSessionRuntimeError,
+) {
+  let reason: ProviderSubagentDetailReadFailureReason;
+  switch (error._tag) {
+    case "ProviderAdapterSessionNotFoundError":
+      reason = "session-unavailable";
+      break;
+    case "CodexAppServerSpawnError":
+      reason = "provider-unavailable";
+      break;
+    case "CodexAppServerProcessExitedError":
+      reason = "provider-process-exited";
+      break;
+    case "CodexAppServerTransportError":
+      reason = "provider-transport-unavailable";
+      break;
+    case "CodexAppServerProtocolParseError":
+      reason = "provider-response-invalid";
+      break;
+    case "CodexSessionRuntimeThreadIdMissingError":
+      reason = "root-thread-unavailable";
+      break;
+    case "CodexSessionRuntimeInvalidSubagentThreadError":
+      reason = error.reason;
+      break;
+    default:
+      // Request errors can contain the provider's response body. Other runtime
+      // state errors are not expected for a read, but are deliberately folded
+      // into the same opaque classification instead of echoing their message.
+      reason = "provider-request-failed";
+      break;
+  }
+  return makeProviderSubagentDetailReadError(reason);
+}
+
 type CodexLifecycleItem =
   | EffectCodexSchema.V2ItemStartedNotification["item"]
   | EffectCodexSchema.V2ItemCompletedNotification["item"];
@@ -193,6 +251,227 @@ function readPayload<A>(
 function trimText(value: string | undefined | null): string | undefined {
   const trimmed = value?.trim();
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
+function stripCodexSubagentUnsafeControls(value: string): string {
+  let sanitized = "";
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    const isControl =
+      (codePoint <= 0x1f && codePoint !== 0x0a) || (codePoint >= 0x7f && codePoint <= 0x9f);
+    const isBidiControl =
+      codePoint === 0x061c ||
+      codePoint === 0x200e ||
+      codePoint === 0x200f ||
+      (codePoint >= 0x202a && codePoint <= 0x202e) ||
+      (codePoint >= 0x2066 && codePoint <= 0x2069);
+    if (!isControl && !isBidiControl) sanitized += character;
+  }
+  return sanitized;
+}
+
+function sliceWithoutDanglingSurrogate(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  const sliced = value.slice(0, maxChars);
+  const finalCodeUnit = sliced.charCodeAt(sliced.length - 1);
+  return finalCodeUnit >= 0xd800 && finalCodeUnit <= 0xdbff ? sliced.slice(0, -1) : sliced;
+}
+
+/**
+ * Sanitize one public transcript fragment without flattening Markdown.
+ *
+ * Newlines are normalized and tabs become spaces so headings, lists, and code
+ * indentation remain readable. All other C0/C1 controls and Unicode bidi
+ * controls are removed before the text crosses the renderer boundary. The
+ * source is sliced before replacements to prevent an adversarial rollout item
+ * from causing an additional unbounded allocation during canonicalization.
+ */
+function sanitizeCodexSubagentPublicText(
+  value: string,
+  maxChars: number,
+): { readonly text: string; readonly truncated: boolean } {
+  if (maxChars <= 0) {
+    return { text: "", truncated: value.length > 0 };
+  }
+  const sourceCap = Math.min(value.length, maxChars + 1);
+  const boundedSource = sliceWithoutDanglingSurrogate(value, sourceCap);
+  const sanitized = stripCodexSubagentUnsafeControls(
+    boundedSource.replace(/\r\n?/g, "\n").replace(/\t/g, "    "),
+  );
+  const text = sliceWithoutDanglingSurrogate(sanitized, maxChars);
+  return {
+    text,
+    truncated: value.length > sourceCap || sanitized.length > text.length,
+  };
+}
+
+function readCodexPublicUserMessage(
+  item: Extract<CodexThreadItem, { readonly type: "userMessage" }>,
+): { readonly text: string; readonly truncated: boolean } {
+  let text = "";
+  let truncated = false;
+  for (const content of item.content) {
+    // Images, audio, skills, and mentions can carry URLs or local paths. Only
+    // explicit text input is public transcript material for this endpoint.
+    if (content.type !== "text") continue;
+    const separator = text.length > 0 ? "\n" : "";
+    const remaining = THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS - text.length;
+    if (remaining <= separator.length) {
+      truncated = true;
+      break;
+    }
+    const sanitized = sanitizeCodexSubagentPublicText(content.text, remaining - separator.length);
+    text += separator + sanitized.text;
+    truncated ||= sanitized.truncated;
+    if (truncated) break;
+  }
+  return { text, truncated };
+}
+
+/**
+ * Reduce a verified Codex child rollout to the only fields allowed on the
+ * public detail RPC: ordered user and assistant text.
+ */
+export function canonicalizeCodexSubagentDetail(
+  snapshot: CodexThreadSnapshot,
+): ProviderSubagentDetail {
+  type LocatedCandidate = ProviderSubagentDetail["messages"][number] & {
+    readonly turnIndex: number;
+    readonly itemIndex: number;
+    readonly truncated: boolean;
+  };
+
+  const readCandidate = (turnIndex: number, itemIndex: number): LocatedCandidate | undefined => {
+    const item = snapshot.turns[turnIndex]?.items[itemIndex];
+    if (!item) return undefined;
+    if (item.type === "userMessage") {
+      return {
+        role: "user",
+        ...readCodexPublicUserMessage(item),
+        turnIndex,
+        itemIndex,
+      };
+    }
+    if (item.type === "agentMessage") {
+      return {
+        role: "assistant",
+        ...sanitizeCodexSubagentPublicText(
+          item.text,
+          THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_CHARS,
+        ),
+        turnIndex,
+        itemIndex,
+      };
+    }
+    return undefined;
+  };
+
+  let initialAssignment: LocatedCandidate | undefined;
+  for (
+    let turnIndex = 0;
+    turnIndex < snapshot.turns.length && initialAssignment === undefined;
+    turnIndex += 1
+  ) {
+    const turn = snapshot.turns[turnIndex];
+    if (!turn) continue;
+    for (let itemIndex = 0; itemIndex < turn.items.length; itemIndex += 1) {
+      const candidate = readCandidate(turnIndex, itemIndex);
+      if (candidate?.role === "user" && candidate.text.trim().length > 0) {
+        initialAssignment = candidate;
+        break;
+      }
+    }
+  }
+
+  let finalAssistant: LocatedCandidate | undefined;
+  for (
+    let turnIndex = snapshot.turns.length - 1;
+    turnIndex >= 0 && finalAssistant === undefined;
+    turnIndex -= 1
+  ) {
+    const turn = snapshot.turns[turnIndex];
+    if (!turn) continue;
+    for (let itemIndex = turn.items.length - 1; itemIndex >= 0; itemIndex -= 1) {
+      const candidate = readCandidate(turnIndex, itemIndex);
+      if (candidate?.role === "assistant" && candidate.text.trim().length > 0) {
+        finalAssistant = candidate;
+        break;
+      }
+    }
+  }
+
+  const selected: LocatedCandidate[] = [];
+  const selectedCoordinates = new Set<string>();
+  let totalChars = 0;
+  let truncated = false;
+
+  const reserveCandidate = (candidate: LocatedCandidate | undefined): void => {
+    if (!candidate) return;
+    const key = `${candidate.turnIndex}:${candidate.itemIndex}`;
+    if (selectedCoordinates.has(key)) return;
+    if (candidate.text.trim().length === 0) {
+      truncated ||= candidate.truncated;
+      return;
+    }
+    if (
+      selected.length >= THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES ||
+      totalChars >= THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_CHARS
+    ) {
+      truncated = true;
+      return;
+    }
+
+    const remainingTotal = THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_CHARS - totalChars;
+    const text = sliceWithoutDanglingSurrogate(candidate.text, remainingTotal);
+    if (text.length === 0) {
+      truncated = true;
+      return;
+    }
+    selected.push({ ...candidate, text });
+    selectedCoordinates.add(key);
+    totalChars += text.length;
+    truncated ||= candidate.truncated || text.length < candidate.text.length;
+  };
+
+  // Reserve the two pieces that give a completed child transcript meaning:
+  // the provider's final assistant report and the user's initial assignment.
+  // Both fit at their per-message maxima under the aggregate contract limit.
+  // The newest-tail pass below then spends the remaining budget on progress.
+  reserveCandidate(finalAssistant);
+  reserveCandidate(initialAssignment);
+
+  // Walk backward so a long rollout keeps its newest public updates. Anchors
+  // already reserved above are skipped, and the bounded result is sorted back
+  // into provider chronology before crossing the transport boundary.
+  outer: for (let turnIndex = snapshot.turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
+    const turn = snapshot.turns[turnIndex];
+    if (!turn) continue;
+    for (let itemIndex = turn.items.length - 1; itemIndex >= 0; itemIndex -= 1) {
+      const candidate = readCandidate(turnIndex, itemIndex);
+      if (!candidate) continue;
+      if (selectedCoordinates.has(`${candidate.turnIndex}:${candidate.itemIndex}`)) continue;
+      if (candidate.text.trim().length === 0) {
+        truncated ||= candidate.truncated;
+        continue;
+      }
+      if (
+        selected.length >= THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES ||
+        totalChars >= THREAD_TURN_SUBAGENT_DETAIL_MAX_TOTAL_CHARS
+      ) {
+        truncated = true;
+        break outer;
+      }
+      reserveCandidate(candidate);
+    }
+  }
+
+  selected.sort(
+    (left, right) => left.turnIndex - right.turnIndex || left.itemIndex - right.itemIndex,
+  );
+  return {
+    messages: selected.map(({ role, text }) => ({ role, text })),
+    truncated,
+  };
 }
 
 interface CodexTransportPolicyEntry {
@@ -3419,6 +3698,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
   const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
+  // A detail click is read-only but still spawns a short-lived app-server when
+  // the root is not already live. Bound that resource amplification per
+  // configured adapter; retries remain safe and deterministic.
+  const transientSubagentHistoryReadSemaphore = yield* Semaphore.make(1);
   const prepareRuntimeHome = options?.prepareRuntimeHome ?? Effect.void;
 
   const prepareRuntimeHomeForSession = Effect.fn("CodexAdapter.prepareRuntimeHomeForSession")(
@@ -4041,6 +4324,76 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       })),
     );
 
+  const readSubagentDetail: NonNullable<CodexAdapterShape["readSubagentDetail"]> = (
+    threadId,
+    subagentId,
+    context,
+  ) => {
+    if (subagentId.trim().length === 0 || subagentId.length > CODEX_SUBAGENT_THREAD_ID_MAX_CHARS) {
+      return Effect.fail(makeProviderSubagentDetailReadError("invalid-request"));
+    }
+
+    const readSnapshot = Effect.suspend(() => {
+      const liveSession = sessions.get(threadId);
+      if (liveSession !== undefined && !liveSession.stopped) {
+        return liveSession.runtime.readSubagentThread(subagentId);
+      }
+
+      const resumeCursor = context?.resumeCursor;
+      if (!isCodexResumeCursorSchema(resumeCursor)) {
+        return Effect.fail(makeProviderSubagentDetailReadError("session-unavailable"));
+      }
+
+      const readTransient =
+        options?.readTransientSubagentThread ??
+        ((readOptions: CodexTransientSubagentHistoryReadOptions) =>
+          readCodexSubagentThreadTransient(readOptions).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
+          ));
+
+      return transientSubagentHistoryReadSemaphore.withPermit(
+        prepareRuntimeHome.pipe(
+          // Shadow-home failures can contain private paths or credential-file
+          // details. Collapse them before entering the shared daemon boundary.
+          Effect.mapError(() => makeProviderSubagentDetailReadError("provider-unavailable")),
+          Effect.andThen(
+            Ref.get(transportPolicyRef).pipe(
+              Effect.flatMap((transportPolicy) => {
+                const runtimeTransportPolicy = toRuntimeTransportPolicy(transportPolicy);
+                return readTransient({
+                  binaryPath: codexConfig.binaryPath,
+                  appServerCwd: serverConfig.stateDir,
+                  rootProviderThreadId: resumeCursor.threadId,
+                  subagentThreadId: subagentId,
+                  ...(options?.environment ? { environment: options.environment } : {}),
+                  ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
+                  ...(runtimeTransportPolicy !== undefined
+                    ? { transportPolicy: runtimeTransportPolicy }
+                    : {}),
+                });
+              }),
+            ),
+          ),
+        ),
+      );
+    });
+
+    return readSnapshot.pipe(
+      Effect.map(canonicalizeCodexSubagentDetail),
+      Effect.mapError((error) =>
+        error._tag === "ProviderSubagentDetailReadError"
+          ? error
+          : redactCodexSubagentDetailReadError(error),
+      ),
+      // A malformed provider client implementation can defect instead of
+      // returning its declared typed error. Defects are also collapsed here so
+      // their stack/cause cannot bypass the finite adapter error algebra.
+      Effect.catchDefect(() =>
+        Effect.fail(makeProviderSubagentDetailReadError("provider-request-failed")),
+      ),
+    );
+  };
+
   const rollbackThread: CodexAdapterShape["rollbackThread"] = (threadId, numTurns) => {
     if (!Number.isInteger(numTurns) || numTurns < 1) {
       return Effect.fail(
@@ -4174,6 +4527,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     setGoal,
     clearGoal,
     readThread,
+    readSubagentDetail,
     rollbackThread,
     respondToRequest,
     respondToUserInput,

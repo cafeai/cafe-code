@@ -39,6 +39,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
@@ -688,6 +689,7 @@ const buildAppUnderTest = (options?: {
               },
             }),
           rollbackConversation: () => Effect.die("unexpected rollbackConversation"),
+          readSubagentDetail: () => Effect.die("unexpected readSubagentDetail"),
           streamEvents: Stream.empty,
           ...options?.layers?.providerService,
         }),
@@ -927,6 +929,7 @@ const buildAppUnderTest = (options?: {
           getPostTerminalStaleSteerCandidateThreadIds: () => Effect.succeed([]),
           getThreadTurnActivityPage: () => Effect.die("unused"),
           getThreadTurnWorkLogPresence: () => Effect.die("unused"),
+          hasThreadTurnSubagentActivity: () => Effect.die("unused"),
           getThreadDetailById: () => Effect.succeed(Option.none()),
           getThreadDetailSnapshotById: () => Effect.succeed(Option.none()),
           getCounts: () => Effect.succeed({ projectCount: 0, threadCount: 0 }),
@@ -2583,6 +2586,91 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(response.environment.environmentId, testEnvironmentDescriptor.environmentId);
       assert.equal(response.auth.policy, "desktop-managed-local");
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect(
+    "does not read provider subagent history without an exact durable activity binding",
+    () =>
+      Effect.gen(function* () {
+        const readSubagentDetail = vi.fn((_input: { threadId: ThreadId; subagentId: string }) =>
+          Effect.succeed({
+            provider: ProviderDriverKind.make("codex"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            messages: [{ role: "assistant" as const, text: "must not be returned" }],
+            truncated: false,
+          }),
+        );
+        yield* buildAppUnderTest({
+          layers: {
+            projectionSnapshotQuery: {
+              hasThreadTurnSubagentActivity: () => Effect.succeed(false),
+            },
+            providerService: { readSubagentDetail },
+          },
+        });
+
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const result = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail]({
+              threadId: ThreadId.make("thread-1"),
+              turnId: TurnId.make("turn-1"),
+              subagentId: "provider-child-unbound",
+            }),
+          ).pipe(Effect.exit),
+        );
+
+        assert.equal(Exit.isFailure(result), true);
+        assert.equal(readSubagentDetail.mock.calls.length, 0);
+      }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect("returns only canonical verified subagent text over the authenticated RPC", () =>
+    Effect.gen(function* () {
+      const readSubagentDetail = vi.fn((_input: { threadId: ThreadId; subagentId: string }) =>
+        Effect.succeed({
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          messages: [
+            { role: "user" as const, text: "Audit the provider" },
+            { role: "assistant" as const, text: "## Result\n\nComplete." },
+          ],
+          truncated: false,
+        }),
+      );
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            hasThreadTurnSubagentActivity: () => Effect.succeed(true),
+          },
+          providerService: { readSubagentDetail },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const detail = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail]({
+            threadId: ThreadId.make("thread-1"),
+            turnId: TurnId.make("turn-1"),
+            subagentId: "provider-child-bound",
+          }),
+        ),
+      );
+
+      assert.deepEqual(detail, {
+        provider: "codex",
+        messages: [
+          { role: "user", text: "Audit the provider" },
+          { role: "assistant", text: "## Result\n\nComplete." },
+        ],
+        truncated: false,
+      });
+      assert.deepEqual(readSubagentDetail.mock.calls[0]?.[0], {
+        threadId: "thread-1",
+        subagentId: "provider-child-bound",
+      });
     }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 

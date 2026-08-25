@@ -13,9 +13,6 @@ import { isLatestTurnSettled } from "../session-logic";
 export const THREAD_SELECTION_SAFE_SELECTOR = "[data-thread-item], [data-thread-selection-safe]";
 export const THREAD_JUMP_HINT_SHOW_DELAY_MS = 100;
 const PROJECT_DELETE_REQUIRES_FORCE_MARKER = "cannot be deleted without force=true";
-// Visible sidebar rows are prewarmed into the thread-detail cache so opening a
-// nearby thread usually reuses an already-hot subscription.
-export const SIDEBAR_THREAD_PREWARM_LIMIT = 10;
 
 export function shouldInsetContentSidebarTrigger(input: {
   readonly isElectronHost: boolean;
@@ -321,13 +318,6 @@ export function getVisibleSidebarThreadIds<TThreadId>(
   return renderedProjects.flatMap((renderedProject) =>
     renderedProject.shouldShowThreadPanel === false ? [] : renderedProject.renderedThreadIds,
   );
-}
-
-export function getSidebarThreadIdsToPrewarm<TThreadId>(
-  visibleThreadIds: readonly TThreadId[],
-  limit = SIDEBAR_THREAD_PREWARM_LIMIT,
-): TThreadId[] {
-  return visibleThreadIds.slice(0, Math.max(0, limit));
 }
 
 export function resolveAdjacentThreadId<T>(input: {

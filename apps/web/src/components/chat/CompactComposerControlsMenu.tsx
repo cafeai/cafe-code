@@ -5,7 +5,7 @@ import {
   RuntimeMode,
 } from "@cafecode/contracts";
 import { memo, type ReactNode } from "react";
-import { EllipsisIcon, ListTodoIcon, TargetIcon } from "lucide-react";
+import { ChevronDownIcon, EllipsisIcon, ListTodoIcon, TargetIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import {
   CLAUDE_PERMISSION_MODE_OPTIONS,
@@ -36,6 +36,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   showGoalControl?: boolean;
   goalStatus?: ProviderThreadGoalStatus | null;
   traitsMenuContent?: ReactNode;
+  traitsTriggerLabel?: string | null;
   onToggleInteractionMode: () => void;
   onNativePermissionModeChange: (mode: ClaudePermissionMode) => void;
   onTogglePlanSidebar: () => void;
@@ -59,12 +60,22 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
           <Button
             size="sm"
             variant="ghost"
-            className="shrink-0 px-2 text-muted-foreground/70 hover:text-foreground/80"
+            className="max-w-40 shrink-0 justify-start gap-1.5 px-2 text-muted-foreground/70 hover:text-foreground/80"
             aria-label="More composer controls"
+            title={props.traitsTriggerLabel ?? undefined}
           />
         }
       >
-        <EllipsisIcon aria-hidden="true" className="size-4" />
+        {props.traitsTriggerLabel ? (
+          <>
+            <span data-compact-composer-controls-label="true" className="min-w-0 truncate">
+              {props.traitsTriggerLabel}
+            </span>
+            <ChevronDownIcon aria-hidden="true" className="size-3 shrink-0 opacity-60" />
+          </>
+        ) : (
+          <EllipsisIcon aria-hidden="true" className="size-4" />
+        )}
       </MenuTrigger>
       <MenuPopup align="start">
         {props.traitsMenuContent ? (

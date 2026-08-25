@@ -6,6 +6,7 @@ import {
   ProviderDaemonLeaseResponse,
   ProviderDaemonLiveness,
   ProviderDaemonRpcRequest,
+  ProviderDaemonRpcEnvelope,
   ProviderDriverKind,
   ProviderInstanceId,
   type ProviderRuntimeEvent,
@@ -13,15 +14,18 @@ import {
   ThreadId,
   TurnId,
 } from "@cafecode/contracts";
-import { assert, describe, it } from "@effect/vitest";
+import { assert, describe, it, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { EventEmitter } from "node:events";
 
 import { ProviderAdapterRegistry } from "../provider/Services/ProviderAdapterRegistry.ts";
+import { ProviderAdapterRequestError } from "../provider/Errors.ts";
+import { ProviderValidationError } from "../provider/Errors.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import {
   ProviderService,
@@ -52,6 +56,9 @@ const decodeProviderDaemonLeaseResponseJson = Schema.decodeUnknownSync(
 );
 const encodeProviderDaemonRpcRequestJson = Schema.encodeSync(
   Schema.fromJsonString(ProviderDaemonRpcRequest),
+);
+const decodeProviderDaemonRpcEnvelopeJson = Schema.decodeUnknownSync(
+  Schema.fromJsonString(ProviderDaemonRpcEnvelope),
 );
 
 const asEventId = (value: string): EventId => EventId.make(value);
@@ -84,6 +91,7 @@ const mockProviderService = {
   getCapabilities: () => Effect.die("unexpected getCapabilities"),
   getInstanceInfo: () => Effect.die("unexpected getInstanceInfo"),
   rollbackConversation: () => Effect.die("unexpected rollbackConversation"),
+  readSubagentDetail: () => Effect.die("unexpected readSubagentDetail"),
   streamEvents: Stream.empty,
 } satisfies ProviderServiceShape;
 
@@ -385,6 +393,238 @@ describe("ProviderDaemonServer", () => {
       assert.equal(health.rpc?.recentFailures?.[0]?.tag, "ProviderDaemonCommandExecutionFailed");
     }).pipe(Effect.scoped, Effect.provide(providerDaemonServerTestLayer)),
   );
+
+  it.effect("forwards bounded subagent detail as a read-only daemon RPC", () => {
+    const readSubagentDetail = vi.fn((_input: { threadId: ThreadId; subagentId: string }) =>
+      Effect.succeed({
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        messages: [
+          { role: "user" as const, text: "Audit the provider" },
+          { role: "assistant" as const, text: "## Result\n\nComplete." },
+        ],
+        truncated: false,
+      }),
+    );
+    const detailProviderServiceLayer = Layer.succeed(ProviderService, {
+      ...mockProviderService,
+      readSubagentDetail,
+    } satisfies ProviderServiceShape);
+    const layer = Layer.mergeAll(
+      detailProviderServiceLayer,
+      ProviderRuntimeInventoryLocalLive.pipe(Layer.provide(mockProviderAdapterRegistryLayer)),
+      mockServerSettingsLayer,
+      ProviderSupervisorRegistryLive,
+    ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+
+    return Effect.gen(function* () {
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
+        host: "127.0.0.1",
+        token: TEST_TOKEN,
+        version: "0.0.0-test",
+      });
+      const response = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${TEST_TOKEN}`,
+            "content-type": "application/json",
+          },
+          body: encodeProviderDaemonRpcRequestJson({
+            method: "readSubagentDetail",
+            payload: {
+              threadId: ThreadId.make("thread-1"),
+              subagentId: "provider-child-1",
+            },
+          }),
+        }),
+      );
+      assert.equal(response.status, 200);
+      const envelope = decodeProviderDaemonRpcEnvelopeJson(
+        yield* Effect.promise(() => response.text()),
+      );
+      assert.equal(envelope.ok, true);
+      if (envelope.ok) {
+        assert.deepEqual(envelope.value, {
+          provider: "codex",
+          providerInstanceId: "codex",
+          messages: [
+            { role: "user", text: "Audit the provider" },
+            { role: "assistant", text: "## Result\n\nComplete." },
+          ],
+          truncated: false,
+        });
+      }
+      assert.equal(readSubagentDetail.mock.calls.length, 1);
+      assert.deepEqual(readSubagentDetail.mock.calls[0]?.[0], {
+        threadId: "thread-1",
+        subagentId: "provider-child-1",
+      });
+
+      const healthResponse = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/health`, {
+          headers: { authorization: `Bearer ${TEST_TOKEN}` },
+        }),
+      );
+      const health = decodeProviderDaemonHealth(yield* Effect.promise(() => healthResponse.json()));
+      assert.equal(health.completedCommandCount, 0);
+    }).pipe(Effect.scoped, Effect.provide(layer));
+  });
+
+  it.effect("does not ledger a failed exact subagent-history recovery as a mutation", () => {
+    const readSubagentDetail = vi.fn((_input: { threadId: ThreadId; subagentId: string }) =>
+      Effect.fail(
+        new ProviderValidationError({
+          operation: "ProviderService.readSubagentDetail",
+          issue: "Exact provider history resume is unavailable.",
+        }),
+      ),
+    );
+    const detailProviderServiceLayer = Layer.succeed(ProviderService, {
+      ...mockProviderService,
+      readSubagentDetail,
+    } satisfies ProviderServiceShape);
+    const layer = Layer.mergeAll(
+      detailProviderServiceLayer,
+      ProviderRuntimeInventoryLocalLive.pipe(Layer.provide(mockProviderAdapterRegistryLayer)),
+      mockServerSettingsLayer,
+      ProviderSupervisorRegistryLive,
+    ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+
+    return Effect.gen(function* () {
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
+        host: "127.0.0.1",
+        token: TEST_TOKEN,
+        version: "0.0.0-test",
+      });
+      const response = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${TEST_TOKEN}`,
+            "content-type": "application/json",
+          },
+          body: encodeProviderDaemonRpcRequestJson({
+            method: "readSubagentDetail",
+            payload: {
+              threadId: ThreadId.make("thread-ended"),
+              subagentId: "provider-child-ended",
+            },
+          }),
+        }),
+      );
+      assert.equal(response.status, 400);
+      assert.equal(readSubagentDetail.mock.calls.length, 1);
+
+      const healthResponse = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/health`, {
+          headers: { authorization: `Bearer ${TEST_TOKEN}` },
+        }),
+      );
+      const health = decodeProviderDaemonHealth(yield* Effect.promise(() => healthResponse.json()));
+      assert.equal(health.completedCommandCount, 0);
+      assert.equal(health.failedCommandCount, 0);
+      assert.equal(health.runningCommandCount, 0);
+      assert.equal(health.rpc?.failedRpcCount, 1);
+    }).pipe(Effect.scoped, Effect.provide(layer));
+  });
+
+  it.effect("redacts subagent read failures from RPC, health diagnostics, and logs", () => {
+    const childId = "sentinel-provider-child-id";
+    const threadId = ThreadId.make("sentinel-cafe-thread-id");
+    const sentinels = [
+      childId,
+      String(threadId),
+      "/Users/private-account/.codex/rollouts/provider-child.jsonl",
+      "owner-account@example.invalid",
+      "raw-provider-response-body",
+      "raw-provider-cause",
+      "raw-provider-stack",
+    ];
+    const rawCause = new Error(`${sentinels[5]} ${sentinels[2]} ${sentinels[3]}`);
+    rawCause.stack = `Error: ${sentinels[6]}\n    at ${sentinels[2]}:1:1`;
+    const logMessages: unknown[] = [];
+    const logCapture = Logger.make<unknown, void>(({ message }) => {
+      if (Array.isArray(message)) {
+        logMessages.push(...message);
+      } else {
+        logMessages.push(message);
+      }
+    });
+    const providerService = {
+      ...mockProviderService,
+      readSubagentDetail: () =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "thread/read-subagent-detail",
+            detail: `${sentinels[4]} ${childId}`,
+            cause: {
+              account: sentinels[3],
+              responseBody: sentinels[4],
+              cause: rawCause,
+            },
+          }),
+        ),
+    } satisfies ProviderServiceShape;
+    const layer = Layer.mergeAll(
+      makeProviderDaemonServerTestLayer(providerService),
+      Logger.layer([logCapture], { mergeWithExisting: false }),
+    );
+
+    return Effect.gen(function* () {
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
+        host: "127.0.0.1",
+        token: TEST_TOKEN,
+        version: "0.0.0-test",
+      });
+      const response = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${TEST_TOKEN}`,
+            "content-type": "application/json",
+          },
+          body: encodeProviderDaemonRpcRequestJson({
+            method: "readSubagentDetail",
+            payload: { threadId, subagentId: childId },
+          }),
+        }),
+      );
+      assert.equal(response.status, 400);
+      const responseText = yield* Effect.promise(() => response.text());
+      const envelope = decodeProviderDaemonRpcEnvelopeJson(responseText);
+      assert.equal(envelope.ok, false);
+      if (!envelope.ok) {
+        assert.equal(envelope.error.tag, "ProviderSubagentDetailReadError");
+        assert.equal(
+          envelope.error.message,
+          "Subagent detail read failed: provider-request-failed",
+        );
+        assert.equal(envelope.error.diagnostics?.stack, undefined);
+        assert.deepEqual(
+          envelope.error.diagnostics?.causeChain.map((entry) => entry.stack),
+          [undefined],
+        );
+      }
+
+      const healthResponse = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/health`, {
+          headers: { authorization: `Bearer ${TEST_TOKEN}` },
+        }),
+      );
+      const healthText = yield* Effect.promise(() => healthResponse.text());
+      const health = decodeProviderDaemonHealth(JSON.parse(healthText));
+      assert.equal(health.rpc?.recentFailures?.[0]?.tag, "ProviderSubagentDetailReadError");
+
+      const serializedLogs = JSON.stringify(logMessages);
+      assert.match(serializedLogs, /provider daemon rpc failed/u);
+      const observableOutput = `${responseText}\n${healthText}\n${serializedLogs}`;
+      for (const sentinel of sentinels) {
+        assert.notInclude(observableOutput, sentinel);
+      }
+    }).pipe(Effect.scoped, Effect.provide(layer));
+  });
 
   it.effect("exposes recent completed command summaries without prompt text in health", () => {
     const successfulSendTurnLayer = Layer.succeed(ProviderService, {

@@ -2062,8 +2062,10 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
 
         const popup = findComposerTaskProgressPopup();
         const scroller = findComposerTaskProgressScroller();
+        const outerViewport = popup?.querySelector<HTMLElement>('[data-slot="popover-viewport"]');
         expect(popup).not.toBeNull();
         expect(scroller).not.toBeNull();
+        expect(outerViewport).not.toBeNull();
         if (!popup || !scroller) {
           throw new Error("Compact task progress popup did not finish mounting.");
         }
@@ -2075,8 +2077,13 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           document.documentElement.clientWidth,
         );
         expect(document.body.scrollWidth).toBeLessThanOrEqual(document.body.clientWidth);
+        expect(getComputedStyle(outerViewport!).overflowY).toBe("hidden");
         expect(getComputedStyle(scroller).overflowY).toBe("auto");
         expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight);
+        expect(scroller.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+          outerViewport!.getBoundingClientRect().bottom + 1,
+        );
+        expect(outerViewport!.scrollTop).toBe(0);
 
         await userEvent.keyboard("{Escape}");
         await vi.waitFor(() => expect(findComposerTaskProgressPopup()).toBeNull());
@@ -2878,6 +2885,16 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       });
 
       try {
+        await mounted.setContainerSize(COMPACT_FOOTER_VIEWPORT);
+        await vi.waitFor(() => {
+          const footer = document.querySelector<HTMLElement>('[data-chat-composer-footer="true"]');
+          const traitsLabel = document.querySelector<HTMLElement>(
+            '[data-compact-composer-controls-label="true"]',
+          );
+          expect(footer?.dataset.chatComposerFooterCompact).toBe("true");
+          expect(traitsLabel?.textContent).toBe("Ultra");
+        });
+
         useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep this turn on Ultra");
         await waitForLayout();
 

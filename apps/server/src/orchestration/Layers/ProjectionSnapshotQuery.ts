@@ -11,6 +11,7 @@ import {
   OrchestrationShellSnapshot,
   OrchestrationThread,
   OrchestrationThreadTurnActivityPageInput,
+  OrchestrationThreadTurnSubagentDetailInput,
   ProviderThreadGoal,
   ProjectScript,
   TurnId,
@@ -131,11 +132,15 @@ const ThreadTurnLookupInput = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
 });
+const ThreadTurnSubagentLookupInput = OrchestrationThreadTurnSubagentDetailInput;
 const CountRowSchema = Schema.Struct({
   count: NonNegativeInt,
 });
 const WorkLogPresenceRowSchema = Schema.Struct({
   hasWorkLog: NonNegativeInt,
+});
+const SubagentActivityPresenceRowSchema = Schema.Struct({
+  hasSubagentActivity: NonNegativeInt,
 });
 const ProjectionProjectLookupRowSchema = ProjectionProjectDbRowSchema;
 const ProjectionThreadIdLookupRowSchema = Schema.Struct({
@@ -1292,6 +1297,24 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             )
           LIMIT 1
         ) AS "hasWorkLog"
+      `,
+  });
+
+  const findThreadTurnSubagentActivityPresence = SqlSchema.findOne({
+    Request: ThreadTurnSubagentLookupInput,
+    Result: SubagentActivityPresenceRowSchema,
+    execute: ({ threadId, turnId, subagentId }) =>
+      sql`
+        SELECT EXISTS(
+          SELECT 1
+          FROM projection_thread_activities
+          WHERE thread_id = ${threadId}
+            AND turn_id = ${turnId}
+            AND kind IN ('task.started', 'task.progress', 'task.completed')
+            AND json_type(payload_json, '$.subagent.threadId') = 'text'
+            AND json_extract(payload_json, '$.subagent.threadId') = ${subagentId}
+          LIMIT 1
+        ) AS "hasSubagentActivity"
       `,
   });
 
@@ -2645,6 +2668,18 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         };
       });
 
+  const hasThreadTurnSubagentActivity: ProjectionSnapshotQueryShape["hasThreadTurnSubagentActivity"] =
+    (input) =>
+      findThreadTurnSubagentActivityPresence(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.hasThreadTurnSubagentActivity:query",
+            "ProjectionSnapshotQuery.hasThreadTurnSubagentActivity:decodeRow",
+          ),
+        ),
+        Effect.map((row) => row.hasSubagentActivity > 0),
+      );
+
   const loadThreadDetailById = (threadId: ThreadId) =>
     Effect.gen(function* () {
       const [
@@ -2866,6 +2901,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getPostTerminalStaleSteerCandidateThreadIds,
     getThreadTurnActivityPage,
     getThreadTurnWorkLogPresence,
+    hasThreadTurnSubagentActivity,
     getThreadDetailById,
     getThreadDetailSnapshotById,
   } satisfies ProjectionSnapshotQueryShape;

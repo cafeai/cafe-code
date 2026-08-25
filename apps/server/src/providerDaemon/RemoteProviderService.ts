@@ -404,6 +404,8 @@ const makeRemoteProviderService = Effect.gen(function* () {
     clearGoal: (input) => rpc(daemonConfig, { method: "clearGoal", payload: input }),
     rollbackConversation: (input) =>
       rpc(daemonConfig, { method: "rollbackConversation", payload: input }),
+    readSubagentDetail: (input) =>
+      rpc(daemonConfig, { method: "readSubagentDetail", payload: input }),
     get streamEvents(): ProviderServiceShape["streamEvents"] {
       return Stream.fromPubSub(runtimeEventPubSub);
     },

@@ -42,8 +42,13 @@ import {
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import { ProviderAdapterProcessError, ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
+import { hasLiveProviderRuntimeOwner } from "../../provider/providerRuntimeOwnerEvidence.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import {
+  ProviderSessionDirectory,
+  type ProviderRuntimeBindingWithMetadata,
+} from "../../provider/Services/ProviderSessionDirectory.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
@@ -58,6 +63,7 @@ import {
   composeSystemPromptProviderInput,
   readSystemPromptFileForInjection,
 } from "../../systemPromptFile.ts";
+import { makeProviderTurnRecoveryEvidenceReader } from "../providerTurnRecoveryEvidence.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
@@ -102,6 +108,26 @@ function mapProviderSessionStatusToOrchestrationStatus(
     default:
       return "ready";
   }
+}
+
+function activeTurnIdFromDurableBinding(
+  binding: ProviderRuntimeBindingWithMetadata,
+  observedAtMs: number,
+): TurnId | undefined {
+  if (binding.status !== "running") {
+    return undefined;
+  }
+  const payload = binding.runtimePayload;
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    return undefined;
+  }
+  if (!hasLiveProviderRuntimeOwner(payload, observedAtMs)) {
+    return undefined;
+  }
+  const activeTurnId = (payload as Readonly<Record<string, unknown>>).activeTurnId;
+  return typeof activeTurnId === "string" && activeTurnId.trim().length > 0
+    ? TurnId.make(activeTurnId)
+    : undefined;
 }
 
 function areStringArraysEqual(
@@ -478,6 +504,8 @@ const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
+  const providerSessionDirectory = yield* ProviderSessionDirectory;
+  const readProviderTurnRecoveryEvidence = yield* makeProviderTurnRecoveryEvidenceReader;
   const serverConfig = yield* ServerConfig;
   const gitWorkflow = yield* GitWorkflowService;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
@@ -619,6 +647,7 @@ const make = Effect.gen(function* () {
   const setThreadSession = (input: {
     readonly threadId: ThreadId;
     readonly session: OrchestrationSession;
+    readonly terminalTurnRecovery?: "live-provider-continuation";
     readonly createdAt: string;
   }) =>
     orchestrationEngine.dispatch({
@@ -626,6 +655,9 @@ const make = Effect.gen(function* () {
       commandId: serverCommandId("provider-session-set"),
       threadId: input.threadId,
       session: input.session,
+      ...(input.terminalTurnRecovery !== undefined
+        ? { terminalTurnRecovery: input.terminalTurnRecovery }
+        : {}),
       createdAt: input.createdAt,
     });
 
@@ -673,40 +705,84 @@ const make = Effect.gen(function* () {
     // of them during backend boot can push Electron's Node runtime into OOM.
     const shellSnapshot = yield* projectionSnapshotQuery.getShellSnapshot();
     const activeProviderSessions = yield* providerService.listSessions();
-    const providerSessionByThreadId = new Map(
-      activeProviderSessions.map((session) => [String(session.threadId), session] as const),
-    );
-    const runningProviderThreadIds = new Set(
-      activeProviderSessions
-        .filter((session) => session.status === "running")
-        .map((session) => String(session.threadId)),
-    );
+    const durableProviderBindings = yield* providerSessionDirectory.listBindings();
+    // ProviderService can be process-local (for example, a web/dev backend),
+    // while a detached desktop daemon owns the real turn. Upstream Codex treats
+    // an active buffered turn as positive liveness evidence; merge the durable
+    // directory with local sessions so an auxiliary backend cannot terminate
+    // another runtime's turn merely because its own session map is empty. A
+    // durable `running` flag is not sufficient by itself: the owner lease must
+    // also have a fresh heartbeat and a live PID, otherwise a crashed daemon
+    // could preserve a phantom turn forever.
+    const liveProviderTurnByThreadId = new Map<string, TurnId>();
+    const recoveryObservedAtMs = Date.now();
+    for (const binding of durableProviderBindings) {
+      const activeTurnId = activeTurnIdFromDurableBinding(binding, recoveryObservedAtMs);
+      if (activeTurnId !== undefined) {
+        liveProviderTurnByThreadId.set(String(binding.threadId), activeTurnId);
+      }
+    }
+    for (const session of activeProviderSessions) {
+      if (session.status === "running" && session.activeTurnId !== undefined) {
+        liveProviderTurnByThreadId.set(String(session.threadId), session.activeTurnId);
+      }
+    }
+    const runningProviderThreadIds = new Set(liveProviderTurnByThreadId.keys());
     const interruptedThreads = shellSnapshot.threads.filter(
       (thread) =>
         thread.session?.status === "starting" &&
         thread.session.activeTurnId === null &&
         !runningProviderThreadIds.has(thread.id),
     );
-    const orphanedActiveThreads = shellSnapshot.threads.filter(
-      (thread) =>
-        thread.session?.status === "running" &&
-        thread.session.activeTurnId !== null &&
-        !providerSessionByThreadId.has(thread.id),
-    );
-    const interruptedProviderTurns = shellSnapshot.threads.flatMap((thread) => {
-      const runtimeSession = providerSessionByThreadId.get(thread.id);
-      const runtimeTurnId = runtimeSession?.activeTurnId;
+    const orphanedActiveThreads = shellSnapshot.threads.filter((thread) => {
+      const projectedTurnId = thread.session?.activeTurnId;
+      if (
+        thread.session?.status !== "running" ||
+        projectedTurnId === null ||
+        projectedTurnId === undefined
+      ) {
+        return false;
+      }
+      const liveTurnId = liveProviderTurnByThreadId.get(thread.id);
+      return liveTurnId === undefined || String(liveTurnId) !== String(projectedTurnId);
+    });
+    const terminalThreadsWithLiveTurns = shellSnapshot.threads.flatMap((thread) => {
+      const runtimeTurnId = liveProviderTurnByThreadId.get(thread.id);
       return thread.session?.status === "interrupted" &&
         thread.latestTurn?.state === "interrupted" &&
-        runtimeSession?.status === "running" &&
         runtimeTurnId !== undefined &&
         String(thread.latestTurn.turnId) === String(runtimeTurnId)
         ? [{ thread, runtimeTurnId }]
         : [];
     });
+    const classifiedTerminalTurns = yield* Effect.forEach(
+      terminalThreadsWithLiveTurns,
+      ({ thread, runtimeTurnId }) =>
+        readProviderTurnRecoveryEvidence({ threadId: thread.id, turnId: runtimeTurnId }).pipe(
+          Effect.map((evidence) => ({ thread, runtimeTurnId, evidence })),
+          // On an unreadable event ledger, preserve provider work. Retrying an
+          // interrupt without durable proof is destructive and diverges from
+          // upstream's positive-liveness rule.
+          Effect.catchCause((cause) =>
+            Effect.logWarning("provider turn recovery evidence lookup failed", {
+              threadId: thread.id,
+              turnId: runtimeTurnId,
+              cause: Cause.pretty(cause),
+            }).pipe(Effect.as({ thread, runtimeTurnId, evidence: "none" as const })),
+          ),
+        ),
+      { concurrency: 4 },
+    );
+    const falselyInterruptedProviderTurns = classifiedTerminalTurns.filter(
+      (entry) => entry.evidence === "orphaned-active-turn",
+    );
+    const interruptedProviderTurns = classifiedTerminalTurns.filter(
+      (entry) => entry.evidence === "interrupt-requested",
+    );
     if (
       interruptedThreads.length === 0 &&
       orphanedActiveThreads.length === 0 &&
+      falselyInterruptedProviderTurns.length === 0 &&
       interruptedProviderTurns.length === 0
     ) {
       return;
@@ -776,6 +852,40 @@ const make = Effect.gen(function* () {
       { concurrency: 1 },
     );
     yield* Effect.forEach(
+      falselyInterruptedProviderTurns,
+      ({ thread, runtimeTurnId }) =>
+        Effect.gen(function* () {
+          const session = thread.session;
+          if (session === null) {
+            return;
+          }
+          yield* setThreadSession({
+            threadId: thread.id,
+            session: {
+              ...session,
+              status: "running",
+              activeTurnId: runtimeTurnId,
+              lastError: null,
+              updatedAt: recoveredAt,
+            },
+            terminalTurnRecovery: "live-provider-continuation",
+            createdAt: recoveredAt,
+          });
+          yield* appendProviderDiagnosticActivity({
+            threadId: thread.id,
+            kind: "runtime.warning",
+            summary: "Live provider turn restored after restart reconciliation",
+            detail:
+              "Cafe Code found durable provider ownership for a turn that another backend had incorrectly closed. The live turn was restored without resending input.",
+            turnId: runtimeTurnId,
+            createdAt: recoveredAt,
+            tone: "info",
+            payload: { recovery: "false-orphan-terminal-restored" },
+          });
+        }),
+      { concurrency: 1 },
+    );
+    yield* Effect.forEach(
       interruptedProviderTurns,
       ({ thread, runtimeTurnId }) =>
         providerService.interruptTurn({ threadId: thread.id, turnId: runtimeTurnId }).pipe(
@@ -808,6 +918,7 @@ const make = Effect.gen(function* () {
       {
         interruptedStartCount: interruptedThreads.length,
         orphanedActiveTurnCount: orphanedActiveThreads.length,
+        restoredFalseTerminalCount: falselyInterruptedProviderTurns.length,
         retriedInterruptCount: interruptedProviderTurns.length,
       },
     );

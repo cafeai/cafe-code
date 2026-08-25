@@ -241,8 +241,14 @@ async function mountPicker(props: {
   providers?: ReadonlyArray<ServerProvider>;
   settings?: UnifiedSettings;
   triggerVariant?: "ghost" | "outline";
+  compact?: boolean;
+  hostWidth?: number;
 }) {
   const host = document.createElement("div");
+  if (props.hostWidth !== undefined) {
+    host.style.display = "flex";
+    host.style.width = `${props.hostWidth}px`;
+  }
   document.body.append(host);
   const onInstanceModelChange = vi.fn();
   const providers = props.providers ?? TEST_PROVIDERS;
@@ -262,6 +268,7 @@ async function mountPicker(props: {
       lockedContinuationGroupKey={props.lockedContinuationGroupKey ?? null}
       instanceEntries={instanceEntries}
       modelOptionsByInstance={modelOptionsByInstance}
+      {...(props.compact !== undefined ? { compact: props.compact } : {})}
       triggerVariant={props.triggerVariant}
       onInstanceModelChange={onInstanceModelChange}
     />,
@@ -269,6 +276,7 @@ async function mountPicker(props: {
   );
 
   return {
+    host,
     onInstanceModelChange,
     // Back-compat alias used by callers that still assert on the old callback
     // name. Delegates to the instance-aware mock so existing expectations work.
@@ -315,6 +323,56 @@ describe("ProviderModelPicker", () => {
     document.body.innerHTML = "";
     localStorage.clear();
     await __resetLocalApiForTests();
+  });
+
+  it("uses available compact-footer width to show Daybreak Blue without clipping", async () => {
+    const originalViewport = { width: window.innerWidth, height: window.innerHeight };
+    await page.viewport(477, Math.max(700, originalViewport.height));
+
+    const daybreakModel = {
+      slug: "gpt-daybreak-blue-latest",
+      name: "Daybreak Blue",
+      isCustom: false,
+      capabilities: createModelCapabilities({ optionDescriptors: [] }),
+    };
+    const mounted = await mountPicker({
+      activeInstanceId: CODEX_INSTANCE_ID,
+      model: daybreakModel.slug,
+      lockedProvider: ProviderDriverKind.make("codex"),
+      providers: [buildCodexProvider([daybreakModel])],
+      compact: true,
+      hostWidth: 260,
+    });
+
+    try {
+      await vi.waitFor(() => {
+        const trigger = document.querySelector<HTMLElement>(
+          '[data-chat-provider-model-picker="true"]',
+        );
+        const title = document.querySelector<HTMLElement>(
+          '[data-provider-model-trigger-title="true"]',
+        );
+        expect(trigger).not.toBeNull();
+        expect(title?.textContent).toBe("Daybreak Blue");
+        expect(title!.scrollWidth).toBeLessThanOrEqual(title!.clientWidth);
+        expect(trigger!.getBoundingClientRect().right).toBeLessThanOrEqual(
+          mounted.host.getBoundingClientRect().right,
+        );
+      });
+
+      mounted.host.style.width = "120px";
+      await vi.waitFor(() => {
+        const trigger = document.querySelector<HTMLElement>(
+          '[data-chat-provider-model-picker="true"]',
+        );
+        expect(trigger!.getBoundingClientRect().right).toBeLessThanOrEqual(
+          mounted.host.getBoundingClientRect().right,
+        );
+      });
+    } finally {
+      await mounted.cleanup();
+      await page.viewport(originalViewport.width, originalViewport.height);
+    }
   });
 
   it("shows provider sidebar in unlocked mode", async () => {

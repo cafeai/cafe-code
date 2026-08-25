@@ -41,7 +41,12 @@ import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-import { type ProviderServiceError } from "../provider/Errors.ts";
+import {
+  isProviderSubagentDetailReadFailureReason,
+  makeProviderSubagentDetailReadError,
+  type ProviderServiceError,
+  type ProviderSubagentDetailReadFailureReason,
+} from "../provider/Errors.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -718,6 +723,52 @@ function toRpcError(error: unknown): Extract<ProviderDaemonRpcEnvelope, { readon
   };
 }
 
+/**
+ * Fail closed before a child-transcript error reaches daemon diagnostics.
+ *
+ * This operation talks to a provider API whose failures can echo opaque child
+ * ids, local paths, account details, and response bodies. The generic daemon
+ * diagnostics intentionally preserve error messages, causes, and stacks for
+ * ordinary operations, so child reads must be reduced to a finite reason here
+ * even if a service implementation returns an unexpected error shape.
+ */
+function redactProviderSubagentDetailReadError(error: unknown) {
+  const record =
+    error !== null && typeof error === "object" ? (error as Record<string, unknown>) : undefined;
+  const tag = typeof record?._tag === "string" ? record._tag : undefined;
+  let reason: ProviderSubagentDetailReadFailureReason;
+
+  if (
+    tag === "ProviderSubagentDetailReadError" &&
+    isProviderSubagentDetailReadFailureReason(record?.reason)
+  ) {
+    reason = record.reason;
+  } else {
+    switch (tag) {
+      case "ProviderValidationError":
+      case "ProviderAdapterValidationError":
+        reason = "invalid-request";
+        break;
+      case "ProviderSessionNotFoundError":
+      case "ProviderAdapterSessionNotFoundError":
+      case "ProviderAdapterSessionClosedError":
+        reason = "session-unavailable";
+        break;
+      case "ProviderUnsupportedError":
+      case "ProviderInstanceNotFoundError":
+        reason = "provider-unavailable";
+        break;
+      default:
+        reason = "provider-request-failed";
+        break;
+    }
+  }
+
+  // Reconstruct even an already-typed error so a hand-written/mock service
+  // cannot smuggle an own stack or extra enumerable fields into diagnostics.
+  return makeProviderSubagentDetailReadError(reason);
+}
+
 const executeRpcRequest = (
   providerService: ProviderServiceShape,
   request: ProviderDaemonRpcRequestValue,
@@ -765,6 +816,15 @@ const executeRpcRequest = (
         : Effect.die("Provider service does not expose goal operations.");
     case "rollbackConversation":
       return providerService.rollbackConversation(request.payload);
+    case "readSubagentDetail":
+      return providerService.readSubagentDetail(request.payload).pipe(
+        Effect.mapError(redactProviderSubagentDetailReadError),
+        // Defects do not pass through mapError. Collapse them separately while
+        // preserving interruption so daemon shutdown remains cooperative.
+        Effect.catchDefect(() =>
+          Effect.fail(makeProviderSubagentDetailReadError("provider-request-failed")),
+        ),
+      );
     default:
       request satisfies never;
       return Effect.void;

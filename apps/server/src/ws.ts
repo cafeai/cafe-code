@@ -805,6 +805,59 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "orchestration" },
           ),
+        [ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.getThreadTurnSubagentDetail,
+            Effect.gen(function* () {
+              // This durable projection lookup is the authorization boundary
+              // for the opaque provider id. Never forward an arbitrary id
+              // supplied by a renderer to Codex, even on an authenticated
+              // connection.
+              const authorized = yield* projectionSnapshotQuery
+                .hasThreadTurnSubagentActivity(input)
+                .pipe(
+                  Effect.mapError(
+                    () =>
+                      new OrchestrationGetSnapshotError({
+                        message: "Failed to validate subagent detail access",
+                      }),
+                  ),
+                );
+              if (!authorized) {
+                return yield* new OrchestrationGetSnapshotError({
+                  message: "Subagent details are unavailable for this thread and turn",
+                });
+              }
+
+              const detail = yield* providerService
+                .readSubagentDetail({
+                  threadId: input.threadId,
+                  subagentId: input.subagentId,
+                })
+                .pipe(
+                  // Provider exceptions can contain rollout data. Collapse
+                  // every failure to a stable public message and deliberately
+                  // omit the original cause from the RPC error and logs.
+                  Effect.mapError(
+                    () =>
+                      new OrchestrationGetSnapshotError({
+                        message: "Failed to load verified subagent details",
+                      }),
+                  ),
+                );
+              if (detail.provider !== "codex") {
+                return yield* new OrchestrationGetSnapshotError({
+                  message: "Subagent details are unavailable for this provider",
+                });
+              }
+              return {
+                provider: "codex" as const,
+                messages: detail.messages,
+                truncated: detail.truncated,
+              };
+            }),
+            { "rpc.aggregate": "orchestration" },
+          ),
         [ORCHESTRATION_WS_METHODS.getThreadTurnWorkLogPresence]: (input) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.getThreadTurnWorkLogPresence,

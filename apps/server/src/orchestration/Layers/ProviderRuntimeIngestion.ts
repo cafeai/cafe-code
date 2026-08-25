@@ -53,6 +53,7 @@ import {
   hasRenderableAssistantText,
 } from "../providerAssistantCompletionText.ts";
 import { AssistantStreamTextCommitment } from "../providerAssistantStreamCommitment.ts";
+import { makeProviderTurnRecoveryEvidenceReader } from "../providerTurnRecoveryEvidence.ts";
 import { sanitizeProviderToolData } from "@cafecode/shared/activityPayloadSanitizer";
 import { ServerSettingsService } from "../../serverSettings.ts";
 
@@ -886,6 +887,7 @@ const make = Effect.gen(function* () {
   const projectionStateRepository = yield* ProjectionStateRepository;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
+  const readProviderTurnRecoveryEvidence = yield* makeProviderTurnRecoveryEvidenceReader;
   let lastPersistedProviderDaemonCursor = 0;
   let pendingProviderDaemonCursor = 0;
   // Codex app-server owns goal continuation and emits the next turn itself.
@@ -1728,6 +1730,14 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const getRunningProviderTurnIdForThread = Effect.fn("getRunningProviderTurnIdForThread")(
+    function* (threadId: ThreadId) {
+      const sessions = yield* providerService.listSessions();
+      const session = sessions.find((entry) => entry.threadId === threadId);
+      return session?.status === "running" ? session.activeTurnId : undefined;
+    },
+  );
+
   const getSourceProposedPlanReferenceForAcceptedTurnStart = Effect.fn(
     "getSourceProposedPlanReferenceForAcceptedTurnStart",
   )(function* (threadId: ThreadId, eventTurnId: TurnId | undefined) {
@@ -1859,7 +1869,7 @@ const make = Effect.gen(function* () {
       const activeGoalContinuationExpected =
         activeGoalThreadIds.has(thread.id) && !interruptedGoalThreadIds.has(thread.id);
 
-      const terminalTurnRecovery =
+      const explicitTerminalTurnRecovery =
         event.type === "turn.started" &&
         event.raw?.source === "codex.app-server.notification" &&
         event.raw.method === "codex.aggregateTurn/reopened"
@@ -1906,6 +1916,58 @@ const make = Effect.gen(function* () {
         providerRuntimeActiveTurnIdForConflict,
         eventTurnId,
       );
+      const falseOrphanTerminalRecoveryCandidate =
+        activeTurnId === null &&
+        eventTurnId !== undefined &&
+        runtimeEventCarriesActiveTurnWork(event) &&
+        thread.latestTurn?.state === "interrupted" &&
+        sameId(thread.latestTurn.turnId, eventTurnId);
+      const providerRuntimeActiveTurnIdForTerminalRecovery = falseOrphanTerminalRecoveryCandidate
+        ? yield* getRunningProviderTurnIdForThread(thread.id).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning(
+                "provider runtime ingestion could not verify live ownership for terminal recovery",
+                {
+                  eventId: event.eventId,
+                  eventType: event.type,
+                  threadId: thread.id,
+                  eventTurnId,
+                  cause: Cause.pretty(cause),
+                },
+              ).pipe(Effect.as(undefined)),
+            ),
+          )
+        : undefined;
+      const providerRuntimeOwnsTerminalRecoveryTurn = sameId(
+        providerRuntimeActiveTurnIdForTerminalRecovery,
+        eventTurnId,
+      );
+      const terminalRecoveryEvidence =
+        providerRuntimeOwnsTerminalRecoveryTurn && eventTurnId !== undefined
+          ? yield* readProviderTurnRecoveryEvidence({
+              threadId: thread.id,
+              turnId: eventTurnId,
+            }).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning(
+                  "provider runtime ingestion could not read terminal recovery evidence",
+                  {
+                    eventId: event.eventId,
+                    eventType: event.type,
+                    threadId: thread.id,
+                    eventTurnId,
+                    cause: Cause.pretty(cause),
+                  },
+                ).pipe(Effect.as("none" as const)),
+              ),
+            )
+          : "none";
+      const restoresFalseOrphanTerminal =
+        providerRuntimeOwnsTerminalRecoveryTurn &&
+        terminalRecoveryEvidence === "orphaned-active-turn";
+      const terminalTurnRecovery =
+        explicitTerminalTurnRecovery ??
+        (restoresFalseOrphanTerminal ? ("live-provider-continuation" as const) : undefined);
 
       const shouldApplyThreadLifecycle = (() => {
         if (!STRICT_PROVIDER_LIFECYCLE_GUARD) {
@@ -1973,14 +2035,16 @@ const make = Effect.gen(function* () {
       // for a turn that projections have already closed. Preserve the content
       // later in this function, but do not reopen session lifecycle state from
       // those ambiguous events. Codex aggregate child continuation is the one
-      // explicit exception: CodexSessionRuntime emits a synthetic turn.started
-      // carrying `terminalTurnRecovery` only after observing live child-channel
-      // work in the same runtime, so projectors can distinguish it from stale
-      // reconnect snapshots.
+      // provider-native exception. Cafe's own orphan repair is also reversible,
+      // but only when the durable event ledger identifies that exact repair and
+      // the current ProviderService still owns the same active turn. A later
+      // explicit Stop wins in sequence order and therefore remains terminal.
       const eventCarriesActiveTurnWork =
         eventTurnId !== undefined &&
         runtimeEventCarriesActiveTurnWork(event) &&
-        (eventMatchesTrackedActiveTurn || providerRuntimeOwnsConflictingTurn);
+        (eventMatchesTrackedActiveTurn ||
+          providerRuntimeOwnsConflictingTurn ||
+          restoresFalseOrphanTerminal);
       // Once turn.started has made the provider turn active, token/tool
       // notifications are runtime progress facts, not session heartbeats that
       // need another durable thread.session-set. Writing a session-set for
@@ -2121,9 +2185,11 @@ const make = Effect.gen(function* () {
                 : event.type === "turn.completed" &&
                     normalizeRuntimeTurnState(event.payload.state) === "failed"
                   ? (event.payload.errorMessage ?? thread.session?.lastError ?? "Turn failed")
-                  : status === "ready" || status === "starting"
+                  : restoresFalseOrphanTerminal
                     ? null
-                    : (thread.session?.lastError ?? null);
+                    : status === "ready" || status === "starting"
+                      ? null
+                      : (thread.session?.lastError ?? null);
 
         if (shouldApplyThreadLifecycle) {
           if (event.type === "turn.started" && acceptedTurnStartedSourcePlan !== null) {
