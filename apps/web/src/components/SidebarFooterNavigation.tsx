@@ -25,7 +25,7 @@ export const SidebarFooterNavigation = memo(function SidebarFooterNavigation({
   onOpenSettings,
 }: SidebarFooterNavigationProps) {
   const menuButtonClassName =
-    "min-w-0 flex-1 gap-2 px-2 py-1.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground";
+    "min-w-0 flex-1 select-none gap-2 px-2 py-1.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground";
 
   return (
     <SidebarMenu>
@@ -41,7 +41,7 @@ export const SidebarFooterNavigation = memo(function SidebarFooterNavigation({
           >
             <span
               aria-hidden="true"
-              className="grid size-3.5 shrink-0 place-items-center text-[13px] leading-none"
+              className='inline-flex h-5 w-5 shrink-0 items-center justify-center text-base leading-none [font-family:"Apple_Color_Emoji","Segoe_UI_Emoji","Noto_Color_Emoji",sans-serif]'
               data-cafe-task-atrium-unicorn-icon="true"
             >
               🦄

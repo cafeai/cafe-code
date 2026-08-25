@@ -37,6 +37,15 @@ describe("SidebarFooterNavigation", () => {
       expect(
         buttons[0]?.querySelector('[data-cafe-task-atrium-unicorn-icon="true"]'),
       ).not.toBeNull();
+      const unicorn = buttons[0]?.querySelector<HTMLElement>(
+        '[data-cafe-task-atrium-unicorn-icon="true"]',
+      );
+      expect(unicorn?.textContent).toBe("🦄");
+      expect(unicorn?.className).toContain("text-base");
+      expect(unicorn?.className).toContain("Apple_Color_Emoji");
+      expect(unicorn?.getBoundingClientRect().width).toBeGreaterThanOrEqual(16);
+      expect(unicorn?.getBoundingClientRect().height).toBeGreaterThanOrEqual(16);
+      expect(getComputedStyle(unicorn!).fontFamily).toContain("Apple Color Emoji");
 
       buttons[0]?.click();
       buttons[1]?.click();

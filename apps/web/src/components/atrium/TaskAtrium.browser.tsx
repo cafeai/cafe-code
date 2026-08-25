@@ -810,10 +810,15 @@ describe("TaskAtriumOverlay", () => {
     }
   });
 
-  it("closes on Escape", async () => {
-    useTaskAtriumStore.getState().setOpen(true);
+  it("closes on Escape and restores keyboard focus to the opener", async () => {
+    useTaskAtriumStore.getState().setOpen(false);
+    const opener = document.createElement("button");
+    opener.textContent = "Open Atrium";
+    document.body.append(opener);
+    opener.focus();
     const { host, screen } = await mountOverlay();
     try {
+      useTaskAtriumStore.getState().setOpen(true);
       await vi.waitFor(() => expect(overlay()).not.toBeNull());
       document.activeElement?.dispatchEvent(
         new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
@@ -821,11 +826,51 @@ describe("TaskAtriumOverlay", () => {
       await vi.waitFor(() => {
         expect(overlay()).toBeNull();
         expect(useTaskAtriumStore.getState().open).toBe(false);
+        expect(document.activeElement).toBe(opener);
       });
     } finally {
       useTaskAtriumStore.getState().setOpen(false);
       await screen.unmount();
       host.remove();
+      opener.remove();
+    }
+  });
+
+  it("keeps titlebar controls clickable and does not reselect the opener after pointer close", async () => {
+    useTaskAtriumStore.getState().setOpen(false);
+    const opener = document.createElement("button");
+    opener.textContent = "Open Atrium";
+    document.body.append(opener);
+    opener.focus();
+    const { host, screen } = await mountOverlay();
+    try {
+      useTaskAtriumStore.getState().setOpen(true);
+      await vi.waitFor(() => {
+        expect(overlay()).not.toBeNull();
+        expect(overlay()?.getAttribute("data-cafe-window-no-drag")).toBe("true");
+        expect(overlay()?.className).toContain("[-webkit-app-region:no-drag]");
+        expect(getComputedStyle(overlay()!).getPropertyValue("-webkit-app-region")).toBe("no-drag");
+      });
+
+      await page.getByRole("button", { name: /^Codex / }).click();
+      await vi.waitFor(() => {
+        expect(page.getByRole("button", { name: /^Codex / }).element().ariaPressed).toBe("true");
+      });
+      await page.getByRole("button", { name: /^All work / }).click();
+      await vi.waitFor(() => {
+        expect(page.getByRole("button", { name: /^All work / }).element().ariaPressed).toBe("true");
+      });
+      await page.getByRole("button", { name: "Close Task Atrium" }).click();
+      await vi.waitFor(() => {
+        expect(overlay()).toBeNull();
+        expect(useTaskAtriumStore.getState().open).toBe(false);
+        expect(document.activeElement).not.toBe(opener);
+      });
+    } finally {
+      useTaskAtriumStore.getState().setOpen(false);
+      await screen.unmount();
+      host.remove();
+      opener.remove();
     }
   });
 
