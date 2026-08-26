@@ -10,7 +10,7 @@ import {
 } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { scopeThreadRef } from "@cafecode/client-runtime";
-import { CircleCheckIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronUpIcon, CircleCheckIcon } from "lucide-react";
 
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { useTheme } from "../../hooks/useTheme";
@@ -72,6 +72,8 @@ const compactUsdFormat = new Intl.NumberFormat("en-US", {
  */
 const MAX_ATRIUM_DETAIL_SUBSCRIPTIONS = 24;
 const ATRIUM_DETAIL_PREFETCH_MARGIN_PX = 320;
+/** Keep recent completions useful without letting historical rows dominate a card. */
+const COMPLETED_SUBAGENT_PREVIEW_COUNT = 3;
 
 const STATE_LABEL: Record<AtriumCardState, string> = {
   holding: "Waiting on you",
@@ -312,6 +314,43 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
   const accent = stateColor(card.state, tint);
   const elapsed = formatElapsed(card.startedAt, now);
   const titleId = useId();
+  const subagentListId = useId();
+  const [showAllCompletedSubagents, setShowAllCompletedSubagents] = useState(false);
+  const completedSubagents = useMemo(
+    () =>
+      card.subagents
+        .filter((subagent) => subagent.status === "completed")
+        .toSorted((left, right) => {
+          // Completion time answers which historical work is most useful now.
+          // Imported legacy rows can lack it, so their start time is the
+          // deterministic fallback and the stable row key breaks exact ties.
+          const leftTime = left.completedAt ?? left.startedAt ?? 0;
+          const rightTime = right.completedAt ?? right.startedAt ?? 0;
+          return leftTime - rightTime || left.rowKey.localeCompare(right.rowKey);
+        }),
+    [card.subagents],
+  );
+  const hiddenCompletedSubagentCount = Math.max(
+    0,
+    completedSubagents.length - COMPLETED_SUBAGENT_PREVIEW_COUNT,
+  );
+  const visibleSubagents = useMemo(() => {
+    if (showAllCompletedSubagents || hiddenCompletedSubagentCount === 0) {
+      return card.subagents;
+    }
+
+    // Only successful historical work is eligible for disclosure. Waiting,
+    // active, failed, and stopped children always stay visible so this compact
+    // presentation can never hide work or a condition that needs attention.
+    const recentCompletedRowKeys = new Set(
+      completedSubagents
+        .slice(-COMPLETED_SUBAGENT_PREVIEW_COUNT)
+        .map((subagent) => subagent.rowKey),
+    );
+    return card.subagents.filter(
+      (subagent) => subagent.status !== "completed" || recentCompletedRowKeys.has(subagent.rowKey),
+    );
+  }, [card.subagents, completedSubagents, hiddenCompletedSubagentCount, showAllCompletedSubagents]);
   const cardRef = useCallback(
     (element: HTMLElement | null) => onCardElement(card.key, element),
     [card.key, onCardElement],
@@ -382,56 +421,97 @@ const TaskAtriumCardView = memo(function TaskAtriumCardView({
 
       {/* The reference's photo window becomes the live subagent list. */}
       {card.subagents.length > 0 ? (
-        <ul
-          aria-label={`Subagents for ${card.title}`}
-          className="mt-3 flex flex-col gap-1 rounded-xl bg-[#ece7e2] p-2.5 dark:bg-white/8"
-          data-cafe-atrium-subagent-list="true"
-        >
-          {card.subagents.map((subagent) => (
-            <li
-              key={subagent.rowKey}
-              className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2.5 rounded-lg px-0.5 py-1.5 text-[11px] text-[#4a4248] dark:text-white/75"
-              data-cafe-atrium-subagent-row="true"
-            >
-              <SubagentAvatar seed={subagent.id} className="size-7" />
-              <span className="min-w-0">
-                <span className="block truncate font-semibold text-[#3c353a] dark:text-white/85">
-                  {subagent.label}
-                </span>
-                <span
-                  className="mt-0.5 block leading-4 text-[#6c636a] break-words dark:text-white/50"
-                  data-cafe-atrium-subagent-detail="true"
-                >
-                  {subagent.detail}
-                </span>
-              </span>
-              <span className="min-w-12 shrink-0 pt-0.5 text-right">
-                <span
-                  className="block text-[9px] font-semibold uppercase tracking-[0.06em]"
-                  style={{ color: subagent.running ? accent : SETTLED_COLOR }}
-                >
-                  {subagent.status === "waiting"
-                    ? "Waiting"
-                    : subagent.status === "active"
-                      ? "Working"
-                      : subagent.status === "failed"
-                        ? "Failed"
-                        : subagent.status === "stopped"
-                          ? "Stopped"
-                          : "Done"}
-                </span>
-                {subagent.startedAt !== null ? (
-                  <span className="mt-0.5 block font-mono text-[10px] tabular-nums text-[#8a8189] dark:text-white/45">
-                    {formatElapsed(
-                      subagent.startedAt,
-                      subagent.running ? now : (subagent.completedAt ?? now),
-                    )}
+        <div className="mt-3 rounded-xl bg-[#ece7e2] p-2.5 dark:bg-white/8">
+          <ul
+            id={subagentListId}
+            aria-label={`Subagents for ${card.title}`}
+            className="flex flex-col gap-1"
+            data-cafe-atrium-subagent-list="true"
+          >
+            {visibleSubagents.map((subagent) => (
+              <li
+                key={subagent.rowKey}
+                className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2.5 rounded-lg px-0.5 py-1.5 text-[11px] text-[#4a4248] dark:text-white/75"
+                data-cafe-atrium-subagent-row="true"
+              >
+                <SubagentAvatar seed={subagent.id} className="size-7" />
+                <span className="min-w-0">
+                  <span className="block truncate font-semibold text-[#3c353a] dark:text-white/85">
+                    {subagent.label}
                   </span>
-                ) : null}
-              </span>
-            </li>
-          ))}
-        </ul>
+                  <span
+                    className="mt-0.5 block leading-4 text-[#6c636a] break-words dark:text-white/50"
+                    data-cafe-atrium-subagent-detail="true"
+                  >
+                    {subagent.detail}
+                  </span>
+                </span>
+                <span className="min-w-12 shrink-0 pt-0.5 text-right">
+                  <span
+                    className="block text-[9px] font-semibold uppercase tracking-[0.06em]"
+                    style={{ color: subagent.running ? accent : SETTLED_COLOR }}
+                  >
+                    {subagent.status === "waiting"
+                      ? "Waiting"
+                      : subagent.status === "active"
+                        ? "Working"
+                        : subagent.status === "failed"
+                          ? "Failed"
+                          : subagent.status === "stopped"
+                            ? "Stopped"
+                            : "Done"}
+                  </span>
+                  {subagent.startedAt !== null ? (
+                    <span className="mt-0.5 block font-mono text-[10px] tabular-nums text-[#8a8189] dark:text-white/45">
+                      {formatElapsed(
+                        subagent.startedAt,
+                        subagent.running ? now : (subagent.completedAt ?? now),
+                      )}
+                    </span>
+                  ) : null}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {hiddenCompletedSubagentCount > 0 ? (
+            <button
+              type="button"
+              aria-controls={subagentListId}
+              aria-expanded={showAllCompletedSubagents}
+              aria-label={
+                showAllCompletedSubagents
+                  ? `Show fewer completed subagents for ${card.title}`
+                  : `Show ${hiddenCompletedSubagentCount} more completed subagents for ${card.title}`
+              }
+              className={cn(
+                "relative z-20 mt-1 flex min-h-9 w-full items-center justify-center gap-1.5 border-t border-black/10 pt-2",
+                "rounded-b-lg text-[11px] font-semibold text-[#6c636a] transition-colors hover:text-[#3c353a]",
+                "outline-none focus-visible:ring-2 focus-visible:ring-[var(--cafe-atrium-accent)]",
+                "dark:border-white/10 dark:text-white/55 dark:hover:text-white/85",
+              )}
+              data-cafe-atrium-completed-subagent-toggle="true"
+              onClick={(event) => {
+                // The card has a full-surface navigation button beneath this
+                // disclosure. Consume the click so expanding history cannot
+                // unexpectedly leave the Atrium.
+                event.stopPropagation();
+                setShowAllCompletedSubagents((expanded) => !expanded);
+              }}
+            >
+              {showAllCompletedSubagents ? (
+                <>
+                  Show less
+                  <ChevronUpIcon aria-hidden="true" className="size-3.5" />
+                </>
+              ) : (
+                <>
+                  Show {hiddenCompletedSubagentCount} more completed
+                  <ChevronDownIcon aria-hidden="true" className="size-3.5" />
+                </>
+              )}
+            </button>
+          ) : null}
+        </div>
       ) : null}
 
       {card.activityLabel ? (

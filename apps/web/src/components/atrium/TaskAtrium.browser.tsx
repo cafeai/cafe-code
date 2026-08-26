@@ -314,7 +314,12 @@ function addRunningThreads(count: number): () => void {
   };
 }
 
-function installStructuredSubagents(count: number): () => void {
+type FixtureSubagentStatus = "waiting" | "active" | "completed" | "failed" | "stopped";
+
+function installStructuredSubagents(
+  count: number,
+  statusForIndex: (index: number) => FixtureSubagentStatus = () => "active",
+): () => void {
   type HarnessActivity = {
     id: string;
     tone: string;
@@ -334,17 +339,22 @@ function installStructuredSubagents(count: number): () => void {
   const previousActivities = activityByThreadId["thread-1"];
   const ids: string[] = [];
   const activities: Record<string, HarnessActivity> = {};
+  const fixtureNow = Date.now();
 
   for (let index = 0; index < count; index += 1) {
     const id = `subagent-${index + 1}`;
+    const status = statusForIndex(index);
+    const terminal = status === "completed" || status === "failed" || status === "stopped";
+    const createdAt = new Date(fixtureNow - (count - index) * 1_000).toISOString();
     ids.push(id);
     activities[id] = {
       id,
       tone: "info",
-      kind: "task.progress",
-      summary: "Subagent update",
+      kind: terminal ? "task.completed" : "task.progress",
+      summary: terminal ? "Subagent completed" : "Subagent update",
       payload: {
         taskId: `claude-task-${index + 1}`,
+        ...(terminal ? { status } : {}),
         detail:
           index === count - 1
             ? `Visible task description ${index + 1} stays completely readable even when the bounded provider text wraps across several narrow card lines without an inner clip.`
@@ -353,12 +363,12 @@ function installStructuredSubagents(count: number): () => void {
           threadId: `claude-task-${index + 1}`,
           label: `Claude worker ${index + 1}`,
           objective: `Original task objective ${index + 1}`,
-          status: "active",
-          startedAt: new Date(Date.now() - (index + 1) * 1_000).toISOString(),
+          status,
+          startedAt: new Date(fixtureNow - (count - index) * 1_000 - 60_000).toISOString(),
         },
       },
       turnId: "turn-1",
-      createdAt: new Date(Date.now() - (count - index) * 1_000).toISOString(),
+      createdAt,
     };
   }
   activityIdsByThreadId["thread-1"] = ids;
@@ -590,6 +600,90 @@ describe("TaskAtriumBoard", () => {
         taskScroller.getBoundingClientRect().top - 1,
       );
     } finally {
+      restoreSubagents();
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("collapses only completed subagents and expands them without navigating", async () => {
+    const statuses: readonly FixtureSubagentStatus[] = [
+      "active",
+      "waiting",
+      "failed",
+      "stopped",
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+    ];
+    const restoreSubagents = installStructuredSubagents(
+      statuses.length,
+      (index) => statuses[index] ?? "active",
+    );
+    navigations.length = 0;
+    useTaskAtriumStore.getState().setOpen(true);
+    const { host, screen } = await renderInTheme("dark");
+    host.style.width = "390px";
+    host.style.height = "420px";
+    try {
+      await vi.waitFor(() => {
+        expect(host.querySelectorAll('[data-cafe-atrium-subagent-row="true"]')).toHaveLength(7);
+      });
+
+      // Every actionable or abnormal row remains present. Of the six
+      // successful completions, only the three newest are previewed.
+      for (const worker of [1, 2, 3, 4, 8, 9, 10]) {
+        expect(host.textContent).toContain(`Claude worker ${worker}`);
+      }
+      for (const worker of [5, 6, 7]) {
+        expect(host.textContent).not.toContain(`Claude worker ${worker}`);
+      }
+      expect(host.querySelectorAll('[data-cafe-subagent-avatar="true"]')).toHaveLength(7);
+
+      const expand = page.getByRole("button", {
+        name: "Show 3 more completed subagents for Port the ambiance engine to WebGL",
+      });
+      expect(expand.element().textContent).toContain("Show 3 more completed");
+      expect(expand.element().getAttribute("aria-expanded")).toBe("false");
+      const controlledId = expand.element().getAttribute("aria-controls");
+      expect(controlledId).toBeTruthy();
+      expect(host.querySelector(`#${CSS.escape(controlledId ?? "")}`)).not.toBeNull();
+
+      await expand.click();
+      await vi.waitFor(() => {
+        expect(host.querySelectorAll('[data-cafe-atrium-subagent-row="true"]')).toHaveLength(10);
+        expect(host.querySelectorAll('[data-cafe-subagent-avatar="true"]')).toHaveLength(10);
+        expect(navigations).toHaveLength(0);
+        expect(useTaskAtriumStore.getState().open).toBe(true);
+      });
+
+      const collapse = page.getByRole("button", {
+        name: "Show fewer completed subagents for Port the ambiance engine to WebGL",
+      });
+      expect(collapse.element().textContent).toContain("Show less");
+      expect(collapse.element().getAttribute("aria-expanded")).toBe("true");
+      await collapse.click();
+      await vi.waitFor(() => {
+        expect(host.querySelectorAll('[data-cafe-atrium-subagent-row="true"]')).toHaveLength(7);
+      });
+
+      const list = host.querySelector<HTMLElement>('[data-cafe-atrium-subagent-list="true"]');
+      const card = list?.closest<HTMLElement>('[data-cafe-atrium-task-card="true"]');
+      const pane = host.querySelector<HTMLElement>('[data-cafe-atrium-pane-scroll="true"]');
+      expect(list).not.toBeNull();
+      expect(card).not.toBeNull();
+      expect(pane).not.toBeNull();
+      if (!list || !card || !pane) throw new Error("Responsive Atrium surface did not mount");
+      expect(getComputedStyle(list).overflowY).toBe("visible");
+      expect(list.scrollHeight).toBeLessThanOrEqual(list.clientHeight + 1);
+      expect(card.scrollHeight).toBeLessThanOrEqual(card.clientHeight + 1);
+      expect(getComputedStyle(pane).overflowY).toBe("auto");
+      expect(pane.scrollWidth).toBeLessThanOrEqual(pane.clientWidth + 1);
+    } finally {
+      useTaskAtriumStore.getState().setOpen(false);
       restoreSubagents();
       await screen.unmount();
       host.remove();
