@@ -1,4 +1,6 @@
-import type { DictationRealtimeClientSecret } from "@cafecode/contracts";
+import type { DictationErrorCode, DictationRealtimeClientSecret } from "@cafecode/contracts";
+
+import { DICTATION_RPC_ERROR_MESSAGES, readDictationRpcErrorCode } from "./errors";
 
 export const OPENAI_REALTIME_CALLS_URL = "https://api.openai.com/v1/realtime/calls";
 
@@ -18,13 +20,16 @@ const MAX_ITEM_ID_CHARS = 256;
 const MAX_TRANSCRIPT_CHARS = 128_000;
 
 export type RealtimeTranscriptionErrorCode =
+  | DictationErrorCode
   | "cancelled"
   | "connection_failed"
   | "finalization_timeout"
   | "microphone_denied"
   | "microphone_unavailable"
   | "protocol_error"
+  | "session_rejected"
   | "session_expired"
+  | "session_setup_failed"
   | "transcript_conflict"
   | "unsupported";
 
@@ -51,6 +56,54 @@ const connectionError = () =>
     "connection_failed",
     "Cafe could not connect the microphone to OpenAI.",
   );
+
+const sessionSetupError = () =>
+  new RealtimeTranscriptionError("session_setup_failed", "Cafe could not start dictation.");
+
+/**
+ * The client-secret RPC returns a typed, sanitized DictationError. Rebuild the
+ * error from its allowlisted code so a hostile or older server cannot smuggle
+ * its message, cause, provider body, or credential into a renderer toast.
+ */
+function normalizeClientSecretError(
+  error: unknown,
+  externallyCancelled: boolean,
+): RealtimeTranscriptionError {
+  if (externallyCancelled) return cancelledError();
+  const code = readDictationRpcErrorCode(error);
+  return code === null
+    ? sessionSetupError()
+    : new RealtimeTranscriptionError(code, DICTATION_RPC_ERROR_MESSAGES[code]);
+}
+
+/** Classify only the public HTTP status; never read an error response body. */
+function realtimeCallResponseError(status: number): RealtimeTranscriptionError {
+  if (status === 401 || status === 403) {
+    return new RealtimeTranscriptionError(
+      "session_rejected",
+      "OpenAI rejected the Realtime dictation session. Check this API project's model access.",
+    );
+  }
+  if (status === 429) {
+    return new RealtimeTranscriptionError(
+      "upstream_rate_limited",
+      DICTATION_RPC_ERROR_MESSAGES.upstream_rate_limited,
+    );
+  }
+  if (status === 400 || status === 404 || status === 422) {
+    return new RealtimeTranscriptionError(
+      "session_rejected",
+      "OpenAI rejected Cafe's Realtime dictation session configuration.",
+    );
+  }
+  if (status >= 500 && status <= 599) {
+    return new RealtimeTranscriptionError(
+      "upstream_unavailable",
+      "OpenAI is temporarily unavailable for dictation.",
+    );
+  }
+  return connectionError();
+}
 
 const protocolError = () =>
   new RealtimeTranscriptionError("protocol_error", "OpenAI returned an invalid dictation event.");
@@ -444,6 +497,7 @@ export async function startRealtimeTranscription(
   let stopPromise: Promise<void> | null = null;
   const setupAbortController = new AbortController();
   const transportIsClosed = () => lifecycle === "closed";
+  let awaitingClientSecret = true;
 
   const stopMediaTracks = () => {
     if (!mediaStream) return;
@@ -557,6 +611,7 @@ export async function startRealtimeTranscription(
     // access. Status can race with a Settings clear, and a missing key must be
     // a true no-op that never opens a browser permission prompt.
     const clientSecret = await input.getClientSecret();
+    awaitingClientSecret = false;
     if (input.signal?.aborted || transportIsClosed()) throw cancelledError();
     if (clientSecret.expiresAt * 1_000 <= dependencies.now() + MIN_CLIENT_SECRET_LIFETIME_MS) {
       throw new RealtimeTranscriptionError(
@@ -625,7 +680,7 @@ export async function startRealtimeTranscription(
         referrerPolicy: "no-referrer",
         signal: setupAbortController.signal,
       });
-      if (!response.ok) throw connectionError();
+      if (!response.ok) throw realtimeCallResponseError(response.status);
       const answerSdp = await readBoundedSdpAnswer(response);
       await peerConnection?.setRemoteDescription({ type: "answer", sdp: answerSdp });
     })();
@@ -687,7 +742,9 @@ export async function startRealtimeTranscription(
       cancel: cleanup,
     };
   } catch (error) {
-    const normalized = normalizeSetupError(error, input.signal?.aborted === true);
+    const normalized = awaitingClientSecret
+      ? normalizeClientSecretError(error, input.signal?.aborted === true)
+      : normalizeSetupError(error, input.signal?.aborted === true);
     cleanup();
     throw normalized;
   }

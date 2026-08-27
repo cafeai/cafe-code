@@ -156,8 +156,14 @@ describe("DictationSettings", () => {
       expect(dictationHarness.setApiKey).toHaveBeenCalledWith({ apiKey });
       expect(document.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe("");
     });
-    await expect.element(page.getByText("Ready", { exact: true })).toBeVisible();
-    await expect.element(page.getByText("OpenAI API key saved.", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Configured", { exact: true })).toBeVisible();
+    await expect
+      .element(
+        page.getByText("OpenAI API key saved. Cafe will verify access when dictation starts.", {
+          exact: true,
+        }),
+      )
+      .toBeVisible();
     expect(document.body.textContent).not.toContain(apiKey);
     expect(document.body.innerHTML).not.toContain(apiKey);
     expect(queryClient?.getQueryData(["dictation", "status", PRIMARY_ENVIRONMENT_ID])).toEqual({
@@ -170,7 +176,7 @@ describe("DictationSettings", () => {
     dictationHarness.reset({ configured: true, canManage: false });
     await renderSettings();
 
-    await expect.element(page.getByText("Ready", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Configured", { exact: true })).toBeVisible();
     await expect
       .element(page.getByText("Only an owner session can add, replace, or remove this credential."))
       .toBeVisible();
@@ -184,7 +190,7 @@ describe("DictationSettings", () => {
   it("requires confirmation before removing the server-side key", async () => {
     dictationHarness.reset({ configured: true, canManage: true });
     await renderSettings();
-    await expect.element(page.getByText("Ready", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Configured", { exact: true })).toBeVisible();
 
     await page.getByRole("button", { name: "Remove key" }).click();
     await expect.element(page.getByRole("alertdialog")).toBeVisible();

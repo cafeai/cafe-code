@@ -5,16 +5,13 @@ import {
   ShieldCheckIcon,
   TriangleAlertIcon,
 } from "lucide-react";
-import {
-  DICTATION_API_KEY_MAX_CHARS,
-  type DictationCredentialStatus,
-  type DictationErrorCode,
-} from "@cafecode/contracts";
+import { DICTATION_API_KEY_MAX_CHARS, type DictationCredentialStatus } from "@cafecode/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useCallback, useState } from "react";
 
 import { usePrimaryEnvironmentId } from "~/environments/primary";
 import { requireEnvironmentConnection } from "~/environments/runtime";
+import { readDictationRpcErrorCode } from "~/dictation/errors";
 import { dictationQueryKeys, dictationStatusQueryOptions } from "~/lib/dictationReactQuery";
 import {
   AlertDialog,
@@ -48,36 +45,8 @@ function containsApiKeyControlCharacter(value: string): boolean {
   return false;
 }
 
-/**
- * Typed dictation failures have deliberately sanitized server messages, but a
- * rejected transport can still carry arbitrary implementation details. Map by
- * allowlisted code and never render a raw error or RPC cause on a credential
- * management surface.
- */
-function readDictationErrorCode(error: unknown): DictationErrorCode | null {
-  if (typeof error !== "object" || error === null || !("code" in error)) {
-    return null;
-  }
-
-  const code = Reflect.get(error, "code");
-  switch (code) {
-    case "not_configured":
-    case "not_authorized":
-    case "insecure_transport":
-    case "rate_limited":
-    case "secret_store_failed":
-    case "upstream_auth_failed":
-    case "upstream_rate_limited":
-    case "upstream_unavailable":
-    case "upstream_invalid_response":
-      return code;
-    default:
-      return null;
-  }
-}
-
 function formatCredentialManagementError(error: unknown): string {
-  switch (readDictationErrorCode(error)) {
+  switch (readDictationRpcErrorCode(error)) {
     case "not_authorized":
       return "Only an owner session can manage the OpenAI API key.";
     case "insecure_transport":
@@ -92,7 +61,7 @@ function formatCredentialManagementError(error: unknown): string {
 }
 
 function formatStatusError(error: unknown): string {
-  switch (readDictationErrorCode(error)) {
+  switch (readDictationRpcErrorCode(error)) {
     case "not_authorized":
       return "This session is not authorized to view dictation status.";
     case "insecure_transport":
@@ -132,7 +101,7 @@ function statusBadge(input: {
     return (
       <Badge variant="success" size="sm">
         <CheckCircle2Icon />
-        Ready
+        Configured
       </Badge>
     );
   }
@@ -199,7 +168,9 @@ export function DictationSettings() {
         writeAuthoritativeStatus(nextStatus);
         setFeedback({
           kind: "success",
-          message: configured ? "OpenAI API key replaced." : "OpenAI API key saved.",
+          message: configured
+            ? "OpenAI API key replaced. Cafe will verify access when dictation starts."
+            : "OpenAI API key saved. Cafe will verify access when dictation starts.",
         });
       } catch (error) {
         setFeedback({ kind: "error", message: formatCredentialManagementError(error) });
@@ -238,7 +209,7 @@ export function DictationSettings() {
       : statusQuery.isPending || !status
         ? "Checking the server-side credential status."
         : configured
-          ? "The composer can start live transcription when you explicitly choose Dictation."
+          ? "The key is stored. Cafe verifies OpenAI access when you explicitly start Dictation."
           : "No key is stored, so Dictation does not access the microphone or OpenAI.";
 
   return (
@@ -248,6 +219,10 @@ export function DictationSettings() {
         <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground">
           Opt in to OpenAI live transcription for the composer. Dictation remains off until an API
           key is configured and you explicitly start it from the microphone control.
+        </p>
+        <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
+          GPT Live Transcribe requires a paid OpenAI API project with Realtime model access; the
+          OpenAI API Free tier does not support this model.
         </p>
       </div>
 

@@ -7,6 +7,7 @@ import {
   startRealtimeTranscription,
   type RealtimeTranscriptionSession,
 } from "~/dictation/realtimeTranscription";
+import { formatDictationRpcError } from "~/dictation/errors";
 
 export type ComposerDictationPhase = "error" | "finalizing" | "idle" | "recording" | "starting";
 
@@ -42,29 +43,10 @@ interface ScopedPhase {
   readonly phase: ComposerDictationPhase;
 }
 
-const DICTATION_RPC_ERROR_MESSAGES: Readonly<Record<string, string>> = {
-  insecure_transport: "Dictation requires HTTPS or a same-machine Cafe connection.",
-  not_authorized: "This Cafe connection is not allowed to start dictation.",
-  not_configured: "Dictation is not configured on this Cafe server.",
-  rate_limited: "Dictation was started too frequently. Please wait a moment and try again.",
-  secret_store_failed: "Cafe could not access the saved dictation credential.",
-  upstream_auth_failed: "OpenAI rejected the saved dictation credential.",
-  upstream_invalid_response: "OpenAI returned an invalid dictation session response.",
-  upstream_rate_limited: "OpenAI is rate limiting dictation. Please try again shortly.",
-  upstream_unavailable: "Cafe could not reach OpenAI to start dictation.",
-};
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 /** Convert all transport/RPC failures to fixed strings safe for a user toast. */
 export function formatComposerDictationError(error: unknown): string {
   if (error instanceof RealtimeTranscriptionError) return error.message;
-  if (isRecord(error) && typeof error.code === "string") {
-    return DICTATION_RPC_ERROR_MESSAGES[error.code] ?? "Cafe could not start dictation.";
-  }
-  return "Cafe could not start dictation.";
+  return formatDictationRpcError(error) ?? "Cafe could not start dictation.";
 }
 
 export interface ComposerDictationController {

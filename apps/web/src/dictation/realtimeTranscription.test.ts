@@ -169,25 +169,58 @@ describe("Realtime transcript reconciliation", () => {
 });
 
 describe("startRealtimeTranscription", () => {
-  it("validates a client secret before requesting microphone access", async () => {
+  it("preserves a sanitized client-secret rejection before requesting microphone access", async () => {
     const fixture = makeDependencies();
     const order: string[] = [];
+    const leakedDetail = "sk-secret-provider-detail-that-must-not-surface";
     const getClientSecret = vi.fn(async () => {
       order.push("credential");
-      throw { code: "not_configured" };
+      throw {
+        code: "upstream_auth_failed",
+        message: leakedDetail,
+        cause: { credential: leakedDetail },
+      };
     });
     fixture.getUserMedia.mockImplementation(async () => {
       order.push("microphone");
       return fixture.media.stream;
     });
 
-    await expect(
+    const rejected = expect(
       startRealtimeTranscription(
         { getClientSecret, onTranscript: () => undefined },
         fixture.dependencies,
       ),
-    ).rejects.toMatchObject({ code: "connection_failed" });
+    ).rejects;
+    await rejected.toMatchObject({
+      code: "upstream_auth_failed",
+      message:
+        "OpenAI rejected the saved dictation credential or its Realtime transcription access.",
+    });
+    await rejected.not.toMatchObject({ message: leakedDetail });
     expect(order).toEqual(["credential"]);
+    expect(fixture.getUserMedia).not.toHaveBeenCalled();
+    expect(fixture.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("sanitizes an unknown client-secret transport failure", async () => {
+    const fixture = makeDependencies();
+    const leakedDetail = "unsafe-rpc-detail";
+
+    await expect(
+      startRealtimeTranscription(
+        {
+          getClientSecret: async () => {
+            throw { code: "future_unknown_code", message: leakedDetail };
+          },
+          onTranscript: () => undefined,
+        },
+        fixture.dependencies,
+      ),
+    ).rejects.toMatchObject({
+      code: "session_setup_failed",
+      message: "Cafe could not start dictation.",
+    });
     expect(fixture.getUserMedia).not.toHaveBeenCalled();
     expect(fixture.fetchMock).not.toHaveBeenCalled();
   });
@@ -269,6 +302,46 @@ describe("startRealtimeTranscription", () => {
     expect(fixture.peer.channel.closeMock).toHaveBeenCalledOnce();
     expect(fixture.peer.closeMock).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    {
+      status: 403,
+      code: "session_rejected",
+      message:
+        "OpenAI rejected the Realtime dictation session. Check this API project's model access.",
+    },
+    {
+      status: 429,
+      code: "upstream_rate_limited",
+      message:
+        "OpenAI has no Realtime transcription capacity or quota available for this API project.",
+    },
+    {
+      status: 500,
+      code: "upstream_unavailable",
+      message: "OpenAI is temporarily unavailable for dictation.",
+    },
+  ])(
+    "maps an OpenAI $status SDP rejection by status without exposing its body",
+    async ({ status, code, message }) => {
+      const leakedDetail = "provider-response-secret-that-must-not-surface";
+      const fixture = makeDependencies({
+        response: new Response(leakedDetail, { status, statusText: leakedDetail }),
+      });
+
+      const rejected = expect(
+        startRealtimeTranscription(
+          { getClientSecret: async () => validClientSecret, onTranscript: () => undefined },
+          fixture.dependencies,
+        ),
+      ).rejects;
+      await rejected.toMatchObject({ code, message });
+      await rejected.not.toMatchObject({ message: leakedDetail });
+      expect(fixture.media.stop).toHaveBeenCalledOnce();
+      expect(fixture.peer.channel.closeMock).toHaveBeenCalledOnce();
+      expect(fixture.peer.closeMock).toHaveBeenCalledOnce();
+    },
+  );
 
   it("hard-caps an oversized streamed SDP answer without relying on Content-Length", async () => {
     const response = new Response(new Uint8Array(1_048_577));
