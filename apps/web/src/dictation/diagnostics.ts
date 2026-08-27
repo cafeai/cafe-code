@@ -3,9 +3,10 @@ import {
   DICTATION_PROVIDER_ERROR_CODES,
   DICTATION_PROVIDER_ERROR_TYPES,
   DICTATION_SESSION_PROFILE,
-  DICTATION_TRANSCRIPTION_MODEL,
+  DICTATION_TRANSCRIPTION_MODELS,
   type DictationProviderErrorCode,
   type DictationProviderErrorType,
+  type DictationTranscriptionModel,
 } from "@cafecode/contracts";
 
 import type { RealtimeTranscriptionErrorCode } from "./realtimeTranscription";
@@ -24,6 +25,9 @@ const MAX_AUDIO_SAMPLE_RATE = 768_000;
 const MAX_AUDIO_CHANNEL_COUNT = 32;
 const MAX_AUDIO_SAMPLE_SIZE = 64;
 const MAX_DATE_MS = 8_640_000_000_000_000;
+const DICTATION_TRANSCRIPTION_MODEL_CATEGORIES: ReadonlySet<string> = new Set(
+  DICTATION_TRANSCRIPTION_MODELS,
+);
 
 export type DictationDiagnosticStage =
   | "client_secret"
@@ -136,7 +140,7 @@ export interface DictationDiagnosticTimelineEntry {
   readonly responseBodySha256: string | null;
   readonly responseBodyTruncated: boolean | null;
   readonly sessionProfile: typeof DICTATION_SESSION_PROFILE | null;
-  readonly clientSecretModel: typeof DICTATION_TRANSCRIPTION_MODEL | null;
+  readonly clientSecretModel: DictationTranscriptionModel | null;
   readonly clientSecretLifetimeMs: number | null;
   readonly clientSecretRequestId: string | null;
   readonly clientSecretRequestDurationMs: number | null;
@@ -570,9 +574,9 @@ function buildTimelineEntry(
     responseBodySha256: normalizeSha256(input.responseBodySha256),
     responseBodyTruncated: normalizeBoolean(input.responseBodyTruncated),
     sessionProfile: normalizeExactLiteral(input.sessionProfile, DICTATION_SESSION_PROFILE),
-    clientSecretModel: normalizeExactLiteral(
+    clientSecretModel: normalizeAllowlistedString<DictationTranscriptionModel>(
       input.clientSecretModel,
-      DICTATION_TRANSCRIPTION_MODEL,
+      DICTATION_TRANSCRIPTION_MODEL_CATEGORIES,
     ),
     clientSecretLifetimeMs: normalizeDurationMs(input.clientSecretLifetimeMs),
     clientSecretRequestId: normalizeOpenAiRequestId(input.clientSecretRequestId),

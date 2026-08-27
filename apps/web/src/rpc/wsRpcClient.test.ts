@@ -101,12 +101,15 @@ describe("wsRpcClient", () => {
       clientSecretOpenAiProcessingMs: 12,
       clientSecretEffectiveProfile: "matches",
     });
+    await expect(
+      client.dictation.createClientSecret({ model: "gpt-realtime-whisper" }),
+    ).resolves.toMatchObject({ clientSecret: "ephemeral-test-secret" });
 
     expect(getStatus).toHaveBeenCalledWith({});
     expect(setApiKey).toHaveBeenCalledWith({ apiKey: "sk-test" });
     expect(clearApiKey).toHaveBeenCalledWith({});
-    expect(createClientSecret).toHaveBeenCalledWith({});
-    expect(requestMock).toHaveBeenCalledTimes(4);
+    expect(createClientSecret.mock.calls).toEqual([[{}], [{ model: "gpt-realtime-whisper" }]]);
+    expect(requestMock).toHaveBeenCalledTimes(5);
   });
 
   it("retries an interrupted durable command with the same command id", async () => {

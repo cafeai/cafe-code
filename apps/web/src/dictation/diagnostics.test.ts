@@ -198,6 +198,7 @@ describe("dictation diagnostics", () => {
       outcome: "starting",
       attempt: 2,
       maxAttempts: 3,
+      clientSecretModel: "gpt-realtime-whisper",
     });
     recordDiagnostic({
       nowMs: 1_350,
@@ -205,6 +206,7 @@ describe("dictation diagnostics", () => {
       outcome: "starting",
       attempt: 2,
       maxAttempts: 3,
+      clientSecretModel: "gpt-realtime-whisper",
       requestDurationMs: 50,
       httpStatus: 200,
       requestId: "req_attempt-2",
@@ -251,6 +253,7 @@ describe("dictation diagnostics", () => {
       peerConnectionState: "connecting",
       audioTrackEnabled: true,
       audioSampleRate: 48_000,
+      clientSecretModel: "gpt-realtime-whisper",
       omittedTimelineEntryCount: 0,
     });
     expect(snapshot?.timeline).toHaveLength(5);

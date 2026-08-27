@@ -8,7 +8,7 @@ import {
   DICTATION_PROVIDER_ERROR_CODES,
   DICTATION_PROVIDER_ERROR_TYPES,
   DICTATION_SESSION_PROFILE,
-  DICTATION_TRANSCRIPTION_MODEL,
+  DICTATION_TRANSCRIPTION_MODELS,
   type DesktopDebugEndpointState,
   type DesktopRendererDebugSnapshot,
 } from "@cafecode/contracts";
@@ -114,6 +114,9 @@ const DICTATION_PROVIDER_ERROR_TYPE_CATEGORIES: ReadonlySet<string> = new Set(
 );
 const DICTATION_PROVIDER_ERROR_CODE_CATEGORIES: ReadonlySet<string> = new Set(
   DICTATION_PROVIDER_ERROR_CODES,
+);
+const DICTATION_TRANSCRIPTION_MODEL_CATEGORIES: ReadonlySet<string> = new Set(
+  DICTATION_TRANSCRIPTION_MODELS,
 );
 const DICTATION_ERROR_CODES = new Set([
   "not_configured",
@@ -488,6 +491,13 @@ function readExactDictationLiteral(value: unknown, expected: string): string | n
   return value === expected ? expected : null;
 }
 
+function readAllowlistedDictationLiteral(
+  value: unknown,
+  allowlist: ReadonlySet<string>,
+): string | null {
+  return typeof value === "string" && allowlist.has(value) ? value : null;
+}
+
 function readDictationSha256(value: unknown): string | null {
   const digest = readString(value);
   return digest !== null && DICTATION_SHA256_PATTERN.test(digest) ? digest.toLowerCase() : null;
@@ -541,9 +551,9 @@ function summarizeDictationTimelineEntry(value: unknown): Record<string, unknown
     responseBodySha256: readDictationSha256(entry.responseBodySha256),
     responseBodyTruncated: readBoolean(entry.responseBodyTruncated),
     sessionProfile: readExactDictationLiteral(entry.sessionProfile, DICTATION_SESSION_PROFILE),
-    clientSecretModel: readExactDictationLiteral(
+    clientSecretModel: readAllowlistedDictationLiteral(
       entry.clientSecretModel,
-      DICTATION_TRANSCRIPTION_MODEL,
+      DICTATION_TRANSCRIPTION_MODEL_CATEGORIES,
     ),
     clientSecretLifetimeMs: readBoundedNumber(
       entry.clientSecretLifetimeMs,

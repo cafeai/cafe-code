@@ -2,6 +2,7 @@ import type {
   DictationCredentialStatus,
   DictationError,
   DictationRealtimeClientSecret,
+  DictationTranscriptionModel,
 } from "@cafecode/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
@@ -19,6 +20,7 @@ export interface OpenAiRealtimeDictationShape {
    */
   readonly createClientSecret: (input: {
     readonly safetyIdentifier: string;
+    readonly model?: DictationTranscriptionModel;
   }) => Effect.Effect<DictationRealtimeClientSecret, DictationError>;
 }
 

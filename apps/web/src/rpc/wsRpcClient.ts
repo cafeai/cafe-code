@@ -102,7 +102,9 @@ export interface WsRpcClient {
     readonly getStatus: RpcUnaryNoArgMethod<typeof WS_METHODS.dictationGetStatus>;
     readonly setApiKey: RpcUnaryMethod<typeof WS_METHODS.dictationSetApiKey>;
     readonly clearApiKey: RpcUnaryNoArgMethod<typeof WS_METHODS.dictationClearApiKey>;
-    readonly createClientSecret: RpcUnaryNoArgMethod<typeof WS_METHODS.dictationCreateClientSecret>;
+    readonly createClientSecret: (
+      input?: RpcInput<typeof WS_METHODS.dictationCreateClientSecret>,
+    ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.dictationCreateClientSecret>>;
   };
   readonly server: {
     readonly getConfig: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetConfig>;
@@ -253,9 +255,11 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         transport.request((client) =>
           client[WS_METHODS.dictationClearApiKey]({}).pipe(Effect.withTracerEnabled(false)),
         ),
-      createClientSecret: () =>
+      createClientSecret: (input = {}) =>
         transport.request((client) =>
-          client[WS_METHODS.dictationCreateClientSecret]({}).pipe(Effect.withTracerEnabled(false)),
+          client[WS_METHODS.dictationCreateClientSecret](input).pipe(
+            Effect.withTracerEnabled(false),
+          ),
         ),
     },
     server: {

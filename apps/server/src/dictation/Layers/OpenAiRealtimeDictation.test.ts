@@ -149,6 +149,49 @@ describe("OpenAiRealtimeDictationLive", () => {
     }).pipe(Effect.provide(layer));
   });
 
+  it.effect("binds the audited fallback model into the short-lived session", () => {
+    const { execute, layer } = makeTestLayer(() =>
+      Response.json({
+        value: "ek_test_fallback_credential",
+        expires_at: Math.floor(Date.now() / 1_000) + 60,
+        session: {
+          type: "transcription",
+          audio: {
+            input: {
+              format: { type: "audio/pcm", rate: 24_000 },
+              transcription: { model: "gpt-realtime-whisper" },
+              turn_detection: null,
+            },
+          },
+        },
+      }),
+    );
+    return Effect.gen(function* () {
+      const dictation = yield* OpenAiRealtimeDictation;
+      yield* dictation.setApiKey("sk-test-permanent");
+      const result = yield* dictation.createClientSecret({
+        safetyIdentifier: "sha256-session-digest",
+        model: "gpt-realtime-whisper",
+      });
+
+      assert.strictEqual(result.model, "gpt-realtime-whisper");
+      assert.strictEqual(result.clientSecretEffectiveProfile, "matches");
+      const request = execute.mock.calls[0]?.[0];
+      assert.isDefined(request);
+      const rawBody = (request.body as { readonly body?: Uint8Array }).body;
+      assert.isDefined(rawBody);
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      const body = JSON.parse(decoder.decode(rawBody)) as {
+        readonly session: {
+          readonly audio: {
+            readonly input: { readonly transcription: { readonly model: string } };
+          };
+        };
+      };
+      assert.strictEqual(body.session.audio.input.transcription.model, "gpt-realtime-whisper");
+    }).pipe(Effect.provide(layer));
+  });
+
   it.effect("maps upstream failures to bounded public errors without response details", () => {
     const leakedDetail = "provider-debug-secret-that-must-not-surface";
     const { layer } = makeTestLayer(

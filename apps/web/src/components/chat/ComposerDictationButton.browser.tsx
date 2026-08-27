@@ -35,6 +35,9 @@ describe("ComposerDictationButton", () => {
     await expect
       .element(page.getByRole("button", { name: "Stop dictation" }))
       .toHaveAttribute("aria-pressed", "true");
+    expect(
+      document.querySelector('[data-composer-dictation="true"] svg.fill-current'),
+    ).not.toBeNull();
     await expect.element(page.getByRole("status")).toHaveTextContent("Listening");
 
     await mounted.rerender(
@@ -45,6 +48,9 @@ describe("ComposerDictationButton", () => {
       />,
     );
     await expect.element(page.getByRole("button", { name: "Finishing dictation" })).toBeDisabled();
+    expect(
+      document.querySelector('[data-composer-dictation="true"] svg.animate-spin'),
+    ).not.toBeNull();
     await expect.element(page.getByRole("status")).toHaveTextContent("Finishing dictation");
   });
 });

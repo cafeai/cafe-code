@@ -1138,13 +1138,14 @@ const makeWsRpcLayer = (
               Effect.flatMap(dictationStatus),
             ),
           ),
-        [WS_METHODS.dictationCreateClientSecret]: (_input) =>
+        [WS_METHODS.dictationCreateClientSecret]: ({ model }) =>
           observeRpcEffect(
             WS_METHODS.dictationCreateClientSecret,
             requireSecureDictationTransport.pipe(
               Effect.flatMap(() =>
                 dictation.createClientSecret({
                   safetyIdentifier: dictationSafetyIdentifier,
+                  ...(model === undefined ? {} : { model }),
                 }),
               ),
             ),

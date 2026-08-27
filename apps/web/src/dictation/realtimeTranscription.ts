@@ -1,8 +1,11 @@
 import {
+  DICTATION_FALLBACK_TRANSCRIPTION_MODEL,
   DICTATION_PROVIDER_ERROR_CODES,
   DICTATION_PROVIDER_ERROR_TYPES,
+  DICTATION_TRANSCRIPTION_MODEL,
   type DictationErrorCode,
   type DictationRealtimeClientSecret,
+  type DictationTranscriptionModel,
 } from "@cafecode/contracts";
 
 import {
@@ -99,7 +102,10 @@ function normalizeClientSecretError(
 }
 
 /** Classify only the public HTTP status; never read an error response body. */
-function realtimeCallResponseError(status: number): RealtimeTranscriptionError {
+function realtimeCallResponseError(
+  status: number,
+  attemptedModel: DictationTranscriptionModel,
+): RealtimeTranscriptionError {
   if (status === 401 || status === 403) {
     return new RealtimeTranscriptionError(
       "session_rejected",
@@ -119,6 +125,12 @@ function realtimeCallResponseError(status: number): RealtimeTranscriptionError {
     );
   }
   if (status >= 500 && status <= 599) {
+    if (attemptedModel === DICTATION_FALLBACK_TRANSCRIPTION_MODEL) {
+      return new RealtimeTranscriptionError(
+        "upstream_unavailable",
+        `OpenAI could not allocate either supported Realtime dictation model (HTTP ${status}). The microphone is available; verify this key belongs to a paid API project with Realtime access, or retry shortly.`,
+      );
+    }
     return new RealtimeTranscriptionError(
       "upstream_unavailable",
       `OpenAI returned a temporary HTTP ${status} error while starting dictation. Cafe retried the request; try again shortly.`,
@@ -390,6 +402,52 @@ function browserDependencies(): RealtimeTranscriptionDependencies {
     setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
     clearTimeout: (timerId) => window.clearTimeout(timerId),
   };
+}
+
+/**
+ * Wait until the browser has folded every gathered ICE candidate into
+ * `localDescription`. `createOffer()` returns only the initial SDP template;
+ * posting that stale value can omit all candidates and make OpenAI fail the
+ * call allocation with an otherwise opaque HTTP 500. Cafe does not retain or
+ * diagnose the finalized SDP because it can contain private network details.
+ *
+ * The operation is bounded by the session's existing setup abort/timeout.
+ * Removing both listeners on every exit is important because a closed peer may
+ * never emit another gathering event.
+ */
+function waitForIceGatheringComplete(
+  connection: RTCPeerConnection,
+  signal: AbortSignal,
+): Promise<void> {
+  if (connection.iceGatheringState === "complete") return Promise.resolve();
+
+  return new Promise<void>((resolve) => {
+    const cleanup = () => {
+      connection.removeEventListener("icegatheringstatechange", handleStateChange);
+      signal.removeEventListener("abort", handleAbort);
+    };
+    const handleStateChange = () => {
+      if (connection.iceGatheringState !== "complete") return;
+      cleanup();
+      resolve();
+    };
+    const handleAbort = () => {
+      cleanup();
+      // `interruptSetup` records the precise cancellation or timeout error
+      // before it aborts this signal. Resolve here so awaitSetup's mandatory
+      // liveness fence rethrows that authoritative error instead of racing it
+      // with a generic transport failure.
+      resolve();
+    };
+
+    connection.addEventListener("icegatheringstatechange", handleStateChange);
+    signal.addEventListener("abort", handleAbort, { once: true });
+
+    // Close the race in which gathering completed between the initial state
+    // read and listener registration.
+    handleStateChange();
+    if (signal.aborted) handleAbort();
+  });
 }
 
 interface Deferred<T> {
@@ -736,7 +794,9 @@ export interface RealtimeTranscriptionSession {
 }
 
 export interface StartRealtimeTranscriptionInput {
-  readonly getClientSecret: () => Promise<DictationRealtimeClientSecret>;
+  readonly getClientSecret: (
+    model: DictationTranscriptionModel,
+  ) => Promise<DictationRealtimeClientSecret>;
   readonly onTranscript: (snapshot: {
     readonly transcript: string;
     readonly event: RealtimeTranscriptEvent;
@@ -1055,6 +1115,7 @@ export async function startRealtimeTranscription(
 
   const mintUsableClientSecret = async (
     attempt: number | null,
+    requestedModel: DictationTranscriptionModel,
   ): Promise<DictationRealtimeClientSecret> => {
     resetPerAttemptDiagnostics();
     diagnosticDetails = {
@@ -1074,7 +1135,7 @@ export async function startRealtimeTranscription(
     recordDiagnostic("starting");
     let clientSecret: DictationRealtimeClientSecret;
     try {
-      clientSecret = await awaitSetup(input.getClientSecret());
+      clientSecret = await awaitSetup(input.getClientSecret(requestedModel));
     } catch (error) {
       // Setup cancellation/timeout is already a sanitized local error. Only
       // errors originating at the RPC boundary are decoded as credential
@@ -1112,7 +1173,8 @@ export async function startRealtimeTranscription(
     // Resolve a usable ephemeral credential before prompting for microphone
     // access. Status can race with a Settings clear, and a missing key must be
     // a true no-op that never opens a browser permission prompt.
-    let clientSecret = await mintUsableClientSecret(null);
+    let nextAttemptModel: DictationTranscriptionModel = DICTATION_TRANSCRIPTION_MODEL;
+    let clientSecret = await mintUsableClientSecret(null, nextAttemptModel);
     assertSetupLive();
 
     diagnosticStage = "microphone";
@@ -1176,7 +1238,7 @@ export async function startRealtimeTranscription(
           attempt > 1 ||
           clientSecret.expiresAt * 1_000 <= dependencies.now() + MIN_CLIENT_SECRET_LIFETIME_MS
         ) {
-          clientSecret = await mintUsableClientSecret(attempt);
+          clientSecret = await mintUsableClientSecret(attempt, nextAttemptModel);
           // mintUsableClientSecret has its own async return continuation. An
           // abort can land after its internal liveness check but before this
           // caller resumes, so fence again before allocating a retry peer.
@@ -1226,10 +1288,20 @@ export async function startRealtimeTranscription(
 
         const offer = await awaitSetup(attemptConnection.createOffer());
         assertSetupLive();
-        const offerSdp = offer.sdp;
-        if (!offerSdp) throw protocolError();
+        if (!offer.sdp) throw protocolError();
         await awaitSetup(attemptConnection.setLocalDescription(offer));
         assertSetupLive();
+        await awaitSetup(
+          waitForIceGatheringComplete(attemptConnection, setupAbortController.signal),
+        );
+        assertSetupLive();
+
+        // Only the post-gather local description is authoritative. Never fall
+        // back to `offer.sdp`: doing so silently reintroduces the candidate-free
+        // request that this wait is designed to prevent.
+        const finalizedOffer = attemptConnection.localDescription;
+        const offerSdp = finalizedOffer?.type === "offer" ? finalizedOffer.sdp : undefined;
+        if (!offerSdp) throw protocolError();
         const offerShape = summarizeSdpShape(offerSdp);
         diagnosticDetails = {
           ...diagnosticDetails,
@@ -1308,6 +1380,18 @@ export async function startRealtimeTranscription(
             isRetryableRealtimeCallStatus(response.status) &&
             attempt < REALTIME_CALL_MAX_ATTEMPTS
           ) {
+            // A generic 5xx or capacity response can be isolated to one
+            // Realtime transcription allocator even when the API project is
+            // otherwise healthy. Retry with OpenAI's other supported streaming
+            // transcription model, using a newly token-bound session. Network
+            // timeouts retain the current model because they do not establish
+            // that OpenAI reached model allocation.
+            if (
+              clientSecret.model === DICTATION_TRANSCRIPTION_MODEL &&
+              (response.status === 429 || response.status >= 500)
+            ) {
+              nextAttemptModel = DICTATION_FALLBACK_TRANSCRIPTION_MODEL;
+            }
             recordDiagnostic(
               "retrying",
               response.status === 429 ? "upstream_rate_limited" : "upstream_unavailable",
@@ -1325,7 +1409,7 @@ export async function startRealtimeTranscription(
             assertSetupLive();
             continue;
           }
-          throw realtimeCallResponseError(response.status);
+          throw realtimeCallResponseError(response.status, clientSecret.model);
         }
 
         const answerSdp = await awaitSetup(

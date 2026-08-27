@@ -1,5 +1,5 @@
 import { memo, type PointerEventHandler } from "react";
-import { MicIcon } from "lucide-react";
+import { LoaderCircleIcon, MicIcon, SquareIcon } from "lucide-react";
 
 import type { ComposerDictationPhase } from "~/hooks/useComposerDictation";
 import { cn } from "~/lib/utils";
@@ -52,13 +52,15 @@ export const ComposerDictationButton = memo(function ComposerDictationButton(pro
           : {})}
         onClick={props.onToggle}
       >
-        <MicIcon
-          aria-hidden="true"
-          className={cn(
-            "size-4",
-            (isRecording || isTransitioning) && "animate-pulse motion-reduce:animate-none",
-          )}
-        />
+        {isTransitioning ? (
+          <LoaderCircleIcon aria-hidden="true" className="size-4 animate-spin" />
+        ) : isRecording ? (
+          // Dictation has its own explicit stop affordance. The primary arrow
+          // remains a Send/queue action and never impersonates this control.
+          <SquareIcon aria-hidden="true" className="size-3 fill-current" />
+        ) : (
+          <MicIcon aria-hidden="true" className="size-4" />
+        )}
       </Button>
       <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {props.statusMessage}

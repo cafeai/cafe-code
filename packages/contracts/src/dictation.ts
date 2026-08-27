@@ -28,7 +28,24 @@ export const DictationSetApiKeyInput = Schema.Struct({
 export type DictationSetApiKeyInput = typeof DictationSetApiKeyInput.Type;
 
 export const DICTATION_TRANSCRIPTION_MODEL = "gpt-live-transcribe" as const;
-export const DictationTranscriptionModel = Schema.Literal(DICTATION_TRANSCRIPTION_MODEL);
+export const DICTATION_FALLBACK_TRANSCRIPTION_MODEL = "gpt-realtime-whisper" as const;
+export const DICTATION_TRANSCRIPTION_MODELS = [
+  DICTATION_TRANSCRIPTION_MODEL,
+  DICTATION_FALLBACK_TRANSCRIPTION_MODEL,
+] as const;
+export const DictationTranscriptionModel = Schema.Literals(DICTATION_TRANSCRIPTION_MODELS);
+export type DictationTranscriptionModel = typeof DictationTranscriptionModel.Type;
+
+/**
+ * The renderer may request only one of Cafe's audited streaming transcription
+ * models. Keeping this allowlist in the shared RPC schema prevents a modified
+ * client from turning the server-side API key into an unrestricted model
+ * credential minting proxy.
+ */
+export const DictationCreateClientSecretInput = Schema.Struct({
+  model: Schema.optional(DictationTranscriptionModel),
+});
+export type DictationCreateClientSecretInput = typeof DictationCreateClientSecretInput.Type;
 
 /**
  * Upstream error identifiers are provider-controlled strings. Diagnostics may

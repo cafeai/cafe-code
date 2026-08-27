@@ -1,4 +1,7 @@
-import type { DictationRealtimeClientSecret } from "@cafecode/contracts";
+import type {
+  DictationRealtimeClientSecret,
+  DictationTranscriptionModel,
+} from "@cafecode/contracts";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import {
@@ -32,7 +35,9 @@ interface ReplaceComposerRangeInput {
 interface UseComposerDictationInput {
   readonly enabled: boolean;
   readonly sessionKey: string;
-  readonly createClientSecret: () => Promise<DictationRealtimeClientSecret>;
+  readonly createClientSecret: (
+    model: DictationTranscriptionModel,
+  ) => Promise<DictationRealtimeClientSecret>;
   readonly readComposerSnapshot: () => ComposerSnapshot;
   readonly replaceComposerRange: (input: ReplaceComposerRangeInput) => boolean;
   readonly onError: (message: string) => void;
@@ -53,6 +58,13 @@ export interface ComposerDictationController {
   readonly phase: ComposerDictationPhase;
   readonly isEditingLocked: boolean;
   readonly statusMessage: string;
+  /**
+   * Finish any in-flight startup or recording and wait until the final,
+   * authoritative transcript has been applied to the composer. A false result
+   * means startup/finalization failed or the session was invalidated, so a
+   * caller must not submit the interim text that happened to be visible.
+   */
+  readonly finish: () => Promise<boolean>;
   readonly toggle: () => void;
 }
 
@@ -77,6 +89,8 @@ export function useComposerDictation(
   const generationRef = useRef(0);
   const sessionRef = useRef<RealtimeTranscriptionSession | null>(null);
   const pendingStartAbortRef = useRef<AbortController | null>(null);
+  const pendingStartPromiseRef = useRef<Promise<boolean> | null>(null);
+  const pendingFinalizationPromiseRef = useRef<Promise<boolean> | null>(null);
   const ownedRangeRef = useRef<ComposerDictationOwnedRange | null>(null);
   const reportedErrorGenerationRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
@@ -90,6 +104,8 @@ export function useComposerDictation(
     generationRef.current += 1;
     pendingStartAbortRef.current?.abort();
     pendingStartAbortRef.current = null;
+    pendingStartPromiseRef.current = null;
+    pendingFinalizationPromiseRef.current = null;
     sessionRef.current?.cancel();
     sessionRef.current = null;
     ownedRangeRef.current = null;
@@ -103,7 +119,7 @@ export function useComposerDictation(
     inputRef.current.onError(formatComposerDictationError(error));
   }, []);
 
-  const start = useCallback(async () => {
+  const start = useCallback(async (): Promise<boolean> => {
     const currentInput = inputRef.current;
     if (
       !currentInput.enabled ||
@@ -111,7 +127,7 @@ export function useComposerDictation(
       phaseRef.current === "recording" ||
       phaseRef.current === "finalizing"
     ) {
-      return;
+      return false;
     }
 
     const generation = generationRef.current + 1;
@@ -167,46 +183,90 @@ export function useComposerDictation(
 
       if (generationRef.current !== generation || abortController.signal.aborted) {
         session.cancel();
-        return;
+        return false;
       }
       pendingStartAbortRef.current = null;
       sessionRef.current = session;
       transition(sessionKey, "recording");
+      return true;
     } catch (error) {
-      if (generationRef.current !== generation) return;
+      if (generationRef.current !== generation) return false;
       pendingStartAbortRef.current = null;
       sessionRef.current = null;
       ownedRangeRef.current = null;
       if (error instanceof RealtimeTranscriptionError && error.code === "cancelled") {
         transition(sessionKey, "idle");
-        return;
+        return false;
       }
       transition(sessionKey, "error");
       reportErrorOnce(generation, error);
+      return false;
     }
   }, [reportErrorOnce, transition]);
 
-  const stop = useCallback(async () => {
+  const stop = useCallback((): Promise<boolean> => {
+    if (phaseRef.current === "finalizing") {
+      return pendingFinalizationPromiseRef.current ?? Promise.resolve(false);
+    }
+
     const session = sessionRef.current;
-    if (!session || phaseRef.current !== "recording") return;
+    if (!session || phaseRef.current !== "recording") {
+      return Promise.resolve(phaseRef.current === "idle");
+    }
 
     const generation = generationRef.current;
     const sessionKey = inputRef.current.sessionKey;
     transition(sessionKey, "finalizing");
-    try {
-      await session.stopAndFinalize();
-      if (generationRef.current !== generation) return;
-      sessionRef.current = null;
-      ownedRangeRef.current = null;
-      transition(sessionKey, "idle");
-    } catch (error) {
-      if (generationRef.current !== generation) return;
-      sessionRef.current = null;
-      ownedRangeRef.current = null;
-      transition(sessionKey, "error");
-      reportErrorOnce(generation, error);
-    }
+    const operation = (async (): Promise<boolean> => {
+      try {
+        await session.stopAndFinalize();
+        if (generationRef.current !== generation) return false;
+        sessionRef.current = null;
+        ownedRangeRef.current = null;
+        transition(sessionKey, "idle");
+        return true;
+      } catch (error) {
+        if (generationRef.current !== generation) return false;
+        sessionRef.current = null;
+        ownedRangeRef.current = null;
+        transition(sessionKey, "error");
+        reportErrorOnce(generation, error);
+        return false;
+      }
+    })();
+    pendingFinalizationPromiseRef.current = operation;
+    const clearOperation = () => {
+      if (pendingFinalizationPromiseRef.current === operation) {
+        pendingFinalizationPromiseRef.current = null;
+      }
+    };
+    // Both handlers deliberately consume the settlement. The operation itself
+    // is already sanitized to a boolean, but this also prevents a future
+    // refactor from turning this fire-and-forget cleanup into an unhandled
+    // rejection.
+    void operation.then(clearOperation, clearOperation);
+    return operation;
   }, [reportErrorOnce, transition]);
+
+  const finish = useCallback(async (): Promise<boolean> => {
+    const generation = generationRef.current;
+
+    if (phaseRef.current === "starting") {
+      const pendingStart = pendingStartPromiseRef.current;
+      if (!pendingStart || !(await pendingStart)) return false;
+      // A route/configuration change cancels the prior generation. Never let a
+      // delayed Send action submit text owned by that invalidated session.
+      if (generationRef.current !== generation) return false;
+    }
+
+    if (phaseRef.current === "recording") {
+      return stop();
+    }
+    if (phaseRef.current === "finalizing") {
+      return pendingFinalizationPromiseRef.current ?? false;
+    }
+    return phaseRef.current === "idle";
+  }, [stop]);
 
   const toggle = useCallback(() => {
     if (phaseRef.current === "recording") {
@@ -214,7 +274,14 @@ export function useComposerDictation(
       return;
     }
     if (phaseRef.current === "idle" || phaseRef.current === "error") {
-      void start();
+      const operation = start();
+      pendingStartPromiseRef.current = operation;
+      const clearOperation = () => {
+        if (pendingStartPromiseRef.current === operation) {
+          pendingStartPromiseRef.current = null;
+        }
+      };
+      void operation.then(clearOperation, clearOperation);
     }
   }, [start, stop]);
 
@@ -257,6 +324,7 @@ export function useComposerDictation(
             : phase === "error"
               ? "Dictation stopped"
               : "Dictation ready",
+    finish,
     toggle,
   };
 }

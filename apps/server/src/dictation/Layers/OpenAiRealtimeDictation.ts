@@ -6,6 +6,7 @@ import {
   type DictationEffectiveSessionProfile,
   DictationError,
   type DictationRealtimeClientSecret,
+  type DictationTranscriptionModel,
 } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -88,13 +89,16 @@ function isUnknownRecord(value: unknown): value is Record<string, unknown> {
  * The endpoint has historically omitted parts of this object, so absence is a
  * diagnostic result rather than a hard failure. Never retain the raw session.
  */
-function inspectEffectiveSessionProfile(audio: unknown): DictationEffectiveSessionProfile {
+function inspectEffectiveSessionProfile(
+  audio: unknown,
+  requestedModel: DictationTranscriptionModel,
+): DictationEffectiveSessionProfile {
   if (audio === undefined) return "not_reported";
   if (!isUnknownRecord(audio) || !isUnknownRecord(audio.input)) return "malformed";
 
   const input = audio.input;
   if (!isUnknownRecord(input.transcription)) return "malformed";
-  if (input.transcription.model !== DICTATION_TRANSCRIPTION_MODEL) return "model_mismatch";
+  if (input.transcription.model !== requestedModel) return "model_mismatch";
 
   if (!isUnknownRecord(input.format)) return "malformed";
   if (input.format.type !== "audio/pcm" || input.format.rate !== 24_000) {
@@ -195,6 +199,7 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
 
   const decodeSuccessfulResponse = (
     body: string,
+    requestedModel: DictationTranscriptionModel,
     diagnostics: {
       readonly requestId: string | null;
       readonly requestDurationMs: number;
@@ -232,12 +237,15 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
           ? Effect.succeed({
               clientSecret: decoded.value,
               expiresAt: decoded.expires_at,
-              model: DICTATION_TRANSCRIPTION_MODEL,
+              model: requestedModel,
               sessionProfile: DICTATION_SESSION_PROFILE,
               clientSecretRequestId: diagnostics.requestId,
               clientSecretRequestDurationMs: diagnostics.requestDurationMs,
               clientSecretOpenAiProcessingMs: diagnostics.openAiProcessingMs,
-              clientSecretEffectiveProfile: inspectEffectiveSessionProfile(decoded.session.audio),
+              clientSecretEffectiveProfile: inspectEffectiveSessionProfile(
+                decoded.session.audio,
+                requestedModel,
+              ),
             } satisfies DictationRealtimeClientSecret)
           : Effect.fail(
               sanitizedError(
@@ -303,6 +311,7 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
 
   const createClientSecret: OpenAiRealtimeDictationShape["createClientSecret"] = (input) =>
     Effect.gen(function* () {
+      const requestedModel = input.model ?? DICTATION_TRANSCRIPTION_MODEL;
       const apiKey = yield* readApiKey;
       if (apiKey === null) {
         return yield* sanitizedError(
@@ -331,10 +340,11 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
                 // controls are valid in isolation, but omitting them removes
                 // request variables while investigating opaque HTTP 500s from
                 // /v1/realtime/calls. Streaming delta events remain part of
-                // gpt-live-transcribe without those optional controls.
+                // both Cafe-audited streaming transcription models without
+                // those optional controls.
                 // https://developers.openai.com/api/docs/guides/realtime-transcription
                 transcription: {
-                  model: DICTATION_TRANSCRIPTION_MODEL,
+                  model: requestedModel,
                 },
                 turn_detection: null,
               },
@@ -391,7 +401,7 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
         );
       }
       const body = yield* readBoundedResponseText(response);
-      return yield* decodeSuccessfulResponse(body, {
+      return yield* decodeSuccessfulResponse(body, requestedModel, {
         requestId: normalizeOpenAiRequestId(response.headers["x-request-id"]),
         requestDurationMs,
         openAiProcessingMs: readOpenAiProcessingMs(response.headers["openai-processing-ms"]),

@@ -1,5 +1,6 @@
 import type {
   ApprovalRequestId,
+  DictationTranscriptionModel,
   EnvironmentId,
   ModelSelection,
   ProjectEntry,
@@ -1147,6 +1148,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const mobileComposerExpandInFlightRef = useRef(false);
   const dragDepthRef = useRef(0);
   const composerFileInputRef = useRef<HTMLInputElement>(null);
+  // A Send/queue action issued while dictation is active must cross exactly
+  // one finalization boundary. Keeping the single-flight here prevents a
+  // double click from dispatching the same final transcript twice while the
+  // microphone session is still committing its last audio buffer.
+  const pendingDictationComposerActionRef = useRef<Promise<void> | null>(null);
 
   // ------------------------------------------------------------------
   // Derived: composer send state
@@ -1791,7 +1797,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     draftId ?? routeThreadRef.threadId,
   ]);
   const createComposerDictationClientSecret = useCallback(
-    () => requireEnvironmentConnection(environmentId).client.dictation.createClientSecret(),
+    (model: DictationTranscriptionModel) =>
+      requireEnvironmentConnection(environmentId).client.dictation.createClientSecret({ model }),
     [environmentId],
   );
   const replaceComposerDictationRange = useCallback(
@@ -1818,13 +1825,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     replaceComposerRange: replaceComposerDictationRange,
     onError: reportComposerDictationError,
   });
+  const finishComposerDictation = composerDictation.finish;
   const composerEditorDisabled =
     isSendBusy ||
     isConnecting ||
     composerDictation.isEditingLocked ||
     isComposerApprovalState ||
     (environmentUnavailable !== null && activePendingProgress === null);
-  const isComposerPrimaryActionBusy = isSendBusy || composerDictation.isEditingLocked;
+  // Dictation owns its own connecting/recording/finalizing state. Reusing its
+  // transcript edit lock as the send button's busy state incorrectly rendered
+  // a "Sending" spinner before Cafe had dispatched any message.
+  const isComposerPrimaryActionBusy = isSendBusy;
   const previousComposerEditorDisabledRef = useRef(composerEditorDisabled);
 
   const resolveActiveComposerTrigger = useCallback((): {
@@ -2025,53 +2036,96 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     };
   }, [dismissMobileComposerKeyboard, isComposerFocused, isOnScreenKeyboardDevice]);
 
-  const submitComposer = useCallback(
-    (event?: { preventDefault: () => void }) => {
-      if (composerDictation.isEditingLocked) {
-        event?.preventDefault();
-        return;
-      }
+  const runComposerActionAfterDictation = useCallback(
+    (action: () => void | Promise<void>) => {
+      if (pendingDictationComposerActionRef.current) return;
+
+      const operation = (async () => {
+        // `finish` resolves only after OpenAI's authoritative final transcript
+        // has been applied through replaceComposerRange. Deferring `action`
+        // until then means onSend/onSteer re-read the final prompt rather than
+        // racing the interim text currently painted in the editor.
+        if (!(await finishComposerDictation())) return;
+        await action();
+      })();
+      pendingDictationComposerActionRef.current = operation;
+      const clearOperation = () => {
+        if (pendingDictationComposerActionRef.current === operation) {
+          pendingDictationComposerActionRef.current = null;
+        }
+      };
+      void operation.then(clearOperation, clearOperation);
+    },
+    [finishComposerDictation],
+  );
+
+  const runSubmitComposer = useCallback(
+    async (event?: { preventDefault: () => void }) => {
       const keepKeyboardClosed = isOnScreenKeyboardDevice;
       mobileDebugLog("submit-start", { keepKeyboardClosed, ...domSnapshot() });
-      void Promise.resolve(onSend(event)).finally(() => {
+      try {
+        await onSend(event);
+      } finally {
         mobileDebugLog("submit-settled", { keepKeyboardClosed, ...domSnapshot() });
         if (keepKeyboardClosed) {
           dismissMobileComposerKeyboard();
-          return;
+        } else {
+          requestComposerEditorFocus();
         }
-        requestComposerEditorFocus();
-      });
+      }
     },
-    [
-      composerDictation.isEditingLocked,
-      dismissMobileComposerKeyboard,
-      isOnScreenKeyboardDevice,
-      onSend,
-      requestComposerEditorFocus,
-    ],
+    [dismissMobileComposerKeyboard, isOnScreenKeyboardDevice, onSend, requestComposerEditorFocus],
   );
-  const steerComposer = useCallback(
+
+  const submitComposer = useCallback(
     (event?: { preventDefault: () => void }) => {
-      if (composerDictation.isEditingLocked) {
+      if (pendingDictationComposerActionRef.current) {
         event?.preventDefault();
         return;
       }
+      if (composerDictation.isEditingLocked) {
+        // Prevent the browser's native form submission immediately. The real
+        // send is intentionally issued without this short-lived event only
+        // after dictation finalization has committed the last transcript.
+        event?.preventDefault();
+        runComposerActionAfterDictation(() => runSubmitComposer());
+        return;
+      }
+      void runSubmitComposer(event);
+    },
+    [composerDictation.isEditingLocked, runComposerActionAfterDictation, runSubmitComposer],
+  );
+
+  const runSteerComposer = useCallback(
+    async (event?: { preventDefault: () => void }) => {
       const keepKeyboardClosed = isOnScreenKeyboardDevice;
-      void Promise.resolve(onSteer(event)).finally(() => {
+      try {
+        await onSteer(event);
+      } finally {
         if (keepKeyboardClosed) {
           dismissMobileComposerKeyboard();
-          return;
+        } else {
+          requestComposerEditorFocus();
         }
-        requestComposerEditorFocus();
-      });
+      }
     },
-    [
-      composerDictation.isEditingLocked,
-      dismissMobileComposerKeyboard,
-      isOnScreenKeyboardDevice,
-      onSteer,
-      requestComposerEditorFocus,
-    ],
+    [dismissMobileComposerKeyboard, isOnScreenKeyboardDevice, onSteer, requestComposerEditorFocus],
+  );
+
+  const steerComposer = useCallback(
+    (event?: { preventDefault: () => void }) => {
+      if (pendingDictationComposerActionRef.current) {
+        event?.preventDefault();
+        return;
+      }
+      if (composerDictation.isEditingLocked) {
+        event?.preventDefault();
+        runComposerActionAfterDictation(() => runSteerComposer());
+        return;
+      }
+      void runSteerComposer(event);
+    },
+    [composerDictation.isEditingLocked, runComposerActionAfterDictation, runSteerComposer],
   );
 
   useEffect(() => {

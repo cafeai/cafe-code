@@ -4,6 +4,7 @@ import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 
 import { ExternalLauncherError, LaunchEditorInput, LaunchTerminalInput } from "./editor.ts";
 import {
+  DictationCreateClientSecretInput,
   DictationCredentialStatus,
   DictationError,
   DictationRealtimeClientSecret,
@@ -276,7 +277,7 @@ export const WsDictationClearApiKeyRpc = Rpc.make(WS_METHODS.dictationClearApiKe
 });
 
 export const WsDictationCreateClientSecretRpc = Rpc.make(WS_METHODS.dictationCreateClientSecret, {
-  payload: Schema.Struct({}),
+  payload: DictationCreateClientSecretInput,
   success: DictationRealtimeClientSecret,
   error: DictationError,
 });

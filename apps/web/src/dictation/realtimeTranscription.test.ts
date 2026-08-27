@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type {
+  DictationRealtimeClientSecret,
+  DictationTranscriptionModel,
+} from "@cafecode/contracts";
 
 import { __dictationDiagnosticsTestApi, getDictationDiagnosticSnapshot } from "./diagnostics";
 
@@ -40,7 +44,11 @@ class FakeDataChannel extends EventTarget {
 
 class FakePeerConnection extends EventTarget {
   readonly offerSdp: string;
+  readonly finalizedOfferSdp: string;
   connectionState: RTCPeerConnectionState = "new";
+  iceGatheringState: RTCIceGatheringState = "new";
+  localDescription: RTCSessionDescription | null = null;
+  autoCompleteIceGathering = true;
   readonly channel = new FakeDataChannel();
   readonly addTrackMock = vi.fn();
   readonly closeMock = vi.fn();
@@ -60,6 +68,7 @@ class FakePeerConnection extends EventTarget {
     super();
     this.offerSdp =
       attempt === 1 ? "v=0\r\nt=test-offer\r\n" : `v=0\r\nt=test-offer-${attempt}\r\n`;
+    this.finalizedOfferSdp = `${this.offerSdp}a=candidate:${attempt} 1 udp 1 127.0.0.1 9 typ host\r\n`;
   }
 
   createDataChannel(label: string): RTCDataChannel {
@@ -72,6 +81,23 @@ class FakePeerConnection extends EventTarget {
 
   async setLocalDescription(description: RTCSessionDescriptionInit): Promise<void> {
     await this.setLocalDescriptionMock(description);
+    this.localDescription = {
+      type: "offer",
+      sdp: description.sdp ?? "",
+      toJSON: () => ({ type: "offer", sdp: description.sdp ?? "" }),
+    } as RTCSessionDescription;
+    this.iceGatheringState = "gathering";
+    if (this.autoCompleteIceGathering) this.finishIceGathering();
+  }
+
+  finishIceGathering(): void {
+    this.localDescription = {
+      type: "offer",
+      sdp: this.finalizedOfferSdp,
+      toJSON: () => ({ type: "offer", sdp: this.finalizedOfferSdp }),
+    } as RTCSessionDescription;
+    this.iceGatheringState = "complete";
+    this.dispatchEvent(new Event("icegatheringstatechange"));
   }
 
   async setRemoteDescription(description: RTCSessionDescriptionInit): Promise<void> {
@@ -318,12 +344,13 @@ describe("startRealtimeTranscription", () => {
     expect(url).toBe(OPENAI_REALTIME_CALLS_URL);
     expect(request).toMatchObject({
       method: "POST",
-      body: "v=0\r\nt=test-offer\r\n",
+      body: fixture.peer.finalizedOfferSdp,
       cache: "no-store",
       credentials: "omit",
       redirect: "error",
       referrerPolicy: "no-referrer",
     });
+    expect(request?.body).not.toBe(fixture.peer.offerSdp);
     expect((request?.headers as Record<string, string> | undefined)?.Authorization).toBe(
       "Bearer ephemeral-test-secret",
     );
@@ -343,8 +370,8 @@ describe("startRealtimeTranscription", () => {
       clientSecretOpenAiProcessingMs: 12,
       clientSecretEffectiveProfile: "matches",
       httpStatus: 200,
-      offerSdpBytes: 19,
-      offerSdpLineCount: 2,
+      offerCandidateCount: 1,
+      offerHasIceCandidate: true,
       answerSdpBytes: 20,
       answerSdpLineCount: 2,
       audioTrackCount: 1,
@@ -425,7 +452,7 @@ describe("startRealtimeTranscription", () => {
       attempts: 3,
       code: "upstream_unavailable",
       message:
-        "OpenAI returned a temporary HTTP 500 error while starting dictation. Cafe retried the request; try again shortly.",
+        "OpenAI could not allocate either supported Realtime dictation model (HTTP 500). The microphone is available; verify this key belongs to a paid API project with Realtime access, or retry shortly.",
     },
   ])(
     "maps an OpenAI $status SDP rejection by status without exposing its body",
@@ -437,7 +464,10 @@ describe("startRealtimeTranscription", () => {
 
       const rejected = expect(
         startRealtimeTranscription(
-          { getClientSecret: async () => validClientSecret, onTranscript: () => undefined },
+          {
+            getClientSecret: async (model) => ({ ...validClientSecret, model }),
+            onTranscript: () => undefined,
+          },
           fixture.dependencies,
         ),
       ).rejects;
@@ -462,9 +492,13 @@ describe("startRealtimeTranscription", () => {
       ],
     });
     const getClientSecret = vi
-      .fn<() => Promise<typeof validClientSecret>>()
+      .fn<(model: DictationTranscriptionModel) => Promise<DictationRealtimeClientSecret>>()
       .mockResolvedValueOnce({ ...validClientSecret, clientSecret: "ephemeral-attempt-1" })
-      .mockResolvedValueOnce({ ...validClientSecret, clientSecret: "ephemeral-attempt-2" });
+      .mockResolvedValueOnce({
+        ...validClientSecret,
+        clientSecret: "ephemeral-attempt-2",
+        model: "gpt-realtime-whisper",
+      });
 
     const session = await startRealtimeTranscription(
       { getClientSecret, onTranscript: () => undefined },
@@ -472,6 +506,7 @@ describe("startRealtimeTranscription", () => {
     );
 
     expect(getClientSecret).toHaveBeenCalledTimes(2);
+    expect(getClientSecret.mock.calls).toEqual([["gpt-live-transcribe"], ["gpt-realtime-whisper"]]);
     expect(fixture.getUserMedia).toHaveBeenCalledOnce();
     expect(fixture.fetchMock).toHaveBeenCalledTimes(2);
     expect(fixture.peers).toHaveLength(2);
@@ -479,8 +514,8 @@ describe("startRealtimeTranscription", () => {
     expect(fixture.peers[1]?.closeMock).not.toHaveBeenCalled();
     const firstRequest = fixture.fetchMock.mock.calls[0]?.[1];
     const secondRequest = fixture.fetchMock.mock.calls[1]?.[1];
-    expect(firstRequest?.body).toBe("v=0\r\nt=test-offer\r\n");
-    expect(secondRequest?.body).toBe("v=0\r\nt=test-offer-2\r\n");
+    expect(firstRequest?.body).toBe(fixture.peers[0]?.finalizedOfferSdp);
+    expect(secondRequest?.body).toBe(fixture.peers[1]?.finalizedOfferSdp);
     expect((firstRequest?.headers as Record<string, string>)?.Authorization).toBe(
       "Bearer ephemeral-attempt-1",
     );
@@ -806,6 +841,58 @@ describe("startRealtimeTranscription", () => {
     });
   });
 
+  it("cancels while ICE gathering is pending without posting stale SDP", async () => {
+    const fixture = makeDependencies();
+    const controller = new AbortController();
+    fixture.peer.autoCompleteIceGathering = false;
+
+    const started = startRealtimeTranscription(
+      {
+        getClientSecret: async () => validClientSecret,
+        onTranscript: () => undefined,
+        signal: controller.signal,
+      },
+      fixture.dependencies,
+    );
+    await vi.waitFor(() => expect(fixture.peer.iceGatheringState).toBe("gathering"));
+    controller.abort();
+
+    await expect(started).rejects.toMatchObject({ code: "cancelled" });
+    expect(fixture.fetchMock).not.toHaveBeenCalled();
+    expect(fixture.media.stop).toHaveBeenCalledOnce();
+    expect(fixture.peer.channel.closeMock).toHaveBeenCalledOnce();
+    expect(fixture.peer.closeMock).toHaveBeenCalledOnce();
+  });
+
+  it("times out pending ICE gathering and releases the microphone and peer", async () => {
+    const fixture = makeDependencies();
+    fixture.peer.autoCompleteIceGathering = false;
+    const setupTimeoutScheduled = createTestDeferred<() => void>();
+    const dependencies = {
+      ...fixture.dependencies,
+      setTimeout: (callback: () => void, delayMs: number) => {
+        expect(delayMs).toBe(20_000);
+        setupTimeoutScheduled.resolve(callback);
+        return 92;
+      },
+      clearTimeout: vi.fn(),
+    };
+
+    const started = startRealtimeTranscription(
+      { getClientSecret: async () => validClientSecret, onTranscript: () => undefined },
+      dependencies,
+    );
+    await vi.waitFor(() => expect(fixture.peer.iceGatheringState).toBe("gathering"));
+    const triggerSetupTimeout = await setupTimeoutScheduled.promise;
+    triggerSetupTimeout();
+
+    await expect(started).rejects.toMatchObject({ code: "connection_failed" });
+    expect(fixture.fetchMock).not.toHaveBeenCalled();
+    expect(fixture.media.stop).toHaveBeenCalledOnce();
+    expect(fixture.peer.channel.closeMock).toHaveBeenCalledOnce();
+    expect(fixture.peer.closeMock).toHaveBeenCalledOnce();
+  });
+
   it("settles an in-flight finalization immediately when the session is cancelled", async () => {
     const fixture = makeDependencies();
     const session = await startRealtimeTranscription(
@@ -844,11 +931,12 @@ describe("startRealtimeTranscription", () => {
       ),
     });
     let mintedSecretCount = 0;
-    const getClientSecret = vi.fn(async () => {
+    const getClientSecret = vi.fn(async (model: DictationTranscriptionModel) => {
       mintedSecretCount += 1;
       return {
         ...validClientSecret,
         clientSecret: `ephemeral-exhausted-${mintedSecretCount}`,
+        model,
       };
     });
 
@@ -861,19 +949,22 @@ describe("startRealtimeTranscription", () => {
     await rejected.toMatchObject({
       code: "upstream_unavailable",
       message:
-        "OpenAI returned a temporary HTTP 503 error while starting dictation. Cafe retried the request; try again shortly.",
+        "OpenAI could not allocate either supported Realtime dictation model (HTTP 503). The microphone is available; verify this key belongs to a paid API project with Realtime access, or retry shortly.",
     });
     await rejected.not.toMatchObject({ message: leakedDetail });
     expect(getClientSecret).toHaveBeenCalledTimes(3);
+    expect(getClientSecret.mock.calls).toEqual([
+      ["gpt-live-transcribe"],
+      ["gpt-realtime-whisper"],
+      ["gpt-realtime-whisper"],
+    ]);
     expect(fixture.getUserMedia).toHaveBeenCalledOnce();
     expect(fixture.fetchMock).toHaveBeenCalledTimes(3);
     expect(fixture.peers).toHaveLength(3);
     expect(fixture.peers.every((peer) => peer.closeMock.mock.calls.length === 1)).toBe(true);
-    expect(fixture.fetchMock.mock.calls.map(([, request]) => request?.body)).toEqual([
-      "v=0\r\nt=test-offer\r\n",
-      "v=0\r\nt=test-offer-2\r\n",
-      "v=0\r\nt=test-offer-3\r\n",
-    ]);
+    expect(fixture.fetchMock.mock.calls.map(([, request]) => request?.body)).toEqual(
+      fixture.peers.map((peer) => peer.finalizedOfferSdp),
+    );
     expect(fixture.waitForRetry).toHaveBeenCalledTimes(2);
     const diagnostic = getDictationDiagnosticSnapshot();
     expect(diagnostic).toMatchObject({

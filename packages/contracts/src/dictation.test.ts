@@ -6,12 +6,16 @@ import {
   DICTATION_API_KEY_MAX_CHARS,
   DICTATION_SESSION_PROFILE,
   DictationApiKey,
+  DictationCreateClientSecretInput,
   DictationProviderErrorCode,
   DictationProviderErrorType,
   DictationRealtimeClientSecret,
 } from "./dictation.ts";
 
 const decodeDictationApiKey = Schema.decodeUnknownEffect(DictationApiKey);
+const decodeDictationCreateClientSecretInput = Schema.decodeUnknownEffect(
+  DictationCreateClientSecretInput,
+);
 const decodeDictationRealtimeClientSecret = Schema.decodeUnknownEffect(
   DictationRealtimeClientSecret,
 );
@@ -49,6 +53,14 @@ describe("dictation contracts", () => {
       });
       assert.strictEqual(decoded.model, "gpt-live-transcribe");
       assert.strictEqual(decoded.sessionProfile, "transcription_pcm24k_minimal_v1");
+
+      const fallback = yield* decodeDictationRealtimeClientSecret({
+        clientSecret: "ek-short-lived-fallback",
+        expiresAt: 42,
+        model: "gpt-realtime-whisper",
+        sessionProfile: DICTATION_SESSION_PROFILE,
+      });
+      assert.strictEqual(fallback.model, "gpt-realtime-whisper");
 
       const legacyServerResponse = yield* decodeDictationRealtimeClientSecret({
         clientSecret: "ek-short-lived",
@@ -112,6 +124,21 @@ describe("dictation contracts", () => {
       );
       assert.isTrue(
         yield* decodeDictationProviderErrorCode("Bearer_provider_secret").pipe(
+          Effect.match({ onFailure: () => true, onSuccess: () => false }),
+        ),
+      );
+    }),
+  );
+
+  it.effect("allows only Cafe-audited streaming models for client-secret minting", () =>
+    Effect.gen(function* () {
+      assert.deepStrictEqual(yield* decodeDictationCreateClientSecretInput({}), {});
+      assert.deepStrictEqual(
+        yield* decodeDictationCreateClientSecretInput({ model: "gpt-realtime-whisper" }),
+        { model: "gpt-realtime-whisper" },
+      );
+      assert.isTrue(
+        yield* decodeDictationCreateClientSecretInput({ model: "arbitrary-expensive-model" }).pipe(
           Effect.match({ onFailure: () => true, onSuccess: () => false }),
         ),
       );
