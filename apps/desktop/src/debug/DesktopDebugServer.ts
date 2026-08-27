@@ -28,6 +28,47 @@ const PROCESS_DIAGNOSTIC_MESSAGE_LIMIT = 4_000;
 const PROCESS_DIAGNOSTIC_STACK_LIMIT = 16_000;
 const COMPACT_STRING_LIMIT = 240;
 const COMPACT_ARRAY_LIMIT = 12;
+const DICTATION_REQUEST_ID_LIMIT = 128;
+const DICTATION_REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]+$/u;
+const DICTATION_STAGES = new Set([
+  "client_secret",
+  "microphone",
+  "sdp_exchange",
+  "peer_connect",
+  "active",
+  "finalizing",
+  "closed",
+]);
+const DICTATION_OUTCOMES = new Set([
+  "starting",
+  "retrying",
+  "connected",
+  "completed",
+  "cancelled",
+  "failed",
+]);
+const DICTATION_ERROR_CODES = new Set([
+  "not_configured",
+  "not_authorized",
+  "insecure_transport",
+  "rate_limited",
+  "secret_store_failed",
+  "upstream_auth_failed",
+  "upstream_rate_limited",
+  "upstream_unavailable",
+  "upstream_invalid_response",
+  "cancelled",
+  "connection_failed",
+  "finalization_timeout",
+  "microphone_denied",
+  "microphone_unavailable",
+  "protocol_error",
+  "session_rejected",
+  "session_expired",
+  "session_setup_failed",
+  "transcript_conflict",
+  "unsupported",
+]);
 const KNOWN_SLOW_VALIDATION_TARGETS = [
   {
     target: "apps/server/src/git/GitManager.test.ts",
@@ -327,6 +368,62 @@ function compactCountedArray(value: unknown, limit = COMPACT_ARRAY_LIMIT): Recor
     count: value.length,
     items: value.slice(0, limit),
     omitted: Math.max(0, value.length - limit),
+  };
+}
+
+function readAllowlistedString(value: unknown, allowlist: ReadonlySet<string>): string | null {
+  return typeof value === "string" && allowlist.has(value) ? value : null;
+}
+
+function readBoundedInteger(value: unknown, minimum: number, maximum: number): number | null {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= minimum &&
+    value <= maximum
+    ? value
+    : null;
+}
+
+function readCanonicalIsoTimestamp(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const timestampMs = Date.parse(value);
+  return Number.isFinite(timestampMs) ? new Date(timestampMs).toISOString() : null;
+}
+
+/**
+ * Re-validate the renderer's dictation diagnostic at the desktop boundary.
+ * Renderer IPC is not a trusted source for debug output, so this function
+ * rebuilds the object field-by-field and cannot accidentally carry audio,
+ * transcripts, SDP, credentials, response bodies, or raw Error objects into
+ * the default `/debug` response.
+ */
+function summarizeDictationForCompactDebug(value: unknown): Record<string, unknown> | null {
+  const dictation = readRecord(value);
+  if (dictation === null) {
+    return null;
+  }
+
+  const requestId = readString(dictation.requestId);
+  return {
+    // Canonicalize instead of echoing the renderer string. Date.parse accepts
+    // multiple spellings; returning the source would create a covert path for
+    // arbitrary renderer text through an otherwise allowlisted field.
+    capturedAt: readCanonicalIsoTimestamp(dictation.capturedAt),
+    stage: readAllowlistedString(dictation.stage, DICTATION_STAGES),
+    outcome: readAllowlistedString(dictation.outcome, DICTATION_OUTCOMES),
+    attempt: readBoundedInteger(dictation.attempt, 1, 10),
+    maxAttempts: readBoundedInteger(dictation.maxAttempts, 1, 10),
+    httpStatus: readBoundedInteger(dictation.httpStatus, 100, 599),
+    requestId:
+      requestId !== null &&
+      requestId.length > 0 &&
+      requestId.length <= DICTATION_REQUEST_ID_LIMIT &&
+      DICTATION_REQUEST_ID_PATTERN.test(requestId)
+        ? requestId
+        : null,
+    errorCode: readAllowlistedString(dictation.errorCode, DICTATION_ERROR_CODES),
   };
 }
 
@@ -897,6 +994,7 @@ function summarizeRendererForCompactDebug(): Record<string, unknown> {
   const connection = readRecord(snapshot.connection);
   const usage = readRecord(snapshot.usage);
   const usageDetail = readRecord(usage?.detail);
+  const dictation = snapshot.dictation;
   const timelineScroll = readRecord(snapshot.timelineScroll);
 
   return {
@@ -966,6 +1064,7 @@ function summarizeRendererForCompactDebug(): Record<string, unknown> {
               lastTokenBreakdownCount: readNumber(usageDetail.lastTokenBreakdownCount),
             },
     },
+    dictation: summarizeDictationForCompactDebug(dictation),
     timelineScroll:
       timelineScroll === null
         ? null

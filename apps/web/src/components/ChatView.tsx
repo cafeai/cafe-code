@@ -110,6 +110,7 @@ import { getProviderModelCapabilities, resolveSelectableProvider } from "../prov
 import { useSettings } from "../hooks/useSettings";
 import { getWsConnectionDiagnostics } from "../rpc/wsConnectionState";
 import { getUsageStatsDetailDiagnostics } from "./stats/usageStatsDetailResource";
+import { getDictationDiagnosticSnapshot } from "../dictation/diagnostics";
 import { resolveAppModelSelectionForInstance } from "../modelSelection";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -3726,6 +3727,10 @@ export default function ChatView(props: ChatViewProps) {
       usage: {
         detail: usageDetailDiagnostics,
       },
+      // Dictation diagnostics are deliberately content-free. The source module
+      // exposes only bounded lifecycle metadata: never audio, transcripts, SDP,
+      // credentials, provider response bodies, or raw errors.
+      dictation: getDictationDiagnosticSnapshot(),
       timelineScroll: timelineScrollDebug,
       composer: composerDebugState,
       performance: {

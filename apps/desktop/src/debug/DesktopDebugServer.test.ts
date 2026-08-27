@@ -107,6 +107,22 @@ const makeLargeRendererSnapshot = (index: number) => ({
       payload: "usage payload secret",
     },
   },
+  dictation: {
+    capturedAt: "2026-08-27T10:00:00.000Z",
+    stage: "sdp_exchange",
+    outcome: "failed",
+    attempt: 3,
+    maxAttempts: 3,
+    httpStatus: 503,
+    requestId: "req_safe-123",
+    errorCode: "upstream_unavailable",
+    transcript: `dictation-transcript-secret-${index}`,
+    audio: `dictation-audio-secret-${index}`,
+    sdp: `dictation-sdp-secret-${index}`,
+    credential: `dictation-credential-secret-${index}`,
+    responseBody: `dictation-response-secret-${index}`,
+    rawError: { message: `dictation-error-secret-${index}` },
+  },
   performance: {
     rendererSnapshotBuildDurationMs: 12,
     activeThread: {
@@ -291,6 +307,12 @@ describe("DesktopDebugServer compact snapshots", () => {
     assert.equal(compactJson.includes("bearer secret"), false);
     assert.equal(compactJson.includes("recent event secret"), false);
     assert.equal(compactJson.includes("usage payload secret"), false);
+    assert.equal(compactJson.includes("dictation-transcript-secret"), false);
+    assert.equal(compactJson.includes("dictation-audio-secret"), false);
+    assert.equal(compactJson.includes("dictation-sdp-secret"), false);
+    assert.equal(compactJson.includes("dictation-credential-secret"), false);
+    assert.equal(compactJson.includes("dictation-response-secret"), false);
+    assert.equal(compactJson.includes("dictation-error-secret"), false);
     assert.equal(compactJson.includes("daemon stream secret"), false);
     assert.equal(compactJson.includes('"laggingDisconnectCount":7'), true);
     assert.equal(compactJson.includes('"lastDurationMs":5123'), true);
@@ -298,7 +320,49 @@ describe("DesktopDebugServer compact snapshots", () => {
     assert.equal(compactJson.includes("ultra"), true);
     assert.equal(compactJson.includes("provider-running-tool"), true);
     assert.equal(compactJson.includes("debug-pruned"), true);
+    assert.deepEqual((compact.renderer as Record<string, unknown>).dictation, {
+      capturedAt: "2026-08-27T10:00:00.000Z",
+      stage: "sdp_exchange",
+      outcome: "failed",
+      attempt: 3,
+      maxAttempts: 3,
+      httpStatus: 503,
+      requestId: "req_safe-123",
+      errorCode: "upstream_unavailable",
+    });
     assert.ok(Buffer.byteLength(compactJson, "utf8") < 80_000);
+  });
+
+  it("rejects malformed dictation diagnostic fields at the desktop boundary", () => {
+    debugServer.reset();
+    debugServer.publishRendererSnapshot({
+      ...makeLargeRendererSnapshot(1),
+      dictation: {
+        capturedAt: "not-a-timestamp",
+        stage: "transcript-secret",
+        outcome: "provider-body-secret",
+        attempt: 999,
+        maxAttempts: -1,
+        httpStatus: 999,
+        requestId: "req unsafe Authorization bearer-secret",
+        errorCode: "raw-provider-error-secret",
+      },
+    });
+
+    const compact = debugServer.buildCompactDebugSnapshot();
+
+    assert.deepEqual((compact.renderer as Record<string, unknown>).dictation, {
+      capturedAt: null,
+      stage: null,
+      outcome: null,
+      attempt: null,
+      maxAttempts: null,
+      httpStatus: null,
+      requestId: null,
+      errorCode: null,
+    });
+    assert.equal(JSON.stringify(compact).includes("bearer-secret"), false);
+    assert.equal(JSON.stringify(compact).includes("raw-provider-error-secret"), false);
   });
 
   it("keeps full debug explicit for local forensic reads", () => {
