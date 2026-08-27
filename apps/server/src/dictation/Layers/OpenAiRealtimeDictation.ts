@@ -8,6 +8,7 @@ import {
   type DictationRealtimeClientSecret,
   type DictationTranscriptionModel,
 } from "@cafecode/contracts";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -17,6 +18,7 @@ import * as Stream from "effect/Stream";
 import {
   FetchHttpClient,
   HttpClient,
+  HttpClientError,
   HttpClientRequest,
   HttpClientResponse,
 } from "effect/unstable/http";
@@ -31,7 +33,11 @@ const OPENAI_API_KEY_SECRET_NAME = "openai-realtime-api-key";
 const OPENAI_CLIENT_SECRET_URL = "https://api.openai.com/v1/realtime/client_secrets";
 const CLIENT_SECRET_TTL_SECONDS = 60;
 const UPSTREAM_TIMEOUT_MS = 10_000;
-const MAX_UPSTREAM_RESPONSE_BYTES = 64 * 1024;
+const UPSTREAM_BODY_TIMEOUT_MS = 10_000;
+// A 429 body is advisory: its exact structured discriminator can improve the
+// user-facing diagnosis, but it must never delay the known rate-limit status.
+const UPSTREAM_ERROR_BODY_INSPECTION_TIMEOUT_MS = 250;
+const MAX_UPSTREAM_RESPONSE_BYTES = 64 * 1_024;
 const ISSUANCE_WINDOW_MS = 60_000;
 // One user-visible start can mint up to three independent call attempts. Keep
 // enough headroom for a few deliberate retries while still bounding a buggy or
@@ -283,12 +289,27 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
             });
       },
     ).pipe(
-      Effect.mapError(() =>
-        sanitizedError(
-          "upstream_invalid_response",
-          "OpenAI returned an invalid dictation session response.",
-        ),
-      ),
+      Effect.catchCause((cause) => {
+        if (Cause.hasInterruptsOnly(cause)) return Effect.interrupt;
+        const error = Option.getOrUndefined(Cause.findErrorOption(cause));
+        // A response is allowed to have no body. In particular, authentication
+        // and configuration failures may legitimately be header-only, and the
+        // HTTP status still carries enough information for a safe fixed error.
+        if (
+          error !== undefined &&
+          HttpClientError.isHttpClientError(error) &&
+          error.reason._tag === "EmptyBodyError"
+        ) {
+          return Effect.succeed({ chunks: [], byteLength: 0 });
+        }
+        // Preserve deliberate size-limit failures. Transport/decode failures
+        // from the body stream are availability failures instead; classifying
+        // them as malformed provider data would incorrectly suppress retries.
+        if (error instanceof DictationError) return Effect.fail(error);
+        return Effect.fail(
+          sanitizedError("upstream_unavailable", "OpenAI did not finish its dictation response."),
+        );
+      }),
       Effect.flatMap(({ chunks, byteLength }) =>
         Effect.try({
           try: () => {
@@ -307,7 +328,162 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
             ),
         }),
       ),
+      // Fetch resolves once response headers arrive. Bound the subsequent body
+      // drain separately so a peer that sends headers and then stalls cannot
+      // pin a WebSocket RPC fiber indefinitely.
+      Effect.timeoutOption(UPSTREAM_BODY_TIMEOUT_MS),
+      Effect.flatMap(
+        Option.match({
+          onNone: () =>
+            Effect.fail(
+              sanitizedError(
+                "upstream_unavailable",
+                "OpenAI did not finish its dictation response.",
+              ),
+            ),
+          onSome: Effect.succeed,
+        }),
+      ),
     );
+
+  /**
+   * OpenAI uses the structured `insufficient_quota` code when a project has
+   * no API credits. We inspect only that exact allowlisted discriminator and
+   * immediately discard the provider body. Messages and all other fields are
+   * deliberately ignored because they may contain account-specific details.
+   */
+  const responseReportsInsufficientQuota = (body: string): boolean => {
+    try {
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      const decoded: unknown = JSON.parse(body);
+      if (!isUnknownRecord(decoded) || !isUnknownRecord(decoded.error)) return false;
+      return (
+        decoded.error.code === "insufficient_quota" || decoded.error.type === "insufficient_quota"
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * Rejected bodies are not useful after their fixed HTTP classification. Run
+   * the same capped reader in a detached, bounded fiber so small bodies drain
+   * for connection reuse while stalled or oversized bodies are cancelled by
+   * the reader timeout/limit. Every failure is swallowed inside the fiber so
+   * provider-controlled details cannot escape through logs or error causes.
+   */
+  const startRejectedResponseCleanup = (
+    response: HttpClientResponse.HttpClientResponse,
+  ): Effect.Effect<void> =>
+    readBoundedResponseText(response).pipe(
+      Effect.catchCause(() => Effect.void),
+      Effect.forkDetach({ startImmediately: true }),
+      Effect.asVoid,
+    );
+
+  /**
+   * Only a complete, bounded, valid JSON body may refine HTTP 429 into the
+   * non-retryable quota code. Any stall, stream failure, overflow, malformed
+   * UTF-8, or malformed JSON keeps the authoritative rate-limit fallback.
+   */
+  const inspectRateLimitQuota = (
+    response: HttpClientResponse.HttpClientResponse,
+  ): Effect.Effect<boolean> =>
+    readBoundedResponseText(response).pipe(
+      Effect.timeoutOption(UPSTREAM_ERROR_BODY_INSPECTION_TIMEOUT_MS),
+      Effect.map(
+        Option.match({
+          onNone: () => false,
+          onSome: responseReportsInsufficientQuota,
+        }),
+      ),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause) ? Effect.interrupt : Effect.succeed(false),
+      ),
+    );
+
+  const executeUpstreamRequest = (
+    request: HttpClientRequest.HttpClientRequest,
+  ): Effect.Effect<
+    {
+      readonly response: HttpClientResponse.HttpClientResponse;
+      readonly requestDurationMs: number;
+    },
+    DictationError
+  > =>
+    Effect.gen(function* () {
+      // Redirects are forbidden so the permanent credential can never follow
+      // an upstream Location header. Tracing is disabled because transport
+      // failures may retain the request object, including Authorization.
+      const requestStartedAt = Date.now();
+      const responseOption = yield* httpClient.execute(request).pipe(
+        Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
+        Effect.provideService(References.TracerEnabled, false),
+        Effect.timeoutOption(UPSTREAM_TIMEOUT_MS),
+        Effect.mapError(() =>
+          sanitizedError("upstream_unavailable", "Cafe could not reach OpenAI to start dictation."),
+        ),
+      );
+      if (Option.isNone(responseOption)) {
+        return yield* sanitizedError(
+          "upstream_unavailable",
+          "OpenAI did not respond while starting dictation.",
+        );
+      }
+      return {
+        response: responseOption.value,
+        requestDurationMs: normalizeDurationMs(Date.now() - requestStartedAt),
+      };
+    });
+
+  const requireSuccessfulUpstreamResponse = (
+    response: HttpClientResponse.HttpClientResponse,
+  ): Effect.Effect<void, DictationError> =>
+    Effect.gen(function* () {
+      if (response.status >= 200 && response.status < 300) return;
+
+      if (response.status === 429) {
+        if (yield* inspectRateLimitQuota(response)) {
+          return yield* sanitizedError(
+            "upstream_quota_exhausted",
+            "This OpenAI API project has no available credits for dictation.",
+          );
+        }
+        return yield* sanitizedError(
+          "upstream_rate_limited",
+          "OpenAI is rate limiting dictation. Please try again shortly.",
+        );
+      }
+
+      // HTTP status is authoritative for every other rejection. Cleanup must
+      // not make a known auth, billing, or configuration response look like a
+      // transient body transport failure.
+      yield* startRejectedResponseCleanup(response);
+      if (response.status === 401 || response.status === 403) {
+        return yield* sanitizedError(
+          "upstream_auth_failed",
+          "OpenAI rejected the saved dictation credential.",
+        );
+      }
+      if (response.status === 402) {
+        return yield* sanitizedError(
+          "upstream_quota_exhausted",
+          "This OpenAI API project has no available credits for dictation.",
+        );
+      }
+      if (response.status >= 400 && response.status < 500 && response.status !== 408) {
+        return yield* sanitizedError(
+          "upstream_invalid_response",
+          "OpenAI rejected Cafe's dictation configuration.",
+        );
+      }
+      if (response.status < 200 || response.status >= 300) {
+        return yield* sanitizedError(
+          "upstream_unavailable",
+          "OpenAI could not start a dictation session.",
+        );
+      }
+    });
 
   const createClientSecret: OpenAiRealtimeDictationShape["createClientSecret"] = (input) =>
     Effect.gen(function* () {
@@ -336,12 +512,9 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
               input: {
                 format: { type: "audio/pcm", rate: 24_000 },
                 // Keep the token-bound profile at OpenAI's documented minimal
-                // transcription shape. Optional noise-reduction and delay
-                // controls are valid in isolation, but omitting them removes
-                // request variables while investigating opaque HTTP 500s from
-                // /v1/realtime/calls. Streaming delta events remain part of
-                // both Cafe-audited streaming transcription models without
-                // those optional controls.
+                // transcription shape. Optional controls are omitted so the
+                // short-lived credential grants only the capabilities Cafe's
+                // renderer requires for streaming transcription.
                 // https://developers.openai.com/api/docs/guides/realtime-transcription
                 transcription: {
                   model: requestedModel,
@@ -353,46 +526,10 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
         }),
       );
 
-      // `redirect: manual` prevents a credential-bearing request from ever
-      // following an upstream redirect. Tracing is disabled because transport
-      // errors may retain the request object (and therefore Authorization).
-      const requestStartedAt = Date.now();
-      const responseOption = yield* httpClient.execute(request).pipe(
-        Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
-        Effect.provideService(References.TracerEnabled, false),
-        Effect.timeoutOption(UPSTREAM_TIMEOUT_MS),
-        Effect.mapError(() =>
-          sanitizedError("upstream_unavailable", "Cafe could not reach OpenAI to start dictation."),
-        ),
-      );
-      if (Option.isNone(responseOption)) {
-        return yield* sanitizedError(
-          "upstream_unavailable",
-          "OpenAI did not respond while starting dictation.",
-        );
-      }
+      const { response, requestDurationMs } = yield* executeUpstreamRequest(request);
+      yield* requireSuccessfulUpstreamResponse(response);
 
-      const response = responseOption.value;
-      const requestDurationMs = normalizeDurationMs(Date.now() - requestStartedAt);
-      if (response.status === 401 || response.status === 403) {
-        return yield* sanitizedError(
-          "upstream_auth_failed",
-          "OpenAI rejected the saved dictation credential.",
-        );
-      }
-      if (response.status === 429) {
-        return yield* sanitizedError(
-          "upstream_rate_limited",
-          "OpenAI is rate limiting dictation. Please try again shortly.",
-        );
-      }
-      if (response.status < 200 || response.status >= 300) {
-        return yield* sanitizedError(
-          "upstream_unavailable",
-          "OpenAI could not start a dictation session.",
-        );
-      }
-
+      const body = yield* readBoundedResponseText(response);
       const declaredLength = Number.parseInt(response.headers["content-length"] ?? "", 10);
       if (Number.isFinite(declaredLength) && declaredLength > MAX_UPSTREAM_RESPONSE_BYTES) {
         return yield* sanitizedError(
@@ -400,7 +537,6 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
           "OpenAI returned an invalid dictation session response.",
         );
       }
-      const body = yield* readBoundedResponseText(response);
       return yield* decodeSuccessfulResponse(body, requestedModel, {
         requestId: normalizeOpenAiRequestId(response.headers["x-request-id"]),
         requestDurationMs,

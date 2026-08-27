@@ -143,7 +143,6 @@ describe("dictation diagnostics", () => {
 
   it("retains a bounded per-attempt timeline with safe handshake and peer metadata", () => {
     const recordDiagnostic = beginDictationDiagnosticOperation();
-    const digest = "A".repeat(64);
 
     recordDiagnostic({
       nowMs: 1_000,
@@ -188,7 +187,6 @@ describe("dictation diagnostics", () => {
       providerErrorType: "server_error",
       providerErrorCode: "internal_error",
       responseBodyBytes: 98,
-      responseBodySha256: digest,
       responseBodyTruncated: true,
       errorCode: "upstream_unavailable",
     });
@@ -212,7 +210,6 @@ describe("dictation diagnostics", () => {
       requestId: "req_attempt-2",
       responseContentTypeCategory: "sdp",
       responseBodyBytes: 864,
-      responseBodySha256: "b".repeat(64),
       answerSdpBytes: 864,
       answerSdpLineCount: 20,
       answerMediaSectionCount: 2,
@@ -270,7 +267,6 @@ describe("dictation diagnostics", () => {
       httpStatus: 500,
       providerErrorType: "server_error",
       providerErrorCode: "internal_error",
-      responseBodySha256: digest.toLowerCase(),
       responseBodyTruncated: true,
     });
     expect(Object.isFrozen(snapshot)).toBe(true);
@@ -309,7 +305,6 @@ describe("dictation diagnostics", () => {
       providerErrorType: "sk_provider_type_secret",
       providerErrorCode: "Bearer_provider_code_secret",
       responseBodyBytes: -1,
-      responseBodySha256: providerSecret,
       responseBodyTruncated: "provider-truncation-secret" as never,
       sessionProfile: "transcription_pcm24k_minimal_v1_debug",
       clientSecretModel: "gpt-live-transcribe-preview",
@@ -339,7 +334,6 @@ describe("dictation diagnostics", () => {
       providerErrorType: "other",
       providerErrorCode: "other",
       responseBodyBytes: null,
-      responseBodySha256: null,
       responseBodyTruncated: null,
       sessionProfile: null,
       clientSecretModel: null,
@@ -363,6 +357,27 @@ describe("dictation diagnostics", () => {
     expect(JSON.stringify(snapshot)).not.toContain("provider-opus-secret");
     expect(JSON.stringify(snapshot)).not.toContain("provider-echo-secret");
     expect(JSON.stringify(snapshot)).not.toContain("provider-profile-secret");
+  });
+
+  it("retains only the fixed quota category and error code", () => {
+    const recordDiagnostic = beginDictationDiagnosticOperation();
+    recordDiagnostic({
+      nowMs: 10,
+      stage: "sdp_exchange",
+      outcome: "failed",
+      httpStatus: 429,
+      providerErrorType: "insufficient_quota",
+      providerErrorCode: "insufficient_quota",
+      responseBodyBytes: 128,
+      responseBodyTruncated: false,
+      errorCode: "upstream_quota_exhausted",
+    });
+
+    expect(getDictationDiagnosticSnapshot()).toMatchObject({
+      providerErrorType: "insufficient_quota",
+      providerErrorCode: "insufficient_quota",
+      errorCode: "upstream_quota_exhausted",
+    });
   });
 
   it("ignores a late update from an older dictation operation", () => {

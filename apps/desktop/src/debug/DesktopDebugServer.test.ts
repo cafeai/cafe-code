@@ -126,7 +126,6 @@ const makeLargeRendererSnapshot = (index: number) => ({
     providerErrorType: "server_error",
     providerErrorCode: "internal_error",
     responseBodyBytes: 98,
-    responseBodySha256: "A".repeat(64),
     responseBodyTruncated: true,
     sessionProfile: "transcription_pcm24k_minimal_v1",
     clientSecretModel: "gpt-realtime-whisper",
@@ -182,7 +181,6 @@ const makeLargeRendererSnapshot = (index: number) => ({
         requestId: "req_timeline-1",
         responseContentTypeCategory: "json",
         responseBodyBytes: 98,
-        responseBodySha256: "B".repeat(64),
         responseBodyTruncated: true,
         providerErrorType: "server_error",
         providerErrorCode: "internal_error",
@@ -421,7 +419,6 @@ describe("DesktopDebugServer compact snapshots", () => {
       providerErrorType: "server_error",
       providerErrorCode: "internal_error",
       responseBodyBytes: 98,
-      responseBodySha256: "a".repeat(64),
       responseBodyTruncated: true,
       sessionProfile: "transcription_pcm24k_minimal_v1",
       clientSecretModel: "gpt-realtime-whisper",
@@ -477,7 +474,6 @@ describe("DesktopDebugServer compact snapshots", () => {
       httpStatus: 500,
       requestId: "req_timeline-1",
       responseBodyBytes: 98,
-      responseBodySha256: "b".repeat(64),
       responseBodyTruncated: true,
       providerErrorType: "server_error",
       providerErrorCode: "internal_error",
@@ -509,7 +505,6 @@ describe("DesktopDebugServer compact snapshots", () => {
         providerErrorType: "sk_provider_type_secret",
         providerErrorCode: "Bearer_provider_code_secret",
         responseBodyBytes: -1,
-        responseBodySha256: "provider-body-secret",
         responseBodyTruncated: "provider-truncation-secret",
         sessionProfile: "transcription_pcm24k_minimal_v1_debug",
         clientSecretModel: "gpt-live-transcribe-preview",
@@ -589,7 +584,6 @@ describe("DesktopDebugServer compact snapshots", () => {
       providerErrorType: "other",
       providerErrorCode: "other",
       responseBodyBytes: null,
-      responseBodySha256: null,
       responseBodyTruncated: null,
       sessionProfile: null,
       clientSecretModel: null,
@@ -653,6 +647,37 @@ describe("DesktopDebugServer compact snapshots", () => {
     assert.equal(compactJson.includes("nested response body secret"), false);
   });
 
+  it("preserves the fixed dictation quota error category", () => {
+    debugServer.reset();
+    debugServer.publishRendererSnapshot({
+      ...makeLargeRendererSnapshot(1),
+      dictation: {
+        capturedAt: "2026-08-27T10:00:00.000Z",
+        stage: "sdp_exchange",
+        outcome: "failed",
+        httpStatus: 429,
+        providerErrorType: "insufficient_quota",
+        providerErrorCode: "insufficient_quota",
+        responseBodyBytes: 128,
+        responseBodyTruncated: false,
+        errorCode: "upstream_quota_exhausted",
+        timeline: [],
+        omittedTimelineEntryCount: 0,
+      },
+    });
+
+    const compact = debugServer.buildCompactDebugSnapshot();
+    const compactDictation = (compact.renderer as Record<string, unknown>).dictation as Record<
+      string,
+      unknown
+    >;
+    assert.deepInclude(compactDictation, {
+      providerErrorType: "insufficient_quota",
+      providerErrorCode: "insufficient_quota",
+      errorCode: "upstream_quota_exhausted",
+    });
+  });
+
   it("revalidates and caps an oversized renderer dictation timeline", () => {
     debugServer.reset();
     debugServer.publishRendererSnapshot({
@@ -676,7 +701,6 @@ describe("DesktopDebugServer compact snapshots", () => {
           maxAttempts: 3,
           httpStatus: 500,
           requestId: `req_timeline-${index}`,
-          responseBodySha256: index.toString(16).padStart(64, "0"),
           errorCode: "upstream_unavailable",
           responseBody: `oversized-timeline-provider-secret-${index}`,
         })),

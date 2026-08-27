@@ -58,6 +58,7 @@ export const DICTATION_PROVIDER_ERROR_TYPES = [
   "invalid_request_error",
   "server_error",
   "transcription_error",
+  "insufficient_quota",
   "other",
 ] as const;
 export const DictationProviderErrorType = Schema.Literals(DICTATION_PROVIDER_ERROR_TYPES);
@@ -68,6 +69,7 @@ export const DICTATION_PROVIDER_ERROR_CODES = [
   "internal_error",
   "audio_unintelligible",
   "allocation_failed",
+  "insufficient_quota",
   "other",
 ] as const;
 export const DictationProviderErrorCode = Schema.Literals(DICTATION_PROVIDER_ERROR_CODES);
@@ -128,6 +130,7 @@ export const DictationErrorCode = Schema.Literals([
   "rate_limited",
   "secret_store_failed",
   "upstream_auth_failed",
+  "upstream_quota_exhausted",
   "upstream_rate_limited",
   "upstream_unavailable",
   "upstream_invalid_response",

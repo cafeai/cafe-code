@@ -1,6 +1,8 @@
 import { assert, describe, it, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
 
 import {
@@ -31,6 +33,7 @@ function makeTestLayer(
         },
       },
       {
+        status: 201,
         headers: {
           "openai-processing-ms": "12.4",
           "x-request-id": "req_mint-safe_123",
@@ -192,6 +195,155 @@ describe("OpenAiRealtimeDictationLive", () => {
     }).pipe(Effect.provide(layer));
   });
 
+  it.effect("maps exhausted API credits separately from transient 429 responses", () => {
+    let requestCount = 0;
+    const { layer } = makeTestLayer(() => {
+      requestCount += 1;
+      return requestCount === 1
+        ? new Response(
+            JSON.stringify({
+              error: {
+                type: "insufficient_quota",
+                code: "insufficient_quota",
+                message: "provider account details must never surface",
+              },
+            }),
+            { status: 429 },
+          )
+        : new Response(JSON.stringify({ error: { type: "rate_limit_error" } }), {
+            status: 429,
+          });
+    });
+    return Effect.gen(function* () {
+      const dictation = yield* OpenAiRealtimeDictation;
+      yield* dictation.setApiKey("sk-quota-secret");
+      const quotaError = yield* Effect.flip(
+        dictation.createClientSecret({ safetyIdentifier: "quota-session" }),
+      );
+      assert.strictEqual(quotaError.code, "upstream_quota_exhausted");
+      assert.notInclude(JSON.stringify(quotaError), "provider account details");
+      assert.notInclude(JSON.stringify(quotaError), "sk-quota-secret");
+
+      const transientError = yield* Effect.flip(
+        dictation.createClientSecret({ safetyIdentifier: "rate-session" }),
+      );
+      assert.strictEqual(transientError.code, "upstream_rate_limited");
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("preserves a known quota status without waiting for its stalled body", () => {
+    let closeBody: (() => void) | undefined;
+    const stalled = makeTestLayer(
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(encoder.encode('{"error":{"type":"billing"'));
+              closeBody = () => controller.close();
+            },
+          }),
+          { status: 402, headers: { "content-type": "application/json" } },
+        ),
+    );
+    return Effect.gen(function* () {
+      const dictation = yield* OpenAiRealtimeDictation;
+      yield* dictation.setApiKey("sk-stalled-secret");
+      const fiber = yield* Effect.flip(
+        dictation.createClientSecret({ safetyIdentifier: "stalled-session" }),
+      ).pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Effect.yieldNow;
+      assert.isDefined(fiber.pollUnsafe());
+      const error = yield* Fiber.join(fiber);
+      assert.strictEqual(error.code, "upstream_quota_exhausted");
+      assert.notInclude(JSON.stringify(error), "sk-stalled-secret");
+      yield* Effect.sync(() => closeBody?.());
+    }).pipe(Effect.provide(stalled.layer), Effect.provide(TestClock.layer()));
+  });
+
+  it.effect("keeps stalled, failed, and oversized 429 bodies rate limited", () => {
+    let requestCount = 0;
+    let stalledBodyCancelled = false;
+    const leakedDetail = "provider-429-stream-failure-must-not-surface";
+    const responses = makeTestLayer(() => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(encoder.encode('{"error":{"type":"insufficient_quota"'));
+            },
+            cancel() {
+              stalledBodyCancelled = true;
+            },
+          }),
+          { status: 429, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (requestCount === 2) {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              controller.error(new Error(leakedDetail));
+            },
+          }),
+          { status: 429, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response("x".repeat(65 * 1_024), { status: 429 });
+    });
+    return Effect.gen(function* () {
+      const dictation = yield* OpenAiRealtimeDictation;
+      yield* dictation.setApiKey("sk-429-secret");
+
+      const stalledFiber = yield* Effect.flip(
+        dictation.createClientSecret({ safetyIdentifier: "stalled-429-session" }),
+      ).pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Effect.yieldNow;
+      assert.isUndefined(stalledFiber.pollUnsafe());
+      yield* TestClock.adjust("250 millis");
+      const stalledError = yield* Fiber.join(stalledFiber);
+      assert.strictEqual(stalledError.code, "upstream_rate_limited");
+      assert.isTrue(stalledBodyCancelled);
+
+      const failedError = yield* Effect.flip(
+        dictation.createClientSecret({ safetyIdentifier: "failed-429-session" }),
+      );
+      assert.strictEqual(failedError.code, "upstream_rate_limited");
+      assert.notInclude(JSON.stringify(failedError), leakedDetail);
+
+      const oversizedError = yield* Effect.flip(
+        dictation.createClientSecret({ safetyIdentifier: "oversized-429-session" }),
+      );
+      assert.strictEqual(oversizedError.code, "upstream_rate_limited");
+      assert.notInclude(JSON.stringify(oversizedError), "sk-429-secret");
+    }).pipe(Effect.provide(responses.layer), Effect.provide(TestClock.layer()));
+  });
+
+  it.effect("maps body-stream transport failures to availability errors", () => {
+    const leakedDetail = "provider-stream-failure-must-not-surface";
+    const failed = makeTestLayer(
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              controller.error(new Error(leakedDetail));
+            },
+          }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        ),
+    );
+    return Effect.gen(function* () {
+      const dictation = yield* OpenAiRealtimeDictation;
+      yield* dictation.setApiKey("sk-stream-secret");
+      const error = yield* Effect.flip(
+        dictation.createClientSecret({ safetyIdentifier: "stream-failure-session" }),
+      );
+      assert.strictEqual(error.code, "upstream_unavailable");
+      assert.notInclude(JSON.stringify(error), leakedDetail);
+      assert.notInclude(JSON.stringify(error), "sk-stream-secret");
+    }).pipe(Effect.provide(failed.layer));
+  });
+
   it.effect("maps upstream failures to bounded public errors without response details", () => {
     const leakedDetail = "provider-debug-secret-that-must-not-surface";
     const { layer } = makeTestLayer(
@@ -208,6 +360,58 @@ describe("OpenAiRealtimeDictationLive", () => {
       assert.notInclude(error.message, leakedDetail);
       assert.notInclude(error.message, "sk-secret-that-must-not-surface");
       assert.deepStrictEqual(Object.keys(error).toSorted(), ["_tag", "code"]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("maps client-secret 5xx responses without exposing provider details", () => {
+    const leakedDetail = "provider-500-body-must-not-surface";
+    const { layer } = makeTestLayer(
+      () => new Response(leakedDetail, { status: 500, statusText: leakedDetail }),
+    );
+    return Effect.gen(function* () {
+      const dictation = yield* OpenAiRealtimeDictation;
+      yield* dictation.setApiKey("sk-500-secret-must-not-surface");
+      const error = yield* Effect.flip(
+        dictation.createClientSecret({ safetyIdentifier: "server-error-session" }),
+      );
+      assert.strictEqual(error.code, "upstream_unavailable");
+      assert.notInclude(JSON.stringify(error), leakedDetail);
+      assert.notInclude(JSON.stringify(error), "sk-500-secret-must-not-surface");
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("classifies deterministic client rejections as non-transient", () => {
+    const statuses = [400, 404, 405, 409, 413, 415, 422, 402, 408, 500] as const;
+    let responseIndex = 0;
+    const leakedDetail = "provider-classification-body-must-not-surface";
+    const { layer } = makeTestLayer(() => {
+      const status = statuses[responseIndex] ?? 500;
+      responseIndex += 1;
+      return new Response(leakedDetail, { status });
+    });
+    return Effect.gen(function* () {
+      const dictation = yield* OpenAiRealtimeDictation;
+      yield* dictation.setApiKey("sk-classification-secret");
+
+      for (const [index, status] of statuses.entries()) {
+        const error = yield* Effect.flip(
+          dictation.createClientSecret({
+            safetyIdentifier: `classification-session-${index}`,
+          }),
+        );
+        const expectedCode =
+          status === 402
+            ? "upstream_quota_exhausted"
+            : status >= 400 && status < 500 && status !== 408
+              ? "upstream_invalid_response"
+              : "upstream_unavailable";
+        assert.strictEqual(error.code, expectedCode);
+        if (expectedCode === "upstream_invalid_response") {
+          assert.strictEqual(error.message, "OpenAI rejected Cafe's dictation configuration.");
+        }
+        assert.notInclude(JSON.stringify(error), leakedDetail);
+        assert.notInclude(JSON.stringify(error), "sk-classification-secret");
+      }
     }).pipe(Effect.provide(layer));
   });
 

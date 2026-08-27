@@ -12,7 +12,6 @@ import {
 import type { RealtimeTranscriptionErrorCode } from "./realtimeTranscription";
 
 const OPENAI_REQUEST_ID_PATTERN = /^req_[A-Za-z0-9_-]+$/u;
-const SHA256_PATTERN = /^[A-Fa-f0-9]{64}$/u;
 const MAX_DIAGNOSTIC_ATTEMPTS = 8;
 const MAX_TIMELINE_ENTRIES = 32;
 const MAX_DURATION_MS = 24 * 60 * 60 * 1_000;
@@ -113,10 +112,10 @@ export interface DictationSafeResponseHeaderDiagnostics {
 
 /**
  * One immutable, content-free lifecycle observation. Entries contain only
- * bounded numbers, booleans, enums, `req_`-prefixed request IDs, finite provider
- * error categories, and a SHA-256 fingerprint. They can never retain a
- * key/token, header map, SDP, audio, transcript, provider message/body, raw
- * Error, URL, or local path.
+ * bounded numbers, booleans, enums, `req_`-prefixed request IDs, and finite
+ * provider error categories. They can never retain a key/token, header map,
+ * SDP, audio, transcript, provider message/body/hash, raw Error, URL, or local
+ * path.
  */
 export interface DictationDiagnosticTimelineEntry {
   readonly capturedAt: string;
@@ -137,7 +136,6 @@ export interface DictationDiagnosticTimelineEntry {
   readonly providerErrorType: DictationProviderErrorType | null;
   readonly providerErrorCode: DictationProviderErrorCode | null;
   readonly responseBodyBytes: number | null;
-  readonly responseBodySha256: string | null;
   readonly responseBodyTruncated: boolean | null;
   readonly sessionProfile: typeof DICTATION_SESSION_PROFILE | null;
   readonly clientSecretModel: DictationTranscriptionModel | null;
@@ -207,7 +205,6 @@ export interface DictationDiagnosticUpdate {
   readonly providerErrorType?: string | null;
   readonly providerErrorCode?: string | null;
   readonly responseBodyBytes?: number | null;
-  readonly responseBodySha256?: string | null;
   readonly responseBodyTruncated?: boolean | null;
   readonly sessionProfile?: string | null;
   readonly clientSecretModel?: string | null;
@@ -284,6 +281,7 @@ const DICTATION_ERROR_CODES: ReadonlySet<string> = new Set([
   "rate_limited",
   "secret_store_failed",
   "upstream_auth_failed",
+  "upstream_quota_exhausted",
   "upstream_rate_limited",
   "upstream_unavailable",
   "upstream_invalid_response",
@@ -386,10 +384,6 @@ function normalizeProviderErrorCategory<T extends string>(
 
 function normalizeExactLiteral<const T extends string>(value: unknown, expected: T): T | null {
   return value === expected ? expected : null;
-}
-
-function normalizeSha256(value: unknown): string | null {
-  return typeof value === "string" && SHA256_PATTERN.test(value) ? value.toLowerCase() : null;
 }
 
 function normalizeAttempt(value: unknown): number | null {
@@ -571,7 +565,6 @@ function buildTimelineEntry(
       "other",
     ),
     responseBodyBytes: normalizeBoundedInteger(input.responseBodyBytes, MAX_BYTE_COUNT),
-    responseBodySha256: normalizeSha256(input.responseBodySha256),
     responseBodyTruncated: normalizeBoolean(input.responseBodyTruncated),
     sessionProfile: normalizeExactLiteral(input.sessionProfile, DICTATION_SESSION_PROFILE),
     clientSecretModel: normalizeAllowlistedString<DictationTranscriptionModel>(

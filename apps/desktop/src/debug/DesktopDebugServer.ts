@@ -37,7 +37,6 @@ const PROCESS_DIAGNOSTIC_STACK_LIMIT = 16_000;
 const COMPACT_STRING_LIMIT = 240;
 const COMPACT_ARRAY_LIMIT = 12;
 const DICTATION_REQUEST_ID_PATTERN = /^req_[A-Za-z0-9_-]+$/u;
-const DICTATION_SHA256_PATTERN = /^[A-Fa-f0-9]{64}$/u;
 const DICTATION_TIMELINE_LIMIT = 32;
 const DICTATION_MAX_DURATION_MS = 24 * 60 * 60 * 1_000;
 const DICTATION_MAX_BYTE_COUNT = 100 * 1024 * 1024;
@@ -125,6 +124,7 @@ const DICTATION_ERROR_CODES = new Set([
   "rate_limited",
   "secret_store_failed",
   "upstream_auth_failed",
+  "upstream_quota_exhausted",
   "upstream_rate_limited",
   "upstream_unavailable",
   "upstream_invalid_response",
@@ -498,11 +498,6 @@ function readAllowlistedDictationLiteral(
   return typeof value === "string" && allowlist.has(value) ? value : null;
 }
 
-function readDictationSha256(value: unknown): string | null {
-  const digest = readString(value);
-  return digest !== null && DICTATION_SHA256_PATTERN.test(digest) ? digest.toLowerCase() : null;
-}
-
 /**
  * Rebuild one renderer timeline entry from the compact-debug allowlist. This
  * duplicate validation is intentional: renderer IPC is not a trust boundary,
@@ -548,7 +543,6 @@ function summarizeDictationTimelineEntry(value: unknown): Record<string, unknown
       DICTATION_PROVIDER_ERROR_CODE_CATEGORIES,
     ),
     responseBodyBytes: readBoundedInteger(entry.responseBodyBytes, 0, DICTATION_MAX_BYTE_COUNT),
-    responseBodySha256: readDictationSha256(entry.responseBodySha256),
     responseBodyTruncated: readBoolean(entry.responseBodyTruncated),
     sessionProfile: readExactDictationLiteral(entry.sessionProfile, DICTATION_SESSION_PROFILE),
     clientSecretModel: readAllowlistedDictationLiteral(

@@ -34,6 +34,9 @@ const REALTIME_CALL_RETRY_DELAYS_MS = [250, 750] as const;
 // is deliberately generous for a short composer utterance while still giving
 // Stop deterministic cleanup semantics when the upstream session disappears.
 const REALTIME_FINALIZATION_TIMEOUT_MS = 10_000;
+// Error text is diagnostic-only. Never let a provider that sent usable HTTP
+// status headers consume the 20-second session deadline by stalling its body.
+const REALTIME_ERROR_BODY_READ_TIMEOUT_MS = 500;
 const MIN_CLIENT_SECRET_LIFETIME_MS = 5_000;
 const MAX_SDP_ANSWER_BYTES = 1_048_576;
 const MAX_REALTIME_ERROR_BODY_BYTES = 64 * 1_024;
@@ -101,11 +104,20 @@ function normalizeClientSecretError(
     : new RealtimeTranscriptionError(code, DICTATION_RPC_ERROR_MESSAGES[code]);
 }
 
-/** Classify only the public HTTP status; never read an error response body. */
+/**
+ * Map only the public HTTP status and the already-selected model to fixed UI
+ * copy. Provider-controlled response text is never interpolated into errors.
+ */
 function realtimeCallResponseError(
   status: number,
   attemptedModel: DictationTranscriptionModel,
 ): RealtimeTranscriptionError {
+  if (status === 402) {
+    return new RealtimeTranscriptionError(
+      "upstream_quota_exhausted",
+      DICTATION_RPC_ERROR_MESSAGES.upstream_quota_exhausted,
+    );
+  }
   if (status === 401 || status === 403) {
     return new RealtimeTranscriptionError(
       "session_rejected",
@@ -128,18 +140,18 @@ function realtimeCallResponseError(
     if (attemptedModel === DICTATION_FALLBACK_TRANSCRIPTION_MODEL) {
       return new RealtimeTranscriptionError(
         "upstream_unavailable",
-        `OpenAI could not allocate either supported Realtime dictation model (HTTP ${status}). The microphone is available; verify this key belongs to a paid API project with Realtime access, or retry shortly.`,
+        `OpenAI could not start either supported Realtime dictation model (HTTP ${status}). Check this API project's credits, billing, and Realtime transcription access, then retry.`,
       );
     }
     return new RealtimeTranscriptionError(
       "upstream_unavailable",
-      `OpenAI returned a temporary HTTP ${status} error while starting dictation. Cafe retried the request; try again shortly.`,
+      `OpenAI returned a temporary HTTP ${status} error while starting dictation. Please try again shortly.`,
     );
   }
   if (status === 408 || status === 409) {
     return new RealtimeTranscriptionError(
       "upstream_unavailable",
-      `OpenAI returned a temporary HTTP ${status} error while starting dictation. Cafe retried the request; try again shortly.`,
+      `OpenAI returned a temporary HTTP ${status} error while starting dictation. Please try again shortly.`,
     );
   }
   return connectionError();
@@ -147,6 +159,22 @@ function realtimeCallResponseError(
 
 function isRetryableRealtimeCallStatus(status: number): boolean {
   return status === 408 || status === 409 || status === 429 || (status >= 500 && status <= 599);
+}
+
+/**
+ * OpenAI can report exhausted project billing as HTTP 429, which must not be
+ * retried like an ordinary capacity limit. Match only the documented exact
+ * category after the bounded body reader has discarded all provider text.
+ */
+function isQuotaExhaustedResponse(
+  status: number,
+  metadata: RealtimeErrorResponseMetadata,
+): boolean {
+  return (
+    status === 402 ||
+    metadata.providerErrorType === "insufficient_quota" ||
+    metadata.providerErrorCode === "insufficient_quota"
+  );
 }
 
 const protocolError = () =>
@@ -404,52 +432,6 @@ function browserDependencies(): RealtimeTranscriptionDependencies {
   };
 }
 
-/**
- * Wait until the browser has folded every gathered ICE candidate into
- * `localDescription`. `createOffer()` returns only the initial SDP template;
- * posting that stale value can omit all candidates and make OpenAI fail the
- * call allocation with an otherwise opaque HTTP 500. Cafe does not retain or
- * diagnose the finalized SDP because it can contain private network details.
- *
- * The operation is bounded by the session's existing setup abort/timeout.
- * Removing both listeners on every exit is important because a closed peer may
- * never emit another gathering event.
- */
-function waitForIceGatheringComplete(
-  connection: RTCPeerConnection,
-  signal: AbortSignal,
-): Promise<void> {
-  if (connection.iceGatheringState === "complete") return Promise.resolve();
-
-  return new Promise<void>((resolve) => {
-    const cleanup = () => {
-      connection.removeEventListener("icegatheringstatechange", handleStateChange);
-      signal.removeEventListener("abort", handleAbort);
-    };
-    const handleStateChange = () => {
-      if (connection.iceGatheringState !== "complete") return;
-      cleanup();
-      resolve();
-    };
-    const handleAbort = () => {
-      cleanup();
-      // `interruptSetup` records the precise cancellation or timeout error
-      // before it aborts this signal. Resolve here so awaitSetup's mandatory
-      // liveness fence rethrows that authoritative error instead of racing it
-      // with a generic transport failure.
-      resolve();
-    };
-
-    connection.addEventListener("icegatheringstatechange", handleStateChange);
-    signal.addEventListener("abort", handleAbort, { once: true });
-
-    // Close the race in which gathering completed between the initial state
-    // read and listener registration.
-    handleStateChange();
-    if (signal.aborted) handleAbort();
-  });
-}
-
 interface Deferred<T> {
   readonly promise: Promise<T>;
   readonly resolve: (value: T | PromiseLike<T>) => void;
@@ -475,10 +457,19 @@ async function withTimeout<T>(input: {
   readonly timeoutMs: number;
   readonly dependencies: RealtimeTranscriptionDependencies;
   readonly onTimeout: () => void;
+  readonly deferTimeout?: () => boolean;
+  readonly onDeferredTimeout?: () => void;
   readonly timeoutError: () => RealtimeTranscriptionError;
 }): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timerId = input.dependencies.setTimeout(() => {
+      // Once an error HTTP status has arrived, its fixed status classification
+      // is more informative than a generic setup timeout. The body refinement
+      // owns a separate 500 ms deadline, so deferring here cannot hang setup.
+      if (input.deferTimeout?.() === true) {
+        input.onDeferredTimeout?.();
+        return;
+      }
       input.onTimeout();
       reject(input.timeoutError());
     }, input.timeoutMs);
@@ -524,11 +515,20 @@ function parseValidContentLength(response: Response): number | null {
   return Number.isSafeInteger(length) ? length : null;
 }
 
+/** Discard an optional provider body without ever delaying status handling. */
+function cancelResponseBody(response: Response): void {
+  try {
+    void response.body?.cancel().catch(() => undefined);
+  } catch {
+    // Status-derived behavior remains authoritative if cancellation itself is
+    // unsupported or a hostile stream implementation throws synchronously.
+  }
+}
+
 interface RealtimeErrorResponseMetadata {
   readonly providerErrorType: string | null;
   readonly providerErrorCode: string | null;
   readonly responseBodyBytes: number | null;
-  readonly responseBodySha256: string | null;
   readonly responseBodyTruncated: boolean | null;
 }
 
@@ -536,19 +536,6 @@ interface RealtimeErrorResponseMetadata {
 function categorizeProviderError(value: unknown, allowlist: ReadonlySet<string>): string | null {
   if (value === null || value === undefined) return null;
   return typeof value === "string" && allowlist.has(value) ? value : "other";
-}
-
-async function sha256Hex(bytes: Uint8Array): Promise<string | null> {
-  if (bytes.byteLength === 0 || globalThis.crypto?.subtle === undefined) return null;
-  try {
-    // Copy the bounded prefix into a plain ArrayBuffer so TypeScript and the
-    // WebCrypto implementation cannot retain a view into a larger body chunk.
-    const digestInput = bytes.slice().buffer;
-    const digest = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", digestInput));
-    return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -560,110 +547,151 @@ async function sha256Hex(bytes: Uint8Array): Promise<string | null> {
 async function readBoundedRealtimeErrorMetadata(
   response: Response,
   signal: AbortSignal,
+  timers: Pick<RealtimeTranscriptionDependencies, "setTimeout" | "clearTimeout">,
 ): Promise<RealtimeErrorResponseMetadata> {
   if (!response.body) {
     return {
       providerErrorType: null,
       providerErrorCode: null,
       responseBodyBytes: 0,
-      responseBodySha256: null,
       responseBodyTruncated: false,
     };
   }
 
   const declaredLength = parseValidContentLength(response);
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let byteCount = 0;
-  let streamFinished = false;
-  let truncated = declaredLength !== null && declaredLength > MAX_REALTIME_ERROR_BODY_BYTES;
-  const handleAbort = () => {
-    // Response-body reads are independent from the fetch signal once headers
-    // have arrived. Explicitly cancel the reader so an upstream that stalls
-    // mid-error cannot retain a background stream after Cafe times out.
-    void reader.cancel().catch(() => undefined);
-  };
-  signal.addEventListener("abort", handleAbort, { once: true });
-
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
   try {
-    if (signal.aborted) {
-      handleAbort();
-      return {
-        providerErrorType: null,
-        providerErrorCode: null,
-        responseBodyBytes: null,
-        responseBodySha256: null,
-        responseBodyTruncated: null,
-      };
-    }
-    while (byteCount < MAX_REALTIME_ERROR_BODY_BYTES) {
-      const chunk = await reader.read();
-      if (chunk.done) {
-        streamFinished = true;
-        break;
-      }
-      const remaining = MAX_REALTIME_ERROR_BODY_BYTES - byteCount;
-      if (chunk.value.byteLength > remaining) {
-        chunks.push(chunk.value.slice(0, remaining));
-        byteCount += remaining;
-        truncated = true;
-        break;
-      }
-      const copiedChunk = chunk.value.slice();
-      chunks.push(copiedChunk);
-      byteCount += copiedChunk.byteLength;
-    }
-
-    // Do not perform a look-ahead read at the byte ceiling. A single stream
-    // chunk has no browser-enforced upper bound, and a server can also leave a
-    // look-ahead pending indefinitely. When EOF was not observed within the
-    // ceiling, conservatively mark the prefix truncated and cancel the body.
-    if (!streamFinished && byteCount === MAX_REALTIME_ERROR_BODY_BYTES) truncated = true;
-    if (truncated || !streamFinished) await reader.cancel().catch(() => undefined);
-
-    const bytes = new Uint8Array(byteCount);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-
-    const responseBodySha256 = await sha256Hex(bytes);
-    let providerErrorType: string | null = null;
-    let providerErrorCode: string | null = null;
-    if (!truncated && bytes.byteLength > 0) {
-      try {
-        const decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-        const parsed: unknown = JSON.parse(decoded);
-        if (isRecord(parsed) && isRecord(parsed.error)) {
-          providerErrorType = categorizeProviderError(parsed.error.type, providerErrorTypes);
-          providerErrorCode = categorizeProviderError(parsed.error.code, providerErrorCodes);
-        }
-      } catch {
-        // Non-JSON or invalid UTF-8 provider messages remain fingerprint-only.
-      }
-    }
-
-    return {
-      providerErrorType,
-      providerErrorCode,
-      responseBodyBytes: byteCount,
-      responseBodySha256,
-      responseBodyTruncated: truncated,
-    };
+    reader = response.body.getReader();
   } catch {
-    await reader.cancel().catch(() => undefined);
+    cancelResponseBody(response);
     return {
       providerErrorType: null,
       providerErrorCode: null,
       responseBodyBytes: null,
-      responseBodySha256: null,
       responseBodyTruncated: null,
     };
-  } finally {
-    signal.removeEventListener("abort", handleAbort);
-    reader.releaseLock();
   }
+  const chunks: Uint8Array[] = [];
+  let byteCount = 0;
+  let streamFinished = false;
+  let truncated = declaredLength !== null && declaredLength > MAX_REALTIME_ERROR_BODY_BYTES;
+  const cancelReader = () => {
+    try {
+      void reader.cancel().catch(() => undefined);
+    } catch {
+      // A hostile or incomplete browser stream implementation must not replace
+      // the already-known HTTP status with a local transport error.
+    }
+  };
+  const handleAbort = () => {
+    // Response-body reads are independent from the fetch signal once headers
+    // have arrived. Explicitly cancel the reader so an upstream that stalls
+    // mid-error cannot retain a background stream after Cafe times out.
+    cancelReader();
+  };
+  signal.addEventListener("abort", handleAbort, { once: true });
+
+  const readOperation = (async (): Promise<RealtimeErrorResponseMetadata> => {
+    try {
+      if (signal.aborted) {
+        handleAbort();
+        return {
+          providerErrorType: null,
+          providerErrorCode: null,
+          responseBodyBytes: null,
+          responseBodyTruncated: null,
+        };
+      }
+      while (byteCount < MAX_REALTIME_ERROR_BODY_BYTES) {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          streamFinished = true;
+          break;
+        }
+        const remaining = MAX_REALTIME_ERROR_BODY_BYTES - byteCount;
+        if (chunk.value.byteLength > remaining) {
+          chunks.push(chunk.value.slice(0, remaining));
+          byteCount += remaining;
+          truncated = true;
+          break;
+        }
+        const copiedChunk = chunk.value.slice();
+        chunks.push(copiedChunk);
+        byteCount += copiedChunk.byteLength;
+      }
+
+      // Do not perform a look-ahead read at the byte ceiling. A single stream
+      // chunk has no browser-enforced upper bound, and a server can also leave a
+      // look-ahead pending indefinitely. When EOF was not observed within the
+      // ceiling, conservatively mark the prefix truncated and cancel the body.
+      if (!streamFinished && byteCount === MAX_REALTIME_ERROR_BODY_BYTES) truncated = true;
+      if (truncated || !streamFinished) cancelReader();
+
+      const bytes = new Uint8Array(byteCount);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+
+      let providerErrorType: string | null = null;
+      let providerErrorCode: string | null = null;
+      if (!truncated && bytes.byteLength > 0) {
+        try {
+          const decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+          const parsed: unknown = JSON.parse(decoded);
+          if (isRecord(parsed) && isRecord(parsed.error)) {
+            providerErrorType = categorizeProviderError(parsed.error.type, providerErrorTypes);
+            providerErrorCode = categorizeProviderError(parsed.error.code, providerErrorCodes);
+          }
+        } catch {
+          // Non-JSON or invalid UTF-8 provider messages are discarded entirely.
+        }
+      }
+
+      return {
+        providerErrorType,
+        providerErrorCode,
+        responseBodyBytes: byteCount,
+        responseBodyTruncated: truncated,
+      };
+    } catch {
+      cancelReader();
+      return {
+        providerErrorType: null,
+        providerErrorCode: null,
+        responseBodyBytes: null,
+        responseBodyTruncated: null,
+      };
+    } finally {
+      signal.removeEventListener("abort", handleAbort);
+      try {
+        reader.releaseLock();
+      } catch {
+        // A still-pending read retains its own lock until cancellation settles.
+      }
+    }
+  })();
+
+  let deadlineTimerId: number | null = null;
+  const deadline = new Promise<RealtimeErrorResponseMetadata>((resolve) => {
+    deadlineTimerId = timers.setTimeout(() => {
+      cancelReader();
+      resolve({
+        providerErrorType: null,
+        providerErrorCode: null,
+        responseBodyBytes: byteCount,
+        responseBodyTruncated: null,
+      });
+    }, REALTIME_ERROR_BODY_READ_TIMEOUT_MS);
+  });
+
+  const metadata = await Promise.race([readOperation, deadline]);
+  if (deadlineTimerId !== null) timers.clearTimeout(deadlineTimerId);
+  // The body operation catches its own failures. If the deadline won, leave a
+  // rejection handler attached while the stream cancellation settles.
+  void readOperation.catch(() => undefined);
+  return metadata;
 }
 
 interface SdpShapeDiagnostics {
@@ -829,6 +857,7 @@ export async function startRealtimeTranscription(
 
   let lifecycle: "connecting" | "active" | "finalizing" | "closed" = "connecting";
   let mediaStream: MediaStream | null = null;
+  let mediaTracksStopped = false;
   let peerConnection: RTCPeerConnection | null = null;
   let dataChannel: RTCDataChannel | null = null;
   let transcriptState = createRealtimeTranscriptState();
@@ -847,6 +876,8 @@ export async function startRealtimeTranscription(
   let diagnosticAttempt: number | null = null;
   let diagnosticHttpStatus: number | null = null;
   let diagnosticRequestId: string | null = null;
+  let errorResponseMetadataPending = false;
+  let setupDeadlineElapsedAfterErrorHeaders = false;
   let diagnosticDetails: Omit<
     Partial<DictationDiagnosticUpdate>,
     | "nowMs"
@@ -953,7 +984,6 @@ export async function startRealtimeTranscription(
       providerErrorType: null,
       providerErrorCode: null,
       responseBodyBytes: null,
-      responseBodySha256: null,
       responseBodyTruncated: null,
       offerSdpBytes: null,
       offerSdpLineCount: null,
@@ -975,7 +1005,11 @@ export async function startRealtimeTranscription(
   };
 
   const stopMediaTracks = () => {
-    if (!mediaStream) return;
+    if (!mediaStream || mediaTracksStopped) return;
+    // Stop is a lifecycle transition, not a best-effort cleanup hint. Guard it
+    // so finalization and the shared cleanup path cannot invoke device-backed
+    // track implementations twice during the same session.
+    mediaTracksStopped = true;
     stopStreamTracks(mediaStream);
   };
 
@@ -1291,17 +1325,13 @@ export async function startRealtimeTranscription(
         if (!offer.sdp) throw protocolError();
         await awaitSetup(attemptConnection.setLocalDescription(offer));
         assertSetupLive();
-        await awaitSetup(
-          waitForIceGatheringComplete(attemptConnection, setupAbortController.signal),
-        );
-        assertSetupLive();
 
-        // Only the post-gather local description is authoritative. Never fall
-        // back to `offer.sdp`: doing so silently reintroduces the candidate-free
-        // request that this wait is designed to prevent.
-        const finalizedOffer = attemptConnection.localDescription;
-        const offerSdp = finalizedOffer?.type === "offer" ? finalizedOffer.sdp : undefined;
-        if (!offerSdp) throw protocolError();
+        // OpenAI's official WebRTC flow posts the original `offer.sdp` after
+        // setLocalDescription. Do not wait for ICE gathering or substitute the
+        // browser's later candidate-rich localDescription: that adds avoidable
+        // startup latency and drifts from the provider's documented handshake.
+        // SDP remains ephemeral and is never retained verbatim.
+        const offerSdp = offer.sdp;
         const offerShape = summarizeSdpShape(offerSdp);
         diagnosticDetails = {
           ...diagnosticDetails,
@@ -1371,11 +1401,30 @@ export async function startRealtimeTranscription(
           responseContentLengthBytes: responseHeaders.contentLengthBytes,
         };
         if (!response.ok) {
+          if (response.status === 402) {
+            cancelResponseBody(response);
+            throw realtimeCallResponseError(response.status, clientSecret.model);
+          }
+          errorResponseMetadataPending = true;
           const errorMetadata = await awaitSetup(
-            readBoundedRealtimeErrorMetadata(response, setupAbortController.signal),
+            readBoundedRealtimeErrorMetadata(response, setupAbortController.signal, dependencies),
           );
+          errorResponseMetadataPending = false;
           assertSetupLive();
           diagnosticDetails = { ...diagnosticDetails, ...errorMetadata };
+          if (isQuotaExhaustedResponse(response.status, errorMetadata)) {
+            throw new RealtimeTranscriptionError(
+              "upstream_quota_exhausted",
+              DICTATION_RPC_ERROR_MESSAGES.upstream_quota_exhausted,
+            );
+          }
+          if (setupDeadlineElapsedAfterErrorHeaders) {
+            // The global setup deadline elapsed only after Cafe had received a
+            // usable error status. Do not start another attempt outside that
+            // budget, but preserve the provider-status classification instead
+            // of replacing it with a generic connection failure.
+            throw realtimeCallResponseError(response.status, clientSecret.model);
+          }
           if (
             isRetryableRealtimeCallStatus(response.status) &&
             attempt < REALTIME_CALL_MAX_ATTEMPTS
@@ -1420,7 +1469,6 @@ export async function startRealtimeTranscription(
         diagnosticDetails = {
           ...diagnosticDetails,
           responseBodyBytes: answerShape.bytes,
-          responseBodySha256: null,
           responseBodyTruncated: false,
           answerSdpBytes: answerShape.bytes,
           answerSdpLineCount: answerShape.lineCount,
@@ -1452,6 +1500,10 @@ export async function startRealtimeTranscription(
       timeoutMs: REALTIME_SETUP_TIMEOUT_MS,
       dependencies,
       onTimeout: () => interruptSetup(connectionError()),
+      deferTimeout: () => errorResponseMetadataPending,
+      onDeferredTimeout: () => {
+        setupDeadlineElapsedAfterErrorHeaders = true;
+      },
       timeoutError: connectionError,
     });
     assertSetupLive();

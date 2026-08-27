@@ -7,6 +7,7 @@ import {
   DICTATION_SESSION_PROFILE,
   DictationApiKey,
   DictationCreateClientSecretInput,
+  DictationErrorCode,
   DictationProviderErrorCode,
   DictationProviderErrorType,
   DictationRealtimeClientSecret,
@@ -19,6 +20,7 @@ const decodeDictationCreateClientSecretInput = Schema.decodeUnknownEffect(
 const decodeDictationRealtimeClientSecret = Schema.decodeUnknownEffect(
   DictationRealtimeClientSecret,
 );
+const decodeDictationErrorCode = Schema.decodeUnknownEffect(DictationErrorCode);
 const decodeDictationProviderErrorType = Schema.decodeUnknownEffect(DictationProviderErrorType);
 const decodeDictationProviderErrorCode = Schema.decodeUnknownEffect(DictationProviderErrorCode);
 
@@ -110,12 +112,20 @@ describe("dictation contracts", () => {
   it.effect("keeps provider error diagnostics in a finite semantic vocabulary", () =>
     Effect.gen(function* () {
       assert.strictEqual(yield* decodeDictationProviderErrorType("server_error"), "server_error");
+      assert.strictEqual(
+        yield* decodeDictationProviderErrorType("insufficient_quota"),
+        "insufficient_quota",
+      );
       assert.strictEqual(yield* decodeDictationProviderErrorType("other"), "other");
       assert.strictEqual(
         yield* decodeDictationProviderErrorCode("internal_error"),
         "internal_error",
       );
       assert.strictEqual(yield* decodeDictationProviderErrorCode("other"), "other");
+      assert.strictEqual(
+        yield* decodeDictationProviderErrorCode("insufficient_quota"),
+        "insufficient_quota",
+      );
 
       assert.isTrue(
         yield* decodeDictationProviderErrorType("sk_provider_secret").pipe(
@@ -141,6 +151,19 @@ describe("dictation contracts", () => {
         yield* decodeDictationCreateClientSecretInput({ model: "arbitrary-expensive-model" }).pipe(
           Effect.match({ onFailure: () => true, onSuccess: () => false }),
         ),
+      );
+    }),
+  );
+
+  it.effect("distinguishes exhausted API credits from transient rate limiting", () =>
+    Effect.gen(function* () {
+      assert.strictEqual(
+        yield* decodeDictationErrorCode("upstream_quota_exhausted"),
+        "upstream_quota_exhausted",
+      );
+      assert.strictEqual(
+        yield* decodeDictationErrorCode("upstream_rate_limited"),
+        "upstream_rate_limited",
       );
     }),
   );

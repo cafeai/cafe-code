@@ -14,9 +14,11 @@ export const DICTATION_RPC_ERROR_MESSAGES: Readonly<Record<DictationErrorCode, s
   secret_store_failed: "Cafe could not access the saved dictation credential.",
   upstream_auth_failed:
     "OpenAI rejected the saved dictation credential or its Realtime transcription access.",
+  upstream_quota_exhausted:
+    "This OpenAI API project has insufficient credits or quota for dictation. Add API credits or check its billing and usage limits, then try again.",
   upstream_invalid_response: "OpenAI returned an invalid dictation session response.",
   upstream_rate_limited:
-    "OpenAI has no Realtime transcription capacity or quota available for this API project.",
+    "OpenAI is rate limiting Realtime transcription. Please wait a moment and try again.",
   upstream_unavailable: "Cafe could not reach OpenAI to start dictation.",
 };
 
@@ -35,6 +37,7 @@ export function readDictationRpcErrorCode(error: unknown): DictationErrorCode | 
     case "rate_limited":
     case "secret_store_failed":
     case "upstream_auth_failed":
+    case "upstream_quota_exhausted":
     case "upstream_rate_limited":
     case "upstream_unavailable":
     case "upstream_invalid_response":
