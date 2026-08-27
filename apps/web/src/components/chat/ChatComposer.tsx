@@ -27,6 +27,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import { flushSync } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -59,6 +60,7 @@ import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommand
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerAttachImageButton } from "./ComposerAttachImageButton";
+import { ComposerDictationButton } from "./ComposerDictationButton";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
@@ -113,6 +115,10 @@ import { formatProviderSkillDisplayName } from "../../providerSkillPresentation"
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useHasOnScreenKeyboard } from "../../hooks/useMediaQuery";
 import { useSettings } from "../../hooks/useSettings";
+import { useComposerDictation } from "../../hooks/useComposerDictation";
+import { readDictationBrowserCapability } from "../../dictation/realtimeTranscription";
+import { requireEnvironmentConnection } from "../../environments/runtime";
+import { dictationStatusQueryOptions } from "../../lib/dictationReactQuery";
 import { domSnapshot, mobileDebugLog } from "../../lib/mobileDebugLog";
 import {
   applyClaudePermissionMode,
@@ -240,6 +246,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   isEnvironmentUnavailable: boolean;
   hasSendableContent: boolean;
   pendingStatusLabel: string | null;
+  dictationAction: ReactNode;
   preserveComposerFocusOnPointerDown?: boolean;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
@@ -256,6 +263,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
       {props.pendingStatusLabel ? (
         <span className="text-muted-foreground/70 text-xs">{props.pendingStatusLabel}</span>
       ) : null}
+      {props.dictationAction}
       <ComposerPrimaryActions
         compact={props.compact}
         pendingAction={props.pendingAction}
@@ -1106,6 +1114,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // than any phone breakpoint while still typing through an on-screen keyboard.
   const isOnScreenKeyboardDevice = useHasOnScreenKeyboard();
   const isComposerCollapsedMobile = isOnScreenKeyboardDevice && !isComposerFocused;
+  const [dictationBrowserCapability] = useState(readDictationBrowserCapability);
+  const dictationStatusQuery = useQuery({
+    ...dictationStatusQueryOptions(environmentId),
+    enabled: dictationBrowserCapability.supported && environmentUnavailable === null,
+  });
 
   // TEMPORARY: mobile DOM debugging — remove with lib/mobileDebugLog.ts.
   useEffect(() => {
@@ -1299,6 +1312,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const isComposerApprovalState = activePendingApproval !== null;
   const activePendingUserInput = pendingUserInputs[0] ?? null;
+  const showComposerDictation =
+    dictationBrowserCapability.supported &&
+    dictationStatusQuery.data?.configured === true &&
+    !isComposerApprovalState &&
+    pendingUserInputs.length === 0;
+  const isComposerDictationUnavailable =
+    isSendBusy || isConnecting || environmentUnavailable !== null;
+  const isComposerDictationEnabled = showComposerDictation && !isComposerDictationUnavailable;
   const hasComposerHeader =
     isComposerApprovalState ||
     pendingUserInputs.length > 0 ||
@@ -1317,15 +1338,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const showPlanSidebarToggle = sidebarProposedPlan !== null;
   const composerFooterActionLayoutKey = useMemo(() => {
     if (activePendingProgress) {
-      return `pending:${activePendingProgress.questionIndex}:${activePendingProgress.isLastQuestion}:${activePendingIsResponding}`;
+      return `pending:${activePendingProgress.questionIndex}:${activePendingProgress.isLastQuestion}:${activePendingIsResponding}:dictation:${showComposerDictation}`;
     }
     if (phase === "running") {
-      return "running";
+      return `running:dictation:${showComposerDictation}`;
     }
     if (showPlanFollowUpPrompt) {
-      return prompt.trim().length > 0 ? "plan:refine" : "plan:implement";
+      return `${prompt.trim().length > 0 ? "plan:refine" : "plan:implement"}:dictation:${showComposerDictation}`;
     }
-    return `idle:${composerSendState.hasSendableContent}:${isSendBusy}:${isConnecting}:${isPreparingWorktree}`;
+    return `idle:${composerSendState.hasSendableContent}:${isSendBusy}:${isConnecting}:${isPreparingWorktree}:dictation:${showComposerDictation}`;
   }, [
     activePendingIsResponding,
     activePendingProgress,
@@ -1335,6 +1356,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isSendBusy,
     phase,
     prompt,
+    showComposerDictation,
     showPlanFollowUpPrompt,
   ]);
 
@@ -1400,13 +1422,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // is overlaid on the editor instead. Approval state keeps its own footer.
   const showMobileComposerActionsOverlay =
     isOnScreenKeyboardDevice && !isComposerCollapsedMobile && !isComposerApprovalState;
-  const composerEditorDisabled =
-    isSendBusy ||
-    isConnecting ||
-    isComposerApprovalState ||
-    (environmentUnavailable !== null && activePendingProgress === null);
-  const previousComposerEditorDisabledRef = useRef(composerEditorDisabled);
-
   // ------------------------------------------------------------------
   // Prompt helpers
   // ------------------------------------------------------------------
@@ -1770,6 +1785,48 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     };
   }, [composerCursor, promptRef]);
 
+  const composerDictationSessionKey = JSON.stringify([
+    environmentId,
+    routeKind,
+    draftId ?? routeThreadRef.threadId,
+  ]);
+  const createComposerDictationClientSecret = useCallback(
+    () => requireEnvironmentConnection(environmentId).client.dictation.createClientSecret(),
+    [environmentId],
+  );
+  const replaceComposerDictationRange = useCallback(
+    (replacement: {
+      readonly start: number;
+      readonly end: number;
+      readonly replacement: string;
+      readonly expectedText: string;
+    }) =>
+      applyPromptReplacement(replacement.start, replacement.end, replacement.replacement, {
+        expectedText: replacement.expectedText,
+        focusEditorAfterReplace: false,
+      }),
+    [applyPromptReplacement],
+  );
+  const reportComposerDictationError = useCallback((message: string) => {
+    toastManager.add({ type: "error", title: message });
+  }, []);
+  const composerDictation = useComposerDictation({
+    enabled: isComposerDictationEnabled,
+    sessionKey: composerDictationSessionKey,
+    createClientSecret: createComposerDictationClientSecret,
+    readComposerSnapshot,
+    replaceComposerRange: replaceComposerDictationRange,
+    onError: reportComposerDictationError,
+  });
+  const composerEditorDisabled =
+    isSendBusy ||
+    isConnecting ||
+    composerDictation.isEditingLocked ||
+    isComposerApprovalState ||
+    (environmentUnavailable !== null && activePendingProgress === null);
+  const isComposerPrimaryActionBusy = isSendBusy || composerDictation.isEditingLocked;
+  const previousComposerEditorDisabledRef = useRef(composerEditorDisabled);
+
   const resolveActiveComposerTrigger = useCallback((): {
     snapshot: { value: string; cursor: number; expandedCursor: number };
     trigger: ComposerTrigger | null;
@@ -1970,6 +2027,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const submitComposer = useCallback(
     (event?: { preventDefault: () => void }) => {
+      if (composerDictation.isEditingLocked) {
+        event?.preventDefault();
+        return;
+      }
       const keepKeyboardClosed = isOnScreenKeyboardDevice;
       mobileDebugLog("submit-start", { keepKeyboardClosed, ...domSnapshot() });
       void Promise.resolve(onSend(event)).finally(() => {
@@ -1981,10 +2042,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         requestComposerEditorFocus();
       });
     },
-    [dismissMobileComposerKeyboard, isOnScreenKeyboardDevice, onSend, requestComposerEditorFocus],
+    [
+      composerDictation.isEditingLocked,
+      dismissMobileComposerKeyboard,
+      isOnScreenKeyboardDevice,
+      onSend,
+      requestComposerEditorFocus,
+    ],
   );
   const steerComposer = useCallback(
     (event?: { preventDefault: () => void }) => {
+      if (composerDictation.isEditingLocked) {
+        event?.preventDefault();
+        return;
+      }
       const keepKeyboardClosed = isOnScreenKeyboardDevice;
       void Promise.resolve(onSteer(event)).finally(() => {
         if (keepKeyboardClosed) {
@@ -1994,7 +2065,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         requestComposerEditorFocus();
       });
     },
-    [dismissMobileComposerKeyboard, isOnScreenKeyboardDevice, onSteer, requestComposerEditorFocus],
+    [
+      composerDictation.isEditingLocked,
+      dismissMobileComposerKeyboard,
+      isOnScreenKeyboardDevice,
+      onSteer,
+      requestComposerEditorFocus,
+    ],
   );
 
   useEffect(() => {
@@ -2356,6 +2433,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ],
   );
 
+  const renderComposerDictationButton = (className?: string): ReactNode =>
+    showComposerDictation ? (
+      <ComposerDictationButton
+        phase={composerDictation.phase}
+        statusMessage={composerDictation.statusMessage}
+        disabled={isComposerDictationUnavailable}
+        preserveComposerFocusOnPointerDown
+        {...(className ? { className } : {})}
+        onToggle={composerDictation.toggle}
+      />
+    ) : null;
+
   // Render
   // ------------------------------------------------------------------
   return (
@@ -2551,7 +2640,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       isRunning={false}
                       showPlanFollowUpPrompt={false}
                       promptHasText={false}
-                      isSendBusy={isSendBusy}
+                      isSendBusy={isComposerPrimaryActionBusy}
                       isConnecting={isConnecting}
                       isEnvironmentUnavailable={environmentUnavailable !== null}
                       isPreparingWorktree={false}
@@ -2761,6 +2850,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       onClick={openComposerImagePicker}
                     />
                   ) : null}
+                  {renderComposerDictationButton("bg-background/80 hover:bg-background/90")}
                   <ComposerPrimaryActions
                     compact
                     pendingAction={pendingPrimaryAction}
@@ -2769,7 +2859,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       pendingUserInputs.length === 0 && showPlanFollowUpPrompt
                     }
                     promptHasText={prompt.trim().length > 0}
-                    isSendBusy={isSendBusy}
+                    isSendBusy={isComposerPrimaryActionBusy}
                     isConnecting={isConnecting}
                     isEnvironmentUnavailable={environmentUnavailable !== null}
                     isPreparingWorktree={isPreparingWorktree}
@@ -2917,7 +3007,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 onOpenSubagentDetail={onOpenSubagentDetail}
               />
 
-              {/* Right side: send / stop button */}
+              {/* Right side: dictation plus send / stop button */}
               <div
                 data-chat-composer-actions="right"
                 data-chat-composer-primary-actions-compact={
@@ -2933,12 +3023,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   isRunning={phase === "running"}
                   showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}
                   promptHasText={prompt.trim().length > 0}
-                  isSendBusy={isSendBusy}
+                  isSendBusy={isComposerPrimaryActionBusy}
                   isConnecting={isConnecting}
                   isEnvironmentUnavailable={environmentUnavailable !== null}
                   isPreparingWorktree={isPreparingWorktree}
                   hasSendableContent={composerSendState.hasSendableContent}
                   pendingStatusLabel={composerPendingStatusLabel}
+                  dictationAction={renderComposerDictationButton()}
                   preserveComposerFocusOnPointerDown
                   onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                   onInterrupt={handleInterruptPrimaryAction}

@@ -22,6 +22,7 @@ import { Route as SettingsNotificationsRouteImport } from './routes/settings.not
 import { Route as SettingsKeybindingsRouteImport } from './routes/settings.keybindings'
 import { Route as SettingsGeneralRouteImport } from './routes/settings.general'
 import { Route as SettingsFilesDiffsRouteImport } from './routes/settings.files-diffs'
+import { Route as SettingsDictationRouteImport } from './routes/settings.dictation'
 import { Route as SettingsDiagnosticsRouteImport } from './routes/settings.diagnostics'
 import { Route as SettingsConnectionsRouteImport } from './routes/settings.connections'
 import { Route as SettingsChatThreadsRouteImport } from './routes/settings.chat-threads'
@@ -95,6 +96,11 @@ const SettingsFilesDiffsRoute = SettingsFilesDiffsRouteImport.update({
   path: '/files-diffs',
   getParentRoute: () => SettingsRoute,
 } as any)
+const SettingsDictationRoute = SettingsDictationRouteImport.update({
+  id: '/dictation',
+  path: '/dictation',
+  getParentRoute: () => SettingsRoute,
+} as any)
 const SettingsDiagnosticsRoute = SettingsDiagnosticsRouteImport.update({
   id: '/diagnostics',
   path: '/diagnostics',
@@ -147,6 +153,7 @@ export interface FileRoutesByFullPath {
   '/settings/chat-threads': typeof SettingsChatThreadsRoute
   '/settings/connections': typeof SettingsConnectionsRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
+  '/settings/dictation': typeof SettingsDictationRoute
   '/settings/files-diffs': typeof SettingsFilesDiffsRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
@@ -168,6 +175,7 @@ export interface FileRoutesByTo {
   '/settings/chat-threads': typeof SettingsChatThreadsRoute
   '/settings/connections': typeof SettingsConnectionsRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
+  '/settings/dictation': typeof SettingsDictationRoute
   '/settings/files-diffs': typeof SettingsFilesDiffsRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
@@ -192,6 +200,7 @@ export interface FileRoutesById {
   '/settings/chat-threads': typeof SettingsChatThreadsRoute
   '/settings/connections': typeof SettingsConnectionsRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
+  '/settings/dictation': typeof SettingsDictationRoute
   '/settings/files-diffs': typeof SettingsFilesDiffsRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
@@ -217,6 +226,7 @@ export interface FileRouteTypes {
     | '/settings/chat-threads'
     | '/settings/connections'
     | '/settings/diagnostics'
+    | '/settings/dictation'
     | '/settings/files-diffs'
     | '/settings/general'
     | '/settings/keybindings'
@@ -238,6 +248,7 @@ export interface FileRouteTypes {
     | '/settings/chat-threads'
     | '/settings/connections'
     | '/settings/diagnostics'
+    | '/settings/dictation'
     | '/settings/files-diffs'
     | '/settings/general'
     | '/settings/keybindings'
@@ -261,6 +272,7 @@ export interface FileRouteTypes {
     | '/settings/chat-threads'
     | '/settings/connections'
     | '/settings/diagnostics'
+    | '/settings/dictation'
     | '/settings/files-diffs'
     | '/settings/general'
     | '/settings/keybindings'
@@ -374,6 +386,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsFilesDiffsRouteImport
       parentRoute: typeof SettingsRoute
     }
+    '/settings/dictation': {
+      id: '/settings/dictation'
+      path: '/dictation'
+      fullPath: '/settings/dictation'
+      preLoaderRoute: typeof SettingsDictationRouteImport
+      parentRoute: typeof SettingsRoute
+    }
     '/settings/diagnostics': {
       id: '/settings/diagnostics'
       path: '/diagnostics'
@@ -454,6 +473,7 @@ interface SettingsRouteChildren {
   SettingsChatThreadsRoute: typeof SettingsChatThreadsRoute
   SettingsConnectionsRoute: typeof SettingsConnectionsRoute
   SettingsDiagnosticsRoute: typeof SettingsDiagnosticsRoute
+  SettingsDictationRoute: typeof SettingsDictationRoute
   SettingsFilesDiffsRoute: typeof SettingsFilesDiffsRoute
   SettingsGeneralRoute: typeof SettingsGeneralRoute
   SettingsKeybindingsRoute: typeof SettingsKeybindingsRoute
@@ -472,6 +492,7 @@ const SettingsRouteChildren: SettingsRouteChildren = {
   SettingsChatThreadsRoute: SettingsChatThreadsRoute,
   SettingsConnectionsRoute: SettingsConnectionsRoute,
   SettingsDiagnosticsRoute: SettingsDiagnosticsRoute,
+  SettingsDictationRoute: SettingsDictationRoute,
   SettingsFilesDiffsRoute: SettingsFilesDiffsRoute,
   SettingsGeneralRoute: SettingsGeneralRoute,
   SettingsKeybindingsRoute: SettingsKeybindingsRoute,

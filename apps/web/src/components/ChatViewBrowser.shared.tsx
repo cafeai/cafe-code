@@ -1062,6 +1062,9 @@ function resolveWsRpc(body: NormalizedWsRpcRequestBody): unknown {
   if (tag === WS_METHODS.serverGetConfig) {
     return encodeServerConfig(fixture.serverConfig);
   }
+  if (tag === WS_METHODS.dictationGetStatus) {
+    return { configured: false, canManage: true };
+  }
   if (tag === WS_METHODS.serverDiscoverSourceControl) {
     return {
       versionControlSystems: [],
@@ -1938,6 +1941,36 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
   });
 
   if (chatViewBrowserPart === "composer") {
+    it("places configured dictation immediately before the send action", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-user-dictation-action" as MessageId,
+          targetText: "dictation action target",
+        }),
+        resolveRpc: (body) =>
+          body._tag === WS_METHODS.dictationGetStatus
+            ? { configured: true, canManage: true }
+            : undefined,
+      });
+
+      try {
+        const dictationButton = await waitForElement(
+          () => document.querySelector<HTMLButtonElement>('button[aria-label="Start dictation"]'),
+          "Unable to find configured dictation button.",
+        );
+        const sendButton = await waitForSendButton();
+        const actionButtons = Array.from(
+          dictationButton
+            .closest<HTMLElement>('[data-chat-composer-actions="right"]')
+            ?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+        );
+        expect(actionButtons.indexOf(dictationButton)).toBe(actionButtons.indexOf(sendButton) - 1);
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
     it.each([80, 130] as const)(
       "scales desktop composer typography and editor bounds at %i percent",
       async (interfaceScalePercent) => {

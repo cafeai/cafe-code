@@ -2604,6 +2604,38 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 
+  it.effect("manages dictation credentials without returning the permanent key", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const { cookie } = yield* bootstrapBrowserSession();
+      assert.isDefined(cookie);
+      const wsUrl = appendSessionCookieToWsUrl(
+        yield* getWsServerUrl("/ws", { authenticated: false }),
+        cookie?.split(";")[0] ?? "",
+      );
+      const permanentKey = "sk-websocket-secret-must-not-return";
+      const states = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const initial = yield* client[WS_METHODS.dictationGetStatus]({});
+            const configured = yield* client[WS_METHODS.dictationSetApiKey]({
+              apiKey: permanentKey,
+            });
+            const reread = yield* client[WS_METHODS.dictationGetStatus]({});
+            const cleared = yield* client[WS_METHODS.dictationClearApiKey]({});
+            return { initial, configured, reread, cleared };
+          }),
+        ),
+      );
+
+      assert.deepStrictEqual(states.initial, { configured: false, canManage: true });
+      assert.deepStrictEqual(states.configured, { configured: true, canManage: true });
+      assert.deepStrictEqual(states.reread, { configured: true, canManage: true });
+      assert.deepStrictEqual(states.cleared, { configured: false, canManage: true });
+      assert.notInclude(JSON.stringify(states), permanentKey);
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
   it.effect("orders the hard-delete RPC across provider, ingestion, and engine barriers", () =>
     Effect.gen(function* () {
       const calls: string[] = [];

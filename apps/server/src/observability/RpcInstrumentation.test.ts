@@ -269,6 +269,27 @@ describe("RpcInstrumentation", () => {
     }),
   );
 
+  it.effect("never traces dictation credential RPC handlers", () =>
+    Effect.gen(function* () {
+      for (const method of [
+        WS_METHODS.dictationGetStatus,
+        WS_METHODS.dictationSetApiKey,
+        WS_METHODS.dictationClearApiKey,
+        WS_METHODS.dictationCreateClientSecret,
+      ]) {
+        const spanNames = yield* collectSpanNames(
+          observeRpcEffect(
+            method,
+            Effect.succeed("sensitive").pipe(
+              Effect.withSpan("rpc.instrumentation.dictation.child"),
+            ),
+          ),
+        );
+        assert.deepStrictEqual(spanNames, []);
+      }
+    }),
+  );
+
   it.effect("does not create spans for disabled direct stream RPC handlers", () =>
     Effect.gen(function* () {
       const spanNames = yield* collectSpanNames(

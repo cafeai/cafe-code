@@ -456,6 +456,7 @@ export const CLIENT_SETTINGS_EXCLUDED_SECRET_STORES = [
   "provider-credentials",
   "provider-api-keys",
   "provider-environment-secrets",
+  "openai-realtime-api-key",
   "tls-private-keys",
 ] as const;
 

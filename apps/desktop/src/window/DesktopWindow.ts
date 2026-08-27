@@ -25,6 +25,96 @@ const TITLEBAR_COLOR = "#01000000"; // #00000000 does not work correctly on Linu
 const TITLEBAR_LIGHT_SYMBOL_COLOR = "#1f2937";
 const TITLEBAR_DARK_SYMBOL_COLOR = "#f8fafc";
 
+/**
+ * Electron does not apply Chromium's normal permission defaults unless the
+ * embedder defines both permission handlers. Dictation needs one deliberately
+ * narrow exception: microphone audio requested by Cafe's trusted top-level
+ * renderer. Camera access, child frames, foreign origins, destroyed/replaced
+ * webContents, and every unrelated permission continue to fail closed.
+ */
+function isTrustedOrigin(candidate: string | undefined, trustedOrigin: string): boolean {
+  if (!candidate) return false;
+  try {
+    return new URL(candidate).origin === trustedOrigin;
+  } catch {
+    return false;
+  }
+}
+
+function isTrustedAudioPermissionCheck(input: {
+  readonly requestingWebContents: Electron.WebContents | null;
+  readonly trustedWebContents: Electron.WebContents;
+  readonly trustedOrigin: string;
+  readonly permission: string;
+  readonly requestingOrigin: string;
+  readonly details: Electron.PermissionCheckHandlerHandlerDetails;
+}): boolean {
+  return (
+    input.requestingWebContents === input.trustedWebContents &&
+    !input.trustedWebContents.isDestroyed() &&
+    input.permission === "media" &&
+    input.details.isMainFrame &&
+    input.details.mediaType === "audio" &&
+    isTrustedOrigin(input.requestingOrigin, input.trustedOrigin) &&
+    (input.details.securityOrigin === undefined ||
+      isTrustedOrigin(input.details.securityOrigin, input.trustedOrigin)) &&
+    (input.details.requestingUrl === undefined ||
+      isTrustedOrigin(input.details.requestingUrl, input.trustedOrigin))
+  );
+}
+
+function isTrustedAudioPermissionRequest(input: {
+  readonly requestingWebContents: Electron.WebContents;
+  readonly trustedWebContents: Electron.WebContents;
+  readonly trustedOrigin: string;
+  readonly permission: string;
+  readonly details: Electron.PermissionRequest;
+}): boolean {
+  const mediaDetails = input.details as Electron.MediaAccessPermissionRequest;
+  return (
+    input.requestingWebContents === input.trustedWebContents &&
+    !input.trustedWebContents.isDestroyed() &&
+    input.permission === "media" &&
+    input.details.isMainFrame &&
+    mediaDetails.mediaTypes?.length === 1 &&
+    mediaDetails.mediaTypes[0] === "audio" &&
+    isTrustedOrigin(input.details.requestingUrl, input.trustedOrigin) &&
+    (mediaDetails.securityOrigin === undefined ||
+      isTrustedOrigin(mediaDetails.securityOrigin, input.trustedOrigin))
+  );
+}
+
+function installTrustedAudioPermissionPolicy(
+  webContents: Electron.WebContents,
+  trustedUrl: URL,
+): void {
+  const trustedOrigin = trustedUrl.origin;
+  webContents.session.setPermissionCheckHandler(
+    (requestingWebContents, permission, requestingOrigin, details) =>
+      isTrustedAudioPermissionCheck({
+        requestingWebContents,
+        trustedWebContents: webContents,
+        trustedOrigin,
+        permission,
+        requestingOrigin,
+        details,
+      }),
+  );
+  webContents.session.setPermissionRequestHandler(
+    (requestingWebContents, permission, callback, details) => {
+      callback(
+        isTrustedAudioPermissionRequest({
+          requestingWebContents,
+          trustedWebContents: webContents,
+          trustedOrigin,
+          permission,
+          details,
+        }),
+      );
+    },
+  );
+}
+
 type WindowTitleBarOptions = Pick<
   Electron.BrowserWindowConstructorOptions,
   "titleBarOverlay" | "titleBarStyle" | "trafficLightPosition"
@@ -186,6 +276,11 @@ const make = Effect.gen(function* () {
     });
     yield* desktopIpc.trustWebContents(window.webContents);
 
+    const rendererUrl = environment.isDevelopment
+      ? new URL(yield* resolveDesktopDevServerUrl(environment))
+      : backendHttpUrl;
+    installTrustedAudioPermissionPolicy(window.webContents, rendererUrl);
+
     window.webContents.on("context-menu", (event, params) => {
       event.preventDefault();
 
@@ -282,8 +377,7 @@ const make = Effect.gen(function* () {
     });
 
     if (environment.isDevelopment) {
-      const devServerUrl = yield* resolveDesktopDevServerUrl(environment);
-      void window.loadURL(devServerUrl);
+      void window.loadURL(rendererUrl.href);
       window.webContents.openDevTools({ mode: "detach" });
     } else {
       void window.loadURL(backendHttpUrl.href);

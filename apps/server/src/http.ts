@@ -85,7 +85,7 @@ export function resolveDevRedirectUrl(devUrl: URL, requestUrl: URL): string {
 // same-machine browser are never shown the HTTPS bootstrap page.
 const LOOPBACK_REMOTE_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1", ""]);
 
-function isLoopbackRemoteAddress(address: string): boolean {
+export function isLoopbackRemoteAddress(address: string): boolean {
   const normalized = address
     .trim()
     .toLowerCase()

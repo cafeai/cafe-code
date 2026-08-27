@@ -1,3 +1,5 @@
+import * as Crypto from "node:crypto";
+
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -25,6 +27,7 @@ import {
   FilesystemBrowseError,
   ThreadId,
   ServerProviderRuntimeRestartError,
+  DictationError,
   WS_METHODS,
   WsRpcGroup,
 } from "@cafecode/contracts";
@@ -100,6 +103,12 @@ import { ensureSystemPromptFile } from "./systemPromptFile.ts";
 import { makeWebSocketConnectionFlowControl } from "./websocket/ConnectionFlowControl.ts";
 import { encodeThreadDetailSnapshotStreamItems } from "./websocket/ThreadDetailSnapshotStream.ts";
 import { addProviderWebSocketDiagnostics } from "@cafecode/shared/providerPipelineDiagnostics";
+import type { AuthenticatedSession } from "./auth/Services/ServerAuth.ts";
+import {
+  OpenAiRealtimeDictation,
+  type OpenAiRealtimeDictationShape,
+} from "./dictation/Services/OpenAiRealtimeDictation.ts";
+import { isLoopbackRemoteAddress } from "./http.ts";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 const isWorkspacePathOutsideRootError = Schema.is(WorkspacePathOutsideRootError);
 
@@ -171,12 +180,15 @@ function toAuthAccessStreamEvent(
 }
 
 const makeWsRpcLayer = (
-  currentSessionId: AuthSessionId,
+  currentSession: AuthenticatedSession,
+  secureSecretTransport: boolean,
+  dictation: OpenAiRealtimeDictationShape,
   orchestrationSubscriptionHub: OrchestrationSubscriptionHubShape,
   providerMaintenanceRunner: ProviderMaintenanceRunner.ProviderMaintenanceRunnerShape,
 ) =>
   WsRpcGroup.toLayer(
     Effect.gen(function* () {
+      const currentSessionId = currentSession.sessionId;
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
       const orchestrationEngine = yield* OrchestrationEngineService;
       const providerRuntimeIngestion = yield* ProviderRuntimeIngestionService;
@@ -220,6 +232,46 @@ const makeWsRpcLayer = (
       const connectionFlowControl = makeWebSocketConnectionFlowControl();
       const serverCommandId = (tag: string) =>
         CommandId.make(`server:${tag}:${crypto.randomUUID()}`);
+
+      const dictationStatus = () =>
+        dictation.getStatus.pipe(
+          Effect.map(({ configured }) => ({
+            configured,
+            canManage: currentSession.role === "owner" && secureSecretTransport,
+          })),
+        );
+
+      const requireSecureDictationTransport: Effect.Effect<void, DictationError> = Effect.suspend(
+        () =>
+          secureSecretTransport
+            ? Effect.void
+            : Effect.fail(
+                new DictationError({
+                  code: "insecure_transport",
+                  message: "Dictation requires HTTPS or a same-machine Cafe connection.",
+                }),
+              ),
+      );
+
+      const requireDictationOwner: Effect.Effect<void, DictationError> = Effect.suspend(() =>
+        currentSession.role === "owner"
+          ? Effect.void
+          : Effect.fail(
+              new DictationError({
+                code: "not_authorized",
+                message: "Only the Cafe owner can manage the dictation credential.",
+              }),
+            ),
+      );
+
+      // OpenAI asks applications to bind ephemeral tokens to a stable,
+      // privacy-preserving end-user identifier. Cafe session IDs are already
+      // high entropy; domain-separated hashing prevents the raw ID from being
+      // disclosed to OpenAI or retained in the dictation service.
+      const dictationSafetyIdentifier = Crypto.createHash("sha256")
+        .update("cafecode:openai-realtime-dictation:v1\0", "utf8")
+        .update(currentSessionId, "utf8")
+        .digest("hex");
 
       const loadAuthAccessSnapshot = () =>
         Effect.all({
@@ -1068,6 +1120,35 @@ const makeWsRpcLayer = (
               "rpc.aggregate": "server",
             },
           ),
+        [WS_METHODS.dictationGetStatus]: (_input) =>
+          observeRpcEffect(WS_METHODS.dictationGetStatus, dictationStatus()),
+        [WS_METHODS.dictationSetApiKey]: ({ apiKey }) =>
+          observeRpcEffect(
+            WS_METHODS.dictationSetApiKey,
+            Effect.all([requireSecureDictationTransport, requireDictationOwner]).pipe(
+              Effect.flatMap(() => dictation.setApiKey(apiKey)),
+              Effect.flatMap(dictationStatus),
+            ),
+          ),
+        [WS_METHODS.dictationClearApiKey]: (_input) =>
+          observeRpcEffect(
+            WS_METHODS.dictationClearApiKey,
+            Effect.all([requireSecureDictationTransport, requireDictationOwner]).pipe(
+              Effect.flatMap(() => dictation.clearApiKey),
+              Effect.flatMap(dictationStatus),
+            ),
+          ),
+        [WS_METHODS.dictationCreateClientSecret]: (_input) =>
+          observeRpcEffect(
+            WS_METHODS.dictationCreateClientSecret,
+            requireSecureDictationTransport.pipe(
+              Effect.flatMap(() =>
+                dictation.createClientSecret({
+                  safetyIdentifier: dictationSafetyIdentifier,
+                }),
+              ),
+            ),
+          ),
         [WS_METHODS.usageStatsGet]: (_input) =>
           observeRpcEffect(WS_METHODS.usageStatsGet, usageStats.get, {
             "rpc.aggregate": "server",
@@ -1410,6 +1491,11 @@ export const websocketRpcRouteLayer = Layer.unwrap(
       orchestrationEngine,
       initialCursor: initialSnapshot.snapshotSequence,
     });
+    // Resolve the credential-bearing service while constructing the route. If
+    // it were resolved inside each request handler, its dependency would leak
+    // through the router output and could not be safely provided at this
+    // boundary.
+    const dictation = yield* OpenAiRealtimeDictation;
     const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
     return HttpRouter.add(
       "GET",
@@ -1419,12 +1505,23 @@ export const websocketRpcRouteLayer = Layer.unwrap(
         const serverAuth = yield* ServerAuth;
         const sessions = yield* SessionCredentialService;
         const session = yield* serverAuth.authenticateWebSocketUpgrade(request);
+        // Cafe's HTTPS sibling terminates TLS and forwards to this listener over
+        // loopback. Trust the observed peer, never client-controlled forwarded
+        // headers, before accepting a permanent key or returning an ephemeral
+        // OpenAI credential. A remote reverse proxy must likewise connect over
+        // a local/IPC boundary; direct non-loopback cleartext always fails shut.
+        const secureSecretTransport = Option.match(request.remoteAddress, {
+          onNone: () => false,
+          onSome: isLoopbackRemoteAddress,
+        });
         const rpcWebSocketHttpEffect = yield* RpcServer.toHttpEffectWebsocket(WsRpcGroup, {
           disableTracing: true,
         }).pipe(
           Effect.provide(
             makeWsRpcLayer(
-              session.sessionId,
+              session,
+              secureSecretTransport,
+              dictation,
               orchestrationSubscriptionHub,
               providerMaintenanceRunner,
             ).pipe(

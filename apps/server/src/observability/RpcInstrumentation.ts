@@ -20,6 +20,13 @@ const RPC_METHODS_WITH_TRACING_DISABLED: ReadonlySet<string> = new Set([
   WS_METHODS.serverGetProcessDiagnostics,
   WS_METHODS.serverGetProcessResourceHistory,
   WS_METHODS.serverSignalProcess,
+  // These methods either accept the permanent OpenAI API key or return an
+  // ephemeral Realtime credential. Metrics retain only the method/outcome;
+  // spans are disabled so neither payload can enter trace attributes/events.
+  WS_METHODS.dictationGetStatus,
+  WS_METHODS.dictationSetApiKey,
+  WS_METHODS.dictationClearApiKey,
+  WS_METHODS.dictationCreateClientSecret,
 ]);
 
 function shouldTraceRpc(method: string): boolean {

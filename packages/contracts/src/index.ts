@@ -2,6 +2,7 @@ export * from "./baseSchemas.ts";
 export * from "./auth.ts";
 export * from "./environment.ts";
 export * from "./desktopBootstrap.ts";
+export * from "./dictation.ts";
 export * from "./remoteAccess.ts";
 export * from "./ipc.ts";
 export * from "./provider.ts";

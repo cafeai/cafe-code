@@ -100,6 +100,7 @@ import {
   authWebSocketTokenRouteLayer,
 } from "./auth/http.ts";
 import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore.ts";
+import { OpenAiRealtimeDictationLive } from "./dictation/Layers/OpenAiRealtimeDictation.ts";
 import { ServerAuthLive } from "./auth/Layers/ServerAuth.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
@@ -258,6 +259,8 @@ const AuthLayerLive = ServerAuthLive.pipe(
   Layer.provide(ServerSecretStoreLive),
 );
 
+const DictationLayerLive = OpenAiRealtimeDictationLive.pipe(Layer.provide(ServerSecretStoreLive));
+
 const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
   Layer.provideMerge(ProviderLayerLive),
   Layer.provideMerge(ProviderSessionDirectoryLayerLive),
@@ -353,7 +356,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   webPushPublicKeyRouteLayer,
   webPushSubscribeRouteLayer,
   webPushUnsubscribeRouteLayer,
-  websocketRpcRouteLayer,
+  websocketRpcRouteLayer.pipe(Layer.provide(DictationLayerLive)),
 ).pipe(Layer.provide(browserApiCorsLayer));
 
 export const makeServerLayer = Layer.unwrap(

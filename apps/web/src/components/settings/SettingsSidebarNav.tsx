@@ -11,6 +11,7 @@ import {
   GitBranchIcon,
   KeyboardIcon,
   MessageSquareIcon,
+  MicIcon,
   MonitorSmartphoneIcon,
   PaletteIcon,
   Settings2Icon,
@@ -41,6 +42,7 @@ export type SettingsSectionPath =
   | "/settings/providers"
   | "/settings/source-control"
   | "/settings/connections"
+  | "/settings/dictation"
   | "/settings/stats"
   | "/settings/archived"
   | "/settings/recently-deleted"
@@ -80,6 +82,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
     label: "AI & Integrations",
     items: [
       { label: "Providers", to: "/settings/providers", icon: BotIcon },
+      { label: "Dictation", to: "/settings/dictation", icon: MicIcon },
       { label: "Source Control", to: "/settings/source-control", icon: GitBranchIcon },
       { label: "WebUI", to: "/settings/connections", icon: MonitorSmartphoneIcon },
     ],

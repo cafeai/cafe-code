@@ -3,6 +3,12 @@ import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 
 import { ExternalLauncherError, LaunchEditorInput, LaunchTerminalInput } from "./editor.ts";
+import {
+  DictationCredentialStatus,
+  DictationError,
+  DictationRealtimeClientSecret,
+  DictationSetApiKeyInput,
+} from "./dictation.ts";
 import { AuthAccessStreamEvent } from "./auth.ts";
 import {
   FilesystemBrowseInput,
@@ -150,6 +156,13 @@ export const WS_METHODS = {
   serverGetRuntimeLayerDiagnostics: "server.getRuntimeLayerDiagnostics",
   serverSignalProcess: "server.signalProcess",
 
+  // Opt-in OpenAI Realtime dictation. The permanent key is accepted only by
+  // the dedicated set method and is never part of ServerSettings.
+  dictationGetStatus: "dictation.getStatus",
+  dictationSetApiKey: "dictation.setApiKey",
+  dictationClearApiKey: "dictation.clearApiKey",
+  dictationCreateClientSecret: "dictation.createClientSecret",
+
   // Usage stats
   usageStatsGet: "usageStats.get",
 
@@ -242,6 +255,30 @@ export const WsServerUpdateClientSettingsRpc = Rpc.make(WS_METHODS.serverUpdateC
   payload: Schema.Struct({ patch: ClientSettingsPatch }),
   success: ClientSettingsSchema,
   error: ClientSettingsError,
+});
+
+export const WsDictationGetStatusRpc = Rpc.make(WS_METHODS.dictationGetStatus, {
+  payload: Schema.Struct({}),
+  success: DictationCredentialStatus,
+  error: DictationError,
+});
+
+export const WsDictationSetApiKeyRpc = Rpc.make(WS_METHODS.dictationSetApiKey, {
+  payload: DictationSetApiKeyInput,
+  success: DictationCredentialStatus,
+  error: DictationError,
+});
+
+export const WsDictationClearApiKeyRpc = Rpc.make(WS_METHODS.dictationClearApiKey, {
+  payload: Schema.Struct({}),
+  success: DictationCredentialStatus,
+  error: DictationError,
+});
+
+export const WsDictationCreateClientSecretRpc = Rpc.make(WS_METHODS.dictationCreateClientSecret, {
+  payload: Schema.Struct({}),
+  success: DictationRealtimeClientSecret,
+  error: DictationError,
 });
 
 export const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
@@ -541,6 +578,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerUpdateSettingsRpc,
   WsServerGetClientSettingsRpc,
   WsServerUpdateClientSettingsRpc,
+  WsDictationGetStatusRpc,
+  WsDictationSetApiKeyRpc,
+  WsDictationClearApiKeyRpc,
+  WsDictationCreateClientSecretRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerGetTraceDiagnosticsRpc,
   WsServerGetProcessDiagnosticsRpc,

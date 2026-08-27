@@ -98,6 +98,12 @@ export interface WsRpcClient {
       typeof WS_METHODS.gitPreparePullRequestThread
     >;
   };
+  readonly dictation: {
+    readonly getStatus: RpcUnaryNoArgMethod<typeof WS_METHODS.dictationGetStatus>;
+    readonly setApiKey: RpcUnaryMethod<typeof WS_METHODS.dictationSetApiKey>;
+    readonly clearApiKey: RpcUnaryNoArgMethod<typeof WS_METHODS.dictationClearApiKey>;
+    readonly createClientSecret: RpcUnaryNoArgMethod<typeof WS_METHODS.dictationCreateClientSecret>;
+  };
   readonly server: {
     readonly getConfig: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetConfig>;
     /**
@@ -233,6 +239,24 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         transport.request((client) => client[WS_METHODS.gitResolvePullRequest](input)),
       preparePullRequestThread: (input) =>
         transport.request((client) => client[WS_METHODS.gitPreparePullRequestThread](input)),
+    },
+    dictation: {
+      getStatus: () =>
+        transport.request((client) =>
+          client[WS_METHODS.dictationGetStatus]({}).pipe(Effect.withTracerEnabled(false)),
+        ),
+      setApiKey: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.dictationSetApiKey](input).pipe(Effect.withTracerEnabled(false)),
+        ),
+      clearApiKey: () =>
+        transport.request((client) =>
+          client[WS_METHODS.dictationClearApiKey]({}).pipe(Effect.withTracerEnabled(false)),
+        ),
+      createClientSecret: () =>
+        transport.request((client) =>
+          client[WS_METHODS.dictationCreateClientSecret]({}).pipe(Effect.withTracerEnabled(false)),
+        ),
     },
     server: {
       getConfig: () => transport.request((client) => client[WS_METHODS.serverGetConfig]({})),

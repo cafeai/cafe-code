@@ -33,14 +33,21 @@ const environmentInput = {
 } satisfies DesktopEnvironment.MakeDesktopEnvironmentInput;
 
 function makeFakeBrowserWindow() {
+  const setPermissionCheckHandler = vi.fn();
+  const setPermissionRequestHandler = vi.fn();
   const webContents = {
     copyImageAt: vi.fn(),
+    isDestroyed: vi.fn(() => false),
     isLoadingMainFrame: vi.fn(() => false),
     on: vi.fn(),
     once: vi.fn(),
     openDevTools: vi.fn(),
     replaceMisspelling: vi.fn(),
     send: vi.fn(),
+    session: {
+      setPermissionCheckHandler,
+      setPermissionRequestHandler,
+    },
     setWindowOpenHandler: vi.fn(),
   };
 
@@ -64,6 +71,8 @@ function makeFakeBrowserWindow() {
     window: window as unknown as Electron.BrowserWindow,
     loadURL: window.loadURL,
     openDevTools: webContents.openDevTools,
+    setPermissionCheckHandler,
+    setPermissionRequestHandler,
   };
 }
 
@@ -185,6 +194,80 @@ describe("DesktopWindow", () => {
         assert.equal(yield* Ref.get(createCount), 1);
         assert.deepEqual(fakeWindow.loadURL.mock.calls[0], ["http://127.0.0.1:5733/"]);
         assert.equal(fakeWindow.openDevTools.mock.calls.length, 1);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("grants only trusted top-level microphone requests", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const layer = makeTestLayer({
+        window: fakeWindow.window,
+        createCount,
+        mainWindow,
+      });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady;
+
+        const checkHandler = fakeWindow.setPermissionCheckHandler.mock.calls[0]?.[0] as
+          | NonNullable<Parameters<Electron.Session["setPermissionCheckHandler"]>[0]>
+          | undefined;
+        const requestHandler = fakeWindow.setPermissionRequestHandler.mock.calls[0]?.[0] as
+          | NonNullable<Parameters<Electron.Session["setPermissionRequestHandler"]>[0]>
+          | undefined;
+        assert.isDefined(checkHandler);
+        assert.isDefined(requestHandler);
+
+        const trustedWebContents = fakeWindow.window.webContents;
+        const checkDetails: Electron.PermissionCheckHandlerHandlerDetails = {
+          isMainFrame: true,
+          mediaType: "audio",
+          requestingUrl: "http://127.0.0.1:5733/chat",
+          securityOrigin: "http://127.0.0.1:5733",
+        };
+        assert.isTrue(
+          checkHandler(trustedWebContents, "media", "http://127.0.0.1:5733", checkDetails),
+        );
+        assert.isFalse(
+          checkHandler(trustedWebContents, "media", "https://attacker.example", checkDetails),
+        );
+        assert.isFalse(
+          checkHandler(trustedWebContents, "media", "http://127.0.0.1:5733", {
+            ...checkDetails,
+            mediaType: "video",
+          }),
+        );
+        assert.isFalse(
+          checkHandler(trustedWebContents, "media", "http://127.0.0.1:5733", {
+            ...checkDetails,
+            isMainFrame: false,
+          }),
+        );
+        assert.isFalse(
+          checkHandler({} as Electron.WebContents, "media", "http://127.0.0.1:5733", checkDetails),
+        );
+
+        const requestResult = vi.fn();
+        requestHandler(trustedWebContents, "media", requestResult, {
+          isMainFrame: true,
+          requestingUrl: "http://127.0.0.1:5733/chat",
+          securityOrigin: "http://127.0.0.1:5733",
+          mediaTypes: ["audio"],
+        });
+        assert.deepStrictEqual(requestResult.mock.calls, [[true]]);
+
+        const cameraResult = vi.fn();
+        requestHandler(trustedWebContents, "media", cameraResult, {
+          isMainFrame: true,
+          requestingUrl: "http://127.0.0.1:5733/chat",
+          securityOrigin: "http://127.0.0.1:5733",
+          mediaTypes: ["audio", "video"],
+        });
+        assert.deepStrictEqual(cameraResult.mock.calls, [[false]]);
       }).pipe(Effect.provide(layer));
     }),
   );
