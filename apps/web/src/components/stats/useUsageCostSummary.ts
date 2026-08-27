@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import type { UsageStatsGetResult } from "@cafecode/contracts";
 import { rollUpCost, type ModelRate } from "@cafecode/shared/modelPricing";
 
 import { useSettings } from "../../hooks/useSettings";
 import { useCountUp } from "./useCountUp";
+import { useUsageStatsDetail } from "./usageStatsDetailResource";
 
 /**
  * Lifetime token and cost totals, for surfaces that want the headline figure
@@ -11,11 +12,10 @@ import { useCountUp } from "./useCountUp";
  *
  * Deliberately does not subscribe to the 10 Hz snapshot stream: this exists for
  * ambient readouts, and a decorative counter has no business re-rendering its
- * host ten times a second. It polls the same detail endpoint the Usage page
- * uses every five seconds and stops entirely while the document is hidden.
+ * host ten times a second. The shared detail resource single-flights one
+ * five-second refresh across Atrium and Settings, retains the last successful
+ * response across unmounts, and refreshes immediately after reconnection.
  */
-
-const REFRESH_INTERVAL_MS = 5_000;
 
 export interface UsageCostSummary {
   readonly cost: number;
@@ -57,58 +57,7 @@ export function useUsageCostSummary(enabled: boolean, dayWindow = 30): UsageCost
   const overrides = useSettings((settings) => settings.modelPricingOverrides) as
     | Record<string, ModelRate>
     | undefined;
-  const [usage, setUsage] = useState<UsageStatsGetResult | null>(null);
-
-  useEffect(() => {
-    if (!enabled) return;
-    let cancelled = false;
-    let inFlight = false;
-    let interval: number | null = null;
-
-    const load = async () => {
-      if (cancelled || inFlight || document.visibilityState !== "visible") return;
-      inFlight = true;
-      try {
-        // Imported on demand: this hook hangs off decorative surfaces, and a
-        // static import would drag the whole environment runtime into their
-        // module graph for a readout that may never be shown.
-        const { getPrimaryEnvironmentConnection } = await import("~/environments/runtime");
-        const result = await getPrimaryEnvironmentConnection().client.server.getUsageStats();
-        if (!cancelled) setUsage(result);
-      } catch {
-        // An ambient readout must never surface a transport failure; it simply
-        // keeps showing the last figure it had.
-      } finally {
-        inFlight = false;
-      }
-    };
-
-    const stop = () => {
-      if (interval === null) return;
-      window.clearInterval(interval);
-      interval = null;
-    };
-    const syncVisibility = () => {
-      if (document.visibilityState !== "visible") {
-        stop();
-        return;
-      }
-      // Repeated visibility events must not create parallel timers or eager
-      // duplicate requests. A newly visible surface catches up immediately,
-      // then owns exactly one bounded polling interval until it hides again.
-      if (interval !== null) return;
-      void load();
-      interval = window.setInterval(() => void load(), REFRESH_INTERVAL_MS);
-    };
-
-    syncVisibility();
-    document.addEventListener("visibilitychange", syncVisibility);
-    return () => {
-      cancelled = true;
-      stop();
-      document.removeEventListener("visibilitychange", syncVisibility);
-    };
-  }, [enabled]);
+  const usage = useUsageStatsDetail(enabled).data;
 
   const summary = useMemo(() => {
     if (usage === null) return EMPTY;

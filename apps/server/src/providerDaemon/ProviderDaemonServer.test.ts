@@ -9,12 +9,13 @@ import {
   ProviderDaemonRpcEnvelope,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ProviderDaemonEventRecord,
   type ProviderRuntimeEvent,
   RuntimeTaskId,
   ThreadId,
   TurnId,
 } from "@cafecode/contracts";
-import { assert, describe, it, vi } from "@effect/vitest";
+import { assert, describe, expect, it, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
@@ -35,10 +36,12 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { ProviderSupervisorRegistryLive } from "../providerSupervisor/ProviderSupervisorRegistry.ts";
 import {
   captureProviderDaemonProcessDiagnostic,
+  handleProviderDaemonEventStream,
   runProviderDaemonServer,
   writeProviderDaemonStreamLine,
   type ProviderDaemonServerOptions,
 } from "./ProviderDaemonServer.ts";
+import type { ProviderDaemonPersistentEventJournal } from "./EventJournal.ts";
 import { ProviderRuntimeInventoryLocalLive } from "./ProviderRuntimeInventory.ts";
 
 const TEST_TOKEN = "provider-daemon-test-token-000000000000000000000000";
@@ -62,6 +65,22 @@ const decodeProviderDaemonRpcEnvelopeJson = Schema.decodeUnknownSync(
 );
 
 const asEventId = (value: string): EventId => EventId.make(value);
+
+function makeDaemonRecord(cursor: number): ProviderDaemonEventRecord {
+  return {
+    cursor,
+    emittedAt: "2026-08-27T00:00:00.000Z",
+    event: {
+      eventId: asEventId(`stream-event-${cursor}`),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      threadId: ThreadId.make("thread-stream"),
+      createdAt: "2026-08-27T00:00:00.000Z",
+      type: "session.started",
+      payload: { message: `event-${cursor}` },
+    },
+  };
+}
 
 const startProviderDaemonServerOnEphemeralPort = (
   options: Omit<ProviderDaemonServerOptions, "port">,
@@ -167,6 +186,212 @@ describe("ProviderDaemonServer", () => {
     const closeError = await closeResult;
     assert.instanceOf(closeError, Error);
     assert.match(closeError.message, /closed before drain/u);
+  });
+
+  it("filters replay/live overlap before it can overflow the finite live queue", async () => {
+    class FakeRequest extends EventEmitter {}
+    class FakeResponse extends EventEmitter {
+      destroyed = false;
+      writableEnded = false;
+      readonly lines: string[] = [];
+      readonly destroyCauses: unknown[] = [];
+      writeHead(): void {}
+      write(line: string): boolean {
+        this.lines.push(line);
+        if (this.lines.length === 305) queueMicrotask(() => this.emit("close"));
+        return true;
+      }
+      end(): void {
+        this.writableEnded = true;
+      }
+      destroy(cause?: unknown): void {
+        this.destroyed = true;
+        this.destroyCauses.push(cause);
+        this.emit("close");
+      }
+    }
+
+    let liveListener: ((record: ProviderDaemonEventRecord) => void) | null = null;
+    let replayCallCount = 0;
+    const journal = {
+      publish: () => Effect.die("unexpected publish"),
+      replayAfter: () => Effect.die("unexpected replayAfter"),
+      replayPageAfter: () => Effect.die("unexpected replayPageAfter"),
+      replayPageThrough: () =>
+        Effect.sync(() => {
+          replayCallCount += 1;
+          if (replayCallCount > 1) return [];
+          // These 300 callbacks are the historical records the current replay
+          // page will also return. Before boundary filtering they exceeded the
+          // 256-record live queue and disconnected the stream.
+          for (let cursor = 1; cursor <= 305; cursor += 1) {
+            liveListener?.(makeDaemonRecord(cursor));
+          }
+          return Array.from({ length: 300 }, (_, index) => makeDaemonRecord(index + 1));
+        }),
+      subscribe: () => () => undefined,
+      subscribeWithReplayBoundary: (listener: (record: ProviderDaemonEventRecord) => void) =>
+        Effect.sync(() => {
+          liveListener = listener;
+          return {
+            replayBoundaryCursor: 300,
+            unsubscribe: () => {
+              liveListener = null;
+            },
+          };
+        }),
+      snapshot: Effect.succeed({
+        eventCursor: 300,
+        retainedEventCount: 300,
+        oldestCursor: 1,
+        newestCursor: 300,
+      }),
+      startupMaintenance: Effect.void,
+    } satisfies ProviderDaemonPersistentEventJournal;
+    const request = new FakeRequest();
+    const response = new FakeResponse();
+    let cleanupCount = 0;
+
+    await handleProviderDaemonEventStream(
+      request as unknown as Parameters<typeof handleProviderDaemonEventStream>[0],
+      response as unknown as Parameters<typeof handleProviderDaemonEventStream>[1],
+      journal,
+      0,
+      (effect) => Effect.runPromise(effect),
+      () => {
+        cleanupCount += 1;
+      },
+    );
+
+    expect(response.destroyCauses).toEqual([]);
+    expect(response.lines).toHaveLength(305);
+    expect(
+      response.lines.map((line) => (JSON.parse(line) as ProviderDaemonEventRecord).cursor),
+    ).toEqual(Array.from({ length: 305 }, (_, index) => index + 1));
+    expect(cleanupCount).toBe(1);
+    expect(liveListener).toBeNull();
+  });
+
+  it("cleans up the HTTP stream when replay-boundary acquisition fails", async () => {
+    class FakeRequest extends EventEmitter {}
+    class FakeResponse extends EventEmitter {
+      destroyed = false;
+      writableEnded = false;
+      readonly destroyCauses: unknown[] = [];
+      writeHead(): void {}
+      write(): boolean {
+        return true;
+      }
+      end(): void {
+        this.writableEnded = true;
+      }
+      destroy(cause?: unknown): void {
+        this.destroyed = true;
+        this.destroyCauses.push(cause);
+        this.emit("close");
+      }
+    }
+
+    const journal = {
+      publish: () => Effect.die("unexpected publish"),
+      replayAfter: () => Effect.die("unexpected replayAfter"),
+      replayPageAfter: () => Effect.die("unexpected replayPageAfter"),
+      replayPageThrough: () => Effect.die("unexpected replayPageThrough"),
+      subscribe: () => () => undefined,
+      subscribeWithReplayBoundary: () => Effect.die(new Error("boundary snapshot failed")),
+      snapshot: Effect.die("unexpected snapshot"),
+      startupMaintenance: Effect.void,
+    } satisfies ProviderDaemonPersistentEventJournal;
+    const response = new FakeResponse();
+    let cleanupCount = 0;
+
+    await handleProviderDaemonEventStream(
+      new FakeRequest() as unknown as Parameters<typeof handleProviderDaemonEventStream>[0],
+      response as unknown as Parameters<typeof handleProviderDaemonEventStream>[1],
+      journal,
+      0,
+      (effect) => Effect.runPromise(effect),
+      () => {
+        cleanupCount += 1;
+      },
+    );
+
+    expect(cleanupCount).toBe(1);
+    expect(response.destroyed).toBe(true);
+    expect(response.destroyCauses).toHaveLength(1);
+    expect(response.destroyCauses[0]).toBeInstanceOf(Error);
+  });
+
+  it("unsubscribes when the response closes during replay-boundary acquisition", async () => {
+    class FakeRequest extends EventEmitter {}
+    class FakeResponse extends EventEmitter {
+      destroyed = false;
+      writableEnded = false;
+      writeHead(): void {}
+      write(): boolean {
+        return true;
+      }
+      end(): void {
+        this.writableEnded = true;
+      }
+      destroy(): void {
+        this.destroyed = true;
+        this.emit("close");
+      }
+    }
+
+    let signalBoundaryStarted!: () => void;
+    const boundaryStarted = new Promise<void>((resolve) => {
+      signalBoundaryStarted = resolve;
+    });
+    let releaseBoundary!: () => void;
+    const boundaryGate = new Promise<void>((resolve) => {
+      releaseBoundary = resolve;
+    });
+    let unsubscribeCount = 0;
+    const journal = {
+      publish: () => Effect.die("unexpected publish"),
+      replayAfter: () => Effect.die("unexpected replayAfter"),
+      replayPageAfter: () => Effect.die("unexpected replayPageAfter"),
+      replayPageThrough: () => Effect.die("unexpected replayPageThrough"),
+      subscribe: () => () => undefined,
+      subscribeWithReplayBoundary: () =>
+        Effect.promise(async () => {
+          signalBoundaryStarted();
+          await boundaryGate;
+          return {
+            replayBoundaryCursor: 0,
+            unsubscribe: () => {
+              unsubscribeCount += 1;
+            },
+          };
+        }),
+      snapshot: Effect.die("unexpected snapshot"),
+      startupMaintenance: Effect.void,
+    } satisfies ProviderDaemonPersistentEventJournal;
+    const request = new FakeRequest();
+    const response = new FakeResponse();
+    let cleanupCount = 0;
+
+    const stream = handleProviderDaemonEventStream(
+      request as unknown as Parameters<typeof handleProviderDaemonEventStream>[0],
+      response as unknown as Parameters<typeof handleProviderDaemonEventStream>[1],
+      journal,
+      0,
+      (effect) => Effect.runPromise(effect),
+      () => {
+        cleanupCount += 1;
+      },
+    );
+
+    await boundaryStarted;
+    response.emit("close");
+    releaseBoundary();
+    await stream;
+
+    expect(cleanupCount).toBe(1);
+    expect(unsubscribeCount).toBe(1);
+    expect(response.writableEnded).toBe(true);
   });
 
   it.effect("serves authenticated liveness without reading provider diagnostics", () => {

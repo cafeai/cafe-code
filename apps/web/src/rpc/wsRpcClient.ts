@@ -14,7 +14,7 @@ import * as Stream from "effect/Stream";
 import { dispatchIdempotentCommandWithTransportRetry } from "./idempotentDispatch";
 import { type WsRpcProtocolClient } from "./protocol";
 import { resetWsReconnectBackoff } from "./wsConnectionState";
-import { WsTransport } from "./wsTransport";
+import { WsTransport, type WsTransportOpenEvent } from "./wsTransport";
 
 type RpcTag = keyof WsRpcProtocolClient & string;
 type RpcMethod<TTag extends RpcTag> = WsRpcProtocolClient[TTag];
@@ -53,6 +53,9 @@ export interface WsRpcClient {
   readonly dispose: () => Promise<void>;
   readonly reconnect: () => Promise<void>;
   readonly isHeartbeatFresh: () => boolean;
+  readonly subscribeConnectionOpened: (
+    listener: (event: WsTransportOpenEvent) => void,
+  ) => () => void;
   readonly projects: {
     readonly searchEntries: RpcUnaryMethod<typeof WS_METHODS.projectsSearchEntries>;
     readonly writeFile: RpcUnaryMethod<typeof WS_METHODS.projectsWriteFile>;
@@ -177,6 +180,7 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
       await transport.reconnect();
     },
     isHeartbeatFresh: () => transport.isHeartbeatFresh(),
+    subscribeConnectionOpened: (listener) => transport.subscribeConnectionOpened(listener),
     projects: {
       searchEntries: (input) =>
         transport.request((client) => client[WS_METHODS.projectsSearchEntries](input)),

@@ -296,6 +296,38 @@ export const ServerProviderProbeDiagnostics = Schema.Struct({
 });
 export type ServerProviderProbeDiagnostics = typeof ServerProviderProbeDiagnostics.Type;
 
+export const ServerProviderProbePhaseName = Schema.Literals([
+  "prepare-runtime-home",
+  "version",
+  "login-status",
+  "account-usage",
+]);
+export type ServerProviderProbePhaseName = typeof ServerProviderProbePhaseName.Type;
+
+export const ServerProviderProbePhaseOutcome = Schema.Literals([
+  "success",
+  "error",
+  "timeout",
+  "skipped",
+]);
+export type ServerProviderProbePhaseOutcome = typeof ServerProviderProbePhaseOutcome.Type;
+
+/**
+ * Payload-free timing for one allowlisted provider-probe phase. Provider
+ * commands, output, paths, account data, and error messages must never be
+ * added here because ordinary provider snapshots reach renderer diagnostics.
+ */
+export const ServerProviderProbePhaseDiagnostics = Schema.Struct({
+  phase: ServerProviderProbePhaseName,
+  outcome: ServerProviderProbePhaseOutcome,
+  durationMs: NonNegativeInt,
+});
+export type ServerProviderProbePhaseDiagnostics = typeof ServerProviderProbePhaseDiagnostics.Type;
+
+const ServerProviderProbePhaseDiagnosticsList = Schema.Array(
+  ServerProviderProbePhaseDiagnostics,
+).check(Schema.isMaxLength(8));
+
 export const ServerProvider = Schema.Struct({
   // Routing key for the configured instance this snapshot represents. This
   // is the only stable identity consumers may use for provider routing.
@@ -333,6 +365,7 @@ export const ServerProvider = Schema.Struct({
   accountRateLimits: Schema.optionalKey(ServerProviderAccountRateLimits),
   runtimeCapabilities: Schema.optionalKey(ServerProviderRuntimeCapabilities),
   probeDiagnostics: Schema.optionalKey(ServerProviderProbeDiagnostics),
+  probePhases: Schema.optionalKey(ServerProviderProbePhaseDiagnosticsList),
   versionAdvisory: Schema.optionalKey(ServerProviderVersionAdvisory),
   updateState: Schema.optionalKey(ServerProviderUpdateState),
 });

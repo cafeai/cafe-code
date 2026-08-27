@@ -52,6 +52,7 @@ import { useTaskAtriumStore } from "./taskAtriumStore";
  */
 
 const FALLBACK_TINT = "#48cfff";
+const MemoizedUsageCostContent = memo(UsageCostContent);
 /** Matches the engine's state palette so the two views never disagree. */
 const HOLD_COLOR = "#f5a524";
 const FAULT_COLOR = "#ef4444";
@@ -72,6 +73,8 @@ const compactUsdFormat = new Intl.NumberFormat("en-US", {
  */
 const MAX_ATRIUM_DETAIL_SUBSCRIPTIONS = 24;
 const ATRIUM_DETAIL_PREFETCH_MARGIN_PX = 320;
+/** Give the tiny usage RPC priority over multi-megabyte thread detail hydration. */
+const ATRIUM_USAGE_PRIORITY_WINDOW_MS = 750;
 /** Keep recent completions useful without letting historical rows dominate a card. */
 const COMPLETED_SUBAGENT_PREVIEW_COUNT = 3;
 
@@ -151,6 +154,13 @@ function AtriumSceneCanvas({
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sceneRef = useRef<AtriumScene | null>(null);
+  // Seed the expensive DPR-scaled backing layers with the actual appearance.
+  // Later theme changes still use the setters, but the initial mount no longer
+  // builds the default layers and immediately rebuilds them once or twice.
+  const currentAppearanceRef = useRef({ tint, dark });
+  const currentPointerRef = useRef(pointer);
+  currentAppearanceRef.current = { tint, dark };
+  currentPointerRef.current = pointer;
   const continueBackgroundAnimations = useSettings(
     (settings) => settings.continueBackgroundAnimations,
   );
@@ -158,8 +168,9 @@ function AtriumSceneCanvas({
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const scene = createAtriumScene(canvas);
+    const scene = createAtriumScene(canvas, currentAppearanceRef.current);
     if (!scene) return;
+    scene.setPointer(currentPointerRef.current.x, currentPointerRef.current.y);
     sceneRef.current = scene;
 
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -580,6 +591,18 @@ export function TaskAtriumBoard() {
   // Lifetime spend, alongside the live work. Same odometer as the Usage page,
   // so the two never animate differently.
   const usage = useUsageCostSummary(true);
+  const [detailHydrationReady, setDetailHydrationReady] = useState(false);
+  useEffect(() => {
+    // Reserve the first paint/transport window for the small headline request
+    // even when a cached graph is already visible: that cache triggers a fresh
+    // background read, and immediate multi-megabyte detail hydration could
+    // otherwise starve it again. Parent task cards remain visible throughout.
+    const timeout = window.setTimeout(
+      () => setDetailHydrationReady(true),
+      ATRIUM_USAGE_PRIORITY_WINDOW_MS,
+    );
+    return () => window.clearTimeout(timeout);
+  }, []);
 
   // Derivation allocates fresh arrays, so subscribing to the store directly
   // would re-render this board on every streamed token. Poll on one slow clock
@@ -732,13 +755,14 @@ export function TaskAtriumBoard() {
     [snapshot.cards, providerFilter],
   );
   const detailHydrationCards = useMemo(() => {
+    if (!detailHydrationReady) return [];
     const observed = filtered.filter((card) => visibleCardKeys.has(card.key));
     // Before the first observer callback, hydrate the leading card so a cold
     // board never sits empty. The fixed slice remains a security boundary even
     // when an unusually tall viewport intersects many compact cards at once.
     const candidates = observed.length > 0 ? observed : filtered.slice(0, 1);
     return candidates.slice(0, MAX_ATRIUM_DETAIL_SUBSCRIPTIONS);
-  }, [filtered, visibleCardKeys]);
+  }, [detailHydrationReady, filtered, visibleCardKeys]);
   useEffect(() => {
     const retained = retainedDetailsRef.current;
     const desired = new Set(detailHydrationCards.map((card) => card.key));
@@ -1053,9 +1077,23 @@ export function TaskAtriumBoard() {
                   Summary &middot; all threads
                 </span>
               </div>
-              <UsageCostContent usage={usage.raw} />
+              <MemoizedUsageCostContent usage={usage.raw} />
             </section>
-          ) : null}
+          ) : (
+            <section
+              className={cn("rounded-2xl border p-4 backdrop-blur-md sm:p-5", glass)}
+              data-cafe-atrium-usage-loading="true"
+              aria-label="Loading usage summary"
+            >
+              <div className={cn("font-mono text-[10px] uppercase tracking-[0.14em]", label)}>
+                Summary &middot; all threads
+              </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-[minmax(13rem,0.34fr)_1fr]">
+                <div className="h-28 animate-pulse rounded-xl bg-white/5 motion-reduce:animate-none" />
+                <div className="h-28 animate-pulse rounded-xl bg-white/5 motion-reduce:animate-none" />
+              </div>
+            </section>
+          )}
         </div>
       </div>
     </div>

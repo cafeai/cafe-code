@@ -1220,6 +1220,18 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               AND identities.subagent_thread_id =
                 json_extract(activities.payload_json, '$.subagent.threadId')
             WHERE activities.thread_id = ${threadId}
+              -- The identity CTE contains only the current turn, but SQLite
+              -- cannot reliably push that fact through this JSON-expression
+              -- join. Without the explicit predicate it can scan and parse
+              -- every activity ever retained by a long-running thread. That
+              -- synchronous scan can exceed the WebSocket heartbeat window,
+              -- causing a reconnect that immediately repeats the same query.
+              AND activities.turn_id = (
+                SELECT latest_turn_id
+                FROM projection_threads
+                WHERE thread_id = ${threadId}
+                LIMIT 1
+              )
               AND activities.kind IN ('task.started', 'task.progress', 'task.completed')
               AND json_type(activities.payload_json, '$.subagent.threadId') = 'text'
           )

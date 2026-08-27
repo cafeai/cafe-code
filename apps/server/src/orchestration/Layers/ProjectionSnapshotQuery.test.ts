@@ -2084,6 +2084,17 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             '{"taskId":"child-1","status":"completed","subagent":{"threadId":"child-1","status":"completed"}}',
             6,
             '2026-04-07T00:00:06.000Z'
+          ),
+          (
+            'subagent-old-turn-corrupt',
+            'thread-task-plan-cap',
+            'turn-task-plan-old',
+            'info',
+            'task.progress',
+            'Old subagent update',
+            '{malformed legacy payload',
+            1,
+            '2026-04-06T00:00:01.000Z'
           )
       `;
       yield* sql`
@@ -2126,6 +2137,10 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const detail = yield* snapshotQuery.getThreadDetailById(
         ThreadId.make("thread-task-plan-cap"),
       );
+      // A current-turn lifecycle lookup must not JSON-parse task rows from an
+      // older turn. Besides tolerating a corrupt legacy payload, this proves
+      // the query is constrained to the indexed thread+turn range instead of
+      // scanning an arbitrarily long thread history on every subscription.
       assert.equal(detail._tag, "Some");
       if (detail._tag === "Some") {
         const activities = detail.value.activities;

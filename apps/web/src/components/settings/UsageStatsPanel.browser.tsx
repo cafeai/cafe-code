@@ -13,6 +13,7 @@ const usageHarness = vi.hoisted(() => {
   let snapshot: unknown;
   const updateSettings = vi.fn();
   const getUsageStats = vi.fn(async () => detail);
+  const subscribeConnectionOpened = vi.fn(() => () => undefined);
   const subscribeUsageStats = vi.fn((nextListener: (event: unknown) => void) => {
     nextListener(snapshot);
     return () => undefined;
@@ -21,12 +22,14 @@ const usageHarness = vi.hoisted(() => {
   return {
     updateSettings,
     getUsageStats,
+    subscribeConnectionOpened,
     subscribeUsageStats,
     reset(nextDetail: unknown, nextSnapshot: unknown) {
       detail = nextDetail;
       snapshot = nextSnapshot;
       updateSettings.mockReset();
       getUsageStats.mockClear();
+      subscribeConnectionOpened.mockClear();
       subscribeUsageStats.mockClear();
     },
   };
@@ -39,6 +42,7 @@ vi.mock("../../environments/runtime", () => ({
         getUsageStats: usageHarness.getUsageStats,
         subscribeUsageStats: usageHarness.subscribeUsageStats,
       },
+      subscribeConnectionOpened: usageHarness.subscribeConnectionOpened,
     },
   }),
 }));
@@ -182,6 +186,7 @@ describe("UsageStatsPanel", () => {
       .element(page.getByText("Recorded before provider and model attribution"))
       .toBeVisible();
     expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
+    expect(usageHarness.subscribeConnectionOpened).toHaveBeenCalledTimes(1);
     expect(usageHarness.subscribeUsageStats).toHaveBeenCalledTimes(1);
   });
 

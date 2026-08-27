@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   getWsConnectionStatus,
+  getWsConnectionDiagnostics,
   getWsReconnectDelayMsForRetry,
   getWsConnectionUiState,
   recordWsConnectionAttempt,
@@ -103,5 +104,29 @@ describe("wsConnectionState", () => {
       reconnectAttemptCount: WS_RECONNECT_MAX_ATTEMPTS,
       reconnectPhase: "exhausted",
     });
+  });
+
+  it("retains only bounded payload-free websocket lifecycle diagnostics", () => {
+    for (let index = 0; index < 20; index += 1) {
+      recordWsConnectionAttempt(`wss://secret.example.test/ws?token=secret-${index}`, {
+        connectionLabel: `Sensitive host ${index}`,
+      });
+      recordWsConnectionClosed({
+        code: 4_000 + index,
+        reason: `private close reason ${index}`,
+      });
+    }
+
+    const diagnostics = getWsConnectionDiagnostics();
+    const serialized = JSON.stringify(diagnostics);
+    expect(diagnostics.recentEvents).toHaveLength(32);
+    expect(diagnostics.recentEvents.at(-1)).toMatchObject({
+      kind: "closed",
+      closeCode: 4_019,
+    });
+    expect(serialized).not.toContain("secret.example.test");
+    expect(serialized).not.toContain("token=secret");
+    expect(serialized).not.toContain("Sensitive host");
+    expect(serialized).not.toContain("private close reason");
   });
 });

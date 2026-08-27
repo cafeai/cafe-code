@@ -108,6 +108,8 @@ import { stackedThreadToast, toastManager } from "./ui/toast";
 import { newCommandId, newDraftId, newMessageId, newThreadId } from "~/lib/utils";
 import { getProviderModelCapabilities, resolveSelectableProvider } from "../providerModels";
 import { useSettings } from "../hooks/useSettings";
+import { getWsConnectionDiagnostics } from "../rpc/wsConnectionState";
+import { getUsageStatsDetailDiagnostics } from "./stats/usageStatsDetailResource";
 import { resolveAppModelSelectionForInstance } from "../modelSelection";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -211,7 +213,7 @@ const IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROPOSED_PLANS: Thread["proposedPlans"] = [];
-const DEBUG_SNAPSHOT_VERSION = 12;
+const DEBUG_SNAPSHOT_VERSION = 13;
 const DEBUG_TEXT_PREVIEW_LIMIT = 120;
 const DEBUG_JSON_PREVIEW_LIMIT = 600;
 const DEBUG_RECENT_MESSAGE_LIMIT = 6;
@@ -3506,6 +3508,8 @@ export default function ChatView(props: ChatViewProps) {
     const capturedAtMs = Date.now();
     const capturedAt = new Date(capturedAtMs).toISOString();
     const localApi = readLocalApi();
+    const wsConnectionDiagnostics = getWsConnectionDiagnostics();
+    const usageDetailDiagnostics = getUsageStatsDetailDiagnostics();
     const composerDebugState = readComposerHandle(composerRef)?.readDebugState() ?? null;
     const firstItem = firstActiveFollowUpQueueItem;
     const activePendingSteerInterruptRecovery =
@@ -3714,6 +3718,13 @@ export default function ChatView(props: ChatViewProps) {
           resourceHistoryAvailable:
             typeof localApi?.server.getProcessResourceHistory === "function",
         },
+      },
+      connection: {
+        ...wsConnectionDiagnostics,
+        connected: wsConnectionDiagnostics.phase === "connected",
+      },
+      usage: {
+        detail: usageDetailDiagnostics,
       },
       timelineScroll: timelineScrollDebug,
       composer: composerDebugState,

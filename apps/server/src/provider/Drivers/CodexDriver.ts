@@ -21,7 +21,13 @@
  *
  * @module provider/Drivers/CodexDriver
  */
-import { CodexSettings, ProviderDriverKind, type ServerProvider } from "@cafecode/contracts";
+import {
+  CodexSettings,
+  ProviderDriverKind,
+  type ServerProvider,
+  type ServerProviderProbePhaseDiagnostics,
+} from "@cafecode/contracts";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -243,15 +249,32 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // model/skill metadata requests and block for long enough to show a
       // false "provider unavailable" warning before the user has sent a
       // message. Real sessions still use the app-server lifecycle below.
-      const checkProvider = refreshCodexShadowHome.pipe(
-        Effect.catch((cause) =>
-          Effect.logWarning("codex.home.authRefreshBeforeStatusFailed", {
-            instanceId,
-            detail: cause.message,
+      const checkProvider = Effect.gen(function* () {
+        const prepareStartedAtMs = yield* Clock.currentTimeMillis;
+        let prepareOutcome: ServerProviderProbePhaseDiagnostics["outcome"] = "success";
+        yield* refreshCodexShadowHome.pipe(
+          Effect.catch((cause) => {
+            prepareOutcome = "error";
+            return Effect.logWarning("codex.home.authRefreshBeforeStatusFailed", {
+              instanceId,
+              detail: cause.message,
+            });
           }),
-        ),
-        Effect.andThen(checkCodexCliProviderStatus(effectiveConfig, effectiveEnvironment)),
-        Effect.map(stampIdentity),
+        );
+        const prepareFinishedAtMs = yield* Clock.currentTimeMillis;
+        const checked = yield* checkCodexCliProviderStatus(effectiveConfig, effectiveEnvironment);
+        return stampIdentity({
+          ...checked,
+          probePhases: [
+            {
+              phase: "prepare-runtime-home",
+              outcome: prepareOutcome,
+              durationMs: Math.max(0, Math.floor(prepareFinishedAtMs - prepareStartedAtMs)),
+            },
+            ...(checked.probePhases ?? []),
+          ],
+        });
+      }).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.provideService(FileSystem.FileSystem, fileSystem),
         Effect.provideService(Path.Path, path),

@@ -116,6 +116,20 @@ describe("ServerProvider", () => {
         rawOutput: "SECRET CLI OUTPUT",
         commandPath: "/private/provider/home/codex",
       },
+      probePhases: [
+        {
+          phase: "prepare-runtime-home",
+          outcome: "success",
+          durationMs: 42,
+          command: "SECRET PHASE COMMAND",
+        },
+        {
+          phase: "version",
+          outcome: "timeout",
+          durationMs: 5_001,
+          output: "SECRET PHASE OUTPUT",
+        },
+      ],
     });
 
     expect(parsed.probeDiagnostics).toEqual({
@@ -129,8 +143,13 @@ describe("ServerProvider", () => {
       periodicPhaseOffsetMs: 42_000,
       nextScheduledAt: "2026-04-10T00:05:42.000Z",
     });
+    expect(parsed.probePhases).toEqual([
+      { phase: "prepare-runtime-home", outcome: "success", durationMs: 42 },
+      { phase: "version", outcome: "timeout", durationMs: 5_001 },
+    ]);
     expect(JSON.stringify(parsed)).not.toContain("SECRET CLI OUTPUT");
     expect(JSON.stringify(parsed)).not.toContain("/private/provider/home/codex");
+    expect(JSON.stringify(parsed)).not.toContain("SECRET PHASE");
   });
 
   it("defaults one-click update support when decoding older advisory snapshots", () => {

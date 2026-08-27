@@ -161,7 +161,10 @@ export type AtriumScene = {
   dispose: () => void;
 };
 
-export function createAtriumScene(canvas: HTMLCanvasElement): AtriumScene | null {
+export function createAtriumScene(
+  canvas: HTMLCanvasElement,
+  initial?: { readonly tint?: string; readonly dark?: boolean },
+): AtriumScene | null {
   let ctx: CanvasRenderingContext2D | null = null;
   try {
     ctx = canvas.getContext("2d");
@@ -174,8 +177,8 @@ export function createAtriumScene(canvas: HTMLCanvasElement): AtriumScene | null
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   let width = 1;
   let height = 1;
-  let dark = true;
-  let tint = "#48cfff";
+  let dark = initial?.dark ?? true;
+  let tint = initial?.tint ?? "#48cfff";
   let palette = buildPalette(tint, dark);
   let pointerX = 0;
   let pointerY = 0;

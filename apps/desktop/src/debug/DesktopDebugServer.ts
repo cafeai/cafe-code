@@ -665,6 +665,12 @@ function summarizeProviderDaemonHealthForCompactDebug(
   const supervisor = readRecord(health.supervisor);
   const supervisorProcess = readRecord(health.supervisorProcess);
   const processDiagnostics = readRecord(health.processDiagnostics);
+  const pipelineDiagnostics = readRecord(health.pipelineDiagnostics);
+  const pipelineEventLoop = readRecord(pipelineDiagnostics?.eventLoop);
+  const daemonStream = readRecord(pipelineDiagnostics?.daemonStream);
+  const backendBridge = readRecord(pipelineDiagnostics?.backendBridge);
+  const subscriptions = readRecord(pipelineDiagnostics?.subscriptions);
+  const webSocket = readRecord(pipelineDiagnostics?.webSocket);
 
   return {
     ok: readBoolean(health.ok),
@@ -686,6 +692,54 @@ function summarizeProviderDaemonHealthForCompactDebug(
     completedCommandCount: readNumber(health.completedCommandCount),
     failedCommandCount: readNumber(health.failedCommandCount),
     runningCommandCount: readNumber(health.runningCommandCount),
+    pipelineDiagnostics:
+      pipelineDiagnostics === null
+        ? null
+        : {
+            eventLoop: {
+              retainedSampleCount: readNumber(pipelineEventLoop?.retainedSampleCount),
+              currentLagMs: readNumber(pipelineEventLoop?.currentLagMs),
+              p95LagMs: readNumber(pipelineEventLoop?.p95LagMs),
+              p99LagMs: readNumber(pipelineEventLoop?.p99LagMs),
+              maxLagMs: readNumber(pipelineEventLoop?.maxLagMs),
+            },
+            daemonStream: {
+              activeStreamCount: readNumber(daemonStream?.activeStreamCount),
+              replayPageCount: readNumber(daemonStream?.replayPageCount),
+              replayRecordCount: readNumber(daemonStream?.replayRecordCount),
+              replayBytes: readNumber(daemonStream?.replayBytes),
+              drainWaitCount: readNumber(daemonStream?.drainWaitCount),
+              queuedLiveRecords: readNumber(daemonStream?.queuedLiveRecords),
+              queuedLiveBytes: readNumber(daemonStream?.queuedLiveBytes),
+              laggingDisconnectCount: readNumber(daemonStream?.laggingDisconnectCount),
+            },
+            backendBridge: {
+              pendingBytes: readNumber(backendBridge?.pendingBytes),
+              largestLineBytes: readNumber(backendBridge?.largestLineBytes),
+              pauseCount: readNumber(backendBridge?.pauseCount),
+              pausedMs: readNumber(backendBridge?.pausedMs),
+              decodedRecordCount: readNumber(backendBridge?.decodedRecordCount),
+              decodeFailureCount: readNumber(backendBridge?.decodeFailureCount),
+              acceptedRecordCount: readNumber(backendBridge?.acceptedRecordCount),
+            },
+            subscriptions: {
+              cursor: readNumber(subscriptions?.cursor),
+              replayRingEvents: readNumber(subscriptions?.replayRingEvents),
+              replayRingBytes: readNumber(subscriptions?.replayRingBytes),
+              activeShellSubscribers: readNumber(subscriptions?.activeShellSubscribers),
+              activeThreadSubscribers: readNumber(subscriptions?.activeThreadSubscribers),
+              slowSubscriberCloseCount: readNumber(subscriptions?.slowSubscriberCloseCount),
+              coalescedEventCount: readNumber(subscriptions?.coalescedEventCount),
+            },
+            webSocket: {
+              activeBulkFrames: readNumber(webSocket?.activeBulkFrames),
+              activeBulkBytes: readNumber(webSocket?.activeBulkBytes),
+              largestFrameBytes: readNumber(webSocket?.largestFrameBytes),
+              serializationTimeMs: readNumber(webSocket?.serializationTimeMs),
+              overloadCloseCount: readNumber(webSocket?.overloadCloseCount),
+              connectionOpenCount: readNumber(webSocket?.connectionOpenCount),
+            },
+          },
     rpc:
       rpc === null
         ? null
@@ -841,6 +895,8 @@ function summarizeRendererForCompactDebug(): Record<string, unknown> {
   const composer = readRecord(snapshot.composer);
   const diagnostics = readRecord(snapshot.diagnostics);
   const connection = readRecord(snapshot.connection);
+  const usage = readRecord(snapshot.usage);
+  const usageDetail = readRecord(usage?.detail);
   const timelineScroll = readRecord(snapshot.timelineScroll);
 
   return {
@@ -861,6 +917,54 @@ function summarizeRendererForCompactDebug(): Record<string, unknown> {
       phase: readString(connection?.phase),
       hasConnected: readBoolean(connection?.hasConnected),
       connected: readBoolean(connection?.connected),
+      online: readBoolean(connection?.online),
+      reconnectPhase: readString(connection?.reconnectPhase),
+      attemptCount: readNumber(connection?.attemptCount),
+      reconnectAttemptCount: readNumber(connection?.reconnectAttemptCount),
+      reconnectMaxAttempts: readNumber(connection?.reconnectMaxAttempts),
+      closeCode: readNumber(connection?.closeCode),
+      connectedAt: readString(connection?.connectedAt),
+      disconnectedAt: readString(connection?.disconnectedAt),
+      lastErrorAt: readString(connection?.lastErrorAt),
+      nextRetryAt: readString(connection?.nextRetryAt),
+      recentEvents: Array.isArray(connection?.recentEvents)
+        ? connection.recentEvents.slice(-32).map((eventValue) => {
+            const event = readRecord(eventValue);
+            return {
+              at: readString(event?.at),
+              kind: readString(event?.kind),
+              phase: readString(event?.phase),
+              reconnectPhase: readString(event?.reconnectPhase),
+              attemptCount: readNumber(event?.attemptCount),
+              reconnectAttemptCount: readNumber(event?.reconnectAttemptCount),
+              closeCode: readNumber(event?.closeCode),
+              online: readBoolean(event?.online),
+            };
+          })
+        : [],
+    },
+    usage: {
+      detail:
+        usageDetail === null
+          ? null
+          : {
+              active: readBoolean(usageDetail.active),
+              consumerCount: readNumber(usageDetail.consumerCount),
+              cacheAvailable: readBoolean(usageDetail.cacheAvailable),
+              inFlight: readBoolean(usageDetail.inFlight),
+              attemptCount: readNumber(usageDetail.attemptCount),
+              successCount: readNumber(usageDetail.successCount),
+              failureCount: readNumber(usageDetail.failureCount),
+              reconnectRefreshCount: readNumber(usageDetail.reconnectRefreshCount),
+              lastStartedAt: readString(usageDetail.lastStartedAt),
+              lastFinishedAt: readString(usageDetail.lastFinishedAt),
+              lastSuccessAt: readString(usageDetail.lastSuccessAt),
+              lastDurationMs: readNumber(usageDetail.lastDurationMs),
+              lastOutcome: readString(usageDetail.lastOutcome),
+              lastErrorCategory: readString(usageDetail.lastErrorCategory),
+              lastDayCount: readNumber(usageDetail.lastDayCount),
+              lastTokenBreakdownCount: readNumber(usageDetail.lastTokenBreakdownCount),
+            },
     },
     timelineScroll:
       timelineScroll === null

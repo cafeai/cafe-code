@@ -62,6 +62,51 @@ const makeLargeRendererSnapshot = (index: number) => ({
     },
     promptPreview: `composer-prompt-secret-${index}`.repeat(1_000),
   },
+  connection: {
+    phase: "disconnected",
+    reconnectPhase: "waiting",
+    hasConnected: true,
+    connected: false,
+    online: true,
+    attemptCount: 4,
+    reconnectAttemptCount: 2,
+    reconnectMaxAttempts: 8,
+    closeCode: 1006,
+    socketUrl: "wss://secret.example.test/ws?token=secret",
+    closeReason: "private provider response",
+    lastError: "bearer secret should not be retained",
+    recentEvents: [
+      {
+        at: "2026-05-26T00:00:00.000Z",
+        kind: "closed",
+        phase: "disconnected",
+        reconnectPhase: "waiting",
+        attemptCount: 4,
+        reconnectAttemptCount: 2,
+        closeCode: 1006,
+        online: true,
+        injectedSecret: "recent event secret",
+      },
+    ],
+  },
+  usage: {
+    detail: {
+      active: true,
+      consumerCount: 1,
+      cacheAvailable: true,
+      inFlight: true,
+      attemptCount: 8,
+      successCount: 6,
+      failureCount: 2,
+      reconnectRefreshCount: 2,
+      lastDurationMs: 5_123,
+      lastOutcome: "success",
+      lastErrorCategory: null,
+      lastDayCount: 51,
+      lastTokenBreakdownCount: 93,
+      payload: "usage payload secret",
+    },
+  },
   performance: {
     rendererSnapshotBuildDurationMs: 12,
     activeThread: {
@@ -192,6 +237,29 @@ const makeLargeProviderDaemonSnapshot = () => ({
       lastThreadId: "thread-1",
       lastTurnId: "turn-1",
     },
+    pipelineDiagnostics: {
+      eventLoop: {
+        retainedSampleCount: 600,
+        currentLagMs: 1,
+        p95LagMs: 2,
+        p99LagMs: 3,
+        maxLagMs: 4,
+      },
+      daemonStream: {
+        activeStreamCount: 1,
+        replayPageCount: 489,
+        replayRecordCount: 3_879,
+        replayBytes: 10_674_735,
+        drainWaitCount: 173,
+        queuedLiveRecords: 74,
+        queuedLiveBytes: 375_649,
+        laggingDisconnectCount: 7,
+        secret: "daemon stream secret",
+      },
+      backendBridge: {},
+      subscriptions: {},
+      webSocket: {},
+    },
     supervisor: {
       sessionCount: 5,
       runningSessionCount: 1,
@@ -218,6 +286,14 @@ describe("DesktopDebugServer compact snapshots", () => {
     assert.equal(compactJson.includes("queued prompt should be omitted"), false);
     assert.equal(compactJson.includes("composer-prompt-secret"), false);
     assert.equal(compactJson.includes("command-secret"), false);
+    assert.equal(compactJson.includes("secret.example.test"), false);
+    assert.equal(compactJson.includes("private provider response"), false);
+    assert.equal(compactJson.includes("bearer secret"), false);
+    assert.equal(compactJson.includes("recent event secret"), false);
+    assert.equal(compactJson.includes("usage payload secret"), false);
+    assert.equal(compactJson.includes("daemon stream secret"), false);
+    assert.equal(compactJson.includes('"laggingDisconnectCount":7'), true);
+    assert.equal(compactJson.includes('"lastDurationMs":5123'), true);
     assert.equal(compactJson.includes("gpt-5.6-sol"), true);
     assert.equal(compactJson.includes("ultra"), true);
     assert.equal(compactJson.includes("provider-running-tool"), true);

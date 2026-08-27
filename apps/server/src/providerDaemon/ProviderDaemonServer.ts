@@ -928,7 +928,7 @@ function yieldProviderStreamTurn(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-async function handleEventStream(
+export async function handleProviderDaemonEventStream(
   request: http.IncomingMessage,
   response: http.ServerResponse,
   journal: ProviderDaemonPersistentEventJournal,
@@ -954,6 +954,7 @@ async function handleEventStream(
   let cleaned = false;
   let wakeWriter: (() => void) | null = null;
   let unsubscribe: (() => void) | null = null;
+  let replayBoundaryCursor: number | null = null;
 
   const cleanup = (cause?: unknown): void => {
     if (cleaned) return;
@@ -984,6 +985,14 @@ async function handleEventStream(
 
   const enqueueLive = (record: ProviderDaemonEventRecord): void => {
     if (!active) return;
+    // Once the durable high-water cursor is known, records at or below it are
+    // replay responsibility. The listener was deliberately installed before
+    // the snapshot, so it can observe those same records; dropping that proven
+    // overlap here prevents a large historical replay from filling the finite
+    // live queue with duplicates and forcing a reconnect loop.
+    if (replayBoundaryCursor !== null && record.cursor <= replayBoundaryCursor) {
+      return;
+    }
     try {
       const queued = encodeRecord(record);
       if (
@@ -1020,34 +1029,75 @@ async function handleEventStream(
 
   request.once("aborted", () => cleanup());
   response.once("close", () => cleanup());
-  unsubscribe = journal.subscribe(enqueueLive);
-
-  let cursor = Math.max(0, Math.trunc(afterCursor));
-  let turnRecords = 0;
-  let turnBytes = 0;
-  let turnStartedAt = performance.now();
-  const accountWork = async (bytes: number): Promise<void> => {
-    turnRecords += 1;
-    turnBytes += bytes;
-    if (
-      turnRecords >= PROVIDER_PIPELINE_POLICY.workTurnMaxRecords ||
-      turnBytes >= PROVIDER_PIPELINE_POLICY.workTurnMaxBytes ||
-      performance.now() - turnStartedAt >= PROVIDER_PIPELINE_POLICY.workTurnMaxElapsedMs
-    ) {
-      await yieldProviderStreamTurn();
-      turnRecords = 0;
-      turnBytes = 0;
-      turnStartedAt = performance.now();
-    }
-  };
 
   try {
-    // Subscribe before replay so an event committed between the initial cursor
-    // and the database query cannot be lost. Cursor dedupe removes the overlap.
+    // Subscribe before capturing the high-water cursor. A record committed
+    // during the SQL snapshot is then guaranteed to be represented by replay,
+    // the live listener, or both. Boundary acquisition is inside this guarded
+    // region so even a database defect closes the response and decrements the
+    // route's active-stream count.
+    const replaySubscription = await runJournalEffect(
+      journal.subscribeWithReplayBoundary(enqueueLive),
+    );
+    unsubscribe = replaySubscription.unsubscribe;
+    if (!active) {
+      // `cleanup` may have run while the durable boundary query was still in
+      // flight, before the subscription returned its disposer. In that case
+      // the normal idempotent cleanup path had nothing it could unsubscribe.
+      // Release the late-arriving listener explicitly so repeated early
+      // reconnects cannot accumulate dormant callbacks on every publication.
+      replaySubscription.unsubscribe();
+      unsubscribe = null;
+      return;
+    }
+    replayBoundaryCursor = replaySubscription.replayBoundaryCursor;
+
+    // Listener callbacks can race boundary capture and temporarily enter the
+    // queue before `replayBoundaryCursor` is assigned. Remove only records that
+    // the durable snapshot proves replay will cover, retaining every newer live
+    // record in original cursor order.
+    if (liveQueue.length > 0) {
+      const newerRecords = liveQueue.filter(
+        (queued) => queued.record.cursor > replaySubscription.replayBoundaryCursor,
+      );
+      liveQueue.splice(0, liveQueue.length, ...newerRecords);
+      liveQueueBytes = newerRecords.reduce((total, queued) => total + queued.bytes, 0);
+      setProviderDaemonStreamDiagnostics({
+        queuedLiveRecords: liveQueue.length,
+        queuedLiveBytes: liveQueueBytes,
+      });
+    }
+
+    let cursor = Math.max(0, Math.trunc(afterCursor));
+    let turnRecords = 0;
+    let turnBytes = 0;
+    let turnStartedAt = performance.now();
+    const accountWork = async (bytes: number): Promise<void> => {
+      turnRecords += 1;
+      turnBytes += bytes;
+      if (
+        turnRecords >= PROVIDER_PIPELINE_POLICY.workTurnMaxRecords ||
+        turnBytes >= PROVIDER_PIPELINE_POLICY.workTurnMaxBytes ||
+        performance.now() - turnStartedAt >= PROVIDER_PIPELINE_POLICY.workTurnMaxElapsedMs
+      ) {
+        await yieldProviderStreamTurn();
+        turnRecords = 0;
+        turnBytes = 0;
+        turnStartedAt = performance.now();
+      }
+    };
+
+    // Replay is deliberately capped at the captured high-water cursor. Without
+    // this bound a busy provider can keep extending historical replay while
+    // the same records accumulate in the live queue.
     for (;;) {
       if (!active) break;
       const page = await runJournalEffect(
-        journal.replayPageAfter(cursor, PROVIDER_PIPELINE_POLICY.daemonReplayPageRecords),
+        journal.replayPageThrough(
+          cursor,
+          replaySubscription.replayBoundaryCursor,
+          PROVIDER_PIPELINE_POLICY.daemonReplayPageRecords,
+        ),
       );
       if (page.length === 0) break;
       addProviderDaemonStreamDiagnostics({ replayPageCount: 1 });
@@ -1493,7 +1543,7 @@ export const runProviderDaemonServer = (
           }
           activeStreamCount += 1;
           setProviderDaemonStreamDiagnostics({ activeStreamCount });
-          void handleEventStream(
+          void handleProviderDaemonEventStream(
             request,
             response,
             journal,

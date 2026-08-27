@@ -20,6 +20,7 @@ import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -57,7 +58,33 @@ export interface ProviderDaemonPersistentEventJournal {
     cursor: number,
     limit?: number,
   ) => Effect.Effect<ReadonlyArray<ProviderDaemonEventRecord>>;
+  /**
+   * Reads one bounded replay page without crossing a previously captured
+   * journal high-water cursor.
+   *
+   * The upper bound is part of the correctness contract for HTTP event-stream
+   * handoff: records at or below the boundary belong to replay, while records
+   * above it belong to the live queue. Keeping that distinction in the SQL
+   * query prevents an active provider from extending replay indefinitely.
+   */
+  readonly replayPageThrough: (
+    cursor: number,
+    throughCursor: number,
+    limit?: number,
+  ) => Effect.Effect<ReadonlyArray<ProviderDaemonEventRecord>>;
   readonly subscribe: (listener: (record: ProviderDaemonEventRecord) => void) => () => void;
+  /**
+   * Installs the listener before reading the durable high-water cursor.
+   * Callers must replay only through `replayBoundaryCursor` and discard queued
+   * listener records at or below it. This closes the subscribe/query race
+   * without charging replay duplicates against a finite live queue.
+   */
+  readonly subscribeWithReplayBoundary: (
+    listener: (record: ProviderDaemonEventRecord) => void,
+  ) => Effect.Effect<{
+    readonly replayBoundaryCursor: number;
+    readonly unsubscribe: () => void;
+  }>;
   readonly snapshot: Effect.Effect<ProviderDaemonEventJournalSnapshot>;
   /** Resolves after the bounded post-startup prune, compaction, and index work completes. */
   readonly startupMaintenance: Effect.Effect<void>;
@@ -490,12 +517,17 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
       Effect.asVoid,
     );
 
-    const replayPageAfter = (
+    const replayPageThrough = (
       cursor: number,
+      throughCursor: number,
       limit: number = PROVIDER_PIPELINE_POLICY.daemonReplayPageRecords,
     ): Effect.Effect<ReadonlyArray<ProviderDaemonEventRecord>> =>
       Effect.gen(function* () {
         const normalizedCursor = normalizeCursor(cursor);
+        const normalizedThroughCursor = normalizeCursor(throughCursor);
+        if (normalizedThroughCursor <= normalizedCursor) {
+          return [];
+        }
         const normalizedLimit = Math.max(
           1,
           Math.min(
@@ -523,6 +555,7 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
           FROM provider_daemon_events
           WHERE owner_key = ${ownerKey}
             AND cursor > ${normalizedCursor}
+            AND cursor <= ${normalizedThroughCursor}
           ORDER BY cursor ASC
           LIMIT ${normalizedLimit}
         `.pipe(Effect.orDie)) as unknown as ReadonlyArray<PersistedEventRow>;
@@ -542,6 +575,12 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
         }
         return records;
       });
+
+    const replayPageAfter = (
+      cursor: number,
+      limit: number = PROVIDER_PIPELINE_POLICY.daemonReplayPageRecords,
+    ): Effect.Effect<ReadonlyArray<ProviderDaemonEventRecord>> =>
+      replayPageThrough(cursor, Number.MAX_SAFE_INTEGER, limit);
 
     const replayAfter = (cursor: number): Effect.Effect<ReadonlyArray<ProviderDaemonEventRecord>> =>
       replayPageAfter(cursor, capacity);
@@ -632,11 +671,36 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
       };
     };
 
+    const subscribeWithReplayBoundary = (
+      listener: (record: ProviderDaemonEventRecord) => void,
+    ): Effect.Effect<{
+      readonly replayBoundaryCursor: number;
+      readonly unsubscribe: () => void;
+    }> =>
+      Effect.gen(function* () {
+        // Listener installation must be synchronous and happen before the SQL
+        // snapshot. A publish that races the snapshot is therefore either
+        // included by the high-water cursor, captured by this listener, or
+        // both; the stream-side cursor filter safely removes the overlap.
+        const unsubscribe = subscribe(listener);
+        const boundaryExit = yield* Effect.exit(snapshot);
+        if (Exit.isFailure(boundaryExit)) {
+          unsubscribe();
+          return yield* Effect.failCause(boundaryExit.cause);
+        }
+        return {
+          replayBoundaryCursor: boundaryExit.value.eventCursor,
+          unsubscribe,
+        };
+      });
+
     return {
       publish,
       replayAfter,
       replayPageAfter,
+      replayPageThrough,
       subscribe,
+      subscribeWithReplayBoundary,
       snapshot,
       startupMaintenance: Deferred.await(startupMaintenanceReady),
     };

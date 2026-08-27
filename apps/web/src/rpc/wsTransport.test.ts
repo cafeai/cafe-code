@@ -427,6 +427,28 @@ describe("WsTransport", () => {
     await transport.dispose();
   });
 
+  it("reports first-open and reconnect events per transport", async () => {
+    const transport = createTransport("ws://localhost:3020");
+    const opened = vi.fn();
+    const unsubscribe = transport.subscribeConnectionOpened(opened);
+
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    getSocket().open();
+    await waitFor(() =>
+      expect(opened).toHaveBeenLastCalledWith({ openCount: 1, reconnected: false }),
+    );
+
+    await transport.reconnect();
+    await waitFor(() => expect(sockets).toHaveLength(2));
+    getSocket().open();
+    await waitFor(() =>
+      expect(opened).toHaveBeenLastCalledWith({ openCount: 2, reconnected: true }),
+    );
+
+    unsubscribe();
+    expect(opened).toHaveBeenCalledTimes(2);
+  });
+
   it("recycles the websocket session when heartbeat recovery is requested", async () => {
     const transport = createTransport("ws://localhost:3020");
 
@@ -1195,6 +1217,7 @@ describe("WsTransport", () => {
     };
     const transport = {
       disposed: false,
+      openListeners: new Set(),
       session: {
         clientScope: {} as never,
         runtime,

@@ -5,6 +5,7 @@ import { getPrimaryEnvironmentConnection } from "~/environments/runtime";
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { ActivityHeatmap } from "../stats/ActivityHeatmap";
 import { useCountUp } from "../stats/useCountUp";
+import { useUsageStatsDetail } from "../stats/usageStatsDetailResource";
 import { PROVIDER_ICON_BY_PROVIDER } from "../chat/providerIconUtils";
 import { Skeleton } from "../ui/skeleton";
 import { Switch } from "../ui/switch";
@@ -18,7 +19,6 @@ import {
 } from "./usageStatsPresentation";
 
 const integerFormat = new Intl.NumberFormat("en-US");
-const DETAIL_REFRESH_INTERVAL_MS = 5_000;
 
 const pad = (value: number) => String(value).padStart(2, "0");
 
@@ -222,45 +222,14 @@ function TokenBreakdownSection({
 export function UsageStatsPanel() {
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
-  const [initial, setInitial] = useState<UsageStatsGetResult | null>(null);
+  const detail = useUsageStatsDetail(true);
+  const initial = detail.data;
   const [snapshot, setSnapshot] = useState<UsageStatsSnapshot | null>(null);
-  const [loadError, setLoadError] = useState(false);
+  const loadError = detail.phase === "error" && initial === null;
 
   useEffect(() => {
     let cancelled = false;
-    let detailRequestInFlight = false;
-    let detailLoaded = false;
     const connection = getPrimaryEnvironmentConnection();
-    const loadDetail = async () => {
-      if (detailRequestInFlight) {
-        return;
-      }
-      detailRequestInFlight = true;
-      try {
-        const result = await connection.client.server.getUsageStats();
-        if (!cancelled) {
-          detailLoaded = true;
-          setLoadError(false);
-          setInitial(result);
-          // The subscription owns the live clock once it arrives. A detail
-          // refresh should initialize, but never rewind, that high-rate state.
-          setSnapshot((current) => current ?? result);
-        }
-      } catch {
-        if (!cancelled && !detailLoaded) {
-          setLoadError(true);
-        }
-      } finally {
-        detailRequestInFlight = false;
-      }
-    };
-
-    void loadDetail();
-    // Detail responses are in-memory and model-cardinality bounded, but they
-    // stay off the 10 Hz snapshot stream. Refresh only while this page exists.
-    const detailRefreshId = window.setInterval(() => {
-      void loadDetail();
-    }, DETAIL_REFRESH_INTERVAL_MS);
     const unsubscribe = connection.client.server.subscribeUsageStats((event) => {
       if (!cancelled) {
         setSnapshot(event);
@@ -268,10 +237,16 @@ export function UsageStatsPanel() {
     });
     return () => {
       cancelled = true;
-      window.clearInterval(detailRefreshId);
       unsubscribe();
     };
   }, []);
+
+  useEffect(() => {
+    // The high-rate subscription owns live totals after its first event. The
+    // shared detail cache may arrive first, in which case it is a safe initial
+    // snapshot but must never rewind newer live state.
+    if (initial !== null) setSnapshot((current) => current ?? initial);
+  }, [initial]);
 
   const totals = useLiveTotals(snapshot);
   const generating = (totals?.activeSessionCount ?? 0) > 0 && (totals?.collectionEnabled ?? false);

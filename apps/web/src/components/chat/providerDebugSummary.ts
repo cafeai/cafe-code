@@ -38,6 +38,11 @@ export function summarizeProviderDebugFleet(providers: ReadonlyArray<ServerProvi
               startedAt: provider.updateState.startedAt,
               finishedAt: provider.updateState.finishedAt,
             },
+      probePhases: (provider.probePhases ?? []).map((phase) => ({
+        phase: phase.phase,
+        outcome: phase.outcome,
+        durationMs: phase.durationMs,
+      })),
       probe:
         provider.probeDiagnostics === undefined
           ? null

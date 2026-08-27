@@ -48,6 +48,11 @@ function providerFixture(index: number): ServerProvider {
       periodicPhaseOffsetMs: index,
       nextScheduledAt: "2026-08-27T01:05:00.000Z",
     },
+    probePhases: [
+      { phase: "prepare-runtime-home", outcome: "success", durationMs: 45 },
+      { phase: "version", outcome: "timeout", durationMs: 5_001 },
+      { phase: "login-status", outcome: "skipped", durationMs: 0 },
+    ],
     updateState: {
       status: "failed",
       startedAt: "2026-08-27T00:50:00.000Z",
@@ -82,6 +87,11 @@ describe("summarizeProviderDebugFleet", () => {
             startedAt: "2026-08-27T00:50:00.000Z",
             finishedAt: "2026-08-27T00:51:00.000Z",
           },
+          probePhases: [
+            { phase: "prepare-runtime-home", outcome: "success", durationMs: 45 },
+            { phase: "version", outcome: "timeout", durationMs: 5_001 },
+            { phase: "login-status", outcome: "skipped", durationMs: 0 },
+          ],
           probe: {
             attemptCount: 4,
             consecutiveInconclusiveCount: 1,

@@ -1,4 +1,5 @@
 import * as DateTime from "effect/DateTime";
+import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -25,6 +26,7 @@ import type {
   ServerProviderAccountRateLimitResetCredit,
   ServerProviderAccountRateLimitSnapshot,
   ServerProviderAccountRateLimitWindow,
+  ServerProviderProbePhaseDiagnostics,
 } from "@cafecode/contracts";
 import { ProviderDriverKind, ServerSettingsError } from "@cafecode/contracts";
 
@@ -1004,20 +1006,36 @@ const emptyCodexModelsFromSettings = (codexSettings: CodexSettings): ServerProvi
 const fallbackCodexModelsFromSettings = (codexSettings: CodexSettings): ServerProvider["models"] =>
   appendCustomCodexModels(STATIC_CODEX_MODELS, codexSettings.customModels);
 
-const runCodexCommand = Effect.fn("runCodexCommand")(function* (
+export function makeCodexHealthProbeCommand(
   codexSettings: CodexSettings,
   args: ReadonlyArray<string>,
   environment: NodeJS.ProcessEnv = process.env,
-) {
+): ChildProcess.StandardCommand {
   const resolvedHomePath = codexSettings.homePath ? expandHomePath(codexSettings.homePath) : "";
-  const command = ChildProcess.make(codexSettings.binaryPath, [...args], {
+  return ChildProcess.make(codexSettings.binaryPath, [...args], {
     env: {
       ...environment,
       ...(resolvedHomePath.length > 0 ? { CODEX_HOME: resolvedHomePath } : {}),
     },
     shell: process.platform === "win32",
+    // POSIX probes use their own process group so cleanup reaches descendants;
+    // Windows keeps the platform default and uses taskkill. The scoped
+    // backstop is SIGKILL because runCodexCommand performs the graceful,
+    // bounded SIGTERM -> SIGKILL sequence before scope release.
+    killSignal: "SIGKILL",
+    detached: process.platform !== "win32",
   });
-  return yield* spawnAndCollect(codexSettings.binaryPath, command);
+}
+
+const runCodexCommand = Effect.fn("runCodexCommand")(function* (
+  codexSettings: CodexSettings,
+  args: ReadonlyArray<string>,
+  environment: NodeJS.ProcessEnv = process.env,
+) {
+  const command = makeCodexHealthProbeCommand(codexSettings, args, environment);
+  return yield* spawnAndCollect(codexSettings.binaryPath, command, {
+    terminationGrace: Duration.seconds(1),
+  });
 });
 
 function codexAuthProbeStatusFromLoginStatusResult(result: {
@@ -1291,6 +1309,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
 > {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const models = fallbackCodexModelsFromSettings(codexSettings);
+  const phases: ServerProviderProbePhaseDiagnostics[] = [];
 
   if (!codexSettings.enabled) {
     return buildServerProvider({
@@ -1309,12 +1328,18 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
     });
   }
 
+  const versionStartedAtMs = yield* Clock.currentTimeMillis;
   const versionProbe = yield* runCodexCommand(codexSettings, ["--version"], environment).pipe(
     Effect.timeoutOption(DEFAULT_TIMEOUT_MS),
     Effect.result,
   );
+  const versionFinishedAtMs = yield* Clock.currentTimeMillis;
+  const versionDurationMs = Math.max(0, Math.floor(versionFinishedAtMs - versionStartedAtMs));
 
   if (Result.isFailure(versionProbe)) {
+    phases.push({ phase: "version", outcome: "error", durationMs: versionDurationMs });
+    phases.push({ phase: "login-status", outcome: "skipped", durationMs: 0 });
+    phases.push({ phase: "account-usage", outcome: "skipped", durationMs: 0 });
     const error = versionProbe.failure;
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
@@ -1327,6 +1352,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
         version: null,
         status: "error",
         auth: { status: "unknown" },
+        phases,
         message: isCommandMissingCause(error)
           ? "Codex CLI (`codex`) is not installed or not on PATH."
           : `Failed to execute Codex CLI health check: ${error instanceof Error ? error.message : String(error)}.`,
@@ -1335,6 +1361,9 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
   }
 
   if (Option.isNone(versionProbe.success)) {
+    phases.push({ phase: "version", outcome: "timeout", durationMs: versionDurationMs });
+    phases.push({ phase: "login-status", outcome: "skipped", durationMs: 0 });
+    phases.push({ phase: "account-usage", outcome: "skipped", durationMs: 0 });
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
       enabled: codexSettings.enabled,
@@ -1346,6 +1375,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
         version: null,
         status: "error",
         auth: { status: "unknown" },
+        phases,
         message: "Codex CLI is installed but failed to run. Timed out while running command.",
       },
     });
@@ -1354,6 +1384,9 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
   const versionResult = versionProbe.success.value;
   const parsedVersion = parseGenericCliVersion(`${versionResult.stdout}\n${versionResult.stderr}`);
   if (versionResult.code !== 0) {
+    phases.push({ phase: "version", outcome: "error", durationMs: versionDurationMs });
+    phases.push({ phase: "login-status", outcome: "skipped", durationMs: 0 });
+    phases.push({ phase: "account-usage", outcome: "skipped", durationMs: 0 });
     const detail = detailFromResult(versionResult);
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
@@ -1366,20 +1399,27 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
         version: parsedVersion,
         status: "error",
         auth: { status: "unknown" },
+        phases,
         message: detail
           ? `Codex CLI is installed but failed to run. ${detail}`
           : "Codex CLI is installed but failed to run.",
       },
     });
   }
+  phases.push({ phase: "version", outcome: "success", durationMs: versionDurationMs });
 
+  const loginStartedAtMs = yield* Clock.currentTimeMillis;
   const loginStatusProbe = yield* runCodexCommand(
     codexSettings,
     ["login", "status"],
     environment,
   ).pipe(Effect.timeoutOption(DEFAULT_TIMEOUT_MS), Effect.result);
+  const loginFinishedAtMs = yield* Clock.currentTimeMillis;
+  const loginDurationMs = Math.max(0, Math.floor(loginFinishedAtMs - loginStartedAtMs));
 
   if (Result.isFailure(loginStatusProbe)) {
+    phases.push({ phase: "login-status", outcome: "error", durationMs: loginDurationMs });
+    phases.push({ phase: "account-usage", outcome: "skipped", durationMs: 0 });
     const error = loginStatusProbe.failure;
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
@@ -1392,12 +1432,15 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
         version: parsedVersion,
         status: "error",
         auth: { status: "unknown" },
+        phases,
         message: `Failed to execute Codex CLI login status check: ${error instanceof Error ? error.message : String(error)}.`,
       },
     });
   }
 
   if (Option.isNone(loginStatusProbe.success)) {
+    phases.push({ phase: "login-status", outcome: "timeout", durationMs: loginDurationMs });
+    phases.push({ phase: "account-usage", outcome: "skipped", durationMs: 0 });
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
       enabled: codexSettings.enabled,
@@ -1409,20 +1452,36 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
         version: parsedVersion,
         status: "warning",
         auth: { status: "unknown" },
+        phases,
         message: CODEX_CLI_LOGIN_STATUS_TIMEOUT_MESSAGE,
       },
     });
   }
+  const loginStatusResult = loginStatusProbe.success.value;
+  phases.push({
+    phase: "login-status",
+    outcome: loginStatusResult.code === 0 ? "success" : "error",
+    durationMs: loginDurationMs,
+  });
 
   const authEmail = yield* readCodexAuthEmail(codexSettings, environment);
   const accountStatus = codexAuthProbeStatusFromLoginStatusResult({
-    ...loginStatusProbe.success.value,
+    ...loginStatusResult,
     ...(authEmail ? { authEmail } : {}),
   });
-  const accountRateLimits =
-    accountStatus.auth.status === "authenticated" && accountStatus.auth.type === "chatgpt"
-      ? yield* readCodexAccountRateLimits(codexSettings, environment, checkedAt)
-      : undefined;
+  let accountRateLimits: ServerProviderAccountRateLimits | undefined;
+  if (accountStatus.auth.status === "authenticated" && accountStatus.auth.type === "chatgpt") {
+    const usageStartedAtMs = yield* Clock.currentTimeMillis;
+    accountRateLimits = yield* readCodexAccountRateLimits(codexSettings, environment, checkedAt);
+    const usageFinishedAtMs = yield* Clock.currentTimeMillis;
+    phases.push({
+      phase: "account-usage",
+      outcome: accountRateLimits === undefined ? "skipped" : "success",
+      durationMs: Math.max(0, Math.floor(usageFinishedAtMs - usageStartedAtMs)),
+    });
+  } else {
+    phases.push({ phase: "account-usage", outcome: "skipped", durationMs: 0 });
+  }
   return buildServerProvider({
     presentation: CODEX_PRESENTATION,
     enabled: codexSettings.enabled,
@@ -1434,6 +1493,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
       version: parsedVersion,
       status: accountStatus.status,
       auth: accountStatus.auth,
+      phases,
       ...(accountRateLimits ? { accountRateLimits } : {}),
       ...(accountStatus.message ? { message: accountStatus.message } : {}),
     },
