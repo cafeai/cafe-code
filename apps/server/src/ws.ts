@@ -173,6 +173,7 @@ function toAuthAccessStreamEvent(
 const makeWsRpcLayer = (
   currentSessionId: AuthSessionId,
   orchestrationSubscriptionHub: OrchestrationSubscriptionHubShape,
+  providerMaintenanceRunner: ProviderMaintenanceRunner.ProviderMaintenanceRunnerShape,
 ) =>
   WsRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -188,7 +189,6 @@ const makeWsRpcLayer = (
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
       const providerRegistry = yield* ProviderRegistry;
       const providerService = yield* ProviderService;
-      const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
       const config = yield* ServerConfig;
       const lifecycleEvents = yield* ServerLifecycleEvents;
       const serverSettings = yield* ServerSettingsService;
@@ -1396,6 +1396,11 @@ const makeWsRpcLayer = (
     }),
   );
 
+// Provider updates mutate process-global package-manager state. Provide the
+// maintenance runner once at the route-layer boundary so every accepted
+// WebSocket shares its coordinator and server-owned worker scope. Providing it
+// inside `makeWsRpcLayer` would recreate the lock set per connection and would
+// tie an admitted update's lifetime to the requesting socket.
 export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
     const orchestrationEngine = yield* OrchestrationEngineService;
@@ -1405,6 +1410,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
       orchestrationEngine,
       initialCursor: initialSnapshot.snapshotSequence,
     });
+    const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
     return HttpRouter.add(
       "GET",
       "/ws",
@@ -1417,10 +1423,13 @@ export const websocketRpcRouteLayer = Layer.unwrap(
           disableTracing: true,
         }).pipe(
           Effect.provide(
-            makeWsRpcLayer(session.sessionId, orchestrationSubscriptionHub).pipe(
+            makeWsRpcLayer(
+              session.sessionId,
+              orchestrationSubscriptionHub,
+              providerMaintenanceRunner,
+            ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(ProviderJournalMessageRepairLive),
-              Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(
                 SourceControlDiscoveryLayer.layer.pipe(
                   Layer.provide(
@@ -1453,4 +1462,4 @@ export const websocketRpcRouteLayer = Layer.unwrap(
       }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
     );
   }),
-);
+).pipe(Layer.provide(ProviderMaintenanceRunner.layer));

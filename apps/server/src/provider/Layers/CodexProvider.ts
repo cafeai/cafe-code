@@ -26,7 +26,7 @@ import type {
   ServerProviderAccountRateLimitSnapshot,
   ServerProviderAccountRateLimitWindow,
 } from "@cafecode/contracts";
-import { ServerSettingsError } from "@cafecode/contracts";
+import { ProviderDriverKind, ServerSettingsError } from "@cafecode/contracts";
 
 import { createModelCapabilities } from "@cafecode/shared/model";
 import {
@@ -53,6 +53,8 @@ const MAX_PROVIDER_EMAIL_LENGTH = 320;
 const CODEX_ACCOUNT_RATE_LIMIT_TIMEOUT_MS = 3_000;
 const CODEX_CHATGPT_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_ORIGINATOR = "cafecode_desktop";
+export const CODEX_CLI_LOGIN_STATUS_TIMEOUT_MESSAGE =
+  "Codex CLI login status check timed out. Provider sessions may still work.";
 
 export interface CodexAppServerProviderSnapshot {
   readonly account: CodexSchema.V2GetAccountResponse;
@@ -1407,7 +1409,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
         version: parsedVersion,
         status: "warning",
         auth: { status: "unknown" },
-        message: "Codex CLI login status check timed out. Provider sessions may still work.",
+        message: CODEX_CLI_LOGIN_STATUS_TIMEOUT_MESSAGE,
       },
     });
   }
@@ -1437,6 +1439,20 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
     },
   });
 });
+
+/**
+ * A login-status timeout is different from a conclusive authentication
+ * failure: Codex sessions may remain usable and the bounded subprocess simply
+ * failed to answer in time. Keep this classification colocated with the probe
+ * that emits it so the managed provider never has to infer lifecycle meaning
+ * from arbitrary provider output.
+ */
+export const isCodexCliLoginStatusProbeInconclusive = (snapshot: ServerProvider): boolean =>
+  snapshot.driver === ProviderDriverKind.make("codex") &&
+  snapshot.installed &&
+  snapshot.status === "warning" &&
+  snapshot.auth.status === "unknown" &&
+  snapshot.message === CODEX_CLI_LOGIN_STATUS_TIMEOUT_MESSAGE;
 
 // NOTE: the singleton `CodexProviderLive` Layer has been removed as part of
 // the per-instance-driver refactor. `CodexDriver.create()` builds a managed

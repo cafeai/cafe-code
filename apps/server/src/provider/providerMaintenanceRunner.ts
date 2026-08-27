@@ -13,6 +13,8 @@ import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -194,6 +196,7 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
   const providerRegistry = yield* ProviderRegistry;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const httpClient = yield* HttpClient.HttpClient;
+  const runnerScope = yield* Effect.scope;
   const runMaintenanceCommand = (command: string, args: ReadonlyArray<string>) =>
     runProviderMaintenanceCommandWithSpawner({
       spawner,
@@ -310,13 +313,12 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
         message: "Waiting for another provider update to finish.",
       }),
     ).pipe(Effect.asVoid);
+    const startedAtRef = yield* Ref.make<string | null>(null);
 
     const runProviderUpdate = Effect.fn("ProviderMaintenanceRunner.runProviderUpdate")(
       function* () {
         const finish = (state: ServerProviderUpdateState) =>
           setUpdateState(state).pipe(Effect.map((providers) => ({ providers })));
-        const startedAtRef = yield* Ref.make<string | null>(null);
-
         const runCommandAndVerify = Effect.fn("ProviderMaintenanceRunner.runCommandAndVerify")(
           function* () {
             const startedAt = yield* nowIso;
@@ -371,14 +373,26 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
 
         const recordFailedUpdate = Effect.fn("ProviderMaintenanceRunner.recordFailedUpdate")(
           function* (cause: Cause.Cause<unknown>) {
-            const failure = Cause.squash(cause);
+            // Provider/process failures may embed executable paths, platform
+            // diagnostics, environment fragments, or command details. Record
+            // only an allowlisted category in server logs and expose a fixed
+            // client message; the normal non-zero-exit path above separately
+            // publishes the already-bounded stdout/stderr intended for users.
+            const failureKind = Cause.hasInterruptsOnly(cause)
+              ? "interrupted"
+              : "unexpected_failure";
+            yield* Effect.logWarning("Provider update failed before completion", {
+              provider,
+              instanceId,
+              failureKind,
+            });
             const startedAt = yield* Ref.get(startedAtRef);
             return yield* finish(
               makeUpdateState({
                 status: "failed",
                 startedAt,
                 finishedAt: yield* nowIso,
-                message: failure instanceof Error ? failure.message : "Update command failed.",
+                message: "Provider update failed before completion.",
                 output: null,
               }),
             );
@@ -389,11 +403,36 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
       },
     );
 
-    return yield* commandCoordinator
+    const updateJob = commandCoordinator
       .withCommandLock({
         targetKey,
         lockKey: update.lockKey,
         onQueued: setQueuedState,
+        onAcquiredExit: (exit) =>
+          Exit.isSuccess(exit)
+            ? Effect.void
+            : Ref.get(startedAtRef).pipe(
+                Effect.flatMap((startedAt) =>
+                  nowIso.pipe(
+                    Effect.flatMap((finishedAt) =>
+                      setUpdateState(
+                        makeUpdateState({
+                          status: "failed",
+                          startedAt,
+                          finishedAt,
+                          // Do not surface Effect causes or interruptor metadata here.
+                          // Provider update errors can contain paths or process details;
+                          // this terminal state only needs to explain that the owned job
+                          // stopped before it could publish its normal result.
+                          message: "Provider update stopped before completion.",
+                          output: null,
+                        }),
+                      ),
+                    ),
+                  ),
+                ),
+                Effect.asVoid,
+              ),
         run: runProviderUpdate(),
       })
       .pipe(
@@ -406,6 +445,18 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
             : error,
         ),
       );
+
+    // A provider update mutates process-global package-manager state. Once
+    // admitted, its lifetime belongs to the server, not to whichever renderer
+    // WebSocket happened to request it. Forking into the runner layer's scope
+    // lets a reconnect stop waiting without interrupting the command; the
+    // authoritative ProviderRegistry snapshots keep every client informed.
+    return yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const worker = yield* updateJob.pipe(Effect.interruptible, Effect.forkIn(runnerScope));
+        return yield* restore(Fiber.join(worker));
+      }),
+    );
   });
 
   return ProviderMaintenanceRunner.of({

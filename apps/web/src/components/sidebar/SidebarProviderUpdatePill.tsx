@@ -1,7 +1,14 @@
 import { useNavigate } from "@tanstack/react-router";
 import type { ServerProvider } from "@cafecode/contracts";
 import { CircleCheckIcon, DownloadIcon, LoaderIcon, TriangleAlertIcon, XIcon } from "lucide-react";
-import { useCallback, useEffect, useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type CSSProperties,
+  type TransitionEvent as ReactTransitionEvent,
+} from "react";
 
 import { useServerProviders } from "../../rpc/serverState";
 import {
@@ -27,6 +34,28 @@ const PROVIDER_UPDATE_PILL_PROGRESS_STYLES = {
   error: "bg-destructive/14",
 } as const;
 
+// The visual exit lasts 180 ms. React state must never depend exclusively on
+// `transitionend`: Chromium is allowed to emit `transitioncancel` instead, and
+// a hidden or suspended Electron renderer can omit both events. This bounded
+// fallback keeps animation decorative rather than a provider-state authority.
+const PROVIDER_UPDATE_PILL_EXIT_FALLBACK_MS = 250;
+
+interface ProviderUpdatePillTransitionState {
+  readonly dismissedKeys: ReadonlySet<string>;
+  readonly renderedView: ProviderUpdateSidebarPillView | null;
+  readonly pendingView: ProviderUpdateSidebarPillView | null;
+  readonly exitingKey: string | null;
+  readonly dismissAfterExitKey: string | null;
+}
+
+const INITIAL_PROVIDER_UPDATE_PILL_TRANSITION_STATE: ProviderUpdatePillTransitionState = {
+  dismissedKeys: new Set(),
+  renderedView: null,
+  pendingView: null,
+  exitingKey: null,
+  dismissAfterExitKey: null,
+};
+
 function latestProviderCheckedAt(
   providers: ReadonlyArray<Pick<ServerProvider, "checkedAt">>,
 ): string | undefined {
@@ -37,22 +66,28 @@ function latestProviderCheckedAt(
   );
 }
 
-export function SidebarProviderUpdatePill() {
-  const navigate = useNavigate();
-  const providers = useServerProviders();
-  const [dismissedKeys, setDismissedKeys] = useState<ReadonlySet<string>>(() => new Set());
-  const [renderedView, setRenderedView] = useState<ProviderUpdateSidebarPillView | null>(null);
-  const [pendingView, setPendingView] = useState<ProviderUpdateSidebarPillView | null>(null);
-  const [exitingKey, setExitingKey] = useState<string | null>(null);
-  const [dismissAfterExitKey, setDismissAfterExitKey] = useState<string | null>(null);
+export function SidebarProviderUpdatePillContent({
+  providers,
+  onOpenProviderSettings,
+}: {
+  readonly providers: ReadonlyArray<ServerProvider>;
+  readonly onOpenProviderSettings: () => void;
+}) {
+  const [transitionState, setTransitionState] = useState<ProviderUpdatePillTransitionState>(
+    () => INITIAL_PROVIDER_UPDATE_PILL_TRANSITION_STATE,
+  );
   const [visibleAfterIso, setVisibleAfterIso] = useState<string | undefined>();
   const effectiveVisibleAfterIso = visibleAfterIso ?? latestProviderCheckedAt(providers);
-  const view = getProviderUpdateSidebarPillView(providers, {
-    ...(effectiveVisibleAfterIso !== undefined
-      ? { visibleAfterIso: effectiveVisibleAfterIso }
-      : {}),
-    dismissedKeys,
-  });
+  const view = useMemo(
+    () =>
+      getProviderUpdateSidebarPillView(providers, {
+        ...(effectiveVisibleAfterIso !== undefined
+          ? { visibleAfterIso: effectiveVisibleAfterIso }
+          : {}),
+        dismissedKeys: transitionState.dismissedKeys,
+      }),
+    [effectiveVisibleAfterIso, providers, transitionState.dismissedKeys],
+  );
 
   useEffect(() => {
     if (visibleAfterIso === undefined && effectiveVisibleAfterIso !== undefined) {
@@ -60,54 +95,103 @@ export function SidebarProviderUpdatePill() {
     }
   }, [effectiveVisibleAfterIso, visibleAfterIso]);
 
-  const openProviderSettings = useCallback(() => {
-    void navigate({ to: "/settings/providers" });
-  }, [navigate]);
-  const displayedView = renderedView ?? view;
+  const displayedView = transitionState.renderedView ?? view;
   const dismissAfterVisibleMs = displayedView?.dismissAfterVisibleMs;
   const viewKey = displayedView?.key ?? null;
   const showDismissProgress =
     dismissAfterVisibleMs !== undefined &&
     displayedView?.tone !== "loading" &&
-    exitingKey !== viewKey;
+    transitionState.exitingKey !== viewKey;
 
   const startExit = useCallback(
-    (key: string, nextView: ProviderUpdateSidebarPillView | null, dismissKey?: string) => {
-      if (exitingKey === key) {
-        return;
-      }
-      setPendingView(nextView);
-      setExitingKey(key);
-      setDismissAfterExitKey(dismissKey ?? null);
-    },
-    [exitingKey],
+    (key: string, nextView: ProviderUpdateSidebarPillView | null, dismissKey?: string) =>
+      setTransitionState((previous) => {
+        if (previous.exitingKey === key) {
+          const nextDismissAfterExitKey = dismissKey ?? previous.dismissAfterExitKey;
+          if (
+            previous.pendingView === nextView &&
+            previous.dismissAfterExitKey === nextDismissAfterExitKey
+          ) {
+            return previous;
+          }
+          return {
+            ...previous,
+            pendingView: nextView,
+            dismissAfterExitKey: nextDismissAfterExitKey,
+          };
+        }
+        return {
+          ...previous,
+          pendingView: nextView,
+          exitingKey: key,
+          dismissAfterExitKey: dismissKey ?? null,
+        };
+      }),
+    [],
   );
 
-  useEffect(() => {
-    if (exitingKey !== null) {
-      return;
-    }
-    if (!renderedView) {
-      if (view) {
-        setRenderedView(view);
+  const completeExit = useCallback((key: string) => {
+    setTransitionState((previous) => {
+      // Multiple CSS properties may finish independently, transitioncancel can
+      // race the timeout, and React Strict Mode may replay effects. Matching the
+      // exact key makes every completion path safely idempotent.
+      if (previous.exitingKey !== key) {
+        return previous;
       }
+      const dismissedKeys =
+        previous.dismissAfterExitKey === key
+          ? new Set(previous.dismissedKeys).add(key)
+          : previous.dismissedKeys;
+      return {
+        dismissedKeys,
+        renderedView: previous.pendingView,
+        pendingView: null,
+        exitingKey: null,
+        dismissAfterExitKey: null,
+      };
+    });
+  }, []);
+
+  useEffect(() => {
+    setTransitionState((previous) => {
+      if (previous.exitingKey !== null) {
+        // Provider status can move through queued, running, and terminal states
+        // during a single 180 ms exit. Always land on the newest authoritative
+        // view rather than an intermediate snapshot captured at exit start.
+        return previous.pendingView === view ? previous : { ...previous, pendingView: view };
+      }
+      if (!previous.renderedView) {
+        return view ? { ...previous, renderedView: view } : previous;
+      }
+      if (!view || view.key !== previous.renderedView.key) {
+        return {
+          ...previous,
+          pendingView: view,
+          exitingKey: previous.renderedView.key,
+          dismissAfterExitKey: null,
+        };
+      }
+      return previous.renderedView === view ? previous : { ...previous, renderedView: view };
+    });
+  }, [view]);
+
+  useEffect(() => {
+    const exitingKey = transitionState.exitingKey;
+    if (exitingKey === null) {
       return;
     }
-    if (!view) {
-      startExit(renderedView.key, null);
-      return;
-    }
-    if (view.key !== renderedView.key) {
-      startExit(renderedView.key, view);
-      return;
-    }
-  }, [exitingKey, renderedView, startExit, view]);
+    const timeoutId = window.setTimeout(
+      () => completeExit(exitingKey),
+      PROVIDER_UPDATE_PILL_EXIT_FALLBACK_MS,
+    );
+    return () => window.clearTimeout(timeoutId);
+  }, [completeExit, transitionState.exitingKey]);
 
   useEffect(() => {
     if (!dismissAfterVisibleMs || !viewKey) {
       return;
     }
-    if (exitingKey === viewKey) {
+    if (transitionState.exitingKey === viewKey) {
       return;
     }
     const timeoutId = window.setTimeout(() => {
@@ -115,7 +199,7 @@ export function SidebarProviderUpdatePill() {
     }, dismissAfterVisibleMs);
 
     return () => window.clearTimeout(timeoutId);
-  }, [dismissAfterVisibleMs, exitingKey, startExit, viewKey]);
+  }, [dismissAfterVisibleMs, startExit, transitionState.exitingKey, viewKey]);
 
   if (!displayedView) {
     return null;
@@ -123,27 +207,25 @@ export function SidebarProviderUpdatePill() {
 
   return (
     <div
+      data-cafe-provider-update-pill="true"
       className={`group/provider-update relative flex h-7 w-full items-center overflow-hidden rounded-lg text-xs font-medium transform-gpu transition-all duration-180 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-transform ${
         PROVIDER_UPDATE_PILL_STYLES[displayedView.tone]
       } ${
-        exitingKey === displayedView.key
+        transitionState.exitingKey === displayedView.key
           ? "pointer-events-none translate-y-1.5 opacity-0"
           : "translate-y-0 opacity-100"
       }`}
-      onTransitionEnd={(event) => {
+      onTransitionEnd={(event: ReactTransitionEvent<HTMLDivElement>) => {
         if (event.target !== event.currentTarget) {
           return;
         }
-        if (!displayedView || exitingKey !== displayedView.key) {
+        completeExit(displayedView.key);
+      }}
+      onTransitionCancel={(event: ReactTransitionEvent<HTMLDivElement>) => {
+        if (event.target !== event.currentTarget) {
           return;
         }
-        if (dismissAfterExitKey === displayedView.key) {
-          setDismissedKeys((previous) => new Set(previous).add(displayedView.key));
-        }
-        setRenderedView(pendingView);
-        setPendingView(null);
-        setExitingKey(null);
-        setDismissAfterExitKey(null);
+        completeExit(displayedView.key);
       }}
     >
       {showDismissProgress ? (
@@ -168,7 +250,7 @@ export function SidebarProviderUpdatePill() {
               type="button"
               aria-label={displayedView.description}
               className="provider-update-main relative z-[1] flex h-full flex-1 items-center gap-2 px-2 text-left"
-              onClick={openProviderSettings}
+              onClick={onOpenProviderSettings}
             >
               {displayedView.tone === "loading" ? (
                 <LoaderIcon className="size-3.5 animate-spin" />
@@ -203,5 +285,20 @@ export function SidebarProviderUpdatePill() {
         </Tooltip>
       )}
     </div>
+  );
+}
+
+export function SidebarProviderUpdatePill() {
+  const navigate = useNavigate();
+  const providers = useServerProviders();
+  const openProviderSettings = useCallback(() => {
+    void navigate({ to: "/settings/providers" });
+  }, [navigate]);
+
+  return (
+    <SidebarProviderUpdatePillContent
+      providers={providers}
+      onOpenProviderSettings={openProviderSettings}
+    />
   );
 }

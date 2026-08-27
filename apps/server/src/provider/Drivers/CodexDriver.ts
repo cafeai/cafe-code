@@ -38,6 +38,7 @@ import { ProviderDriverError } from "../Errors.ts";
 import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
 import {
   checkCodexCliProviderStatus,
+  isCodexCliLoginStatusProbeInconclusive,
   makePendingCodexProvider,
   readCodexAccountRateLimits,
 } from "../Layers/CodexProvider.ts";
@@ -295,6 +296,17 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
             Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),
           ),
         refreshInterval: PERIODIC_SNAPSHOT_REFRESH_INTERVAL,
+        probePolicy: {
+          // ProviderRegistry owns bounded initial admission across every
+          // configured provider. Avoid a second unbounded startup fiber here.
+          initialRefresh: "external",
+          // An isolated bounded `codex login status` timeout is not evidence
+          // that an already-authenticated session became unhealthy. Retain
+          // known-good state twice, then surface the third consecutive timeout
+          // so a persistently wedged CLI remains visible and diagnosable.
+          isInconclusiveSnapshot: isCodexCliLoginStatusProbeInconclusive,
+          inconclusiveFailureThreshold: 3,
+        },
       }).pipe(
         Effect.mapError(
           (cause) =>

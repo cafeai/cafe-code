@@ -193,6 +193,7 @@ import { describeSendFailureMessage, sanitizeThreadErrorMessage } from "~/rpc/tr
 import { retainThreadDetailSubscription } from "../environments/runtime/service";
 import { RightPanelSheet } from "./RightPanelSheet";
 import { deriveDebugWaitReasons } from "./chat/debugWaitReasons";
+import { summarizeProviderDebugFleet } from "./chat/providerDebugSummary";
 import {
   summarizeTimelineScrollMetrics,
   type TimelineScrollDebugEvent,
@@ -210,7 +211,7 @@ const IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROPOSED_PLANS: Thread["proposedPlans"] = [];
-const DEBUG_SNAPSHOT_VERSION = 11;
+const DEBUG_SNAPSHOT_VERSION = 12;
 const DEBUG_TEXT_PREVIEW_LIMIT = 120;
 const DEBUG_JSON_PREVIEW_LIMIT = 600;
 const DEBUG_RECENT_MESSAGE_LIMIT = 6;
@@ -222,10 +223,14 @@ const DEBUG_INTERESTING_THREAD_LIMIT = 16;
 const DEBUG_THREAD_DETAIL_MESSAGE_LIMIT = 2_000;
 const DEBUG_THREAD_DETAIL_ACTIVITY_LIMIT = 500;
 const DEBUG_RENDERER_HEARTBEAT_INTERVAL_MS = 5_000;
-const DEBUG_RENDERER_SNAPSHOT_MIN_INTERVAL_MS = 250;
+// Snapshot construction traverses every retained thread and can produce a
+// sizeable structured-clone payload under 16+ hour workloads. One update per
+// second is still interactive for diagnostics while preventing debug mode from
+// adding a four-times-per-second renderer/main-process serialization tax.
+const DEBUG_RENDERER_SNAPSHOT_MIN_INTERVAL_MS = 1_000;
 const DEBUG_LARGE_THREAD_TEXT_CHARS = 1_000_000;
 const DEBUG_LARGE_ACTIVITY_PAYLOAD_CHARS = 1_000_000;
-const DEBUG_TIMELINE_SCROLL_EVENT_LIMIT = 300;
+const DEBUG_TIMELINE_SCROLL_EVENT_LIMIT = 100;
 const TIMELINE_USER_SCROLL_INTENT_SETTLE_MS = 250;
 const DEBUG_SECRET_REDACTIONS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bnpm_[A-Za-z0-9]{8,}\b/g, "npm_[redacted]"],
@@ -3904,6 +3909,7 @@ export default function ChatView(props: ChatViewProps) {
         activeProviderInstanceId,
         activeProviderLiveSteerSupported,
         activeProviderLiveSteerAvailable,
+        fleet: summarizeProviderDebugFleet(providerStatuses),
         activeProviderStatus: activeProviderStatus
           ? {
               instanceId: activeProviderStatus.instanceId,
@@ -4106,6 +4112,7 @@ export default function ChatView(props: ChatViewProps) {
     localDispatchStartedAt,
     phase,
     pendingSteerDispatchByMessageId,
+    providerStatuses,
     queuedFollowUpPendingDispatchByThreadId,
     routeKind,
     selectedProvider,

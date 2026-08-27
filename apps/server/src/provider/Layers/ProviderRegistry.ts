@@ -57,6 +57,19 @@ import {
 import type { ProviderInstance } from "../ProviderDriver.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 import type { ProviderSnapshotSource } from "../builtInProviderCatalog.ts";
+import {
+  DEFAULT_PROVIDER_INCONCLUSIVE_FAILURE_THRESHOLD,
+  hasConclusiveProviderAuthState,
+  reconcileInconclusiveProviderProbeStreak,
+  retainConclusiveProviderState,
+} from "../providerProbePolicy.ts";
+
+/**
+ * Status probes spawn provider-owned subprocesses and may read shared auth
+ * homes. Bound startup/rebuild admission across the whole registry so a
+ * multi-instance configuration cannot create a CPU/I/O thundering herd.
+ */
+export const INITIAL_PROVIDER_REFRESH_CONCURRENCY = 2;
 
 const loadProviders = (
   providerSources: ReadonlyArray<ProviderSnapshotSource>,
@@ -116,33 +129,53 @@ const mergeProviderModels = (
 export const mergeProviderSnapshot = (
   previousProvider: ServerProvider | undefined,
   nextProvider: ServerProvider,
-): ServerProvider =>
-  !previousProvider
-    ? nextProvider
-    : {
-        ...nextProvider,
-        models: mergeProviderModels(previousProvider.models, nextProvider.models),
-        // Carry forward event-sourced account rate limits when an incoming snapshot
-        // omits them. Claude's periodic probe never sends a prompt, so it produces no
-        // `accountRateLimits`; without this, each refresh would wipe the limits accrued
-        // from `rate_limit_event`s.
-        //
-        // Codex has both full probe snapshots and sparse live updates. Preserve the
-        // latest redacted usage when the same authenticated account suffers a transient
-        // probe failure, but clear it on auth/account churn so a percentage from one
-        // account can never be presented as another account's quota. Grok's ACP auth
-        // response does not currently expose a stable account identity, so an omitted
-        // full-probe usage result must clear instead of guessing that cached-token auth
-        // still represents the same person. Its usage-only prompt refresh independently
-        // preserves a known-good snapshot on transient endpoint failure.
-        ...(nextProvider.accountRateLimits === undefined &&
-        previousProvider.accountRateLimits !== undefined &&
-        nextProvider.driver !== ProviderDriverKind.make("grok") &&
-        (nextProvider.driver !== ProviderDriverKind.make("codex") ||
-          isSameAuthenticatedProviderAccount(previousProvider, nextProvider))
-          ? { accountRateLimits: previousProvider.accountRateLimits }
-          : {}),
-      };
+): ServerProvider => {
+  if (!previousProvider) {
+    return nextProvider;
+  }
+
+  // A backend restart hydrates the last conclusive provider snapshot from the
+  // private status cache, while the newly-created managed provider begins its
+  // own consecutive-attempt counter at zero. Apply the same bounded retention
+  // rule at this merge boundary so one or two startup timeouts do not create a
+  // false auth-loss banner; the third timeout still becomes visible.
+  const streakReconciledProvider = reconcileInconclusiveProviderProbeStreak(
+    previousProvider,
+    nextProvider,
+  );
+  const reconciledProvider =
+    streakReconciledProvider.probeDiagnostics?.lastOutcome === "inconclusive" &&
+    streakReconciledProvider.probeDiagnostics.consecutiveInconclusiveCount <
+      DEFAULT_PROVIDER_INCONCLUSIVE_FAILURE_THRESHOLD &&
+    hasConclusiveProviderAuthState(previousProvider)
+      ? retainConclusiveProviderState(previousProvider, streakReconciledProvider)
+      : streakReconciledProvider;
+
+  return {
+    ...reconciledProvider,
+    models: mergeProviderModels(previousProvider.models, reconciledProvider.models),
+    // Carry forward event-sourced account rate limits when an incoming snapshot
+    // omits them. Claude's periodic probe never sends a prompt, so it produces no
+    // `accountRateLimits`; without this, each refresh would wipe the limits accrued
+    // from `rate_limit_event`s.
+    //
+    // Codex has both full probe snapshots and sparse live updates. Preserve the
+    // latest redacted usage when the same authenticated account suffers a transient
+    // probe failure, but clear it on auth/account churn so a percentage from one
+    // account can never be presented as another account's quota. Grok's ACP auth
+    // response does not currently expose a stable account identity, so an omitted
+    // full-probe usage result must clear instead of guessing that cached-token auth
+    // still represents the same person. Its usage-only prompt refresh independently
+    // preserves a known-good snapshot on transient endpoint failure.
+    ...(reconciledProvider.accountRateLimits === undefined &&
+    previousProvider.accountRateLimits !== undefined &&
+    reconciledProvider.driver !== ProviderDriverKind.make("grok") &&
+    (reconciledProvider.driver !== ProviderDriverKind.make("codex") ||
+      isSameAuthenticatedProviderAccount(previousProvider, reconciledProvider))
+      ? { accountRateLimits: previousProvider.accountRateLimits }
+      : {}),
+  };
+};
 
 export const mergeProviderSnapshots = (
   previousProviders: ReadonlyArray<ServerProvider>,
@@ -654,7 +687,8 @@ export const ProviderRegistryLive = Layer.effect(
      *     attachment race that otherwise drops the initial probe;
      *   - prune `providersRef` of instances that no longer exist.
      *
-     * Initial refreshes are awaited in parallel rather than forked, so
+     * Initial refreshes are awaited with bounded parallelism rather than
+     * forked, so
      * callers (layer build; `streamChanges` watcher) see fully-probed
      * state on return. This matters for layer build in particular:
      * consumers reading `getProviders` immediately after layer build
@@ -700,10 +734,10 @@ export const ProviderRegistryLive = Layer.effect(
         }
 
         // Fork long-lived subscriptions to each new/rebuilt instance's
-        // change stream BEFORE kicking off refreshes — if the driver's
-        // own initial probe (line 140 in `makeManagedServerProvider`)
-        // wins the refreshSemaphore race, its PubSub publish must land
-        // in an active subscriber or the result is dropped.
+        // change stream BEFORE kicking off refreshes. ProviderRegistry is the
+        // sole owner of production initial-refresh admission; managed Codex
+        // and Claude snapshots intentionally disable their old independent
+        // startup fibers so this global bound cannot be bypassed.
         for (const [, instance] of newlyAdded) {
           const source = buildSnapshotSource(instance);
           yield* Stream.runForEach(source.streamChanges, (provider) =>
@@ -711,8 +745,8 @@ export const ProviderRegistryLive = Layer.effect(
           ).pipe(Effect.forkScoped);
         }
 
-        // Force-refresh every new/rebuilt instance in parallel and wait
-        // for them all to complete. The refresh's result is piped
+        // Force-refresh every new/rebuilt instance with a small global
+        // concurrency bound and wait for them all to complete. The refresh's result is piped
         // directly into `syncProvider`, so `providersRef` is populated
         // deterministically by the time this block returns — regardless
         // of PubSub subscription timing. Failures are logged and
@@ -721,7 +755,7 @@ export const ProviderRegistryLive = Layer.effect(
           newlyAdded,
           ([, instance]) =>
             refreshOneSource(buildSnapshotSource(instance)).pipe(Effect.ignoreCause({ log: true })),
-          { concurrency: "unbounded", discard: true },
+          { concurrency: INITIAL_PROVIDER_REFRESH_CONCURRENCY, discard: true },
         );
         yield* upsertProviders(unavailableProviders, {
           persist: false,

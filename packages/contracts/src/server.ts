@@ -265,6 +265,37 @@ export const ServerProviderUpdateState = Schema.Struct({
 });
 export type ServerProviderUpdateState = typeof ServerProviderUpdateState.Type;
 
+/**
+ * A deliberately small, redacted account of the provider-status probe loop.
+ *
+ * This structure is safe to include in normal provider snapshots and debug
+ * summaries: it records only timing, scheduling, and classified outcomes. It
+ * must never grow raw stdout/stderr, command lines, filesystem paths, account
+ * identifiers, or credential material.
+ */
+export const ServerProviderProbeOutcome = Schema.Literals([
+  "pending",
+  "ready",
+  "warning",
+  "error",
+  "disabled",
+  "inconclusive",
+]);
+export type ServerProviderProbeOutcome = typeof ServerProviderProbeOutcome.Type;
+
+export const ServerProviderProbeDiagnostics = Schema.Struct({
+  attemptCount: NonNegativeInt,
+  consecutiveInconclusiveCount: NonNegativeInt,
+  lastOutcome: ServerProviderProbeOutcome,
+  lastStartedAt: Schema.NullOr(IsoDateTime),
+  lastFinishedAt: Schema.NullOr(IsoDateTime),
+  lastDurationMs: Schema.NullOr(NonNegativeInt),
+  periodicIntervalMs: Schema.NullOr(NonNegativeInt),
+  periodicPhaseOffsetMs: Schema.NullOr(NonNegativeInt),
+  nextScheduledAt: Schema.NullOr(IsoDateTime),
+});
+export type ServerProviderProbeDiagnostics = typeof ServerProviderProbeDiagnostics.Type;
+
 export const ServerProvider = Schema.Struct({
   // Routing key for the configured instance this snapshot represents. This
   // is the only stable identity consumers may use for provider routing.
@@ -301,6 +332,7 @@ export const ServerProvider = Schema.Struct({
   skills: Schema.Array(ServerProviderSkill).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   accountRateLimits: Schema.optionalKey(ServerProviderAccountRateLimits),
   runtimeCapabilities: Schema.optionalKey(ServerProviderRuntimeCapabilities),
+  probeDiagnostics: Schema.optionalKey(ServerProviderProbeDiagnostics),
   versionAdvisory: Schema.optionalKey(ServerProviderVersionAdvisory),
   updateState: Schema.optionalKey(ServerProviderUpdateState),
 });

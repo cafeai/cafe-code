@@ -10,6 +10,7 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import { makeManagedServerProvider } from "./makeManagedServerProvider.ts";
+import { deterministicProviderProbePhaseOffsetMs } from "./providerProbePolicy.ts";
 
 const emptyCapabilities = createModelCapabilities({ optionDescriptors: [] });
 const fastModeCapabilities = createModelCapabilities({
@@ -118,6 +119,250 @@ const enrichedSnapshotSecond: ServerProvider = {
 };
 
 describe("makeManagedServerProvider", () => {
+  it("derives stable, distributed periodic phases from public instance ids", () => {
+    const intervalMs = 300_000;
+    const codexPhase = deterministicProviderProbePhaseOffsetMs(
+      ProviderInstanceId.make("codex"),
+      intervalMs,
+    );
+    const workPhase = deterministicProviderProbePhaseOffsetMs(
+      ProviderInstanceId.make("codex_work"),
+      intervalMs,
+    );
+    const claudePhase = deterministicProviderProbePhaseOffsetMs(
+      ProviderInstanceId.make("claudeAgent"),
+      intervalMs,
+    );
+
+    assert.strictEqual(
+      codexPhase,
+      deterministicProviderProbePhaseOffsetMs(ProviderInstanceId.make("codex"), intervalMs),
+    );
+    assert.isAtLeast(codexPhase, 0);
+    assert.isBelow(codexPhase, intervalMs);
+    assert.notStrictEqual(codexPhase, workPhase);
+    assert.notStrictEqual(codexPhase, claudePhase);
+    assert.notStrictEqual(workPhase, claudePhase);
+  });
+
+  it.effect("lets the registry own initial refresh admission and records redacted timing", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const checkCalls = yield* Ref.make(0);
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+          initialSnapshot: () => Effect.succeed(initialSnapshot),
+          checkProvider: Ref.update(checkCalls, (count) => count + 1).pipe(
+            Effect.as(refreshedSnapshot),
+          ),
+          refreshInterval: "5 minutes",
+          probePolicy: { initialRefresh: "external" },
+        });
+
+        yield* Effect.yieldNow;
+        assert.strictEqual(yield* Ref.get(checkCalls), 0);
+        const pending = yield* provider.getSnapshot;
+        assert.strictEqual(pending.probeDiagnostics?.attemptCount, 0);
+        assert.strictEqual(pending.probeDiagnostics?.lastOutcome, "pending");
+        assert.strictEqual(pending.probeDiagnostics?.periodicIntervalMs, 300_000);
+        assert.isNumber(pending.probeDiagnostics?.periodicPhaseOffsetMs);
+        assert.isNull(pending.probeDiagnostics?.nextScheduledAt);
+
+        const refreshed = yield* provider.refresh;
+        yield* Effect.yieldNow;
+        assert.strictEqual(yield* Ref.get(checkCalls), 1);
+        assert.strictEqual(refreshed.probeDiagnostics?.attemptCount, 1);
+        assert.strictEqual(refreshed.probeDiagnostics?.lastOutcome, "ready");
+        assert.strictEqual(refreshed.probeDiagnostics?.consecutiveInconclusiveCount, 0);
+        assert.strictEqual(refreshed.probeDiagnostics?.lastDurationMs, 0);
+        assert.isString(refreshed.probeDiagnostics?.nextScheduledAt);
+        assert.strictEqual(
+          (yield* provider.getSnapshot).probeDiagnostics?.nextScheduledAt,
+          refreshed.probeDiagnostics?.nextScheduledAt,
+        );
+      }).pipe(Effect.provide(TestClock.layer())),
+    ),
+  );
+
+  it.effect("starts periodic probing only after external admission and the instance phase", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const intervalMs = 1_000;
+        const phaseOffsetMs = deterministicProviderProbePhaseOffsetMs(
+          initialSnapshot.instanceId,
+          intervalMs,
+        );
+        const checkCalls = yield* Ref.make(0);
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+          initialSnapshot: () => Effect.succeed(initialSnapshot),
+          checkProvider: Ref.update(checkCalls, (count) => count + 1).pipe(
+            Effect.as(refreshedSnapshot),
+          ),
+          refreshInterval: "1 second",
+          probePolicy: { initialRefresh: "external" },
+        });
+
+        yield* Effect.yieldNow;
+        // Even a pathologically long registry queue cannot be bypassed by the
+        // construction-relative periodic timer.
+        yield* TestClock.adjust(`${intervalMs * 10 + phaseOffsetMs} millis`);
+        yield* Effect.yieldNow;
+        assert.strictEqual(yield* Ref.get(checkCalls), 0);
+
+        yield* provider.refresh;
+        yield* Effect.yieldNow;
+        assert.strictEqual(yield* Ref.get(checkCalls), 1);
+        yield* TestClock.adjust(`${intervalMs + phaseOffsetMs - 1} millis`);
+        yield* Effect.yieldNow;
+        assert.strictEqual(yield* Ref.get(checkCalls), 1);
+
+        yield* TestClock.adjust("1 millis");
+        yield* Effect.yieldNow;
+        assert.strictEqual(yield* Ref.get(checkCalls), 2);
+        assert.strictEqual(
+          (yield* provider.getSnapshot).probeDiagnostics?.periodicPhaseOffsetMs,
+          phaseOffsetMs,
+        );
+      }).pipe(Effect.provide(TestClock.layer())),
+    ),
+  );
+
+  it.effect("skips missed fixed-rate slots when a probe exceeds its interval", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const intervalMs = 1_000;
+        const phaseOffsetMs = deterministicProviderProbePhaseOffsetMs(
+          initialSnapshot.instanceId,
+          intervalMs,
+        );
+        const checkCalls = yield* Ref.make(0);
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+          initialSnapshot: () => Effect.succeed(initialSnapshot),
+          checkProvider: Ref.updateAndGet(checkCalls, (count) => count + 1).pipe(
+            Effect.flatMap((count) =>
+              count === 1
+                ? Effect.succeed(refreshedSnapshot)
+                : Effect.sleep("1500 millis").pipe(Effect.as(refreshedSnapshot)),
+            ),
+          ),
+          refreshInterval: "1 second",
+          probePolicy: { initialRefresh: "external" },
+        });
+        assert.isNull((yield* provider.getSnapshot).probeDiagnostics?.nextScheduledAt);
+        yield* provider.refresh;
+        yield* Effect.yieldNow;
+        const pending = yield* provider.getSnapshot;
+        const firstScheduledAtMs = Date.parse(
+          pending.probeDiagnostics?.nextScheduledAt ?? "invalid",
+        );
+        assert.isTrue(Number.isFinite(firstScheduledAtMs));
+        assert.strictEqual(yield* Ref.get(checkCalls), 1);
+
+        yield* TestClock.adjust(`${intervalMs + phaseOffsetMs} millis`);
+        yield* Effect.yieldNow;
+        assert.strictEqual(yield* Ref.get(checkCalls), 2);
+
+        yield* TestClock.adjust("1500 millis");
+        yield* Effect.yieldNow;
+        assert.strictEqual(yield* Ref.get(checkCalls), 2);
+        assert.strictEqual(
+          (yield* provider.getSnapshot).probeDiagnostics?.nextScheduledAt,
+          new Date(firstScheduledAtMs + intervalMs * 2).toISOString(),
+        );
+
+        yield* TestClock.adjust("499 millis");
+        yield* Effect.yieldNow;
+        assert.strictEqual(yield* Ref.get(checkCalls), 2);
+        yield* TestClock.adjust("1 millis");
+        yield* Effect.yieldNow;
+        assert.strictEqual(yield* Ref.get(checkCalls), 3);
+      }).pipe(Effect.provide(TestClock.layer())),
+    ),
+  );
+
+  it.effect(
+    "retains conclusive auth for two inconclusive probes, degrades on the third, and resets",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const inconclusiveSnapshot: ServerProvider = {
+            ...refreshedSnapshot,
+            checkedAt: "2026-04-10T00:00:05.000Z",
+            status: "warning",
+            auth: { status: "unknown" },
+            message: "probe timed out",
+          };
+          const snapshots = [
+            refreshedSnapshot,
+            inconclusiveSnapshot,
+            inconclusiveSnapshot,
+            inconclusiveSnapshot,
+            refreshedSnapshotSecond,
+          ];
+          let index = 0;
+          const provider = yield* makeManagedServerProvider<TestSettings>({
+            maintenanceCapabilities,
+            getSettings: Effect.succeed({ enabled: true }),
+            streamSettings: Stream.empty,
+            haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+            initialSnapshot: () => Effect.succeed(initialSnapshot),
+            checkProvider: Effect.sync(() => snapshots[index++] ?? refreshedSnapshotSecond),
+            refreshInterval: null,
+            probePolicy: {
+              initialRefresh: "external",
+              isInconclusiveSnapshot: (snapshot) => snapshot.message === "probe timed out",
+              inconclusiveFailureThreshold: 3,
+            },
+          });
+
+          const healthy = yield* provider.refresh;
+          assert.strictEqual(healthy.status, "ready");
+          assert.strictEqual(healthy.auth.status, "authenticated");
+          yield* Effect.yieldNow;
+
+          const firstTimeout = yield* provider.refresh;
+          assert.strictEqual(firstTimeout.status, "ready");
+          assert.strictEqual(firstTimeout.auth.status, "authenticated");
+          assert.strictEqual(firstTimeout.checkedAt, refreshedSnapshot.checkedAt);
+          assert.isUndefined(firstTimeout.message);
+          assert.strictEqual(firstTimeout.probeDiagnostics?.lastOutcome, "inconclusive");
+          assert.strictEqual(firstTimeout.probeDiagnostics?.consecutiveInconclusiveCount, 1);
+          yield* Effect.yieldNow;
+
+          const secondTimeout = yield* provider.refresh;
+          assert.strictEqual(secondTimeout.status, "ready");
+          assert.strictEqual(secondTimeout.auth.status, "authenticated");
+          assert.strictEqual(secondTimeout.probeDiagnostics?.consecutiveInconclusiveCount, 2);
+          yield* Effect.yieldNow;
+
+          const persistentTimeout = yield* provider.refresh;
+          assert.strictEqual(persistentTimeout.status, "warning");
+          assert.strictEqual(persistentTimeout.auth.status, "unknown");
+          assert.strictEqual(persistentTimeout.message, "probe timed out");
+          assert.strictEqual(persistentTimeout.probeDiagnostics?.consecutiveInconclusiveCount, 3);
+          yield* Effect.yieldNow;
+
+          const recovered = yield* provider.refresh;
+          assert.strictEqual(recovered.status, "ready");
+          assert.strictEqual(recovered.auth.status, "authenticated");
+          assert.strictEqual(recovered.probeDiagnostics?.lastOutcome, "ready");
+          assert.strictEqual(recovered.probeDiagnostics?.consecutiveInconclusiveCount, 0);
+          assert.strictEqual(recovered.probeDiagnostics?.attemptCount, 5);
+        }),
+      ),
+  );
+
   it.effect(
     "runs the initial provider check in the background and streams the refreshed snapshot",
     () =>

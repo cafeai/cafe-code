@@ -147,6 +147,9 @@ describe("serverState", () => {
     expect(getServerConfig()).toEqual(baseServerConfig);
 
     expect(serverApi.subscribeConfig).toHaveBeenCalledOnce();
+    expect(serverApi.subscribeConfig).toHaveBeenCalledWith(expect.any(Function), {
+      retryNonTransportErrors: true,
+    });
     expect(serverApi.subscribeLifecycle).toHaveBeenCalledOnce();
     expect(serverApi.getConfig).toHaveBeenCalledOnce();
     expect(configListener).toHaveBeenCalledWith(

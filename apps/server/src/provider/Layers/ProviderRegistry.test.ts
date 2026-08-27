@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, it, assert } from "@effect/vitest";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -34,8 +35,10 @@ import { createModelCapabilities } from "@cafecode/shared/model";
 import { applyServerSettingsPatch } from "@cafecode/shared/serverSettings";
 
 import {
+  CODEX_CLI_LOGIN_STATUS_TIMEOUT_MESSAGE,
   checkCodexCliProviderStatus,
   checkCodexProviderStatus,
+  isCodexCliLoginStatusProbeInconclusive,
   type CodexAppServerProviderSnapshot,
 } from "./CodexProvider.ts";
 import {
@@ -52,6 +55,7 @@ import {
 } from "./ProviderInstanceRegistryHydration.ts";
 import {
   haveProvidersChanged,
+  INITIAL_PROVIDER_REFRESH_CONCURRENCY,
   mergeProviderAccountRateLimitSnapshot,
   mergeProviderSnapshot,
   mergeProviderSnapshots,
@@ -60,7 +64,11 @@ import {
 } from "./ProviderRegistry.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings.ts";
-import { readProviderStatusCache, resolveProviderStatusCachePath } from "../providerStatusCache.ts";
+import {
+  hydrateCachedProvider,
+  readProviderStatusCache,
+  resolveProviderStatusCachePath,
+} from "../providerStatusCache.ts";
 import type { ProviderInstance } from "../ProviderDriver.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderInstanceRegistryMutator } from "../Services/ProviderInstanceRegistryMutator.ts";
@@ -616,6 +624,171 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         ]);
       });
 
+      it("retains cached conclusive auth for bounded inconclusive startup probes", () => {
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make("codex"),
+          driver: ProviderDriverKind.make("codex"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated", type: "chatgpt", email: "safe@example.com" },
+          checkedAt: "2026-04-14T00:00:00.000Z",
+          version: "0.133.0",
+          models: [],
+          slashCommands: [],
+          skills: [],
+        } as const satisfies ServerProvider;
+        const inconclusiveProvider = {
+          ...previousProvider,
+          status: "warning",
+          auth: { status: "unknown" },
+          checkedAt: "2026-04-14T00:05:00.000Z",
+          message: CODEX_CLI_LOGIN_STATUS_TIMEOUT_MESSAGE,
+          probeDiagnostics: {
+            attemptCount: 1,
+            consecutiveInconclusiveCount: 1,
+            lastOutcome: "inconclusive",
+            lastStartedAt: "2026-04-14T00:04:56.000Z",
+            lastFinishedAt: "2026-04-14T00:05:00.000Z",
+            lastDurationMs: 4_000,
+            periodicIntervalMs: 300_000,
+            periodicPhaseOffsetMs: 42_000,
+            nextScheduledAt: "2026-04-14T00:10:42.000Z",
+          },
+        } as const satisfies ServerProvider;
+
+        const retained = mergeProviderSnapshot(previousProvider, inconclusiveProvider);
+        assert.strictEqual(retained.status, "ready");
+        assert.deepStrictEqual(retained.auth, previousProvider.auth);
+        assert.strictEqual(retained.checkedAt, previousProvider.checkedAt);
+        assert.isUndefined(retained.message);
+        assert.strictEqual(retained.probeDiagnostics?.lastOutcome, "inconclusive");
+        assert.strictEqual(retained.probeDiagnostics?.consecutiveInconclusiveCount, 1);
+
+        // The direct refresh result and the provider change stream can deliver
+        // the exact same observation. It must not consume another allowance.
+        const duplicate = mergeProviderSnapshot(retained, inconclusiveProvider);
+        assert.strictEqual(duplicate.probeDiagnostics?.consecutiveInconclusiveCount, 1);
+
+        const reorderedSchedulelessDuplicate = mergeProviderSnapshot(retained, {
+          ...inconclusiveProvider,
+          probeDiagnostics: {
+            ...inconclusiveProvider.probeDiagnostics,
+            nextScheduledAt: null,
+          },
+        });
+        assert.strictEqual(
+          reorderedSchedulelessDuplicate.probeDiagnostics?.nextScheduledAt,
+          inconclusiveProvider.probeDiagnostics.nextScheduledAt,
+        );
+
+        const conclusiveScheduledProvider = {
+          ...previousProvider,
+          checkedAt: "2026-04-14T00:20:00.000Z",
+          probeDiagnostics: {
+            attemptCount: 3,
+            consecutiveInconclusiveCount: 0,
+            lastOutcome: "ready",
+            lastStartedAt: "2026-04-14T00:19:50.000Z",
+            lastFinishedAt: "2026-04-14T00:20:00.000Z",
+            lastDurationMs: 10_000,
+            periodicIntervalMs: 300_000,
+            periodicPhaseOffsetMs: 42_000,
+            nextScheduledAt: "2026-04-14T00:30:42.000Z",
+          },
+        } as const satisfies ServerProvider;
+        const reorderedEarlierSchedule = mergeProviderSnapshot(conclusiveScheduledProvider, {
+          ...conclusiveScheduledProvider,
+          probeDiagnostics: {
+            ...conclusiveScheduledProvider.probeDiagnostics,
+            nextScheduledAt: "2026-04-14T00:25:42.000Z",
+          },
+        });
+        assert.strictEqual(
+          reorderedEarlierSchedule.probeDiagnostics?.nextScheduledAt,
+          conclusiveScheduledProvider.probeDiagnostics.nextScheduledAt,
+        );
+
+        const retainedAfterSecond = mergeProviderSnapshot(duplicate, {
+          ...inconclusiveProvider,
+          probeDiagnostics: {
+            ...inconclusiveProvider.probeDiagnostics,
+            attemptCount: 2,
+            consecutiveInconclusiveCount: 2,
+            lastStartedAt: "2026-04-14T00:09:56.000Z",
+            lastFinishedAt: "2026-04-14T00:10:00.000Z",
+          },
+        });
+        assert.strictEqual(retainedAfterSecond.status, "ready");
+        assert.strictEqual(retainedAfterSecond.probeDiagnostics?.consecutiveInconclusiveCount, 2);
+
+        // A delayed direct/stream observation from the first attempt must not
+        // look like a provider-scope reset or manufacture a third failure.
+        const retainedAfterStaleObservation = mergeProviderSnapshot(
+          retainedAfterSecond,
+          inconclusiveProvider,
+        );
+        assert.strictEqual(retainedAfterStaleObservation.status, "ready");
+        assert.strictEqual(
+          retainedAfterStaleObservation.probeDiagnostics?.consecutiveInconclusiveCount,
+          2,
+        );
+
+        const hydratedAfterRestart = hydrateCachedProvider({
+          cachedProvider: retainedAfterSecond,
+          fallbackProvider: {
+            ...previousProvider,
+            probeDiagnostics: {
+              attemptCount: 0,
+              consecutiveInconclusiveCount: 0,
+              lastOutcome: "pending",
+              lastStartedAt: null,
+              lastFinishedAt: null,
+              lastDurationMs: null,
+              periodicIntervalMs: 300_000,
+              periodicPhaseOffsetMs: 77_000,
+              nextScheduledAt: null,
+            },
+          },
+        });
+        assert.strictEqual(hydratedAfterRestart.probeDiagnostics?.consecutiveInconclusiveCount, 2);
+        assert.strictEqual(hydratedAfterRestart.probeDiagnostics?.periodicPhaseOffsetMs, 77_000);
+        assert.isNull(hydratedAfterRestart.probeDiagnostics?.nextScheduledAt);
+
+        // Rebuilding the backend/provider resets its local attempt counter.
+        // The cached streak must carry across that reset so the next timeout is
+        // still the third failure rather than another first failure.
+        const degraded = mergeProviderSnapshot(hydratedAfterRestart, {
+          ...inconclusiveProvider,
+          probeDiagnostics: {
+            ...inconclusiveProvider.probeDiagnostics,
+            attemptCount: 1,
+            consecutiveInconclusiveCount: 1,
+            lastStartedAt: "2026-04-14T00:14:56.000Z",
+            lastFinishedAt: "2026-04-14T00:15:00.000Z",
+          },
+        });
+        assert.strictEqual(degraded.status, "warning");
+        assert.strictEqual(degraded.auth.status, "unknown");
+        assert.strictEqual(degraded.message, CODEX_CLI_LOGIN_STATUS_TIMEOUT_MESSAGE);
+        assert.strictEqual(degraded.probeDiagnostics?.consecutiveInconclusiveCount, 3);
+
+        const recovered = mergeProviderSnapshot(degraded, {
+          ...previousProvider,
+          checkedAt: "2026-04-14T00:20:00.000Z",
+          probeDiagnostics: {
+            ...inconclusiveProvider.probeDiagnostics,
+            attemptCount: 2,
+            consecutiveInconclusiveCount: 0,
+            lastOutcome: "ready",
+            lastStartedAt: "2026-04-14T00:19:59.000Z",
+            lastFinishedAt: "2026-04-14T00:20:00.000Z",
+          },
+        });
+        assert.strictEqual(recovered.status, "ready");
+        assert.strictEqual(recovered.probeDiagnostics?.consecutiveInconclusiveCount, 0);
+      });
+
       it("preserves event-sourced account rate limits when a refresh omits them", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("claudeAgent"),
@@ -1048,6 +1221,103 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               models: [...initialProvider.models],
             });
           }).pipe(Effect.provide(runtimeServices));
+        }),
+      );
+
+      it.effect("bounds initial provider refresh concurrency across instances", () =>
+        Effect.gen(function* () {
+          const externalDriver = ProviderDriverKind.make("externalDriver");
+          const activeRefreshes = yield* Ref.make(0);
+          const maxActiveRefreshes = yield* Ref.make(0);
+          const startedRefreshes = yield* Ref.make(0);
+          const boundReached = yield* Deferred.make<void>();
+          const releaseRefreshes = yield* Deferred.make<void>();
+          const instances = Array.from({ length: 5 }, (_, index) => {
+            const instanceId = ProviderInstanceId.make(`external_provider_${index}`);
+            const provider = {
+              instanceId,
+              driver: externalDriver,
+              status: "ready",
+              enabled: true,
+              installed: true,
+              auth: { status: "authenticated" },
+              checkedAt: "2026-04-14T00:00:00.000Z",
+              version: "1.0.0",
+              models: [],
+              slashCommands: [],
+              skills: [],
+            } as const satisfies ServerProvider;
+            const refresh = Effect.gen(function* () {
+              const active = yield* Ref.updateAndGet(activeRefreshes, (count) => count + 1);
+              yield* Ref.update(maxActiveRefreshes, (maximum) => Math.max(maximum, active));
+              const started = yield* Ref.updateAndGet(startedRefreshes, (count) => count + 1);
+              if (started === INITIAL_PROVIDER_REFRESH_CONCURRENCY) {
+                yield* Deferred.succeed(boundReached, undefined).pipe(Effect.ignore);
+              }
+              yield* Deferred.await(releaseRefreshes);
+              return provider;
+            }).pipe(Effect.ensuring(Ref.update(activeRefreshes, (count) => count - 1)));
+
+            return {
+              instanceId,
+              driverKind: externalDriver,
+              continuationIdentity: {
+                driverKind: externalDriver,
+                continuationKey: `externalDriver:instance:${instanceId}`,
+              },
+              displayName: undefined,
+              enabled: true,
+              snapshot: {
+                maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+                  provider: externalDriver,
+                  packageName: null,
+                }),
+                getSnapshot: Effect.succeed(provider),
+                refresh,
+                streamChanges: Stream.empty,
+              },
+              adapter: {} as ProviderInstance["adapter"],
+              textGeneration: {} as ProviderInstance["textGeneration"],
+            } satisfies ProviderInstance;
+          });
+          const instanceRegistryLayer = Layer.succeed(ProviderInstanceRegistry, {
+            getInstance: (instanceId) =>
+              Effect.succeed(instances.find((instance) => instance.instanceId === instanceId)),
+            listInstances: Effect.succeed(instances),
+            listUnavailable: Effect.succeed([]),
+            streamChanges: Stream.empty,
+            subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
+              PubSub.subscribe(pubsub),
+            ),
+          });
+          const scope = yield* Scope.make();
+          yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+          const buildFiber = yield* Layer.build(
+            ProviderRegistryLive.pipe(
+              Layer.provideMerge(instanceRegistryLayer),
+              Layer.provideMerge(
+                ServerConfig.layerTest(process.cwd(), {
+                  prefix: "t3-provider-registry-bounded-initial-refresh-",
+                }),
+              ),
+              Layer.provideMerge(NodeServices.layer),
+            ),
+          ).pipe(Scope.provide(scope), Effect.forkChild);
+
+          yield* Deferred.await(boundReached);
+          yield* Effect.yieldNow;
+          assert.strictEqual(
+            yield* Ref.get(maxActiveRefreshes),
+            INITIAL_PROVIDER_REFRESH_CONCURRENCY,
+          );
+          assert.strictEqual(
+            yield* Ref.get(startedRefreshes),
+            INITIAL_PROVIDER_REFRESH_CONCURRENCY,
+          );
+
+          yield* Deferred.succeed(releaseRefreshes, undefined);
+          yield* Fiber.join(buildFiber);
+          assert.strictEqual(yield* Ref.get(startedRefreshes), instances.length);
         }),
       );
 
@@ -1545,6 +1815,33 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
     });
 
     describe("checkCodexCliProviderStatus", () => {
+      it("classifies only the bounded login-status timeout as inconclusive", () => {
+        const timeoutSnapshot = {
+          instanceId: ProviderInstanceId.make("codex"),
+          driver: ProviderDriverKind.make("codex"),
+          enabled: true,
+          installed: true,
+          version: "0.133.0",
+          status: "warning",
+          auth: { status: "unknown" },
+          checkedAt: "2026-04-10T00:00:00.000Z",
+          message: CODEX_CLI_LOGIN_STATUS_TIMEOUT_MESSAGE,
+          models: [],
+          slashCommands: [],
+          skills: [],
+        } as const satisfies ServerProvider;
+
+        assert.isTrue(isCodexCliLoginStatusProbeInconclusive(timeoutSnapshot));
+        assert.isFalse(
+          isCodexCliLoginStatusProbeInconclusive({
+            ...timeoutSnapshot,
+            status: "error",
+            auth: { status: "unauthenticated" },
+            message: "Codex CLI is not authenticated.",
+          }),
+        );
+      });
+
       it.effect("uses the Codex CLI login status path for lightweight provider status", () =>
         Effect.gen(function* () {
           const status = yield* checkCodexCliProviderStatus(defaultCodexSettings).pipe(

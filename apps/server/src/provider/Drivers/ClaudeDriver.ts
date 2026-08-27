@@ -240,6 +240,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
             Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),
           ),
         refreshInterval: SNAPSHOT_REFRESH_INTERVAL,
+        probePolicy: {
+          // ProviderRegistry performs the one bounded startup refresh for all
+          // instances. The managed provider still owns staggered periodic and
+          // explicit manual refreshes after that admission boundary.
+          initialRefresh: "external",
+        },
       }).pipe(
         Effect.mapError(
           (cause) =>
