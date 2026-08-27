@@ -817,6 +817,63 @@ describe("Codex child conversation routing", () => {
     );
   });
 
+  it("uses parent-emitted completed subagent activity as authoritative child liveness", () => {
+    const parentTurnId = TurnId.make("turn-parent");
+    const routes = new Map<string, TurnId>([["thread-child", parentTurnId]]);
+    const started = updateCodexChildConversationLiveness(
+      new Map(),
+      routes,
+      {
+        method: "item/started",
+        params: {
+          threadId: "thread-parent",
+          turnId: "turn-parent",
+          item: {
+            type: "subAgentActivity",
+            id: "subagent-activity-started",
+            kind: "started",
+            agentThreadId: "thread-child",
+            agentPath: "/root/workers/audit",
+          },
+        },
+      },
+      "2026-08-27T00:00:00.000Z",
+    );
+    const completed = updateCodexChildConversationLiveness(
+      started,
+      routes,
+      {
+        method: "item/completed",
+        params: {
+          threadId: "thread-parent",
+          turnId: "turn-parent",
+          item: {
+            type: "subAgentActivity",
+            id: "subagent-activity-completed",
+            kind: "completed",
+            agentThreadId: "thread-child",
+            agentPath: "/root/workers/audit",
+          },
+        },
+      },
+      "2026-08-27T00:00:01.000Z",
+    );
+
+    assert.deepStrictEqual(started.get("thread-child"), {
+      parentTurnId,
+      state: "active",
+      observedAt: "2026-08-27T00:00:00.000Z",
+      method: "subAgentActivity:started",
+    });
+    assert.deepStrictEqual(completed.get("thread-child"), {
+      parentTurnId,
+      state: "inactive",
+      observedAt: "2026-08-27T00:00:01.000Z",
+      method: "subAgentActivity:completed",
+    });
+    assert.equal(codexAggregateTurnHasUnfinishedChildren(routes, completed, parentTurnId), false);
+  });
+
   it("resets child liveness when Codex reuses a child thread for a later parent turn", () => {
     const firstParentTurnId = TurnId.make("turn-parent-first");
     const secondParentTurnId = TurnId.make("turn-parent-second");
@@ -964,6 +1021,40 @@ describe("Codex notification route fields", () => {
       {
         turnId: TurnId.make("turn-1"),
         itemId: undefined,
+      },
+    );
+    assert.deepStrictEqual(
+      readCodexNotificationRouteFields({
+        method: "thread/realtime/item/started",
+        params: {
+          threadId: "thread-1",
+          item: {
+            type: "bemItemPromoted",
+            id: "realtime-item-1",
+            realtimeSessionId: "realtime-session-1",
+            item_id: "provider-item-1",
+            turn_id: "turn-realtime-1",
+            presentation: { type: "wholeItem" },
+          },
+        },
+      }),
+      {
+        turnId: TurnId.make("turn-realtime-1"),
+        itemId: ProviderItemId.make("realtime-item-1"),
+      },
+    );
+    assert.deepStrictEqual(
+      readCodexNotificationRouteFields({
+        method: "thread/realtime/item/transcript/delta",
+        params: {
+          threadId: "thread-1",
+          itemId: "realtime-transcript-1",
+          delta: "private transcript text",
+        },
+      }),
+      {
+        turnId: undefined,
+        itemId: ProviderItemId.make("realtime-transcript-1"),
       },
     );
   });

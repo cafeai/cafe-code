@@ -709,7 +709,7 @@ function makeStaticCodexReasoningCapabilities(input: {
 
 const CODEX_STANDARD_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 const CODEX_MAX_REASONING_EFFORTS = [...CODEX_STANDARD_REASONING_EFFORTS, "max"] as const;
-// Mirrors Codex app-server `model/list` from codex-cli 0.149.0. The live
+// Mirrors Codex app-server `model/list` from codex-cli 0.150.0. The live
 // app-server response remains authoritative when available; this fallback keeps
 // fresh installs usable before the full Codex probe refreshes provider cache.
 const CODEX_ULTRA_REASONING_EFFORTS = [...CODEX_MAX_REASONING_EFFORTS, "ultra"] as const;
@@ -856,6 +856,12 @@ function parseCodexSkillsListResponse(
 
     if (skill.description) {
       parsedSkill.description = skill.description;
+    }
+    if (skill.pluginId?.trim()) {
+      // Codex 0.150 makes plugin ownership explicit. Preserve the provider's
+      // stable plugin id instead of forcing the renderer to infer ownership
+      // from a platform-specific cache path.
+      parsedSkill.pluginId = skill.pluginId.trim();
     }
     if (skill.scope) {
       parsedSkill.scope = skill.scope;

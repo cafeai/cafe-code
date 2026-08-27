@@ -1640,6 +1640,9 @@ function readNotificationThreadId(notification: CodexServerNotification): string
     case "turn/moderationMetadata":
     case "thread/realtime/started":
     case "thread/realtime/itemAdded":
+    case "thread/realtime/item/started":
+    case "thread/realtime/item/transcript/delta":
+    case "thread/realtime/item/completed":
     case "thread/realtime/transcript/delta":
     case "thread/realtime/transcript/done":
     case "thread/realtime/outputAudio/delta":
@@ -1709,6 +1712,24 @@ export function readCodexNotificationRouteFields(notification: CodexServerNotifi
       return {
         turnId: readNotificationTurnId(notification),
         itemId: undefined,
+      };
+    case "thread/realtime/item/started":
+    case "thread/realtime/item/completed": {
+      const params = readRecord(notification.params);
+      const item = params ? readRecord(params.item) : undefined;
+      const promotedTurnId = item?.type === "bemItemPromoted" ? item.turn_id : undefined;
+      return {
+        turnId:
+          typeof promotedTurnId === "string" && promotedTurnId.length > 0
+            ? TurnId.make(promotedTurnId)
+            : undefined,
+        itemId: providerItemIdFromString(readString(item?.id)),
+      };
+    }
+    case "thread/realtime/item/transcript/delta":
+      return {
+        turnId: undefined,
+        itemId: providerItemIdFromString(readNotificationParamString(notification, "itemId")),
       };
     case "error":
       return {
@@ -2008,6 +2029,35 @@ export function updateCodexChildConversationLiveness(
         observedAt,
         method: "child-registered",
       });
+    }
+  }
+
+  if (notification.method === "item/started" || notification.method === "item/completed") {
+    const params = readRecord(notification.params);
+    const item = params ? readRecord(params.item) : undefined;
+    if (item?.type === "subAgentActivity") {
+      const activityThreadId = readString(item.agentThreadId);
+      const activityParentTurnId = activityThreadId
+        ? childConversationTurns.get(activityThreadId)
+        : undefined;
+      const kind = readString(item.kind);
+      const state =
+        kind === "started"
+          ? "active"
+          : kind === "completed" || kind === "interrupted"
+            ? "inactive"
+            : undefined;
+      if (activityThreadId && activityParentTurnId && state) {
+        // Codex 0.150's TUI treats explicit completed/interrupted activity as
+        // authoritative liveness. Apply the same signal even though the
+        // notification itself is emitted on the initiating parent thread.
+        next.set(activityThreadId, {
+          parentTurnId: activityParentTurnId,
+          state,
+          observedAt,
+          method: `subAgentActivity:${kind}`,
+        });
+      }
     }
   }
 
@@ -4486,14 +4536,17 @@ export const makeCodexSessionRuntime = (
         const requestId = ApprovalRequestId.make(yield* Random.nextUUIDv4);
         const turnId = TurnId.make(payload.turnId);
         const itemId = ProviderItemId.make(payload.itemId);
+        const requestKind: ProviderRequestKind =
+          payload.kind === "writeStdin" ? "terminal-input" : "command";
+        const jsonRpcId = payload.approvalId ?? payload.itemId;
         const decision = yield* Deferred.make<ProviderApprovalDecision>();
 
         yield* Ref.update(pendingApprovalsRef, (current) => {
           const next = new Map(current);
           next.set(requestId, {
             requestId,
-            jsonRpcId: payload.approvalId ?? payload.itemId,
-            requestKind: "command",
+            jsonRpcId,
+            requestKind,
             turnId,
             itemId,
             decision,
@@ -4502,9 +4555,9 @@ export const makeCodexSessionRuntime = (
         });
         yield* Ref.update(approvalCorrelationsRef, (current) => {
           const next = new Map(current);
-          next.set(payload.approvalId ?? payload.itemId, {
+          next.set(jsonRpcId, {
             requestId,
-            requestKind: "command",
+            requestKind,
             turnId,
             itemId,
           });
@@ -4516,7 +4569,7 @@ export const makeCodexSessionRuntime = (
           threadId: options.threadId,
           method: "item/commandExecution/requestApproval",
           requestId,
-          requestKind: "command",
+          requestKind,
           ...(turnId ? { turnId } : {}),
           ...(itemId ? { itemId } : {}),
           payload,

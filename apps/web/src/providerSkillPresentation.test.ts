@@ -25,6 +25,16 @@ describe("formatProviderSkillDisplayName", () => {
 });
 
 describe("formatProviderSkillInstallSource", () => {
+  it("uses explicit Codex plugin ownership before path heuristics", () => {
+    expect(
+      formatProviderSkillInstallSource({
+        path: "/opaque/provider/skill.md",
+        pluginId: "openai/github",
+        scope: "user",
+      }),
+    ).toBe("App");
+  });
+
   it("marks plugin-backed skills as app installs", () => {
     expect(
       formatProviderSkillInstallSource({

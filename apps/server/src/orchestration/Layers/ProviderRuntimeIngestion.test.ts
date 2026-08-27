@@ -4285,14 +4285,42 @@ describe("ProviderRuntimeIngestion", () => {
       },
     });
 
+    harness.emit({
+      type: "request.opened",
+      eventId: asEventId("evt-terminal-input-request-opened"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      requestId: ApprovalRequestId.make("req-terminal-input"),
+      payload: {
+        requestType: "terminal_input_approval",
+        detail: "Allow input to the running terminal",
+      },
+    });
+
+    harness.emit({
+      type: "request.resolved",
+      eventId: asEventId("evt-terminal-input-request-resolved"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      requestId: ApprovalRequestId.make("req-terminal-input"),
+      payload: {
+        requestType: "terminal_input_approval",
+        decision: "accept",
+      },
+    });
+
     await waitForThread(
       harness.readModel,
       (entry) =>
         entry.activities.some(
-          (activity: ProviderRuntimeTestActivity) => activity.kind === "approval.requested",
+          (activity: ProviderRuntimeTestActivity) =>
+            activity.id === "evt-terminal-input-request-opened",
         ) &&
         entry.activities.some(
-          (activity: ProviderRuntimeTestActivity) => activity.kind === "approval.resolved",
+          (activity: ProviderRuntimeTestActivity) =>
+            activity.id === "evt-terminal-input-request-resolved",
         ),
     );
 
@@ -4319,6 +4347,29 @@ describe("ProviderRuntimeIngestion", () => {
         : undefined;
     expect(resolvedPayload?.requestKind).toBe("command");
     expect(resolvedPayload?.requestType).toBe("command_execution_approval");
+
+    const terminalInputRequested = thread?.activities.find(
+      (activity: ProviderRuntimeTestActivity) =>
+        activity.id === "evt-terminal-input-request-opened",
+    );
+    const terminalInputRequestedPayload =
+      terminalInputRequested?.payload && typeof terminalInputRequested.payload === "object"
+        ? (terminalInputRequested.payload as Record<string, unknown>)
+        : undefined;
+    expect(terminalInputRequested?.summary).toBe("Terminal input approval requested");
+    expect(terminalInputRequestedPayload?.requestKind).toBe("terminal-input");
+    expect(terminalInputRequestedPayload?.requestType).toBe("terminal_input_approval");
+
+    const terminalInputResolved = thread?.activities.find(
+      (activity: ProviderRuntimeTestActivity) =>
+        activity.id === "evt-terminal-input-request-resolved",
+    );
+    const terminalInputResolvedPayload =
+      terminalInputResolved?.payload && typeof terminalInputResolved.payload === "object"
+        ? (terminalInputResolved.payload as Record<string, unknown>)
+        : undefined;
+    expect(terminalInputResolvedPayload?.requestKind).toBe("terminal-input");
+    expect(terminalInputResolvedPayload?.requestType).toBe("terminal_input_approval");
   });
 
   it("maps runtime.error into errored session state", async () => {

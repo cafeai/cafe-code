@@ -134,6 +134,32 @@ describe("derivePendingApprovals", () => {
     ]);
   });
 
+  it("maps Codex terminal-input approvals into a distinct pending approval", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "terminal-input-approval-open",
+        createdAt: "2026-08-27T00:00:01.000Z",
+        kind: "approval.requested",
+        summary: "Terminal input approval requested",
+        tone: "approval",
+        payload: {
+          requestId: "stdin-approval-1",
+          requestType: "terminal_input_approval",
+          detail: "Allow input to the running terminal",
+        },
+      }),
+    ];
+
+    expect(derivePendingApprovals(activities)).toEqual([
+      {
+        requestId: "stdin-approval-1",
+        requestKind: "terminal-input",
+        createdAt: "2026-08-27T00:00:01.000Z",
+        detail: "Allow input to the running terminal",
+      },
+    ]);
+  });
+
   it("clears stale pending approvals when provider reports unknown pending request", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

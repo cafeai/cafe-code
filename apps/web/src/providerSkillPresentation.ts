@@ -23,8 +23,11 @@ export function formatProviderSkillDisplayName(
 }
 
 export function formatProviderSkillInstallSource(
-  skill: Pick<ServerProviderSkill, "path" | "scope">,
+  skill: Pick<ServerProviderSkill, "path" | "pluginId" | "scope">,
 ): string | null {
+  if (skill.pluginId?.trim()) {
+    return "App";
+  }
   const normalizedPath = normalizePathSeparators(skill.path);
   if (normalizedPath.includes("/.codex/plugins/") || normalizedPath.includes("/.agents/plugins/")) {
     return "App";

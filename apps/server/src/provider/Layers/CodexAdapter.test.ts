@@ -1522,7 +1522,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
-  it.effect("maps Codex hook lifecycle into canonical hook events", () =>
+  it.effect("maps Codex interrupt hook lifecycle into canonical hook events", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
       const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
@@ -1541,7 +1541,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
           turnId: "turn-1",
           run: {
             id: "hook-1",
-            eventName: "postToolUse",
+            eventName: "interrupt",
             scope: "turn",
             source: "project",
             sourcePath: "/tmp/hooks.json",
@@ -1602,10 +1602,11 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
             rationale: "The command exceeds the current authorization level.",
           },
           action: {
-            type: "command",
-            source: "shell",
-            command: "dangerous-command",
-            cwd: "/tmp",
+            type: "writeStdin",
+            approvalId: "stdin-approval-secret-id",
+            processId: "process-secret-id",
+            stdin: "literal terminal input must never be persisted",
+            cwd: "/private/terminal/cwd",
           },
         },
       } satisfies ProviderEvent);
@@ -1621,6 +1622,20 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       assert.equal(
         firstEvent.value.payload.summary,
         "The command exceeds the current authorization level.",
+      );
+      assert.deepStrictEqual(firstEvent.value.raw?.payload, {
+        redacted: true,
+        reason: "approval-review-provider-content",
+        actionType: "writeStdin",
+        reviewStatus: "denied",
+        decisionSource: "agent",
+        startedAtMs: 1_778_000_000_000,
+        completedAtMs: 1_778_000_001_000,
+        terminalInputPresent: true,
+      });
+      assert.doesNotMatch(
+        JSON.stringify(firstEvent.value.raw),
+        /literal terminal input|private\/terminal|process-secret|stdin-approval-secret/,
       );
     }),
   );
@@ -1747,6 +1762,104 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
           .update("provider-thread-child", "utf8")
           .digest("hex"),
       });
+    }),
+  );
+
+  it.effect("treats Codex multi-agent-v2 completed activity as terminal", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-subagent-activity-completed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:04.000Z",
+        method: "item/completed",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-parent"),
+        itemId: asItemId("subagent-activity-completed"),
+        payload: {
+          completedAtMs: 1_767_225_604_000,
+          threadId: "provider-thread-1",
+          turnId: "turn-parent",
+          item: {
+            type: "subAgentActivity",
+            id: "subagent-activity-completed",
+            kind: "completed",
+            agentThreadId: "provider-thread-child",
+            agentPath: "/root/workers/audit",
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "task.completed") {
+        return;
+      }
+      assert.equal(firstEvent.value.payload.taskId, "provider-thread-child");
+      assert.equal(firstEvent.value.payload.status, "completed");
+      assert.equal(firstEvent.value.payload.summary, "Completed");
+      assert.equal(firstEvent.value.payload.subagent?.status, "completed");
+      assert.deepStrictEqual(firstEvent.value.raw?.payload, {
+        source: "codex.subAgentActivity",
+        kind: "completed",
+        childThreadIdHash: crypto
+          .createHash("sha256")
+          .update("provider-thread-child", "utf8")
+          .digest("hex"),
+      });
+    }),
+  );
+
+  it.effect("keeps Codex 0.150 analytics-only collaboration calls out of the work log", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-collab-send-message"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/completed",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-parent"),
+        itemId: asItemId("collab-send-message"),
+        payload: {
+          completedAtMs: 1_767_225_600_000,
+          threadId: "provider-thread-1",
+          turnId: "turn-parent",
+          item: {
+            type: "collabAgentToolCall",
+            id: "collab-send-message",
+            tool: "sendMessage",
+            status: "completed",
+            senderThreadId: "provider-thread-1",
+            receiverThreadIds: ["provider-thread-child"],
+            prompt: "Private provider message that must not create a duplicate row.",
+            agentsStates: {},
+          },
+        },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-collab-analytics-sentinel"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "process/stderr",
+        turnId: asTurnId("turn-parent"),
+        message: "sentinel warning",
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "runtime.warning") {
+        return;
+      }
+      assert.equal(firstEvent.value.payload.message, "sentinel warning");
     }),
   );
 
@@ -3002,6 +3115,58 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }
       assert.equal(firstEvent.value.turnId, "turn-1");
       assert.equal(firstEvent.value.payload.message, "warning: normal stderr diagnostic");
+    }),
+  );
+
+  it.effect("maps terminal-input approvals without retaining command or stdin context", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-terminal-input-approval"),
+        kind: "request",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/commandExecution/requestApproval",
+        requestKind: "terminal-input",
+        requestId: ApprovalRequestId.make("stdin-approval-1"),
+        payload: {
+          approvalId: "stdin-approval-1",
+          command: "secret-running-command --token hidden",
+          cwd: "/private/terminal/cwd",
+          itemId: "command-item-1",
+          kind: "writeStdin",
+          reason: "Allow input to the running terminal",
+          startedAtMs: 1_767_225_600_000,
+          threadId: "provider-thread-1",
+          turnId: "turn-1",
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "request.opened") {
+        return;
+      }
+      assert.equal(firstEvent.value.payload.requestType, "terminal_input_approval");
+      assert.equal(firstEvent.value.payload.detail, "Allow input to the running terminal");
+      assert.equal(firstEvent.value.payload.args, undefined);
+      assert.deepStrictEqual(firstEvent.value.raw?.payload, {
+        redacted: true,
+        reason: "terminal-input-approval-provider-content",
+        kind: "writeStdin",
+        approvalIdPresent: true,
+        commandContextPresent: true,
+        cwdPresent: true,
+        reasonPresent: true,
+      });
+      assert.doesNotMatch(
+        JSON.stringify(firstEvent.value.raw),
+        /secret-running-command|private\/terminal|token hidden/,
+      );
     }),
   );
 

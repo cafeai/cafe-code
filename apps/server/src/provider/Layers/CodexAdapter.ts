@@ -929,7 +929,9 @@ function itemDetail(item: CodexLifecycleItem): string | undefined {
         ? "Started"
         : item.kind === "interacted"
           ? "Interacted with"
-          : "Interrupted";
+          : item.kind === "completed"
+            ? "Completed"
+            : "Interrupted";
     const agentPath = trimText(item.agentPath);
     return agentPath ? `${action} ${agentPath}` : action;
   }
@@ -1073,6 +1075,8 @@ function toRequestTypeFromKind(kind: ProviderRequestKind | undefined): Canonical
   switch (kind) {
     case "command":
       return "command_execution_approval";
+    case "terminal-input":
+      return "terminal_input_approval";
     case "file-read":
       return "file_read_approval";
     case "file-change":
@@ -1259,6 +1263,56 @@ function replaceSensitiveNativeEventPayload(
   };
 }
 
+function summarizeCodexApprovalReviewPayload(payload: unknown): Record<string, unknown> {
+  const record = readRecordValue(payload);
+  const action = readRecordValue(record?.action);
+  const review = readRecordValue(record?.review);
+  const stdin = action?.stdin;
+
+  // Codex 0.150 adds `writeStdin` review actions whose payload contains literal
+  // terminal input and cwd. Commands, paths, rationales, and terminal input are
+  // provider/user content, so retain only bounded lifecycle metadata in Cafe's
+  // native and canonical raw diagnostics.
+  return {
+    redacted: true,
+    reason: "approval-review-provider-content",
+    actionType: readStringValue(action?.type) ?? "unknown",
+    reviewStatus: readStringValue(review?.status) ?? "unknown",
+    ...(typeof record?.decisionSource === "string"
+      ? { decisionSource: record.decisionSource }
+      : {}),
+    ...(typeof record?.startedAtMs === "number" ? { startedAtMs: record.startedAtMs } : {}),
+    ...(typeof record?.completedAtMs === "number" ? { completedAtMs: record.completedAtMs } : {}),
+    terminalInputPresent: typeof stdin === "string" && stdin.length > 0,
+  };
+}
+
+function summarizeCodexTerminalInputApprovalPayload(payload: unknown): Record<string, unknown> {
+  const record = readRecordValue(payload);
+  return {
+    redacted: true,
+    reason: "terminal-input-approval-provider-content",
+    kind: "writeStdin",
+    approvalIdPresent: typeof record?.approvalId === "string" && record.approvalId.length > 0,
+    commandContextPresent: typeof record?.command === "string" && record.command.length > 0,
+    cwdPresent: typeof record?.cwd === "string" && record.cwd.length > 0,
+    reasonPresent: typeof record?.reason === "string" && record.reason.length > 0,
+  };
+}
+
+function summarizeCodexRealtimePayload(payload: unknown): Record<string, unknown> {
+  const record = readRecordValue(payload);
+  const item = readRecordValue(record?.item);
+  const delta = record?.delta;
+  return {
+    redacted: true,
+    reason: "experimental-realtime-provider-content",
+    ...(typeof item?.type === "string" ? { itemType: item.type } : {}),
+    ...(typeof delta === "string" ? { deltaChars: delta.length } : {}),
+    audioPresent: record?.audio !== undefined,
+  };
+}
+
 function sanitizeNativeProviderEventForLog(event: ProviderEvent): ProviderEvent {
   if (event.method.startsWith("codex.subagent/")) {
     const payload = readRecordValue(event.payload);
@@ -1297,6 +1351,37 @@ function sanitizeNativeProviderEventForLog(event: ProviderEvent): ProviderEvent 
             updatedAt: goal.updatedAt,
           }
         : {}),
+    });
+  }
+
+  if (
+    event.method === "item/autoApprovalReview/started" ||
+    event.method === "item/autoApprovalReview/completed"
+  ) {
+    return replaceSensitiveNativeEventPayload(
+      event,
+      summarizeCodexApprovalReviewPayload(event.payload),
+    );
+  }
+
+  if (
+    event.method === "item/commandExecution/requestApproval" &&
+    event.requestKind === "terminal-input"
+  ) {
+    return replaceSensitiveNativeEventPayload(
+      event,
+      summarizeCodexTerminalInputApprovalPayload(event.payload),
+    );
+  }
+
+  if (event.method.startsWith("thread/realtime/")) {
+    return replaceSensitiveNativeEventPayload(event, summarizeCodexRealtimePayload(event.payload));
+  }
+
+  if (event.method === "mcpServer/event/stream/notification") {
+    return replaceSensitiveNativeEventPayload(event, {
+      redacted: true,
+      reason: "experimental-mcp-event-provider-content",
     });
   }
 
@@ -1617,7 +1702,8 @@ function mapCodexSubagentItemLifecycle(
     if (!activityThreadId) {
       return [];
     }
-    const status = item.kind === "interrupted" ? "stopped" : "active";
+    const status =
+      item.kind === "interrupted" ? "stopped" : item.kind === "completed" ? "completed" : "active";
     const presentation = makeSubagentPresentation({
       threadId: activityThreadId,
       // `/root` describes the interaction target, not the source child. Omit
@@ -1635,10 +1721,10 @@ function mapCodexSubagentItemLifecycle(
       childThreadIdHash: hashTextSha256(activityThreadId),
     };
 
-    // Upstream emits an item started/completed pair immediately around the
-    // *interaction*. Completion therefore is not evidence that the spawned
-    // child finished. Only the explicit interrupted action is terminal here;
-    // child turn/thread notifications below own the real task lifecycle.
+    // The item started/completed pair is the envelope around one activity, so
+    // envelope completion alone is not terminal. Codex 0.150 adds an explicit
+    // `kind: completed` signal and its TUI clears child liveness from that
+    // value, just as it does for `interrupted`.
     if (item.kind === "started") {
       return lifecycle === "item.started"
         ? [
@@ -1667,6 +1753,20 @@ function mapCodexSubagentItemLifecycle(
           ]
         : [];
     }
+    if (item.kind === "completed") {
+      return lifecycle === "item.completed"
+        ? [
+            subagentCompletedEvent({
+              event,
+              canonicalThreadId,
+              presentation,
+              summary: "Completed",
+              lifecycle: "activity-completed",
+              rawPayload,
+            }),
+          ]
+        : [];
+    }
     return lifecycle === "item.completed"
       ? [
           subagentProgressEvent({
@@ -1681,6 +1781,18 @@ function mapCodexSubagentItemLifecycle(
       : [];
   }
 
+  if (
+    item.tool === "sendMessage" ||
+    item.tool === "followupTask" ||
+    item.tool === "interruptAgent" ||
+    item.tool === "listAgents"
+  ) {
+    // These multi-agent-v2 calls are analytics-only in the official 0.150 TUI.
+    // Their user-visible lifecycle arrives through `subAgentActivity`; mapping
+    // both shapes would create duplicate or permanently active Cafe task rows.
+    return [];
+  }
+
   const objective = boundedSingleLine(item.prompt, CODEX_SUBAGENT_OBJECTIVE_MAX_CHARS);
   const events: ProviderRuntimeEvent[] = [];
   const receiverThreadIds = item.receiverThreadIds.slice(
@@ -1691,7 +1803,12 @@ function mapCodexSubagentItemLifecycle(
   for (const receiverThreadId of receiverThreadIds) {
     const agentState = item.agentsStates[receiverThreadId];
     const status = runtimeSubagentStatus(
-      agentState?.status ?? (item.status === "failed" ? "failed" : undefined),
+      agentState?.status ??
+        (item.status === "failed"
+          ? "failed"
+          : item.status === "interrupted"
+            ? "interrupted"
+            : undefined),
     );
     const presentation = makeSubagentPresentation({
       threadId: receiverThreadId,
@@ -2220,6 +2337,11 @@ function mapToRuntimeEvents(
       ];
     }
 
+    const terminalInputApproval = event.requestKind === "terminal-input";
+    const requestType =
+      event.requestKind !== undefined
+        ? toRequestTypeFromKind(event.requestKind)
+        : toRequestTypeFromMethod(event.method);
     const detail = (() => {
       switch (event.method) {
         case "item/commandExecution/requestApproval": {
@@ -2227,6 +2349,9 @@ function mapToRuntimeEvents(
             EffectCodexSchema.ServerRequest__CommandExecutionRequestApprovalParams,
             event.payload,
           );
+          if (terminalInputApproval) {
+            return trimText(payload?.reason) ?? "Input to a running terminal";
+          }
           return payload?.command ?? payload?.reason ?? undefined;
         }
         case "item/fileChange/requestApproval": {
@@ -2264,12 +2389,18 @@ function mapToRuntimeEvents(
 
     return [
       {
-        ...runtimeEventBase(event, canonicalThreadId),
+        ...runtimeEventBase(
+          event,
+          canonicalThreadId,
+          terminalInputApproval
+            ? { rawPayload: summarizeCodexTerminalInputApprovalPayload(event.payload) }
+            : undefined,
+        ),
         type: "request.opened",
         payload: {
-          requestType: toRequestTypeFromMethod(event.method),
+          requestType,
           ...(detail ? { detail } : {}),
-          ...(event.payload !== undefined ? { args: event.payload } : {}),
+          ...(!terminalInputApproval && event.payload !== undefined ? { args: event.payload } : {}),
         },
       },
     ];
@@ -2634,7 +2765,9 @@ function mapToRuntimeEvents(
     }
     return [
       {
-        ...runtimeEventBase(event, canonicalThreadId),
+        ...runtimeEventBase(event, canonicalThreadId, {
+          rawPayload: summarizeCodexApprovalReviewPayload(event.payload),
+        }),
         type: "task.started",
         payload: {
           taskId: codexApprovalReviewTaskId(payload.reviewId),
@@ -2655,7 +2788,9 @@ function mapToRuntimeEvents(
     }
     return [
       {
-        ...runtimeEventBase(event, canonicalThreadId),
+        ...runtimeEventBase(event, canonicalThreadId, {
+          rawPayload: summarizeCodexApprovalReviewPayload(event.payload),
+        }),
         type: "task.completed",
         payload: {
           taskId: codexApprovalReviewTaskId(payload.reviewId),
@@ -3193,6 +3328,26 @@ function mapToRuntimeEvents(
           ]
         : []),
     ];
+  }
+
+  if (event.method === "mcpServer/event/stream/notification") {
+    // Codex 0.150 exposes this only for an explicitly started experimental MCP
+    // event subscription. Cafe does not create those subscriptions. Do not
+    // persist arbitrary nested MCP notifications until Cafe owns an
+    // authenticated, bounded consumer for that surface.
+    return [];
+  }
+
+  if (
+    event.method === "thread/realtime/item/started" ||
+    event.method === "thread/realtime/item/transcript/delta" ||
+    event.method === "thread/realtime/item/completed"
+  ) {
+    // The 0.150 realtime timeline carries transcript text and promoted item
+    // metadata. Cafe intentionally does not advertise realtime yet, so decode
+    // and route these notifications at the protocol boundary but keep them out
+    // of durable chat/work-log state until a dedicated playback UX exists.
+    return [];
   }
 
   if (event.method === "thread/realtime/started") {

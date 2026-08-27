@@ -431,11 +431,13 @@ function runtimeEventCarriesActiveTurnWork(event: ProviderRuntimeEvent): boolean
 
 function requestKindFromCanonicalRequestType(
   requestType: string | undefined,
-): "command" | "file-read" | "file-change" | undefined {
+): "command" | "terminal-input" | "file-read" | "file-change" | undefined {
   switch (requestType) {
     case "command_execution_approval":
     case "exec_command_approval":
       return "command";
+    case "terminal_input_approval":
+      return "terminal-input";
     case "file_read_approval":
       return "file-read";
     case "file_change_approval":
@@ -470,11 +472,13 @@ function runtimeEventToActivities(
           summary:
             requestKind === "command"
               ? "Command approval requested"
-              : requestKind === "file-read"
-                ? "File-read approval requested"
-                : requestKind === "file-change"
-                  ? "File-change approval requested"
-                  : "Approval requested",
+              : requestKind === "terminal-input"
+                ? "Terminal input approval requested"
+                : requestKind === "file-read"
+                  ? "File-read approval requested"
+                  : requestKind === "file-change"
+                    ? "File-change approval requested"
+                    : "Approval requested",
           payload: {
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),
