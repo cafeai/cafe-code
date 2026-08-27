@@ -39,6 +39,7 @@ class FakeDataChannel extends EventTarget {
 }
 
 class FakePeerConnection extends EventTarget {
+  readonly offerSdp: string;
   connectionState: RTCPeerConnectionState = "new";
   readonly channel = new FakeDataChannel();
   readonly addTrackMock = vi.fn();
@@ -55,12 +56,18 @@ class FakePeerConnection extends EventTarget {
     this.channel.open();
   });
 
+  constructor(attempt = 1) {
+    super();
+    this.offerSdp =
+      attempt === 1 ? "v=0\r\nt=test-offer\r\n" : `v=0\r\nt=test-offer-${attempt}\r\n`;
+  }
+
   createDataChannel(label: string): RTCDataChannel {
     return this.createDataChannelMock(label);
   }
 
   async createOffer(): Promise<RTCSessionDescriptionInit> {
-    return { type: "offer", sdp: "v=0\r\nt=test-offer\r\n" };
+    return { type: "offer", sdp: this.offerSdp };
   }
 
   async setLocalDescription(description: RTCSessionDescriptionInit): Promise<void> {
@@ -92,11 +99,23 @@ function makeMediaFixture() {
   return { stop, stream, track };
 }
 
+function createTestDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
 function makeDependencies(input?: {
   readonly response?: Response;
   readonly responses?: readonly Response[];
 }) {
   const peer = new FakePeerConnection();
+  const peers = [peer];
+  let peerCreationCount = 0;
   const media = makeMediaFixture();
   const getUserMedia = vi.fn(async () => media.stream);
   const queuedResponses = [...(input?.responses ?? [])];
@@ -106,7 +125,13 @@ function makeDependencies(input?: {
   });
   const waitForRetry = vi.fn(async (_delayMs: number, _signal: AbortSignal) => undefined);
   const dependencies: NonNullable<Parameters<typeof startRealtimeTranscription>[1]> = {
-    createPeerConnection: () => peer as unknown as RTCPeerConnection,
+    createPeerConnection: () => {
+      peerCreationCount += 1;
+      if (peerCreationCount === 1) return peer as unknown as RTCPeerConnection;
+      const nextPeer = new FakePeerConnection(peerCreationCount);
+      peers.push(nextPeer);
+      return nextPeer as unknown as RTCPeerConnection;
+    },
     fetch: fetchMock as typeof fetch,
     getUserMedia,
     now: () => 1_000_000,
@@ -115,13 +140,26 @@ function makeDependencies(input?: {
       globalThis.setTimeout(callback, delayMs) as unknown as number,
     clearTimeout: (timerId) => globalThis.clearTimeout(timerId),
   };
-  return { dependencies, fetchMock, getUserMedia, media, peer, waitForRetry };
+  return {
+    dependencies,
+    fetchMock,
+    getUserMedia,
+    media,
+    peer,
+    peers,
+    waitForRetry,
+  };
 }
 
 const validClientSecret = {
   clientSecret: "ephemeral-test-secret",
   expiresAt: 2_000,
   model: "gpt-live-transcribe" as const,
+  sessionProfile: "transcription_pcm24k_minimal_v1" as const,
+  clientSecretRequestId: "req_mint_test",
+  clientSecretRequestDurationMs: 42,
+  clientSecretOpenAiProcessingMs: 12,
+  clientSecretEffectiveProfile: "matches" as const,
 };
 
 afterEach(() => {
@@ -237,6 +275,32 @@ describe("startRealtimeTranscription", () => {
     expect(fixture.fetchMock).not.toHaveBeenCalled();
   });
 
+  it("does not request the microphone when cancellation lands between mint continuations", async () => {
+    const fixture = makeDependencies();
+    const controller = new AbortController();
+    const pendingSecret = createTestDeferred<typeof validClientSecret>();
+    const secretRequested = createTestDeferred<void>();
+    const started = startRealtimeTranscription(
+      {
+        getClientSecret: () => {
+          secretRequested.resolve();
+          return pendingSecret.promise;
+        },
+        onTranscript: () => undefined,
+        signal: controller.signal,
+      },
+      fixture.dependencies,
+    );
+    await secretRequested.promise;
+
+    pendingSecret.resolve(validClientSecret);
+    queueMicrotask(() => queueMicrotask(() => controller.abort()));
+
+    await expect(started).rejects.toMatchObject({ code: "cancelled" });
+    expect(fixture.getUserMedia).not.toHaveBeenCalled();
+    expect(fixture.fetchMock).not.toHaveBeenCalled();
+  });
+
   it("posts SDP with the ephemeral bearer, streams partials, and waits for final completion", async () => {
     const fixture = makeDependencies();
     const onTranscript = vi.fn();
@@ -266,6 +330,25 @@ describe("startRealtimeTranscription", () => {
     expect((request?.headers as Record<string, string> | undefined)?.["Content-Type"]).toBe(
       "application/sdp",
     );
+    expect((request?.headers as Record<string, string> | undefined)?.["X-Client-Request-Id"]).toBe(
+      undefined,
+    );
+    expect(getDictationDiagnosticSnapshot()).toMatchObject({
+      stage: "active",
+      outcome: "connected",
+      sessionProfile: "transcription_pcm24k_minimal_v1",
+      clientSecretModel: "gpt-live-transcribe",
+      clientSecretRequestId: "req_mint_test",
+      clientSecretRequestDurationMs: 42,
+      clientSecretOpenAiProcessingMs: 12,
+      clientSecretEffectiveProfile: "matches",
+      httpStatus: 200,
+      offerSdpBytes: 19,
+      offerSdpLineCount: 2,
+      answerSdpBytes: 20,
+      answerSdpLineCount: 2,
+      audioTrackCount: 1,
+    });
 
     fixture.peer.channel.emitServerEvent({
       type: "conversation.item.input_audio_transcription.delta",
@@ -378,13 +461,38 @@ describe("startRealtimeTranscription", () => {
         new Response("v=0\r\nt=test-answer\r\n"),
       ],
     });
+    const getClientSecret = vi
+      .fn<() => Promise<typeof validClientSecret>>()
+      .mockResolvedValueOnce({ ...validClientSecret, clientSecret: "ephemeral-attempt-1" })
+      .mockResolvedValueOnce({ ...validClientSecret, clientSecret: "ephemeral-attempt-2" });
 
     const session = await startRealtimeTranscription(
-      { getClientSecret: async () => validClientSecret, onTranscript: () => undefined },
+      { getClientSecret, onTranscript: () => undefined },
       fixture.dependencies,
     );
 
+    expect(getClientSecret).toHaveBeenCalledTimes(2);
+    expect(fixture.getUserMedia).toHaveBeenCalledOnce();
     expect(fixture.fetchMock).toHaveBeenCalledTimes(2);
+    expect(fixture.peers).toHaveLength(2);
+    expect(fixture.peers[0]?.closeMock).toHaveBeenCalledOnce();
+    expect(fixture.peers[1]?.closeMock).not.toHaveBeenCalled();
+    const firstRequest = fixture.fetchMock.mock.calls[0]?.[1];
+    const secondRequest = fixture.fetchMock.mock.calls[1]?.[1];
+    expect(firstRequest?.body).toBe("v=0\r\nt=test-offer\r\n");
+    expect(secondRequest?.body).toBe("v=0\r\nt=test-offer-2\r\n");
+    expect((firstRequest?.headers as Record<string, string>)?.Authorization).toBe(
+      "Bearer ephemeral-attempt-1",
+    );
+    expect((secondRequest?.headers as Record<string, string>)?.Authorization).toBe(
+      "Bearer ephemeral-attempt-2",
+    );
+    expect(
+      (firstRequest?.headers as Record<string, string>)?.["X-Client-Request-Id"],
+    ).toBeUndefined();
+    expect(
+      (secondRequest?.headers as Record<string, string>)?.["X-Client-Request-Id"],
+    ).toBeUndefined();
     expect(fixture.waitForRetry).toHaveBeenCalledOnce();
     expect(fixture.waitForRetry).toHaveBeenCalledWith(250, expect.any(AbortSignal));
     expect(getDictationDiagnosticSnapshot()).toMatchObject({
@@ -392,11 +500,22 @@ describe("startRealtimeTranscription", () => {
       outcome: "connected",
       attempt: 2,
       maxAttempts: 3,
-      httpStatus: 503,
-      requestId: "req_retry-1",
+      httpStatus: 200,
+      requestId: null,
       errorCode: null,
     });
+    expect(getDictationDiagnosticSnapshot()?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stage: "sdp_exchange",
+          outcome: "retrying",
+          httpStatus: 503,
+          requestId: "req_retry-1",
+        }),
+      ]),
+    );
     session.cancel();
+    expect(fixture.peers[1]?.closeMock).toHaveBeenCalledOnce();
   });
 
   it("retries a renderer network failure without retaining the thrown transport detail", async () => {
@@ -413,6 +532,85 @@ describe("startRealtimeTranscription", () => {
     expect(fixture.waitForRetry).toHaveBeenCalledOnce();
     expect(JSON.stringify(getDictationDiagnosticSnapshot())).not.toContain(leakedDetail);
     session.cancel();
+  });
+
+  it("honors OpenAI Retry-After when it exceeds the local retry floor", async () => {
+    const fixture = makeDependencies({
+      responses: [
+        new Response("capacity", { status: 429, headers: { "retry-after": "2" } }),
+        new Response("v=0\r\nt=test-answer\r\n"),
+      ],
+    });
+
+    const session = await startRealtimeTranscription(
+      { getClientSecret: async () => validClientSecret, onTranscript: () => undefined },
+      fixture.dependencies,
+    );
+
+    expect(fixture.waitForRetry).toHaveBeenCalledOnce();
+    expect(fixture.waitForRetry).toHaveBeenCalledWith(2_000, expect.any(AbortSignal));
+    session.cancel();
+  });
+
+  it("sanitizes a fresh-credential failure during retry and releases the first transport", async () => {
+    const fixture = makeDependencies({ response: new Response("retry", { status: 503 }) });
+    const leakedDetail = "provider-retry-secret-detail";
+    const getClientSecret = vi
+      .fn<() => Promise<typeof validClientSecret>>()
+      .mockResolvedValueOnce(validClientSecret)
+      .mockRejectedValueOnce({
+        code: "upstream_auth_failed",
+        message: leakedDetail,
+        cause: { credential: leakedDetail },
+      });
+
+    const rejected = expect(
+      startRealtimeTranscription(
+        { getClientSecret, onTranscript: () => undefined },
+        fixture.dependencies,
+      ),
+    ).rejects;
+    await rejected.toMatchObject({
+      code: "upstream_auth_failed",
+      message:
+        "OpenAI rejected the saved dictation credential or its Realtime transcription access.",
+    });
+    await rejected.not.toMatchObject({ message: leakedDetail });
+    expect(getClientSecret).toHaveBeenCalledTimes(2);
+    expect(fixture.getUserMedia).toHaveBeenCalledOnce();
+    expect(fixture.fetchMock).toHaveBeenCalledOnce();
+    expect(fixture.peers).toHaveLength(1);
+    expect(fixture.peer.closeMock).toHaveBeenCalledOnce();
+    expect(fixture.media.stop).toHaveBeenCalledOnce();
+    expect(JSON.stringify(getDictationDiagnosticSnapshot())).not.toContain(leakedDetail);
+  });
+
+  it("does not allocate a new retry peer when cancellation lands between mint continuations", async () => {
+    const fixture = makeDependencies({ response: new Response("retry", { status: 503 }) });
+    const controller = new AbortController();
+    const retrySecret = createTestDeferred<typeof validClientSecret>();
+    const retryMintStarted = createTestDeferred<void>();
+    const getClientSecret = vi
+      .fn<() => Promise<typeof validClientSecret>>()
+      .mockResolvedValueOnce(validClientSecret)
+      .mockImplementationOnce(() => {
+        retryMintStarted.resolve();
+        return retrySecret.promise;
+      });
+
+    const started = startRealtimeTranscription(
+      { getClientSecret, onTranscript: () => undefined, signal: controller.signal },
+      fixture.dependencies,
+    );
+    await retryMintStarted.promise;
+    retrySecret.resolve({ ...validClientSecret, clientSecret: "late-retry-secret" });
+    queueMicrotask(() => queueMicrotask(() => controller.abort()));
+
+    await expect(started).rejects.toMatchObject({ code: "cancelled" });
+    expect(getClientSecret).toHaveBeenCalledTimes(2);
+    expect(fixture.peers).toHaveLength(1);
+    expect(fixture.peer.closeMock).toHaveBeenCalledOnce();
+    expect(fixture.media.stop).toHaveBeenCalledOnce();
   });
 
   it("cancels immediately during retry backoff and releases the microphone", async () => {
@@ -450,6 +648,164 @@ describe("startRealtimeTranscription", () => {
     });
   });
 
+  it("stops a microphone resolved in the microtask immediately before cancellation", async () => {
+    const fixture = makeDependencies();
+    const controller = new AbortController();
+    const mediaRequested = createTestDeferred<void>();
+    const pendingMedia = createTestDeferred<MediaStream>();
+    fixture.getUserMedia.mockImplementation(() => {
+      mediaRequested.resolve();
+      return pendingMedia.promise;
+    });
+
+    const started = startRealtimeTranscription(
+      {
+        getClientSecret: async () => validClientSecret,
+        onTranscript: () => undefined,
+        signal: controller.signal,
+      },
+      fixture.dependencies,
+    );
+    await mediaRequested.promise;
+
+    // Preserve this ordering: both media reactions are queued first, then the
+    // abort, then the async continuation produced by Promise.race. The stream
+    // must still be disposed even though cleanup ran before ownership moved to
+    // the session's mediaStream field.
+    pendingMedia.resolve(fixture.media.stream);
+    queueMicrotask(() => controller.abort());
+
+    await expect(started).rejects.toMatchObject({ code: "cancelled" });
+    expect(fixture.media.stop).toHaveBeenCalledOnce();
+    expect(fixture.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("times out an unresolved retry credential without relabeling or late diagnostic writes", async () => {
+    const fixture = makeDependencies({ response: new Response("retry", { status: 503 }) });
+    const retryMint = createTestDeferred<typeof validClientSecret>();
+    const retryMintStarted = createTestDeferred<void>();
+    const getClientSecret = vi
+      .fn<() => Promise<typeof validClientSecret>>()
+      .mockResolvedValueOnce(validClientSecret)
+      .mockImplementationOnce(() => {
+        retryMintStarted.resolve();
+        return retryMint.promise;
+      });
+    const setupTimeoutScheduled = createTestDeferred<() => void>();
+    const dependencies = {
+      ...fixture.dependencies,
+      setTimeout: (callback: () => void, delayMs: number) => {
+        expect(delayMs).toBe(20_000);
+        setupTimeoutScheduled.resolve(callback);
+        return 91;
+      },
+      clearTimeout: vi.fn(),
+    };
+
+    const started = startRealtimeTranscription(
+      { getClientSecret, onTranscript: () => undefined },
+      dependencies,
+    );
+    await retryMintStarted.promise;
+    const triggerSetupTimeout = await setupTimeoutScheduled.promise;
+    triggerSetupTimeout();
+
+    await expect(started).rejects.toMatchObject({ code: "connection_failed" });
+    expect(fixture.media.stop).toHaveBeenCalledOnce();
+    expect(fixture.peer.closeMock).toHaveBeenCalledOnce();
+    expect(getDictationDiagnosticSnapshot()).toMatchObject({
+      stage: "client_secret",
+      outcome: "failed",
+      errorCode: "connection_failed",
+    });
+
+    const terminalSnapshot = JSON.stringify(getDictationDiagnosticSnapshot());
+    retryMint.resolve({ ...validClientSecret, clientSecret: "late-secret" });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(JSON.stringify(getDictationDiagnosticSnapshot())).toBe(terminalSnapshot);
+  });
+
+  it("settles a setup timeout while the data channel is unopened", async () => {
+    const fixture = makeDependencies();
+    const remoteDescriptionSet = createTestDeferred<void>();
+    fixture.peer.setRemoteDescriptionMock.mockImplementation(async () => {
+      remoteDescriptionSet.resolve();
+      // Deliberately leave the channel connecting to exercise the open waiter.
+    });
+    const setupTimeoutScheduled = createTestDeferred<() => void>();
+    const dependencies = {
+      ...fixture.dependencies,
+      setTimeout: (callback: () => void, delayMs: number) => {
+        expect(delayMs).toBe(20_000);
+        setupTimeoutScheduled.resolve(callback);
+        return 92;
+      },
+      clearTimeout: vi.fn(),
+    };
+
+    const started = startRealtimeTranscription(
+      { getClientSecret: async () => validClientSecret, onTranscript: () => undefined },
+      dependencies,
+    );
+    await remoteDescriptionSet.promise;
+    const triggerSetupTimeout = await setupTimeoutScheduled.promise;
+    triggerSetupTimeout();
+
+    await expect(started).rejects.toMatchObject({ code: "connection_failed" });
+    expect(fixture.media.stop).toHaveBeenCalledOnce();
+    expect(fixture.peer.channel.closeMock).toHaveBeenCalledOnce();
+    expect(fixture.peer.closeMock).toHaveBeenCalledOnce();
+    const terminalSnapshot = JSON.stringify(getDictationDiagnosticSnapshot());
+    fixture.peer.channel.open();
+    fixture.peer.dispatchEvent(new Event("connectionstatechange"));
+    expect(JSON.stringify(getDictationDiagnosticSnapshot())).toBe(terminalSnapshot);
+  });
+
+  it("closes a newly allocated peer when data-channel creation throws", async () => {
+    const fixture = makeDependencies();
+    fixture.peer.createDataChannelMock.mockImplementationOnce(() => {
+      throw new Error("unsafe-browser-detail");
+    });
+
+    await expect(
+      startRealtimeTranscription(
+        { getClientSecret: async () => validClientSecret, onTranscript: () => undefined },
+        fixture.dependencies,
+      ),
+    ).rejects.toMatchObject({ code: "connection_failed" });
+    expect(fixture.fetchMock).not.toHaveBeenCalled();
+    expect(fixture.media.stop).toHaveBeenCalledOnce();
+    expect(fixture.peer.closeMock).toHaveBeenCalledOnce();
+    expect(JSON.stringify(getDictationDiagnosticSnapshot())).not.toContain("unsafe-browser-detail");
+  });
+
+  it("settles immediately when the connecting transport fails during an uncancellable peer await", async () => {
+    const fixture = makeDependencies();
+    const offerStarted = createTestDeferred<void>();
+    const neverOffer = createTestDeferred<RTCSessionDescriptionInit>();
+    vi.spyOn(fixture.peer, "createOffer").mockImplementation(() => {
+      offerStarted.resolve();
+      return neverOffer.promise;
+    });
+
+    const started = startRealtimeTranscription(
+      { getClientSecret: async () => validClientSecret, onTranscript: () => undefined },
+      fixture.dependencies,
+    );
+    await offerStarted.promise;
+    fixture.peer.channel.dispatchEvent(new Event("error"));
+
+    await expect(started).rejects.toMatchObject({ code: "connection_failed" });
+    expect(fixture.media.stop).toHaveBeenCalledOnce();
+    expect(fixture.peer.channel.closeMock).toHaveBeenCalledOnce();
+    expect(fixture.peer.closeMock).toHaveBeenCalledOnce();
+    expect(getDictationDiagnosticSnapshot()).toMatchObject({
+      outcome: "failed",
+      errorCode: "connection_failed",
+    });
+  });
+
   it("settles an in-flight finalization immediately when the session is cancelled", async () => {
     const fixture = makeDependencies();
     const session = await startRealtimeTranscription(
@@ -471,18 +827,34 @@ describe("startRealtimeTranscription", () => {
   it("retains only the final safe status and request id after exhausting transient retries", async () => {
     const leakedDetail = "secret-provider-body";
     const fixture = makeDependencies({
-      responses: [1, 2, 3].map(
-        (attempt) =>
-          new Response(leakedDetail, {
+      responses: [1, 2, 3].map((attempt) =>
+        Response.json(
+          {
+            error: {
+              type: "server_error",
+              code: "allocation_failed",
+              message: `${leakedDetail}-${attempt}`,
+            },
+          },
+          {
             status: 503,
             headers: { "x-request-id": `req_attempt-${attempt}` },
-          }),
+          },
+        ),
       ),
+    });
+    let mintedSecretCount = 0;
+    const getClientSecret = vi.fn(async () => {
+      mintedSecretCount += 1;
+      return {
+        ...validClientSecret,
+        clientSecret: `ephemeral-exhausted-${mintedSecretCount}`,
+      };
     });
 
     const rejected = expect(
       startRealtimeTranscription(
-        { getClientSecret: async () => validClientSecret, onTranscript: () => undefined },
+        { getClientSecret, onTranscript: () => undefined },
         fixture.dependencies,
       ),
     ).rejects;
@@ -492,17 +864,93 @@ describe("startRealtimeTranscription", () => {
         "OpenAI returned a temporary HTTP 503 error while starting dictation. Cafe retried the request; try again shortly.",
     });
     await rejected.not.toMatchObject({ message: leakedDetail });
+    expect(getClientSecret).toHaveBeenCalledTimes(3);
+    expect(fixture.getUserMedia).toHaveBeenCalledOnce();
     expect(fixture.fetchMock).toHaveBeenCalledTimes(3);
+    expect(fixture.peers).toHaveLength(3);
+    expect(fixture.peers.every((peer) => peer.closeMock.mock.calls.length === 1)).toBe(true);
+    expect(fixture.fetchMock.mock.calls.map(([, request]) => request?.body)).toEqual([
+      "v=0\r\nt=test-offer\r\n",
+      "v=0\r\nt=test-offer-2\r\n",
+      "v=0\r\nt=test-offer-3\r\n",
+    ]);
     expect(fixture.waitForRetry).toHaveBeenCalledTimes(2);
-    expect(getDictationDiagnosticSnapshot()).toMatchObject({
+    const diagnostic = getDictationDiagnosticSnapshot();
+    expect(diagnostic).toMatchObject({
       stage: "sdp_exchange",
       outcome: "failed",
       attempt: 3,
       maxAttempts: 3,
       httpStatus: 503,
       requestId: "req_attempt-3",
+      responseContentTypeCategory: "json",
+      providerErrorType: "server_error",
+      providerErrorCode: "allocation_failed",
+      responseBodyTruncated: false,
       errorCode: "upstream_unavailable",
     });
+    expect(diagnostic?.responseBodySha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(JSON.stringify(diagnostic)).not.toContain(leakedDetail);
+  });
+
+  it("fingerprints and truncates an oversized provider error without retaining it", async () => {
+    const leakedDetail = "provider-body-secret";
+    const fixture = makeDependencies({
+      response: new Response(leakedDetail.repeat(10_000), {
+        status: 400,
+        headers: { "content-type": "text/plain" },
+      }),
+    });
+
+    await expect(
+      startRealtimeTranscription(
+        { getClientSecret: async () => validClientSecret, onTranscript: () => undefined },
+        fixture.dependencies,
+      ),
+    ).rejects.toMatchObject({ code: "session_rejected" });
+
+    const diagnostic = getDictationDiagnosticSnapshot();
+    expect(diagnostic).toMatchObject({
+      httpStatus: 400,
+      responseContentTypeCategory: "text",
+      responseBodyBytes: 65_536,
+      responseBodyTruncated: true,
+      providerErrorType: null,
+      providerErrorCode: null,
+    });
+    expect(diagnostic?.responseBodySha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(JSON.stringify(diagnostic)).not.toContain(leakedDetail);
+  });
+
+  it("collapses token-shaped provider error identifiers before recording diagnostics", async () => {
+    const fixture = makeDependencies({
+      response: Response.json(
+        {
+          error: {
+            type: "sk-proj-secret-shaped-type",
+            code: "ek_secret_shaped_code",
+            message: "provider-message-secret",
+          },
+        },
+        { status: 400 },
+      ),
+    });
+
+    await expect(
+      startRealtimeTranscription(
+        { getClientSecret: async () => validClientSecret, onTranscript: () => undefined },
+        fixture.dependencies,
+      ),
+    ).rejects.toMatchObject({ code: "session_rejected" });
+
+    const diagnosticJson = JSON.stringify(getDictationDiagnosticSnapshot());
+    expect(getDictationDiagnosticSnapshot()).toMatchObject({
+      providerErrorType: "other",
+      providerErrorCode: "other",
+    });
+    expect(diagnosticJson).not.toContain("sk-proj-secret-shaped-type");
+    expect(diagnosticJson).not.toContain("ek_secret_shaped_code");
+    expect(diagnosticJson).not.toContain("provider-message-secret");
   });
 
   it("hard-caps an oversized streamed SDP answer without relying on Content-Length", async () => {

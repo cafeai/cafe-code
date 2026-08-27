@@ -1,6 +1,9 @@
 import {
+  DICTATION_OPENAI_REQUEST_ID_MAX_CHARS,
+  DICTATION_SESSION_PROFILE,
   DICTATION_TRANSCRIPTION_MODEL,
   DictationApiKey,
+  type DictationEffectiveSessionProfile,
   DictationError,
   type DictationRealtimeClientSecret,
 } from "@cafecode/contracts";
@@ -29,8 +32,13 @@ const CLIENT_SECRET_TTL_SECONDS = 60;
 const UPSTREAM_TIMEOUT_MS = 10_000;
 const MAX_UPSTREAM_RESPONSE_BYTES = 64 * 1024;
 const ISSUANCE_WINDOW_MS = 60_000;
-const MAX_ISSUANCES_PER_WINDOW = 6;
+// One user-visible start can mint up to three independent call attempts. Keep
+// enough headroom for a few deliberate retries while still bounding a buggy or
+// adversarial renderer to a small number of short-lived credentials per minute.
+const MAX_ISSUANCES_PER_WINDOW = 12;
 const MAX_TRACKED_IDENTIFIERS = 1_024;
+const MAX_SAFE_DIAGNOSTIC_DURATION_MS = 600_000;
+const OPENAI_REQUEST_ID_PATTERN = /^req_[A-Za-z0-9_-]+$/u;
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -40,6 +48,7 @@ const OpenAiClientSecretResponse = Schema.Struct({
   expires_at: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   session: Schema.Struct({
     type: Schema.Literal("transcription"),
+    audio: Schema.optional(Schema.Unknown),
   }),
 });
 const decodeDictationApiKey = Schema.decodeUnknownEffect(DictationApiKey);
@@ -47,6 +56,55 @@ const decodeOpenAiClientSecretResponse = Schema.decodeUnknownEffect(OpenAiClient
 
 const sanitizedError = (code: DictationError["code"], message: string): DictationError =>
   new DictationError({ code, message });
+
+function normalizeOpenAiRequestId(value: string | undefined): string | null {
+  return value !== undefined &&
+    value.length > 0 &&
+    value.length <= DICTATION_OPENAI_REQUEST_ID_MAX_CHARS &&
+    OPENAI_REQUEST_ID_PATTERN.test(value)
+    ? value
+    : null;
+}
+
+function normalizeDurationMs(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.min(MAX_SAFE_DIAGNOSTIC_DURATION_MS, Math.round(value));
+}
+
+function readOpenAiProcessingMs(value: string | undefined): number | null {
+  if (value === undefined || !/^\d+(?:\.\d+)?$/u.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= MAX_SAFE_DIAGNOSTIC_DURATION_MS
+    ? Math.round(parsed)
+    : null;
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Validate only fixed, non-sensitive facts from OpenAI's effective session.
+ * The endpoint has historically omitted parts of this object, so absence is a
+ * diagnostic result rather than a hard failure. Never retain the raw session.
+ */
+function inspectEffectiveSessionProfile(audio: unknown): DictationEffectiveSessionProfile {
+  if (audio === undefined) return "not_reported";
+  if (!isUnknownRecord(audio) || !isUnknownRecord(audio.input)) return "malformed";
+
+  const input = audio.input;
+  if (!isUnknownRecord(input.transcription)) return "malformed";
+  if (input.transcription.model !== DICTATION_TRANSCRIPTION_MODEL) return "model_mismatch";
+
+  if (!isUnknownRecord(input.format)) return "malformed";
+  if (input.format.type !== "audio/pcm" || input.format.rate !== 24_000) {
+    return "format_mismatch";
+  }
+
+  if (!("turn_detection" in input)) return "malformed";
+  if (input.turn_detection !== null) return "turn_detection_mismatch";
+  return "matches";
+}
 
 const secretStoreFailure = (): DictationError =>
   sanitizedError("secret_store_failed", "Cafe could not access the saved dictation credential.");
@@ -137,6 +195,11 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
 
   const decodeSuccessfulResponse = (
     body: string,
+    diagnostics: {
+      readonly requestId: string | null;
+      readonly requestDurationMs: number;
+      readonly openAiProcessingMs: number | null;
+    },
   ): Effect.Effect<DictationRealtimeClientSecret, DictationError> => {
     if (body.length > MAX_UPSTREAM_RESPONSE_BYTES) {
       return Effect.fail(
@@ -170,6 +233,11 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
               clientSecret: decoded.value,
               expiresAt: decoded.expires_at,
               model: DICTATION_TRANSCRIPTION_MODEL,
+              sessionProfile: DICTATION_SESSION_PROFILE,
+              clientSecretRequestId: diagnostics.requestId,
+              clientSecretRequestDurationMs: diagnostics.requestDurationMs,
+              clientSecretOpenAiProcessingMs: diagnostics.openAiProcessingMs,
+              clientSecretEffectiveProfile: inspectEffectiveSessionProfile(decoded.session.audio),
             } satisfies DictationRealtimeClientSecret)
           : Effect.fail(
               sanitizedError(
@@ -258,14 +326,15 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
             audio: {
               input: {
                 format: { type: "audio/pcm", rate: 24_000 },
-                noise_reduction: { type: "near_field" },
-                // OpenAI documents `low` as the useful starting point for
-                // live-caption latency. `gpt-live-transcribe` emits deltas
-                // before this manually controlled turn is committed, while
-                // the eventual completed event remains authoritative.
+                // Keep the token-bound profile at OpenAI's documented minimal
+                // transcription shape. Optional noise-reduction and delay
+                // controls are valid in isolation, but omitting them removes
+                // request variables while investigating opaque HTTP 500s from
+                // /v1/realtime/calls. Streaming delta events remain part of
+                // gpt-live-transcribe without those optional controls.
+                // https://developers.openai.com/api/docs/guides/realtime-transcription
                 transcription: {
                   model: DICTATION_TRANSCRIPTION_MODEL,
-                  delay: "low",
                 },
                 turn_detection: null,
               },
@@ -277,6 +346,7 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
       // `redirect: manual` prevents a credential-bearing request from ever
       // following an upstream redirect. Tracing is disabled because transport
       // errors may retain the request object (and therefore Authorization).
+      const requestStartedAt = Date.now();
       const responseOption = yield* httpClient.execute(request).pipe(
         Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
         Effect.provideService(References.TracerEnabled, false),
@@ -293,6 +363,7 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
       }
 
       const response = responseOption.value;
+      const requestDurationMs = normalizeDurationMs(Date.now() - requestStartedAt);
       if (response.status === 401 || response.status === 403) {
         return yield* sanitizedError(
           "upstream_auth_failed",
@@ -320,7 +391,11 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
         );
       }
       const body = yield* readBoundedResponseText(response);
-      return yield* decodeSuccessfulResponse(body);
+      return yield* decodeSuccessfulResponse(body, {
+        requestId: normalizeOpenAiRequestId(response.headers["x-request-id"]),
+        requestDurationMs,
+        openAiProcessingMs: readOpenAiProcessingMs(response.headers["openai-processing-ms"]),
+      });
     });
 
   return {

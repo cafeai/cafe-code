@@ -1,10 +1,16 @@
-import type { DictationErrorCode, DictationRealtimeClientSecret } from "@cafecode/contracts";
+import {
+  DICTATION_PROVIDER_ERROR_CODES,
+  DICTATION_PROVIDER_ERROR_TYPES,
+  type DictationErrorCode,
+  type DictationRealtimeClientSecret,
+} from "@cafecode/contracts";
 
 import {
   beginDictationDiagnosticOperation,
-  readSafeOpenAiRequestId,
+  readSafeOpenAiResponseHeaders,
   type DictationDiagnosticOutcome,
   type DictationDiagnosticStage,
+  type DictationDiagnosticUpdate,
 } from "./diagnostics";
 import { DICTATION_RPC_ERROR_MESSAGES, readDictationRpcErrorCode } from "./errors";
 
@@ -27,9 +33,13 @@ const REALTIME_CALL_RETRY_DELAYS_MS = [250, 750] as const;
 const REALTIME_FINALIZATION_TIMEOUT_MS = 10_000;
 const MIN_CLIENT_SECRET_LIFETIME_MS = 5_000;
 const MAX_SDP_ANSWER_BYTES = 1_048_576;
+const MAX_REALTIME_ERROR_BODY_BYTES = 64 * 1_024;
 const MAX_EVENT_CHARS = 256_000;
 const MAX_ITEM_ID_CHARS = 256;
 const MAX_TRANSCRIPT_CHARS = 128_000;
+const providerErrorTypes: ReadonlySet<string> = new Set(DICTATION_PROVIDER_ERROR_TYPES);
+const providerErrorCodes: ReadonlySet<string> = new Set(DICTATION_PROVIDER_ERROR_CODES);
+const textEncoder = new TextEncoder();
 
 export type RealtimeTranscriptionErrorCode =
   | DictationErrorCode
@@ -456,12 +466,225 @@ function parseValidContentLength(response: Response): number | null {
   return Number.isSafeInteger(length) ? length : null;
 }
 
+interface RealtimeErrorResponseMetadata {
+  readonly providerErrorType: string | null;
+  readonly providerErrorCode: string | null;
+  readonly responseBodyBytes: number | null;
+  readonly responseBodySha256: string | null;
+  readonly responseBodyTruncated: boolean | null;
+}
+
+/** Collapse provider-controlled identifiers before they leave the body reader. */
+function categorizeProviderError(value: unknown, allowlist: ReadonlySet<string>): string | null {
+  if (value === null || value === undefined) return null;
+  return typeof value === "string" && allowlist.has(value) ? value : "other";
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string | null> {
+  if (bytes.byteLength === 0 || globalThis.crypto?.subtle === undefined) return null;
+  try {
+    // Copy the bounded prefix into a plain ArrayBuffer so TypeScript and the
+    // WebCrypto implementation cannot retain a view into a larger body chunk.
+    const digestInput = bytes.slice().buffer;
+    const digest = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", digestInput));
+    return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read only a bounded error-body prefix and immediately reduce it to safe
+ * structural metadata. Provider messages are never extracted; the temporary
+ * bytes/string/JSON object remain local to this call and are discarded before
+ * anything reaches Cafe's diagnostics snapshot.
+ */
+async function readBoundedRealtimeErrorMetadata(
+  response: Response,
+  signal: AbortSignal,
+): Promise<RealtimeErrorResponseMetadata> {
+  if (!response.body) {
+    return {
+      providerErrorType: null,
+      providerErrorCode: null,
+      responseBodyBytes: 0,
+      responseBodySha256: null,
+      responseBodyTruncated: false,
+    };
+  }
+
+  const declaredLength = parseValidContentLength(response);
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let byteCount = 0;
+  let streamFinished = false;
+  let truncated = declaredLength !== null && declaredLength > MAX_REALTIME_ERROR_BODY_BYTES;
+  const handleAbort = () => {
+    // Response-body reads are independent from the fetch signal once headers
+    // have arrived. Explicitly cancel the reader so an upstream that stalls
+    // mid-error cannot retain a background stream after Cafe times out.
+    void reader.cancel().catch(() => undefined);
+  };
+  signal.addEventListener("abort", handleAbort, { once: true });
+
+  try {
+    if (signal.aborted) {
+      handleAbort();
+      return {
+        providerErrorType: null,
+        providerErrorCode: null,
+        responseBodyBytes: null,
+        responseBodySha256: null,
+        responseBodyTruncated: null,
+      };
+    }
+    while (byteCount < MAX_REALTIME_ERROR_BODY_BYTES) {
+      const chunk = await reader.read();
+      if (chunk.done) {
+        streamFinished = true;
+        break;
+      }
+      const remaining = MAX_REALTIME_ERROR_BODY_BYTES - byteCount;
+      if (chunk.value.byteLength > remaining) {
+        chunks.push(chunk.value.slice(0, remaining));
+        byteCount += remaining;
+        truncated = true;
+        break;
+      }
+      const copiedChunk = chunk.value.slice();
+      chunks.push(copiedChunk);
+      byteCount += copiedChunk.byteLength;
+    }
+
+    // Do not perform a look-ahead read at the byte ceiling. A single stream
+    // chunk has no browser-enforced upper bound, and a server can also leave a
+    // look-ahead pending indefinitely. When EOF was not observed within the
+    // ceiling, conservatively mark the prefix truncated and cancel the body.
+    if (!streamFinished && byteCount === MAX_REALTIME_ERROR_BODY_BYTES) truncated = true;
+    if (truncated || !streamFinished) await reader.cancel().catch(() => undefined);
+
+    const bytes = new Uint8Array(byteCount);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+
+    const responseBodySha256 = await sha256Hex(bytes);
+    let providerErrorType: string | null = null;
+    let providerErrorCode: string | null = null;
+    if (!truncated && bytes.byteLength > 0) {
+      try {
+        const decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        const parsed: unknown = JSON.parse(decoded);
+        if (isRecord(parsed) && isRecord(parsed.error)) {
+          providerErrorType = categorizeProviderError(parsed.error.type, providerErrorTypes);
+          providerErrorCode = categorizeProviderError(parsed.error.code, providerErrorCodes);
+        }
+      } catch {
+        // Non-JSON or invalid UTF-8 provider messages remain fingerprint-only.
+      }
+    }
+
+    return {
+      providerErrorType,
+      providerErrorCode,
+      responseBodyBytes: byteCount,
+      responseBodySha256,
+      responseBodyTruncated: truncated,
+    };
+  } catch {
+    await reader.cancel().catch(() => undefined);
+    return {
+      providerErrorType: null,
+      providerErrorCode: null,
+      responseBodyBytes: null,
+      responseBodySha256: null,
+      responseBodyTruncated: null,
+    };
+  } finally {
+    signal.removeEventListener("abort", handleAbort);
+    reader.releaseLock();
+  }
+}
+
+interface SdpShapeDiagnostics {
+  readonly bytes: number;
+  readonly lineCount: number;
+  readonly mediaSectionCount: number;
+  readonly audioSectionCount: number;
+  readonly applicationSectionCount: number;
+  readonly candidateCount: number;
+  readonly hasOpus: boolean;
+  readonly hasIceCandidate: boolean;
+}
+
+/** Derive protocol-shape facts without retaining or hashing SDP contents. */
+function summarizeSdpShape(sdp: string): SdpShapeDiagnostics {
+  const lines = sdp.split(/\r\n|\r|\n/u);
+  if (lines.at(-1) === "") lines.pop();
+  let mediaSectionCount = 0;
+  let audioSectionCount = 0;
+  let applicationSectionCount = 0;
+  let candidateCount = 0;
+  let hasOpus = false;
+
+  for (const line of lines) {
+    if (line.startsWith("m=")) mediaSectionCount += 1;
+    if (line.startsWith("m=audio ")) audioSectionCount += 1;
+    if (line.startsWith("m=application ")) applicationSectionCount += 1;
+    if (line.startsWith("a=candidate:")) candidateCount += 1;
+    if (/^a=rtpmap:\d+\s+opus\/\d+/iu.test(line)) hasOpus = true;
+  }
+
+  return {
+    bytes: textEncoder.encode(sdp).byteLength,
+    lineCount: lines.length,
+    mediaSectionCount,
+    audioSectionCount,
+    applicationSectionCount,
+    candidateCount,
+    hasOpus,
+    hasIceCandidate: candidateCount > 0,
+  };
+}
+
+function readAudioDiagnostics(
+  stream: MediaStream,
+  track: MediaStreamTrack,
+): Partial<DictationDiagnosticUpdate> {
+  let settings: Record<string, unknown> = {};
+  try {
+    if (typeof track.getSettings === "function") {
+      settings = track.getSettings() as Record<string, unknown>;
+    }
+  } catch {
+    // A browser may revoke the device between capture and inspection. Track
+    // lifecycle state below remains useful even when settings become unreadable.
+  }
+  return {
+    audioTrackCount: stream.getAudioTracks().length,
+    audioTrackState: track.readyState,
+    audioTrackEnabled: track.enabled,
+    audioTrackMuted: track.muted,
+    audioSampleRate: typeof settings.sampleRate === "number" ? settings.sampleRate : null,
+    audioChannelCount: typeof settings.channelCount === "number" ? settings.channelCount : null,
+    audioSampleSize: typeof settings.sampleSize === "number" ? settings.sampleSize : null,
+    audioEchoCancellation:
+      typeof settings.echoCancellation === "boolean" ? settings.echoCancellation : null,
+    audioNoiseSuppression:
+      typeof settings.noiseSuppression === "boolean" ? settings.noiseSuppression : null,
+    audioAutoGainControl:
+      typeof settings.autoGainControl === "boolean" ? settings.autoGainControl : null,
+  };
+}
+
 /**
  * Response.text() buffers without a caller-controlled ceiling. Read the SDP
  * stream ourselves so a malicious or broken upstream cannot allocate an
  * arbitrarily large renderer string before Cafe notices the protocol error.
  */
-async function readBoundedSdpAnswer(response: Response): Promise<string> {
+async function readBoundedSdpAnswer(response: Response, signal: AbortSignal): Promise<string> {
   const contentLength = parseValidContentLength(response);
   if (contentLength !== null && contentLength > MAX_SDP_ANSWER_BYTES) {
     await response.body?.cancel().catch(() => undefined);
@@ -473,7 +696,15 @@ async function readBoundedSdpAnswer(response: Response): Promise<string> {
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let byteCount = 0;
   let answer = "";
+  const handleAbort = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+  signal.addEventListener("abort", handleAbort, { once: true });
   try {
+    if (signal.aborted) {
+      handleAbort();
+      throw connectionError();
+    }
     while (true) {
       const chunk = await reader.read();
       if (chunk.done) break;
@@ -489,6 +720,7 @@ async function readBoundedSdpAnswer(response: Response): Promise<string> {
     if (error instanceof RealtimeTranscriptionError) throw error;
     throw protocolError();
   } finally {
+    signal.removeEventListener("abort", handleAbort);
     reader.releaseLock();
   }
 
@@ -513,12 +745,21 @@ export interface StartRealtimeTranscriptionInput {
   readonly signal?: AbortSignal;
 }
 
+function stopStreamTracks(stream: MediaStream): void {
+  for (const track of stream.getTracks()) {
+    track.enabled = false;
+    track.stop();
+  }
+}
+
 /**
  * Connect one browser microphone to an OpenAI Realtime transcription session.
  * The permanent API key remains on Cafe's backend; this function receives only
- * a short-lived client secret and never stores it after setup. OpenAI permits
- * reuse until expiry; Cafe reuses it only for bounded retries of this one
- * session handshake and never persists it.
+ * short-lived client secrets and never stores them after setup. Each retry is
+ * deliberately a new OpenAI call creation: it mints another credential and
+ * builds another peer connection and SDP offer. OpenAI does not document call
+ * creation as idempotent, so replaying one token/offer can repeatedly hit the
+ * same failed allocation rather than forming an independent attempt.
  */
 export async function startRealtimeTranscription(
   input: StartRealtimeTranscriptionInput,
@@ -532,27 +773,69 @@ export async function startRealtimeTranscription(
   let dataChannel: RTCDataChannel | null = null;
   let transcriptState = createRealtimeTranscriptState();
   const completedItemIds = new Set<string>();
-  const openDeferred = deferred<void>();
+  let openDeferred = deferred<void>();
   let finalizationDeferred: Deferred<void> | null = null;
   let requiredCompletedItemCount = 0;
   let fatalErrorReported = false;
   let stopPromise: Promise<void> | null = null;
   const setupAbortController = new AbortController();
+  const setupInterrupted = deferred<never>();
+  let setupInterruptionError: RealtimeTranscriptionError | null = null;
+  let diagnosticsTerminal = false;
   const transportIsClosed = () => lifecycle === "closed";
-  let awaitingClientSecret = true;
   let diagnosticStage: DictationDiagnosticStage = "client_secret";
   let diagnosticAttempt: number | null = null;
   let diagnosticHttpStatus: number | null = null;
   let diagnosticRequestId: string | null = null;
-  let lastTransientHttpStatus: number | null = null;
-  let lastTransientRequestId: string | null = null;
+  let diagnosticDetails: Omit<
+    Partial<DictationDiagnosticUpdate>,
+    | "nowMs"
+    | "stage"
+    | "outcome"
+    | "attempt"
+    | "maxAttempts"
+    | "httpStatus"
+    | "requestId"
+    | "errorCode"
+  > = {};
   const recordOperationDiagnostic = beginDictationDiagnosticOperation();
+
+  const readCurrentTransportDiagnostics = (): Partial<DictationDiagnosticUpdate> => {
+    const audioTrack = mediaStream?.getAudioTracks()[0] ?? null;
+    return {
+      peerConnectionState: peerConnection?.connectionState ?? null,
+      iceConnectionState: peerConnection?.iceConnectionState ?? null,
+      iceGatheringState: peerConnection?.iceGatheringState ?? null,
+      signalingState: peerConnection?.signalingState ?? null,
+      dataChannelState: dataChannel?.readyState ?? null,
+      ...(mediaStream !== null && audioTrack !== null
+        ? readAudioDiagnostics(mediaStream, audioTrack)
+        : {
+            audioTrackCount: null,
+            audioTrackState: null,
+            audioTrackEnabled: null,
+            audioTrackMuted: null,
+            audioSampleRate: null,
+            audioChannelCount: null,
+            audioSampleSize: null,
+            audioEchoCancellation: null,
+            audioNoiseSuppression: null,
+            audioAutoGainControl: null,
+          }),
+    };
+  };
 
   const recordDiagnostic = (
     outcome: DictationDiagnosticOutcome,
     errorCode: RealtimeTranscriptionErrorCode | null = null,
   ) => {
+    // A timed-out or cancelled setup can still have an uncancellable browser
+    // promise settle later. Never let that stale continuation replace the
+    // terminal snapshot which explains why the visible operation ended.
+    if (diagnosticsTerminal) return;
     recordOperationDiagnostic({
+      ...diagnosticDetails,
+      ...readCurrentTransportDiagnostics(),
       nowMs: dependencies.now(),
       stage: diagnosticStage,
       outcome,
@@ -563,23 +846,109 @@ export async function startRealtimeTranscription(
       errorCode,
     });
   };
-  recordDiagnostic("starting");
+
+  const recordTerminalDiagnostic = (
+    outcome: Extract<DictationDiagnosticOutcome, "cancelled" | "completed" | "failed">,
+    errorCode: RealtimeTranscriptionErrorCode | null = null,
+  ) => {
+    if (diagnosticsTerminal) return;
+    recordDiagnostic(outcome, errorCode);
+    diagnosticsTerminal = true;
+  };
+
+  const assertSetupLive = () => {
+    if (setupInterruptionError !== null) throw setupInterruptionError;
+    if (input.signal?.aborted) throw cancelledError();
+    if (transportIsClosed()) throw connectionError();
+  };
+
+  /**
+   * Browser media/WebRTC methods are not uniformly abortable. Racing every
+   * setup await against one private cancellation promise makes Cafe settle
+   * immediately, while post-await liveness checks keep late results from
+   * mutating diagnostics or attaching resources to a closed session.
+   */
+  const awaitSetup = async <T>(promise: Promise<T>): Promise<T> => {
+    const value = await Promise.race([promise, setupInterrupted.promise]);
+    assertSetupLive();
+    return value;
+  };
+
+  const interruptSetup = (error: RealtimeTranscriptionError) => {
+    if (setupInterruptionError !== null) return;
+    setupInterruptionError = error;
+    setupAbortController.abort();
+    openDeferred.reject(error);
+    setupInterrupted.reject(error);
+  };
+
+  const resetPerAttemptDiagnostics = () => {
+    diagnosticDetails = {
+      ...diagnosticDetails,
+      requestDurationMs: null,
+      openAiProcessingMs: null,
+      retryAfterMs: null,
+      responseContentTypeCategory: null,
+      responseContentLengthBytes: null,
+      providerErrorType: null,
+      providerErrorCode: null,
+      responseBodyBytes: null,
+      responseBodySha256: null,
+      responseBodyTruncated: null,
+      offerSdpBytes: null,
+      offerSdpLineCount: null,
+      offerMediaSectionCount: null,
+      offerAudioSectionCount: null,
+      offerApplicationSectionCount: null,
+      offerCandidateCount: null,
+      offerHasOpus: null,
+      offerHasIceCandidate: null,
+      answerSdpBytes: null,
+      answerSdpLineCount: null,
+      answerMediaSectionCount: null,
+      answerAudioSectionCount: null,
+      answerApplicationSectionCount: null,
+      answerCandidateCount: null,
+      answerHasOpus: null,
+      answerHasIceCandidate: null,
+    };
+  };
 
   const stopMediaTracks = () => {
     if (!mediaStream) return;
-    for (const track of mediaStream.getTracks()) {
-      track.enabled = false;
-      track.stop();
-    }
+    stopStreamTracks(mediaStream);
   };
 
-  const removeTransportListeners = () => {
-    dataChannel?.removeEventListener("open", handleDataChannelOpen);
-    dataChannel?.removeEventListener("message", handleDataChannelMessage);
-    dataChannel?.removeEventListener("close", handleDataChannelClose);
-    dataChannel?.removeEventListener("error", handleDataChannelError);
-    peerConnection?.removeEventListener("connectionstatechange", handleConnectionStateChange);
-    input.signal?.removeEventListener("abort", handleExternalAbort);
+  const removeTransportListeners = (
+    connection: RTCPeerConnection | null,
+    channel: RTCDataChannel | null,
+  ) => {
+    channel?.removeEventListener("open", handleDataChannelOpen);
+    channel?.removeEventListener("message", handleDataChannelMessage);
+    channel?.removeEventListener("close", handleDataChannelClose);
+    channel?.removeEventListener("error", handleDataChannelError);
+    connection?.removeEventListener("connectionstatechange", handleConnectionStateChange);
+    connection?.removeEventListener("iceconnectionstatechange", handleIceConnectionStateChange);
+    connection?.removeEventListener("icegatheringstatechange", handlePeerStateObservation);
+    connection?.removeEventListener("signalingstatechange", handlePeerStateObservation);
+  };
+
+  /**
+   * Retire only the current WebRTC attempt while keeping the one captured
+   * microphone stream alive for the next attempt. Listeners are detached
+   * before close so the expected retirement cannot be misclassified as an
+   * active-session transport failure.
+   */
+  const discardCurrentTransportAttempt = () => {
+    const discardedConnection = peerConnection;
+    const discardedChannel = dataChannel;
+    removeTransportListeners(discardedConnection, discardedChannel);
+    if (discardedChannel && discardedChannel.readyState !== "closed") {
+      discardedChannel.close();
+    }
+    discardedConnection?.close();
+    if (dataChannel === discardedChannel) dataChannel = null;
+    if (peerConnection === discardedConnection) peerConnection = null;
   };
 
   const cleanup = () => {
@@ -587,17 +956,15 @@ export async function startRealtimeTranscription(
     lifecycle = "closed";
     setupAbortController.abort();
     stopMediaTracks();
-    removeTransportListeners();
-    if (dataChannel && dataChannel.readyState !== "closed") dataChannel.close();
-    peerConnection?.close();
-    dataChannel = null;
-    peerConnection = null;
+    input.signal?.removeEventListener("abort", handleExternalAbort);
+    discardCurrentTransportAttempt();
     mediaStream = null;
   };
 
   const failTransport = (error: RealtimeTranscriptionError) => {
     const shouldReport = lifecycle === "active" || lifecycle === "finalizing";
-    recordDiagnostic("failed", error.code);
+    if (lifecycle === "connecting") interruptSetup(error);
+    recordTerminalDiagnostic("failed", error.code);
     openDeferred.reject(error);
     finalizationDeferred?.reject(error);
     cleanup();
@@ -609,13 +976,15 @@ export async function startRealtimeTranscription(
 
   function handleExternalAbort(): void {
     const error = cancelledError();
-    recordDiagnostic("cancelled", error.code);
+    interruptSetup(error);
+    recordTerminalDiagnostic("cancelled", error.code);
     openDeferred.reject(error);
     finalizationDeferred?.reject(error);
     cleanup();
   }
 
   function handleDataChannelOpen(): void {
+    recordDiagnostic("starting");
     openDeferred.resolve(undefined);
   }
 
@@ -671,29 +1040,87 @@ export async function startRealtimeTranscription(
   }
 
   function handleConnectionStateChange(): void {
+    recordDiagnostic("starting");
     if (peerConnection?.connectionState === "failed") failTransport(connectionError());
   }
 
-  try {
-    // Resolve a usable ephemeral credential before prompting for microphone
-    // access. Status can race with a Settings clear, and a missing key must be
-    // a true no-op that never opens a browser permission prompt.
-    const clientSecret = await input.getClientSecret();
-    awaitingClientSecret = false;
-    if (input.signal?.aborted || transportIsClosed()) throw cancelledError();
+  function handleIceConnectionStateChange(): void {
+    recordDiagnostic("starting");
+    if (peerConnection?.iceConnectionState === "failed") failTransport(connectionError());
+  }
+
+  function handlePeerStateObservation(): void {
+    recordDiagnostic("starting");
+  }
+
+  const mintUsableClientSecret = async (
+    attempt: number | null,
+  ): Promise<DictationRealtimeClientSecret> => {
+    resetPerAttemptDiagnostics();
+    diagnosticDetails = {
+      ...diagnosticDetails,
+      sessionProfile: null,
+      clientSecretModel: null,
+      clientSecretLifetimeMs: null,
+      clientSecretRequestId: null,
+      clientSecretRequestDurationMs: null,
+      clientSecretOpenAiProcessingMs: null,
+      clientSecretEffectiveProfile: null,
+    };
+    diagnosticStage = "client_secret";
+    diagnosticAttempt = attempt;
+    diagnosticHttpStatus = null;
+    diagnosticRequestId = null;
+    recordDiagnostic("starting");
+    let clientSecret: DictationRealtimeClientSecret;
+    try {
+      clientSecret = await awaitSetup(input.getClientSecret());
+    } catch (error) {
+      // Setup cancellation/timeout is already a sanitized local error. Only
+      // errors originating at the RPC boundary are decoded as credential
+      // failures, so a retry timeout cannot be mislabeled session_setup_failed.
+      if (error instanceof RealtimeTranscriptionError) throw error;
+      throw normalizeClientSecretError(error, input.signal?.aborted === true);
+    }
     if (clientSecret.expiresAt * 1_000 <= dependencies.now() + MIN_CLIENT_SECRET_LIFETIME_MS) {
       throw new RealtimeTranscriptionError(
         "session_expired",
         "The dictation session expired before it could start. Please try again.",
       );
     }
+    diagnosticDetails = {
+      ...diagnosticDetails,
+      sessionProfile: clientSecret.sessionProfile ?? null,
+      clientSecretModel: clientSecret.model,
+      clientSecretLifetimeMs: Math.max(0, clientSecret.expiresAt * 1_000 - dependencies.now()),
+      clientSecretRequestId: clientSecret.clientSecretRequestId ?? null,
+      clientSecretRequestDurationMs: clientSecret.clientSecretRequestDurationMs ?? null,
+      clientSecretOpenAiProcessingMs: clientSecret.clientSecretOpenAiProcessingMs ?? null,
+      clientSecretEffectiveProfile: clientSecret.clientSecretEffectiveProfile ?? null,
+    };
+    recordDiagnostic("completed");
+    return clientSecret;
+  };
+
+  try {
+    // Listen before the first RPC so route changes and explicit cancellation
+    // settle immediately even if the client-secret request itself is stuck.
+    input.signal?.addEventListener("abort", handleExternalAbort, { once: true });
+    if (input.signal?.aborted) handleExternalAbort();
+    assertSetupLive();
+
+    // Resolve a usable ephemeral credential before prompting for microphone
+    // access. Status can race with a Settings clear, and a missing key must be
+    // a true no-op that never opens a browser permission prompt.
+    let clientSecret = await mintUsableClientSecret(null);
+    assertSetupLive();
 
     diagnosticStage = "microphone";
     diagnosticAttempt = null;
     diagnosticHttpStatus = null;
     diagnosticRequestId = null;
     recordDiagnostic("starting");
-    mediaStream = await dependencies.getUserMedia({
+    const mediaPromise = dependencies.getUserMedia({
       audio: {
         autoGainControl: true,
         echoCancellation: true,
@@ -701,11 +1128,28 @@ export async function startRealtimeTranscription(
       },
       video: false,
     });
-    if (input.signal?.aborted) throw cancelledError();
-
-    // Register abort immediately after capture so a route change stops the
-    // microphone while the SDP exchange or peer negotiation is in flight.
-    input.signal?.addEventListener("abort", handleExternalAbort, { once: true });
+    // If cancellation wins the race, getUserMedia can still resolve later.
+    // Stop that late stream immediately so no browser track survives a closed
+    // Cafe session merely because the permission prompt was uncancellable.
+    void mediaPromise.then(
+      (lateStream) => {
+        if (setupInterruptionError !== null || transportIsClosed()) {
+          stopStreamTracks(lateStream);
+        }
+      },
+      () => undefined,
+    );
+    // Acquire and transfer ownership in this one async continuation. Calling
+    // the generic async awaitSetup helper here would introduce another
+    // microtask between its liveness check and this assignment: an abort in
+    // that gap could close the session before Cafe owned (and could stop) the
+    // newly resolved microphone stream.
+    const capturedStream = await Promise.race([mediaPromise, setupInterrupted.promise]);
+    if (setupInterruptionError !== null || input.signal?.aborted === true || transportIsClosed()) {
+      stopStreamTracks(capturedStream);
+      assertSetupLive();
+    }
+    mediaStream = capturedStream;
 
     const audioTrack = mediaStream.getAudioTracks()[0];
     if (!audioTrack) {
@@ -715,33 +1159,29 @@ export async function startRealtimeTranscription(
       );
     }
 
-    // Permission prompts can remain open past the short-lived credential's
-    // TTL. Recheck after the user responds and before any OpenAI connection.
-    if (input.signal?.aborted || transportIsClosed()) throw cancelledError();
-    if (clientSecret.expiresAt * 1_000 <= dependencies.now() + MIN_CLIENT_SECRET_LIFETIME_MS) {
-      throw new RealtimeTranscriptionError(
-        "session_expired",
-        "The dictation session expired before it could start. Please try again.",
-      );
-    }
-
-    peerConnection = dependencies.createPeerConnection();
-    dataChannel = peerConnection.createDataChannel("oai-events");
-    dataChannel.addEventListener("open", handleDataChannelOpen);
-    dataChannel.addEventListener("message", handleDataChannelMessage);
-    dataChannel.addEventListener("close", handleDataChannelClose);
-    dataChannel.addEventListener("error", handleDataChannelError);
-    peerConnection.addEventListener("connectionstatechange", handleConnectionStateChange);
-    peerConnection.addTrack(audioTrack, mediaStream);
-
-    const offer = await peerConnection.createOffer();
-    const offerSdp = offer.sdp;
-    if (!offerSdp) throw protocolError();
-    await peerConnection.setLocalDescription(offer);
+    assertSetupLive();
+    recordDiagnostic("completed");
 
     const exchangePromise = (async () => {
       for (let attempt = 1; attempt <= REALTIME_CALL_MAX_ATTEMPTS; attempt += 1) {
-        if (setupAbortController.signal.aborted || transportIsClosed()) throw connectionError();
+        assertSetupLive();
+
+        // A browser permission prompt can outlive the first credential. It is
+        // safe to mint a replacement now because the initial preflight already
+        // proved that dictation is configured before Cafe touched the mic.
+        // Every later attempt always mints a fresh credential: OpenAI does not
+        // document replaying call creation with one ephemeral token as an
+        // idempotent operation.
+        if (
+          attempt > 1 ||
+          clientSecret.expiresAt * 1_000 <= dependencies.now() + MIN_CLIENT_SECRET_LIFETIME_MS
+        ) {
+          clientSecret = await mintUsableClientSecret(attempt);
+          // mintUsableClientSecret has its own async return continuation. An
+          // abort can land after its internal liveness check but before this
+          // caller resumes, so fence again before allocating a retry peer.
+          assertSetupLive();
+        }
         if (clientSecret.expiresAt * 1_000 <= dependencies.now() + MIN_CLIENT_SECRET_LIFETIME_MS) {
           throw new RealtimeTranscriptionError(
             "session_expired",
@@ -749,73 +1189,176 @@ export async function startRealtimeTranscription(
           );
         }
 
+        resetPerAttemptDiagnostics();
+        diagnosticDetails = {
+          ...diagnosticDetails,
+          clientSecretLifetimeMs: Math.max(0, clientSecret.expiresAt * 1_000 - dependencies.now()),
+        };
         diagnosticStage = "sdp_exchange";
         diagnosticAttempt = attempt;
         diagnosticHttpStatus = null;
         diagnosticRequestId = null;
         recordDiagnostic("starting");
 
+        // A retry owns a wholly independent WebRTC transport and SDP offer.
+        // The microphone stream remains single-owner and is attached to each
+        // short-lived peer in turn, avoiding a second permission prompt.
+        discardCurrentTransportAttempt();
+        openDeferred = deferred<void>();
+        const attemptConnection = dependencies.createPeerConnection();
+        // Take ownership before createDataChannel: some WebRTC shims can throw
+        // there, and cleanup must still close the newly allocated peer.
+        peerConnection = attemptConnection;
+        const attemptChannel = attemptConnection.createDataChannel("oai-events");
+        dataChannel = attemptChannel;
+        attemptChannel.addEventListener("open", handleDataChannelOpen);
+        attemptChannel.addEventListener("message", handleDataChannelMessage);
+        attemptChannel.addEventListener("close", handleDataChannelClose);
+        attemptChannel.addEventListener("error", handleDataChannelError);
+        attemptConnection.addEventListener("connectionstatechange", handleConnectionStateChange);
+        attemptConnection.addEventListener(
+          "iceconnectionstatechange",
+          handleIceConnectionStateChange,
+        );
+        attemptConnection.addEventListener("icegatheringstatechange", handlePeerStateObservation);
+        attemptConnection.addEventListener("signalingstatechange", handlePeerStateObservation);
+        attemptConnection.addTrack(audioTrack, mediaStream);
+
+        const offer = await awaitSetup(attemptConnection.createOffer());
+        assertSetupLive();
+        const offerSdp = offer.sdp;
+        if (!offerSdp) throw protocolError();
+        await awaitSetup(attemptConnection.setLocalDescription(offer));
+        assertSetupLive();
+        const offerShape = summarizeSdpShape(offerSdp);
+        diagnosticDetails = {
+          ...diagnosticDetails,
+          offerSdpBytes: offerShape.bytes,
+          offerSdpLineCount: offerShape.lineCount,
+          offerMediaSectionCount: offerShape.mediaSectionCount,
+          offerAudioSectionCount: offerShape.audioSectionCount,
+          offerApplicationSectionCount: offerShape.applicationSectionCount,
+          offerCandidateCount: offerShape.candidateCount,
+          offerHasOpus: offerShape.hasOpus,
+          offerHasIceCandidate: offerShape.hasIceCandidate,
+        };
+        recordDiagnostic("starting");
+
         let response: Response;
+        const requestStartedAtMs = dependencies.now();
         try {
-          response = await dependencies.fetch(OPENAI_REALTIME_CALLS_URL, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${clientSecret.clientSecret}`,
-              "Content-Type": "application/sdp",
-            },
-            body: offerSdp,
-            cache: "no-store",
-            credentials: "omit",
-            redirect: "error",
-            referrerPolicy: "no-referrer",
-            signal: setupAbortController.signal,
-          });
-        } catch {
+          // Re-check immediately before the irreversible network side effect;
+          // an abort can land between any async helper's return and its caller.
+          assertSetupLive();
+          response = await awaitSetup(
+            dependencies.fetch(OPENAI_REALTIME_CALLS_URL, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${clientSecret.clientSecret}`,
+                "Content-Type": "application/sdp",
+              },
+              body: offerSdp,
+              cache: "no-store",
+              credentials: "omit",
+              redirect: "error",
+              referrerPolicy: "no-referrer",
+              signal: setupAbortController.signal,
+            }),
+          );
+          assertSetupLive();
+        } catch (error) {
+          diagnosticDetails = {
+            ...diagnosticDetails,
+            requestDurationMs: Math.max(0, dependencies.now() - requestStartedAtMs),
+          };
+          if (error instanceof RealtimeTranscriptionError) throw error;
+          if (input.signal?.aborted) throw cancelledError();
           if (setupAbortController.signal.aborted || transportIsClosed()) throw connectionError();
           if (attempt === REALTIME_CALL_MAX_ATTEMPTS) throw connectionError();
           recordDiagnostic("retrying", "connection_failed");
-          await dependencies.waitForRetry(
-            REALTIME_CALL_RETRY_DELAYS_MS[attempt - 1] ?? 0,
-            setupAbortController.signal,
+          discardCurrentTransportAttempt();
+          await awaitSetup(
+            dependencies.waitForRetry(
+              REALTIME_CALL_RETRY_DELAYS_MS[attempt - 1] ?? 0,
+              setupAbortController.signal,
+            ),
           );
+          assertSetupLive();
           continue;
         }
 
         diagnosticHttpStatus = response.status;
-        diagnosticRequestId = readSafeOpenAiRequestId(response.headers);
+        const responseHeaders = readSafeOpenAiResponseHeaders(response.headers, dependencies.now());
+        diagnosticRequestId = responseHeaders.requestId;
+        diagnosticDetails = {
+          ...diagnosticDetails,
+          requestDurationMs: Math.max(0, dependencies.now() - requestStartedAtMs),
+          openAiProcessingMs: responseHeaders.openAiProcessingMs,
+          retryAfterMs: responseHeaders.retryAfterMs,
+          responseContentTypeCategory: responseHeaders.contentTypeCategory,
+          responseContentLengthBytes: responseHeaders.contentLengthBytes,
+        };
         if (!response.ok) {
-          // Error bodies can contain provider internals and are never useful to
-          // the renderer. Cancel rather than buffer them, then decide solely
-          // from the public status and bounded x-request-id metadata.
-          await response.body?.cancel().catch(() => undefined);
+          const errorMetadata = await awaitSetup(
+            readBoundedRealtimeErrorMetadata(response, setupAbortController.signal),
+          );
+          assertSetupLive();
+          diagnosticDetails = { ...diagnosticDetails, ...errorMetadata };
           if (
             isRetryableRealtimeCallStatus(response.status) &&
             attempt < REALTIME_CALL_MAX_ATTEMPTS
           ) {
-            lastTransientHttpStatus = response.status;
-            lastTransientRequestId = diagnosticRequestId;
             recordDiagnostic(
               "retrying",
               response.status === 429 ? "upstream_rate_limited" : "upstream_unavailable",
             );
-            await dependencies.waitForRetry(
-              REALTIME_CALL_RETRY_DELAYS_MS[attempt - 1] ?? 0,
-              setupAbortController.signal,
+            discardCurrentTransportAttempt();
+            await awaitSetup(
+              dependencies.waitForRetry(
+                Math.max(
+                  REALTIME_CALL_RETRY_DELAYS_MS[attempt - 1] ?? 0,
+                  responseHeaders.retryAfterMs ?? 0,
+                ),
+                setupAbortController.signal,
+              ),
             );
+            assertSetupLive();
             continue;
           }
           throw realtimeCallResponseError(response.status);
         }
 
-        const answerSdp = await readBoundedSdpAnswer(response);
+        const answerSdp = await awaitSetup(
+          readBoundedSdpAnswer(response, setupAbortController.signal),
+        );
+        assertSetupLive();
+        const answerShape = summarizeSdpShape(answerSdp);
+        diagnosticDetails = {
+          ...diagnosticDetails,
+          responseBodyBytes: answerShape.bytes,
+          responseBodySha256: null,
+          responseBodyTruncated: false,
+          answerSdpBytes: answerShape.bytes,
+          answerSdpLineCount: answerShape.lineCount,
+          answerMediaSectionCount: answerShape.mediaSectionCount,
+          answerAudioSectionCount: answerShape.audioSectionCount,
+          answerApplicationSectionCount: answerShape.applicationSectionCount,
+          answerCandidateCount: answerShape.candidateCount,
+          answerHasOpus: answerShape.hasOpus,
+          answerHasIceCandidate: answerShape.hasIceCandidate,
+        };
+        recordDiagnostic("completed");
         diagnosticStage = "peer_connect";
-        // Preserve the last recovered failure in the content-free snapshot.
-        // `outcome: connected` plus the attempt count makes clear that this
-        // status belongs to a recovered handshake, not the active transport.
-        diagnosticHttpStatus = lastTransientHttpStatus ?? response.status;
-        diagnosticRequestId = lastTransientRequestId ?? diagnosticRequestId;
         recordDiagnostic("starting");
-        await peerConnection?.setRemoteDescription({ type: "answer", sdp: answerSdp });
+        assertSetupLive();
+        await awaitSetup(
+          attemptConnection.setRemoteDescription({ type: "answer", sdp: answerSdp }),
+        );
+        assertSetupLive();
+        await awaitSetup(
+          attemptChannel.readyState === "open" ? Promise.resolve() : openDeferred.promise,
+        );
+        assertSetupLive();
         return;
       }
     })();
@@ -824,19 +1367,11 @@ export async function startRealtimeTranscription(
       promise: exchangePromise,
       timeoutMs: REALTIME_SETUP_TIMEOUT_MS,
       dependencies,
-      onTimeout: () => setupAbortController.abort(),
+      onTimeout: () => interruptSetup(connectionError()),
       timeoutError: connectionError,
     });
-    if (input.signal?.aborted || transportIsClosed()) throw cancelledError();
+    assertSetupLive();
 
-    await withTimeout({
-      promise: dataChannel.readyState === "open" ? Promise.resolve() : openDeferred.promise,
-      timeoutMs: REALTIME_SETUP_TIMEOUT_MS,
-      dependencies,
-      onTimeout: () => setupAbortController.abort(),
-      timeoutError: connectionError,
-    });
-    if (input.signal?.aborted || transportIsClosed()) throw cancelledError();
     lifecycle = "active";
     diagnosticStage = "active";
     recordDiagnostic("connected");
@@ -845,8 +1380,10 @@ export async function startRealtimeTranscription(
       if (stopPromise) return stopPromise;
       stopPromise = (async () => {
         if (lifecycle !== "active" || !dataChannel || dataChannel.readyState !== "open") {
+          const error = connectionError();
+          recordTerminalDiagnostic("failed", error.code);
           cleanup();
-          throw connectionError();
+          throw error;
         }
 
         lifecycle = "finalizing";
@@ -869,11 +1406,11 @@ export async function startRealtimeTranscription(
                 "Dictation stopped before OpenAI returned the final transcript.",
               ),
           });
-          recordDiagnostic("completed");
+          recordTerminalDiagnostic("completed");
         } catch (error) {
           const normalized =
             error instanceof RealtimeTranscriptionError ? error : connectionError();
-          recordDiagnostic(
+          recordTerminalDiagnostic(
             normalized.code === "cancelled" ? "cancelled" : "failed",
             normalized.code,
           );
@@ -892,15 +1429,16 @@ export async function startRealtimeTranscription(
         const error = cancelledError();
         finalizationDeferred?.reject(error);
         diagnosticStage = "closed";
-        recordDiagnostic("cancelled", error.code);
+        recordTerminalDiagnostic("cancelled", error.code);
         cleanup();
       },
     };
   } catch (error) {
-    const normalized = awaitingClientSecret
-      ? normalizeClientSecretError(error, input.signal?.aborted === true)
-      : normalizeSetupError(error, input.signal?.aborted === true);
-    recordDiagnostic(normalized.code === "cancelled" ? "cancelled" : "failed", normalized.code);
+    const normalized = normalizeSetupError(error, input.signal?.aborted === true);
+    recordTerminalDiagnostic(
+      normalized.code === "cancelled" ? "cancelled" : "failed",
+      normalized.code,
+    );
     cleanup();
     throw normalized;
   }

@@ -47,6 +47,11 @@ describe("wsRpcClient", () => {
         clientSecret: "ephemeral-test-secret",
         expiresAt: 2_000,
         model: "gpt-live-transcribe" as const,
+        sessionProfile: "transcription_pcm24k_minimal_v1" as const,
+        clientSecretRequestId: "req_mint_test",
+        clientSecretRequestDurationMs: 42,
+        clientSecretOpenAiProcessingMs: 12,
+        clientSecretEffectiveProfile: "matches" as const,
       }),
     );
     const requestMock = vi.fn(
@@ -90,6 +95,11 @@ describe("wsRpcClient", () => {
       clientSecret: "ephemeral-test-secret",
       expiresAt: 2_000,
       model: "gpt-live-transcribe",
+      sessionProfile: "transcription_pcm24k_minimal_v1",
+      clientSecretRequestId: "req_mint_test",
+      clientSecretRequestDurationMs: 42,
+      clientSecretOpenAiProcessingMs: 12,
+      clientSecretEffectiveProfile: "matches",
     });
 
     expect(getStatus).toHaveBeenCalledWith({});

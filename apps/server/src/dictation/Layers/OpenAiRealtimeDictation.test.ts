@@ -15,11 +15,28 @@ const decoder = new TextDecoder();
 
 function makeTestLayer(
   response: (request: HttpClientRequest.HttpClientRequest) => Response = () =>
-    Response.json({
-      value: "ek_test_ephemeral_credential",
-      expires_at: Math.floor(Date.now() / 1_000) + 60,
-      session: { type: "transcription" },
-    }),
+    Response.json(
+      {
+        value: "ek_test_ephemeral_credential",
+        expires_at: Math.floor(Date.now() / 1_000) + 60,
+        session: {
+          type: "transcription",
+          audio: {
+            input: {
+              format: { type: "audio/pcm", rate: 24_000 },
+              transcription: { model: "gpt-live-transcribe" },
+              turn_detection: null,
+            },
+          },
+        },
+      },
+      {
+        headers: {
+          "openai-processing-ms": "12.4",
+          "x-request-id": "req_mint-safe_123",
+        },
+      },
+    ),
 ) {
   const secrets = new Map<string, Uint8Array>();
   const secretStore = {
@@ -99,6 +116,12 @@ describe("OpenAiRealtimeDictationLive", () => {
 
       assert.strictEqual(result.clientSecret, "ek_test_ephemeral_credential");
       assert.strictEqual(result.model, "gpt-live-transcribe");
+      assert.strictEqual(result.sessionProfile, "transcription_pcm24k_minimal_v1");
+      assert.strictEqual(result.clientSecretRequestId, "req_mint-safe_123");
+      assert.isDefined(result.clientSecretRequestDurationMs);
+      assert.isAtLeast(result.clientSecretRequestDurationMs ?? -1, 0);
+      assert.strictEqual(result.clientSecretOpenAiProcessingMs, 12);
+      assert.strictEqual(result.clientSecretEffectiveProfile, "matches");
       assert.isAbove(result.expiresAt, Math.floor(Date.now() / 1_000));
 
       const request = execute.mock.calls[0]?.[0];
@@ -117,8 +140,7 @@ describe("OpenAiRealtimeDictationLive", () => {
           audio: {
             input: {
               format: { type: "audio/pcm", rate: 24_000 },
-              noise_reduction: { type: "near_field" },
-              transcription: { model: "gpt-live-transcribe", delay: "low" },
+              transcription: { model: "gpt-live-transcribe" },
               turn_detection: null,
             },
           },
@@ -164,6 +186,55 @@ describe("OpenAiRealtimeDictationLive", () => {
     }).pipe(Effect.provide(malformed.layer));
   });
 
+  it.effect("reports an effective-profile mismatch without retaining provider payloads", () => {
+    const mismatched = makeTestLayer(() =>
+      Response.json({
+        value: "ek_test_ephemeral_credential",
+        expires_at: Math.floor(Date.now() / 1_000) + 60,
+        session: {
+          type: "transcription",
+          audio: {
+            input: {
+              format: { type: "audio/pcm", rate: 24_000 },
+              transcription: { model: "unexpected-provider-model" },
+              turn_detection: null,
+            },
+          },
+        },
+      }),
+    );
+    return Effect.gen(function* () {
+      const dictation = yield* OpenAiRealtimeDictation;
+      yield* dictation.setApiKey("sk-test-permanent");
+      const result = yield* dictation.createClientSecret({
+        safetyIdentifier: "session-digest",
+      });
+      assert.strictEqual(result.clientSecretEffectiveProfile, "model_mismatch");
+      assert.notInclude(JSON.stringify(result), "unexpected-provider-model");
+    }).pipe(Effect.provide(mismatched.layer));
+  });
+
+  it.effect("drops an upstream identifier that is not an OpenAI request id", () => {
+    const invalidRequestId = makeTestLayer(() =>
+      Response.json(
+        {
+          value: "ek_test_ephemeral_credential",
+          expires_at: Math.floor(Date.now() / 1_000) + 60,
+          session: { type: "transcription" },
+        },
+        { headers: { "x-request-id": "syntactically_safe_but_not_openai" } },
+      ),
+    );
+    return Effect.gen(function* () {
+      const dictation = yield* OpenAiRealtimeDictation;
+      yield* dictation.setApiKey("sk-test-permanent");
+      const result = yield* dictation.createClientSecret({
+        safetyIdentifier: "session-digest",
+      });
+      assert.strictEqual(result.clientSecretRequestId, null);
+    }).pipe(Effect.provide(invalidRequestId.layer));
+  });
+
   it.effect("stops reading oversized successful responses", () => {
     const oversized = makeTestLayer(() => new Response("x".repeat(65 * 1_024), { status: 200 }));
     return Effect.gen(function* () {
@@ -181,14 +252,14 @@ describe("OpenAiRealtimeDictationLive", () => {
     return Effect.gen(function* () {
       const dictation = yield* OpenAiRealtimeDictation;
       yield* dictation.setApiKey("sk-test-permanent");
-      for (let index = 0; index < 6; index += 1) {
+      for (let index = 0; index < 12; index += 1) {
         yield* dictation.createClientSecret({ safetyIdentifier: "same-session-digest" });
       }
       const error = yield* Effect.flip(
         dictation.createClientSecret({ safetyIdentifier: "same-session-digest" }),
       );
       assert.strictEqual(error.code, "rate_limited");
-      assert.strictEqual(execute.mock.calls.length, 6);
+      assert.strictEqual(execute.mock.calls.length, 12);
     }).pipe(Effect.provide(layer));
   });
 
