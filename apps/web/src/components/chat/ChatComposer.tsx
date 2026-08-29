@@ -131,6 +131,13 @@ import {
 const IMAGE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024))}MB`;
 
 const COMPOSER_PATH_QUERY_DEBOUNCE_MS = 120;
+// React clears a queued follow-up draft immediately after submit. Retain the
+// harmless Send affordance across the ordinary double-click/tap window so the
+// same pointer coordinates cannot turn into the destructive Stop action
+// between clicks. This state belongs to ChatComposer because mobile submission
+// swaps the keyboard overlay action for the footer action without unmounting
+// the composer itself.
+const POST_SUBMIT_INTERRUPT_GUARD_MS = 500;
 const EMPTY_PROJECT_ENTRIES: ProjectEntry[] = [];
 const COMPOSER_FLOATING_LAYER_SELECTOR = [
   '[data-slot="popover-popup"]',
@@ -246,9 +253,11 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   isConnecting: boolean;
   isEnvironmentUnavailable: boolean;
   hasSendableContent: boolean;
+  postSubmitInterruptGuardActive: boolean;
   pendingStatusLabel: string | null;
   dictationAction: ReactNode;
   preserveComposerFocusOnPointerDown?: boolean;
+  onArmPostSubmitInterruptGuard: () => void;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
@@ -276,7 +285,9 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         isEnvironmentUnavailable={props.isEnvironmentUnavailable}
         isPreparingWorktree={props.isPreparingWorktree}
         hasSendableContent={props.hasSendableContent}
+        postSubmitInterruptGuardActive={props.postSubmitInterruptGuardActive}
         preserveComposerFocusOnPointerDown={props.preserveComposerFocusOnPointerDown ?? false}
+        onArmPostSubmitInterruptGuard={props.onArmPostSubmitInterruptGuard}
         onPreviousPendingQuestion={props.onPreviousPendingQuestion}
         onInterrupt={props.onInterrupt}
         onImplementPlanInNewThread={props.onImplementPlanInNewThread}
@@ -1111,6 +1122,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
   const [isComposerFocused, setIsComposerFocused] = useState(false);
   const [composerFocusRequestRevision, setComposerFocusRequestRevision] = useState(0);
+  const [postSubmitInterruptGuardActive, setPostSubmitInterruptGuardActive] = useState(false);
   // Touch capability, not viewport width: foldables and tablets can be wider
   // than any phone breakpoint while still typing through an on-screen keyboard.
   const isOnScreenKeyboardDevice = useHasOnScreenKeyboard();
@@ -1153,6 +1165,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // double click from dispatching the same final transcript twice while the
   // microphone session is still committing its last audio buffer.
   const pendingDictationComposerActionRef = useRef<Promise<void> | null>(null);
+  const postSubmitInterruptGuardArmedRef = useRef(false);
+  const postSubmitInterruptGuardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ------------------------------------------------------------------
   // Derived: composer send state
@@ -1165,6 +1179,54 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }),
     [composerImages.length, prompt],
   );
+  const postSubmitInterruptGuardTarget =
+    routeKind === "draft"
+      ? `draft:${draftId ?? "none"}`
+      : `thread:${routeThreadRef.environmentId}:${routeThreadRef.threadId}`;
+  const armPostSubmitInterruptGuard = useCallback(() => {
+    if (phase !== "running" || !composerSendState.hasSendableContent) return;
+    if (postSubmitInterruptGuardTimerRef.current !== null) {
+      clearTimeout(postSubmitInterruptGuardTimerRef.current);
+      postSubmitInterruptGuardTimerRef.current = null;
+    }
+    postSubmitInterruptGuardArmedRef.current = true;
+    setPostSubmitInterruptGuardActive(true);
+  }, [composerSendState.hasSendableContent, phase]);
+  const settlePostSubmitInterruptGuard = useCallback(() => {
+    if (!postSubmitInterruptGuardArmedRef.current) return;
+    if (postSubmitInterruptGuardTimerRef.current !== null) {
+      clearTimeout(postSubmitInterruptGuardTimerRef.current);
+    }
+    // Start the click-safety window after the asynchronous submit settles.
+    // Mobile keeps its keyboard overlay mounted until then, so starting this
+    // timer from the original click could expire before the footer replaces it.
+    setPostSubmitInterruptGuardActive(true);
+    postSubmitInterruptGuardTimerRef.current = setTimeout(() => {
+      postSubmitInterruptGuardTimerRef.current = null;
+      postSubmitInterruptGuardArmedRef.current = false;
+      setPostSubmitInterruptGuardActive(false);
+    }, POST_SUBMIT_INTERRUPT_GUARD_MS);
+  }, []);
+
+  useEffect(() => {
+    // A guard belongs only to the stable route target that armed it. Clear it
+    // when navigation selects another target (not when provider lifecycle
+    // reconciliation transiently changes activeThreadId or phase),
+    // and clear the timer on unmount so it cannot update a retired composer.
+    if (postSubmitInterruptGuardTimerRef.current !== null) {
+      clearTimeout(postSubmitInterruptGuardTimerRef.current);
+      postSubmitInterruptGuardTimerRef.current = null;
+    }
+    postSubmitInterruptGuardArmedRef.current = false;
+    setPostSubmitInterruptGuardActive(false);
+    return () => {
+      if (postSubmitInterruptGuardTimerRef.current !== null) {
+        clearTimeout(postSubmitInterruptGuardTimerRef.current);
+        postSubmitInterruptGuardTimerRef.current = null;
+      }
+      postSubmitInterruptGuardArmedRef.current = false;
+    };
+  }, [postSubmitInterruptGuardTarget]);
   const selectedProviderDisplayName =
     selectedProviderEntry?.displayName ||
     selectedProviderStatus?.displayName?.trim() ||
@@ -1347,7 +1409,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       return `pending:${activePendingProgress.questionIndex}:${activePendingProgress.isLastQuestion}:${activePendingIsResponding}:dictation:${showComposerDictation}`;
     }
     if (phase === "running") {
-      return `running:dictation:${showComposerDictation}`;
+      return `running:${composerSendState.hasSendableContent}:${postSubmitInterruptGuardActive}:dictation:${showComposerDictation}`;
     }
     if (showPlanFollowUpPrompt) {
       return `${prompt.trim().length > 0 ? "plan:refine" : "plan:implement"}:dictation:${showComposerDictation}`;
@@ -1361,6 +1423,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isPreparingWorktree,
     isSendBusy,
     phase,
+    postSubmitInterruptGuardActive,
     prompt,
     showComposerDictation,
     showPlanFollowUpPrompt,
@@ -1999,7 +2062,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ) {
       activeElement.blur();
     }
-    setIsComposerFocused(false);
+    // Commit the collapsed state before any deferred focus work can run. This
+    // mirrors the synchronous expansion path and prevents a cleared mobile
+    // draft from repainting the keyboard overlay after its submit settles.
+    flushSync(() => {
+      setIsComposerFocused(false);
+    });
     mobileDebugLog("dismiss-keyboard", domSnapshot());
   }, []);
 
@@ -2041,12 +2109,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       if (pendingDictationComposerActionRef.current) return;
 
       const operation = (async () => {
-        // `finish` resolves only after OpenAI's authoritative final transcript
-        // has been applied through replaceComposerRange. Deferring `action`
-        // until then means onSend/onSteer re-read the final prompt rather than
-        // racing the interim text currently painted in the editor.
-        if (!(await finishComposerDictation())) return;
-        await action();
+        let actionStarted = false;
+        try {
+          // `finish` resolves only after OpenAI's authoritative final transcript
+          // has been applied through replaceComposerRange. Deferring `action`
+          // until then means onSend/onSteer re-read the final prompt rather than
+          // racing the interim text currently painted in the editor.
+          if (!(await finishComposerDictation())) return;
+          actionStarted = true;
+          await action();
+        } finally {
+          // A failed/cancelled finalization never reaches runSubmitComposer's
+          // own finally block. Settle any click guard here so a failed
+          // microphone handoff cannot hide Stop behind Queue indefinitely.
+          if (!actionStarted) {
+            settlePostSubmitInterruptGuard();
+          }
+        }
       })();
       pendingDictationComposerActionRef.current = operation;
       const clearOperation = () => {
@@ -2056,7 +2135,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       };
       void operation.then(clearOperation, clearOperation);
     },
-    [finishComposerDictation],
+    [finishComposerDictation, settlePostSubmitInterruptGuard],
   );
 
   const runSubmitComposer = useCallback(
@@ -2067,6 +2146,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         await onSend(event);
       } finally {
         mobileDebugLog("submit-settled", { keepKeyboardClosed, ...domSnapshot() });
+        settlePostSubmitInterruptGuard();
         if (keepKeyboardClosed) {
           dismissMobileComposerKeyboard();
         } else {
@@ -2074,7 +2154,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         }
       }
     },
-    [dismissMobileComposerKeyboard, isOnScreenKeyboardDevice, onSend, requestComposerEditorFocus],
+    [
+      dismissMobileComposerKeyboard,
+      isOnScreenKeyboardDevice,
+      onSend,
+      requestComposerEditorFocus,
+      settlePostSubmitInterruptGuard,
+    ],
   );
 
   const submitComposer = useCallback(
@@ -2699,7 +2785,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       isEnvironmentUnavailable={environmentUnavailable !== null}
                       isPreparingWorktree={false}
                       hasSendableContent={false}
+                      postSubmitInterruptGuardActive={postSubmitInterruptGuardActive}
                       preserveComposerFocusOnPointerDown
+                      onArmPostSubmitInterruptGuard={armPostSubmitInterruptGuard}
                       onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                       onInterrupt={handleInterruptPrimaryAction}
                       onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
@@ -2918,7 +3006,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     isEnvironmentUnavailable={environmentUnavailable !== null}
                     isPreparingWorktree={isPreparingWorktree}
                     hasSendableContent={composerSendState.hasSendableContent}
+                    postSubmitInterruptGuardActive={postSubmitInterruptGuardActive}
                     preserveComposerFocusOnPointerDown
+                    onArmPostSubmitInterruptGuard={armPostSubmitInterruptGuard}
                     onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                     onInterrupt={handleInterruptPrimaryAction}
                     onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
@@ -3082,9 +3172,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   isEnvironmentUnavailable={environmentUnavailable !== null}
                   isPreparingWorktree={isPreparingWorktree}
                   hasSendableContent={composerSendState.hasSendableContent}
+                  postSubmitInterruptGuardActive={postSubmitInterruptGuardActive}
                   pendingStatusLabel={composerPendingStatusLabel}
                   dictationAction={renderComposerDictationButton()}
                   preserveComposerFocusOnPointerDown
+                  onArmPostSubmitInterruptGuard={armPostSubmitInterruptGuard}
                   onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                   onInterrupt={handleInterruptPrimaryAction}
                   onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}

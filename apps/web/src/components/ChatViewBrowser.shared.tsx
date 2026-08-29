@@ -4279,6 +4279,154 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         await mounted.cleanup();
       }
     });
+
+    it("replaces Stop with Send while a running turn has a follow-up draft", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-user-running-follow-up-send" as MessageId,
+          targetText: "running follow-up send target",
+          sessionStatus: "running",
+        }),
+      });
+
+      try {
+        const initialStopButton = await waitForElement(
+          () => document.querySelector<HTMLButtonElement>('button[aria-label="Stop generation"]'),
+          "Unable to find the empty running composer Stop button.",
+        );
+        expect(initialStopButton.disabled).toBe(false);
+
+        useComposerDraftStore
+          .getState()
+          .setPrompt(THREAD_REF, "Queue this without interrupting the active turn");
+
+        const queueButton = await waitForElement(
+          () => document.querySelector<HTMLButtonElement>('button[aria-label="Queue message"]'),
+          "Unable to find the running composer Send button.",
+        );
+        expect(queueButton.disabled).toBe(false);
+        expect(
+          document.querySelector<HTMLButtonElement>('button[aria-label="Stop generation"]'),
+        ).toBeNull();
+
+        queueButton.click();
+
+        await vi.waitFor(
+          () => {
+            expect(document.querySelector('[data-cafe-followup-queue="true"]')).not.toBeNull();
+            expect(
+              useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.prompt ?? "",
+            ).toBe("");
+            const queuedGuardButton = document.querySelector<HTMLButtonElement>(
+              'button[aria-label="Queue message"]',
+            );
+            expect(queuedGuardButton).not.toBeNull();
+            expect(queuedGuardButton?.disabled).toBe(true);
+            expect(
+              document.querySelector<HTMLButtonElement>('button[aria-label="Stop generation"]'),
+            ).toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        // Exercise the control again during the double-click guard. A rapid
+        // second activation must remain harmless instead of landing on Stop.
+        document.querySelector<HTMLButtonElement>('button[aria-label="Queue message"]')?.click();
+        await waitForLayout();
+        expect(
+          wsRequests.some(
+            (request) =>
+              request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+              request.type === "thread.turn.interrupt",
+          ),
+        ).toBe(false);
+
+        await waitForElement(
+          () => document.querySelector<HTMLButtonElement>('button[aria-label="Stop generation"]'),
+          "Stop did not return after the post-send double-click guard elapsed.",
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("keeps Send guarded when a mobile follow-up collapses the keyboard overlay", async () => {
+      const restoreTouchMediaQuery = forceOnScreenKeyboardMediaQuery();
+      const mounted = await mountChatView({
+        viewport: COMPACT_FOOTER_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-user-mobile-running-follow-up-send" as MessageId,
+          targetText: "mobile running follow-up send target",
+          sessionStatus: "running",
+        }),
+      });
+
+      try {
+        useComposerDraftStore
+          .getState()
+          .setPrompt(THREAD_REF, "Queue this mobile follow-up without interrupting");
+
+        const expandButton = await waitForElement(
+          () => document.querySelector<HTMLButtonElement>('button[aria-label="Expand composer"]'),
+          "Unable to find the compact running composer expand button.",
+        );
+        expandButton.click();
+
+        const overlayQueueButton = await waitForElement(
+          () =>
+            document.querySelector<HTMLButtonElement>(
+              '[data-chat-composer-mobile-pending-actions="true"] button[aria-label="Queue message"]',
+            ),
+          "Unable to find the mobile keyboard overlay Send button.",
+        );
+        expect(
+          document.querySelector<HTMLButtonElement>(
+            '[data-chat-composer-mobile-pending-actions="true"] button[aria-label="Stop generation"]',
+          ),
+        ).toBeNull();
+
+        // Let the synchronous expand gesture release before exercising the
+        // next touch gesture, matching a real user tap after the keyboard has
+        // opened rather than compressing both gestures into one animation frame.
+        await waitForLayout();
+        overlayQueueButton.click();
+
+        const guardedFooterQueueButton = await waitForElement(() => {
+          const button = document.querySelector<HTMLButtonElement>(
+            '[data-chat-composer-actions="right"] button[aria-label="Queue message"]',
+          );
+          return button?.disabled ? button : null;
+        }, "The mobile footer did not preserve the guarded Send action after hiding the keyboard.");
+        expect(document.querySelector('[data-cafe-followup-queue="true"]')).not.toBeNull();
+        expect(useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.prompt ?? "").toBe(
+          "",
+        );
+        expect(
+          document.querySelector<HTMLButtonElement>('button[aria-label="Stop generation"]'),
+        ).toBeNull();
+
+        // A second activation at the same coordinates remains inert after the
+        // overlay-to-footer transition instead of interrupting the provider.
+        guardedFooterQueueButton.click();
+        await waitForLayout();
+        expect(
+          wsRequests.some(
+            (request) =>
+              request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+              request.type === "thread.turn.interrupt",
+          ),
+        ).toBe(false);
+
+        await waitForElement(
+          () => document.querySelector<HTMLButtonElement>('button[aria-label="Stop generation"]'),
+          "Stop did not return after the mobile post-send guard elapsed.",
+        );
+      } finally {
+        await mounted.cleanup();
+        restoreTouchMediaQuery();
+      }
+    });
   }
 
   if (chatViewBrowserPart === "navigation") {

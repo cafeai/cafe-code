@@ -4824,7 +4824,13 @@ export default function ChatView(props: ChatViewProps) {
     promptRef.current = "";
     clearComposerDraftContent(composerDraftTarget);
     composerRef.current?.resetCursorState();
-    scheduleComposerFocus();
+    // Desktop keeps its efficient type-send-type loop. On touch devices,
+    // however, the primary action intentionally dismisses the software
+    // keyboard after sending; scheduling focus here would race that dismissal
+    // and reopen the mobile composer over the newly queued message.
+    if (!hasOnScreenKeyboard) {
+      scheduleComposerFocus();
+    }
   };
 
   const restoreComposerSnapshotForRetry = (snapshot: ComposerSendSnapshot) => {
@@ -4859,12 +4865,6 @@ export default function ChatView(props: ChatViewProps) {
     }));
     setThreadError(activeThread.id, null);
     clearActiveComposerContent();
-    // On touch devices queueing comes from the send button while the agent
-    // runs; refocusing would reopen the on-screen keyboard the user just
-    // implicitly closed by sending.
-    if (!hasOnScreenKeyboard) {
-      scheduleComposerFocus();
-    }
   };
 
   const removeFollowUpQueueItem = (targetThreadId: ThreadId, itemId: string, revoke: boolean) => {

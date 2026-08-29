@@ -3,7 +3,6 @@ import { ChevronDownIcon, ChevronLeftIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
-import { useHasOnScreenKeyboard } from "../../hooks/useMediaQuery";
 
 interface PendingActionState {
   questionIndex: number;
@@ -24,7 +23,9 @@ interface ComposerPrimaryActionsProps {
   isEnvironmentUnavailable: boolean;
   isPreparingWorktree: boolean;
   hasSendableContent: boolean;
+  postSubmitInterruptGuardActive: boolean;
   preserveComposerFocusOnPointerDown?: boolean;
+  onArmPostSubmitInterruptGuard: () => void;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
@@ -63,12 +64,13 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   isEnvironmentUnavailable,
   isPreparingWorktree,
   hasSendableContent,
+  postSubmitInterruptGuardActive,
   preserveComposerFocusOnPointerDown = false,
+  onArmPostSubmitInterruptGuard,
   onPreviousPendingQuestion,
   onInterrupt,
   onImplementPlanInNewThread,
 }: ComposerPrimaryActionsProps) {
-  const isOnScreenKeyboardDevice = useHasOnScreenKeyboard();
   const pointerFocusProps = preserveComposerFocusOnPointerDown
     ? { onPointerDown: preventPointerFocus }
     : undefined;
@@ -125,32 +127,25 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   }
 
   if (isRunning) {
-    const stopButton = (
-      <button
-        type="button"
-        className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-rose-500/90 text-white transition-all duration-150 hover:bg-rose-500 hover:scale-105 sm:h-8 sm:w-8"
-        {...pointerFocusProps}
-        onClick={onInterrupt}
-        aria-label="Stop generation"
-      >
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
-          <rect x="2" y="2" width="8" height="8" rx="1.5" />
-        </svg>
-      </button>
-    );
-    // Desktop queues a follow-up with bare Enter; on touch devices Enter
-    // inserts a newline, so surface the queue action as its own button
-    // alongside stop whenever there is something to send.
-    if (!isOnScreenKeyboardDevice || !hasSendableContent) {
-      return stopButton;
-    }
-    return (
-      <div className="flex items-center justify-end gap-1.5">
+    // A sendable draft always wins the shared primary-action slot. Aside from
+    // preventing accidental interruption, this mirrors the established
+    // keyboard path: a normal submit during a running turn queues a follow-up;
+    // explicit steering and interruption remain separate user intents.
+    if (hasSendableContent || postSubmitInterruptGuardActive) {
+      // Do not disable the button merely because the click armed the guard:
+      // disabling a submit button during its click dispatch can suppress the
+      // browser's subsequent form-submit default action. Once submission
+      // clears the draft, the same guarded button becomes inert.
+      const sendTemporarilyGuarded = postSubmitInterruptGuardActive && !hasSendableContent;
+      return (
         <button
           type="submit"
           className="flex size-8 enabled:cursor-pointer items-center justify-center rounded-full bg-primary/90 text-primary-foreground transition-all duration-150 hover:bg-primary disabled:pointer-events-none disabled:opacity-30"
           {...pointerFocusProps}
-          disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
+          onClick={onArmPostSubmitInterruptGuard}
+          disabled={
+            isSendBusy || isConnecting || isEnvironmentUnavailable || sendTemporarilyGuarded
+          }
           aria-label="Queue message"
         >
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
@@ -163,8 +158,21 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
             />
           </svg>
         </button>
-        {stopButton}
-      </div>
+      );
+    }
+
+    return (
+      <button
+        type="button"
+        className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-rose-500/90 text-white transition-all duration-150 hover:bg-rose-500 hover:scale-105 sm:h-8 sm:w-8"
+        {...pointerFocusProps}
+        onClick={onInterrupt}
+        aria-label="Stop generation"
+      >
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
+          <rect x="2" y="2" width="8" height="8" rx="1.5" />
+        </svg>
+      </button>
     );
   }
 
