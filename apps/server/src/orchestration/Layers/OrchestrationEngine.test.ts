@@ -1,8 +1,13 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import {
   type ChatAttachment,
   CheckpointRef,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
+  EventId,
   MessageId,
   type OrchestrationCommand,
   ProjectId,
@@ -20,12 +25,20 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { describe, expect, it } from "vitest";
 
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
+import {
+  computeAttachmentContentSha256,
+  insertAttachmentContentCommitment,
+} from "../../attachmentContentCommitment.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import {
+  makeSqlitePersistenceLive,
+  SqlitePersistenceMemory,
+} from "../../persistence/Layers/Sqlite.ts";
 import {
   OrchestrationEventStore,
   type OrchestrationEventStoreShape,
@@ -61,16 +74,46 @@ async function createOrchestrationSystem() {
     Layer.provide(OrchestrationEventStoreLive),
     Layer.provide(OrchestrationCommandReceiptRepositoryLive),
     Layer.provide(RepositoryIdentityResolverLive),
-    Layer.provide(SqlitePersistenceMemory),
+    Layer.provideMerge(SqlitePersistenceMemory),
     Layer.provideMerge(ServerConfigLayer),
     Layer.provideMerge(NodeServices.layer),
   );
   const runtime = ManagedRuntime.make(orchestrationLayer);
   const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
   const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
+  const sql = await runtime.runPromise(Effect.service(SqlClient.SqlClient));
   return {
     engine,
+    sql,
     readModel: () => runtime.runPromise(snapshotQuery.getSnapshot()),
+    run: <A, E>(effect: Effect.Effect<A, E>) => runtime.runPromise(effect),
+    dispose: () => runtime.dispose(),
+  };
+}
+
+async function createPersistentOrchestrationSystem(dbPath: string, baseDir: string) {
+  const persistenceLayer = makeSqlitePersistenceLive(dbPath);
+  const serverConfigLayer = ServerConfig.layerTest(process.cwd(), baseDir);
+  const orchestrationLayer = Layer.mergeAll(
+    OrchestrationEngineLive.pipe(
+      Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+      Layer.provide(OrchestrationProjectionPipelineLive),
+    ),
+    OrchestrationProjectionSnapshotQueryLive,
+  ).pipe(
+    Layer.provide(OrchestrationEventStoreLive),
+    Layer.provide(OrchestrationCommandReceiptRepositoryLive),
+    Layer.provide(RepositoryIdentityResolverLive),
+    Layer.provideMerge(persistenceLayer),
+    Layer.provideMerge(serverConfigLayer),
+    Layer.provideMerge(NodeServices.layer),
+  );
+  const runtime = ManagedRuntime.make(orchestrationLayer);
+  const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
+  const sql = await runtime.runPromise(Effect.service(SqlClient.SqlClient));
+  return {
+    engine,
+    sql,
     run: <A, E>(effect: Effect.Effect<A, E>) => runtime.runPromise(effect),
     dispose: () => runtime.dispose(),
   };
@@ -209,6 +252,9 @@ describe("OrchestrationEngine", () => {
           getThreadCheckpointContext: () => Effect.succeed(Option.none()),
           getThreadShellById: () => Effect.succeed(Option.none()),
           getPostTerminalStaleSteerCandidateThreadIds: () => Effect.succeed([]),
+          getCodexSteerAcceptanceEvidence: () => Effect.succeed([]),
+          getUnsettledCodexSteerIntentEvents: () => Effect.succeed([]),
+          getCodexSteerIntentRecoveryBarriers: () => Effect.die("unused"),
           getThreadTurnActivityPage: () => Effect.die("unused"),
           getThreadTurnWorkLogPresence: () => Effect.die("unused"),
           hasThreadTurnSubagentActivity: () => Effect.die("unused"),
@@ -438,6 +484,14 @@ describe("OrchestrationEngine", () => {
     );
     expect(events.filter((event) => event.type === "thread.turn-start-requested")).toHaveLength(1);
     expect(events.filter((event) => event.type === "thread.turn-steer-requested")).toHaveLength(2);
+    expect(
+      events
+        .filter(
+          (event): event is Extract<OrchestrationEvent, { type: "thread.turn-steer-requested" }> =>
+            event.type === "thread.turn-steer-requested",
+        )
+        .map((event) => event.payload.expectedTurnId),
+    ).toEqual([null, null]);
     expect(events.filter((event) => event.type === "thread.message-sent")).toHaveLength(3);
     expect(
       events.find(
@@ -457,6 +511,483 @@ describe("OrchestrationEngine", () => {
     ).toBeNull();
 
     await system.dispose();
+  });
+
+  it("binds client MessageIds once while permitting one server-authorized exact steer retry", async () => {
+    const createdAt = now();
+    const system = await createOrchestrationSystem();
+    const { engine } = system;
+    const threadId = ThreadId.make("thread-message-identity");
+    const messageId = asMessageId("message-stable-retry");
+    const originalAttachment = {
+      type: "image" as const,
+      id: "attachment-original",
+      name: "evidence.png",
+      mimeType: "image/png",
+      sizeBytes: 512,
+    } as unknown as ChatAttachment;
+    const reuploadedAttachment = {
+      ...originalAttachment,
+      id: "attachment-reuploaded",
+      mimeType: "IMAGE/PNG",
+    } as unknown as ChatAttachment;
+    const changedBytesAttachment = {
+      ...originalAttachment,
+      id: "attachment-changed-bytes",
+    } as unknown as ChatAttachment;
+
+    await system.run(
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-project-message-identity"),
+        projectId: asProjectId("project-message-identity"),
+        title: "Message identity",
+        workspaceRoot: "/tmp/project-message-identity",
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        createdAt,
+      }),
+    );
+    await system.run(
+      engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-thread-message-identity"),
+        threadId,
+        projectId: asProjectId("project-message-identity"),
+        title: "Message identity",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      }),
+    );
+    const originalBytes = Buffer.alloc(originalAttachment.sizeBytes, 0x61);
+    const changedBytes = Buffer.alloc(originalAttachment.sizeBytes, 0x62);
+    await system.run(
+      Effect.forEach(
+        [originalAttachment, reuploadedAttachment],
+        (attachment) =>
+          insertAttachmentContentCommitment({
+            sql: system.sql,
+            attachmentId: attachment.id,
+            threadId,
+            contentSha256: computeAttachmentContentSha256(originalBytes),
+            sizeBytes: attachment.sizeBytes,
+          }),
+        { concurrency: 1, discard: true },
+      ),
+    );
+    await system.run(
+      insertAttachmentContentCommitment({
+        sql: system.sql,
+        attachmentId: changedBytesAttachment.id,
+        threadId,
+        contentSha256: computeAttachmentContentSha256(changedBytes),
+        sizeBytes: changedBytesAttachment.sizeBytes,
+      }),
+    );
+
+    const originalCommand = {
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-message-identity-original"),
+      threadId,
+      message: {
+        messageId,
+        role: "user",
+        text: "retry this exact input",
+        attachments: [originalAttachment],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required" as const,
+      createdAt: "2026-01-01T00:00:01.000Z",
+    } satisfies OrchestrationCommand;
+    const first = await system.run(engine.dispatch(originalCommand));
+    const exactReceiptReplay = await system.run(engine.dispatch(originalCommand));
+    expect(exactReceiptReplay).toEqual(first);
+
+    const unmarkedReuse = await system.run(
+      Effect.exit(
+        engine.dispatch({
+          ...originalCommand,
+          commandId: CommandId.make("cmd-message-identity-unmarked-reuse"),
+        }),
+      ),
+    );
+    expect(unmarkedReuse._tag).toBe("Failure");
+
+    const changedContentReuse = await system.run(
+      Effect.exit(
+        engine.dispatch({
+          ...originalCommand,
+          commandId: CommandId.make("cmd-message-identity-changed-content"),
+          message: {
+            ...originalCommand.message,
+            text: "replace the original input",
+          },
+        }),
+      ),
+    );
+    expect(changedContentReuse._tag).toBe("Failure");
+
+    await system.run(
+      engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("server:message-identity-retryable"),
+        threadId,
+        activity: {
+          id: EventId.make("activity-message-identity-retryable"),
+          tone: "info",
+          kind: "provider.turn.steer.failed",
+          summary: "Provider steer queued",
+          payload: {
+            provider: "codex",
+            messageId,
+            retryableFollowUp: true,
+          },
+          turnId: null,
+          createdAt: "2026-01-01T00:00:02.000Z",
+        },
+        createdAt: "2026-01-01T00:00:02.000Z",
+      }),
+    );
+
+    // Equal metadata cannot authorize different image bytes.
+    const changedBytesReuse = await system.run(
+      Effect.exit(
+        engine.dispatch({
+          ...originalCommand,
+          commandId: CommandId.make("cmd-message-identity-changed-bytes"),
+          message: {
+            ...originalCommand.message,
+            attachments: [changedBytesAttachment],
+          },
+          createdAt: "2026-01-01T00:00:02.500Z",
+        }),
+      ),
+    );
+    expect(changedBytesReuse._tag).toBe("Failure");
+
+    const authorizedRetry = await system.run(
+      engine.dispatch({
+        ...originalCommand,
+        commandId: CommandId.make("cmd-message-identity-authorized-retry"),
+        message: {
+          ...originalCommand.message,
+          attachments: [reuploadedAttachment],
+        },
+        createdAt: "2026-01-01T00:00:03.000Z",
+      }),
+    );
+    expect(authorizedRetry.sequence).toBeGreaterThan(first.sequence);
+
+    // The retry's new message event consumes the older failure marker, so a
+    // third command cannot replay the same identity before another failure.
+    const consumedMarkerReuse = await system.run(
+      Effect.exit(
+        engine.dispatch({
+          ...originalCommand,
+          commandId: CommandId.make("cmd-message-identity-consumed-marker"),
+          message: {
+            ...originalCommand.message,
+            attachments: [reuploadedAttachment],
+          },
+          createdAt: "2026-01-01T00:00:04.000Z",
+        }),
+      ),
+    );
+    expect(consumedMarkerReuse._tag).toBe("Failure");
+
+    await system.run(
+      engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("server:message-identity-second-retryable"),
+        threadId,
+        activity: {
+          id: EventId.make("activity-message-identity-second-retryable"),
+          tone: "info",
+          kind: "provider.turn.steer.failed",
+          summary: "Provider steer queued",
+          payload: {
+            provider: "codex",
+            messageId,
+            retryableFollowUp: true,
+          },
+          turnId: null,
+          createdAt: "2026-01-01T00:00:05.000Z",
+        },
+        createdAt: "2026-01-01T00:00:05.000Z",
+      }),
+    );
+    await system.run(
+      engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("server:message-identity-delivered"),
+        threadId,
+        activity: {
+          id: EventId.make("activity-message-identity-delivered"),
+          tone: "info",
+          kind: "provider.turn.steer.delivered",
+          summary: "Provider steer delivered",
+          payload: {
+            provider: "codex",
+            messageId,
+            delivery: "next-turn",
+          },
+          turnId: null,
+          createdAt: "2026-01-01T00:00:06.000Z",
+        },
+        createdAt: "2026-01-01T00:00:06.000Z",
+      }),
+    );
+    const deliveredReuse = await system.run(
+      Effect.exit(
+        engine.dispatch({
+          ...originalCommand,
+          commandId: CommandId.make("cmd-message-identity-after-delivery"),
+          message: {
+            ...originalCommand.message,
+            attachments: [reuploadedAttachment],
+          },
+          createdAt: "2026-01-01T00:00:07.000Z",
+        }),
+      ),
+    );
+    expect(deliveredReuse._tag).toBe("Failure");
+
+    // Internal terminal recovery is the only unconditional reuse path. The
+    // client schema cannot author terminalRecovery, and the server command is
+    // still protected by its deterministic receipt identity.
+    const terminalRecovery = await system.run(
+      engine.dispatch({
+        type: "thread.turn.steer",
+        commandId: CommandId.make("server:message-identity-terminal-recovery"),
+        threadId,
+        message: {
+          ...originalCommand.message,
+          attachments: [reuploadedAttachment],
+        },
+        terminalRecovery: {
+          staleTurnId: asTurnId("turn-message-identity-stale"),
+        },
+        createdAt: "2026-01-01T00:00:08.000Z",
+      }),
+    );
+    expect(terminalRecovery.sequence).toBeGreaterThan(authorizedRetry.sequence);
+
+    await system.dispose();
+  });
+
+  it("keeps attachment byte commitments across restart and fails legacy identities closed", async () => {
+    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "cafe-message-commitment-restart-"));
+    const dbPath = path.join(baseDir, "orchestration.sqlite");
+    const threadId = ThreadId.make("thread-message-commitment-restart");
+    const projectId = asProjectId("project-message-commitment-restart");
+    const attachmentBytes = Buffer.from("same immutable attachment bytes", "utf8");
+    const makeAttachment = (id: string): ChatAttachment =>
+      ({
+        type: "image",
+        id,
+        name: "restart.png",
+        mimeType: "image/png",
+        sizeBytes: attachmentBytes.byteLength,
+      }) as ChatAttachment;
+    const originalAttachment = makeAttachment("restart-attachment-original");
+    const reuploadedAttachment = makeAttachment("restart-attachment-reuploaded");
+    const legacyOriginalAttachment = makeAttachment("restart-attachment-legacy-original");
+    const legacyReuploadedAttachment = makeAttachment("restart-attachment-legacy-reuploaded");
+    let firstSystem: Awaited<ReturnType<typeof createPersistentOrchestrationSystem>> | undefined;
+    let secondSystem: Awaited<ReturnType<typeof createPersistentOrchestrationSystem>> | undefined;
+
+    try {
+      firstSystem = await createPersistentOrchestrationSystem(dbPath, baseDir);
+      await firstSystem.run(
+        firstSystem.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("cmd-project-message-commitment-restart"),
+          projectId,
+          title: "Message commitment restart",
+          workspaceRoot: "/tmp/project-message-commitment-restart",
+          defaultModelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          createdAt: now(),
+        }),
+      );
+      await firstSystem.run(
+        firstSystem.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-thread-message-commitment-restart"),
+          threadId,
+          projectId,
+          title: "Message commitment restart",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt: now(),
+        }),
+      );
+      await firstSystem.run(
+        insertAttachmentContentCommitment({
+          sql: firstSystem.sql,
+          attachmentId: originalAttachment.id,
+          threadId,
+          contentSha256: computeAttachmentContentSha256(attachmentBytes),
+          sizeBytes: attachmentBytes.byteLength,
+        }),
+      );
+
+      await firstSystem.run(
+        firstSystem.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-message-commitment-restart-original"),
+          threadId,
+          message: {
+            messageId: asMessageId("message-commitment-restart"),
+            role: "user",
+            text: "retry after restart",
+            attachments: [originalAttachment],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: "2026-01-01T00:01:00.000Z",
+        }),
+      );
+      await firstSystem.run(
+        firstSystem.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make("server:message-commitment-restart-retryable"),
+          threadId,
+          activity: {
+            id: EventId.make("activity-message-commitment-restart-retryable"),
+            tone: "info",
+            kind: "provider.turn.steer.failed",
+            summary: "Provider steer queued",
+            payload: {
+              provider: "codex",
+              messageId: asMessageId("message-commitment-restart"),
+              retryableFollowUp: true,
+            },
+            turnId: null,
+            createdAt: "2026-01-01T00:01:01.000Z",
+          },
+          createdAt: "2026-01-01T00:01:01.000Z",
+        }),
+      );
+
+      // Simulate an attachment written by an older Cafe build. Its metadata is
+      // durable, but no immutable content commitment exists to authorize reuse.
+      await firstSystem.run(
+        firstSystem.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-message-commitment-legacy-original"),
+          threadId,
+          message: {
+            messageId: asMessageId("message-commitment-legacy"),
+            role: "user",
+            text: "legacy attachment retry",
+            attachments: [legacyOriginalAttachment],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: "2026-01-01T00:01:02.000Z",
+        }),
+      );
+      await firstSystem.run(
+        firstSystem.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make("server:message-commitment-legacy-retryable"),
+          threadId,
+          activity: {
+            id: EventId.make("activity-message-commitment-legacy-retryable"),
+            tone: "info",
+            kind: "provider.turn.steer.failed",
+            summary: "Provider steer queued",
+            payload: {
+              provider: "codex",
+              messageId: asMessageId("message-commitment-legacy"),
+              retryableFollowUp: true,
+            },
+            turnId: null,
+            createdAt: "2026-01-01T00:01:03.000Z",
+          },
+          createdAt: "2026-01-01T00:01:03.000Z",
+        }),
+      );
+      await firstSystem.dispose();
+      firstSystem = undefined;
+
+      const restartedSystem = await createPersistentOrchestrationSystem(dbPath, baseDir);
+      secondSystem = restartedSystem;
+      await restartedSystem.run(
+        Effect.forEach(
+          [reuploadedAttachment, legacyReuploadedAttachment],
+          (attachment) =>
+            insertAttachmentContentCommitment({
+              sql: restartedSystem.sql,
+              attachmentId: attachment.id,
+              threadId,
+              contentSha256: computeAttachmentContentSha256(attachmentBytes),
+              sizeBytes: attachmentBytes.byteLength,
+            }),
+          { concurrency: 1, discard: true },
+        ),
+      );
+
+      const recovered = await restartedSystem.run(
+        restartedSystem.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-message-commitment-restart-retry"),
+          threadId,
+          message: {
+            messageId: asMessageId("message-commitment-restart"),
+            role: "user",
+            text: "retry after restart",
+            attachments: [reuploadedAttachment],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: "2026-01-01T00:01:04.000Z",
+        }),
+      );
+      expect(recovered.sequence).toBeGreaterThan(0);
+
+      const legacyRetry = await restartedSystem.run(
+        Effect.exit(
+          restartedSystem.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("cmd-message-commitment-legacy-retry"),
+            threadId,
+            message: {
+              messageId: asMessageId("message-commitment-legacy"),
+              role: "user",
+              text: "legacy attachment retry",
+              attachments: [legacyReuploadedAttachment],
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt: "2026-01-01T00:01:05.000Z",
+          }),
+        ),
+      );
+      expect(legacyRetry._tag).toBe("Failure");
+    } finally {
+      await firstSystem?.dispose();
+      await secondSystem?.dispose();
+      fs.rmSync(baseDir, { recursive: true, force: true });
+    }
   });
 
   it("routes a same-provider active turn into a steer but preserves a provider switch", async () => {
@@ -540,6 +1071,12 @@ describe("OrchestrationEngine", () => {
       ),
     );
     expect(events.filter((event) => event.type === "thread.turn-steer-requested")).toHaveLength(1);
+    expect(
+      events.find(
+        (event): event is Extract<OrchestrationEvent, { type: "thread.turn-steer-requested" }> =>
+          event.type === "thread.turn-steer-requested",
+      )?.payload.expectedTurnId,
+    ).toBe(activeTurnId);
     const routedMessage = events.find(
       (event): event is Extract<OrchestrationEvent, { type: "thread.message-sent" }> =>
         event.type === "thread.message-sent" &&

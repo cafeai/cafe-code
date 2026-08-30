@@ -4,6 +4,7 @@ import {
   ApprovalRequestId,
   EventId,
   IsoDateTime,
+  MessageId,
   ProviderItemId,
   ThreadId,
   TurnId,
@@ -114,6 +115,19 @@ export type ProviderSessionForkDiscardInput = typeof ProviderSessionForkDiscardI
 
 export const ProviderSendTurnInput = Schema.Struct({
   threadId: ThreadId,
+  // Cafe's durable message id is correlation metadata. ProviderService passes
+  // it only when an ordinary send is reconciled into an adapter-native live
+  // steer, allowing Codex to derive its bounded opaque client correlation id.
+  // Adapters that start a new turn do not forward this open-string value.
+  messageId: Schema.optional(MessageId),
+  // ProviderService normally reconciles a lagging projection by routing a
+  // send into the adapter's active-turn steer path. Terminal-steer recovery is
+  // different: its saved message is authorized only as a *new* turn after one
+  // exact terminal turn, so a concurrently appearing turn must make the send
+  // fail/queue instead of silently becoming the steer target. This field is an
+  // authenticated internal transport policy; omission preserves the normal
+  // live-steer fallback.
+  allowActiveTurnSteerFallback: Schema.optional(Schema.Boolean),
   input: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
   ),
@@ -128,6 +142,13 @@ export type ProviderSendTurnInput = typeof ProviderSendTurnInput.Type;
 export const ProviderSteerTurnInput = Schema.Struct({
   threadId: ThreadId,
   expectedTurnId: TurnId,
+  // Cafe's durable user-message identity is correlation metadata only. The
+  // Codex adapter derives a bounded opaque token before forwarding it as
+  // `clientUserMessageId`, so notification-before-ACK races and multiple
+  // steers on one turn can be settled without exposing this open-string id to
+  // provider-owned state. It is optional for adapters whose upstream protocol
+  // does not expose an equivalent correlation field.
+  messageId: Schema.optional(MessageId),
   input: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
   ),
@@ -140,6 +161,11 @@ export type ProviderSteerTurnInput = typeof ProviderSteerTurnInput.Type;
 export const ProviderTurnStartResult = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
+  // Present only when ProviderService reconciled sendTurn through a provider's
+  // native steer path. Keeping it in the shared result envelope lets the
+  // orchestration boundary durably correlate that accepted message without
+  // confusing the opaque provider token with Cafe's MessageId.
+  clientCorrelationId: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(512))),
   resumeCursor: Schema.optional(Schema.Unknown),
 });
 export type ProviderTurnStartResult = typeof ProviderTurnStartResult.Type;
@@ -147,6 +173,12 @@ export type ProviderTurnStartResult = typeof ProviderTurnStartResult.Type;
 export const ProviderTurnSteerResult = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
+  // Provider-specific opaque correlation returned after a successful steer.
+  // Consumers may persist and compare this value for exact equality, but must
+  // not interpret it as a Cafe MessageId or other user-controlled content.
+  // Bound the generic envelope even though Codex's current digest is 78 bytes,
+  // leaving room for future provider-native versioned token formats.
+  clientCorrelationId: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(512))),
   resumeCursor: Schema.optional(Schema.Unknown),
 });
 export type ProviderTurnSteerResult = typeof ProviderTurnSteerResult.Type;

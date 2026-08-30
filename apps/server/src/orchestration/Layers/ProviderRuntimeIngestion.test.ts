@@ -58,6 +58,11 @@ import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts"
 import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import {
+  buildCodexSteerAcceptedActivityCommand,
+  CODEX_TERMINAL_STEER_RECOVERY,
+} from "../codexSteerRecovery.ts";
+import { buildCodexSteerClientCorrelationId } from "../../provider/codexSteerCorrelation.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
 function makeTestServerSettingsLayer(overrides: Partial<ServerSettings> = {}) {
@@ -1724,6 +1729,134 @@ describe("ProviderRuntimeIngestion", () => {
     expect(matchingMessages).toHaveLength(1);
     expect(matchingMessages[0]?.text).toBe("hello");
     expect(matchingMessages[0]?.streaming).toBe(false);
+  });
+
+  it("recovers a trusted accepted steer exactly once across terminal replay", async () => {
+    const recoveryDispatches: OrchestrationCommand[] = [];
+    let captureRecoveryDispatches = false;
+    const harness = await createHarness({
+      dispatchGate: (command, dispatch) => {
+        if (captureRecoveryDispatches && command.type === "thread.turn.steer") {
+          recoveryDispatches.push(command);
+        }
+        return dispatch(command);
+      },
+    });
+    const threadId = asThreadId("thread-1");
+    const staleTurnId = asTurnId("turn-terminal-unprocessed-steer");
+    const messageId = asMessageId("user-message-terminal-unprocessed-steer");
+    const prompt = "private recovery prompt must not appear in runtime diagnostics";
+    const turnStartedAt = "2026-01-01T00:00:01.000Z";
+    const steerSubmittedAt = "2026-01-01T00:00:02.000Z";
+    const turnInterruptedAt = "2026-01-01T00:00:03.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-terminal-unprocessed-steer-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: turnStartedAt,
+      threadId,
+      turnId: staleTurnId,
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" && thread.session.activeTurnId === staleTurnId,
+    );
+
+    // Persist the original user message against the active turn, then record
+    // the trusted command-boundary acceptance that ProviderCommandReactor
+    // writes only after the provider service call returns successfully.
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.steer",
+        commandId: CommandId.make("cmd-original-terminal-unprocessed-steer"),
+        threadId,
+        message: {
+          messageId,
+          role: "user",
+          text: prompt,
+          attachments: [],
+        },
+        createdAt: steerSubmittedAt,
+      }),
+    );
+    await waitForThread(harness.readModel, (thread) =>
+      thread.messages.some((message) => message.id === messageId && message.turnId === staleTurnId),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch(
+        buildCodexSteerAcceptedActivityCommand({
+          threadId,
+          turnId: staleTurnId,
+          messageId,
+          createdAt: steerSubmittedAt,
+        }),
+      ),
+    );
+
+    const terminalEvent = {
+      type: "turn.completed",
+      eventId: asEventId("evt-terminal-unprocessed-steer-turn-interrupted"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: turnInterruptedAt,
+      threadId,
+      turnId: staleTurnId,
+      payload: { state: "interrupted" },
+    } as const;
+    captureRecoveryDispatches = true;
+    harness.emit(terminalEvent);
+    harness.emit(terminalEvent);
+    await harness.drain();
+
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.latestTurn?.turnId === staleTurnId &&
+        thread.latestTurn.state === "interrupted" &&
+        thread.session?.activeTurnId === null,
+    );
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity) =>
+          activity.kind === "runtime.warning" &&
+          activity.summary === "Steer continued as next turn" &&
+          (activity.payload as Readonly<Record<string, unknown>> | undefined)?.messageId ===
+            messageId,
+      ),
+    );
+    expect(recoveryDispatches).toHaveLength(1);
+    expect(recoveryDispatches[0]).toMatchObject({
+      type: "thread.turn.steer",
+      threadId,
+      message: {
+        messageId,
+        role: "user",
+        text: prompt,
+        attachments: [],
+      },
+      terminalRecovery: { staleTurnId },
+      createdAt: turnInterruptedAt,
+    });
+    expect(recoveryDispatches[0]?.commandId).toMatch(
+      /^server:terminal-unprocessed-codex-steer:[a-f0-9]{64}:dispatch$/,
+    );
+
+    const recoveryActivity = thread.activities.find(
+      (activity) =>
+        activity.kind === "runtime.warning" &&
+        activity.summary === "Steer continued as next turn" &&
+        (activity.payload as Readonly<Record<string, unknown>> | undefined)?.messageId ===
+          messageId,
+    );
+    expect(recoveryActivity?.kind).toBe("runtime.warning");
+    expect(recoveryActivity?.payload).toMatchObject({
+      recovery: CODEX_TERMINAL_STEER_RECOVERY,
+      messageId,
+      staleTurnId,
+    });
+    expect(JSON.stringify(recoveryActivity?.payload)).not.toContain(prompt);
   });
 
   it("deduplicates replayed buffered assistant deltas before finalization", async () => {
@@ -5169,6 +5302,258 @@ describe("ProviderRuntimeIngestion", () => {
         (entry: ProviderRuntimeTestProposedPlan) => entry.id === "plan:thread-1:turn:turn-task-1",
       )?.planMarkdown,
     ).toBe("# Plan title");
+  });
+
+  it("restores a restart-time Codex steer message id from exact accepted evidence", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-restarted-steer-accepted");
+    const messageId = asMessageId("message-restarted-steer-accepted");
+    const clientCorrelationId = buildCodexSteerClientCorrelationId(messageId);
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-restarted-steer-accepted-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId,
+      turnId,
+    });
+    await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === turnId);
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.steer",
+        commandId: CommandId.make("cmd-restarted-steer-accepted-intent"),
+        threadId,
+        message: {
+          messageId,
+          role: "user",
+          text: "sensitive steer text must not be copied into processing diagnostics",
+          attachments: [],
+        },
+        createdAt: "2026-01-01T00:00:02.000Z",
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch(
+        buildCodexSteerAcceptedActivityCommand({
+          threadId,
+          turnId,
+          messageId,
+          clientCorrelationId,
+          createdAt: "2026-01-01T00:00:02.100Z",
+        }),
+      ),
+    );
+
+    harness.emit({
+      type: "task.progress",
+      eventId: asEventId("evt-restarted-steer-accepted-processing"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId,
+      turnId,
+      payload: {
+        taskId: `codex-turn-steer-processing:${clientCorrelationId}`,
+        description: "Codex observed the correlated user item after runtime recovery.",
+        usage: {
+          clientCorrelationId,
+          providerUserMessageItemId: "provider-item-accepted",
+        },
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity) => activity.id === "evt-restarted-steer-accepted-processing",
+      ),
+    );
+    const activity = thread.activities.find(
+      (candidate) => candidate.id === "evt-restarted-steer-accepted-processing",
+    );
+    expect(activity?.payload).toMatchObject({
+      messageId,
+      usage: {
+        messageId,
+        clientCorrelationId,
+        providerUserMessageItemId: "provider-item-accepted",
+      },
+    });
+    expect(JSON.stringify(activity?.payload)).not.toContain("sensitive steer text");
+  });
+
+  it("restores a restart-time Codex steer message id from an exact unsettled intent", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-restarted-steer-unsettled");
+    const messageId = asMessageId("message-restarted-steer-unsettled");
+    const clientCorrelationId = buildCodexSteerClientCorrelationId(messageId);
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-restarted-steer-unsettled-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId,
+      turnId,
+    });
+    await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === turnId);
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.steer",
+        commandId: CommandId.make("cmd-restarted-steer-unsettled-intent"),
+        threadId,
+        message: {
+          messageId,
+          role: "user",
+          text: "unsettled prompt remains only in the canonical message projection",
+          attachments: [],
+        },
+        createdAt: "2026-01-01T00:00:02.000Z",
+      }),
+    );
+
+    harness.emit({
+      type: "task.progress",
+      eventId: asEventId("evt-restarted-steer-unsettled-processing"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId,
+      turnId,
+      payload: {
+        taskId: `codex-turn-steer-processing:${clientCorrelationId}`,
+        description: "Codex observed the correlated user item after runtime recovery.",
+        usage: {
+          clientCorrelationId,
+          providerUserMessageItemId: "provider-item-unsettled",
+        },
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity) => activity.id === "evt-restarted-steer-unsettled-processing",
+      ),
+    );
+    const activity = thread.activities.find(
+      (candidate) => candidate.id === "evt-restarted-steer-unsettled-processing",
+    );
+    expect(activity?.payload).toMatchObject({
+      messageId,
+      usage: {
+        messageId,
+        clientCorrelationId,
+        providerUserMessageItemId: "provider-item-unsettled",
+      },
+    });
+    expect(JSON.stringify(activity?.payload)).not.toContain("unsettled prompt");
+  });
+
+  it("fails closed for unrelated, cross-thread, and task-token-mismatched Codex progress", async () => {
+    const harness = await createHarness();
+    const sourceThreadId = asThreadId("thread-1");
+    const sourceTurnId = asTurnId("turn-restarted-steer-source");
+    const sourceMessageId = asMessageId("message-restarted-steer-source");
+    const sourceToken = buildCodexSteerClientCorrelationId(sourceMessageId);
+    const unrelatedToken = buildCodexSteerClientCorrelationId("unrelated-message");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-restarted-steer-source-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId: sourceThreadId,
+      turnId: sourceTurnId,
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.activeTurnId === sourceTurnId,
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.steer",
+        commandId: CommandId.make("cmd-restarted-steer-source-intent"),
+        threadId: sourceThreadId,
+        message: {
+          messageId: sourceMessageId,
+          role: "user",
+          text: "source thread only",
+          attachments: [],
+        },
+        createdAt: "2026-01-01T00:00:02.000Z",
+      }),
+    );
+
+    const crossThreadId = asThreadId("thread-2");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-restarted-steer-cross-thread-create"),
+        threadId: crossThreadId,
+        projectId: asProjectId("project-1"),
+        title: "Cross-thread correlation target",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt: "2026-01-01T00:00:02.100Z",
+      }),
+    );
+
+    const events = [
+      {
+        eventId: asEventId("evt-restarted-steer-unrelated-token"),
+        threadId: sourceThreadId,
+        turnId: sourceTurnId,
+        taskToken: unrelatedToken,
+        usageToken: unrelatedToken,
+      },
+      {
+        eventId: asEventId("evt-restarted-steer-conflicting-token"),
+        threadId: sourceThreadId,
+        turnId: sourceTurnId,
+        taskToken: unrelatedToken,
+        usageToken: sourceToken,
+      },
+      {
+        eventId: asEventId("evt-restarted-steer-cross-thread-token"),
+        threadId: crossThreadId,
+        turnId: asTurnId("turn-restarted-steer-cross-thread"),
+        taskToken: sourceToken,
+        usageToken: sourceToken,
+      },
+    ] as const;
+    for (const event of events) {
+      harness.emit({
+        type: "task.progress",
+        eventId: event.eventId,
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:03.000Z",
+        threadId: event.threadId,
+        turnId: event.turnId,
+        payload: {
+          taskId: `codex-turn-steer-processing:${event.taskToken}`,
+          description: "Untrusted correlation attempt.",
+          usage: { clientCorrelationId: event.usageToken },
+        },
+      });
+    }
+    await harness.drain();
+
+    const snapshot = await harness.readModel();
+    for (const event of events) {
+      const activity = snapshot.threads
+        .find((thread) => thread.id === event.threadId)
+        ?.activities.find((candidate) => candidate.id === event.eventId);
+      const payload = activity?.payload as Readonly<Record<string, unknown>> | undefined;
+      const usage = payload?.usage as Readonly<Record<string, unknown>> | undefined;
+      expect(payload?.messageId).toBeUndefined();
+      expect(usage?.messageId).toBeUndefined();
+    }
   });
 
   it("preserves structured subagent presentation across the durable task lifecycle", async () => {

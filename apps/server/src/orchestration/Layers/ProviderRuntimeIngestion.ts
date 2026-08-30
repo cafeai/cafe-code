@@ -32,6 +32,10 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { makeDrainableWorker } from "@cafecode/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import {
+  buildCodexSteerClientCorrelationId,
+  parseCodexSteerClientCorrelationId,
+} from "../../provider/codexSteerCorrelation.ts";
 import { ProjectionStateRepository } from "../../persistence/Services/ProjectionState.ts";
 import { ProjectionStateRepositoryLive } from "../../persistence/Layers/ProjectionState.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
@@ -56,6 +60,10 @@ import {
 } from "../providerAssistantCompletionText.ts";
 import { AssistantStreamTextCommitment } from "../providerAssistantStreamCommitment.ts";
 import { makeProviderTurnRecoveryEvidenceReader } from "../providerTurnRecoveryEvidence.ts";
+import {
+  buildTerminalCodexSteerRecoveryCommands,
+  codexSteerAcceptanceEvidenceFromProjection,
+} from "../codexSteerRecovery.ts";
 import { sanitizeProviderToolData } from "@cafecode/shared/activityPayloadSanitizer";
 import { ServerSettingsService } from "../../serverSettings.ts";
 
@@ -891,6 +899,45 @@ function runtimeEventToActivities(
   return [];
 }
 
+function readUnknownRecord(value: unknown): Readonly<Record<string, unknown>> | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Read Cafe's opaque Codex steer token only from the dedicated processing
+ * activity shape. A provider-controlled `usage` object can contain arbitrary
+ * fields, so knowing a valid token is not enough: the bounded task id must be
+ * derived from that same token before durable Cafe identities are restored.
+ */
+function readCodexSteerProcessingToken(event: ProviderRuntimeEvent): string | undefined {
+  if (event.provider !== "codex" || event.type !== "task.progress") {
+    return undefined;
+  }
+
+  const usage = readUnknownRecord(event.payload.usage);
+  if (usage === null) {
+    return undefined;
+  }
+
+  // Provider-owned diagnostics are never allowed to carry Cafe's raw,
+  // open-string MessageId. Reject legacy or forged mixed-identity payloads;
+  // the trusted orchestration reads below are the only reverse-map authority.
+  if (typeof usage.messageId === "string" && usage.messageId.length > 0) {
+    return undefined;
+  }
+
+  const token = parseCodexSteerClientCorrelationId(
+    typeof usage.clientCorrelationId === "string" ? usage.clientCorrelationId : undefined,
+  );
+  if (token === undefined || event.payload.taskId !== `codex-turn-steer-processing:${token}`) {
+    return undefined;
+  }
+  return token;
+}
+
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const orchestrationEngine = yield* OrchestrationEngineService;
@@ -901,6 +948,101 @@ const make = Effect.gen(function* () {
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
   const readProviderTurnRecoveryEvidence = yield* makeProviderTurnRecoveryEvidenceReader;
+
+  const enrichCodexSteerProcessingActivities = (
+    event: ProviderRuntimeEvent,
+    activities: ReadonlyArray<OrchestrationThreadActivity>,
+  ) => {
+    const clientCorrelationId = readCodexSteerProcessingToken(event);
+    if (clientCorrelationId === undefined) {
+      return Effect.succeed(activities);
+    }
+
+    return Effect.gen(function* () {
+      const eventTurnId = toTurnId(event.turnId);
+      const [acceptanceEvidence, unsettledIntents] = yield* Effect.all([
+        projectionSnapshotQuery.getCodexSteerAcceptanceEvidence({
+          threadId: event.threadId,
+          ...(eventTurnId !== undefined ? { acceptedTurnId: eventTurnId } : {}),
+        }),
+        projectionSnapshotQuery.getUnsettledCodexSteerIntentEvents({
+          threadId: event.threadId,
+        }),
+      ]);
+
+      // Keep candidates keyed by the exact Cafe entity id. The same original
+      // intent can appear in both reads during projection convergence, which
+      // is one identity rather than an ambiguity. Two different identities
+      // matching one token must fail closed, even though SHA-256 makes that
+      // condition computationally infeasible under honest persisted data.
+      const candidatesById = new Map<string, MessageId>();
+      for (const evidence of acceptanceEvidence) {
+        if (
+          evidence.threadId !== event.threadId ||
+          evidence.clientCorrelationId !== clientCorrelationId ||
+          buildCodexSteerClientCorrelationId(evidence.messageId) !== clientCorrelationId
+        ) {
+          continue;
+        }
+        candidatesById.set(evidence.messageId, evidence.messageId);
+      }
+      for (const intent of unsettledIntents) {
+        if (
+          intent.threadId !== event.threadId ||
+          buildCodexSteerClientCorrelationId(intent.messageId) !== clientCorrelationId
+        ) {
+          continue;
+        }
+        candidatesById.set(intent.messageId, intent.messageId);
+      }
+
+      if (candidatesById.size !== 1) {
+        return activities;
+      }
+      const messageId = candidatesById.values().next().value;
+      if (messageId === undefined) {
+        return activities;
+      }
+
+      return activities.map((activity): OrchestrationThreadActivity => {
+        if (activity.kind !== "task.progress") {
+          return activity;
+        }
+        const payload = readUnknownRecord(activity.payload);
+        const usage = readUnknownRecord(payload?.usage);
+        if (
+          payload === null ||
+          usage === null ||
+          payload.taskId !== `codex-turn-steer-processing:${clientCorrelationId}`
+        ) {
+          return activity;
+        }
+
+        // The raw MessageId is restored only in Cafe's canonical activity.
+        // Codex-owned runtime state, task ids, diagnostics, and logs retain the
+        // fixed-size opaque token across process restarts.
+        return {
+          ...activity,
+          payload: {
+            ...payload,
+            messageId,
+            usage: {
+              ...usage,
+              messageId,
+            },
+          },
+        };
+      });
+    }).pipe(
+      Effect.catchCause(() =>
+        Effect.logWarning("Codex restart steer correlation enrichment failed closed", {
+          threadId: event.threadId,
+          eventId: event.eventId,
+          turnId: event.turnId,
+        }).pipe(Effect.as(activities)),
+      ),
+    );
+  };
   let lastPersistedProviderDaemonCursor = 0;
   let pendingProviderDaemonCursor = 0;
   // Codex app-server owns goal continuation and emits the next turn itself.
@@ -2605,7 +2747,10 @@ const make = Effect.gen(function* () {
         }
       }
 
-      const activities = runtimeEventToActivities(event);
+      const activities = yield* enrichCodexSteerProcessingActivities(
+        event,
+        runtimeEventToActivities(event),
+      );
       yield* Effect.forEach(activities, (activity) =>
         orchestrationEngine.dispatch({
           type: "thread.activity.append",
@@ -2615,6 +2760,51 @@ const make = Effect.gen(function* () {
           createdAt: activity.createdAt,
         }),
       ).pipe(Effect.asVoid);
+
+      if (event.provider === "codex" && event.type === "turn.completed") {
+        const terminalTurnId = toTurnId(event.turnId);
+        if (terminalTurnId !== undefined) {
+          // Query exact durable evidence rather than the 500-row UI activity
+          // tail. Long tool-heavy turns can evict either acceptance or
+          // processing rows from that snapshot and must never change replay
+          // authority. The provider-owned active turn is read separately so a
+          // newer turn fences recovery before the guarded command is emitted.
+          const [projectionEvidence, providerSessionsOption] = yield* Effect.all([
+            projectionSnapshotQuery.getCodexSteerAcceptanceEvidence({
+              threadId: thread.id,
+              acceptedTurnId: terminalTurnId,
+            }),
+            providerService.listSessions().pipe(Effect.option),
+          ]);
+          if (Option.isNone(providerSessionsOption)) {
+            yield* Effect.logWarning(
+              "Codex terminal steer recovery skipped without provider session evidence",
+              {
+                threadId: thread.id,
+                terminalTurnId,
+              },
+            );
+            return;
+          }
+          const providerSessions = providerSessionsOption.value;
+          const providerSession = providerSessions.find(
+            (session) => session.threadId === thread.id,
+          );
+          const providerActiveTurnId =
+            providerSession?.status === "running" && providerSession.activeTurnId !== undefined
+              ? providerSession.activeTurnId
+              : null;
+          const recoveryCommands = buildTerminalCodexSteerRecoveryCommands({
+            evidence: projectionEvidence.map(codexSteerAcceptanceEvidenceFromProjection),
+            providerActiveTurnId,
+            createdAt: event.createdAt,
+          });
+          yield* Effect.forEach(recoveryCommands, orchestrationEngine.dispatch, {
+            concurrency: 1,
+            discard: true,
+          });
+        }
+      }
     });
 
   const processDomainEvent = (event: RuntimeIngestionDomainEvent) =>

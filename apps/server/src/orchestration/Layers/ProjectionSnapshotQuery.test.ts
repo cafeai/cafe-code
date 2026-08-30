@@ -17,6 +17,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIdentityResolver.ts";
 import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
+import { buildCodexSteerClientCorrelationId } from "../../provider/codexSteerCorrelation.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import {
   OrchestrationProjectionSnapshotQueryLive,
@@ -30,6 +31,7 @@ const asTurnId = (value: string): TurnId => TurnId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asEventId = (value: string): EventId => EventId.make(value);
 const asCheckpointRef = (value: string): CheckpointRef => CheckpointRef.make(value);
+const codexClientCorrelationId = `cafe-steer-v1:${"a".repeat(64)}`;
 
 const projectionSnapshotLayer = it.layer(
   OrchestrationProjectionSnapshotQueryLive.pipe(
@@ -1510,17 +1512,21 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
-  it.effect("prefilters only terminal Codex threads with post-completion user messages", () =>
-    Effect.gen(function* () {
-      const snapshotQuery = yield* ProjectionSnapshotQuery;
-      const sql = yield* SqlClient.SqlClient;
+  it.effect(
+    "prefilters terminal Codex threads with legacy or trusted accepted-steer evidence",
+    () =>
+      Effect.gen(function* () {
+        const snapshotQuery = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
 
-      yield* sql`DELETE FROM projection_thread_messages`;
-      yield* sql`DELETE FROM projection_thread_sessions`;
-      yield* sql`DELETE FROM projection_turns`;
-      yield* sql`DELETE FROM projection_threads`;
+        yield* sql`DELETE FROM orchestration_events`;
+        yield* sql`DELETE FROM projection_thread_messages`;
+        yield* sql`DELETE FROM projection_thread_activities`;
+        yield* sql`DELETE FROM projection_thread_sessions`;
+        yield* sql`DELETE FROM projection_turns`;
+        yield* sql`DELETE FROM projection_threads`;
 
-      yield* sql`
+        yield* sql`
         INSERT INTO projection_threads (
           thread_id,
           project_id,
@@ -1574,7 +1580,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           )
       `;
 
-      yield* sql`
+        yield* sql`
         INSERT INTO projection_turns (
           thread_id,
           turn_id,
@@ -1617,7 +1623,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           )
       `;
 
-      yield* sql`
+        yield* sql`
         INSERT INTO projection_thread_sessions (
           thread_id,
           status,
@@ -1636,7 +1642,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           ('thread-archived-post-completion', 'ready', 'codex', 'codex', 'full-access', NULL, NULL, '2026-07-14T00:00:10.000Z')
       `;
 
-      yield* sql`
+        yield* sql`
         INSERT INTO projection_thread_messages (
           message_id,
           thread_id,
@@ -1655,10 +1661,1340 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           ('message-archived-post-completion', 'thread-archived-post-completion', 'turn-archived-post-completion', 'user', 'archived', 0, '2026-07-14T00:00:11.000Z', '2026-07-14T00:00:11.000Z')
       `;
 
-      assert.deepStrictEqual(yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(), [
-        ThreadId.make("thread-stale-steer-candidate"),
-      ]);
-    }),
+        assert.deepStrictEqual(yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(), [
+          ThreadId.make("thread-stale-steer-candidate"),
+        ]);
+
+        yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        )
+        VALUES (
+          'accepted-steer-before-completion',
+          'thread-message-before-completion',
+          'turn-message-before-completion',
+          'info',
+          'provider.turn.steer.accepted',
+          'Steer accepted',
+          '{"provider":"codex","messageId":"message-before-completion","acceptedTurnId":"turn-message-before-completion"}',
+          NULL,
+          '2026-07-14T00:00:09.500Z'
+        )
+      `;
+        yield* sql`
+        INSERT INTO orchestration_events (
+          event_id,
+          aggregate_kind,
+          stream_id,
+          stream_version,
+          event_type,
+          occurred_at,
+          command_id,
+          causation_event_id,
+          correlation_id,
+          actor_kind,
+          payload_json,
+          metadata_json
+        )
+        VALUES (
+          'event-accepted-steer-before-completion',
+          'thread',
+          'thread-message-before-completion',
+          0,
+          'thread.activity-appended',
+          '2026-07-14T00:00:09.500Z',
+          'server:codex-steer-accepted:thread-message-before-completion:turn-message-before-completion:message-before-completion',
+          NULL,
+          'server:codex-steer-accepted:thread-message-before-completion:turn-message-before-completion:message-before-completion',
+          'server',
+          '{"threadId":"thread-message-before-completion","activity":{"id":"accepted-steer-before-completion","tone":"info","kind":"provider.turn.steer.accepted","summary":"Steer accepted","payload":{"provider":"codex","messageId":"message-before-completion","acceptedTurnId":"turn-message-before-completion"},"turnId":"turn-message-before-completion","createdAt":"2026-07-14T00:00:09.500Z"}}',
+          '{}'
+        )
+      `;
+        assert.deepStrictEqual(yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(), [
+          ThreadId.make("thread-message-before-completion"),
+          ThreadId.make("thread-stale-steer-candidate"),
+        ]);
+
+        yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        )
+        VALUES (
+          'processed-steer-before-completion',
+          'thread-message-before-completion',
+          'turn-message-before-completion',
+          'info',
+          'task.progress',
+          'Reasoning update',
+          '{"taskId":"codex-turn-steer-processing:message-before-completion","usage":{"messageId":"message-before-completion"}}',
+          NULL,
+          '2026-07-14T00:00:09.750Z'
+        )
+      `;
+        assert.deepStrictEqual(yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(), [
+          ThreadId.make("thread-stale-steer-candidate"),
+        ]);
+      }),
+  );
+
+  it.effect(
+    "reads unbounded exact Codex steer evidence across retargeting, newer turns, and interrupts",
+    () =>
+      Effect.gen(function* () {
+        const snapshotQuery = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+
+        yield* sql`DELETE FROM orchestration_events`;
+        yield* sql`DELETE FROM projection_thread_messages`;
+        yield* sql`DELETE FROM projection_thread_activities`;
+        yield* sql`DELETE FROM projection_thread_sessions`;
+        yield* sql`DELETE FROM projection_turns`;
+        yield* sql`DELETE FROM projection_threads`;
+
+        yield* sql`
+        INSERT INTO projection_threads (
+          thread_id,
+          project_id,
+          title,
+          model_selection_json,
+          runtime_mode,
+          interaction_mode,
+          branch,
+          worktree_path,
+          latest_turn_id,
+          latest_user_message_at,
+          pending_approval_count,
+          pending_user_input_count,
+          has_actionable_proposed_plan,
+          created_at,
+          updated_at,
+          archived_at,
+          deleted_at
+        )
+        VALUES (
+          'thread-historical-steer',
+          'project-stale-steer',
+          'Historical steer',
+          '{"provider":"codex","model":"gpt-5-codex"}',
+          'full-access',
+          'default',
+          NULL,
+          NULL,
+          'turn-newer-latest',
+          '2026-08-30T12:10:00.000Z',
+          0,
+          0,
+          0,
+          '2026-08-30T12:00:00.000Z',
+          '2026-08-30T12:10:00.000Z',
+          NULL,
+          NULL
+        )
+      `;
+
+        yield* sql`
+        INSERT INTO projection_turns (
+          thread_id,
+          turn_id,
+          pending_message_id,
+          assistant_message_id,
+          state,
+          requested_at,
+          started_at,
+          completed_at,
+          checkpoint_turn_count,
+          checkpoint_ref,
+          checkpoint_status,
+          checkpoint_files_json
+        )
+        VALUES
+          (
+            'thread-historical-steer', 'turn-retargeted-acceptance', NULL, NULL,
+            'interrupted', '2026-08-30T12:00:01.000Z', '2026-08-30T12:00:02.000Z',
+            '2026-08-30T12:00:05.000Z', NULL, NULL, NULL, '[]'
+          ),
+          (
+            'thread-historical-steer', 'turn-processed-acceptance', NULL, NULL,
+            'completed', '2026-08-30T12:01:01.000Z', '2026-08-30T12:01:02.000Z',
+            '2026-08-30T12:01:05.000Z', NULL, NULL, NULL, '[]'
+          ),
+          (
+            'thread-historical-steer', 'turn-newer-latest', NULL, NULL,
+            'running', '2026-08-30T12:10:00.000Z', '2026-08-30T12:10:01.000Z',
+            NULL, NULL, NULL, NULL, '[]'
+          )
+      `;
+
+        yield* sql`
+        INSERT INTO projection_thread_sessions (
+          thread_id,
+          status,
+          provider_name,
+          provider_instance_id,
+          runtime_mode,
+          active_turn_id,
+          last_error,
+          updated_at
+        )
+        VALUES (
+          'thread-historical-steer',
+          'running',
+          'codex',
+          'codex',
+          'full-access',
+          'turn-newer-latest',
+          NULL,
+          '2026-08-30T12:10:01.000Z'
+        )
+      `;
+
+        // The first message was retargeted to the newer turn after its
+        // acceptance. Evidence identity remains the accepted activity's
+        // thread + message id, not the mutable message turn assignment.
+        yield* sql`
+        INSERT INTO projection_thread_messages (
+          message_id,
+          thread_id,
+          turn_id,
+          role,
+          text,
+          attachments_json,
+          is_streaming,
+          created_at,
+          updated_at
+        )
+        VALUES
+          (
+            'message-retargeted', 'thread-historical-steer', 'turn-newer-latest', 'user',
+            'retargeted private prompt',
+            '[{"type":"image","id":"attachment-retargeted","name":"retargeted.png","mimeType":"image/png","sizeBytes":1}]',
+            0, '2026-08-30T12:00:03.000Z', '2026-08-30T12:10:00.000Z'
+          ),
+          (
+            'message-processed', 'thread-historical-steer', 'turn-processed-acceptance', 'user',
+            'already processed prompt', NULL,
+            0, '2026-08-30T12:01:03.000Z', '2026-08-30T12:01:03.000Z'
+          ),
+          (
+            'message-forged', 'thread-historical-steer', 'turn-retargeted-acceptance', 'user',
+            'forged provider acceptance', NULL,
+            0, '2026-08-30T12:00:03.500Z', '2026-08-30T12:00:03.500Z'
+          )
+      `;
+
+        yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        )
+        VALUES
+          (
+            'accepted-retargeted', 'thread-historical-steer', 'turn-retargeted-acceptance',
+            'info', 'provider.turn.steer.accepted', 'Steer accepted',
+            ${JSON.stringify({
+              provider: "codex",
+              messageId: "message-retargeted",
+              acceptedTurnId: "turn-retargeted-acceptance",
+              clientCorrelationId: codexClientCorrelationId,
+            })},
+            1, '2026-08-30T12:00:03.100Z'
+          ),
+          (
+            'accepted-processed', 'thread-historical-steer', 'turn-processed-acceptance',
+            'info', 'provider.turn.steer.accepted', 'Steer accepted',
+            '{"provider":"codex","messageId":"message-processed","acceptedTurnId":"turn-processed-acceptance"}',
+            2, '2026-08-30T12:01:03.100Z'
+          ),
+          (
+            'accepted-forged', 'thread-historical-steer', 'turn-retargeted-acceptance',
+            'info', 'provider.turn.steer.accepted', 'Steer accepted',
+            '{"provider":"codex","messageId":"message-forged","acceptedTurnId":"turn-retargeted-acceptance"}',
+            3, '2026-08-30T12:00:03.600Z'
+          ),
+          (
+            'processing-wrong-usage', 'thread-historical-steer', 'turn-retargeted-acceptance',
+            'info', 'task.progress', 'Reasoning update',
+            ${JSON.stringify({
+              taskId: `codex-turn-steer-processing:${codexClientCorrelationId}`,
+              usage: {
+                messageId: "another-message",
+                clientCorrelationId: codexClientCorrelationId,
+              },
+            })},
+            4, '2026-08-30T12:00:04.000Z'
+          ),
+          (
+            'processing-wrong-turn', 'thread-historical-steer', 'turn-newer-latest',
+            'info', 'task.progress', 'Reasoning update',
+            ${JSON.stringify({
+              taskId: `codex-turn-steer-processing:${codexClientCorrelationId}`,
+              usage: {
+                messageId: "message-retargeted",
+                clientCorrelationId: codexClientCorrelationId,
+              },
+            })},
+            5, '2026-08-30T12:10:02.000Z'
+          ),
+          (
+            'processing-wrong-token', 'thread-historical-steer', 'turn-retargeted-acceptance',
+            'info', 'task.progress', 'Reasoning update',
+            ${JSON.stringify({
+              taskId: `codex-turn-steer-processing:cafe-steer-v1:${"b".repeat(64)}`,
+              usage: {
+                messageId: "message-retargeted",
+                clientCorrelationId: `cafe-steer-v1:${"b".repeat(64)}`,
+              },
+            })},
+            7, '2026-08-30T12:00:04.100Z'
+          ),
+          (
+            'processing-exact', 'thread-historical-steer', 'turn-processed-acceptance',
+            'info', 'task.progress', 'Reasoning update',
+            '{"taskId":"codex-turn-steer-processing:message-processed","usage":{"messageId":"message-processed"}}',
+            6, '2026-08-30T12:01:04.000Z'
+          )
+      `;
+
+        // Push both accepted rows far outside the bounded detail activity tail.
+        yield* sql`
+        WITH RECURSIVE activity_counter(value) AS (
+          SELECT 1
+          UNION ALL
+          SELECT value + 1 FROM activity_counter WHERE value < 650
+        )
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        )
+        SELECT
+          'later-noise-' || value,
+          'thread-historical-steer',
+          'turn-newer-latest',
+          'info',
+          'tool.updated',
+          'Later bounded-history noise',
+          '{}',
+          1000 + value,
+          '2026-08-30T12:20:00.000Z'
+        FROM activity_counter
+      `;
+
+        yield* sql`
+        INSERT INTO orchestration_events (
+          event_id,
+          aggregate_kind,
+          stream_id,
+          stream_version,
+          event_type,
+          occurred_at,
+          command_id,
+          causation_event_id,
+          correlation_id,
+          actor_kind,
+          payload_json,
+          metadata_json
+        )
+        VALUES
+          (
+            'event-accepted-retargeted', 'thread', 'thread-historical-steer', 0,
+            'thread.activity-appended', '2026-08-30T12:00:03.100Z',
+            'server:accepted-retargeted', NULL, 'server:accepted-retargeted', 'server',
+            ${JSON.stringify({
+              threadId: "thread-historical-steer",
+              activity: {
+                id: "accepted-retargeted",
+                tone: "info",
+                kind: "provider.turn.steer.accepted",
+                summary: "Steer accepted",
+                payload: {
+                  provider: "codex",
+                  messageId: "message-retargeted",
+                  acceptedTurnId: "turn-retargeted-acceptance",
+                  clientCorrelationId: codexClientCorrelationId,
+                },
+                turnId: "turn-retargeted-acceptance",
+                createdAt: "2026-08-30T12:00:03.100Z",
+              },
+            })},
+            '{}'
+          ),
+          (
+            'event-accepted-processed', 'thread', 'thread-historical-steer', 1,
+            'thread.activity-appended', '2026-08-30T12:01:03.100Z',
+            'server:accepted-processed', NULL, 'server:accepted-processed', 'server',
+            '{"threadId":"thread-historical-steer","activity":{"id":"accepted-processed","tone":"info","kind":"provider.turn.steer.accepted","summary":"Steer accepted","payload":{"provider":"codex","messageId":"message-processed","acceptedTurnId":"turn-processed-acceptance"},"turnId":"turn-processed-acceptance","createdAt":"2026-08-30T12:01:03.100Z"}}',
+            '{}'
+          ),
+          (
+            'event-accepted-forged', 'thread', 'thread-historical-steer', 2,
+            'thread.activity-appended', '2026-08-30T12:00:03.600Z',
+            'provider:accepted-forged', NULL, 'provider:accepted-forged', 'provider',
+            '{"threadId":"thread-historical-steer","activity":{"id":"accepted-forged","tone":"info","kind":"provider.turn.steer.accepted","summary":"Steer accepted","payload":{"provider":"codex","messageId":"message-forged","acceptedTurnId":"turn-retargeted-acceptance"},"turnId":"turn-retargeted-acceptance","createdAt":"2026-08-30T12:00:03.600Z"}}',
+            '{}'
+          ),
+          (
+            'event-exact-manual-interrupt', 'thread', 'thread-historical-steer', 3,
+            'thread.turn-interrupt-requested', '2026-08-30T12:00:04.500Z',
+            'client:manual-stop', NULL, 'client:manual-stop', 'client',
+            '{"threadId":"thread-historical-steer","turnId":"turn-retargeted-acceptance","createdAt":"2026-08-30T12:00:04.500Z"}',
+            '{}'
+          ),
+          (
+            'event-wrong-turn-interrupt', 'thread', 'thread-historical-steer', 4,
+            'thread.turn-interrupt-requested', '2026-08-30T12:10:03.000Z',
+            'client:wrong-turn-stop', NULL, 'client:wrong-turn-stop', 'client',
+            '{"threadId":"thread-historical-steer","turnId":"turn-newer-latest","createdAt":"2026-08-30T12:10:03.000Z"}',
+            '{}'
+          ),
+          (
+            'event-forged-session-stop', 'thread', 'thread-historical-steer', 50000,
+            'thread.session-stop-requested', '2026-08-30T12:00:04.750Z',
+            'provider:forged-session-stop', NULL, 'provider:forged-session-stop', 'provider',
+            '{"threadId":"thread-historical-steer","createdAt":"2026-08-30T12:00:04.750Z"}',
+            '{}'
+          ),
+          (
+            'event-exact-session-stop', 'thread', 'thread-historical-steer', 50001,
+            'thread.session-stop-requested', '2026-08-30T12:00:05.000Z',
+            'client:session-stop', NULL, 'client:session-stop', 'client',
+            '{"threadId":"thread-historical-steer","createdAt":"2026-08-30T12:00:05.000Z"}',
+            '{}'
+          )
+      `;
+
+        const evidence = yield* snapshotQuery.getCodexSteerAcceptanceEvidence({
+          threadId: ThreadId.make("thread-historical-steer"),
+        });
+        assert.equal(evidence.length, 2);
+        const retargetedEvidence = evidence[0];
+        const processedEvidence = evidence[1];
+        assert.ok(retargetedEvidence);
+        assert.ok(processedEvidence);
+        assert.deepStrictEqual(retargetedEvidence, {
+          threadId: ThreadId.make("thread-historical-steer"),
+          acceptedTurnId: TurnId.make("turn-retargeted-acceptance"),
+          clientCorrelationId: codexClientCorrelationId,
+          messageId: MessageId.make("message-retargeted"),
+          messageTurnId: TurnId.make("turn-newer-latest"),
+          messageText: "retargeted private prompt",
+          messageAttachments: [
+            {
+              type: "image",
+              id: "attachment-retargeted",
+              name: "retargeted.png",
+              mimeType: "image/png",
+              sizeBytes: 1,
+            },
+          ],
+          acceptedAt: "2026-08-30T12:00:03.100Z",
+          turnState: "interrupted",
+          turnCompletedAt: "2026-08-30T12:00:05.000Z",
+          processingObserved: false,
+          recoveryObserved: false,
+          interruptRequested: true,
+          sessionStopRequested: true,
+        });
+        assert.deepStrictEqual(processedEvidence, {
+          threadId: ThreadId.make("thread-historical-steer"),
+          acceptedTurnId: TurnId.make("turn-processed-acceptance"),
+          clientCorrelationId: null,
+          messageId: MessageId.make("message-processed"),
+          messageTurnId: TurnId.make("turn-processed-acceptance"),
+          messageText: "already processed prompt",
+          messageAttachments: [],
+          acceptedAt: "2026-08-30T12:01:03.100Z",
+          turnState: "completed",
+          turnCompletedAt: "2026-08-30T12:01:05.000Z",
+          processingObserved: true,
+          recoveryObserved: false,
+          interruptRequested: false,
+          sessionStopRequested: true,
+        });
+
+        // Exact optional filters do not broaden to another message or turn.
+        assert.deepStrictEqual(
+          yield* snapshotQuery.getCodexSteerAcceptanceEvidence({
+            threadId: ThreadId.make("thread-historical-steer"),
+            acceptedTurnId: TurnId.make("turn-retargeted-acceptance"),
+            messageId: MessageId.make("message-retargeted"),
+          }),
+          [retargetedEvidence],
+        );
+        assert.deepStrictEqual(
+          yield* snapshotQuery.getCodexSteerAcceptanceEvidence({
+            threadId: ThreadId.make("thread-historical-steer"),
+            acceptedTurnId: TurnId.make("turn-retargeted-acceptance"),
+            messageId: MessageId.make("message-processed"),
+          }),
+          [],
+        );
+
+        // The candidate scan includes historical terminal evidence even when
+        // a newer turn is latest/running. Manual interrupt remains a candidate
+        // fact so startup can move it to the retryable queue instead of replay.
+        assert.deepStrictEqual(yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(), [
+          ThreadId.make("thread-historical-steer"),
+        ]);
+
+        const recoveredPayload = {
+          provider: "codex",
+          messageId: "message-retargeted",
+          acceptedTurnId: "turn-retargeted-acceptance",
+          recoveredTurnId: "turn-newer-latest",
+          clientCorrelationId: codexClientCorrelationId,
+        };
+        const recoveredEventPayload = {
+          threadId: "thread-historical-steer",
+          activity: {
+            id: "recovered-retargeted",
+            tone: "info",
+            kind: "provider.turn.steer.recovered",
+            summary: "Steer recovered",
+            payload: recoveredPayload,
+            turnId: "turn-newer-latest",
+            createdAt: "2026-08-30T12:11:00.000Z",
+          },
+        };
+        yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        )
+        VALUES (
+          'recovered-retargeted', 'thread-historical-steer', 'turn-newer-latest',
+          'info', 'provider.turn.steer.recovered', 'Steer recovered',
+          ${JSON.stringify(recoveredPayload)}, 1998, '2026-08-30T12:11:00.000Z'
+        )
+      `;
+        yield* sql`
+        INSERT INTO orchestration_events (
+          event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+          command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json
+        )
+        VALUES (
+          'event-forged-recovered-retargeted', 'thread', 'thread-historical-steer', 5,
+          'thread.activity-appended', '2026-08-30T12:11:00.000Z',
+          'provider:forged-recovered', NULL, 'provider:forged-recovered', 'provider',
+          ${JSON.stringify(recoveredEventPayload)}, '{}'
+        )
+      `;
+
+        // A provider-authored lookalike cannot suppress recovery or become a
+        // durable second-restart receipt.
+        const forgedRecoveryEvidence = yield* snapshotQuery.getCodexSteerAcceptanceEvidence({
+          threadId: ThreadId.make("thread-historical-steer"),
+          acceptedTurnId: TurnId.make("turn-retargeted-acceptance"),
+          messageId: MessageId.make("message-retargeted"),
+        });
+        assert.equal(forgedRecoveryEvidence[0]?.recoveryObserved, false);
+        assert.deepStrictEqual(yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(), [
+          ThreadId.make("thread-historical-steer"),
+        ]);
+
+        yield* sql`
+        INSERT INTO orchestration_events (
+          event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+          command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json
+        )
+        VALUES (
+          'event-trusted-recovered-retargeted', 'thread', 'thread-historical-steer', 6,
+          'thread.activity-appended', '2026-08-30T12:11:00.000Z',
+          'server:trusted-recovered', NULL, 'server:trusted-recovered', 'server',
+          ${JSON.stringify(recoveredEventPayload)}, '{}'
+        )
+      `;
+        const trustedRecoveryEvidence = yield* snapshotQuery.getCodexSteerAcceptanceEvidence({
+          threadId: ThreadId.make("thread-historical-steer"),
+          acceptedTurnId: TurnId.make("turn-retargeted-acceptance"),
+          messageId: MessageId.make("message-retargeted"),
+        });
+        assert.equal(trustedRecoveryEvidence[0]?.recoveryObserved, true);
+        assert.deepStrictEqual(
+          yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(),
+          [],
+        );
+
+        yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        )
+        VALUES (
+          'processing-retargeted-exact',
+          'thread-historical-steer',
+          'turn-retargeted-acceptance',
+          'info',
+          'task.progress',
+          'Reasoning update',
+          ${JSON.stringify({
+            taskId: `codex-turn-steer-processing:${codexClientCorrelationId}`,
+            // Restart-time provider observations deliberately carry only the
+            // fixed opaque token. The trusted acceptance maps it back to the
+            // original message without persisting or echoing prompt content.
+            usage: { clientCorrelationId: codexClientCorrelationId },
+          })},
+          2000,
+          '2026-08-30T12:00:04.250Z'
+        )
+      `;
+        assert.deepStrictEqual(
+          yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(),
+          [],
+        );
+        const processedRetargeted = yield* snapshotQuery.getCodexSteerAcceptanceEvidence({
+          threadId: ThreadId.make("thread-historical-steer"),
+          acceptedTurnId: TurnId.make("turn-retargeted-acceptance"),
+          messageId: MessageId.make("message-retargeted"),
+        });
+        assert.equal(processedRetargeted[0]?.processingObserved, true);
+        assert.equal(processedRetargeted[0]?.interruptRequested, true);
+      }),
+  );
+
+  it.effect(
+    "returns only sequence-ordered Codex steer intents with no durable handling outcome",
+    () =>
+      Effect.gen(function* () {
+        const snapshotQuery = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+
+        yield* sql`DELETE FROM orchestration_events`;
+        yield* sql`DELETE FROM projection_thread_activities`;
+        yield* sql`DELETE FROM projection_thread_sessions`;
+        yield* sql`DELETE FROM projection_turns`;
+        yield* sql`DELETE FROM projection_threads`;
+
+        const recoveryThreadId = "thread-unsettled-steer-intents";
+        const createdAt = "2026-08-31T01:00:00.000Z";
+        yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+          branch, worktree_path, latest_turn_id, latest_user_message_at,
+          pending_approval_count, pending_user_input_count, has_actionable_proposed_plan,
+          created_at, updated_at, archived_at, deleted_at
+        )
+        VALUES (
+          ${recoveryThreadId}, 'project-stale-steer', 'Unsettled steer intents',
+          '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+          NULL, NULL, 'turn-unsettled-intents', ${createdAt}, 0, 0, 0,
+          ${createdAt}, ${createdAt}, NULL, NULL
+        )
+      `;
+        yield* sql`
+        INSERT INTO projection_thread_sessions (
+          thread_id, status, provider_name, provider_instance_id, runtime_mode,
+          active_turn_id, last_error, updated_at
+        )
+        VALUES (
+          ${recoveryThreadId}, 'ready', 'codex', 'codex', 'full-access', NULL, NULL, ${createdAt}
+        )
+      `;
+
+        let streamVersion = 0;
+        const insertEvent = (input: {
+          readonly eventId: string;
+          readonly eventType:
+            | "thread.turn-steer-requested"
+            | "thread.turn-start-requested"
+            | "thread.turn-interrupt-requested"
+            | "thread.session-stop-requested"
+            | "thread.activity-appended";
+          readonly actorKind: "client" | "server" | "provider";
+          readonly payload: unknown;
+          readonly occurredAt?: string;
+        }) => {
+          const version = streamVersion;
+          streamVersion += 1;
+          return sql`
+            INSERT INTO orchestration_events (
+              event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+              command_id, causation_event_id, correlation_id, actor_kind, payload_json,
+              metadata_json
+            )
+            VALUES (
+              ${input.eventId}, 'thread', ${recoveryThreadId}, ${version}, ${input.eventType},
+              ${input.occurredAt ?? createdAt},
+              ${`${input.actorKind}:${input.eventId}`}, NULL, ${`${input.actorKind}:${input.eventId}`},
+              ${input.actorKind}, ${JSON.stringify(input.payload)}, '{}'
+            )
+          `;
+        };
+        const insertSteerIntent = (input: {
+          readonly eventId: string;
+          readonly messageId: string;
+          readonly expectedTurnId?: string | null;
+          readonly actorKind?: "client" | "server" | "provider";
+          readonly occurredAt?: string;
+        }) =>
+          insertEvent({
+            eventId: input.eventId,
+            eventType: "thread.turn-steer-requested",
+            actorKind: input.actorKind ?? "client",
+            ...(input.occurredAt !== undefined ? { occurredAt: input.occurredAt } : {}),
+            payload: {
+              threadId: recoveryThreadId,
+              messageId: input.messageId,
+              expectedTurnId:
+                input.expectedTurnId === undefined
+                  ? "turn-unsettled-intents"
+                  : input.expectedTurnId,
+              createdAt: input.occurredAt ?? createdAt,
+            },
+          });
+        const readEventSequence = (eventId: string) =>
+          sql<{ readonly sequence: number }>`
+            SELECT sequence
+            FROM orchestration_events
+            WHERE event_id = ${eventId}
+            LIMIT 1
+          `.pipe(
+            Effect.map((rows) => {
+              const sequence = rows[0]?.sequence;
+              assert.ok(sequence !== undefined);
+              return sequence;
+            }),
+          );
+        const insertActivity = (input: {
+          readonly activityId: string;
+          readonly kind: string;
+          readonly payload: Readonly<Record<string, unknown>>;
+          readonly turnId?: string;
+          readonly actorKind?: "server" | "provider";
+        }) =>
+          Effect.gen(function* () {
+            const turnId = input.turnId ?? "turn-unsettled-intents";
+            yield* sql`
+              INSERT INTO projection_thread_activities (
+                activity_id, thread_id, turn_id, tone, kind, summary,
+                payload_json, sequence, created_at
+              )
+              VALUES (
+                ${input.activityId}, ${recoveryThreadId}, ${turnId}, 'info', ${input.kind},
+                'Steer outcome', ${JSON.stringify(input.payload)}, NULL, ${createdAt}
+              )
+            `;
+            yield* insertEvent({
+              eventId: `event-${input.activityId}`,
+              eventType: "thread.activity-appended",
+              actorKind: input.actorKind ?? "server",
+              payload: {
+                threadId: recoveryThreadId,
+                activity: {
+                  id: input.activityId,
+                  tone: "info",
+                  kind: input.kind,
+                  summary: "Steer outcome",
+                  payload: input.payload,
+                  turnId,
+                  createdAt,
+                },
+              },
+            });
+          });
+
+        // These two authenticated intents model a crash after durable commit
+        // but before the reactor reached provider I/O.
+        yield* insertSteerIntent({
+          eventId: "intent-crash-client",
+          messageId: "message-crash-client",
+        });
+        yield* insertSteerIntent({
+          eventId: "intent-crash-server",
+          messageId: "message-crash-server",
+          expectedTurnId: null,
+          actorKind: "server",
+          occurredAt: "2026-08-31T01:00:01.000Z",
+        });
+        // Provider-authored lookalikes never become replay authority.
+        yield* insertSteerIntent({
+          eventId: "intent-forged-provider",
+          messageId: "message-forged-provider",
+          actorKind: "provider",
+        });
+
+        yield* insertSteerIntent({
+          eventId: "intent-accepted",
+          messageId: "message-accepted",
+        });
+        yield* insertActivity({
+          activityId: "accepted-intent-outcome",
+          kind: "provider.turn.steer.accepted",
+          payload: {
+            provider: "codex",
+            messageId: "message-accepted",
+            acceptedTurnId: "turn-unsettled-intents",
+            clientCorrelationId: codexClientCorrelationId,
+          },
+        });
+
+        yield* insertSteerIntent({
+          eventId: "intent-processing",
+          messageId: "message-processing",
+        });
+        const exactProcessingToken = buildCodexSteerClientCorrelationId("message-processing");
+        yield* sql`
+          INSERT INTO projection_thread_activities (
+            activity_id, thread_id, turn_id, tone, kind, summary,
+            payload_json, sequence, created_at
+          )
+          VALUES (
+            'processing-intent-outcome', ${recoveryThreadId}, 'turn-unsettled-intents',
+            'info', 'task.progress', 'Processing steer',
+            ${JSON.stringify({
+              taskId: `codex-turn-steer-processing:${exactProcessingToken}`,
+              usage: {
+                messageId: "message-processing",
+                clientCorrelationId: exactProcessingToken,
+              },
+            })},
+            NULL, ${createdAt}
+          )
+        `;
+
+        // MessageId equality alone is not processing authority. These rows
+        // model both a different canonical token and a split token/task-id
+        // tuple; neither may suppress startup replay of the saved intent.
+        yield* insertSteerIntent({
+          eventId: "intent-processing-wrong-token",
+          messageId: "message-processing-wrong-token",
+        });
+        const wrongProcessingToken = buildCodexSteerClientCorrelationId("another-message");
+        yield* sql`
+          INSERT INTO projection_thread_activities (
+            activity_id, thread_id, turn_id, tone, kind, summary,
+            payload_json, sequence, created_at
+          )
+          VALUES (
+            'processing-wrong-token-intent-outcome', ${recoveryThreadId},
+            'turn-unsettled-intents', 'info', 'task.progress', 'Processing steer',
+            ${JSON.stringify({
+              taskId: `codex-turn-steer-processing:${wrongProcessingToken}`,
+              usage: {
+                messageId: "message-processing-wrong-token",
+                clientCorrelationId: wrongProcessingToken,
+              },
+            })}, NULL, ${createdAt}
+          )
+        `;
+
+        yield* insertSteerIntent({
+          eventId: "intent-processing-split-binding",
+          messageId: "message-processing-split-binding",
+        });
+        const splitBindingToken = buildCodexSteerClientCorrelationId(
+          "message-processing-split-binding",
+        );
+        yield* sql`
+          INSERT INTO projection_thread_activities (
+            activity_id, thread_id, turn_id, tone, kind, summary,
+            payload_json, sequence, created_at
+          )
+          VALUES (
+            'processing-split-binding-intent-outcome', ${recoveryThreadId},
+            'turn-unsettled-intents', 'info', 'task.progress', 'Processing steer',
+            ${JSON.stringify({
+              taskId: `codex-turn-steer-processing:${wrongProcessingToken}`,
+              usage: {
+                messageId: "message-processing-split-binding",
+                clientCorrelationId: splitBindingToken,
+              },
+            })}, NULL, ${createdAt}
+          )
+        `;
+
+        for (const [suffix, retryableFollowUp] of [
+          ["retryable", true],
+          ["terminal", false],
+        ] as const) {
+          const handledMessageId = `message-failed-${suffix}`;
+          yield* insertSteerIntent({
+            eventId: `intent-failed-${suffix}`,
+            messageId: handledMessageId,
+          });
+          yield* insertActivity({
+            activityId: `failed-intent-${suffix}`,
+            kind: "provider.turn.steer.failed",
+            payload: { messageId: handledMessageId, retryableFollowUp },
+          });
+        }
+
+        yield* insertSteerIntent({
+          eventId: "intent-recovered",
+          messageId: "message-recovered",
+        });
+        yield* insertActivity({
+          activityId: "recovered-intent-outcome",
+          kind: "provider.turn.steer.recovered",
+          turnId: "turn-recovered-intent",
+          payload: {
+            provider: "codex",
+            messageId: "message-recovered",
+            acceptedTurnId: "turn-unsettled-intents",
+            recoveredTurnId: "turn-recovered-intent",
+            clientCorrelationId: codexClientCorrelationId,
+          },
+        });
+
+        yield* insertSteerIntent({
+          eventId: "intent-delivered-next-turn",
+          messageId: "message-delivered-next-turn",
+        });
+        yield* insertActivity({
+          activityId: "delivered-next-turn-outcome",
+          kind: "provider.turn.steer.delivered",
+          turnId: "turn-delivered-next-turn",
+          payload: {
+            provider: "codex",
+            messageId: "message-delivered-next-turn",
+            deliveredTurnId: "turn-delivered-next-turn",
+            delivery: "next-turn",
+            reason: "turn-start-after-provider-no-active-turn",
+          },
+        });
+
+        // A post-intent outbox marker means provider delivery may already have
+        // happened even if Cafe crashed before it persisted the success
+        // receipt. Startup must fail closed rather than duplicate that input.
+        yield* insertSteerIntent({
+          eventId: "intent-delivery-attempted",
+          messageId: "message-delivery-attempted",
+        });
+        const deliveryAttemptedIntentSequence = yield* readEventSequence(
+          "intent-delivery-attempted",
+        );
+        yield* insertActivity({
+          activityId: "delivery-attempted-outcome",
+          kind: "provider.turn.steer.delivery-attempted",
+          payload: {
+            provider: "codex",
+            messageId: "message-delivery-attempted",
+            intentSequence: deliveryAttemptedIntentSequence,
+            delivery: "live-steer",
+            deliveryState: "attempted",
+            reason: "live-steer",
+            expectedTurnId: "turn-unsettled-intents",
+          },
+        });
+
+        // Provider-authored and malformed attempt lookalikes are not allowed
+        // to suppress recovery of a steer which never crossed Cafe's trusted
+        // provider-I/O boundary.
+        yield* insertSteerIntent({
+          eventId: "intent-forged-attempt",
+          messageId: "message-forged-attempt",
+        });
+        const forgedAttemptIntentSequence = yield* readEventSequence("intent-forged-attempt");
+        yield* insertActivity({
+          activityId: "forged-attempt-outcome",
+          kind: "provider.turn.steer.delivery-attempted",
+          actorKind: "provider",
+          payload: {
+            provider: "codex",
+            messageId: "message-forged-attempt",
+            intentSequence: forgedAttemptIntentSequence,
+            delivery: "live-steer",
+            deliveryState: "attempted",
+            reason: "live-steer",
+            expectedTurnId: "turn-unsettled-intents",
+          },
+        });
+        yield* insertSteerIntent({
+          eventId: "intent-malformed-attempt",
+          messageId: "message-malformed-attempt",
+        });
+        const malformedAttemptIntentSequence = yield* readEventSequence("intent-malformed-attempt");
+        yield* insertActivity({
+          activityId: "malformed-attempt-outcome",
+          kind: "provider.turn.steer.delivery-attempted",
+          payload: {
+            provider: "codex",
+            messageId: "message-malformed-attempt",
+            intentSequence: malformedAttemptIntentSequence,
+            delivery: "live-steer",
+            deliveryState: "attempted",
+            reason: "unknown-attempt-kind",
+            expectedTurnId: "turn-unsettled-intents",
+          },
+        });
+
+        // Neither a provider-authored lookalike nor a malformed server receipt
+        // may suppress restart replay of an otherwise unsettled steer intent.
+        yield* insertSteerIntent({
+          eventId: "intent-forged-delivery",
+          messageId: "message-forged-delivery",
+        });
+        yield* insertActivity({
+          activityId: "forged-delivery-outcome",
+          kind: "provider.turn.steer.delivered",
+          turnId: "turn-forged-delivery",
+          actorKind: "provider",
+          payload: {
+            provider: "codex",
+            messageId: "message-forged-delivery",
+            deliveredTurnId: "turn-forged-delivery",
+            delivery: "next-turn",
+            reason: "turn-start-after-provider-no-active-turn",
+          },
+        });
+        yield* insertSteerIntent({
+          eventId: "intent-malformed-delivery",
+          messageId: "message-malformed-delivery",
+        });
+        yield* insertActivity({
+          activityId: "malformed-delivery-outcome",
+          kind: "provider.turn.steer.delivered",
+          turnId: "turn-malformed-delivery",
+          payload: {
+            provider: "codex",
+            messageId: "message-malformed-delivery",
+            deliveredTurnId: "turn-malformed-delivery",
+            delivery: "next-turn",
+            reason: "untrusted-reason",
+          },
+        });
+
+        // A durable automatic retry intentionally reuses MessageId. The first
+        // generation's queue row must not settle the new intent, and the second
+        // failure must author a distinct row so already-mounted renderers can
+        // observe the new outcome instead of being stranded on stale state.
+        const repeatedFailureMessageId = "message-repeated-failure";
+        yield* insertSteerIntent({
+          eventId: "intent-repeated-failure-first",
+          messageId: repeatedFailureMessageId,
+        });
+        const repeatedFailureFirstSequence = yield* readEventSequence(
+          "intent-repeated-failure-first",
+        );
+        yield* insertActivity({
+          activityId: "repeated-failure-first-outcome",
+          kind: "provider.turn.steer.failed",
+          payload: {
+            provider: "codex",
+            messageId: repeatedFailureMessageId,
+            intentSequence: repeatedFailureFirstSequence,
+            retryableFollowUp: true,
+            delivery: "next-turn",
+            deliveryState: "queued",
+          },
+        });
+        yield* insertSteerIntent({
+          eventId: "intent-repeated-failure-second",
+          messageId: repeatedFailureMessageId,
+        });
+        const repeatedFailureSecondSequence = yield* readEventSequence(
+          "intent-repeated-failure-second",
+        );
+        assert.equal(
+          (yield* snapshotQuery.getUnsettledCodexSteerIntentEvents()).some(
+            (candidate) => candidate.sequence === repeatedFailureSecondSequence,
+          ),
+          true,
+        );
+        yield* insertActivity({
+          activityId: "repeated-failure-second-outcome",
+          kind: "provider.turn.steer.failed",
+          payload: {
+            provider: "codex",
+            messageId: repeatedFailureMessageId,
+            intentSequence: repeatedFailureSecondSequence,
+            retryableFollowUp: true,
+            delivery: "next-turn",
+            deliveryState: "queued",
+          },
+        });
+        const repeatedFailureRows = yield* sql<{
+          readonly activityId: string;
+          readonly intentSequence: number;
+        }>`
+          SELECT
+            activity_id AS "activityId",
+            json_extract(payload_json, '$.intentSequence') AS "intentSequence"
+          FROM projection_thread_activities
+          WHERE thread_id = ${recoveryThreadId}
+            AND json_extract(payload_json, '$.messageId') = ${repeatedFailureMessageId}
+            AND kind = 'provider.turn.steer.failed'
+          ORDER BY activity_id ASC
+        `;
+        assert.deepStrictEqual(repeatedFailureRows, [
+          {
+            activityId: "repeated-failure-first-outcome",
+            intentSequence: repeatedFailureFirstSequence,
+          },
+          {
+            activityId: "repeated-failure-second-outcome",
+            intentSequence: repeatedFailureSecondSequence,
+          },
+        ]);
+
+        // The same generation binding also guards the side-effect/receipt
+        // crash window. A prior failed generation cannot alias the new attempt,
+        // while the exact second-generation attempt fails closed on every
+        // subsequent restart until provider evidence resolves it.
+        const retryCrashMessageId = "message-retry-then-crash";
+        yield* insertSteerIntent({
+          eventId: "intent-retry-crash-first",
+          messageId: retryCrashMessageId,
+        });
+        const retryCrashFirstSequence = yield* readEventSequence("intent-retry-crash-first");
+        yield* insertActivity({
+          activityId: "retry-crash-first-failure",
+          kind: "provider.turn.steer.failed",
+          payload: {
+            provider: "codex",
+            messageId: retryCrashMessageId,
+            intentSequence: retryCrashFirstSequence,
+            retryableFollowUp: true,
+          },
+        });
+        yield* insertSteerIntent({
+          eventId: "intent-retry-crash-second",
+          messageId: retryCrashMessageId,
+        });
+        const retryCrashSecondSequence = yield* readEventSequence("intent-retry-crash-second");
+        yield* insertActivity({
+          activityId: "retry-crash-second-attempt",
+          kind: "provider.turn.steer.delivery-attempted",
+          payload: {
+            provider: "codex",
+            messageId: retryCrashMessageId,
+            intentSequence: retryCrashSecondSequence,
+            delivery: "live-steer",
+            deliveryState: "attempted",
+            reason: "live-steer",
+            expectedTurnId: "turn-unsettled-intents",
+          },
+        });
+        for (let restart = 0; restart < 2; restart += 1) {
+          assert.equal(
+            (yield* snapshotQuery.getUnsettledCodexSteerIntentEvents()).some(
+              (candidate) => candidate.messageId === retryCrashMessageId,
+            ),
+            false,
+          );
+        }
+
+        yield* insertSteerIntent({
+          eventId: "intent-superseded",
+          messageId: "message-superseded",
+        });
+        yield* insertEvent({
+          eventId: "later-start-same-message",
+          eventType: "thread.turn-start-requested",
+          actorKind: "server",
+          payload: {
+            threadId: recoveryThreadId,
+            messageId: "message-superseded",
+            createdAt,
+          },
+        });
+
+        // The projection row alone is not trusted; its provider-authored event
+        // must not hide an otherwise unsettled authenticated intent.
+        yield* insertSteerIntent({
+          eventId: "intent-forged-acceptance",
+          messageId: "message-forged-acceptance",
+        });
+        yield* insertActivity({
+          activityId: "forged-accepted-intent-outcome",
+          kind: "provider.turn.steer.accepted",
+          actorKind: "provider",
+          payload: {
+            provider: "codex",
+            messageId: "message-forged-acceptance",
+            acceptedTurnId: "turn-unsettled-intents",
+          },
+        });
+
+        const sequenceRows = yield* sql<{
+          readonly eventId: string;
+          readonly sequence: number;
+        }>`
+          SELECT event_id AS "eventId", sequence
+          FROM orchestration_events
+          WHERE event_id IN (
+            'intent-crash-client',
+            'intent-crash-server',
+            'intent-processing-wrong-token',
+            'intent-processing-split-binding',
+            'intent-forged-attempt',
+            'intent-malformed-attempt',
+            'intent-forged-delivery',
+            'intent-malformed-delivery',
+            'intent-forged-acceptance'
+          )
+          ORDER BY sequence ASC
+        `;
+        const sequenceByEvent = new Map(sequenceRows.map((row) => [row.eventId, row.sequence]));
+        const crashClientSequence = sequenceByEvent.get("intent-crash-client");
+        const crashServerSequence = sequenceByEvent.get("intent-crash-server");
+        const wrongProcessingSequence = sequenceByEvent.get("intent-processing-wrong-token");
+        const splitBindingSequence = sequenceByEvent.get("intent-processing-split-binding");
+        const forgedAcceptanceSequence = sequenceByEvent.get("intent-forged-acceptance");
+        const forgedAttemptSequence = sequenceByEvent.get("intent-forged-attempt");
+        const malformedAttemptSequence = sequenceByEvent.get("intent-malformed-attempt");
+        const forgedDeliverySequence = sequenceByEvent.get("intent-forged-delivery");
+        const malformedDeliverySequence = sequenceByEvent.get("intent-malformed-delivery");
+        assert.ok(crashClientSequence !== undefined);
+        assert.ok(crashServerSequence !== undefined);
+        assert.ok(wrongProcessingSequence !== undefined);
+        assert.ok(splitBindingSequence !== undefined);
+        assert.ok(forgedAcceptanceSequence !== undefined);
+        assert.ok(forgedAttemptSequence !== undefined);
+        assert.ok(malformedAttemptSequence !== undefined);
+        assert.ok(forgedDeliverySequence !== undefined);
+        assert.ok(malformedDeliverySequence !== undefined);
+        const unsettledIntents = yield* snapshotQuery.getUnsettledCodexSteerIntentEvents();
+        assert.deepStrictEqual(unsettledIntents, [
+          {
+            sequence: crashClientSequence,
+            threadId: ThreadId.make(recoveryThreadId),
+            messageId: MessageId.make("message-crash-client"),
+            expectedTurnId: TurnId.make("turn-unsettled-intents"),
+            createdAt,
+          },
+          {
+            sequence: crashServerSequence,
+            threadId: ThreadId.make(recoveryThreadId),
+            messageId: MessageId.make("message-crash-server"),
+            expectedTurnId: null,
+            createdAt: "2026-08-31T01:00:01.000Z",
+          },
+          {
+            sequence: wrongProcessingSequence,
+            threadId: ThreadId.make(recoveryThreadId),
+            messageId: MessageId.make("message-processing-wrong-token"),
+            expectedTurnId: TurnId.make("turn-unsettled-intents"),
+            createdAt,
+          },
+          {
+            sequence: splitBindingSequence,
+            threadId: ThreadId.make(recoveryThreadId),
+            messageId: MessageId.make("message-processing-split-binding"),
+            expectedTurnId: TurnId.make("turn-unsettled-intents"),
+            createdAt,
+          },
+          {
+            sequence: forgedAttemptSequence,
+            threadId: ThreadId.make(recoveryThreadId),
+            messageId: MessageId.make("message-forged-attempt"),
+            expectedTurnId: TurnId.make("turn-unsettled-intents"),
+            createdAt,
+          },
+          {
+            sequence: malformedAttemptSequence,
+            threadId: ThreadId.make(recoveryThreadId),
+            messageId: MessageId.make("message-malformed-attempt"),
+            expectedTurnId: TurnId.make("turn-unsettled-intents"),
+            createdAt,
+          },
+          {
+            sequence: forgedDeliverySequence,
+            threadId: ThreadId.make(recoveryThreadId),
+            messageId: MessageId.make("message-forged-delivery"),
+            expectedTurnId: TurnId.make("turn-unsettled-intents"),
+            createdAt,
+          },
+          {
+            sequence: malformedDeliverySequence,
+            threadId: ThreadId.make(recoveryThreadId),
+            messageId: MessageId.make("message-malformed-delivery"),
+            expectedTurnId: TurnId.make("turn-unsettled-intents"),
+            createdAt,
+          },
+          {
+            sequence: forgedAcceptanceSequence,
+            threadId: ThreadId.make(recoveryThreadId),
+            messageId: MessageId.make("message-forged-acceptance"),
+            expectedTurnId: TurnId.make("turn-unsettled-intents"),
+            createdAt,
+          },
+        ]);
+        assert.deepStrictEqual(
+          yield* snapshotQuery.getUnsettledCodexSteerIntentEvents({
+            threadId: ThreadId.make(recoveryThreadId),
+          }),
+          unsettledIntents,
+        );
+        assert.deepStrictEqual(
+          yield* snapshotQuery.getUnsettledCodexSteerIntentEvents({
+            threadId: ThreadId.make("thread-unrelated-unsettled-intents"),
+          }),
+          [],
+        );
+
+        // Provider-authored cancellation lookalikes are not replay barriers.
+        yield* insertEvent({
+          eventId: "forged-provider-interrupt",
+          eventType: "thread.turn-interrupt-requested",
+          actorKind: "provider",
+          payload: {
+            threadId: recoveryThreadId,
+            turnId: "turn-unsettled-intents",
+            createdAt,
+          },
+        });
+        assert.deepStrictEqual(
+          yield* snapshotQuery.getCodexSteerIntentRecoveryBarriers({
+            sequence: forgedAcceptanceSequence,
+            threadId: ThreadId.make(recoveryThreadId),
+            messageId: MessageId.make("message-forged-acceptance"),
+            expectedTurnId: TurnId.make("turn-unsettled-intents"),
+          }),
+          {
+            intentVerified: true,
+            newerTurnRequested: false,
+            interruptRequested: false,
+            sessionStopRequested: false,
+          },
+        );
+
+        yield* insertEvent({
+          eventId: "later-client-interrupt",
+          eventType: "thread.turn-interrupt-requested",
+          actorKind: "client",
+          payload: {
+            threadId: recoveryThreadId,
+            turnId: "turn-unsettled-intents",
+            createdAt,
+          },
+        });
+        yield* insertEvent({
+          eventId: "later-session-stop",
+          eventType: "thread.session-stop-requested",
+          actorKind: "server",
+          payload: { threadId: recoveryThreadId, createdAt },
+        });
+        yield* insertEvent({
+          eventId: "later-new-turn",
+          eventType: "thread.turn-start-requested",
+          actorKind: "client",
+          payload: {
+            threadId: recoveryThreadId,
+            messageId: "message-newer-turn",
+            createdAt,
+          },
+        });
+        assert.deepStrictEqual(
+          yield* snapshotQuery.getCodexSteerIntentRecoveryBarriers({
+            sequence: crashClientSequence,
+            threadId: ThreadId.make(recoveryThreadId),
+            messageId: MessageId.make("message-crash-client"),
+            expectedTurnId: TurnId.make("turn-unsettled-intents"),
+          }),
+          {
+            intentVerified: true,
+            newerTurnRequested: true,
+            interruptRequested: true,
+            sessionStopRequested: true,
+          },
+        );
+        assert.equal(
+          (yield* snapshotQuery.getCodexSteerIntentRecoveryBarriers({
+            sequence: crashClientSequence,
+            threadId: ThreadId.make(recoveryThreadId),
+            messageId: MessageId.make("message-tuple-collision"),
+            expectedTurnId: TurnId.make("turn-unsettled-intents"),
+          })).intentVerified,
+          false,
+        );
+      }),
   );
 
   it.effect("normalizes active-turn session state from the latest turn", () =>

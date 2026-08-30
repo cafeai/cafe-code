@@ -28,6 +28,7 @@ import {
   orchestrationCommandsTotal,
   orchestrationCommandDuration,
 } from "../../observability/Metrics.ts";
+import { haveSameAttachmentContent } from "../../attachmentContentCommitment.ts";
 import { toPersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
@@ -57,6 +58,120 @@ interface CommandEnvelope {
   command: OrchestrationCommand;
   result: Deferred.Deferred<{ sequence: number }, OrchestrationDispatchError>;
   startedAtMs: number;
+}
+
+type UserTurnMessageCommand =
+  | Extract<OrchestrationCommand, { readonly type: "thread.turn.start" }>
+  | Extract<OrchestrationCommand, { readonly type: "thread.turn.steer" }>;
+
+interface PersistedMessageIdentityRow {
+  readonly sequence: number;
+  readonly payloadJson: string;
+}
+
+interface PersistedSequenceRow {
+  readonly sequence: number;
+}
+
+function isUserTurnMessageCommand(
+  command: OrchestrationCommand,
+): command is UserTurnMessageCommand {
+  return command.type === "thread.turn.start" || command.type === "thread.turn.steer";
+}
+
+function readRecord(value: unknown): Readonly<Record<string, unknown>> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : null;
+}
+
+function parseRecordJson(value: string): Readonly<Record<string, unknown>> | null {
+  try {
+    return readRecord(JSON.parse(value));
+  } catch {
+    return null;
+  }
+}
+
+interface RetryAttachmentIdentity {
+  readonly type: "image";
+  readonly id: string;
+  readonly name: string;
+  readonly mimeType: string;
+  readonly sizeBytes: number;
+}
+
+function readRetryAttachmentIdentity(value: unknown): RetryAttachmentIdentity | null {
+  const record = readRecord(value);
+  if (
+    record?.type !== "image" ||
+    typeof record.id !== "string" ||
+    typeof record.name !== "string" ||
+    typeof record.mimeType !== "string" ||
+    typeof record.sizeBytes !== "number"
+  ) {
+    return null;
+  }
+  return {
+    type: "image",
+    id: record.id,
+    name: record.name,
+    mimeType: record.mimeType.toLowerCase(),
+    sizeBytes: record.sizeBytes,
+  };
+}
+
+/**
+ * Bind stable message fields and pair the old/new server attachment handles.
+ * Reload recovery intentionally assigns a fresh storage id, so the ids cannot
+ * be equal; the caller separately compares their private byte commitments.
+ */
+function readMatchingRetryAttachmentPairs(
+  command: UserTurnMessageCommand,
+  persistedPayloadJson: string,
+): ReadonlyArray<{
+  readonly original: RetryAttachmentIdentity;
+  readonly retry: RetryAttachmentIdentity;
+}> | null {
+  const payload = parseRecordJson(persistedPayloadJson);
+  if (payload?.role !== "user" || payload.text !== command.message.text) {
+    return null;
+  }
+
+  const persistedAttachmentsRaw = payload.attachments ?? [];
+  if (!Array.isArray(persistedAttachmentsRaw)) {
+    return null;
+  }
+  const persistedAttachments = persistedAttachmentsRaw.map(readRetryAttachmentIdentity);
+  if (persistedAttachments.some((attachment) => attachment === null)) {
+    return null;
+  }
+  if (persistedAttachments.length !== command.message.attachments.length) {
+    return null;
+  }
+
+  const pairs = command.message.attachments.map((attachment, index) => {
+    const persisted = persistedAttachments[index];
+    const retry = readRetryAttachmentIdentity(attachment);
+    if (
+      persisted === null ||
+      persisted === undefined ||
+      retry === null ||
+      persisted.type !== retry.type ||
+      persisted.name !== retry.name ||
+      persisted.mimeType !== retry.mimeType ||
+      persisted.sizeBytes !== retry.sizeBytes
+    ) {
+      return null;
+    }
+    return { original: persisted, retry } as const;
+  });
+  return pairs.some((pair) => pair === null)
+    ? null
+    : (pairs as ReadonlyArray<{
+        readonly original: RetryAttachmentIdentity;
+        readonly retry: RetryAttachmentIdentity;
+      }>);
 }
 
 interface RetireThreadForHardDeleteEnvelope {
@@ -129,6 +244,123 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     failedCommandCount: 0,
   });
 
+  const assertUserMessageIdentityAvailable = Effect.fn(
+    "OrchestrationEngine.assertUserMessageIdentityAvailable",
+  )(function* (command: UserTurnMessageCommand) {
+    // A terminal steer recovery is server-authored and intentionally reuses
+    // the original canonical message. Client schemas cannot author this guard.
+    if (command.type === "thread.turn.steer" && command.terminalRecovery !== undefined) {
+      return;
+    }
+
+    // The command read model caps messages for memory safety and revert can
+    // remove rows from the detail projection. The append-only event stream is
+    // therefore the authoritative identity ledger. This exact lookup runs on
+    // the engine's serialized worker before any new events are planned.
+    const existingRows = yield* sql<PersistedMessageIdentityRow>`
+      SELECT
+        sequence,
+        payload_json AS "payloadJson"
+      FROM orchestration_events
+      WHERE aggregate_kind = 'thread'
+        AND stream_id = ${command.threadId}
+        AND event_type = 'thread.message-sent'
+        AND json_extract(payload_json, '$.messageId') = ${command.message.messageId}
+      ORDER BY sequence DESC
+      LIMIT 1
+    `;
+    const existing = existingRows[0];
+    if (existing === undefined) {
+      return;
+    }
+
+    const attachmentPairs = readMatchingRetryAttachmentPairs(command, existing.payloadJson);
+    if (attachmentPairs === null) {
+      return yield* new OrchestrationCommandInvariantError({
+        commandType: command.type,
+        detail: "Message identity is already bound to different content in this thread.",
+      });
+    }
+
+    // Metadata equality is insufficient: different files can share a name,
+    // MIME, and byte count. Both ids must have private commitments recorded by
+    // Cafe's authenticated upload normalizer, and every digest must match. Old
+    // rows intentionally have no backfilled commitment and therefore fail
+    // closed rather than trusting mutable files after the fact.
+    const attachmentContentMatches = yield* Effect.forEach(
+      attachmentPairs,
+      ({ original, retry }) =>
+        haveSameAttachmentContent(sql, {
+          threadId: command.threadId,
+          originalAttachmentId: original.id,
+          originalSizeBytes: original.sizeBytes,
+          retryAttachmentId: retry.id,
+          retrySizeBytes: retry.sizeBytes,
+        }),
+      { concurrency: 1 },
+    );
+    if (attachmentContentMatches.some((matches) => !matches)) {
+      return yield* new OrchestrationCommandInvariantError({
+        commandType: command.type,
+        detail: "Message identity is already bound to different content in this thread.",
+      });
+    }
+
+    // A new command id may reuse the canonical message only after Cafe itself
+    // records that the prior Codex steer is queued for retry. Requiring the
+    // marker to be newer than the latest message event consumes the authority
+    // exactly once: after a retry is accepted, an older failure cannot license
+    // another replay.
+    const retryableFailureRows = yield* sql<PersistedSequenceRow>`
+      SELECT sequence
+      FROM orchestration_events
+      WHERE aggregate_kind = 'thread'
+        AND stream_id = ${command.threadId}
+        AND event_type = 'thread.activity-appended'
+        AND actor_kind = 'server'
+        AND sequence > ${existing.sequence}
+        AND json_extract(payload_json, '$.activity.kind') = 'provider.turn.steer.failed'
+        AND json_extract(payload_json, '$.activity.payload.messageId') = ${command.message.messageId}
+        AND json_extract(payload_json, '$.activity.payload.retryableFollowUp') = 1
+      ORDER BY sequence DESC
+      LIMIT 1
+    `;
+    const retryableFailure = retryableFailureRows[0];
+    if (retryableFailure === undefined) {
+      return yield* new OrchestrationCommandInvariantError({
+        commandType: command.type,
+        detail: "Message identity has already been used in this thread.",
+      });
+    }
+
+    // Accepted is a provider ACK; recovered and delivered cover the two
+    // terminal-boundary completion paths. Any of them consumes the retryable
+    // failure and prevents an old marker from authorizing a duplicate send.
+    const successfulReceiptRows = yield* sql<PersistedSequenceRow>`
+      SELECT sequence
+      FROM orchestration_events
+      WHERE aggregate_kind = 'thread'
+        AND stream_id = ${command.threadId}
+        AND event_type = 'thread.activity-appended'
+        AND actor_kind = 'server'
+        AND sequence > ${retryableFailure.sequence}
+        AND json_extract(payload_json, '$.activity.payload.messageId') = ${command.message.messageId}
+        AND json_extract(payload_json, '$.activity.kind') IN (
+          'provider.turn.steer.accepted',
+          'provider.turn.steer.recovered',
+          'provider.turn.steer.delivered'
+        )
+      ORDER BY sequence ASC
+      LIMIT 1
+    `;
+    if (successfulReceiptRows.length > 0) {
+      return yield* new OrchestrationCommandInvariantError({
+        commandType: command.type,
+        detail: "Message identity was already delivered to the provider.",
+      });
+    }
+  });
+
   const projectEventsOntoReadModel = (
     baseReadModel: OrchestrationReadModel,
     events: ReadonlyArray<OrchestrationEvent>,
@@ -197,6 +429,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             commandId: envelope.command.commandId,
             detail: existingReceipt.value.error ?? "Previously rejected.",
           });
+        }
+
+        if (isUserTurnMessageCommand(envelope.command)) {
+          yield* assertUserMessageIdentityAvailable(envelope.command);
         }
 
         const eventBase = yield* decideOrchestrationCommand({

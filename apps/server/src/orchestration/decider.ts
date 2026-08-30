@@ -661,6 +661,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           payload: {
             threadId: command.threadId,
             messageId: command.message.messageId,
+            expectedTurnId: activeTurnId,
             createdAt: command.createdAt,
           },
         };
@@ -817,6 +818,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             modelSelection: targetThread.modelSelection,
             runtimeMode: targetThread.runtimeMode,
             interactionMode: targetThread.interactionMode,
+            ...(command.terminalRecovery !== undefined
+              ? { terminalSteerRecovery: command.terminalRecovery }
+              : {}),
             createdAt: command.createdAt,
           },
         };
@@ -834,6 +838,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           messageId: command.message.messageId,
+          expectedTurnId: activeTurnId,
+          ...(command.terminalRecovery !== undefined
+            ? { terminalSteerRecovery: command.terminalRecovery }
+            : {}),
           createdAt: command.createdAt,
         },
       };

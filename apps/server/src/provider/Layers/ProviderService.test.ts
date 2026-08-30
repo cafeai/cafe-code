@@ -17,6 +17,7 @@ import type {
 import {
   ApprovalRequestId,
   EventId,
+  MessageId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionStartInput,
@@ -1464,19 +1465,32 @@ routing.layer("ProviderServiceLive routing", (it) => {
         }));
         routing.codex.sendTurn.mockClear();
         routing.codex.steerTurn.mockClear();
+        const messageId = MessageId.make("message-active-steer");
+        const clientCorrelationId =
+          "cafe-steer-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        routing.codex.steerTurn.mockImplementationOnce((input) =>
+          Effect.succeed({
+            threadId: input.threadId,
+            turnId: input.expectedTurnId,
+            clientCorrelationId,
+          }),
+        );
 
         const turn = yield* provider.sendTurn({
           threadId: session.threadId,
+          messageId,
           input: "this must be steered or queued",
           attachments: [],
         });
 
         assert.equal(turn.turnId, asTurnId("turn-active"));
+        assert.equal(turn.clientCorrelationId, clientCorrelationId);
         assert.equal(routing.codex.sendTurn.mock.calls.length, 0);
         assert.equal(routing.codex.steerTurn.mock.calls.length, 1);
         assert.deepEqual(routing.codex.steerTurn.mock.calls[0]?.[0], {
           threadId: session.threadId,
           expectedTurnId: asTurnId("turn-active"),
+          messageId,
           input: "this must be steered or queued",
         });
 
@@ -1497,6 +1511,47 @@ routing.layer("ProviderServiceLive routing", (it) => {
           }
         }
       }),
+  );
+
+  it.effect("does not retarget a terminal-recovery send through a concurrently active turn", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("thread-terminal-recovery-no-steer-fallback");
+      const session = yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      routing.codex.updateSession(session.threadId, (current) => ({
+        ...current,
+        status: "running",
+        activeTurnId: asTurnId("turn-newer"),
+      }));
+      routing.codex.sendTurn.mockClear();
+      routing.codex.steerTurn.mockClear();
+      const messageId = MessageId.make("message-terminal-recovery");
+
+      const turn = yield* provider.sendTurn({
+        threadId: session.threadId,
+        messageId,
+        allowActiveTurnSteerFallback: false,
+        input: "deliver only as the next turn",
+        attachments: [],
+      });
+
+      assert.equal(turn.turnId, asTurnId(`turn-${String(threadId)}`));
+      assert.equal(routing.codex.steerTurn.mock.calls.length, 0);
+      assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
+      assert.deepEqual(routing.codex.sendTurn.mock.calls[0]?.[0], {
+        threadId,
+        messageId,
+        allowActiveTurnSteerFallback: false,
+        input: "deliver only as the next turn",
+        attachments: [],
+      });
+    }),
   );
 
   it.effect(

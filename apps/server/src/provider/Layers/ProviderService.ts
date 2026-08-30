@@ -1745,18 +1745,25 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.kind": routed.adapter.provider,
         ...(input.modelSelection?.model ? { "provider.model": input.modelSelection.model } : {}),
       });
-      if (routed.adapter.capabilities.liveSteer === "supported") {
+      if (
+        routed.adapter.capabilities.liveSteer === "supported" &&
+        input.allowActiveTurnSteerFallback !== false
+      ) {
         // Projection state can lag the provider runtime during long streams or
         // reconnects. Ask the adapter for its live session before starting a
         // turn, and route additional input through its supported steer/queue
         // path whenever it still owns an active turn. This applies to Codex's
-        // native steer RPC and Claude's non-interrupting SDK input queue.
+        // native steer RPC and Claude's non-interrupting SDK input queue. The
+        // one opt-out is terminal-steer recovery: that durable message is
+        // authorized only as a new turn, so its caller deliberately lets the
+        // adapter reject a concurrently appearing active turn instead.
         const activeSessions = yield* routed.adapter.listSessions();
         const activeSession = activeSessions.find((session) => session.threadId === input.threadId);
         if (activeSession?.status === "running" && activeSession.activeTurnId !== undefined) {
           const turn = yield* routed.adapter.steerTurn({
             threadId: input.threadId,
             expectedTurnId: activeSession.activeTurnId,
+            ...(input.messageId !== undefined ? { messageId: input.messageId } : {}),
             ...(input.input !== undefined ? { input: input.input } : {}),
             ...(input.attachments.length > 0 ? { attachments: input.attachments } : {}),
           });

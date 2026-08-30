@@ -4351,6 +4351,615 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       }
     });
 
+    it("keeps a steer pending when another message starts processing on the same turn", async () => {
+      const activeTurnId = "turn-correlated-steer-processing" as TurnId;
+      const baseSnapshot = createSnapshotForTargetUser({
+        targetMessageId: "msg-user-correlated-steer-processing" as MessageId,
+        targetText: "correlated steer processing target",
+        sessionStatus: "running",
+      });
+      const runningSnapshot: OrchestrationReadModel = {
+        ...baseSnapshot,
+        threads: baseSnapshot.threads.map((thread) =>
+          Object.assign({}, thread, {
+            latestTurn: {
+              turnId: activeTurnId,
+              state: "running" as const,
+              requestedAt: isoAt(1_000),
+              startedAt: isoAt(1_001),
+              completedAt: null,
+              assistantMessageId: null,
+            },
+            session: {
+              ...thread.session!,
+              status: "running" as const,
+              activeTurnId,
+              updatedAt: isoAt(1_001),
+            },
+            updatedAt: isoAt(1_001),
+          }),
+        ),
+      };
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: runningSnapshot,
+        configureFixture: (testFixture) => {
+          testFixture.serverConfig = {
+            ...testFixture.serverConfig,
+            providers: testFixture.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: {
+                liveSteer: "supported" as const,
+                threadGoals: "unsupported" as const,
+              },
+            })),
+          };
+        },
+        resolveRpc: (body) => {
+          if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
+            return { sequence: fixture.snapshot.snapshotSequence + 1 };
+          }
+          return undefined;
+        },
+      });
+
+      try {
+        useComposerDraftStore
+          .getState()
+          .setPrompt(THREAD_REF, "Keep this steer pending until its own marker arrives");
+
+        const queueButton = await waitForElement(
+          () => document.querySelector<HTMLButtonElement>('button[aria-label="Queue message"]'),
+          "Unable to find the running composer Send button.",
+        );
+        queueButton.click();
+
+        const steerButton = await waitForElement(
+          () =>
+            document.querySelector<HTMLButtonElement>(
+              '[data-cafe-followup-queue="true"] .cafe-followup-steer-button',
+            ),
+          "Unable to find the queued follow-up Send action.",
+        );
+        steerButton.click();
+
+        let dispatchedMessageId: MessageId | null = null;
+        await vi.waitFor(
+          () => {
+            const request = wsRequests.find(
+              (candidate) =>
+                candidate._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                candidate.type === "thread.turn.steer",
+            ) as
+              | {
+                  readonly type: "thread.turn.steer";
+                  readonly message: { readonly messageId: MessageId };
+                }
+              | undefined;
+            dispatchedMessageId = request?.message.messageId ?? null;
+            expect(dispatchedMessageId).not.toBeNull();
+            expect(
+              document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+            ).not.toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        const emitProcessingActivity = (
+          messageId: MessageId,
+          eventId: string,
+          correlationLocation: "payload" | "usage",
+        ) => {
+          const currentThread = fixture.snapshot.threads[0]!;
+          const snapshotSequence = fixture.snapshot.snapshotSequence + 1;
+          const processingPayload = {
+            taskId: `codex-turn-steer-processing:${activeTurnId}`,
+            detail: "Codex app-server began processing turn/steer.",
+            ...(correlationLocation === "payload" ? { messageId } : { usage: { messageId } }),
+          };
+          const nextThread: OrchestrationReadModel["threads"][number] = {
+            ...currentThread,
+            activities: [
+              ...currentThread.activities,
+              {
+                id: EventId.make(eventId),
+                tone: "info",
+                kind: "task.progress",
+                summary: "Reasoning update",
+                payload: processingPayload,
+                turnId: activeTurnId,
+                sequence: currentThread.activities.length + 1,
+                createdAt: new Date(Date.now() + snapshotSequence * 1_000).toISOString(),
+              },
+            ],
+            updatedAt: new Date(Date.now() + snapshotSequence * 1_000).toISOString(),
+          };
+          fixture.snapshot = {
+            ...fixture.snapshot,
+            snapshotSequence,
+            threads: [nextThread],
+          };
+          rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+            kind: "snapshot",
+            snapshot: {
+              snapshotSequence,
+              thread: nextThread,
+            },
+          });
+        };
+
+        emitProcessingActivity(
+          "different-steer-message" as MessageId,
+          "activity-other-steer-processing",
+          "usage",
+        );
+        await waitForLayout();
+        expect(
+          document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+        ).not.toBeNull();
+
+        emitProcessingActivity(
+          dispatchedMessageId!,
+          "activity-correlated-steer-processing",
+          "payload",
+        );
+        await vi.waitFor(
+          () => {
+            expect(
+              document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+            ).toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+        expect(
+          wsRequests.filter(
+            (request) =>
+              request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+              request.type === "thread.turn.steer",
+          ),
+        ).toHaveLength(1);
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("settles a pending steer only from an exact successful delivery receipt", async () => {
+      const activeTurnId = "turn-steer-delivery-receipt" as TurnId;
+      const baseSnapshot = createSnapshotForTargetUser({
+        targetMessageId: "msg-user-steer-delivery-receipt" as MessageId,
+        targetText: "delivery receipt target",
+        sessionStatus: "running",
+      });
+      const runningSnapshot: OrchestrationReadModel = {
+        ...baseSnapshot,
+        threads: baseSnapshot.threads.map((thread) =>
+          Object.assign({}, thread, {
+            latestTurn: {
+              turnId: activeTurnId,
+              state: "running" as const,
+              requestedAt: isoAt(1_000),
+              startedAt: isoAt(1_001),
+              completedAt: null,
+              assistantMessageId: null,
+            },
+            session: {
+              ...thread.session!,
+              status: "running" as const,
+              activeTurnId,
+              updatedAt: isoAt(1_001),
+            },
+            updatedAt: isoAt(1_001),
+          }),
+        ),
+      };
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: runningSnapshot,
+        configureFixture: (testFixture) => {
+          testFixture.serverConfig = {
+            ...testFixture.serverConfig,
+            providers: testFixture.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: {
+                liveSteer: "supported" as const,
+                threadGoals: "unsupported" as const,
+              },
+            })),
+          };
+        },
+        resolveRpc: (body) => {
+          if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
+            return { sequence: fixture.snapshot.snapshotSequence + 1 };
+          }
+          return undefined;
+        },
+      });
+
+      try {
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Deliver this steer exactly once");
+        const queueButton = await waitForElement(
+          () => document.querySelector<HTMLButtonElement>('button[aria-label="Queue message"]'),
+          "Unable to find the running composer Send button.",
+        );
+        queueButton.click();
+        const steerButton = await waitForElement(
+          () =>
+            document.querySelector<HTMLButtonElement>(
+              '[data-cafe-followup-queue="true"] .cafe-followup-steer-button',
+            ),
+          "Unable to find the queued follow-up Send action.",
+        );
+        steerButton.click();
+
+        let dispatchedMessageId: MessageId | null = null;
+        await vi.waitFor(
+          () => {
+            const request = wsRequests.find(
+              (candidate) =>
+                candidate._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                candidate.type === "thread.turn.steer",
+            ) as
+              | {
+                  readonly type: "thread.turn.steer";
+                  readonly message: { readonly messageId: MessageId };
+                }
+              | undefined;
+            dispatchedMessageId = request?.message.messageId ?? null;
+            expect(dispatchedMessageId).not.toBeNull();
+            expect(
+              document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+            ).not.toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        const emitReceiptActivity = (input: {
+          readonly id: string;
+          readonly kind: string;
+          readonly payload: unknown;
+        }) => {
+          const currentThread = fixture.snapshot.threads[0]!;
+          const snapshotSequence = fixture.snapshot.snapshotSequence + 1;
+          const nextThread: OrchestrationReadModel["threads"][number] = {
+            ...currentThread,
+            activities: [
+              ...currentThread.activities,
+              {
+                id: EventId.make(input.id),
+                tone: "info",
+                kind: input.kind,
+                summary: "Steer delivery state changed",
+                payload: input.payload,
+                turnId: activeTurnId,
+                sequence: currentThread.activities.length + 1,
+                createdAt: isoAt(1_010 + snapshotSequence),
+              },
+            ],
+            updatedAt: isoAt(1_010 + snapshotSequence),
+          };
+          fixture.snapshot = {
+            ...fixture.snapshot,
+            snapshotSequence,
+            threads: [nextThread],
+          };
+          rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+            kind: "snapshot",
+            snapshot: { snapshotSequence, thread: nextThread },
+          });
+        };
+
+        emitReceiptActivity({
+          id: "activity-pre-io-steer-warning",
+          kind: "runtime.warning",
+          payload: {
+            provider: "codex",
+            messageId: dispatchedMessageId!,
+            delivery: "next-turn",
+          },
+        });
+        await waitForLayout();
+        expect(
+          document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+        ).not.toBeNull();
+
+        emitReceiptActivity({
+          id: "activity-steer-delivered",
+          kind: "provider.turn.steer.delivered",
+          payload: {
+            provider: "codex",
+            messageId: dispatchedMessageId!,
+            deliveredTurnId: "turn-delivered-next",
+            delivery: "next-turn",
+            reason: "active-turn-ended-before-steer",
+          },
+        });
+        await vi.waitFor(
+          () => {
+            expect(
+              document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+            ).toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("keeps a same-id retry pending until that retry generation fails", async () => {
+      const activeTurnId = "turn-same-id-steer-retry" as TurnId;
+      const messageId = "msg-same-id-steer-retry" as MessageId;
+      const baseSnapshot = createSnapshotForTargetUser({
+        targetMessageId: "msg-user-same-id-steer-target" as MessageId,
+        targetText: "same-id steer target",
+        sessionStatus: "running",
+      });
+      const retryMessage = {
+        ...createUserMessage({
+          id: messageId,
+          text: "Retry this exact message",
+          offsetSeconds: 2_000,
+        }),
+        turnId: activeTurnId,
+      };
+      const oldFailure = {
+        id: EventId.make("activity-old-same-id-steer-failure"),
+        tone: "error" as const,
+        kind: "provider.turn.steer.failed",
+        summary: "Codex could not steer the compact turn",
+        payload: {
+          provider: "codex",
+          messageId,
+          intentSequence: 41,
+          retryableFollowUp: true,
+          codexNonSteerableTurnKind: "compact",
+        },
+        turnId: activeTurnId,
+        sequence: 42,
+        createdAt: isoAt(2_002),
+      };
+      const runningSnapshot: OrchestrationReadModel = {
+        ...baseSnapshot,
+        threads: baseSnapshot.threads.map((thread) =>
+          Object.assign({}, thread, {
+            messages: [...thread.messages, retryMessage],
+            activities: [oldFailure],
+            latestTurn: {
+              turnId: activeTurnId,
+              state: "running" as const,
+              requestedAt: isoAt(1_900),
+              startedAt: isoAt(1_901),
+              completedAt: null,
+              assistantMessageId: null,
+            },
+            session: {
+              ...thread.session!,
+              status: "running" as const,
+              activeTurnId,
+              updatedAt: isoAt(2_003),
+            },
+            updatedAt: isoAt(2_003),
+          }),
+        ),
+      };
+      const currentIntentSequence = 77;
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: runningSnapshot,
+        configureFixture: (testFixture) => {
+          testFixture.serverConfig = {
+            ...testFixture.serverConfig,
+            providers: testFixture.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: {
+                liveSteer: "supported" as const,
+                threadGoals: "unsupported" as const,
+              },
+            })),
+          };
+        },
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? { sequence: currentIntentSequence }
+            : undefined,
+      });
+
+      try {
+        await vi.waitFor(
+          () => {
+            const steerButton = document.querySelector<HTMLButtonElement>(
+              '[data-cafe-followup-queue="true"] .cafe-followup-steer-button',
+            );
+            const automaticallyDispatched = wsRequests.some(
+              (request) =>
+                request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                request.type === "thread.turn.steer",
+            );
+            expect(steerButton !== null || automaticallyDispatched).toBe(true);
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+        // Compact-blocked retries can become immediately eligible and be
+        // auto-steered; click only when the visible shelf action won the race.
+        document
+          .querySelector<HTMLButtonElement>(
+            '[data-cafe-followup-queue="true"] .cafe-followup-steer-button',
+          )
+          ?.click();
+
+        await vi.waitFor(
+          () => {
+            expect(
+              wsRequests.some(
+                (request) =>
+                  request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                  request.type === "thread.turn.steer" &&
+                  (
+                    request as unknown as {
+                      readonly message: { readonly messageId: MessageId };
+                    }
+                  ).message.messageId === messageId,
+              ),
+            ).toBe(true);
+            // The old generation-41 failure remains in the snapshot, but must
+            // not settle the generation-77 retry that reused its MessageId.
+            expect(
+              document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+            ).not.toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        const currentThread = fixture.snapshot.threads[0]!;
+        const snapshotSequence = fixture.snapshot.snapshotSequence + 1;
+        const nextThread: OrchestrationReadModel["threads"][number] = {
+          ...currentThread,
+          activities: [
+            ...currentThread.activities,
+            {
+              ...oldFailure,
+              id: EventId.make("activity-current-same-id-steer-failure"),
+              payload: { ...oldFailure.payload, intentSequence: currentIntentSequence },
+              sequence: 43,
+              createdAt: new Date().toISOString(),
+            },
+          ],
+          updatedAt: new Date().toISOString(),
+        };
+        fixture.snapshot = { ...fixture.snapshot, snapshotSequence, threads: [nextThread] };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: { snapshotSequence, thread: nextThread },
+        });
+        await vi.waitFor(
+          () => {
+            expect(
+              document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+            ).toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("reconstructs more than 64 durable steer retries once after a reload", async () => {
+      const activeTurnId = "turn-reload-retry-review" as TurnId;
+      const baseSnapshot = createSnapshotForTargetUser({
+        targetMessageId: "msg-user-reload-retry-target" as MessageId,
+        targetText: "reload retry target",
+        sessionStatus: "running",
+      });
+      const retryMessages = Array.from({ length: 65 }, (_, index) => ({
+        ...createUserMessage({
+          id: `msg-reload-retry-${index}` as MessageId,
+          text: `Durable retry prompt ${index}`,
+          offsetSeconds: 2_000 + index * 2,
+        }),
+        turnId: activeTurnId,
+      }));
+      const retryActivities = retryMessages.map((message, index) => ({
+        id: EventId.make(`activity-reload-retry-${index}`),
+        tone: "error" as const,
+        kind: "provider.turn.steer.failed",
+        summary: "Codex could not steer the review turn",
+        payload: {
+          provider: "codex",
+          messageId: message.id,
+          retryableFollowUp: true,
+          codexNonSteerableTurnKind: "review",
+        },
+        turnId: activeTurnId,
+        sequence: index + 1,
+        createdAt: isoAt(2_001 + index * 2),
+      }));
+      const reloadSnapshot: OrchestrationReadModel = {
+        ...baseSnapshot,
+        threads: baseSnapshot.threads.map((thread) =>
+          Object.assign({}, thread, {
+            messages: [...thread.messages, ...retryMessages],
+            activities: retryActivities,
+            latestTurn: {
+              turnId: activeTurnId,
+              state: "running" as const,
+              requestedAt: isoAt(1_900),
+              startedAt: isoAt(1_901),
+              completedAt: null,
+              assistantMessageId: null,
+            },
+            session: {
+              ...thread.session!,
+              status: "running" as const,
+              activeTurnId,
+              updatedAt: isoAt(2_200),
+            },
+            updatedAt: isoAt(2_200),
+          }),
+        ),
+      };
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: reloadSnapshot,
+        configureFixture: (testFixture) => {
+          testFixture.serverConfig = {
+            ...testFixture.serverConfig,
+            providers: testFixture.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: {
+                liveSteer: "supported" as const,
+                threadGoals: "unsupported" as const,
+              },
+            })),
+          };
+        },
+      });
+
+      try {
+        await vi.waitFor(
+          () => {
+            expect(
+              document.querySelectorAll('button[aria-label="Remove queued message"]').length,
+            ).toBe(65);
+            expect(document.body.textContent).toContain("65 steers waiting");
+            expect(document.body.textContent).toContain("Durable retry prompt 0");
+            expect(document.body.textContent).toContain("Durable retry prompt 64");
+          },
+          { timeout: 12_000, interval: 16 },
+        );
+        expect(
+          wsRequests.some(
+            (request) =>
+              request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+              (request.type === "thread.turn.steer" || request.type === "thread.turn.start"),
+          ),
+        ).toBe(false);
+
+        // Replaying the same canonical snapshot models reconnect hydration.
+        // Every source MessageId must remain represented exactly once.
+        const currentThread = fixture.snapshot.threads[0]!;
+        const snapshotSequence = fixture.snapshot.snapshotSequence + 1;
+        fixture.snapshot = {
+          ...fixture.snapshot,
+          snapshotSequence,
+          threads: [{ ...currentThread, updatedAt: isoAt(2_201) }],
+        };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: {
+            snapshotSequence,
+            thread: fixture.snapshot.threads[0]!,
+          },
+        });
+        await waitForLayout();
+        expect(document.querySelectorAll('button[aria-label="Remove queued message"]').length).toBe(
+          65,
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
     it("keeps Send guarded when a mobile follow-up collapses the keyboard overlay", async () => {
       const restoreTouchMediaQuery = forceOnScreenKeyboardMediaQuery();
       const mounted = await mountChatView({

@@ -77,6 +77,8 @@ import Migration0062 from "./Migrations/062_ProjectionThreadGoals.ts";
 import Migration0063 from "./Migrations/063_UsageStatsTokenDetail.ts";
 import Migration0064 from "./Migrations/064_ProviderSubagentHistoryBindings.ts";
 import Migration0065 from "./Migrations/065_HardDeletedThreadTombstones.ts";
+import Migration0066 from "./Migrations/066_OrchestrationMessageIdentityIndexes.ts";
+import Migration0067 from "./Migrations/067_AttachmentContentCommitments.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -158,6 +160,8 @@ export const migrationEntries = [
   [63, "UsageStatsTokenDetail", Migration0063],
   [64, "ProviderSubagentHistoryBindings", Migration0064],
   [65, "HardDeletedThreadTombstones", Migration0065],
+  [66, "OrchestrationMessageIdentityIndexes", Migration0066],
+  [67, "AttachmentContentCommitments", Migration0067],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

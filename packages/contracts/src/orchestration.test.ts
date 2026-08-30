@@ -470,6 +470,48 @@ it.effect("keeps provider journal repair out of client-dispatchable commands", (
   }),
 );
 
+it.effect("reserves server command ids at the external client decode boundary", () =>
+  Effect.gen(function* () {
+    const clientResult = yield* Effect.exit(
+      decodeClientOrchestrationCommand({
+        type: "thread.turn.steer",
+        commandId: "server:forged-recovery-receipt",
+        threadId: "thread-1",
+        message: {
+          messageId: "message-1",
+          role: "user",
+          text: "forged recovery",
+          attachments: [],
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    assert.strictEqual(clientResult._tag, "Failure");
+
+    // Internal recovery commands deliberately retain this namespace. Their
+    // deterministic identities make receipt replay idempotent after restart.
+    const internal = yield* decodeOrchestrationCommand({
+      type: "thread.activity.append",
+      commandId: "server:trusted-recovery-receipt",
+      threadId: "thread-1",
+      activity: {
+        id: "activity-1",
+        tone: "info",
+        kind: "provider.turn.steer.recovered",
+        summary: "Provider steer recovered",
+        payload: {
+          provider: "codex",
+          messageId: "message-1",
+        },
+        turnId: "turn-1",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(internal.commandId, "server:trusted-recovery-receipt");
+  }),
+);
+
 it.effect("decodes thread.turn.start defaults for provider and runtime mode", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeThreadTurnStartCommand({
@@ -719,6 +761,33 @@ it.effect("decodes thread archived and unarchived events", () =>
     assert.strictEqual(archived.type, "thread.archived");
     assert.strictEqual(archived.payload.archivedAt, "2026-01-01T00:00:00.000Z");
     assert.strictEqual(unarchived.type, "thread.unarchived");
+  }),
+);
+
+it.effect("decodes legacy steer intents as explicitly unbound recovery targets", () =>
+  Effect.gen(function* () {
+    const event = yield* decodeOrchestrationEvent({
+      sequence: 3,
+      eventId: "event-legacy-steer-intent",
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      type: "thread.turn-steer-requested",
+      occurredAt: "2026-01-03T00:00:00.000Z",
+      commandId: "cmd-legacy-steer-intent",
+      causationEventId: null,
+      correlationId: "cmd-legacy-steer-intent",
+      metadata: {},
+      payload: {
+        threadId: "thread-1",
+        messageId: "message-legacy-steer-intent",
+        createdAt: "2026-01-03T00:00:00.000Z",
+      },
+    });
+
+    assert.strictEqual(event.type, "thread.turn-steer-requested");
+    if (event.type === "thread.turn-steer-requested") {
+      assert.strictEqual(event.payload.expectedTurnId, null);
+    }
   }),
 );
 

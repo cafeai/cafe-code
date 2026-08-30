@@ -998,6 +998,17 @@ const ThreadTurnSteerCommand = Schema.Struct({
     text: Schema.String,
     attachments: Schema.Array(ChatAttachment),
   }),
+  /**
+   * Server-only guard for replaying a steer that was accepted immediately
+   * before its original turn became terminal. Browser commands deliberately
+   * cannot author this field. Provider reactors must not route a guarded
+   * recovery into a different active turn that appeared after reconciliation.
+   */
+  terminalRecovery: Schema.optional(
+    Schema.Struct({
+      staleTurnId: TurnId,
+    }),
+  ),
   createdAt: IsoDateTime,
 });
 
@@ -1134,7 +1145,18 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadSessionStopCommand,
   ThreadGoalSetCommand,
   ThreadGoalClearCommand,
-]);
+]).pipe(
+  Schema.check(
+    Schema.makeFilter((command) =>
+      String(command.commandId).startsWith("server:")
+        ? {
+            path: ["commandId"],
+            issue: "The 'server:' command-id namespace is reserved for server-authored commands.",
+          }
+        : undefined,
+    ),
+  ),
+);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
 export const TerminalTurnRecoveryReason = Schema.Literal("live-provider-continuation");
@@ -1441,6 +1463,11 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  terminalSteerRecovery: Schema.optional(
+    Schema.Struct({
+      staleTurnId: TurnId,
+    }),
+  ),
   createdAt: IsoDateTime,
 });
 
@@ -1453,6 +1480,18 @@ export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
 export const ThreadTurnSteerRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
+  /**
+   * Immutable turn target captured when the orchestration command is
+   * accepted. Older persisted events and the narrow pre-materialization race
+   * can have no target; recovery code must treat `null` as unbound and must
+   * never substitute a later provider turn.
+   */
+  expectedTurnId: Schema.NullOr(TurnId).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  terminalSteerRecovery: Schema.optional(
+    Schema.Struct({
+      staleTurnId: TurnId,
+    }),
+  ),
   createdAt: IsoDateTime,
 });
 

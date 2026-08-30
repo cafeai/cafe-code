@@ -46,6 +46,10 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { isCodexRootAgentPath } from "./CodexSubagentPath.ts";
+import {
+  buildCodexSteerClientCorrelationId,
+  parseCodexSteerClientCorrelationId,
+} from "../codexSteerCorrelation.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import {
   CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
@@ -115,6 +119,17 @@ const CODEX_TURN_STEER_PROCESSING_WARNING_DELAYS = [
   "60 seconds",
   "120 seconds",
 ] as const;
+// Ambiguous transport failures must retain their client correlation because
+// app-server may have consumed the steer before the connection failed. Bound
+// admission instead of silently evicting those correctness-critical entries.
+// 128 is intentionally far above normal interactive concurrency while still
+// placing a hard memory bound on a hostile or repeatedly failing caller.
+export const CODEX_PENDING_STEER_UNRESOLVED_CAPACITY = 128;
+const CODEX_PENDING_STEER_HISTORY_LIMIT = 50;
+// Restart observations are diagnostic hints, not ownership records. Keeping a
+// bounded recent set suppresses app-server's item/started + item/completed pair
+// without allowing untrusted client ids to grow process memory indefinitely.
+const CODEX_RESTARTED_STEER_OBSERVATION_HISTORY_LIMIT = 256;
 const CODEX_AGGREGATE_CHILD_LIVENESS_POLL_DELAYS = [
   "2 seconds",
   "10 seconds",
@@ -300,6 +315,13 @@ export interface CodexSessionRuntimeSendTurnInput {
 
 export interface CodexSessionRuntimeSteerTurnInput {
   readonly expectedTurnId: TurnId;
+  /**
+   * Fixed-size, content-free correlation derived by CodexAdapter before the
+   * request enters provider-owned runtime state. The runtime validates this
+   * value again before forwarding it to app-server; Cafe's open-string
+   * MessageId must never cross this boundary.
+   */
+  readonly clientCorrelationId?: string;
   readonly input?: string;
   readonly attachments?: ReadonlyArray<{
     readonly type: "image";
@@ -593,20 +615,54 @@ interface CodexTurnStartObservation {
 
 export interface CodexPendingSteerProcessing {
   readonly steerId: string;
+  readonly clientCorrelationId: string;
   readonly providerThreadId: string;
   readonly turnId: TurnId;
   readonly requestedAt: string;
-  readonly acknowledgedAt: string;
-  readonly acknowledgedAtMs: number;
-  readonly ackLatencyMs: number;
+  readonly acknowledgedAt?: string;
+  readonly acknowledgedAtMs?: number;
+  readonly ackLatencyMs?: number;
   readonly promptByteLength: number;
   readonly attachmentCount: number;
   readonly warningCount: number;
   readonly processedAt?: string;
+  readonly processedAtMs?: number;
   readonly providerUserMessageItemId?: ProviderItemId;
   readonly providerUserMessageMethod?: string;
   readonly ackToProviderItemMs?: number;
+  readonly terminalObservedAt?: string;
+  readonly terminalState?: CodexPendingSteerTerminalState;
 }
+
+export interface CodexRestartedSteerProcessingObservation {
+  readonly clientCorrelationId: string;
+  readonly providerThreadId?: string;
+  readonly turnId: TurnId;
+  readonly providerUserMessageItemId?: ProviderItemId;
+  readonly providerUserMessageMethod: string;
+  readonly observedAt: string;
+}
+
+export type CodexPendingSteerAdmission =
+  | {
+      readonly admitted: true;
+      readonly next: Map<string, CodexPendingSteerProcessing>;
+      readonly unresolvedCount: number;
+      readonly capacity: number;
+    }
+  | {
+      readonly admitted: false;
+      readonly next: Map<string, CodexPendingSteerProcessing>;
+      readonly unresolvedCount: number;
+      readonly capacity: number;
+    };
+
+export type CodexPendingSteerTerminalState =
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "cancelled"
+  | "unknown";
 
 export type CodexChildConversationLivenessState = "unknown" | "active" | "inactive";
 
@@ -988,6 +1044,7 @@ export function buildTurnStartParams(input: {
 export function buildTurnSteerParams(input: {
   readonly threadId: string;
   readonly expectedTurnId: TurnId;
+  readonly clientUserMessageId: string;
   readonly prompt?: string;
   readonly attachments?: ReadonlyArray<{
     readonly type: "image";
@@ -1016,6 +1073,7 @@ export function buildTurnSteerParams(input: {
   return decodeV2TurnSteerParams({
     threadId: input.threadId,
     expectedTurnId: input.expectedTurnId,
+    clientUserMessageId: input.clientUserMessageId,
     input: turnInput,
   }).pipe(
     Effect.mapError((error) => toProtocolParseError("Invalid turn/steer request payload", error)),
@@ -1111,21 +1169,28 @@ export function updateCodexPendingSteerProcessingFromNotification(
     readonly turnId?: TurnId | undefined;
     readonly itemId?: ProviderItemId | undefined;
     readonly itemType?: string | undefined;
+    readonly clientUserMessageId?: string | undefined;
     readonly observedAt: string;
     readonly observedAtMs: number;
   },
 ): {
   readonly pending: CodexPendingSteerProcessing | undefined;
+  readonly restartedObservation: CodexRestartedSteerProcessingObservation | undefined;
   readonly next: Map<string, CodexPendingSteerProcessing>;
 } {
   const unchanged = () => (current instanceof Map ? current : new Map(current));
+  const noObservation = () => ({
+    pending: undefined,
+    restartedObservation: undefined,
+    next: unchanged(),
+  });
 
   if (
     (input.method !== "item/started" && input.method !== "item/completed") ||
     !input.turnId ||
     !isCodexUserMessageItemType(input.itemType)
   ) {
-    return { pending: undefined, next: unchanged() };
+    return noObservation();
   }
 
   if (
@@ -1137,48 +1202,439 @@ export function updateCodexPendingSteerProcessingFromNotification(
     // not proof that two queued steers were processed. Preserve the original
     // binding so a later notification for the same provider item cannot consume
     // the next pending steer.
-    return { pending: undefined, next: unchanged() };
+    return noObservation();
   }
 
-  const pending = Array.from(current.values())
-    .filter(
-      (entry) =>
-        entry.processedAt === undefined &&
-        entry.turnId === input.turnId &&
-        (!input.providerThreadId || entry.providerThreadId === input.providerThreadId),
-    )
-    .toSorted((left, right) => left.acknowledgedAt.localeCompare(right.acknowledgedAt))[0];
+  // Codex echoes `clientUserMessageId` as `item.clientId`. Prefer that exact
+  // binding over FIFO order: two steers can target one turn and notifications
+  // may arrive before either RPC response continuation runs. When Codex gives
+  // us a client id that is unknown, do not consume an unrelated pending steer.
+  const exactCorrelation = input.clientUserMessageId
+    ? Array.from(current.values()).find(
+        (entry) => entry.clientCorrelationId === input.clientUserMessageId,
+      )
+    : undefined;
+  const candidates = Array.from(current.values()).filter(
+    (entry) =>
+      entry.processedAt === undefined &&
+      entry.turnId === input.turnId &&
+      (!input.providerThreadId || entry.providerThreadId === input.providerThreadId),
+  );
+  const pending = input.clientUserMessageId
+    ? candidates.find((entry) => entry.clientCorrelationId === input.clientUserMessageId)
+    : candidates
+        .filter((entry) => entry.turnId === input.turnId)
+        .toSorted(
+          (left, right) =>
+            left.requestedAt.localeCompare(right.requestedAt) ||
+            left.steerId.localeCompare(right.steerId),
+        )[0];
 
   if (!pending) {
-    return { pending: undefined, next: unchanged() };
+    // A known client id that is already processed or belongs to another turn
+    // must not produce a second marker. With no known in-memory correlation,
+    // however, this can be a provider item replayed after Cafe restarted. Emit
+    // a content-free observation keyed by the echoed id; orchestration later
+    // requires exact independently persisted acceptance evidence before that
+    // observation can settle or recover anything.
+    const clientCorrelationId = exactCorrelation
+      ? undefined
+      : parseCodexSteerClientCorrelationId(input.clientUserMessageId);
+    return {
+      pending: undefined,
+      restartedObservation: clientCorrelationId
+        ? {
+            clientCorrelationId,
+            ...(input.providerThreadId ? { providerThreadId: input.providerThreadId } : {}),
+            turnId: input.turnId,
+            ...(input.itemId ? { providerUserMessageItemId: input.itemId } : {}),
+            providerUserMessageMethod: input.method,
+            observedAt: input.observedAt,
+          }
+        : undefined,
+      next: unchanged(),
+    };
   }
 
   const updated = {
     ...pending,
+    turnId: input.turnId,
     processedAt: input.observedAt,
+    processedAtMs: input.observedAtMs,
     providerUserMessageMethod: input.method,
-    ackToProviderItemMs: Math.max(0, input.observedAtMs - pending.acknowledgedAtMs),
+    ...(pending.acknowledgedAtMs !== undefined
+      ? { ackToProviderItemMs: Math.max(0, input.observedAtMs - pending.acknowledgedAtMs) }
+      : {}),
     ...(input.itemId ? { providerUserMessageItemId: input.itemId } : {}),
   } satisfies CodexPendingSteerProcessing;
   const next = new Map(current);
   next.set(pending.steerId, updated);
-  return { pending: updated, next };
+  return { pending: updated, restartedObservation: undefined, next };
 }
 
-function prunePendingSteerProcessing(
+/**
+ * Merge the RPC acknowledgement into the correlation registered before I/O.
+ *
+ * Provider notifications and request responses are independent producers in
+ * Codex app-server. This merge must therefore preserve an already-observed
+ * userMessage item or terminal state instead of replacing the entry wholesale.
+ */
+export function acknowledgeCodexPendingSteerProcessing(
+  current: ReadonlyMap<string, CodexPendingSteerProcessing>,
+  input: {
+    readonly steerId: string;
+    readonly turnId: TurnId;
+    readonly acknowledgedAt: string;
+    readonly acknowledgedAtMs: number;
+    readonly ackLatencyMs: number;
+  },
+): {
+  readonly pending: CodexPendingSteerProcessing | undefined;
+  readonly next: Map<string, CodexPendingSteerProcessing>;
+} {
+  const existing = current.get(input.steerId);
+  if (!existing) {
+    return {
+      pending: undefined,
+      next: current instanceof Map ? current : new Map(current),
+    };
+  }
+
+  const changedTurn = existing.turnId !== input.turnId;
+  const {
+    terminalObservedAt: _terminalObservedAt,
+    terminalState: _terminalState,
+    ...existingWithoutTerminal
+  } = existing;
+  const correlationBase = changedTurn ? existingWithoutTerminal : existing;
+  const acknowledged: CodexPendingSteerProcessing = {
+    ...correlationBase,
+    turnId: input.turnId,
+    acknowledgedAt: input.acknowledgedAt,
+    acknowledgedAtMs: input.acknowledgedAtMs,
+    ackLatencyMs: input.ackLatencyMs,
+    ...(existing.processedAtMs !== undefined
+      ? {
+          ackToProviderItemMs: Math.max(0, existing.processedAtMs - input.acknowledgedAtMs),
+        }
+      : {}),
+  } satisfies CodexPendingSteerProcessing;
+  const next = new Map(current);
+  next.set(input.steerId, acknowledged);
+  return { pending: acknowledged, next };
+}
+
+/**
+ * Apply the turn/steer response continuation under the same lock used by all
+ * authoritative terminal sources.
+ *
+ * A JSON-RPC response and `turn/completed`/`thread/read` observations arrive
+ * on independent fibers. Updating the pending correlation and the visible
+ * session in separate critical sections permits this invalid ordering:
+ * terminal snapshot -> late ACK -> session running. Keeping both writes here
+ * makes a terminal marker an irreversible barrier for that steer/turn pair.
+ */
+export function acknowledgeCodexSteerLifecycleBoundary(input: {
+  readonly semaphore: Semaphore.Semaphore;
+  readonly pendingRef: Ref.Ref<Map<string, CodexPendingSteerProcessing>>;
+  readonly sessionRef: Ref.Ref<ProviderSession>;
+  readonly steerId: string;
+  readonly expectedTurnId: TurnId;
+  readonly turnId: TurnId;
+  readonly acknowledgedAt: string;
+  readonly acknowledgedAtMs: number;
+  readonly ackLatencyMs: number;
+}): Effect.Effect<{
+  readonly pending: CodexPendingSteerProcessing | undefined;
+  readonly restoredRunning: boolean;
+}> {
+  return input.semaphore.withPermits(1)(
+    Effect.uninterruptible(
+      Effect.gen(function* () {
+        const acknowledgement = yield* Ref.modify(input.pendingRef, (current) => {
+          const result = acknowledgeCodexPendingSteerProcessing(current, input);
+          return [result, result.next] as const;
+        });
+        if (
+          acknowledgement.pending === undefined ||
+          acknowledgement.pending.terminalObservedAt !== undefined
+        ) {
+          return {
+            pending: acknowledgement.pending,
+            restoredRunning: false,
+          };
+        }
+
+        const restoredRunning = yield* Ref.modify(input.sessionRef, (session) => {
+          const activeTurnId = session.activeTurnId;
+          if (
+            activeTurnId !== undefined &&
+            activeTurnId !== input.expectedTurnId &&
+            activeTurnId !== input.turnId
+          ) {
+            // A newer provider notification won while this request was in
+            // flight. The successful ACK is still retained for correlation,
+            // but must not overwrite that separately authoritative active-turn
+            // identity. Keep the comparison and write in one Ref operation so
+            // an uncorrelated turn/started handler cannot land between them.
+            return [false, session] as const;
+          }
+          return [
+            true,
+            {
+              ...session,
+              status: "running" as const,
+              activeTurnId: input.turnId,
+              updatedAt: input.acknowledgedAt,
+            },
+          ] as const;
+        });
+        return {
+          pending: acknowledgement.pending,
+          restoredRunning,
+        };
+      }),
+    ),
+  );
+}
+
+/**
+ * Move a pre-I/O steer correlation to the active turn reported by Codex.
+ *
+ * A stale expected-turn response is not an acknowledgement and cannot have
+ * consumed the input. Clear terminal observations for only that stale turn,
+ * then bind the correlation to the server-reported turn before retrying so a
+ * terminal notification racing the retry is attributed to the correct turn.
+ */
+export function retargetCodexPendingSteerProcessing(
+  current: ReadonlyMap<string, CodexPendingSteerProcessing>,
+  input: {
+    readonly steerId: string;
+    readonly turnId: TurnId;
+  },
+): Map<string, CodexPendingSteerProcessing> {
+  const existing = current.get(input.steerId);
+  if (!existing || existing.turnId === input.turnId) {
+    return current instanceof Map ? current : new Map(current);
+  }
+  const {
+    terminalObservedAt: _terminalObservedAt,
+    terminalState: _terminalState,
+    ...existingWithoutTerminal
+  } = existing;
+  const next = new Map(current);
+  next.set(input.steerId, {
+    ...existingWithoutTerminal,
+    turnId: input.turnId,
+  });
+  return next;
+}
+
+/**
+ * Record authoritative terminal state for every correlated steer on the turn.
+ * Durable recovery is decided later from the trusted command-boundary
+ * acceptance activity plus the provider processing activity; this in-memory
+ * state exists only to prevent a late RPC continuation from reviving the turn.
+ */
+export function terminalizeCodexPendingSteerProcessing(
+  current: ReadonlyMap<string, CodexPendingSteerProcessing>,
+  input: {
+    readonly turnId: TurnId;
+    readonly terminalState: CodexPendingSteerTerminalState;
+    readonly observedAt: string;
+  },
+): {
+  readonly next: Map<string, CodexPendingSteerProcessing>;
+} {
+  const next = new Map(current);
+  for (const pending of current.values()) {
+    if (pending.turnId !== input.turnId) continue;
+    const terminal = {
+      ...pending,
+      terminalObservedAt: input.observedAt,
+      terminalState: input.terminalState,
+    } satisfies CodexPendingSteerProcessing;
+    next.set(terminal.steerId, terminal);
+  }
+  return { next };
+}
+
+/**
+ * Atomically apply authoritative provider terminal truth to both pending steer
+ * correlations and the visible runtime session. Live completion notifications
+ * and successful terminal `thread/read` snapshots must call this exact
+ * boundary; otherwise a response continuation can observe no terminal marker
+ * and restore `running` after the provider has already ended the turn.
+ */
+export function terminalizeCodexSteerLifecycleBoundary(input: {
+  readonly semaphore: Semaphore.Semaphore;
+  readonly pendingRef: Ref.Ref<Map<string, CodexPendingSteerProcessing>>;
+  readonly sessionRef: Ref.Ref<ProviderSession>;
+  readonly turnId: TurnId;
+  readonly terminalState: CodexPendingSteerTerminalState;
+  readonly observedAt: string;
+  readonly sessionPatch: Partial<ProviderSession>;
+}): Effect.Effect<boolean> {
+  return input.semaphore.withPermits(1)(
+    Effect.uninterruptible(
+      Effect.gen(function* () {
+        yield* Ref.update(
+          input.pendingRef,
+          (current) => terminalizeCodexPendingSteerProcessing(current, input).next,
+        );
+        return yield* Ref.modify(input.sessionRef, (session) =>
+          session.activeTurnId === input.turnId
+            ? [
+                true,
+                {
+                  ...session,
+                  ...input.sessionPatch,
+                  updatedAt: input.observedAt,
+                },
+              ]
+            : [false, session],
+        );
+      }),
+    ),
+  );
+}
+
+export function prunePendingSteerProcessing(
   current: ReadonlyMap<string, CodexPendingSteerProcessing>,
 ): Map<string, CodexPendingSteerProcessing> {
   const next = new Map(current);
-  while (next.size > 50) {
-    const oldest = Array.from(next.values()).toSorted((left, right) =>
-      left.acknowledgedAt.localeCompare(right.acknowledgedAt),
-    )[0];
+  while (next.size > CODEX_PENDING_STEER_HISTORY_LIMIT) {
+    // This map participates in correctness until Codex either echoes the
+    // correlated userMessage or Cafe claims terminal recovery. Never evict an
+    // unresolved entry merely to satisfy the diagnostics-history cap: a late
+    // ACK would otherwise have no terminal marker and could revive an ended
+    // turn. Only settled history is disposable.
+    const oldest = Array.from(next.values())
+      .filter(
+        (entry) =>
+          entry.processedAt !== undefined ||
+          (entry.terminalObservedAt !== undefined && entry.acknowledgedAt !== undefined),
+      )
+      .toSorted((left, right) => left.requestedAt.localeCompare(right.requestedAt))[0];
     if (!oldest) {
       break;
     }
     next.delete(oldest.steerId);
   }
   return next;
+}
+
+function isCodexPendingSteerProcessingSettled(entry: CodexPendingSteerProcessing): boolean {
+  return (
+    entry.processedAt !== undefined ||
+    (entry.terminalObservedAt !== undefined && entry.acknowledgedAt !== undefined)
+  );
+}
+
+/**
+ * Atomically decide whether another correctness-critical steer correlation may
+ * be retained. Settled history can be pruned, but accepted or transport-
+ * ambiguous correlations are never evicted: once the unresolved capacity is
+ * full, callers receive explicit backpressure before any provider I/O.
+ */
+export function admitCodexPendingSteerProcessing(
+  current: ReadonlyMap<string, CodexPendingSteerProcessing>,
+  pending: CodexPendingSteerProcessing,
+): CodexPendingSteerAdmission {
+  const next = prunePendingSteerProcessing(current);
+  const unresolvedCount = Array.from(next.values()).filter(
+    (entry) => !isCodexPendingSteerProcessingSettled(entry),
+  ).length;
+
+  if (next.has(pending.steerId) || unresolvedCount >= CODEX_PENDING_STEER_UNRESOLVED_CAPACITY) {
+    return {
+      admitted: false,
+      next,
+      unresolvedCount,
+      capacity: CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
+    };
+  }
+
+  next.set(pending.steerId, pending);
+  return {
+    admitted: true,
+    next: prunePendingSteerProcessing(next),
+    unresolvedCount: unresolvedCount + 1,
+    capacity: CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
+  };
+}
+
+export function claimCodexRestartedSteerProcessingObservation(
+  current: ReadonlyMap<string, string>,
+  observation: CodexRestartedSteerProcessingObservation,
+): {
+  readonly claimed: boolean;
+  readonly next: Map<string, string>;
+} {
+  // The parsed client token is fixed-size and globally deterministic for a
+  // Cafe message id. Using only that token suppresses both halves of Codex's
+  // item lifecycle without retaining raw, potentially unbounded ids or other
+  // untrusted provider fields in process memory.
+  const key = observation.clientCorrelationId;
+  if (current.has(key)) {
+    return {
+      claimed: false,
+      next: current instanceof Map ? current : new Map(current),
+    };
+  }
+  const next = new Map(current);
+  next.set(key, observation.observedAt);
+  while (next.size > CODEX_RESTARTED_STEER_OBSERVATION_HISTORY_LIMIT) {
+    const oldestKey = next.keys().next().value as string | undefined;
+    if (oldestKey === undefined) break;
+    next.delete(oldestKey);
+  }
+  return { claimed: true, next };
+}
+
+export function buildCodexPendingSteerCapacityError(input: {
+  readonly unresolvedCount: number;
+  readonly capacity: number;
+}): CodexErrors.CodexAppServerRequestError {
+  return CodexErrors.CodexAppServerRequestError.invalidRequest(
+    "cannot steer while unresolved steer capacity is exhausted",
+    {
+      message: "cannot steer while unresolved steer capacity is exhausted",
+      additionalDetails: {
+        unresolvedCount: input.unresolvedCount,
+        capacity: input.capacity,
+        retryableAfterReconciliation: true,
+      },
+    },
+  );
+}
+
+export function buildCodexInvalidSteerCorrelationError(): CodexErrors.CodexAppServerRequestError {
+  return CodexErrors.CodexAppServerRequestError.invalidRequest(
+    "cannot steer with an invalid client correlation",
+    {
+      message: "cannot steer with an invalid client correlation",
+      additionalDetails: {
+        issue: "client correlation must be Cafe's fixed-size Codex steer token",
+      },
+    },
+  );
+}
+
+/**
+ * Resolve the only correlation representation allowed inside the Codex
+ * runtime. Undefined means the adapter had no Cafe message identity, in which
+ * case a random per-request source is hashed. A supplied value must already be
+ * a canonical token; hashing malformed input here would hide a boundary bug
+ * and break the orchestration layer's exact reverse mapping.
+ */
+export function resolveCodexSessionRuntimeSteerClientCorrelationId(input: {
+  readonly clientCorrelationId: string | undefined;
+  readonly fallbackSource: string;
+}): string | undefined {
+  return input.clientCorrelationId === undefined
+    ? buildCodexSteerClientCorrelationId(input.fallbackSource)
+    : parseCodexSteerClientCorrelationId(input.clientCorrelationId);
 }
 
 function parseCodexProcessElapsedSeconds(value: string): number | null {
@@ -2316,8 +2772,31 @@ function readNotificationItemType(notification: CodexServerNotification): string
   );
 }
 
+function readNotificationClientUserMessageId(
+  notification: CodexServerNotification,
+): string | undefined {
+  return (
+    readNotificationNestedString(notification, "item", "clientId") ??
+    readNotificationParamString(notification, "clientUserMessageId")
+  );
+}
+
 function readNotificationTurnStatus(notification: CodexServerNotification): string | undefined {
   return readNotificationNestedString(notification, "turn", "status");
+}
+
+function normalizeCodexPendingSteerTerminalState(
+  value: string | undefined,
+): CodexPendingSteerTerminalState {
+  switch (value) {
+    case "completed":
+    case "failed":
+    case "interrupted":
+    case "cancelled":
+      return value;
+    default:
+      return "unknown";
+  }
 }
 
 function readNotificationErrorMessage(notification: CodexServerNotification): string | undefined {
@@ -2354,6 +2833,74 @@ export function codexTerminalSessionPatch(input: {
     // session polls will resurrect the same recovered error.
     lastError: failed ? input.errorMessage : undefined,
   };
+}
+
+/**
+ * Apply a successful terminal `thread/read` observation through the shared
+ * steer lifecycle boundary. This effect is deliberately exported as a narrow
+ * deterministic test seam: exercising it with the ACK handler verifies the
+ * real Ref/Semaphore ordering used by the runtime, not only the pure map merge.
+ */
+export function reconcileCodexTerminalSnapshotSteerLifecycle(input: {
+  readonly semaphore: Semaphore.Semaphore;
+  readonly pendingRef: Ref.Ref<Map<string, CodexPendingSteerProcessing>>;
+  readonly sessionRef: Ref.Ref<ProviderSession>;
+  readonly turnId: TurnId;
+  readonly turnStatus: string;
+  readonly errorMessage?: string | undefined;
+  readonly observedAt: string;
+}): Effect.Effect<boolean> {
+  return terminalizeCodexSteerLifecycleBoundary({
+    semaphore: input.semaphore,
+    pendingRef: input.pendingRef,
+    sessionRef: input.sessionRef,
+    turnId: input.turnId,
+    terminalState: normalizeCodexPendingSteerTerminalState(input.turnStatus),
+    observedAt: input.observedAt,
+    sessionPatch: codexTerminalSessionPatch({
+      turnStatus: input.turnStatus,
+      errorMessage: input.errorMessage,
+    }),
+  });
+}
+
+/**
+ * Commit a live Codex turn completion before publishing its canonical event.
+ *
+ * Raw app-server notifications are delivered on independent fibers. A late
+ * `turn/completed` for T1 may therefore arrive after `turn/started` has made T2
+ * the visible active turn. The shared lifecycle boundary always records T1's
+ * terminal evidence for its pending steers, but its atomic exact-turn compare
+ * prevents that stale completion from clearing T2. Publication is sequenced
+ * after the commit so downstream recovery can never observe the terminal event
+ * while the response continuation can still revive T1.
+ */
+export function publishCodexTurnCompletionAfterLifecycleBoundary<E, R>(input: {
+  readonly semaphore: Semaphore.Semaphore;
+  readonly pendingRef: Ref.Ref<Map<string, CodexPendingSteerProcessing>>;
+  readonly sessionRef: Ref.Ref<ProviderSession>;
+  readonly turnId: TurnId;
+  readonly turnStatus: string;
+  readonly errorMessage?: string | undefined;
+  readonly observedAt: string;
+  readonly publish: Effect.Effect<void, E, R>;
+}): Effect.Effect<boolean, E, R> {
+  return Effect.gen(function* () {
+    const terminalizedVisibleSession = yield* terminalizeCodexSteerLifecycleBoundary({
+      semaphore: input.semaphore,
+      pendingRef: input.pendingRef,
+      sessionRef: input.sessionRef,
+      turnId: input.turnId,
+      terminalState: normalizeCodexPendingSteerTerminalState(input.turnStatus),
+      observedAt: input.observedAt,
+      sessionPatch: codexTerminalSessionPatch({
+        turnStatus: input.turnStatus,
+        errorMessage: input.errorMessage,
+      }),
+    });
+    yield* input.publish;
+    return terminalizedVisibleSession;
+  });
 }
 
 function parseThreadSnapshot(
@@ -2831,6 +3378,10 @@ export const makeCodexSessionRuntime = (
     const aggregateManagedTurnIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
     const aggregateCompletionWatcherTurnIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set());
     const aggregateLifecycleSemaphore = yield* Semaphore.make(1);
+    // Request responses and raw notifications are independent Effect fibers.
+    // Serialize the two writes that decide steer-vs-terminal ownership so a
+    // late ACK can never overwrite an already-authoritative terminal state.
+    const steerLifecycleSemaphore = yield* Semaphore.make(1);
     const closedRef = yield* Ref.make(false);
     const snapshotBackfillEventIdsRef = yield* Ref.make(new Set<string>());
     const turnStartObservationsRef = yield* Ref.make(new Map<string, CodexTurnStartObservation>());
@@ -2841,6 +3392,7 @@ export const makeCodexSessionRuntime = (
     const pendingSteerProcessingRef = yield* Ref.make(
       new Map<string, CodexPendingSteerProcessing>(),
     );
+    const restartedSteerProcessingObservationsRef = yield* Ref.make(new Map<string, string>());
 
     // `~` is not shell-expanded when env vars are set via
     // `child_process.spawn`; `expandHomePath` lets a configured
@@ -3166,10 +3718,17 @@ export const makeCodexSessionRuntime = (
       });
 
     const recordPendingSteerProcessing = (pending: CodexPendingSteerProcessing) =>
-      Ref.update(pendingSteerProcessingRef, (current) => {
-        const next = new Map(current);
-        next.set(pending.steerId, pending);
-        return prunePendingSteerProcessing(next);
+      Ref.modify(pendingSteerProcessingRef, (current) => {
+        const admission = admitCodexPendingSteerProcessing(current, pending);
+        return [admission, admission.next] as const;
+      });
+
+    const claimRestartedSteerProcessingObservationOnce = (
+      observation: CodexRestartedSteerProcessingObservation,
+    ) =>
+      Ref.modify(restartedSteerProcessingObservationsRef, (current) => {
+        const claim = claimCodexRestartedSteerProcessingObservation(current, observation);
+        return [claim.claimed, claim.next] as const;
       });
 
     const markPendingSteerProcessingWarning = (
@@ -3178,7 +3737,12 @@ export const makeCodexSessionRuntime = (
     ) =>
       Ref.modify(pendingSteerProcessingRef, (current) => {
         const pending = current.get(steerId);
-        if (!pending || pending.processedAt !== undefined) {
+        if (
+          !pending ||
+          pending.acknowledgedAt === undefined ||
+          pending.processedAt !== undefined ||
+          pending.terminalObservedAt !== undefined
+        ) {
           return [undefined, current] as const;
         }
         const updated = {
@@ -3208,8 +3772,8 @@ export const makeCodexSessionRuntime = (
           providerThreadId: input.pending.providerThreadId,
           turnId: input.pending.turnId,
           elapsedDelay: input.elapsedDelay,
-          acknowledgedAt: input.pending.acknowledgedAt,
-          ackLatencyMs: input.pending.ackLatencyMs,
+          acknowledgedAt: input.pending.acknowledgedAt ?? null,
+          ackLatencyMs: input.pending.ackLatencyMs ?? null,
           promptByteLength: input.pending.promptByteLength,
           attachmentCount: input.pending.attachmentCount,
           warningCount: input.pending.warningCount,
@@ -3227,8 +3791,9 @@ export const makeCodexSessionRuntime = (
             turnId: input.pending.turnId,
             elapsedDelay: input.elapsedDelay,
             requestedAt: input.pending.requestedAt,
-            acknowledgedAt: input.pending.acknowledgedAt,
-            ackLatencyMs: input.pending.ackLatencyMs,
+            acknowledgedAt: input.pending.acknowledgedAt ?? null,
+            ackLatencyMs: input.pending.ackLatencyMs ?? null,
+            clientCorrelationId: input.pending.clientCorrelationId,
             promptByteLength: input.pending.promptByteLength,
             attachmentCount: input.pending.attachmentCount,
             warningCount: input.pending.warningCount,
@@ -3270,19 +3835,57 @@ export const makeCodexSessionRuntime = (
           return;
         }
 
-        const processed = yield* Ref.modify(pendingSteerProcessingRef, (current) => {
+        const processing = yield* Ref.modify(pendingSteerProcessingRef, (current) => {
           const result = updateCodexPendingSteerProcessingFromNotification(current, {
             method: notification.method,
             providerThreadId: readNotificationThreadId(notification),
             turnId: readNotificationTurnId(notification),
             itemId: readNotificationItemId(notification),
             itemType: readNotificationItemType(notification),
+            clientUserMessageId: readNotificationClientUserMessageId(notification),
             observedAt: observation.observedAt,
             observedAtMs: observation.observedAtMs,
           });
-          return [result.pending, result.next] as const;
+          return [result, result.next] as const;
         });
+        const processed = processing.pending;
         if (!processed) {
+          const restartedObservation = processing.restartedObservation;
+          if (
+            !restartedObservation ||
+            !(yield* claimRestartedSteerProcessingObservationOnce(restartedObservation))
+          ) {
+            return;
+          }
+
+          yield* Effect.logInfo("codex.turnSteer.processingObservedAfterRestart", {
+            threadId: options.threadId,
+            providerInstanceId: options.providerInstanceId ?? PROVIDER,
+            turnId: restartedObservation.turnId,
+            providerUserMessageItemId: restartedObservation.providerUserMessageItemId ?? null,
+            providerUserMessageMethod: restartedObservation.providerUserMessageMethod,
+            clientCorrelationId: restartedObservation.clientCorrelationId,
+          });
+          yield* emitEvent({
+            kind: "notification",
+            threadId: options.threadId,
+            method: "codex.turnSteer/processingObserved",
+            turnId: restartedObservation.turnId,
+            ...(restartedObservation.providerUserMessageItemId
+              ? { itemId: restartedObservation.providerUserMessageItemId }
+              : {}),
+            message: "Codex app-server observed the correlated user message after recovery.",
+            payload: {
+              clientCorrelationId: restartedObservation.clientCorrelationId,
+              providerThreadId: restartedObservation.providerThreadId ?? null,
+              turnId: restartedObservation.turnId,
+              providerUserMessageItemId: restartedObservation.providerUserMessageItemId ?? null,
+              providerUserMessageMethod: restartedObservation.providerUserMessageMethod,
+              observedAt: restartedObservation.observedAt,
+              semantics:
+                "Cafe restarted without the volatile steer correlation. The provider-echoed client id is an untrusted, content-free observation; durable recovery requires an exact match to independently persisted command-boundary acceptance evidence.",
+            },
+          });
           return;
         }
 
@@ -3296,6 +3899,7 @@ export const makeCodexSessionRuntime = (
           providerUserMessageMethod: processed.providerUserMessageMethod ?? null,
           ackToProviderItemMs: processed.ackToProviderItemMs ?? null,
           warningCount: processed.warningCount,
+          clientCorrelationId: processed.clientCorrelationId,
         });
         yield* emitEvent({
           kind: "notification",
@@ -3308,14 +3912,15 @@ export const makeCodexSessionRuntime = (
           message: "Codex app-server began processing turn/steer.",
           payload: {
             steerId: processed.steerId,
+            clientCorrelationId: processed.clientCorrelationId,
             providerThreadId: processed.providerThreadId,
             turnId: processed.turnId,
             providerUserMessageItemId: processed.providerUserMessageItemId ?? null,
             providerUserMessageMethod: processed.providerUserMessageMethod ?? null,
             requestedAt: processed.requestedAt,
-            acknowledgedAt: processed.acknowledgedAt,
+            acknowledgedAt: processed.acknowledgedAt ?? null,
             processedAt: processed.processedAt ?? null,
-            ackLatencyMs: processed.ackLatencyMs,
+            ackLatencyMs: processed.ackLatencyMs ?? null,
             ackToProviderItemMs: processed.ackToProviderItemMs ?? null,
             promptByteLength: processed.promptByteLength,
             attachmentCount: processed.attachmentCount,
@@ -3325,6 +3930,7 @@ export const makeCodexSessionRuntime = (
           },
         });
       });
+
     const emitSnapshotBackfillEvents = (input: {
       readonly providerThread: CodexSnapshotThread;
       readonly reason: CodexSnapshotBackfillReason;
@@ -3504,22 +4110,22 @@ export const makeCodexSessionRuntime = (
           return;
         }
 
-        const session = yield* Ref.get(sessionRef);
-        if (session.activeTurnId !== input.turnId) {
-          return;
-        }
-
         const observedAt = yield* nowIso;
         // A successful authoritative terminal snapshot supersedes an older
         // runtime error. Apply the same patch as the live completion path so
         // reconnect reconciliation cannot replay a recovered failure.
-        yield* updateSession(
+        const reconciledActiveTurn = yield* reconcileCodexTerminalSnapshotSteerLifecycle({
+          semaphore: steerLifecycleSemaphore,
+          pendingRef: pendingSteerProcessingRef,
           sessionRef,
-          codexTerminalSessionPatch({
-            turnStatus: input.turn.status,
-            errorMessage: input.turn.error?.message,
-          }),
-        );
+          turnId: input.turnId,
+          turnStatus: input.turn.status,
+          errorMessage: input.turn.error?.message,
+          observedAt,
+        });
+        if (!reconciledActiveTurn) {
+          return;
+        }
         yield* Effect.logInfo("codex.turnProgress.reconciledFromThreadRead", {
           threadId: options.threadId,
           providerInstanceId: options.providerInstanceId ?? PROVIDER,
@@ -3867,28 +4473,37 @@ export const makeCodexSessionRuntime = (
           const nextPending = new Set(pending);
           nextPending.delete(key);
           yield* Ref.set(pendingAggregateCompletionsRef, nextPending);
-          yield* updateSession(sessionRef, {
-            status: completion.state === "failed" ? "error" : "ready",
-            activeTurnId: undefined,
-            lastError: completion.state === "failed" ? completion.errorMessage : undefined,
-          });
-          yield* emitEvent({
-            kind: "notification",
-            threadId: options.threadId,
-            method: "codex.aggregateTurn/completed",
+          const aggregateCompletedAt = yield* nowIso;
+          // The root completion was intentionally hidden while child agents
+          // remained live. Commit its pending-steer and exact-turn session
+          // terminal state before the aggregate terminal event becomes visible
+          // to orchestration. A newer active turn must remain untouched.
+          yield* publishCodexTurnCompletionAfterLifecycleBoundary({
+            semaphore: steerLifecycleSemaphore,
+            pendingRef: pendingSteerProcessingRef,
+            sessionRef,
             turnId,
-            message: "Codex aggregate turn completed after all routed subagents became inactive.",
-            payload: {
-              state: completion.state,
-              ...(completion.errorMessage ? { errorMessage: completion.errorMessage } : {}),
-              ...(completion.providerThreadId
-                ? { providerThreadId: completion.providerThreadId }
-                : {}),
-              rootCompletedAt: completion.observedAt,
-              aggregateCompletedAt: yield* nowIso,
-              semantics:
-                "Upstream Codex TUI tracks primary and subagent thread liveness separately. Cafe combines those channels, so the visible aggregate turn becomes terminal only after every routed child thread is non-active.",
-            },
+            turnStatus: completion.state,
+            errorMessage: completion.errorMessage,
+            observedAt: aggregateCompletedAt,
+            publish: emitEvent({
+              kind: "notification",
+              threadId: options.threadId,
+              method: "codex.aggregateTurn/completed",
+              turnId,
+              message: "Codex aggregate turn completed after all routed subagents became inactive.",
+              payload: {
+                state: completion.state,
+                ...(completion.errorMessage ? { errorMessage: completion.errorMessage } : {}),
+                ...(completion.providerThreadId
+                  ? { providerThreadId: completion.providerThreadId }
+                  : {}),
+                rootCompletedAt: completion.observedAt,
+                aggregateCompletedAt,
+                semantics:
+                  "Upstream Codex TUI tracks primary and subagent thread liveness separately. Cafe combines those channels, so the visible aggregate turn becomes terminal only after every routed child thread is non-active.",
+              },
+            }),
           });
           return true;
         }),
@@ -4070,11 +4685,17 @@ export const makeCodexSessionRuntime = (
               yield* Ref.set(pendingAggregateCompletionsRef, nextPending);
             }
             yield* rememberAggregateManagedTurn(turnId);
-            yield* updateSession(sessionRef, {
-              status: "running",
-              activeTurnId: turnId,
-              lastError: undefined,
-            });
+            yield* Ref.update(sessionRef, (session) =>
+              session.activeTurnId !== undefined && session.activeTurnId !== turnId
+                ? session
+                : {
+                    ...session,
+                    status: "running" as const,
+                    activeTurnId: turnId,
+                    lastError: undefined,
+                    updatedAt: observedAt,
+                  },
+            );
             if (!alreadyPending) {
               const childCount = codexChildConversationThreadIdsForTurn(routes, turnId).length;
               yield* emitEvent({
@@ -4200,16 +4821,9 @@ export const makeCodexSessionRuntime = (
             return;
           }
           case "turn/completed": {
-            const turnStatus = readNotificationTurnStatus(notification);
-            const errorMessage =
-              turnStatus === "failed" ? readNotificationErrorMessage(notification) : undefined;
-            yield* updateSession(
-              sessionRef,
-              codexTerminalSessionPatch({
-                turnStatus: turnStatus ?? "completed",
-                errorMessage,
-              }),
-            );
+            // Root completion is committed together with pending steer state
+            // immediately before publication in `handleRawNotification`.
+            // Child completions never own the visible primary session.
             return;
           }
           case "thread/status/changed": {
@@ -4345,6 +4959,10 @@ export const makeCodexSessionRuntime = (
         const subagentProjectionMethod = childRoute
           ? codexSubagentProjectionMethod(notification)
           : undefined;
+        const isCurrentRootTurnCompletion =
+          childRoute === undefined &&
+          notification.method === "turn/completed" &&
+          (yield* notificationBelongsToCurrentSession(notification));
 
         // Use the already-routed parent turn when a subagent creates another
         // subagent. This keeps arbitrary-depth multi-agent output attached to
@@ -4390,10 +5008,9 @@ export const makeCodexSessionRuntime = (
           );
         }
 
-        const aggregateCompletionDeferred =
-          childRoute === undefined && notification.method === "turn/completed"
-            ? yield* handleAggregateRootCompletion(notification, observedAt)
-            : false;
+        const aggregateCompletionDeferred = isCurrentRootTurnCompletion
+          ? yield* handleAggregateRootCompletion(notification, observedAt)
+          : false;
         if (aggregateCompletionDeferred) {
           yield* markTurnStartNotification(notification, routedTurnId, observedAt);
           return;
@@ -4448,7 +5065,7 @@ export const makeCodexSessionRuntime = (
             });
           }
         }
-        yield* emitEvent(
+        const publish = emitEvent(
           {
             kind: "notification",
             threadId: options.threadId,
@@ -4464,6 +5081,23 @@ export const makeCodexSessionRuntime = (
           },
           observedAt,
         );
+        if (isCurrentRootTurnCompletion && turnId) {
+          const turnStatus = readNotificationTurnStatus(notification) ?? "completed";
+          yield* publishCodexTurnCompletionAfterLifecycleBoundary({
+            semaphore: steerLifecycleSemaphore,
+            pendingRef: pendingSteerProcessingRef,
+            sessionRef,
+            turnId,
+            turnStatus,
+            ...(turnStatus === "failed"
+              ? { errorMessage: readNotificationErrorMessage(notification) }
+              : {}),
+            observedAt,
+            publish,
+          });
+          return;
+        }
+        yield* publish;
       });
 
     yield* client.handleServerNotification("thread/started", (payload) =>
@@ -5113,19 +5747,69 @@ export const makeCodexSessionRuntime = (
                 startedAt: activeContextCompaction.startedAt,
               });
             });
+          const steerRequestedAt = yield* nowIso;
+          const steerRequestedAtMs = yield* Clock.currentTimeMillis;
+          const steerId = yield* Random.nextUUIDv4;
+          // Upstream accepts this opaque value and echoes it on the injected
+          // userMessage item. CodexAdapter derives the token from Cafe's exact
+          // MessageId before entering this provider-owned runtime. Requests
+          // without a Cafe message identity use the random steer id as a
+          // fixed-size correlation source. Validate even this internal input
+          // so a future caller cannot accidentally reintroduce an open-string
+          // identifier into app-server state, diagnostics, or event payloads.
+          const clientCorrelationId = resolveCodexSessionRuntimeSteerClientCorrelationId({
+            clientCorrelationId: input.clientCorrelationId,
+            fallbackSource: steerId,
+          });
+          if (clientCorrelationId === undefined) {
+            return yield* buildCodexInvalidSteerCorrelationError();
+          }
           const requestSteer = (expectedTurnId: TurnId) =>
             Effect.gen(function* () {
               yield* rejectIfContextCompactionActive(expectedTurnId);
               const params = yield* buildTurnSteerParams({
                 threadId: providerThreadId,
                 expectedTurnId,
+                clientUserMessageId: clientCorrelationId,
                 ...(input.input ? { prompt: input.input } : {}),
                 ...(input.attachments ? { attachments: input.attachments } : {}),
               });
               return yield* client.raw.request("turn/steer", params);
             });
-          const steerRequestedAt = yield* nowIso;
-          const steerRequestedAtMs = yield* Clock.currentTimeMillis;
+          const pendingSteerAdmission = yield* recordPendingSteerProcessing({
+            steerId,
+            clientCorrelationId,
+            providerThreadId,
+            turnId: input.expectedTurnId,
+            requestedAt: steerRequestedAt,
+            promptByteLength: Buffer.byteLength(input.input ?? "", "utf8"),
+            attachmentCount: input.attachments?.length ?? 0,
+            warningCount: 0,
+          });
+          if (!pendingSteerAdmission.admitted) {
+            // Do not call app-server without retaining the correlation needed
+            // to resolve an ACK/notification/terminal race. In particular, do
+            // not evict an older ambiguous request to make room: Codex may have
+            // accepted it already, so replacement would risk both duplicate
+            // delivery and a late ACK reviving a terminal turn.
+            yield* Effect.logWarning("codex.turnSteer.admissionBackpressure", {
+              threadId: options.threadId,
+              providerInstanceId: options.providerInstanceId ?? PROVIDER,
+              providerThreadId,
+              turnId: input.expectedTurnId,
+              unresolvedCount: pendingSteerAdmission.unresolvedCount,
+              capacity: pendingSteerAdmission.capacity,
+              promptByteLength: Buffer.byteLength(input.input ?? "", "utf8"),
+              attachmentCount: input.attachments?.length ?? 0,
+            });
+            return yield* buildCodexPendingSteerCapacityError(pendingSteerAdmission);
+          }
+          const removePendingSteerProcessing = Ref.update(pendingSteerProcessingRef, (current) => {
+            if (!current.has(steerId)) return current;
+            const next = new Map(current);
+            next.delete(steerId);
+            return next;
+          });
           const rawResponse = yield* requestSteer(input.expectedTurnId).pipe(
             Effect.catchIf(isCodexNoActiveTurnToSteerError, (error) =>
               Effect.gen(function* () {
@@ -5191,8 +5875,29 @@ export const makeCodexSessionRuntime = (
                     "Codex app-server reported a newer active turn; Cafe Code retried turn/steer with that turn id.",
                   payload: diagnostics,
                 });
+                // Bind the correlation to the authoritative active turn
+                // before issuing the retry. A terminal notification for that
+                // turn can arrive before the request promise resumes, and it
+                // must win over the later acknowledgement.
+                yield* steerLifecycleSemaphore.withPermits(1)(
+                  Ref.update(pendingSteerProcessingRef, (current) =>
+                    retargetCodexPendingSteerProcessing(current, {
+                      steerId,
+                      turnId: actualTurnId,
+                    }),
+                  ),
+                );
                 return yield* requestSteer(actualTurnId);
               }),
+            ),
+            // A JSON-RPC error is an explicit provider rejection. Transport,
+            // process, and protocol failures are ambiguous: Codex may already
+            // have accepted the client-correlated input, so preserve that
+            // correlation for a later echoed item or terminal reconciliation.
+            Effect.tapError((error) =>
+              error._tag === "CodexAppServerRequestError"
+                ? removePendingSteerProcessing
+                : Effect.void,
             ),
           );
           const steerAcknowledgedAt = yield* nowIso;
@@ -5203,9 +5908,9 @@ export const makeCodexSessionRuntime = (
             ),
           );
           const turnId = TurnId.make(response.turnId);
-          const steerId = yield* Random.nextUUIDv4;
           const diagnostics = {
             steerId,
+            clientCorrelationId,
             providerThreadId,
             turnId,
             expectedTurnId: input.expectedTurnId,
@@ -5220,7 +5925,16 @@ export const makeCodexSessionRuntime = (
           yield* Effect.logInfo("codex.turnSteer.accepted", {
             threadId: options.threadId,
             providerInstanceId: options.providerInstanceId ?? PROVIDER,
-            ...diagnostics,
+            steerId,
+            clientCorrelationId,
+            providerThreadId,
+            turnId,
+            expectedTurnId: input.expectedTurnId,
+            requestedAt: steerRequestedAt,
+            acknowledgedAt: steerAcknowledgedAt,
+            ackLatencyMs: Math.max(0, steerAcknowledgedAtMs - steerRequestedAtMs),
+            promptByteLength: Buffer.byteLength(input.input ?? "", "utf8"),
+            attachmentCount: input.attachments?.length ?? 0,
           });
           yield* emitEvent({
             kind: "notification",
@@ -5230,32 +5944,42 @@ export const makeCodexSessionRuntime = (
             message: "Codex app-server accepted turn/steer.",
             payload: diagnostics,
           });
-          yield* recordPendingSteerProcessing({
+          const acknowledgement = yield* acknowledgeCodexSteerLifecycleBoundary({
+            semaphore: steerLifecycleSemaphore,
+            pendingRef: pendingSteerProcessingRef,
+            sessionRef,
             steerId,
-            providerThreadId,
+            expectedTurnId: input.expectedTurnId,
             turnId,
-            requestedAt: steerRequestedAt,
             acknowledgedAt: steerAcknowledgedAt,
             acknowledgedAtMs: steerAcknowledgedAtMs,
             ackLatencyMs: Math.max(0, steerAcknowledgedAtMs - steerRequestedAtMs),
-            promptByteLength: Buffer.byteLength(input.input ?? "", "utf8"),
-            attachmentCount: input.attachments?.length ?? 0,
-            warningCount: 0,
           });
-          yield* schedulePendingSteerProcessingWarnings(steerId);
-          yield* updateSession(sessionRef, {
-            status: "running",
-            activeTurnId: turnId,
-          });
-          yield* scheduleSendTurnSnapshotBackfill({
-            providerThreadId,
-            turnId,
-            reason: "turn-steer-follow-up",
-          });
+          if (acknowledgement.pending === undefined) {
+            // Missing correlation is an invariant failure, never evidence that
+            // a late ACK may safely resurrect the turn. Keep this diagnostic
+            // fixed-size and leave authoritative session state intact.
+            yield* Effect.logError("codex.turnSteer.correlationMissingAfterAck", {
+              threadId: options.threadId,
+              providerInstanceId: options.providerInstanceId ?? PROVIDER,
+              steerId,
+              clientCorrelationId,
+              providerThreadId,
+              turnId,
+            });
+          } else if (acknowledgement.restoredRunning) {
+            yield* schedulePendingSteerProcessingWarnings(steerId);
+            yield* scheduleSendTurnSnapshotBackfill({
+              providerThreadId,
+              turnId,
+              reason: "turn-steer-follow-up",
+            });
+          }
           const resumedProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
           return {
             threadId: options.threadId,
             turnId,
+            clientCorrelationId,
             ...(resumedProviderThreadId
               ? { resumeCursor: { threadId: resumedProviderThreadId } }
               : {}),

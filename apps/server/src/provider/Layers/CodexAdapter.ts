@@ -88,6 +88,10 @@ import {
   type CodexThreadSnapshot,
   type CodexTransportPolicy,
 } from "./CodexSessionRuntime.ts";
+import {
+  buildCodexSteerClientCorrelationId,
+  parseCodexSteerClientCorrelationId,
+} from "../codexSteerCorrelation.ts";
 import { isCodexRootAgentPath, normalizeCodexAgentPath } from "./CodexSubagentPath.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import type { CodexShadowHomeError } from "../Drivers/CodexHomeLayout.ts";
@@ -1507,6 +1511,41 @@ function runtimeEventBase(
       payload: options?.rawPayload ?? event.payload ?? {},
     },
   };
+}
+
+/**
+ * Keep task identities bounded even when replaying an older runtime event that
+ * predates the explicit token field. Current events always carry a canonical
+ * `clientCorrelationId`; the digest fallback is compatibility-only and never
+ * copies an open-string Cafe or provider id into durable task identity.
+ */
+function codexSteerClientCorrelationIdFromEvent(event: ProviderEvent): string {
+  const diagnostics = readRecordValue(event.payload);
+  return (
+    parseCodexSteerClientCorrelationId(readStringValue(diagnostics?.clientCorrelationId)) ??
+    buildCodexSteerClientCorrelationId(
+      readStringValue(diagnostics?.steerId) ?? String(event.turnId ?? event.id),
+    )
+  );
+}
+
+/**
+ * ProviderEvent payloads are retained in both `raw` diagnostics and canonical
+ * runtime usage. Keep the exact Cafe MessageId on the orchestration side of
+ * the boundary: even a legacy or accidentally forged runtime event must not
+ * copy an open, potentially unbounded identifier into provider diagnostics.
+ * Replacing the correlation field with the validated/fallback token also
+ * prevents a malformed value from becoming an unbounded task or cache key.
+ */
+function sanitizeCodexSteerDiagnostics(
+  event: ProviderEvent,
+  clientCorrelationId: string,
+): Record<string, unknown> {
+  const diagnostics = readRecordValue(event.payload) ?? {};
+  const safe = { ...diagnostics };
+  delete safe.messageId;
+  safe.clientCorrelationId = clientCorrelationId;
+  return safe;
 }
 
 function subagentRuntimeEventBase(
@@ -3460,10 +3499,20 @@ function mapToRuntimeEvents(
     event.method === "codex.turnSteer/noProviderItemYet" ||
     event.method === "codex.turnProgress/stillInProgressAfterSnapshotPolling"
   ) {
+    const steerClientCorrelationId =
+      event.method === "codex.turnSteer/noProviderItemYet"
+        ? codexSteerClientCorrelationIdFromEvent(event)
+        : undefined;
+    const diagnosticPayload =
+      steerClientCorrelationId === undefined
+        ? event.payload
+        : sanitizeCodexSteerDiagnostics(event, steerClientCorrelationId);
     return [
       {
         type: "runtime.warning",
-        ...runtimeEventBase(event, canonicalThreadId),
+        ...runtimeEventBase(event, canonicalThreadId, {
+          rawPayload: diagnosticPayload ?? {},
+        }),
         payload: {
           message:
             event.message ??
@@ -3472,7 +3521,7 @@ function mapToRuntimeEvents(
               : event.method === "codex.turnSteer/noProviderItemYet"
                 ? "Codex app-server accepted turn/steer but has not emitted the steer user message yet."
                 : "Codex still reports the active turn as in progress after delayed snapshot polling."),
-          ...(event.payload !== undefined ? { detail: event.payload } : {}),
+          ...(diagnosticPayload !== undefined ? { detail: diagnosticPayload } : {}),
         },
       },
     ];
@@ -3493,28 +3542,39 @@ function mapToRuntimeEvents(
   }
 
   if (event.method === "codex.turnSteer/accepted") {
+    const clientCorrelationId = codexSteerClientCorrelationIdFromEvent(event);
+    const diagnostics = sanitizeCodexSteerDiagnostics(event, clientCorrelationId);
     return [
       {
         type: "task.progress",
-        ...runtimeEventBase(event, canonicalThreadId),
+        ...runtimeEventBase(event, canonicalThreadId, { rawPayload: diagnostics }),
         payload: {
-          taskId: RuntimeTaskId.make(`codex-turn-steer:${event.turnId ?? event.id}`),
+          taskId: RuntimeTaskId.make(`codex-turn-steer:${clientCorrelationId}`),
           description: event.message ?? "Codex app-server accepted turn/steer.",
-          ...(event.payload !== undefined ? { usage: event.payload } : {}),
+          usage: diagnostics,
         },
       },
     ];
   }
 
-  if (event.method === "codex.turnSteer/processingStarted") {
+  if (
+    event.method === "codex.turnSteer/processingStarted" ||
+    event.method === "codex.turnSteer/processingObserved"
+  ) {
+    const clientCorrelationId = codexSteerClientCorrelationIdFromEvent(event);
+    const diagnostics = sanitizeCodexSteerDiagnostics(event, clientCorrelationId);
     return [
       {
         type: "task.progress",
-        ...runtimeEventBase(event, canonicalThreadId),
+        ...runtimeEventBase(event, canonicalThreadId, { rawPayload: diagnostics }),
         payload: {
-          taskId: RuntimeTaskId.make(`codex-turn-steer-processing:${event.turnId ?? event.id}`),
-          description: event.message ?? "Codex app-server began processing turn/steer.",
-          ...(event.payload !== undefined ? { usage: event.payload } : {}),
+          taskId: RuntimeTaskId.make(`codex-turn-steer-processing:${clientCorrelationId}`),
+          description:
+            event.message ??
+            (event.method === "codex.turnSteer/processingObserved"
+              ? "Codex app-server observed the correlated user message after recovery."
+              : "Codex app-server began processing turn/steer."),
+          usage: diagnostics,
         },
       },
     ];
@@ -4224,9 +4284,18 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
 
     const session = yield* requireSession(input.threadId);
+    // MessageId is an open Cafe entity id and may be arbitrarily large or
+    // contain control code points. Bind it to a deterministic fixed-size token
+    // before entering CodexSessionRuntime so provider-owned pending state,
+    // app-server state, logs, and events never receive the raw identifier.
+    const clientCorrelationId =
+      input.messageId !== undefined
+        ? buildCodexSteerClientCorrelationId(input.messageId)
+        : undefined;
     return yield* session.runtime
       .steerTurn({
         expectedTurnId: input.expectedTurnId,
+        ...(clientCorrelationId !== undefined ? { clientCorrelationId } : {}),
         ...(input.input !== undefined ? { input: input.input } : {}),
         ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
       })

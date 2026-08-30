@@ -136,6 +136,18 @@ describe("ProviderSendTurnInput", () => {
     expect(getOptionValue(parsed.modelSelection?.options, "fastMode")).toBe(true);
   });
 
+  it("accepts bounded send correlation and internal active-turn fallback policy", () => {
+    const parsed = decodeProviderSendTurnInput({
+      threadId: "thread-1",
+      messageId: "message-steer-1",
+      allowActiveTurnSteerFallback: false,
+      input: "recover this as a new turn only",
+    });
+
+    expect(parsed.messageId).toBe("message-steer-1");
+    expect(parsed.allowActiveTurnSteerFallback).toBe(false);
+  });
+
   it("accepts claude modelSelection including ultrathink", () => {
     const parsed = decodeProviderSendTurnInput({
       threadId: "thread-1",

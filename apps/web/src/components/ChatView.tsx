@@ -169,19 +169,28 @@ import {
   buildLocalDraftThread,
   collectUserMessageBlobPreviewUrls,
   createLocalDispatchSnapshot,
+  deriveRetryableSteerReplayCandidates,
   deriveComposerSendState,
+  doesSteerFailureActivityMatchPending,
+  doesSteerProcessingActivityMatchPending,
   hasServerAcknowledgedLocalDispatch,
+  isSteerProcessingActivityTimely,
   type LocalDispatchSnapshot,
   PullRequestDialogState,
   cloneComposerImageForRetry,
   deriveLockedProvider,
   mergePendingSteerSnapshotsForInterruptedTurn,
+  readDeliveredSteerMessageId,
+  readRecoveredSteerMessageId,
   readFileAsDataUrl,
+  readSteerProcessingMessageId,
+  restoreCanonicalRetryImages,
   resolveFollowUpQueuePhase,
   resolveSendEnvMode,
   revokeBlobPreviewUrl,
   revokeUserMessagePreviewUrls,
   shouldResolvePendingSteerDispatch,
+  shouldBackpressurePendingSteerDispatch,
   shouldPinTimelineToEndForLocalMessage,
   shouldWriteThreadErrorToCurrentServerThread,
   waitForStartedServerThread,
@@ -1529,6 +1538,7 @@ interface PendingSteerDispatch {
   readonly turnId: TurnId | null;
   readonly snapshot: ComposerSendSnapshot;
   readonly dispatchedAt: string;
+  readonly intentSequence: number | null;
 }
 
 interface PendingSteerInterruptRecovery {
@@ -1584,27 +1594,6 @@ function threadHasProviderInterruptFailedForRecovery(
   });
 }
 
-function readRetryableSteerFailure(
-  activity: OrchestrationThreadActivity,
-): { readonly messageId: MessageId; readonly turnKind: CodexNonSteerableTurnKind | null } | null {
-  if (activity.kind !== "provider.turn.steer.failed") {
-    return null;
-  }
-  const payload = readDebugRecord(activity.payload);
-  if (payload === null || readDebugBoolean(payload.retryableFollowUp) !== true) {
-    return null;
-  }
-  const messageId = readDebugString(payload.messageId);
-  const turnKind = readDebugString(payload.codexNonSteerableTurnKind);
-  if (messageId === null) {
-    return null;
-  }
-  return {
-    messageId: MessageId.make(messageId),
-    turnKind: turnKind === "review" || turnKind === "compact" ? turnKind : null,
-  };
-}
-
 function isAutomaticSteerRetryItem(item: FollowUpQueueItem): boolean {
   return item.automaticSteerRetry != null;
 }
@@ -1643,24 +1632,16 @@ function resolveAutomaticSteerRetryBlocker(input: {
   return input.phase === "running" ? "review-active-turn" : null;
 }
 
-function readSteerFailureMessageId(activity: OrchestrationThreadActivity): MessageId | null {
-  if (activity.kind !== "provider.turn.steer.failed") {
-    return null;
-  }
-  const payload = readDebugRecord(activity.payload);
-  const messageId = readDebugString(payload?.messageId);
-  return messageId === null ? null : MessageId.make(messageId);
-}
-
 function readSteerRecoveryMessageId(activity: OrchestrationThreadActivity): MessageId | null {
-  if (activity.kind !== "runtime.warning") {
-    return null;
-  }
-  const payload = readDebugRecord(activity.payload);
-  if (readDebugString(payload?.recovery) !== "turn-start-after-no-active-turn") {
-    return null;
-  }
-  const messageId = readDebugString(payload?.messageId);
+  const messageId =
+    readRecoveredSteerMessageId({
+      activityKind: activity.kind,
+      payload: activity.payload,
+    }) ??
+    readDeliveredSteerMessageId({
+      activityKind: activity.kind,
+      payload: activity.payload,
+    });
   return messageId === null ? null : MessageId.make(messageId);
 }
 
@@ -1683,8 +1664,15 @@ function threadHasTerminalTurnAfterSteer(thread: Thread, pending: PendingSteerDi
   );
 }
 
-function threadHasSteerFailureForMessage(thread: Thread, messageId: MessageId) {
-  return thread.activities.some((activity) => readSteerFailureMessageId(activity) === messageId);
+function threadHasSteerFailureForPending(thread: Thread, pending: PendingSteerDispatch) {
+  return thread.activities.some((activity) =>
+    doesSteerFailureActivityMatchPending({
+      activity,
+      pendingMessageId: pending.messageId,
+      pendingIntentSequence: pending.intentSequence,
+      dispatchedAt: pending.dispatchedAt,
+    }),
+  );
 }
 
 function threadHasSteerRecoveryForMessage(thread: Thread, messageId: MessageId) {
@@ -1694,9 +1682,6 @@ function threadHasSteerRecoveryForMessage(thread: Thread, messageId: MessageId) 
 function threadHasSteerProcessingStarted(thread: Thread, pending: PendingSteerDispatch) {
   return thread.activities.some((activity) => {
     if (activity.kind !== "task.progress") {
-      return false;
-    }
-    if (activity.createdAt < pending.dispatchedAt) {
       return false;
     }
 
@@ -1711,10 +1696,16 @@ function threadHasSteerProcessingStarted(thread: Thread, pending: PendingSteerDi
     if (!isSteerProcessingActivity) {
       return false;
     }
-    if (pending.turnId === null || activity.turnId === pending.turnId) {
-      return true;
+    const processingMessageId = readSteerProcessingMessageId(payload);
+    if (
+      !isSteerProcessingActivityTimely({
+        processingMessageId,
+        activityCreatedAt: activity.createdAt,
+        dispatchedAt: pending.dispatchedAt,
+      })
+    ) {
+      return false;
     }
-
     // Codex can ACK a turn/start or steer against Cafe's provisional active
     // turn id, then report the concrete app-server active turn under a
     // different id. The backend repairs that projection, but the renderer may
@@ -1722,12 +1713,19 @@ function threadHasSteerProcessingStarted(thread: Thread, pending: PendingSteerDi
     // Treat the explicit Codex steer-processing marker as enough to clear that
     // marker when it lands on the current provider-owned turn for the same
     // thread; unrelated task.progress rows still cannot clear it.
-    return (
-      thread.session?.provider === "codex" &&
-      activity.turnId !== null &&
-      (activity.turnId === thread.session.activeTurnId ||
-        activity.turnId === thread.latestTurn?.turnId)
-    );
+    const legacyTurnMatches =
+      pending.turnId === null ||
+      activity.turnId === pending.turnId ||
+      (thread.session?.provider === "codex" &&
+        activity.turnId !== null &&
+        (activity.turnId === thread.session.activeTurnId ||
+          activity.turnId === thread.latestTurn?.turnId));
+
+    return doesSteerProcessingActivityMatchPending({
+      pendingMessageId: pending.messageId,
+      processingMessageId,
+      legacyTurnMatches,
+    });
   });
 }
 
@@ -1736,7 +1734,7 @@ function threadHasResolvedPendingSteer(thread: Thread, pending: PendingSteerDisp
     provider: thread.session?.provider,
     terminalTurnAfterSteer: threadHasTerminalTurnAfterSteer(thread, pending),
     steerProcessingStarted: threadHasSteerProcessingStarted(thread, pending),
-    steerFailureRecorded: threadHasSteerFailureForMessage(thread, pending.messageId),
+    steerFailureRecorded: threadHasSteerFailureForPending(thread, pending),
     steerRecoveryRecorded: threadHasSteerRecoveryForMessage(thread, pending.messageId),
     assistantResponseAfterSteer: threadHasAssistantResponseAfterSteer(thread, pending),
   });
@@ -1973,6 +1971,12 @@ export default function ChatView(props: ChatViewProps) {
   const [pendingSteerDispatchByMessageId, setPendingSteerDispatchByMessageId] = useState<
     Record<string, PendingSteerDispatch>
   >({});
+  // Durable retryable-failure activities can outlive this component. Track
+  // which source messages this mount has already reconstructed or explicitly
+  // dismissed so snapshot refreshes remain idempotent, while a real reload can
+  // rebuild unresolved entries from canonical thread state again.
+  const handledRetryableSteerSourceMessageIdsRef = useRef<Set<string>>(new Set());
+  const retryableSteerReconstructionInFlightRef = useRef<Set<string>>(new Set());
   const pendingSteerInterruptRecoveryByThreadIdRef = useRef<
     Record<string, PendingSteerInterruptRecovery>
   >({});
@@ -2278,43 +2282,109 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
 
-    for (const activity of activeThread.activities) {
-      const retryableFailure = readRetryableSteerFailure(activity);
-      if (retryableFailure === null) {
-        continue;
-      }
-      const pending =
-        pendingSteerDispatchByMessageIdRef.current[String(retryableFailure.messageId)];
-      if (!pending) {
-        continue;
-      }
+    const queuedSourceMessageIds = new Set<string>(
+      Object.values(followUpQueueByThreadIdRef.current)
+        .flat()
+        .flatMap((item) =>
+          item.automaticSteerRetry === null || item.automaticSteerRetry === undefined
+            ? []
+            : [String(item.automaticSteerRetry.sourceMessageId)],
+        ),
+    );
+    for (const messageId of handledRetryableSteerSourceMessageIdsRef.current) {
+      queuedSourceMessageIds.add(messageId);
+    }
+    const candidates = deriveRetryableSteerReplayCandidates({
+      thread: activeThread,
+      existingSourceMessageIds: queuedSourceMessageIds,
+    });
 
-      removePendingSteerDispatch(retryableFailure.messageId);
+    for (const candidate of candidates) {
+      const sourceMessageKey = String(candidate.failure.messageId);
+      if (retryableSteerReconstructionInFlightRef.current.has(sourceMessageKey)) {
+        continue;
+      }
+      retryableSteerReconstructionInFlightRef.current.add(sourceMessageKey);
+
+      const pending = pendingSteerDispatchByMessageIdRef.current[sourceMessageKey];
+      if (pending) {
+        removePendingSteerDispatch(candidate.failure.messageId);
+      }
       setOptimisticUserMessages((existing) => {
-        const removed = existing.filter((message) => message.id === retryableFailure.messageId);
-        for (const message of removed) {
-          revokeUserMessagePreviewUrls(message);
+        const removed = existing.filter((message) => message.id === candidate.failure.messageId);
+        // A live pending snapshot transfers ownership of its blob previews to
+        // the retry shelf. Reload reconstruction has no such renderer-owned
+        // File, so any stale optimistic previews can be released normally.
+        if (!pending) {
+          for (const message of removed) {
+            revokeUserMessagePreviewUrls(message);
+          }
         }
-        return existing.filter((message) => message.id !== retryableFailure.messageId);
+        return existing.filter((message) => message.id !== candidate.failure.messageId);
       });
 
-      const queuedItem: FollowUpQueueItem = {
-        ...pending.snapshot,
-        id: newMessageId(),
-        environmentId: pending.environmentId,
-        threadId: pending.threadId,
-        queuedAt: activity.createdAt,
-        expanded: false,
-        blockedReason: null,
-        automaticSteerRetry: {
-          nonSteerableTurnKind: retryableFailure.turnKind,
-          sourceMessageId: retryableFailure.messageId,
-        },
-      };
-      setFollowUpQueueByThreadId((existing) => ({
-        ...existing,
-        [pending.threadId]: [...(existing[pending.threadId] ?? EMPTY_FOLLOW_UP_QUEUE), queuedItem],
-      }));
+      void (async () => {
+        try {
+          const restored = pending
+            ? { images: pending.snapshot.images, unavailableCount: 0 }
+            : await restoreCanonicalRetryImages(candidate.message.attachments);
+          const snapshot: ComposerSendSnapshot = pending?.snapshot ?? {
+            // Image-only canonical messages contain Cafe's transport bootstrap
+            // text. Restore the original empty composer text when images are
+            // still present so retries do not expose or duplicate that marker.
+            promptText:
+              candidate.message.text === IMAGE_ONLY_BOOTSTRAP_PROMPT &&
+              (candidate.message.attachments?.length ?? 0) > 0
+                ? ""
+                : candidate.message.text,
+            images: restored.images,
+            provider: activeThread.session?.provider ?? ProviderDriverKind.make("codex"),
+            model: activeThread.modelSelection.model,
+            // Canonical message text is already provider-formatted. Keeping
+            // capabilities empty avoids injecting a second Claude effort
+            // prefix when reconstructing historical provider input.
+            providerModels: [],
+            promptEffort: null,
+            modelSelection: activeThread.modelSelection,
+            runtimeMode: activeThread.runtimeMode,
+            interactionMode: activeThread.interactionMode,
+          };
+          const queuedItem: FollowUpQueueItem = {
+            ...snapshot,
+            id: newMessageId(),
+            environmentId: pending?.environmentId ?? activeThread.environmentId,
+            threadId: pending?.threadId ?? activeThread.id,
+            queuedAt: candidate.failedAt,
+            expanded: false,
+            blockedReason:
+              restored.unavailableCount > 0
+                ? `${restored.unavailableCount} attachment${restored.unavailableCount === 1 ? "" : "s"} could not be restored after reconnecting. Remove this retry and resend the missing attachment${restored.unavailableCount === 1 ? "" : "s"}.`
+                : null,
+            automaticSteerRetry: {
+              nonSteerableTurnKind: candidate.failure.turnKind,
+              sourceMessageId: candidate.failure.messageId,
+            },
+          };
+
+          handledRetryableSteerSourceMessageIdsRef.current.add(sourceMessageKey);
+          setFollowUpQueueByThreadId((existing) => {
+            const current = existing[queuedItem.threadId] ?? EMPTY_FOLLOW_UP_QUEUE;
+            if (
+              current.some(
+                (item) => item.automaticSteerRetry?.sourceMessageId === candidate.failure.messageId,
+              )
+            ) {
+              return existing;
+            }
+            return {
+              ...existing,
+              [queuedItem.threadId]: [...current, queuedItem],
+            };
+          });
+        } finally {
+          retryableSteerReconstructionInFlightRef.current.delete(sourceMessageKey);
+        }
+      })();
     }
   }, [activeThread, removePendingSteerDispatch, setFollowUpQueueByThreadId]);
   useEffect(() => {
@@ -4949,7 +5019,10 @@ export default function ChatView(props: ChatViewProps) {
       beginLocalDispatch({ preparingWorktree: false });
     }
 
-    const messageIdForSend = newMessageId();
+    // Automatic retry items retain the original durable message identity.
+    // This lets a successful provider receipt or turn retarget survive reload
+    // and prevents the old failure activity from manufacturing another copy.
+    const messageIdForSend = item.automaticSteerRetry?.sourceMessageId ?? newMessageId();
     const messageCreatedAt = new Date().toISOString();
     const outgoingMessageText = outgoingTextForSnapshot(item);
     const optimisticAttachments = optimisticAttachmentsForSnapshot(item);
@@ -5065,8 +5138,27 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
 
+    if (
+      shouldBackpressurePendingSteerDispatch(
+        Object.keys(pendingSteerDispatchByMessageIdRef.current).length,
+      )
+    ) {
+      // Keep the pending index bounded without discarding its oldest entries.
+      // New direct input moves to the visible follow-up shelf; an item already
+      // on that shelf stays in place until earlier steers settle.
+      if (!options?.queuedItem) {
+        enqueueFollowUpSnapshot(snapshot);
+      }
+      recordFollowUpQueueDebugAttempt("steer-backpressure", "pending-capacity-reached", {
+        threadId: activeThread.id,
+        itemId: options?.queuedItem?.id ?? null,
+      });
+      return;
+    }
+
     setSendInFlight(true);
-    const messageIdForSend = newMessageId();
+    const messageIdForSend =
+      options?.queuedItem?.automaticSteerRetry?.sourceMessageId ?? newMessageId();
     const messageCreatedAt = new Date().toISOString();
     const outgoingMessageText = outgoingTextForSnapshot(snapshot);
     const optimisticAttachments = optimisticAttachmentsForSnapshot(snapshot);
@@ -5082,17 +5174,9 @@ export default function ChatView(props: ChatViewProps) {
           turnId: activeThread.session?.activeTurnId ?? activeThread.latestTurn?.turnId ?? null,
           snapshot,
           dispatchedAt: messageCreatedAt,
+          intentSequence: null,
         },
       };
-      const pendingSteerEntries = Object.entries(next);
-      if (pendingSteerEntries.length <= 64) {
-        return next;
-      }
-      for (const [messageId] of pendingSteerEntries
-        .toSorted(([, left], [, right]) => left.dispatchedAt.localeCompare(right.dispatchedAt))
-        .slice(0, pendingSteerEntries.length - 64)) {
-        delete next[messageId];
-      }
       return next;
     });
 
@@ -5115,7 +5199,7 @@ export default function ChatView(props: ChatViewProps) {
 
     try {
       const turnAttachments = await turnAttachmentsPromise;
-      await api.orchestration.dispatchCommand({
+      const receipt = await api.orchestration.dispatchCommand({
         type: "thread.turn.steer",
         commandId: newCommandId(),
         threadId: activeThread.id,
@@ -5126,6 +5210,16 @@ export default function ChatView(props: ChatViewProps) {
           attachments: turnAttachments,
         },
         createdAt: messageCreatedAt,
+      });
+      updatePendingSteerDispatches((current) => {
+        const pending = current[String(messageIdForSend)];
+        if (pending?.dispatchedAt !== messageCreatedAt) {
+          return current;
+        }
+        return {
+          ...current,
+          [String(messageIdForSend)]: { ...pending, intentSequence: receipt.sequence },
+        };
       });
       setThreadError(activeThread.id, null);
       if (!options?.queuedItem) {

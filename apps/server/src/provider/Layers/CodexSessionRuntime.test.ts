@@ -4,12 +4,17 @@ import { it as effectIt } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as TestClock from "effect/testing/TestClock";
 import { describe, it, vi } from "vitest";
 import {
+  MessageId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ProviderItemId,
+  type ProviderSession,
   type ProviderUserInputAnswers,
   ThreadId,
   TurnId,
@@ -23,13 +28,19 @@ import {
   CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
 } from "../CodexDeveloperInstructions.ts";
 import {
+  CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
+  acknowledgeCodexPendingSteerProcessing,
+  acknowledgeCodexSteerLifecycleBoundary,
+  admitCodexPendingSteerProcessing,
   buildCodexAppServerArgs,
   buildCodexActiveContextCompactionSteerError,
+  buildCodexPendingSteerCapacityError,
   buildCodexThreadSnapshotBackfillEvents,
   buildTurnStartParams,
   buildTurnSteerParams,
   awaitCodexUserInputResolution,
   claimCodexSnapshotBackfillWatcher,
+  claimCodexRestartedSteerProcessingObservation,
   codexAggregateNotificationMethod,
   codexAggregateTurnHasUnfinishedChildren,
   codexChildConversationThreadIdsForTurn,
@@ -43,25 +54,50 @@ import {
   isCodexUserMessageItemType,
   isTerminalCodexChildThreadReadError,
   openCodexThread,
+  prunePendingSteerProcessing,
+  publishCodexTurnCompletionAfterLifecycleBoundary,
   readCodexExpectedActiveTurnMismatchActualTurnId,
   readCodexSubagentThreadWithInitializedClient,
   readCodexNotificationEmittedAtIso,
   readCodexNotificationRouteFields,
   readCodexSteerExpectedTurnMismatchActualTurnId,
+  reconcileCodexTerminalSnapshotSteerLifecycle,
   rememberCodexChildConversationTurns,
+  retargetCodexPendingSteerProcessing,
+  resolveCodexSessionRuntimeSteerClientCorrelationId,
   resolveCodexThreadSettingsSessionModel,
   resolveCodexChildConversationNotification,
   shouldForwardCodexRootGoalNotification,
   selectCodexActiveSnapshotTurn,
   summarizeCodexAppServerChildProcesses,
+  terminalizeCodexPendingSteerProcessing,
   updateCodexChildConversationLiveness,
   updateCodexActiveContextCompactions,
   updateCodexPendingSteerProcessingFromNotification,
   validateCodexSubagentThreadReadMetadata,
   type CodexInitializedSubagentHistoryReadClient,
+  type CodexPendingSteerProcessing,
   type CodexSubagentHistoryReadClient,
 } from "./CodexSessionRuntime.ts";
+import {
+  buildCodexSteerClientCorrelationId,
+  parseCodexSteerClientCorrelationId,
+} from "../codexSteerCorrelation.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+const decodeMessageId = Schema.decodeUnknownSync(MessageId);
+
+function makePendingSteerProcessingFixture(index: number): CodexPendingSteerProcessing {
+  return {
+    steerId: `steer-${index}`,
+    clientCorrelationId: buildCodexSteerClientCorrelationId(`message-${index}`),
+    providerThreadId: "provider-thread-1",
+    turnId: TurnId.make("turn-active"),
+    requestedAt: new Date(Date.UTC(2026, 4, 26) + index).toISOString(),
+    promptByteLength: 10,
+    attachmentCount: 0,
+    warningCount: 0,
+  };
+}
 
 describe("Codex non-blocking user input", () => {
   effectIt.effect("submits an empty answer map after the upstream 120-second deadline", () =>
@@ -1248,10 +1284,12 @@ describe("buildTurnStartParams", () => {
 
 describe("buildTurnSteerParams", () => {
   it("builds the upstream Codex turn/steer shape without turn-start overrides", () => {
+    const clientCorrelationId = buildCodexSteerClientCorrelationId("message-1");
     const params = Effect.runSync(
       buildTurnSteerParams({
         threadId: "provider-thread-1",
         expectedTurnId: TurnId.make("turn-active"),
+        clientUserMessageId: clientCorrelationId,
         prompt: "stay on this path",
         attachments: [
           {
@@ -1265,6 +1303,7 @@ describe("buildTurnSteerParams", () => {
     assert.deepStrictEqual(params, {
       threadId: "provider-thread-1",
       expectedTurnId: "turn-active",
+      clientUserMessageId: clientCorrelationId,
       input: [
         {
           type: "text",
@@ -1405,12 +1444,116 @@ describe("Codex context compaction steer guard", () => {
 });
 
 describe("Codex steer processing diagnostics", () => {
+  it("accepts only fixed-size correlations inside provider runtime state", () => {
+    const token = buildCodexSteerClientCorrelationId("message-1");
+
+    assert.equal(
+      resolveCodexSessionRuntimeSteerClientCorrelationId({
+        clientCorrelationId: token,
+        fallbackSource: "unused",
+      }),
+      token,
+    );
+    assert.equal(
+      resolveCodexSessionRuntimeSteerClientCorrelationId({
+        clientCorrelationId: `raw-message-${"x".repeat(4_096)}`,
+        fallbackSource: "unused",
+      }),
+      undefined,
+    );
+    assert.equal(
+      resolveCodexSessionRuntimeSteerClientCorrelationId({
+        clientCorrelationId: undefined,
+        fallbackSource: "steer-random-source",
+      }),
+      buildCodexSteerClientCorrelationId("steer-random-source"),
+    );
+  });
+
   it("recognizes upstream user-message item type spellings", () => {
     assert.equal(isCodexUserMessageItemType("userMessage"), true);
     assert.equal(isCodexUserMessageItemType("user_message"), true);
     assert.equal(isCodexUserMessageItemType("user-message"), true);
     assert.equal(isCodexUserMessageItemType("commandExecution"), false);
     assert.equal(isCodexUserMessageItemType(undefined), false);
+  });
+
+  it("recovers a bounded content-free message correlation after runtime restart", () => {
+    const clientCorrelationId = buildCodexSteerClientCorrelationId("message-after-restart");
+    const result = updateCodexPendingSteerProcessingFromNotification(new Map(), {
+      method: "item/started",
+      providerThreadId: "provider-thread-1",
+      turnId: TurnId.make("turn-active"),
+      itemId: ProviderItemId.make("user-message-after-restart"),
+      itemType: "userMessage",
+      clientUserMessageId: clientCorrelationId,
+      observedAt: "2026-05-26T00:00:03.000Z",
+      observedAtMs: 3_000,
+    });
+
+    assert.equal(result.pending, undefined);
+    assert.deepStrictEqual(result.restartedObservation, {
+      clientCorrelationId,
+      providerThreadId: "provider-thread-1",
+      turnId: "turn-active",
+      providerUserMessageItemId: "user-message-after-restart",
+      providerUserMessageMethod: "item/started",
+      observedAt: "2026-05-26T00:00:03.000Z",
+    });
+    assert.equal(result.next.size, 0);
+  });
+
+  it("rejects malformed or oversized provider client ids from restart correlation", () => {
+    const valid = buildCodexSteerClientCorrelationId("message-1");
+    assert.equal(parseCodexSteerClientCorrelationId(" message-1"), undefined);
+    assert.equal(parseCodexSteerClientCorrelationId("message-1\nspoof"), undefined);
+    assert.equal(parseCodexSteerClientCorrelationId(`message-${"x".repeat(600)}`), undefined);
+    assert.equal(parseCodexSteerClientCorrelationId(valid), valid);
+
+    const malformed = updateCodexPendingSteerProcessingFromNotification(new Map(), {
+      method: "item/started",
+      turnId: TurnId.make("turn-active"),
+      itemType: "userMessage",
+      clientUserMessageId: "message-1\u202Espoof",
+      observedAt: "2026-05-26T00:00:03.000Z",
+      observedAtMs: 3_000,
+    });
+    assert.equal(malformed.restartedObservation, undefined);
+  });
+
+  it("deduplicates restart observations across the provider item lifecycle with bounded history", () => {
+    const observation = {
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-after-restart"),
+      providerThreadId: "provider-thread-1",
+      turnId: TurnId.make("turn-active"),
+      providerUserMessageItemId: ProviderItemId.make("item-after-restart"),
+      providerUserMessageMethod: "item/started",
+      observedAt: "2026-05-26T00:00:03.000Z",
+    };
+    const started = claimCodexRestartedSteerProcessingObservation(new Map(), observation);
+    const completed = claimCodexRestartedSteerProcessingObservation(started.next, {
+      ...observation,
+      providerUserMessageMethod: "item/completed",
+      observedAt: "2026-05-26T00:00:03.100Z",
+    });
+
+    assert.equal(started.claimed, true);
+    assert.equal(completed.claimed, false);
+    assert.equal(completed.next.size, 1);
+
+    let bounded = completed.next;
+    for (let index = 0; index < 1_000; index += 1) {
+      const claim = claimCodexRestartedSteerProcessingObservation(bounded, {
+        ...observation,
+        clientCorrelationId: buildCodexSteerClientCorrelationId(`message-${index}`),
+        observedAt: new Date(Date.UTC(2026, 4, 26) + index).toISOString(),
+      });
+      assert.equal(claim.claimed, true);
+      bounded = claim.next;
+    }
+    assert.equal(bounded.size, 256);
+    assert.equal(bounded.has(buildCodexSteerClientCorrelationId("message-after-restart")), false);
+    assert.equal(bounded.has(buildCodexSteerClientCorrelationId("message-999")), true);
   });
 
   it("summarizes active app-server child processes without leaking credential material", () => {
@@ -1578,6 +1721,7 @@ describe("Codex steer processing diagnostics", () => {
     const turnId = TurnId.make("turn-active");
     const first = {
       steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
       providerThreadId: "provider-thread-1",
       turnId,
       requestedAt: "2026-05-26T00:00:00.000Z",
@@ -1619,10 +1763,587 @@ describe("Codex steer processing diagnostics", () => {
     assert.equal(next.get("steer-2")?.processedAt, undefined);
   });
 
+  it("matches an injected user message to its client correlation instead of acknowledgement order", () => {
+    const turnId = TurnId.make("turn-active");
+    const secondMessageId = decodeMessageId(`message-\u0000-\u202e-${"x".repeat(600)}-tail`);
+    const first: CodexPendingSteerProcessing = {
+      steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
+      providerThreadId: "provider-thread-1",
+      turnId,
+      requestedAt: "2026-05-26T00:00:00.000Z",
+      acknowledgedAt: "2026-05-26T00:00:00.100Z",
+      acknowledgedAtMs: 100,
+      ackLatencyMs: 100,
+      promptByteLength: 10,
+      attachmentCount: 0,
+      warningCount: 0,
+    };
+    const second: CodexPendingSteerProcessing = {
+      ...first,
+      steerId: "steer-2",
+      clientCorrelationId: buildCodexSteerClientCorrelationId(secondMessageId),
+      requestedAt: "2026-05-26T00:00:02.000Z",
+      acknowledgedAt: "2026-05-26T00:00:02.100Z",
+      acknowledgedAtMs: 2_100,
+    };
+
+    const { pending, next } = updateCodexPendingSteerProcessingFromNotification(
+      new Map([
+        [first.steerId, first],
+        [second.steerId, second],
+      ]),
+      {
+        method: "item/started",
+        providerThreadId: "provider-thread-1",
+        turnId,
+        itemId: ProviderItemId.make("user-message-2"),
+        itemType: "userMessage",
+        clientUserMessageId: second.clientCorrelationId,
+        observedAt: "2026-05-26T00:00:03.000Z",
+        observedAtMs: 3_000,
+      },
+    );
+
+    assert.equal(pending?.steerId, "steer-2");
+    assert.equal(pending?.clientCorrelationId, buildCodexSteerClientCorrelationId(secondMessageId));
+    assert.equal(pending?.providerUserMessageItemId, "user-message-2");
+    assert.equal(next.get("steer-1")?.processedAt, undefined);
+    const serializedPendingState = JSON.stringify([...next]);
+    assert.equal(serializedPendingState.includes('"messageId"'), false);
+    assert.equal(serializedPendingState.includes("x".repeat(600)), false);
+  });
+
+  it("does not consume another pending steer for an unknown client correlation", () => {
+    const turnId = TurnId.make("turn-active");
+    const pendingSteer = {
+      steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
+      providerThreadId: "provider-thread-1",
+      turnId,
+      requestedAt: "2026-05-26T00:00:00.000Z",
+      acknowledgedAt: "2026-05-26T00:00:00.100Z",
+      acknowledgedAtMs: 100,
+      ackLatencyMs: 100,
+      promptByteLength: 10,
+      attachmentCount: 0,
+      warningCount: 0,
+    };
+
+    const { pending, restartedObservation, next } =
+      updateCodexPendingSteerProcessingFromNotification(
+        new Map([[pendingSteer.steerId, pendingSteer]]),
+        {
+          method: "item/started",
+          providerThreadId: "provider-thread-1",
+          turnId,
+          itemId: ProviderItemId.make("unrelated-user-message"),
+          itemType: "userMessage",
+          clientUserMessageId: buildCodexSteerClientCorrelationId("some-other-client-message"),
+          observedAt: "2026-05-26T00:00:03.000Z",
+          observedAtMs: 3_000,
+        },
+      );
+
+    assert.equal(pending, undefined);
+    assert.equal(
+      restartedObservation?.clientCorrelationId,
+      buildCodexSteerClientCorrelationId("some-other-client-message"),
+    );
+    assert.equal(next.get("steer-1")?.processedAt, undefined);
+  });
+
+  it("does not let an exact client id rebind a steer from another turn", () => {
+    const targetTurnId = TurnId.make("turn-target");
+    const unrelatedTurnId = TurnId.make("turn-unrelated");
+    const pendingSteer = {
+      steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
+      providerThreadId: "provider-thread-1",
+      turnId: targetTurnId,
+      requestedAt: "2026-05-26T00:00:00.000Z",
+      acknowledgedAt: "2026-05-26T00:00:00.100Z",
+      acknowledgedAtMs: 100,
+      ackLatencyMs: 100,
+      promptByteLength: 10,
+      attachmentCount: 0,
+      warningCount: 0,
+    };
+
+    const { pending, restartedObservation, next } =
+      updateCodexPendingSteerProcessingFromNotification(
+        new Map([[pendingSteer.steerId, pendingSteer]]),
+        {
+          method: "item/started",
+          providerThreadId: pendingSteer.providerThreadId,
+          turnId: unrelatedTurnId,
+          itemId: ProviderItemId.make("spoofed-user-message"),
+          itemType: "userMessage",
+          clientUserMessageId: pendingSteer.clientCorrelationId,
+          observedAt: "2026-05-26T00:00:03.000Z",
+          observedAtMs: 3_000,
+        },
+      );
+
+    assert.equal(pending, undefined);
+    assert.equal(restartedObservation, undefined);
+    assert.equal(next.get(pendingSteer.steerId)?.turnId, targetTurnId);
+    assert.equal(next.get(pendingSteer.steerId)?.processedAt, undefined);
+  });
+
+  it("records provider processing when the correlated user message arrives before acknowledgement", () => {
+    const turnId = TurnId.make("turn-active");
+    const inFlightSteer = {
+      steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
+      providerThreadId: "provider-thread-1",
+      turnId,
+      requestedAt: "2026-05-26T00:00:00.000Z",
+      promptByteLength: 10,
+      attachmentCount: 0,
+      warningCount: 0,
+    };
+
+    const { pending, next } = updateCodexPendingSteerProcessingFromNotification(
+      new Map([[inFlightSteer.steerId, inFlightSteer]]),
+      {
+        method: "item/started",
+        providerThreadId: "provider-thread-1",
+        turnId,
+        itemId: ProviderItemId.make("user-message-1"),
+        itemType: "userMessage",
+        clientUserMessageId: inFlightSteer.clientCorrelationId,
+        observedAt: "2026-05-26T00:00:00.050Z",
+        observedAtMs: 50,
+      },
+    );
+
+    assert.equal(pending?.steerId, "steer-1");
+    assert.equal(pending?.processedAt, "2026-05-26T00:00:00.050Z");
+    assert.equal(pending?.providerUserMessageItemId, "user-message-1");
+    assert.equal(pending?.ackToProviderItemMs, undefined);
+    assert.equal(next.get("steer-1")?.processedAt, "2026-05-26T00:00:00.050Z");
+  });
+
+  it("preserves terminal state when acknowledgement arrives after completion", () => {
+    const turnId = TurnId.make("turn-active");
+    const inFlightSteer = {
+      steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
+      providerThreadId: "provider-thread-1",
+      turnId,
+      requestedAt: "2026-05-26T00:00:00.000Z",
+      promptByteLength: 10,
+      attachmentCount: 0,
+      warningCount: 0,
+    };
+
+    const terminal = terminalizeCodexPendingSteerProcessing(
+      new Map([[inFlightSteer.steerId, inFlightSteer]]),
+      {
+        turnId,
+        terminalState: "interrupted",
+        observedAt: "2026-05-26T00:00:00.050Z",
+      },
+    );
+    const acknowledged = acknowledgeCodexPendingSteerProcessing(terminal.next, {
+      steerId: inFlightSteer.steerId,
+      turnId,
+      acknowledgedAt: "2026-05-26T00:00:00.100Z",
+      acknowledgedAtMs: 100,
+      ackLatencyMs: 100,
+    });
+    assert.equal(acknowledged.pending?.steerId, inFlightSteer.steerId);
+    assert.equal(acknowledged.pending?.terminalState, "interrupted");
+
+    const replayedTerminal = terminalizeCodexPendingSteerProcessing(acknowledged.next, {
+      turnId,
+      terminalState: "interrupted",
+      observedAt: "2026-05-26T00:00:00.200Z",
+    });
+    assert.equal(replayedTerminal.next.get(inFlightSteer.steerId)?.terminalState, "interrupted");
+  });
+
+  effectIt.effect(
+    "keeps an authoritative thread/read terminal snapshot final when the steer ACK resumes late",
+    () =>
+      Effect.gen(function* () {
+        const turnId = TurnId.make("turn-active");
+        const pending = makePendingSteerProcessingFixture(1);
+        const pendingRef = yield* Ref.make(
+          new Map<string, CodexPendingSteerProcessing>([[pending.steerId, pending]]),
+        );
+        const sessionRef = yield* Ref.make<ProviderSession>({
+          provider: ProviderDriverKind.make("codex"),
+          status: "running",
+          runtimeMode: "full-access",
+          cwd: "/workspace",
+          threadId: ThreadId.make("thread-1"),
+          activeTurnId: turnId,
+          createdAt: "2026-05-26T00:00:00.000Z",
+          updatedAt: "2026-05-26T00:00:00.000Z",
+          lastError: "stale failure from a previous turn",
+        });
+        const semaphore = yield* Semaphore.make(1);
+        const ackWaiting = yield* Deferred.make<void>();
+        const releaseAck = yield* Deferred.make<void>();
+
+        // Model the JSON-RPC response continuation being runnable but held
+        // until the authoritative thread/read handler has committed. This
+        // gives the regression a deterministic late-ACK order without sleeps.
+        const acknowledgementFiber = yield* Effect.gen(function* () {
+          yield* Deferred.succeed(ackWaiting, undefined);
+          yield* Deferred.await(releaseAck);
+          return yield* acknowledgeCodexSteerLifecycleBoundary({
+            semaphore,
+            pendingRef,
+            sessionRef,
+            steerId: pending.steerId,
+            expectedTurnId: turnId,
+            turnId,
+            acknowledgedAt: "2026-05-26T00:00:00.100Z",
+            acknowledgedAtMs: 100,
+            ackLatencyMs: 100,
+          });
+        }).pipe(Effect.forkChild);
+
+        yield* Deferred.await(ackWaiting);
+        yield* reconcileCodexTerminalSnapshotSteerLifecycle({
+          semaphore,
+          pendingRef,
+          sessionRef,
+          turnId,
+          turnStatus: "completed",
+          observedAt: "2026-05-26T00:00:00.050Z",
+        });
+        yield* Deferred.succeed(releaseAck, undefined);
+
+        const acknowledgement = yield* Fiber.join(acknowledgementFiber);
+        const finalSession = yield* Ref.get(sessionRef);
+        const finalPending = (yield* Ref.get(pendingRef)).get(pending.steerId);
+
+        assert.equal(acknowledgement.restoredRunning, false);
+        assert.equal(acknowledgement.pending?.acknowledgedAt, "2026-05-26T00:00:00.100Z");
+        assert.equal(finalSession.status, "ready");
+        assert.equal(finalSession.activeTurnId, undefined);
+        assert.equal(finalSession.lastError, undefined);
+        assert.equal(finalSession.updatedAt, "2026-05-26T00:00:00.050Z");
+        assert.equal(finalPending?.terminalState, "completed");
+        assert.equal(finalPending?.terminalObservedAt, "2026-05-26T00:00:00.050Z");
+        assert.equal(finalPending?.acknowledgedAt, "2026-05-26T00:00:00.100Z");
+      }),
+  );
+
+  effectIt.effect("commits a late T1 completion before publication without clearing live T2", () =>
+    Effect.gen(function* () {
+      const firstTurnId = TurnId.make("turn-1");
+      const secondTurnId = TurnId.make("turn-2");
+      const pending = {
+        ...makePendingSteerProcessingFixture(1),
+        turnId: firstTurnId,
+      } satisfies CodexPendingSteerProcessing;
+      const pendingRef = yield* Ref.make(
+        new Map<string, CodexPendingSteerProcessing>([[pending.steerId, pending]]),
+      );
+      const sessionRef = yield* Ref.make<ProviderSession>({
+        provider: ProviderDriverKind.make("codex"),
+        status: "running",
+        runtimeMode: "full-access",
+        cwd: "/workspace",
+        threadId: ThreadId.make("thread-1"),
+        activeTurnId: firstTurnId,
+        createdAt: "2026-05-26T00:00:00.000Z",
+        updatedAt: "2026-05-26T00:00:00.000Z",
+      });
+      const semaphore = yield* Semaphore.make(1);
+      const terminalWaiting = yield* Deferred.make<void>();
+      const releaseTerminal = yield* Deferred.make<void>();
+      const stateObservedAtPublication = yield* Ref.make<{
+        readonly session: ProviderSession;
+        readonly pending: CodexPendingSteerProcessing | undefined;
+      } | null>(null);
+
+      // Hold the old turn's terminal handler until the newer turn has become
+      // visible. This models independent notification fibers without sleeps
+      // or relying on scheduler/semaphore FIFO behavior.
+      const terminalFiber = yield* Effect.gen(function* () {
+        yield* Deferred.succeed(terminalWaiting, undefined);
+        yield* Deferred.await(releaseTerminal);
+        return yield* publishCodexTurnCompletionAfterLifecycleBoundary({
+          semaphore,
+          pendingRef,
+          sessionRef,
+          turnId: firstTurnId,
+          turnStatus: "completed",
+          observedAt: "2026-05-26T00:00:00.200Z",
+          publish: Effect.gen(function* () {
+            const session = yield* Ref.get(sessionRef);
+            const pendingAtPublication = (yield* Ref.get(pendingRef)).get(pending.steerId);
+            yield* Ref.set(stateObservedAtPublication, {
+              session,
+              pending: pendingAtPublication,
+            });
+          }),
+        });
+      }).pipe(Effect.forkChild);
+
+      yield* Deferred.await(terminalWaiting);
+      yield* Ref.update(sessionRef, (session) => ({
+        ...session,
+        status: "running" as const,
+        activeTurnId: secondTurnId,
+        lastError: "turn-2 remains live",
+        updatedAt: "2026-05-26T00:00:00.100Z",
+      }));
+      yield* Deferred.succeed(releaseTerminal, undefined);
+
+      const terminalizedVisibleSession = yield* Fiber.join(terminalFiber);
+      const finalSession = yield* Ref.get(sessionRef);
+      const finalPending = (yield* Ref.get(pendingRef)).get(pending.steerId);
+      const publishedState = yield* Ref.get(stateObservedAtPublication);
+
+      assert.equal(terminalizedVisibleSession, false);
+      assert.equal(finalSession.status, "running");
+      assert.equal(finalSession.activeTurnId, secondTurnId);
+      assert.equal(finalSession.lastError, "turn-2 remains live");
+      assert.equal(finalSession.updatedAt, "2026-05-26T00:00:00.100Z");
+      assert.equal(finalPending?.terminalState, "completed");
+      assert.equal(finalPending?.terminalObservedAt, "2026-05-26T00:00:00.200Z");
+      assert.equal(publishedState?.session.activeTurnId, secondTurnId);
+      assert.equal(publishedState?.pending?.terminalState, "completed");
+    }),
+  );
+
+  effectIt.effect("does not apply a late T1 failure to live T2", () =>
+    Effect.gen(function* () {
+      const firstTurnId = TurnId.make("turn-1");
+      const secondTurnId = TurnId.make("turn-2");
+      const pending = {
+        ...makePendingSteerProcessingFixture(1),
+        turnId: firstTurnId,
+      } satisfies CodexPendingSteerProcessing;
+      const pendingRef = yield* Ref.make(
+        new Map<string, CodexPendingSteerProcessing>([[pending.steerId, pending]]),
+      );
+      const sessionRef = yield* Ref.make<ProviderSession>({
+        provider: ProviderDriverKind.make("codex"),
+        status: "running",
+        runtimeMode: "full-access",
+        cwd: "/workspace",
+        threadId: ThreadId.make("thread-1"),
+        activeTurnId: secondTurnId,
+        createdAt: "2026-05-26T00:00:00.000Z",
+        updatedAt: "2026-05-26T00:00:00.100Z",
+        lastError: "turn-2 diagnostic",
+      });
+      const semaphore = yield* Semaphore.make(1);
+      const stateObservedAtPublication = yield* Ref.make<ProviderSession | null>(null);
+
+      const terminalizedVisibleSession = yield* publishCodexTurnCompletionAfterLifecycleBoundary({
+        semaphore,
+        pendingRef,
+        sessionRef,
+        turnId: firstTurnId,
+        turnStatus: "failed",
+        errorMessage: "turn-1 failed late",
+        observedAt: "2026-05-26T00:00:00.200Z",
+        publish: Ref.get(sessionRef).pipe(
+          Effect.flatMap((session) => Ref.set(stateObservedAtPublication, session)),
+        ),
+      });
+
+      const finalSession = yield* Ref.get(sessionRef);
+      const finalPending = (yield* Ref.get(pendingRef)).get(pending.steerId);
+      const publishedSession = yield* Ref.get(stateObservedAtPublication);
+
+      assert.equal(terminalizedVisibleSession, false);
+      assert.equal(finalSession.activeTurnId, secondTurnId);
+      assert.equal(finalSession.status, "running");
+      assert.equal(finalSession.lastError, "turn-2 diagnostic");
+      assert.equal(finalPending?.terminalState, "failed");
+      assert.equal(publishedSession?.activeTurnId, secondTurnId);
+      assert.equal(publishedSession?.lastError, "turn-2 diagnostic");
+    }),
+  );
+
+  it("does not recover a steer whose correlated user message was processed before terminal", () => {
+    const turnId = TurnId.make("turn-active");
+    const inFlightSteer = {
+      steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
+      providerThreadId: "provider-thread-1",
+      turnId,
+      requestedAt: "2026-05-26T00:00:00.000Z",
+      promptByteLength: 10,
+      attachmentCount: 0,
+      warningCount: 0,
+    };
+    const processed = updateCodexPendingSteerProcessingFromNotification(
+      new Map([[inFlightSteer.steerId, inFlightSteer]]),
+      {
+        method: "item/started",
+        providerThreadId: inFlightSteer.providerThreadId,
+        turnId,
+        itemId: ProviderItemId.make("user-message-1"),
+        itemType: "userMessage",
+        clientUserMessageId: inFlightSteer.clientCorrelationId,
+        observedAt: "2026-05-26T00:00:00.050Z",
+        observedAtMs: 50,
+      },
+    );
+    const acknowledged = acknowledgeCodexPendingSteerProcessing(processed.next, {
+      steerId: inFlightSteer.steerId,
+      turnId,
+      acknowledgedAt: "2026-05-26T00:00:00.100Z",
+      acknowledgedAtMs: 100,
+      ackLatencyMs: 100,
+    });
+    assert.equal(acknowledged.pending?.ackToProviderItemMs, 0);
+
+    const terminal = terminalizeCodexPendingSteerProcessing(acknowledged.next, {
+      turnId,
+      terminalState: "completed",
+      observedAt: "2026-05-26T00:00:00.200Z",
+    });
+    assert.equal(terminal.next.get(inFlightSteer.steerId)?.processedAt !== undefined, true);
+  });
+
+  it("retargets a stale expected-turn correlation before retrying provider I/O", () => {
+    const staleTurnId = TurnId.make("turn-stale");
+    const activeTurnId = TurnId.make("turn-active");
+    const pending = {
+      steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
+      providerThreadId: "provider-thread-1",
+      turnId: staleTurnId,
+      requestedAt: "2026-05-26T00:00:00.000Z",
+      promptByteLength: 10,
+      attachmentCount: 0,
+      warningCount: 0,
+      terminalObservedAt: "2026-05-26T00:00:00.050Z",
+      terminalState: "completed" as const,
+    };
+
+    const retargeted = retargetCodexPendingSteerProcessing(new Map([[pending.steerId, pending]]), {
+      steerId: pending.steerId,
+      turnId: activeTurnId,
+    });
+    assert.equal(retargeted.get(pending.steerId)?.turnId, activeTurnId);
+    assert.equal(retargeted.get(pending.steerId)?.terminalObservedAt, undefined);
+
+    const terminal = terminalizeCodexPendingSteerProcessing(retargeted, {
+      turnId: activeTurnId,
+      terminalState: "interrupted",
+      observedAt: "2026-05-26T00:00:00.100Z",
+    });
+    const acknowledged = acknowledgeCodexPendingSteerProcessing(terminal.next, {
+      steerId: pending.steerId,
+      turnId: activeTurnId,
+      acknowledgedAt: "2026-05-26T00:00:00.150Z",
+      acknowledgedAtMs: 150,
+      ackLatencyMs: 150,
+    });
+    assert.equal(acknowledged.pending?.turnId, activeTurnId);
+    assert.equal(acknowledged.pending?.terminalState, "interrupted");
+  });
+
+  it("never evicts unresolved steer correlations to enforce the history cap", () => {
+    const unresolved = new Map<string, CodexPendingSteerProcessing>(
+      Array.from({ length: 51 }, (_, index) => {
+        const steerId = `steer-${index.toString().padStart(2, "0")}`;
+        return [
+          steerId,
+          {
+            steerId,
+            clientCorrelationId: buildCodexSteerClientCorrelationId(`message-${index}`),
+            providerThreadId: "provider-thread-1",
+            turnId: TurnId.make("turn-active"),
+            requestedAt: `2026-05-26T00:00:${index.toString().padStart(2, "0")}.000Z`,
+            promptByteLength: 10,
+            attachmentCount: 0,
+            warningCount: 0,
+          },
+        ] as const;
+      }),
+    );
+
+    assert.equal(prunePendingSteerProcessing(unresolved).size, 51);
+
+    const withSettledOldest = new Map(unresolved);
+    const oldest = withSettledOldest.get("steer-00")!;
+    withSettledOldest.set("steer-00", {
+      ...oldest,
+      processedAt: "2026-05-26T00:01:00.000Z",
+    });
+    const pruned = prunePendingSteerProcessing(withSettledOldest);
+    assert.equal(pruned.size, 50);
+    assert.equal(pruned.has("steer-00"), false);
+  });
+
+  it("applies bounded backpressure without evicting unresolved accepted or ambiguous steers", () => {
+    let current = new Map<string, CodexPendingSteerProcessing>();
+    for (let index = 0; index < CODEX_PENDING_STEER_UNRESOLVED_CAPACITY; index += 1) {
+      const admission = admitCodexPendingSteerProcessing(
+        current,
+        makePendingSteerProcessingFixture(index),
+      );
+      assert.equal(admission.admitted, true);
+      current = admission.next;
+    }
+
+    const protectedIds = [...current.keys()];
+    for (let index = 0; index < 2_000; index += 1) {
+      const denied = admitCodexPendingSteerProcessing(
+        current,
+        makePendingSteerProcessingFixture(CODEX_PENDING_STEER_UNRESOLVED_CAPACITY + index),
+      );
+      assert.equal(denied.admitted, false);
+      assert.equal(denied.unresolvedCount, CODEX_PENDING_STEER_UNRESOLVED_CAPACITY);
+      assert.equal(denied.next.size, CODEX_PENDING_STEER_UNRESOLVED_CAPACITY);
+      current = denied.next;
+    }
+    assert.deepStrictEqual([...current.keys()], protectedIds);
+
+    const settled = current.get("steer-0")!;
+    current.set("steer-0", {
+      ...settled,
+      processedAt: "2026-05-26T00:01:00.000Z",
+    });
+    const admittedAfterSettlement = admitCodexPendingSteerProcessing(
+      current,
+      makePendingSteerProcessingFixture(CODEX_PENDING_STEER_UNRESOLVED_CAPACITY + 2_001),
+    );
+    assert.equal(admittedAfterSettlement.admitted, true);
+    assert.equal(admittedAfterSettlement.next.has("steer-0"), false);
+    assert.equal(admittedAfterSettlement.next.size, CODEX_PENDING_STEER_UNRESOLVED_CAPACITY);
+    for (const id of protectedIds.slice(1)) {
+      assert.equal(admittedAfterSettlement.next.has(id), true);
+    }
+  });
+
+  it("builds content-free steer admission backpressure errors", () => {
+    const error = buildCodexPendingSteerCapacityError({
+      unresolvedCount: CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
+      capacity: CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
+    });
+
+    assert.equal(error.code, -32600);
+    assert.equal(error.errorMessage, "cannot steer while unresolved steer capacity is exhausted");
+    assert.deepStrictEqual(error.data, {
+      message: "cannot steer while unresolved steer capacity is exhausted",
+      additionalDetails: {
+        unresolvedCount: CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
+        capacity: CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
+        retryableAfterReconciliation: true,
+      },
+    });
+  });
+
   it("binds a user message lifecycle pair to only one pending steer", () => {
     const turnId = TurnId.make("turn-active");
     const first = {
       steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
       providerThreadId: "provider-thread-1",
       turnId,
       requestedAt: "2026-05-26T00:00:00.000Z",
@@ -1669,6 +2390,7 @@ describe("Codex steer processing diagnostics", () => {
 
     assert.equal(started.pending?.steerId, "steer-1");
     assert.equal(completed.pending, undefined);
+    assert.equal(completed.restartedObservation, undefined);
     assert.equal(completed.next.get("steer-1")?.providerUserMessageMethod, "item/started");
     assert.equal(completed.next.get("steer-2")?.processedAt, undefined);
   });
@@ -1677,6 +2399,7 @@ describe("Codex steer processing diagnostics", () => {
     const turnId = TurnId.make("turn-active");
     const pendingSteer = {
       steerId: "steer-1",
+      clientCorrelationId: buildCodexSteerClientCorrelationId("message-1"),
       providerThreadId: "provider-thread-1",
       turnId,
       requestedAt: "2026-05-26T00:00:00.000Z",

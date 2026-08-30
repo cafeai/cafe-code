@@ -8,6 +8,7 @@ import {
   ApprovalRequestId,
   CodexSettings,
   EventId,
+  MessageId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderItemId,
@@ -18,6 +19,7 @@ import {
   type ProviderThreadGoal,
   type ProviderThreadGoalSetInput,
   type ProviderTurnStartResult,
+  type ProviderTurnSteerResult,
   type ProviderUserInputAnswers,
   ThreadId,
   THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES,
@@ -48,6 +50,7 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
+import { buildCodexSteerClientCorrelationId } from "../codexSteerCorrelation.ts";
 import {
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeError,
@@ -58,6 +61,7 @@ import {
 } from "./CodexSessionRuntime.ts";
 import { canonicalizeCodexSubagentDetail, makeCodexAdapter } from "./CodexAdapter.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
+const decodeMessageId = Schema.decodeUnknownSync(MessageId);
 
 // Test-local service tag so the rest of the file can keep using `yield* CodexAdapter`.
 class CodexAdapter extends Context.Service<CodexAdapter, CodexAdapterShape>()(
@@ -322,10 +326,12 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   );
 
   public readonly steerTurnImpl = vi.fn(
-    (_input: CodexSessionRuntimeSteerTurnInput): Promise<ProviderTurnStartResult> =>
+    (input: CodexSessionRuntimeSteerTurnInput): Promise<ProviderTurnSteerResult> =>
       Promise.resolve({
         threadId: this.options.threadId,
         turnId: asTurnId("turn-1"),
+        clientCorrelationId:
+          input.clientCorrelationId ?? buildCodexSteerClientCorrelationId("steer-1"),
       }),
   );
 
@@ -933,21 +939,28 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       assert.ok(runtime);
       runtime.steerTurnImpl.mockClear();
       runtime.sendTurnImpl.mockClear();
-
-      yield* Effect.ignore(
-        adapter.steerTurn({
-          threadId: asThreadId("sess-steer"),
-          expectedTurnId: asTurnId("turn-active"),
-          input: "keep going but narrow the scope",
-          attachments: [],
-        }),
+      const messageId = decodeMessageId(
+        `message-steer-\u0000-\u202e-${"provider-state-canary".repeat(80)}`,
       );
+
+      const result = yield* adapter.steerTurn({
+        threadId: asThreadId("sess-steer"),
+        expectedTurnId: asTurnId("turn-active"),
+        messageId,
+        input: "keep going but narrow the scope",
+        attachments: [],
+      });
 
       assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
       assert.deepStrictEqual(runtime.steerTurnImpl.mock.calls[0]?.[0], {
         expectedTurnId: asTurnId("turn-active"),
+        clientCorrelationId: buildCodexSteerClientCorrelationId(messageId),
         input: "keep going but narrow the scope",
       });
+      const serializedRuntimeInput = JSON.stringify(runtime.steerTurnImpl.mock.calls[0]?.[0]);
+      assert.equal(serializedRuntimeInput.includes('"messageId"'), false);
+      assert.equal(serializedRuntimeInput.includes("provider-state-canary"), false);
+      assert.equal(result.clientCorrelationId, buildCodexSteerClientCorrelationId(messageId));
     }),
   );
 
@@ -2863,10 +2876,12 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
-  it.effect("maps Codex turn-steer acceptance diagnostics to task progress", () =>
+  it.effect("strips raw Cafe message identity from Codex steer task diagnostics", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
       const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      const messageId = decodeMessageId(`message-\u0000-\u202e-${"x".repeat(600)}-tail`);
+      const clientCorrelationId = buildCodexSteerClientCorrelationId(messageId);
 
       yield* runtime.emit({
         id: asEventId("evt-turn-steer-accepted"),
@@ -2878,6 +2893,8 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         turnId: asTurnId("turn-1"),
         message: "Codex app-server accepted turn/steer.",
         payload: {
+          messageId,
+          clientCorrelationId,
           providerThreadId: "provider-thread-1",
           expectedTurnId: "turn-1",
           ackLatencyMs: 3,
@@ -2897,15 +2914,22 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         return;
       }
       assert.equal(firstEvent.value.turnId, "turn-1");
-      assert.equal(firstEvent.value.payload.taskId, "codex-turn-steer:turn-1");
+      assert.equal(firstEvent.value.payload.taskId, `codex-turn-steer:${clientCorrelationId}`);
+      assert.equal(Buffer.byteLength(firstEvent.value.payload.taskId, "utf8") < 128, true);
+      assert.equal(/[\p{Cc}\p{Cf}\p{Cs}]/u.test(firstEvent.value.payload.taskId), false);
+      assert.equal(firstEvent.value.payload.taskId.includes("x".repeat(64)), false);
       assert.equal(firstEvent.value.payload.description, "Codex app-server accepted turn/steer.");
       assert.deepEqual(firstEvent.value.payload.usage, {
+        clientCorrelationId,
         providerThreadId: "provider-thread-1",
         expectedTurnId: "turn-1",
         ackLatencyMs: 3,
         semantics:
           "turn/steer appends input to the active turn and does not emit a new turn/started notification.",
       });
+      const serializedEvent = JSON.stringify(firstEvent.value);
+      assert.equal(serializedEvent.includes('"messageId"'), false);
+      assert.equal(serializedEvent.includes("x".repeat(600)), false);
     }),
   );
 
@@ -2913,6 +2937,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
       const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      const clientCorrelationId = buildCodexSteerClientCorrelationId("message-1");
 
       yield* runtime.emit({
         id: asEventId("evt-turn-steer-waiting"),
@@ -2926,6 +2951,8 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
           "Codex app-server accepted turn/steer but has not emitted the steer user message yet.",
         payload: {
           steerId: "steer-1",
+          messageId: "message-1",
+          clientCorrelationId,
           providerThreadId: "provider-thread-1",
           elapsedDelay: "60 seconds",
         },
@@ -2947,9 +2974,11 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       );
       assert.deepEqual(firstEvent.value.payload.detail, {
         steerId: "steer-1",
+        clientCorrelationId,
         providerThreadId: "provider-thread-1",
         elapsedDelay: "60 seconds",
       });
+      assert.equal(JSON.stringify(firstEvent.value).includes('"messageId"'), false);
     }),
   );
 
@@ -2957,6 +2986,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
       const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      const clientCorrelationId = buildCodexSteerClientCorrelationId("message-1");
 
       yield* runtime.emit({
         id: asEventId("evt-turn-steer-processing"),
@@ -2969,6 +2999,8 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         message: "Codex app-server began processing turn/steer.",
         payload: {
           steerId: "steer-1",
+          messageId: "message-1",
+          clientCorrelationId,
           providerThreadId: "provider-thread-1",
           ackToProviderItemMs: 167_000,
         },
@@ -2984,15 +3016,68 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       if (firstEvent.value.type !== "task.progress") {
         return;
       }
-      assert.equal(firstEvent.value.payload.taskId, "codex-turn-steer-processing:turn-1");
+      assert.equal(
+        firstEvent.value.payload.taskId,
+        `codex-turn-steer-processing:${clientCorrelationId}`,
+      );
       assert.equal(
         firstEvent.value.payload.description,
         "Codex app-server began processing turn/steer.",
       );
       assert.deepEqual(firstEvent.value.payload.usage, {
         steerId: "steer-1",
+        clientCorrelationId,
         providerThreadId: "provider-thread-1",
         ackToProviderItemMs: 167_000,
+      });
+      assert.equal(JSON.stringify(firstEvent.value).includes('"messageId"'), false);
+    }),
+  );
+
+  it.effect("maps restart-recovered Codex steer processing to token-correlated progress", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      const clientCorrelationId = buildCodexSteerClientCorrelationId("message-after-restart");
+
+      yield* runtime.emit({
+        id: asEventId("evt-turn-steer-processing-after-restart"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "codex.turnSteer/processingObserved",
+        turnId: asTurnId("turn-1"),
+        message: "Codex app-server observed the correlated user message after recovery.",
+        payload: {
+          clientCorrelationId,
+          providerThreadId: "provider-thread-1",
+          providerUserMessageItemId: "item-after-restart",
+          observedAt: "2026-01-01T00:00:00.000Z",
+          semantics: "The provider echo is gated by independently persisted acceptance evidence.",
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      assert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") return;
+      assert.equal(firstEvent.value.type, "task.progress");
+      if (firstEvent.value.type !== "task.progress") return;
+      assert.equal(
+        firstEvent.value.payload.taskId,
+        `codex-turn-steer-processing:${clientCorrelationId}`,
+      );
+      assert.equal(
+        firstEvent.value.payload.description,
+        "Codex app-server observed the correlated user message after recovery.",
+      );
+      assert.deepStrictEqual(firstEvent.value.payload.usage, {
+        clientCorrelationId,
+        providerThreadId: "provider-thread-1",
+        providerUserMessageItemId: "item-after-restart",
+        observedAt: "2026-01-01T00:00:00.000Z",
+        semantics: "The provider echo is gated by independently persisted acceptance evidence.",
       });
     }),
   );
