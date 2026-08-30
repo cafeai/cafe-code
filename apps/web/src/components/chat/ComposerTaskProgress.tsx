@@ -211,12 +211,20 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
         side="top"
         align="start"
         sideOffset={8}
+        collisionAvoidance={{ fallbackAxisSide: "none" }}
         initialFocus={false}
         className="w-[min(22rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] p-0"
         viewportClassName="overflow-y-hidden p-0 [--viewport-inline-padding:0] not-data-transitioning:overflow-y-hidden"
         data-composer-task-progress-popup="true"
       >
-        <div className="flex max-h-[min(28rem,var(--available-height))] min-h-0 w-full flex-col">
+        {/* Base UI temporarily assigns `--available-height: max-content` while
+            measuring animated popovers. Combining that intrinsic keyword with
+            CSS `min()` invalidates max-height and makes a long task history
+            measure at its full natural height. Floating UI then abandons the
+            requested top/bottom axis and can strand the popup at the viewport
+            edge. Keep measurement bounded by the dynamic viewport; the outer
+            viewport still applies Base UI's final available-height constraint. */}
+        <div className="flex max-h-[min(28rem,calc(100dvh-2rem))] min-h-0 w-full flex-col">
           <div className="shrink-0 border-border/70 border-b px-4 py-3">
             <div className="flex items-baseline justify-between gap-3">
               <PopoverTitle className="text-sm leading-5">Tasks</PopoverTitle>

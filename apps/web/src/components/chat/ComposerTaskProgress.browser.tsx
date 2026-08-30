@@ -365,4 +365,60 @@ describe("ComposerTaskProgress", () => {
       await page.viewport(originalViewport.width, originalViewport.height);
     }
   });
+
+  it("keeps a tall tasks-and-agents popup anchored above the composer pill", async () => {
+    const originalViewport = { height: window.innerHeight, width: window.innerWidth };
+    await page.viewport(430, 932);
+    const subagents: WorkLogEntry[] = Array.from({ length: 3 }, (_, index) => ({
+      id: `active-agent-${index + 1}`,
+      createdAt: `2026-08-25T10:00:0${index}.000Z`,
+      label: `Active audit agent ${index + 1}`,
+      tone: "thinking" as const,
+      subagent: {
+        id: `provider-child-${index + 1}`,
+        label: `Active audit agent ${index + 1}`,
+        description: "Reviewing the current task boundary",
+        status: "active" as const,
+        startedAt: `2026-08-25T10:00:0${index}.000Z`,
+        updatedAt: `2026-08-25T10:00:1${index}.000Z`,
+      },
+    }));
+    const mounted = await mountProgress(
+      {
+        explanation:
+          "Keep the complete active-agent roster and every task visible inside one scroll region.",
+        steps: Array.from({ length: 24 }, (_, index) => ({
+          step: `Task ${index + 1}: verify the popup stays attached to its composer trigger.`,
+          status: index === 0 ? ("inProgress" as const) : ("pending" as const),
+        })),
+      },
+      { composerBottom: true, subagents },
+    );
+
+    try {
+      await page.getByRole("button", { name: /Task progress/ }).hover();
+      await vi.waitFor(() => expect(progressPopup()).not.toBeNull());
+
+      const trigger = progressTrigger();
+      const popup = progressPopup();
+      const positioner = popup?.closest<HTMLElement>('[data-slot="popover-positioner"]');
+      expect(trigger).not.toBeNull();
+      expect(popup).not.toBeNull();
+      expect(positioner).not.toBeNull();
+      if (!trigger || !popup || !positioner) {
+        throw new Error("Anchored task progress popup did not finish mounting.");
+      }
+
+      const triggerBounds = trigger.getBoundingClientRect();
+      const popupBounds = popup.getBoundingClientRect();
+      expect(positioner.dataset.side).toBe("top");
+      expect(triggerBounds.top - popupBounds.bottom).toBeCloseTo(8, 0);
+      // Fractional device-pixel snapping can move the aligned edges by slightly
+      // more than one CSS pixel even though the popup remains visually flush.
+      expect(Math.abs(popupBounds.left - triggerBounds.left)).toBeLessThanOrEqual(2);
+    } finally {
+      await mounted.cleanup();
+      await page.viewport(originalViewport.width, originalViewport.height);
+    }
+  });
 });

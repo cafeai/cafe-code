@@ -2523,6 +2523,28 @@ export function selectThreadExistsByRef(
     : false;
 }
 
+/**
+ * Reports whether the per-thread detail stream has materialized its first
+ * complete snapshot for this thread.
+ *
+ * The shell stream deliberately never writes `messageIdsByThreadId`, while
+ * `writeThreadState` always materializes that entry for a detail snapshot,
+ * including a conclusively empty one. Checking property ownership therefore
+ * distinguishes "history is still loading" from "this thread has no
+ * messages" without guessing from elapsed time or session status.
+ */
+export function selectThreadDetailHydratedByRef(
+  state: AppState,
+  ref: ScopedThreadRef | null | undefined,
+): boolean {
+  if (!ref) {
+    return false;
+  }
+
+  const environmentState = selectEnvironmentState(state, ref.environmentId);
+  return Object.hasOwn(environmentState.messageIdsByThreadId, ref.threadId);
+}
+
 export function selectSidebarThreadSummaryByRef(
   state: AppState,
   ref: ScopedThreadRef | null | undefined,

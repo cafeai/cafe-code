@@ -43,6 +43,7 @@ import {
   HammerIcon,
   ChevronDownIcon,
   ChevronRightIcon,
+  SparklesIcon,
   type LucideIcon,
   SquarePenIcon,
   TerminalIcon,
@@ -173,6 +174,8 @@ const TIMELINE_REVIEW_VISIBLE_CONTENT_POSITION = {
 // ---------------------------------------------------------------------------
 
 interface MessagesTimelineProps {
+  /** True until the detail stream has delivered its first complete snapshot. */
+  isThreadHistoryHydrating?: boolean;
   isWorking: boolean;
   activeTurnInProgress: boolean;
   activeTurnId?: TurnId | null;
@@ -211,6 +214,7 @@ interface MessagesTimelineProps {
 // ---------------------------------------------------------------------------
 
 export const MessagesTimeline = memo(function MessagesTimeline({
+  isThreadHistoryHydrating = false,
   isWorking,
   activeTurnInProgress,
   activeTurnId,
@@ -924,6 +928,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [],
   );
 
+  if (
+    rows.length === 0 &&
+    !isWorking &&
+    resolvedSelectedSubagent === null &&
+    isThreadHistoryHydrating
+  ) {
+    return <ThreadHistoryLoadingState />;
+  }
+
   if (rows.length === 0 && !isWorking && resolvedSelectedSubagent === null) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -1002,6 +1015,43 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     </div>
   );
 });
+
+/**
+ * A deliberately lightweight loading scene. Only the constellation's
+ * `transform` is animated, which browsers can composite without repainting
+ * the conversation surface on every frame. Reduced-motion users receive the
+ * same polished illustration with no animation.
+ */
+function ThreadHistoryLoadingState() {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      data-thread-history-loading="true"
+      className="flex h-full items-center justify-center px-6"
+    >
+      <div className="flex max-w-sm flex-col items-center text-center">
+        <div className="relative mb-5 flex size-24 items-center justify-center" aria-hidden="true">
+          <div className="absolute inset-1 rounded-full border border-primary/15 bg-gradient-to-br from-primary/10 via-card/20 to-cyan-400/10 shadow-[0_0_38px_rgba(56,189,248,0.12)]" />
+          <div className="absolute inset-3 rounded-full border border-dashed border-foreground/15" />
+          <div className="absolute inset-0 animate-spin will-change-transform [animation-duration:5s] motion-reduce:animate-none">
+            <span className="absolute left-1/2 top-0 size-2.5 -translate-x-1/2 rounded-full bg-primary shadow-[0_0_12px_currentColor]" />
+            <span className="absolute bottom-2 left-2.5 size-2 rounded-full bg-cyan-300/90 shadow-[0_0_10px_currentColor]" />
+            <span className="absolute bottom-3 right-1.5 size-1.5 rounded-full bg-foreground/70" />
+          </div>
+          <div className="relative flex size-11 items-center justify-center rounded-full border border-primary/20 bg-card/80 text-primary shadow-sm">
+            <SparklesIcon className="size-5" strokeWidth={1.6} />
+          </div>
+        </div>
+        <p className="font-medium text-foreground text-lg">Restoring your conversation</p>
+        <p className="mt-1.5 text-balance text-muted-foreground text-sm leading-relaxed">
+          Cafe is gathering this thread&apos;s history. It&apos;ll be ready to continue in just a
+          moment.
+        </p>
+      </div>
+    </div>
+  );
+}
 
 function keyExtractor(item: MessagesTimelineRow) {
   return item.id;

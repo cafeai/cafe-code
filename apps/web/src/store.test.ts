@@ -24,6 +24,7 @@ import {
   selectEnvironmentState,
   selectProjectsAcrossEnvironments,
   selectThreadByRef,
+  selectThreadDetailHydratedByRef,
   selectThreadExistsByRef,
   setThreadBranch,
   selectThreadsAcrossEnvironments,
@@ -465,6 +466,32 @@ describe("thread selection memoization", () => {
       ),
     ).toBe(false);
     expect(selectThreadExistsByRef(state, null)).toBe(false);
+  });
+
+  it("distinguishes a shell-only thread from a conclusively empty detail snapshot", () => {
+    const thread = makeThread();
+    const hydratedState = makeState(thread);
+    const ref = scopeThreadRef(thread.environmentId, thread.id);
+    const hydratedEnvironment = hydratedState.environmentStateById[thread.environmentId];
+    if (!hydratedEnvironment) {
+      throw new Error("Expected test environment state");
+    }
+    const shellOnlyState: AppState = {
+      ...hydratedState,
+      environmentStateById: {
+        ...hydratedState.environmentStateById,
+        [thread.environmentId]: {
+          ...hydratedEnvironment,
+          messageIdsByThreadId: {},
+        },
+      },
+    };
+
+    expect(selectThreadDetailHydratedByRef(shellOnlyState, ref)).toBe(false);
+    // An owned empty array is intentional: detail snapshots always materialize
+    // it, so an empty conversation is no longer ambiguous with loading.
+    expect(selectThreadDetailHydratedByRef(hydratedState, ref)).toBe(true);
+    expect(selectThreadDetailHydratedByRef(hydratedState, null)).toBe(false);
   });
 });
 

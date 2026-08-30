@@ -309,6 +309,43 @@ describe("MessagesTimeline", () => {
     }
   });
 
+  it("shows a friendly loading scene until an empty thread detail snapshot is conclusive", async () => {
+    const props = buildProps();
+    const screen = await render(
+      <MessagesTimeline {...props} isThreadHistoryHydrating timelineEntries={[]} />,
+    );
+
+    try {
+      await expect.element(page.getByText("Restoring your conversation")).toBeVisible();
+      await expect
+        .element(
+          page.getByText(
+            "Cafe is gathering this thread's history. It'll be ready to continue in just a moment.",
+          ),
+        )
+        .toBeVisible();
+      await expect
+        .element(page.getByText("Send a message to start the conversation."))
+        .not.toBeInTheDocument();
+
+      const loadingState = document.querySelector<HTMLElement>(
+        '[data-thread-history-loading="true"]',
+      );
+      expect(loadingState?.getAttribute("role")).toBe("status");
+
+      await screen.rerender(
+        <MessagesTimeline {...props} isThreadHistoryHydrating={false} timelineEntries={[]} />,
+      );
+
+      await expect
+        .element(page.getByText("Send a message to start the conversation."))
+        .toBeVisible();
+      await expect.element(page.getByText("Restoring your conversation")).not.toBeInTheDocument();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("shares one visibility-aware clock across live subagents and leaves terminal timing frozen", async () => {
     let now = Date.parse("2026-04-13T12:01:05.000Z");
     let visibility: DocumentVisibilityState = "visible";

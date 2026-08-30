@@ -75,6 +75,7 @@ import {
   selectProjectByRef,
   selectProjectsAcrossEnvironments,
   selectThreadByRef,
+  selectThreadDetailHydratedByRef,
   selectThreadsAcrossEnvironments,
   useStore,
 } from "../store";
@@ -1847,6 +1848,9 @@ export default function ChatView(props: ChatViewProps) {
       () => createThreadSelectorByRef(routeKind === "server" ? routeThreadRef : null),
       [routeKind, routeThreadRef],
     ),
+  );
+  const serverThreadDetailHydrated = useStore((store) =>
+    routeKind === "server" ? selectThreadDetailHydratedByRef(store, routeThreadRef) : true,
   );
   const setStoreThreadError = useStore((store) => store.setError);
   const markThreadVisited = useUiStateStore((store) => store.markThreadVisited);
@@ -6569,6 +6573,7 @@ export default function ChatView(props: ChatViewProps) {
             {/* Messages — LegendList handles virtualization and scrolling internally */}
             <MessagesTimeline
               key={activeThread.id}
+              isThreadHistoryHydrating={isServerThread && !serverThreadDetailHydrated}
               isWorking={isWorking}
               activeTurnInProgress={isWorking || !latestTurnSettled}
               activeTurnId={activeLatestTurn?.turnId ?? null}
