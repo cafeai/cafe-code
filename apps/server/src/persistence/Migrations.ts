@@ -12,7 +12,8 @@ import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Layer from "effect/Layer";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
-import * as SqlError from "effect/unstable/sql/SqlError";
+
+import { isSqliteLockTimeoutError } from "./sqliteLockRetry.ts";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -192,9 +193,7 @@ const run = Migrator.make({});
 const MIGRATION_LOCK_RETRY_ATTEMPTS = 8;
 const MIGRATION_LOCK_RETRY_BASE_DELAY = "50 millis";
 
-export function isMigrationLockTimeoutError(error: unknown): error is SqlError.SqlError {
-  return SqlError.isSqlError(error) && error.reason._tag === "LockTimeoutError";
-}
+export const isMigrationLockTimeoutError = isSqliteLockTimeoutError;
 
 export interface RunMigrationsOptions {
   readonly toMigrationInclusive?: number | undefined;

@@ -1,13 +1,18 @@
 import type { MessageId, ThreadId } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import type * as SqlError from "effect/unstable/sql/SqlError";
 import type * as SqlClient from "effect/unstable/sql/SqlClient";
+
+import { isSqliteBusySnapshotError } from "../persistence/sqliteLockRetry.ts";
 
 // Journal payloads can approach the per-event byte limit. A 64-row page keeps
 // each synchronous node:sqlite materialization conservatively bounded while
 // retaining good index locality and resumable watermark progress.
 const LEGACY_HYDRATION_PAGE_SIZE = 64;
+const LEGACY_HYDRATION_LOCK_RETRIES = 8;
+const LEGACY_HYDRATION_LOCK_RETRY_BASE_DELAY = "10 millis";
 
 export interface PersistedMessageIdentity {
   readonly sequence: number;
@@ -230,24 +235,28 @@ export function hydrateLegacyMessageIdentitiesForThread(
       `;
       const pageEndSequence = page.at(-1)?.sequence ?? legacyCutoffSequence;
 
-      const retired = yield* sql.withTransaction(
-        Effect.gen(function* () {
-          // Hard-delete tombstones are permanent. Check from inside the same
-          // transaction as the compact writes so an older overlapping backend
-          // cannot recreate standalone hydration state after purge. If this
-          // transaction wins first, the later purge removes its rows; if the
-          // tombstone wins first, this branch writes nothing.
-          const [tombstone] = yield* sql<TombstoneRow>`
+      let retryAttempt = 0;
+      const hydratePage = Effect.suspend(() => {
+        retryAttempt += 1;
+        return sql
+          .withTransaction(
+            Effect.gen(function* () {
+              // Hard-delete tombstones are permanent. Check from inside the same
+              // transaction as the compact writes so an older overlapping backend
+              // cannot recreate standalone hydration state after purge. If this
+              // transaction wins first, the later purge removes its rows; if the
+              // tombstone wins first, this branch writes nothing.
+              const [tombstone] = yield* sql<TombstoneRow>`
             SELECT 1 AS retired
             FROM hard_deleted_threads
             WHERE thread_id = ${threadId}
             LIMIT 1
           `;
-          if (tombstone !== undefined) {
-            return true;
-          }
-          if (page.length > 0) {
-            yield* sql`
+              if (tombstone !== undefined) {
+                return true;
+              }
+              if (page.length > 0) {
+                yield* sql`
               INSERT INTO orchestration_message_identities (
                 thread_id,
                 message_id,
@@ -281,9 +290,9 @@ export function hydrateLegacyMessageIdentitiesForThread(
                   excluded.latest_sequence
                 )
             `;
-          }
+              }
 
-          yield* sql`
+              yield* sql`
             INSERT INTO orchestration_message_identity_hydration (
               thread_id,
               through_sequence
@@ -295,7 +304,38 @@ export function hydrateLegacyMessageIdentitiesForThread(
                 excluded.through_sequence
               )
           `;
-          return false;
+              return false;
+            }),
+          )
+          .pipe(
+            Effect.tapError((error) =>
+              isSqliteBusySnapshotError(error)
+                ? Effect.logWarning(
+                    "SQLite message identity hydration lock contention observed",
+                  ).pipe(
+                    Effect.annotateLogs({
+                      attempt: retryAttempt,
+                      reason: error.reason._tag,
+                    }),
+                  )
+                : Effect.void,
+            ),
+          );
+      });
+
+      // Provider-daemon ingestion and the main backend intentionally share
+      // this WAL database. A daemon commit between the tombstone read and the
+      // first compact-ledger write invalidates a deferred snapshot immediately;
+      // SQLite's busy timeout cannot wait that state away. Retry only this
+      // idempotent page transaction from a fresh BEGIN/snapshot. Never retry
+      // the surrounding user command, which could duplicate durable events.
+      // Every retry rechecks the permanent tombstone, and failed transactions
+      // cannot advance the monotonic watermark or expose partial identities.
+      const retired = yield* hydratePage.pipe(
+        Effect.retry({
+          schedule: Schedule.jittered(Schedule.exponential(LEGACY_HYDRATION_LOCK_RETRY_BASE_DELAY)),
+          times: LEGACY_HYDRATION_LOCK_RETRIES,
+          while: isSqliteBusySnapshotError,
         }),
       );
 

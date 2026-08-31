@@ -2564,20 +2564,20 @@ export function selectThreadIdsByProjectRef(
     : EMPTY_THREAD_IDS;
 }
 
-export function setError(state: AppState, threadId: ThreadId, error: string | null): AppState {
-  if (state.activeEnvironmentId === null) {
-    return state;
-  }
-
+export function setError(
+  state: AppState,
+  threadRef: ScopedThreadRef,
+  error: string | null,
+): AppState {
   const nextEnvironmentState = updateThreadState(
-    getStoredEnvironmentState(state, state.activeEnvironmentId),
-    threadId,
+    getStoredEnvironmentState(state, threadRef.environmentId),
+    threadRef.threadId,
     (thread) => {
       if (thread.error === error) return thread;
       return { ...thread, error };
     },
   );
-  return commitEnvironmentState(state, state.activeEnvironmentId, nextEnvironmentState);
+  return commitEnvironmentState(state, threadRef.environmentId, nextEnvironmentState);
 }
 
 export function applyOrchestrationEvent(
@@ -2674,7 +2674,7 @@ interface AppStore extends AppState {
     environmentId: EnvironmentId,
   ) => void;
   applyShellEvent: (event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) => void;
-  setError: (threadId: ThreadId, error: string | null) => void;
+  setError: (threadRef: ScopedThreadRef, error: string | null) => void;
   setThreadBranch: (
     threadRef: ScopedThreadRef,
     branch: string | null,
@@ -2698,7 +2698,7 @@ export const useStore = create<AppStore>((set) => ({
     set((state) => applyOrchestrationEvents(state, events, environmentId)),
   applyShellEvent: (event, environmentId) =>
     set((state) => applyShellEvent(state, event, environmentId)),
-  setError: (threadId, error) => set((state) => setError(state, threadId, error)),
+  setError: (threadRef, error) => set((state) => setError(state, threadRef, error)),
   setThreadBranch: (threadRef, branch, worktreePath) =>
     set((state) => setThreadBranch(state, threadRef, branch, worktreePath)),
 }));

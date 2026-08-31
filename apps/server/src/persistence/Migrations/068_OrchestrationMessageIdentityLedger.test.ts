@@ -1,17 +1,159 @@
 import { MessageId, ThreadId } from "@cafecode/contracts";
 import { assert, it } from "@effect/vitest";
+import { fork, type ChildProcess } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { it as vitestIt } from "vitest";
 
 import {
   hydrateLegacyMessageIdentitiesForThread,
   readLatestMessageIdentity,
 } from "../../orchestration/messageIdentityLedger.ts";
 import { runMigrations } from "../Migrations.ts";
+import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 import * as TestSqliteClient from "../TestSqliteClient.ts";
 
 const layer = it.layer(Layer.mergeAll(TestSqliteClient.layerMemory()));
+
+const SQLITE_WRITER_FIXTURE_REPLY_TIMEOUT_MS = 5_000;
+const SQLITE_WRITER_FIXTURE_GRACEFUL_EXIT_MS = 500;
+const SQLITE_WRITER_FIXTURE_FORCED_EXIT_MS = 5_000;
+const WINDOWS_CLEANUP_RETRY_DELAY_MS = 250;
+const WINDOWS_CLEANUP_RETRY_ATTEMPTS = 40;
+
+type ChildTermination = Promise<void>;
+
+function observeChildTermination(child: ChildProcess): ChildTermination {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      child.off("close", finish);
+      resolve();
+    };
+
+    // `error` is not terminal: Node may emit it for a failed IPC send or kill
+    // while the child is still alive. `close` follows both normal exit and a
+    // failed spawn after stdio/IPC are closed, so it is the only safe point at
+    // which the SQLite handle can no longer remain live in this fixture.
+    child.once("close", finish);
+  });
+}
+
+function waitForPromiseWithin(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(false);
+    }, timeoutMs);
+
+    void promise.then(() => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(true);
+    });
+  });
+}
+
+async function stopSqliteWriterFixture(
+  child: ChildProcess,
+  termination: ChildTermination,
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    await termination;
+    return;
+  }
+
+  // Closing IPC lets a healthy fixture close its DatabaseSync handle and exit
+  // without a signal. The fixture also installs a disconnect cleanup hook for
+  // failure paths where the expected command was never delivered.
+  if (child.connected) {
+    try {
+      child.disconnect();
+    } catch {
+      // A concurrent child-side disconnect is equivalent to the desired state.
+    }
+  }
+  if (await waitForPromiseWithin(termination, SQLITE_WRITER_FIXTURE_GRACEFUL_EXIT_MS)) {
+    return;
+  }
+
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+  }
+  if (!(await waitForPromiseWithin(termination, SQLITE_WRITER_FIXTURE_FORCED_EXIT_MS))) {
+    throw new Error("SQLite writer fixture did not exit after forced termination.");
+  }
+}
+
+function readSqliteWriterFixtureReply(child: ChildProcess, phase: string): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for SQLite writer fixture during ${phase}.`));
+    }, SQLITE_WRITER_FIXTURE_REPLY_TIMEOUT_MS);
+    const onMessage = (message: unknown) => {
+      cleanup();
+      resolve(String(message));
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      cleanup();
+      reject(
+        new Error(`SQLite writer fixture exited during ${phase} (code ${code}, signal ${signal}).`),
+      );
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      child.off("message", onMessage);
+      child.off("error", onError);
+      child.off("exit", onExit);
+    };
+
+    child.once("message", onMessage);
+    child.once("error", onError);
+    child.once("exit", onExit);
+  });
+}
+
+function isRetryableWindowsCleanupError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "EBUSY" || code === "EPERM" || code === "ENOTEMPTY";
+}
+
+async function removeTemporaryDirectory(directory: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rm(directory, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (
+        process.platform !== "win32" ||
+        !isRetryableWindowsCleanupError(error) ||
+        attempt >= WINDOWS_CLEANUP_RETRY_ATTEMPTS - 1
+      ) {
+        throw error;
+      }
+      // Windows can report child exit before SQLite releases the final WAL or
+      // shared-memory handle. Match the bounded retry policy used by native
+      // artifact cleanup instead of making this process-backed test flaky.
+      await new Promise((resolve) => setTimeout(resolve, WINDOWS_CLEANUP_RETRY_DELAY_MS));
+    }
+  }
+}
 
 interface IdentityRow {
   readonly messageId: string;
@@ -371,3 +513,209 @@ multiPageLayer("068 legacy hydration scheduling", (it) => {
     }),
   );
 });
+
+type HydrationContentionScenario = "advance-wal" | "retire-thread";
+
+async function runHydrationContentionScenario(scenario: HydrationContentionScenario) {
+  const directory = mkdtempSync(join(tmpdir(), "cafecode-identity-hydration-lock-"));
+  const filename = join(directory, "state.sqlite");
+  const suffix = scenario === "advance-wal" ? "retry" : "retire";
+
+  try {
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const threadId = ThreadId.make(`thread-hydration-lock-${suffix}`);
+          const messageId = `message-hydration-lock-${suffix}`;
+
+          yield* sql`PRAGMA journal_mode = WAL`;
+          yield* runMigrations({ toMigrationInclusive: 67 });
+          yield* sql`
+            INSERT INTO orchestration_events (
+              event_id,
+              aggregate_kind,
+              stream_id,
+              stream_version,
+              event_type,
+              occurred_at,
+              command_id,
+              causation_event_id,
+              correlation_id,
+              actor_kind,
+              payload_json,
+              metadata_json
+            )
+            VALUES (
+              ${`event-hydration-lock-${suffix}`},
+              'thread',
+              ${threadId},
+              0,
+              'thread.message-sent',
+              '2026-09-01T00:00:00.000Z',
+              ${`command-hydration-lock-${suffix}`},
+              NULL,
+              NULL,
+              'client',
+              ${JSON.stringify({
+                threadId,
+                messageId,
+                role: "user",
+                text: "legacy",
+                attachments: [],
+                turnId: null,
+                streaming: false,
+                createdAt: "2026-09-01T00:00:00.000Z",
+                updatedAt: "2026-09-01T00:00:00.000Z",
+              })},
+              '{}'
+            )
+          `;
+          yield* runMigrations({ toMigrationInclusive: 68 });
+          yield* sql`CREATE TABLE cafe_snapshot_retry_probe(value INTEGER NOT NULL)`;
+
+          const [state] = yield* sql<{ readonly cutoff: number }>`
+            SELECT legacy_cutoff_sequence AS cutoff
+            FROM orchestration_message_identity_state
+            WHERE singleton_id = 1
+          `;
+          assert.ok(state);
+
+          // A separate process is required here: both Cafe runtimes own their
+          // own node:sqlite connection, and the production failure occurs when
+          // one process advances the WAL after the other's deferred read.
+          const lockOwner = fork(
+            fileURLToPath(
+              new URL("../../../test-fixtures/sqlite-writer-lock-child.mjs", import.meta.url),
+            ),
+            [],
+            {
+              execPath: process.execPath,
+              execArgv: [],
+              stdio: ["ignore", "ignore", "ignore", "ipc"],
+            },
+          );
+          const childTermination = observeChildTermination(lockOwner);
+
+          // Keep the lifecycle guard immediately adjacent to `fork`. Setup,
+          // readiness, assertions, and hydration can all fail independently;
+          // none may leave an IPC child or SQLite handle behind.
+          try {
+            const ready = readSqliteWriterFixtureReply(lockOwner, "startup");
+            lockOwner.send({ filename });
+            assert.equal(yield* Effect.promise(() => ready), "ready");
+
+            let snapshotAdvanced = false;
+            let tombstoneLookupCount = 0;
+            const contendedSql = new Proxy(sql, {
+              apply(target, thisArg, argumentList) {
+                const statement = Reflect.apply(target, thisArg, argumentList);
+                const [segments] = argumentList;
+                const isTombstoneLookup =
+                  Array.isArray(segments) &&
+                  segments.every((segment) => typeof segment === "string") &&
+                  segments.join(" ").includes("FROM hard_deleted_threads");
+                if (!isTombstoneLookup) {
+                  return statement;
+                }
+
+                tombstoneLookupCount += 1;
+                if (snapshotAdvanced) {
+                  return statement;
+                }
+                snapshotAdvanced = true;
+                return (statement as Effect.Effect<unknown, unknown, unknown>).pipe(
+                  Effect.tap(() =>
+                    Effect.promise(async () => {
+                      const committed = readSqliteWriterFixtureReply(
+                        lockOwner,
+                        scenario === "advance-wal" ? "WAL advance" : "thread retirement",
+                      );
+                      lockOwner.send(
+                        scenario === "advance-wal"
+                          ? "write"
+                          : {
+                              type: "retire-thread",
+                              threadId,
+                              deletedAt: "2026-09-01T00:01:00.000Z",
+                            },
+                      );
+                      assert.equal(
+                        await committed,
+                        scenario === "advance-wal" ? "committed" : "retired",
+                      );
+                    }),
+                  ),
+                );
+              },
+            }) as unknown as SqlClient.SqlClient;
+
+            yield* hydrateLegacyMessageIdentitiesForThread(contendedSql, threadId);
+            // The first transaction must fail after its deferred snapshot is
+            // invalidated, and the fresh retry must re-read the tombstone.
+            assert.isAtLeast(tombstoneLookupCount, 2);
+
+            const identities = yield* sql<IdentityRow>`
+              SELECT
+                message_id AS "messageId",
+                first_sequence AS "firstSequence",
+                latest_sequence AS "latestSequence"
+              FROM orchestration_message_identities
+              WHERE thread_id = ${threadId}
+            `;
+            const [hydration] = yield* sql<{ readonly throughSequence: number }>`
+              SELECT through_sequence AS "throughSequence"
+              FROM orchestration_message_identity_hydration
+              WHERE thread_id = ${threadId}
+            `;
+            const [tombstone] = yield* sql<{ readonly count: number }>`
+              SELECT COUNT(*) AS count
+              FROM hard_deleted_threads
+              WHERE thread_id = ${threadId}
+            `;
+
+            if (scenario === "advance-wal") {
+              assert.deepStrictEqual(identities, [
+                {
+                  messageId,
+                  firstSequence: state!.cutoff,
+                  latestSequence: state!.cutoff,
+                },
+              ]);
+              assert.equal(hydration?.throughSequence, state!.cutoff);
+              assert.equal(tombstone?.count, 0);
+            } else {
+              // A permanent tombstone committed between attempts must win. A
+              // stale backend may neither recreate the compact identity row nor
+              // leave a standalone hydration watermark after hard deletion.
+              assert.deepStrictEqual(identities, []);
+              assert.isUndefined(hydration);
+              assert.equal(tombstone?.count, 1);
+            }
+          } finally {
+            yield* Effect.promise(() => stopSqliteWriterFixture(lockOwner, childTermination));
+          }
+        }).pipe(Effect.provide(NodeSqliteClient.layer({ filename, busyTimeoutMs: 25 }))),
+      ),
+    );
+  } finally {
+    await removeTemporaryDirectory(directory);
+  }
+}
+
+// Leave enough headroom for the reply deadline plus graceful/forced cleanup on
+// an intentionally broken fixture. Windows also reserves time for delayed WAL
+// handle release and its bounded directory-removal retries.
+const HYDRATION_CONTENTION_TEST_TIMEOUT_MS = process.platform === "win32" ? 40_000 : 25_000;
+
+vitestIt(
+  "retries one legacy hydration page after transient WAL writer contention",
+  () => runHydrationContentionScenario("advance-wal"),
+  HYDRATION_CONTENTION_TEST_TIMEOUT_MS,
+);
+
+vitestIt(
+  "honors a permanent tombstone committed between a failed snapshot and its retry",
+  () => runHydrationContentionScenario("retire-thread"),
+  HYDRATION_CONTENTION_TEST_TIMEOUT_MS,
+);

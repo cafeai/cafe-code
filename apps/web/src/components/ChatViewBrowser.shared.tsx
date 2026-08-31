@@ -8,6 +8,7 @@ import {
   EnvironmentId,
   type DesktopSourceUpdateState,
   type MessageId,
+  OrchestrationDispatchCommandError,
   type OrchestrationReadModel,
   type ProjectId,
   ProviderDriverKind,
@@ -46,8 +47,13 @@ import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import { selectBootstrapCompleteForActiveEnvironment, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
+import { toastManager } from "./ui/toast";
 import { createAuthenticatedSessionHandlers } from "../../test/authHttpHandlers";
-import { BrowserWsRpcHarness, type NormalizedWsRpcRequestBody } from "../../test/wsRpcHarness";
+import {
+  BrowserWsRpcHarness,
+  failBrowserWsRpc,
+  type NormalizedWsRpcRequestBody,
+} from "../../test/wsRpcHarness";
 
 import { DEFAULT_CLIENT_SETTINGS } from "@cafecode/contracts/settings";
 
@@ -1474,6 +1480,14 @@ async function waitForSendButton(): Promise<HTMLButtonElement> {
   return waitForElement(
     () => document.querySelector<HTMLButtonElement>('button[aria-label="Send message"]'),
     "Unable to find send button.",
+  );
+}
+
+function findSendFailureToastTitle(): HTMLElement | null {
+  return (
+    Array.from(document.querySelectorAll<HTMLElement>('[data-slot="toast-title"]')).find(
+      (element) => element.textContent?.trim() === "Message was not sent",
+    ) ?? null
   );
 }
 
@@ -3384,6 +3398,134 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         );
       } finally {
         resolveDispatch({ sequence: fixture.snapshot.snapshotSequence + 1 });
+        await mounted.cleanup();
+      }
+    });
+
+    it("restores rejected direct sends and reports every delivery attempt before a successful retry", async () => {
+      const messageText = "Retry this exact direct message";
+      const repeatedFailure = "The message identity ledger is temporarily busy.";
+      let turnStartAttempts = 0;
+      const dispatchedMessageTexts: string[] = [];
+      const closeToastSpy = vi.spyOn(toastManager, "close");
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-user-direct-send-retry" as MessageId,
+          targetText: "direct send retry target",
+        }),
+        resolveRpc: (body) => {
+          if (
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+            body.type === "thread.turn.start"
+          ) {
+            turnStartAttempts += 1;
+            const message = body.message as { text?: unknown } | undefined;
+            if (typeof message?.text === "string") {
+              dispatchedMessageTexts.push(message.text);
+            }
+            if (turnStartAttempts <= 2) {
+              return failBrowserWsRpc(
+                new OrchestrationDispatchCommandError({ message: repeatedFailure }),
+              );
+            }
+          }
+          if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
+            return { sequence: fixture.snapshot.snapshotSequence + turnStartAttempts + 1 };
+          }
+          return undefined;
+        },
+      });
+
+      const findOptimisticMessage = () =>
+        Array.from(document.querySelectorAll<HTMLElement>('[data-message-role="user"]')).filter(
+          (element) => element.textContent?.includes(messageText),
+        );
+
+      try {
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, messageText);
+        await waitForLayout();
+
+        (await waitForSendButton()).click();
+        await vi.waitFor(
+          () => {
+            expect(turnStartAttempts).toBe(1);
+            expect(findOptimisticMessage()).toHaveLength(0);
+            expect(
+              document.querySelector<HTMLElement>('[data-testid="composer-editor"]')?.textContent,
+            ).toBe(messageText);
+            expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+              messageText,
+            );
+            expect(document.body.textContent).toContain("Failed to send message.");
+            expect(findSendFailureToastTitle()).not.toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        // Dismiss both presentations from the first occurrence. The stable
+        // thread banner intentionally remembers this exact error, while the
+        // notification is occurrence-based and must return for the next press.
+        document.querySelector<HTMLButtonElement>('button[aria-label="Dismiss error"]')?.click();
+        document
+          .querySelector<HTMLButtonElement>('button[aria-label="Dismiss notification"]')
+          ?.click();
+        await vi.waitFor(
+          () => {
+            expect(document.querySelector('button[aria-label="Dismiss error"]')).toBeNull();
+            expect(findSendFailureToastTitle()).toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        (await waitForSendButton()).click();
+        await vi.waitFor(
+          () => {
+            expect(turnStartAttempts).toBe(2);
+            expect(findSendFailureToastTitle()).not.toBeNull();
+            // The dismissed banner remains suppressed, proving the new toast
+            // is what makes an identical second rejection visible.
+            expect(document.querySelector('button[aria-label="Dismiss error"]')).toBeNull();
+            expect(findOptimisticMessage()).toHaveLength(0);
+            expect(
+              document.querySelector<HTMLElement>('[data-testid="composer-editor"]')?.textContent,
+            ).toBe(messageText);
+            expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+              messageText,
+            );
+          },
+          { timeout: 8_000, interval: 16 },
+        );
+
+        // A third press succeeds. The restored draft is consumed exactly once
+        // and its optimistic row remains until the canonical snapshot arrives.
+        const closeCountBeforeSuccessfulRetry = closeToastSpy.mock.calls.length;
+        (await waitForSendButton()).click();
+        await vi.waitFor(
+          () => {
+            expect(turnStartAttempts).toBe(3);
+            expect(closeToastSpy.mock.calls).toHaveLength(closeCountBeforeSuccessfulRetry + 1);
+            expect(findOptimisticMessage()).toHaveLength(1);
+            expect(
+              document.querySelector<HTMLElement>('[data-testid="composer-editor"]')?.textContent ??
+                "",
+            ).toBe("");
+            expect(
+              useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt ?? "",
+            ).toBe("");
+            expect(dispatchedMessageTexts).toEqual([messageText, messageText, messageText]);
+            expect(findSendFailureToastTitle()).toBeNull();
+            expect(document.querySelector('button[aria-label="Dismiss error"]')).toBeNull();
+            expect(document.body.textContent).not.toContain("Failed to send message.");
+          },
+          // The toast manager's normal auto-dismiss is much longer than this
+          // bound. Passing here therefore proves the successful dispatch
+          // closed the stale failure notification instead of merely waiting
+          // for its timer to expire.
+          { timeout: 2_000, interval: 16 },
+        );
+      } finally {
+        closeToastSpy.mockRestore();
         await mounted.cleanup();
       }
     });

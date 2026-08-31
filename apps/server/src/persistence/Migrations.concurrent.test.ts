@@ -9,6 +9,7 @@ import { assert, it } from "vitest";
 
 import { isMigrationLockTimeoutError, runMigrations } from "./Migrations.ts";
 import * as NodeSqliteClient from "./NodeSqliteClient.ts";
+import { isSqliteBusySnapshotError } from "./sqliteLockRetry.ts";
 
 it("runMigrations retries transient cross-process writer contention", async () => {
   await Effect.runPromise(
@@ -72,4 +73,23 @@ it("migration retry admission is limited to SQLite lock timeouts", () => {
   assert.isFalse(isMigrationLockTimeoutError(connectionFailure));
   assert.isFalse(isMigrationLockTimeoutError(statementTimeout));
   assert.isFalse(isMigrationLockTimeoutError(new Error("not sql")));
+});
+
+it("message hydration retry admission is limited to immediate WAL snapshot invalidation", () => {
+  const busySnapshot = new SqlError.SqlError({
+    reason: new SqlError.LockTimeoutError({
+      cause: { code: "ERR_SQLITE_BUSY", errcode: 517 },
+      operation: "execute",
+    }),
+  });
+  const exhaustedWriterTimeout = new SqlError.SqlError({
+    reason: new SqlError.LockTimeoutError({
+      cause: { code: "ERR_SQLITE_BUSY", errcode: 5 },
+      operation: "execute",
+    }),
+  });
+
+  assert.isTrue(isSqliteBusySnapshotError(busySnapshot));
+  assert.isFalse(isSqliteBusySnapshotError(exhaustedWriterTimeout));
+  assert.isFalse(isSqliteBusySnapshotError(new Error("not sql")));
 });

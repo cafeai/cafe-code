@@ -36,7 +36,7 @@ import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
@@ -73,6 +73,7 @@ import {
 } from "../codexSteerRecovery.ts";
 import { buildCodexSteerClientCorrelationId } from "../../provider/codexSteerCorrelation.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { PROVIDER_PIPELINE_POLICY } from "@cafecode/shared/providerPipelinePolicy";
 
 function makeTestServerSettingsLayer(overrides: Partial<ServerSettings> = {}) {
   return ServerSettingsService.layerTest(overrides);
@@ -276,6 +277,7 @@ describe("ProviderRuntimeIngestion", () => {
   }
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await disposeCurrentHarness();
     for (const dir of tempDirs.splice(0)) {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -619,6 +621,8 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("checkpoints a sub-interval replay before admitting its next work turn", async () => {
+    let monotonicNowMs = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => monotonicNowMs);
     let activityCount = 0;
     let releaseSecondDispatch!: () => void;
     let observeSecondDispatch!: () => void;
@@ -635,12 +639,10 @@ describe("ProviderRuntimeIngestion", () => {
         }
         activityCount += 1;
         if (activityCount === 1) {
-          // Cross the elapsed-time work-turn boundary with far fewer than the
-          // legacy 1,000-event cursor interval.
-          const busyUntil = performance.now() + 10;
-          while (performance.now() < busyUntil) {
-            // Intentionally synchronous test work.
-          }
+          // Advance the exact monotonic clock consumed by production work-turn
+          // accounting. This avoids a host-speed race and preserves the
+          // intended one-record replay-bound assertion without a busy spin.
+          monotonicNowMs = PROVIDER_PIPELINE_POLICY.workTurnMaxElapsedMs + 1;
           return dispatch(command);
         }
         observeSecondDispatch();
@@ -677,11 +679,9 @@ describe("ProviderRuntimeIngestion", () => {
 
     releaseSecondDispatch();
     await harness.drain();
-    // The next incomplete work turn remains pending until its own boundary or
-    // the scope finalizer. That is the intended bound: an abrupt failure can
-    // replay one short work turn, but it can no longer discard every record in
-    // a catch-up page merely because the legacy 1,000-event interval was not
-    // reached.
+    // Event 2 completed inside the next bounded work turn, so the durable
+    // cursor intentionally stays at the last checkpoint. A restart replays
+    // this one-record overlap rather than losing an uncheckpointed event.
     expect(await harness.readDurableProviderDaemonCursor()).toBe(100);
   });
 

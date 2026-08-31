@@ -1888,6 +1888,9 @@ export default function ChatView(props: ChatViewProps) {
   const setComposerDraftInteractionMode = useComposerDraftStore(
     (store) => store.setInteractionMode,
   );
+  const restoreComposerDraftContentIfEmpty = useComposerDraftStore(
+    (store) => store.restoreComposerContentIfEmpty,
+  );
   const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
   const getDraftSessionByLogicalProjectKey = useComposerDraftStore(
@@ -1920,6 +1923,10 @@ export default function ChatView(props: ChatViewProps) {
   const [stickTimelineToEndRevision, setStickTimelineToEndRevision] = useState(0);
   const optimisticUserMessagesRef = useRef(optimisticUserMessages);
   optimisticUserMessagesRef.current = optimisticUserMessages;
+  const optimisticUserMessagesOwnerThreadKeyRef = useRef(routeThreadKey);
+  const currentRouteThreadKeyRef = useRef(routeThreadKey);
+  currentRouteThreadKeyRef.current = routeThreadKey;
+  const chatViewMountedRef = useRef(false);
   const [localDraftErrorsByDraftId, setLocalDraftErrorsByDraftId] = useState<
     Record<string, string | null>
   >({});
@@ -1966,6 +1973,9 @@ export default function ChatView(props: ChatViewProps) {
   const attachmentPreviewHandoffByMessageIdRef = useRef<Record<string, string[]>>({});
   const attachmentPreviewPromotionInFlightByMessageIdRef = useRef<Record<string, true>>({});
   const sendInFlightRef = useRef(false);
+  const directSendFailureToastIdByThreadKeyRef = useRef<
+    Map<string, ReturnType<typeof toastManager.add>>
+  >(new Map());
   const queueDispatchInFlightRef = useRef(false);
   const pendingSteerDispatchByMessageIdRef = useRef<Record<string, PendingSteerDispatch>>({});
   const [pendingSteerDispatchByMessageId, setPendingSteerDispatchByMessageId] = useState<
@@ -2013,6 +2023,25 @@ export default function ChatView(props: ChatViewProps) {
     queueDispatchInFlightRef.current = next;
     setDispatchGateRevision((revision) => revision + 1);
   }, []);
+  useEffect(() => {
+    chatViewMountedRef.current = true;
+    return () => {
+      chatViewMountedRef.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    // Toasts live in the root provider, while the IDs that let a successful
+    // retry retire them belong to this ChatView. Close the scoped occurrence
+    // when its route leaves so global toast state cannot outlive its owner or
+    // reappear when another environment later reuses the same ThreadId.
+    const failureToastIds = directSendFailureToastIdByThreadKeyRef.current;
+    return () => {
+      const toastId = failureToastIds.get(routeThreadKey);
+      if (toastId === undefined) return;
+      failureToastIds.delete(routeThreadKey);
+      toastManager.close(toastId);
+    };
+  }, [routeThreadKey]);
   const updatePendingSteerDispatches = useCallback(
     (
       updater: (
@@ -3167,7 +3196,14 @@ export default function ChatView(props: ChatViewProps) {
             return changed ? { ...message, attachments } : message;
           });
 
-    if (optimisticUserMessages.length === 0) {
+    // Optimistic rows are renderer-local and therefore need the same canonical
+    // environment/thread ownership as persisted messages. Route effects run
+    // after paint, so gate synchronously here as well: two environments may
+    // legitimately reuse the same provider-independent ThreadId.
+    if (
+      optimisticUserMessagesOwnerThreadKeyRef.current !== routeThreadKey ||
+      optimisticUserMessages.length === 0
+    ) {
       return serverMessagesWithPreviewHandoff;
     }
     const serverIds = new Set(serverMessagesWithPreviewHandoff.map((message) => message.id));
@@ -3176,7 +3212,7 @@ export default function ChatView(props: ChatViewProps) {
       return serverMessagesWithPreviewHandoff;
     }
     return [...serverMessagesWithPreviewHandoff, ...pendingMessages];
-  }, [serverMessages, attachmentPreviewHandoffByMessageId, optimisticUserMessages]);
+  }, [serverMessages, attachmentPreviewHandoffByMessageId, optimisticUserMessages, routeThreadKey]);
   const historicalWorkLogSummariesByTurnId = useMemo(
     () =>
       deriveHistoricalWorkLogSummaries({
@@ -4269,16 +4305,24 @@ export default function ChatView(props: ChatViewProps) {
   );
 
   const setThreadError = useCallback(
-    (targetThreadId: ThreadId | null, error: string | null) => {
+    (
+      targetThreadId: ThreadId | null,
+      error: string | null,
+      targetThreadRef: ScopedThreadRef = routeThreadRef,
+    ) => {
       if (!targetThreadId) return;
       const nextError = sanitizeThreadErrorMessage(error);
       const isCurrentServerThread = shouldWriteThreadErrorToCurrentServerThread({
         serverThread,
-        routeThreadRef,
+        routeThreadRef: targetThreadRef,
         targetThreadId,
       });
       if (isCurrentServerThread) {
-        setStoreThreadError(targetThreadId, nextError);
+        // The route-owned environment is part of thread identity. An RPC can
+        // settle after the user navigates to another environment, so writing
+        // through the store's mutable active-environment pointer could clear or
+        // replace an unrelated thread that happens to reuse this ThreadId.
+        setStoreThreadError(targetThreadRef, nextError);
         return;
       }
       const localDraftErrorKey = draftId ?? targetThreadId;
@@ -4686,6 +4730,7 @@ export default function ChatView(props: ChatViewProps) {
 
   useEffect(() => {
     if (!activeThread?.id) return;
+    if (optimisticUserMessagesOwnerThreadKeyRef.current !== routeThreadKey) return;
     if (activeThread.messages.length === 0) {
       return;
     }
@@ -4710,9 +4755,16 @@ export default function ChatView(props: ChatViewProps) {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [activeThread?.id, activeThread?.messages, handoffAttachmentPreviews, optimisticUserMessages]);
+  }, [
+    activeThread?.id,
+    activeThread?.messages,
+    handoffAttachmentPreviews,
+    optimisticUserMessages,
+    routeThreadKey,
+  ]);
 
   useEffect(() => {
+    optimisticUserMessagesOwnerThreadKeyRef.current = routeThreadKey;
     setOptimisticUserMessages((existing) => {
       for (const message of existing) {
         revokeUserMessagePreviewUrls(message);
@@ -4721,7 +4773,7 @@ export default function ChatView(props: ChatViewProps) {
     });
     resetLocalDispatch();
     setExpandedImage(null);
-  }, [draftId, resetLocalDispatch, threadId]);
+  }, [draftId, resetLocalDispatch, routeThreadKey]);
 
   const closeExpandedImage = useCallback(() => {
     setExpandedImage(null);
@@ -5080,6 +5132,7 @@ export default function ChatView(props: ChatViewProps) {
         interactionMode: item.interactionMode,
         createdAt: messageCreatedAt,
       });
+
       turnStartSucceeded = true;
       setThreadError(item.threadId, null);
     } catch (err) {
@@ -5440,6 +5493,12 @@ export default function ChatView(props: ChatViewProps) {
     if (!hasSendableContent) return;
     if (!activeProject) return;
     const threadIdForSend = activeThread.id;
+    // Everything below may settle after a route transition. Capture the exact
+    // environment/thread and composer target that owned this attempt instead
+    // of consulting the then-current ChatView props from asynchronous cleanup.
+    const sendAttemptThreadRef = routeThreadRef;
+    const sendAttemptThreadKey = routeThreadKey;
+    const sendAttemptComposerDraftTarget = composerDraftTarget;
     const isFirstMessage = !isServerThread || activeThread.messages.length === 0;
     const baseBranchForWorktree =
       isFirstMessage && sendEnvMode === "worktree" && !activeThread.worktreePath
@@ -5488,21 +5547,31 @@ export default function ChatView(props: ChatViewProps) {
     }));
     pinTimelineToEndForLocalMessage();
 
-    setOptimisticUserMessages((existing) => [
-      ...existing,
-      {
-        id: messageIdForSend,
-        role: "user",
-        text: outgoingMessageText,
-        ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
-        createdAt: messageCreatedAt,
-        streaming: false,
-      },
-    ]);
+    setOptimisticUserMessages((existing) => {
+      const ownsExistingMessages =
+        optimisticUserMessagesOwnerThreadKeyRef.current === sendAttemptThreadKey;
+      if (!ownsExistingMessages) {
+        for (const message of existing) {
+          revokeUserMessagePreviewUrls(message);
+        }
+      }
+      optimisticUserMessagesOwnerThreadKeyRef.current = sendAttemptThreadKey;
+      return [
+        ...(ownsExistingMessages ? existing : []),
+        {
+          id: messageIdForSend,
+          role: "user",
+          text: outgoingMessageText,
+          ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
+          createdAt: messageCreatedAt,
+          streaming: false,
+        },
+      ];
+    });
 
     setThreadError(threadIdForSend, null);
     promptRef.current = "";
-    clearComposerDraftContent(composerDraftTarget);
+    clearComposerDraftContent(sendAttemptComposerDraftTarget);
     composerRef.current?.resetCursorState();
     scheduleComposerFocus();
 
@@ -5599,26 +5668,59 @@ export default function ChatView(props: ChatViewProps) {
         ...(bootstrap ? { bootstrap } : {}),
         createdAt: messageCreatedAt,
       });
+
+      // A successful direct retry supersedes the prior delivery failure.
+      // Remove the occurrence notification immediately instead of leaving
+      // stale failure feedback beside an optimistic message now admitted by
+      // the server. The route key is the same canonical environment/thread
+      // identity used when the failure toast was created below.
+      const previousFailureToastId =
+        directSendFailureToastIdByThreadKeyRef.current.get(sendAttemptThreadKey);
+      if (previousFailureToastId !== undefined) {
+        directSendFailureToastIdByThreadKeyRef.current.delete(sendAttemptThreadKey);
+        toastManager.close(previousFailureToastId);
+      }
+      setThreadError(threadIdForSend, null, sendAttemptThreadRef);
       turnStartSucceeded = true;
-    })().catch(async (err: unknown) => {
-      if (
+    })().catch((err: unknown) => {
+      const retryComposerImages = composerImagesSnapshot.map(cloneComposerImageForRetry);
+      const draftRestored =
         !turnStartSucceeded &&
-        promptRef.current.length === 0 &&
-        composerImagesRef.current.length === 0
-      ) {
-        setOptimisticUserMessages((existing) => {
-          const removed = existing.filter((message) => message.id === messageIdForSend);
-          for (const message of removed) {
-            revokeUserMessagePreviewUrls(message);
-          }
-          const next = existing.filter((message) => message.id !== messageIdForSend);
-          return next.length === existing.length ? existing : next;
+        restoreComposerDraftContentIfEmpty(sendAttemptComposerDraftTarget, {
+          prompt: promptForSend,
+          images: retryComposerImages,
         });
+      const restoredPreviewUrls = new Set(
+        draftRestored ? retryComposerImages.map((image) => image.previewUrl) : [],
+      );
+
+      // Rejection is conclusive: the optimistic row must always disappear,
+      // even when newer content prevents the original draft from being put
+      // back. Preview ownership transfers to the restored draft only when the
+      // compare-and-swap above succeeds.
+      setOptimisticUserMessages((existing) => {
+        const removed = existing.filter((message) => message.id === messageIdForSend);
+        for (const message of removed) {
+          for (const previewUrl of collectUserMessageBlobPreviewUrls(message)) {
+            if (!restoredPreviewUrls.has(previewUrl)) {
+              revokeBlobPreviewUrl(previewUrl);
+            }
+          }
+        }
+        const next = existing.filter((message) => message.id !== messageIdForSend);
+        return next.length === existing.length ? existing : next;
+      });
+      if (!draftRestored) {
+        for (const image of retryComposerImages) {
+          revokeBlobPreviewUrl(image.previewUrl);
+        }
+      }
+
+      const sendAttemptIsStillVisible =
+        chatViewMountedRef.current && currentRouteThreadKeyRef.current === sendAttemptThreadKey;
+      if (draftRestored && sendAttemptIsStillVisible) {
         promptRef.current = promptForSend;
-        const retryComposerImages = composerImagesSnapshot.map(cloneComposerImageForRetry);
         composerImagesRef.current = retryComposerImages;
-        setComposerDraftPrompt(composerDraftTarget, promptForSend);
-        addComposerDraftImages(composerDraftTarget, retryComposerImages);
         composerRef.current?.resetCursorState({
           cursor: collapseExpandedComposerCursor(promptForSend, promptForSend.length),
           prompt: promptForSend,
@@ -5626,7 +5728,49 @@ export default function ChatView(props: ChatViewProps) {
         });
         scheduleComposerFocus();
       }
-      setThreadError(threadIdForSend, describeSendFailureMessage(err, "Failed to send message."));
+      const sendFailureMessage = describeSendFailureMessage(err, "Failed to send message.");
+      setThreadError(threadIdForSend, sendFailureMessage, sendAttemptThreadRef);
+
+      // ThreadErrorBanner deliberately remembers an exact dismissed provider
+      // error so an unchanged authoritative snapshot cannot nag the user on
+      // every poll. A local send rejection is different: every press is a new
+      // delivery attempt, and silently restoring the draft can look exactly
+      // like the button did nothing when the same failure repeats. Emit an
+      // occurrence-based toast for each rejected turn/start while retaining
+      // the thread error above for durable context. Scope the toast to this
+      // thread so it cannot expose an operational failure after navigation.
+      const previousFailureToastId =
+        directSendFailureToastIdByThreadKeyRef.current.get(sendAttemptThreadKey);
+      if (previousFailureToastId !== undefined) {
+        directSendFailureToastIdByThreadKeyRef.current.delete(sendAttemptThreadKey);
+        toastManager.close(previousFailureToastId);
+      }
+
+      if (!sendAttemptIsStillVisible) return;
+
+      let failureToastId!: ReturnType<typeof toastManager.add>;
+      failureToastId = toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Message was not sent",
+          description: sendFailureMessage,
+          data: {
+            // Use the route-owned canonical ref rather than rebuilding scope
+            // from projected thread data. Toast filtering and navigation both
+            // derive identity from this exact environment/thread pair.
+            threadRef: sendAttemptThreadRef,
+            onClose: () => {
+              if (
+                directSendFailureToastIdByThreadKeyRef.current.get(sendAttemptThreadKey) ===
+                failureToastId
+              ) {
+                directSendFailureToastIdByThreadKeyRef.current.delete(sendAttemptThreadKey);
+              }
+            },
+          },
+        }),
+      );
+      directSendFailureToastIdByThreadKeyRef.current.set(sendAttemptThreadKey, failureToastId);
     });
     setSendInFlight(false);
     if (!turnStartSucceeded) {
