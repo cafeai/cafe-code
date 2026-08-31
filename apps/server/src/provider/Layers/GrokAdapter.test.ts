@@ -2145,6 +2145,83 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
 
       assert.deepEqual(yield* adapter.clearGoal!(threadId), { cleared: true });
       assert.isNull(yield* adapter.getGoal!(threadId));
+
+      yield* adapter.stopSession(threadId);
+    }).pipe(TestClock.withLive),
+  );
+
+  it.effect("retries a fragmented Grok goal snapshot but rejects stable malformed JSON", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-goal-fragmented-state");
+      const grokHome = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-goal-fragmented-home-")),
+      );
+      const wrapperPath = yield* Effect.promise(() => makeMockGrokWrapper());
+      const adapter = yield* makeTestAdapter(wrapperPath, undefined, { homePath: grokHome });
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd: process.cwd(),
+        runtimeMode: "approval-required",
+      });
+
+      const goalStatePath = NodePath.join(
+        grokHome,
+        "sessions",
+        encodeURIComponent(process.cwd()),
+        encodeURIComponent("mock-session-1"),
+        "goal",
+        "state.json",
+      );
+      const serializedGoal = `${JSON.stringify({
+        objective: "Finish the fragmented state review",
+        status: "active",
+        token_budget: null,
+        elapsed_ms: 1_000,
+        created_at: "2026-09-01T00:00:00.000Z",
+        updated_at: null,
+        tokens_used_high_water: 42,
+      })}\n`;
+      const splitAt = Math.floor(serializedGoal.length / 2);
+      yield* Effect.promise(() =>
+        NodeFSP.mkdir(NodePath.dirname(goalStatePath), { recursive: true }),
+      );
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(goalStatePath, serializedGoal.slice(0, splitAt), "utf8"),
+      );
+      const finishWrite = yield* Effect.sleep("40 millis").pipe(
+        Effect.andThen(
+          Effect.promise(() =>
+            NodeFSP.appendFile(goalStatePath, serializedGoal.slice(splitAt), "utf8"),
+          ),
+        ),
+        Effect.forkScoped,
+      );
+
+      const goal = yield* adapter.getGoal!(threadId);
+      assert.equal(goal?.objective, "Finish the fragmented state review");
+      assert.equal(goal?.tokensUsed, 42);
+      yield* Fiber.join(finishWrite);
+
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(goalStatePath, '{"objective":"persistent malformed state', "utf8"),
+      );
+      const malformedError = yield* adapter.getGoal!(threadId).pipe(Effect.flip);
+      if (malformedError._tag !== "ProviderAdapterRequestError") {
+        assert.fail(`Expected ProviderAdapterRequestError, received ${malformedError._tag}`);
+      }
+      assert.equal(malformedError.method, "thread/goal/get");
+
+      yield* Effect.promise(() => NodeFSP.writeFile(goalStatePath, '{"status":"active"}', "utf8"));
+      const invalidSchemaError = yield* adapter.getGoal!(threadId).pipe(Effect.flip);
+      assert.equal(invalidSchemaError._tag, "ProviderAdapterRequestError");
+
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(goalStatePath, Buffer.alloc(256 * 1024 + 1, 0x20)),
+      );
+      const oversizedError = yield* adapter.getGoal!(threadId).pipe(Effect.flip);
+      assert.equal(oversizedError._tag, "ProviderAdapterRequestError");
+
       yield* adapter.stopSession(threadId);
     }).pipe(TestClock.withLive),
   );

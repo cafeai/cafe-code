@@ -2,6 +2,7 @@
 import * as NodeConstants from "node:constants";
 import * as NodeFS from "node:fs/promises";
 import * as NodeOS from "node:os";
+import * as NodeTimers from "node:timers/promises";
 
 import {
   ApprovalRequestId,
@@ -106,6 +107,8 @@ const decodeXAiRewindExecuteResponse = Schema.decodeUnknownEffect(XAiRewindExecu
 const PROVIDER = ProviderDriverKind.make("grok");
 const GROK_RESUME_VERSION = 1 as const;
 const GROK_GOAL_STATE_MAX_BYTES = 256 * 1024;
+const GROK_GOAL_STATE_READ_ATTEMPTS = 12;
+const GROK_GOAL_STATE_READ_RETRY_DELAY_MS = 10;
 const GROK_GOAL_STATE_WAIT_ATTEMPTS = 80;
 
 function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
@@ -213,8 +216,34 @@ async function readBoundedNonSymlinkFile(filePath: string): Promise<string | nul
   try {
     handle = await NodeFS.open(filePath, NodeConstants.O_RDONLY | NodeConstants.O_NOFOLLOW);
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.size > GROK_GOAL_STATE_MAX_BYTES) return null;
-    return await handle.readFile({ encoding: "utf8" });
+    if (!stat.isFile()) {
+      throw new Error("Grok goal state is not a regular file.");
+    }
+    if (stat.size > GROK_GOAL_STATE_MAX_BYTES) {
+      throw new Error("Grok goal state exceeds the safe size limit.");
+    }
+
+    /* The provider owns this file and can replace its contents after stat().
+       Read at most MAX+1 bytes from the already no-followed descriptor so an
+       attacker (or a broken provider) cannot win that race and make Cafe
+       allocate an unbounded file. Regular files may short-read, so fill the
+       fixed buffer until EOF or the hard limit is proven exceeded. */
+    const bytes = Buffer.allocUnsafe(GROK_GOAL_STATE_MAX_BYTES + 1);
+    let bytesReadTotal = 0;
+    while (bytesReadTotal < bytes.length) {
+      const { bytesRead } = await handle.read(
+        bytes,
+        bytesReadTotal,
+        bytes.length - bytesReadTotal,
+        bytesReadTotal,
+      );
+      if (bytesRead === 0) break;
+      bytesReadTotal += bytesRead;
+    }
+    if (bytesReadTotal > GROK_GOAL_STATE_MAX_BYTES) {
+      throw new Error("Grok goal state exceeded the safe size limit while being read.");
+    }
+    return bytes.toString("utf8", 0, bytesReadTotal);
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw cause;
@@ -226,27 +255,47 @@ async function readBoundedNonSymlinkFile(filePath: string): Promise<string | nul
 async function readGrokGoalStateFile(
   ctx: Pick<GrokSessionContext, "goalStatePath" | "threadId">,
 ): Promise<ProviderThreadGoal | null> {
-  const raw = await readBoundedNonSymlinkFile(ctx.goalStatePath);
-  if (raw === null) return null;
-  const parsed = JSON.parse(raw) as unknown;
-  if (!isRecord(parsed)) return null;
-  const objective = typeof parsed.objective === "string" ? parsed.objective.trim() : "";
-  const status = grokGoalStatus(parsed.status);
-  if (!objective || !status) return null;
-  const now = new Date().toISOString();
-  const createdAt = normalizedGoalTimestamp(parsed.created_at, now);
-  const updatedAt = normalizedGoalTimestamp(parsed.updated_at, createdAt);
-  const tokenBudget = nonNegativeFinite(parsed.token_budget);
-  return {
-    threadId: ctx.threadId,
-    objective,
-    status,
-    tokenBudget: tokenBudget > 0 ? Math.floor(tokenBudget) : null,
-    tokensUsed: Math.floor(nonNegativeFinite(parsed.tokens_used_high_water)),
-    timeUsedSeconds: Math.floor(nonNegativeFinite(parsed.elapsed_ms) / 1_000),
-    createdAt,
-    updatedAt,
-  };
+  for (let attempt = 1; ; attempt += 1) {
+    const raw = await readBoundedNonSymlinkFile(ctx.goalStatePath);
+    if (raw === null) return null;
+
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!isRecord(parsed)) {
+        throw new Error("Grok goal state has an invalid structure.");
+      }
+      const objective = typeof parsed.objective === "string" ? parsed.objective.trim() : "";
+      const status = grokGoalStatus(parsed.status);
+      if (!objective || !status) {
+        throw new Error("Grok goal state is missing required fields.");
+      }
+      const now = new Date().toISOString();
+      const createdAt = normalizedGoalTimestamp(parsed.created_at, now);
+      const updatedAt = normalizedGoalTimestamp(parsed.updated_at, createdAt);
+      const tokenBudget = nonNegativeFinite(parsed.token_budget);
+      return {
+        threadId: ctx.threadId,
+        objective,
+        status,
+        tokenBudget: tokenBudget > 0 ? Math.floor(tokenBudget) : null,
+        tokensUsed: Math.floor(nonNegativeFinite(parsed.tokens_used_high_water)),
+        timeUsedSeconds: Math.floor(nonNegativeFinite(parsed.elapsed_ms) / 1_000),
+        createdAt,
+        updatedAt,
+      };
+    } catch (cause) {
+      /* Grok owns this file and currently rewrites it in place. A reader can
+         therefore observe the short truncate/write window even though neither
+         process has failed. Retry only JSON syntax failures, reopen with
+         O_NOFOLLOW on every attempt, and preserve the final parse error after
+         a small fixed budget so a persistently malformed or adversarial file
+         still fails closed. */
+      if (!(cause instanceof SyntaxError) || attempt >= GROK_GOAL_STATE_READ_ATTEMPTS) {
+        throw cause;
+      }
+      await NodeTimers.setTimeout(GROK_GOAL_STATE_READ_RETRY_DELAY_MS);
+    }
+  }
 }
 
 interface GrokUsageTotals {
