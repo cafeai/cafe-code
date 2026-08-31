@@ -222,9 +222,12 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
             CSS `min()` invalidates max-height and makes a long task history
             measure at its full natural height. Floating UI then abandons the
             requested top/bottom axis and can strand the popup at the viewport
-            edge. Keep measurement bounded by the dynamic viewport; the outer
-            viewport still applies Base UI's final available-height constraint. */}
-        <div className="flex max-h-[min(28rem,calc(100dvh-2rem))] min-h-0 w-full flex-col">
+            edge. Keep measurement bounded by the dynamic viewport. The extra
+            rem below the usual page gutter reserves the trigger gap and
+            collision clearance that Base UI removes from the final viewport;
+            without it, Linux Chromium can leave the last task row clipped by
+            the outer popover even though the inner list itself scrolls. */}
+        <div className="flex max-h-[min(28rem,calc(100dvh-3rem))] min-h-0 w-full flex-col">
           <div className="shrink-0 border-border/70 border-b px-4 py-3">
             <div className="flex items-baseline justify-between gap-3">
               <PopoverTitle className="text-sm leading-5">Tasks</PopoverTitle>
