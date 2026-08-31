@@ -191,10 +191,11 @@ const decodeV2ThreadStartResponse = Schema.decodeUnknownEffect(
 const decodeV2ThreadResumeResponse = Schema.decodeUnknownEffect(
   EffectCodexSchema.V2ThreadResumeResponse,
 );
-// Codex 0.151 added bounded resume hydration after Cafe's generated 0.150
-// protocol snapshot was pinned. Keep this compatibility schema deliberately
-// narrow: Cafe asks for one turn with no items, and only reads that page back.
-// Unknown provider fields remain owned by the generated response decoder.
+// Codex 0.151 exposes bounded resume hydration as an experimental response
+// field that is intentionally absent from its stable generated top-level
+// schema. Keep this compatibility schema deliberately narrow: Cafe asks for
+// one turn with no items, and only reads that page back. Unknown provider
+// fields remain owned by the generated response decoder.
 const CodexThreadResumeInitialTurnsPageResponse = Schema.Struct({
   initialTurnsPage: Schema.optionalKey(
     Schema.Union([EffectCodexSchema.V2ThreadResumeResponse__TurnsPage, Schema.Null]),
@@ -2017,7 +2018,7 @@ const requestCodexThreadOpen = <M extends CodexThreadOpenMethod>(
           if (initialTurnsPage === undefined || initialTurnsPage === null) {
             return response;
           }
-          // Normalize the bounded page into the generated 0.150 response shape
+          // Normalize the bounded page into the generated stable response shape
           // so the existing active-turn recovery and snapshot backfill paths do
           // not need a second pagination-specific lifecycle implementation.
           return {
@@ -2088,6 +2089,151 @@ export const openCodexThread = (input: {
     ),
   );
 };
+
+/**
+ * Minimal app-server surface needed by Cafe's lifecycle reconciliation reads.
+ *
+ * Codex 0.151 deprecated `thread/read(includeTurns: true)` because one JSON-RPC
+ * line then grows with the complete retained rollout. A multi-day thread can
+ * exceed Cafe's deliberately finite protocol boundary and terminate the stdio
+ * reader while an otherwise healthy turn is running. Keep metadata and turn
+ * pagination as two explicit, bounded requests instead.
+ */
+export interface CodexBoundedThreadSnapshotClient {
+  readonly request: CodexClient.CodexAppServerClientShape["request"];
+}
+
+export const CODEX_BOUNDED_SNAPSHOT_TURN_LIMIT = 1;
+
+// History reads serve user-visible transcript repair and subagent detail, so
+// they need more than the newest lifecycle turn. They still must remain
+// finite: Codex app-server writes each JSON-RPC response on one line, and Cafe
+// deliberately rejects lines above its 64 MiB protocol safety boundary. Small
+// summary pages avoid persisted command output, while independent page and
+// turn caps prevent a hostile or malformed cursor stream from growing memory
+// or keeping the provider runtime busy indefinitely.
+export const CODEX_SUMMARY_HISTORY_PAGE_TURN_LIMIT = 16;
+export const CODEX_SUMMARY_HISTORY_MAX_PAGES = 16;
+export const CODEX_SUMMARY_HISTORY_MAX_TURNS = 200;
+
+type CodexSummaryHistoryTurn = EffectCodexSchema.V2ThreadTurnsListResponse__Turn;
+
+/**
+ * Read the newest bounded window of summarized turns and restore chronological
+ * order for Cafe's provider-neutral snapshot contract.
+ *
+ * `sortDirection: "desc"` is intentional: when a thread contains more history
+ * than Cafe's hard cap, retain the most recent work rather than an arbitrarily
+ * old prefix. Opaque cursors are never logged or returned in errors because
+ * provider cursor contents are not part of Cafe's public diagnostic surface.
+ */
+export const readCodexBoundedSummaryTurnsWithClient = Effect.fn(
+  "CodexSessionRuntime.readCodexBoundedSummaryTurnsWithClient",
+)(function* (input: {
+  readonly client: CodexBoundedThreadSnapshotClient;
+  readonly providerThreadId: string;
+}) {
+  const descendingTurns: Array<CodexSummaryHistoryTurn> = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+
+  for (
+    let pageIndex = 0;
+    pageIndex < CODEX_SUMMARY_HISTORY_MAX_PAGES &&
+    descendingTurns.length < CODEX_SUMMARY_HISTORY_MAX_TURNS;
+    pageIndex += 1
+  ) {
+    const remainingTurnCapacity = CODEX_SUMMARY_HISTORY_MAX_TURNS - descendingTurns.length;
+    const response = yield* input.client.request("thread/turns/list", {
+      threadId: input.providerThreadId,
+      limit: Math.min(CODEX_SUMMARY_HISTORY_PAGE_TURN_LIMIT, remainingTurnCapacity),
+      sortDirection: "desc",
+      itemsView: "summary",
+      ...(cursor !== undefined ? { cursor } : {}),
+    });
+
+    // Do not trust an upstream implementation to honor the requested limit.
+    // Slice before retaining data so Cafe's in-memory snapshot cap is a hard
+    // invariant even across provider-version regressions.
+    descendingTurns.push(...response.data.slice(0, remainingTurnCapacity));
+
+    const nextCursor = response.nextCursor ?? undefined;
+    if (
+      response.data.length === 0 ||
+      nextCursor === undefined ||
+      nextCursor.length === 0 ||
+      descendingTurns.length >= CODEX_SUMMARY_HISTORY_MAX_TURNS
+    ) {
+      break;
+    }
+    if (seenCursors.has(nextCursor)) {
+      return yield* Effect.fail(
+        CodexErrors.CodexAppServerRequestError.internalError(
+          "Codex thread history pagination returned a repeated cursor",
+        ),
+      );
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+
+  // Descending pages are newest-first both within and across pages. Reverse
+  // the complete bounded window once so consumers see oldest-to-newest turns.
+  return descendingTurns.toReversed();
+});
+
+/** Metadata-only thread read followed by bounded summarized history pages. */
+export const readCodexBoundedSummaryThreadWithClient = Effect.fn(
+  "CodexSessionRuntime.readCodexBoundedSummaryThreadWithClient",
+)(function* (input: {
+  readonly client: CodexBoundedThreadSnapshotClient;
+  readonly providerThreadId: string;
+}) {
+  const metadata = yield* input.client.request("thread/read", {
+    threadId: input.providerThreadId,
+    includeTurns: false,
+  });
+  const turns = yield* readCodexBoundedSummaryTurnsWithClient(input);
+
+  return {
+    ...metadata,
+    thread: {
+      ...metadata.thread,
+      turns,
+    },
+  } satisfies EffectCodexSchema.V2ThreadReadResponse;
+});
+
+export const readCodexBoundedThreadSnapshotWithClient = Effect.fn(
+  "CodexSessionRuntime.readCodexBoundedThreadSnapshotWithClient",
+)(function* (input: {
+  readonly client: CodexBoundedThreadSnapshotClient;
+  readonly providerThreadId: string;
+}) {
+  // Keep these reads sequential. Metadata is tiny and verifies that the loaded
+  // thread still exists before Cafe asks for even a bounded history page.
+  const metadata = yield* input.client.request("thread/read", {
+    threadId: input.providerThreadId,
+    includeTurns: false,
+  });
+  const recentTurns = yield* input.client.request("thread/turns/list", {
+    threadId: input.providerThreadId,
+    limit: CODEX_BOUNDED_SNAPSHOT_TURN_LIMIT,
+    sortDirection: "desc",
+    // Summary keeps enough public lifecycle material for missed-event
+    // backfill without allowing command output or a long turn's complete item
+    // history to recreate the unbounded response that this path replaces.
+    itemsView: "summary",
+  });
+
+  return {
+    ...metadata,
+    thread: {
+      ...metadata.thread,
+      turns: recentTurns.data,
+    },
+  } satisfies EffectCodexSchema.V2ThreadReadResponse;
+});
 
 function readNotificationThreadId(notification: CodexServerNotification): string | undefined {
   switch (notification.method) {
@@ -3318,21 +3464,35 @@ export const readCodexSubagentThreadWithClient = Effect.fn(
       reason: "root-identity-mismatch",
     });
   }
-  const childResponse = yield* input.client.request("thread/read", {
+  const childMetadata = yield* input.client.request("thread/read", {
     threadId: input.subagentThreadId,
-    includeTurns: true,
+    includeTurns: false,
   });
   const validationFailure = validateCodexSubagentThreadReadMetadata({
     expectedRootThreadId: input.rootProviderThreadId,
     expectedChildThreadId: input.subagentThreadId,
     root: rootResponse.thread,
-    child: childResponse.thread,
+    child: childMetadata.thread,
   });
   if (validationFailure !== undefined) {
     return yield* new CodexSessionRuntimeInvalidSubagentThreadError({
       reason: validationFailure,
     });
   }
+
+  // Do not disclose even bounded child history until both metadata reads prove
+  // that the browser-supplied id belongs to the root's provider session tree.
+  const childTurns = yield* readCodexBoundedSummaryTurnsWithClient({
+    client: input.client,
+    providerThreadId: input.subagentThreadId,
+  });
+  const childResponse = {
+    ...childMetadata,
+    thread: {
+      ...childMetadata.thread,
+      turns: childTurns,
+    },
+  } satisfies EffectCodexSchema.V2ThreadReadResponse;
 
   return parseThreadSnapshot(childResponse);
 });
@@ -3481,6 +3641,13 @@ export const makeCodexSessionRuntime = (
         ),
       );
 
+    const protocolTerminationRef = yield* Ref.make<
+      | {
+          readonly tag: CodexErrors.CodexAppServerError["_tag"];
+          readonly maxBytes?: number;
+        }
+      | undefined
+    >(undefined);
     const clientContext = yield* CodexClient.layerChildProcess(child, {
       logger: (event) =>
         Effect.logWarning("codex.app-server.protocol.diagnostic", {
@@ -3490,6 +3657,24 @@ export const makeCodexSessionRuntime = (
           stage: event.stage,
           payload: event.payload,
         }),
+      onTermination: (error) => {
+        const diagnostic = {
+          tag: error._tag,
+          ...(error._tag === "CodexAppServerIncomingMessageTooLargeError"
+            ? { maxBytes: error.maxBytes }
+            : {}),
+        } as const;
+        return Ref.set(protocolTerminationRef, diagnostic).pipe(
+          Effect.andThen(
+            Effect.logError("codex.app-server.protocol.terminated", {
+              threadId: options.threadId,
+              providerInstanceId: options.providerInstanceId ?? PROVIDER,
+              errorTag: diagnostic.tag,
+              maxBytes: diagnostic.maxBytes ?? null,
+            }),
+          ),
+        );
+      },
     }).pipe(Layer.build, Effect.provideService(Scope.Scope, runtimeScope));
     const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
       Effect.provide(clientContext),
@@ -4041,12 +4226,10 @@ export const makeCodexSessionRuntime = (
         timeout: CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT,
       }).pipe(
         Effect.andThen(
-          client
-            .request("thread/read", {
-              threadId: input.providerThreadId,
-              includeTurns: true,
-            })
-            .pipe(Effect.timeoutOption(CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT)),
+          readCodexBoundedThreadSnapshotWithClient({
+            client,
+            providerThreadId: input.providerThreadId,
+          }).pipe(Effect.timeoutOption(CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT)),
         ),
         Effect.flatMap(
           Option.match({
@@ -4220,12 +4403,10 @@ export const makeCodexSessionRuntime = (
         timeout: CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT,
       }).pipe(
         Effect.andThen(
-          client
-            .request("thread/read", {
-              threadId: input.providerThreadId,
-              includeTurns: true,
-            })
-            .pipe(Effect.timeoutOption(CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT)),
+          readCodexBoundedThreadSnapshotWithClient({
+            client,
+            providerThreadId: input.providerThreadId,
+          }).pipe(Effect.timeoutOption(CODEX_SEND_TURN_SNAPSHOT_BACKFILL_READ_TIMEOUT)),
         ),
         Effect.flatMap(
           Option.match({
@@ -4360,8 +4541,8 @@ export const makeCodexSessionRuntime = (
 
         // A steer belongs to the existing active turn. Reusing that turn's one
         // watchdog preserves Cafe's missed-event recovery without multiplying
-        // full `thread/read(includeTurns)` calls for every steer in a long run.
-        // Upstream turn/completed and authoritative thread/read status remain
+        // bounded metadata + newest-turn reads for every steer in a long run.
+        // Upstream turn/completed and authoritative paginated status remain
         // the only terminal signals; deduplication changes polling load only.
         const watcher = Effect.gen(function* () {
           const scheduledAtMs = yield* Clock.currentTimeMillis;
@@ -5499,20 +5680,37 @@ export const makeCodexSessionRuntime = (
             if (closed) {
               return Effect.void;
             }
-            const nextStatus = exitCode === 0 ? "closed" : "error";
-            return updateSession(sessionRef, {
-              status: nextStatus,
-              activeTurnId: undefined,
-            }).pipe(
-              Effect.andThen(
-                emitSessionEvent(
-                  "session/exited",
-                  exitCode === 0
-                    ? "Codex App Server exited."
-                    : `Codex App Server exited with code ${exitCode}.`,
-                ),
-              ),
-            );
+            return Effect.gen(function* () {
+              const termination = yield* Ref.get(protocolTerminationRef);
+              const exitMessage =
+                termination?.tag === "CodexAppServerIncomingMessageTooLargeError"
+                  ? "Codex App Server ended after a provider response exceeded Cafe's finite protocol safety limit."
+                  : exitCode === 0
+                    ? "Codex App Server exited unexpectedly."
+                    : `Codex App Server exited unexpectedly with code ${exitCode}.`;
+              yield* updateSession(sessionRef, {
+                status: "error",
+                activeTurnId: undefined,
+                lastError: exitMessage,
+              });
+              // An app-server process is expected to live until `close` marks
+              // the runtime closed. Even exit code zero is therefore a provider
+              // failure here, not a graceful session completion. Publish the
+              // error before `session/exited` so projections and the user never
+              // receive a silent stopped state for a lost active turn.
+              yield* emitEvent({
+                kind: "error",
+                threadId: options.threadId,
+                method: "process/exitedUnexpectedly",
+                message: exitMessage,
+                payload: {
+                  exitCode,
+                  protocolErrorTag: termination?.tag ?? null,
+                  maxIncomingLineBytes: termination?.maxBytes ?? null,
+                },
+              });
+              yield* emitSessionEvent("session/exited", exitMessage);
+            });
           }),
         ),
       ),
@@ -6220,9 +6418,9 @@ export const makeCodexSessionRuntime = (
       }),
       readThread: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;
-        const response = yield* client.request("thread/read", {
-          threadId: providerThreadId,
-          includeTurns: true,
+        const response = yield* readCodexBoundedSummaryThreadWithClient({
+          client,
+          providerThreadId,
         });
         return parseThreadSnapshot(response);
       }),

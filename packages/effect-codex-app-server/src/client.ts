@@ -39,6 +39,13 @@ export interface CodexAppServerClientOptions {
   readonly logger?: (
     event: CodexProtocol.CodexAppServerProtocolLogEvent,
   ) => Effect.Effect<void, never>;
+  /**
+   * Observe terminal transport failures even when no request is currently
+   * awaiting a response. Long-lived notification streams otherwise collapse
+   * an oversized or malformed provider message into a later generic process
+   * exit, which hides the actionable protocol boundary from diagnostics.
+   */
+  readonly onTermination?: (error: CodexError.CodexAppServerError) => Effect.Effect<void, never>;
 }
 
 interface CodexAppServerClientRaw {
@@ -262,6 +269,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     ...(options.logger ? { logger: options.logger } : {}),
     onNotification: dispatchNotification,
     onRequest: dispatchRequest,
+    ...(options.onTermination ? { onTermination: options.onTermination } : {}),
   });
 
   const request = <M extends CodexRpc.ClientRequestMethod>(

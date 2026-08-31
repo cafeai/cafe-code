@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { it as effectIt } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
@@ -28,6 +29,9 @@ import {
   CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
 } from "../CodexDeveloperInstructions.ts";
 import {
+  CODEX_SUMMARY_HISTORY_MAX_PAGES,
+  CODEX_SUMMARY_HISTORY_MAX_TURNS,
+  CODEX_SUMMARY_HISTORY_PAGE_TURN_LIMIT,
   CODEX_PENDING_STEER_UNRESOLVED_CAPACITY,
   acknowledgeCodexPendingSteerProcessing,
   acknowledgeCodexSteerLifecycleBoundary,
@@ -56,6 +60,8 @@ import {
   openCodexThread,
   prunePendingSteerProcessing,
   publishCodexTurnCompletionAfterLifecycleBoundary,
+  readCodexBoundedSummaryThreadWithClient,
+  readCodexBoundedThreadSnapshotWithClient,
   readCodexExpectedActiveTurnMismatchActualTurnId,
   readCodexSubagentThreadWithInitializedClient,
   readCodexNotificationEmittedAtIso,
@@ -76,6 +82,7 @@ import {
   updateCodexPendingSteerProcessingFromNotification,
   validateCodexSubagentThreadReadMetadata,
   type CodexInitializedSubagentHistoryReadClient,
+  type CodexBoundedThreadSnapshotClient,
   type CodexPendingSteerProcessing,
   type CodexSubagentHistoryReadClient,
 } from "./CodexSessionRuntime.ts";
@@ -96,6 +103,32 @@ function makePendingSteerProcessingFixture(index: number): CodexPendingSteerProc
     promptByteLength: 10,
     attachmentCount: 0,
     warningCount: 0,
+  };
+}
+
+function makeCodexSummaryTurnFixture(id: string) {
+  return {
+    id,
+    status: "completed" as const,
+    itemsView: "summary" as const,
+    items: [],
+    startedAt: null,
+    completedAt: null,
+    durationMs: null,
+    error: null,
+  };
+}
+
+function makeCodexMetadataResponseFixture(threadId: string) {
+  return {
+    thread: {
+      id: threadId,
+      parentThreadId: null,
+      sessionId: "provider-session-1",
+      source: "appServer" as const,
+      status: { type: "idle" as const },
+      turns: [],
+    },
   };
 }
 
@@ -235,7 +268,7 @@ describe("Codex subagent thread ownership validation", () => {
     );
   });
 
-  effectIt.effect("reads exact root metadata before the child without opening a thread", () =>
+  effectIt.effect("validates root and child metadata before reading bounded child history", () =>
     Effect.gen(function* () {
       const calls: Array<{ method: string; payload: unknown }> = [];
       const request = ((method: string, payload: unknown) =>
@@ -244,6 +277,19 @@ describe("Codex subagent thread ownership validation", () => {
           if (method === "initialize") {
             return { userAgent: "codex-test" };
           }
+          if (method === "thread/turns/list") {
+            return {
+              data: [
+                {
+                  id: "child-turn-1",
+                  status: "completed",
+                  itemsView: "summary",
+                  items: [],
+                },
+              ],
+              nextCursor: null,
+            };
+          }
           const requestedThreadId = (payload as { threadId: string }).threadId;
           return {
             thread:
@@ -251,12 +297,7 @@ describe("Codex subagent thread ownership validation", () => {
                 ? { ...root, turns: [] }
                 : {
                     ...nestedChild,
-                    turns: [
-                      {
-                        id: "child-turn-1",
-                        items: [],
-                      },
-                    ],
+                    turns: [],
                   },
           };
         })) as CodexSubagentHistoryReadClient["request"];
@@ -274,11 +315,20 @@ describe("Codex subagent thread ownership validation", () => {
       assert.equal(snapshot.threadId, nestedChild.id);
       assert.deepEqual(
         calls.map((call) => call.method),
-        ["initialize", "initialized", "thread/read", "thread/read"],
+        ["initialize", "initialized", "thread/read", "thread/read", "thread/turns/list"],
       );
       assert.deepEqual(calls.slice(2), [
         { method: "thread/read", payload: { threadId: root.id, includeTurns: false } },
-        { method: "thread/read", payload: { threadId: nestedChild.id, includeTurns: true } },
+        { method: "thread/read", payload: { threadId: nestedChild.id, includeTurns: false } },
+        {
+          method: "thread/turns/list",
+          payload: {
+            threadId: nestedChild.id,
+            limit: CODEX_SUMMARY_HISTORY_PAGE_TURN_LIMIT,
+            sortDirection: "desc",
+            itemsView: "summary",
+          },
+        },
       ]);
       assert.equal(
         calls.some((call) => call.method === "thread/resume"),
@@ -286,6 +336,42 @@ describe("Codex subagent thread ownership validation", () => {
       );
       assert.equal(
         calls.some((call) => call.method === "thread/start"),
+        false,
+      );
+    }),
+  );
+
+  effectIt.effect("rejects invalid child metadata before requesting any child turns", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: string; payload: unknown }> = [];
+      const request = ((method: string, payload: unknown) =>
+        Effect.sync(() => {
+          calls.push({ method, payload });
+          if (method === "thread/read") {
+            const requestedThreadId = (payload as { threadId: string }).threadId;
+            return {
+              thread:
+                requestedThreadId === root.id
+                  ? { ...root, turns: [] }
+                  : { ...nestedChild, sessionId: "unrelated-session-tree", turns: [] },
+            };
+          }
+          throw new Error(`Unexpected method: ${method}`);
+        })) as CodexSubagentHistoryReadClient["request"];
+
+      const exit = yield* readCodexSubagentThreadWithInitializedClient({
+        client: {
+          request,
+          notify: ((_method: string, _payload: unknown) =>
+            Effect.void) as CodexInitializedSubagentHistoryReadClient["notify"],
+        },
+        rootProviderThreadId: root.id,
+        subagentThreadId: nestedChild.id,
+      }).pipe(Effect.exit);
+
+      assert.equal(exit._tag, "Failure");
+      assert.equal(
+        calls.some((call) => call.method === "thread/turns/list"),
         false,
       );
     }),
@@ -322,6 +408,240 @@ describe("Codex subagent thread ownership validation", () => {
       ]);
     }),
   );
+});
+
+describe("Codex bounded lifecycle snapshots", () => {
+  effectIt.effect(
+    "reads metadata plus one summarized newest turn without full-history hydration",
+    () =>
+      Effect.gen(function* () {
+        const calls: Array<{ method: string; payload: unknown }> = [];
+        const request = ((method: string, payload: unknown) =>
+          Effect.sync(() => {
+            calls.push({ method, payload });
+            if (method === "thread/read") {
+              return {
+                thread: {
+                  id: "provider-thread-1",
+                  parentThreadId: null,
+                  sessionId: "provider-session-1",
+                  source: "appServer",
+                  status: { type: "active", activeFlags: [] },
+                  turns: [],
+                },
+              };
+            }
+            if (method === "thread/turns/list") {
+              return {
+                data: [
+                  {
+                    id: "turn-latest",
+                    status: "inProgress",
+                    itemsView: "summary",
+                    items: [],
+                    startedAt: 1_788_174_288,
+                    completedAt: null,
+                    durationMs: null,
+                    error: null,
+                  },
+                ],
+                nextCursor: "older-turns",
+              };
+            }
+            throw new Error(`Unexpected method: ${method}`);
+          })) as CodexBoundedThreadSnapshotClient["request"];
+
+        const response = yield* readCodexBoundedThreadSnapshotWithClient({
+          client: { request },
+          providerThreadId: "provider-thread-1",
+        });
+
+        assert.deepEqual(calls, [
+          {
+            method: "thread/read",
+            payload: { threadId: "provider-thread-1", includeTurns: false },
+          },
+          {
+            method: "thread/turns/list",
+            payload: {
+              threadId: "provider-thread-1",
+              limit: 1,
+              sortDirection: "desc",
+              itemsView: "summary",
+            },
+          },
+        ]);
+        assert.equal(response.thread.turns.length, 1);
+        assert.equal(response.thread.turns[0]?.id, "turn-latest");
+        assert.equal(
+          calls.some(
+            (call) =>
+              call.method === "thread/read" &&
+              (call.payload as { includeTurns?: boolean }).includeTurns === true,
+          ),
+          false,
+        );
+      }),
+  );
+});
+
+describe("Codex bounded summary history", () => {
+  effectIt.effect("paginates newest-first summaries and returns chronological turns", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: string; payload: unknown }> = [];
+      const request = ((method: string, payload: unknown) =>
+        Effect.sync(() => {
+          calls.push({ method, payload });
+          if (method === "thread/read") {
+            return makeCodexMetadataResponseFixture("provider-thread-1");
+          }
+          if (method === "thread/turns/list") {
+            const cursor = (payload as { cursor?: string }).cursor;
+            return cursor === undefined
+              ? {
+                  data: [
+                    makeCodexSummaryTurnFixture("turn-3"),
+                    makeCodexSummaryTurnFixture("turn-2"),
+                  ],
+                  nextCursor: "older-page",
+                }
+              : { data: [makeCodexSummaryTurnFixture("turn-1")], nextCursor: null };
+          }
+          throw new Error(`Unexpected method: ${method}`);
+        })) as CodexBoundedThreadSnapshotClient["request"];
+
+      const response = yield* readCodexBoundedSummaryThreadWithClient({
+        client: { request },
+        providerThreadId: "provider-thread-1",
+      });
+
+      assert.deepEqual(
+        response.thread.turns.map((turn) => turn.id),
+        ["turn-1", "turn-2", "turn-3"],
+      );
+      assert.deepEqual(calls, [
+        {
+          method: "thread/read",
+          payload: { threadId: "provider-thread-1", includeTurns: false },
+        },
+        {
+          method: "thread/turns/list",
+          payload: {
+            threadId: "provider-thread-1",
+            limit: CODEX_SUMMARY_HISTORY_PAGE_TURN_LIMIT,
+            sortDirection: "desc",
+            itemsView: "summary",
+          },
+        },
+        {
+          method: "thread/turns/list",
+          payload: {
+            threadId: "provider-thread-1",
+            limit: CODEX_SUMMARY_HISTORY_PAGE_TURN_LIMIT,
+            sortDirection: "desc",
+            itemsView: "summary",
+            cursor: "older-page",
+          },
+        },
+      ]);
+      assert.equal(
+        calls.some(
+          (call) =>
+            call.method === "thread/turns/list" &&
+            (call.payload as { itemsView?: string }).itemsView === "full",
+        ),
+        false,
+      );
+    }),
+  );
+
+  effectIt.effect("fails closed when app-server repeats a pagination cursor", () =>
+    Effect.gen(function* () {
+      let turnsListCalls = 0;
+      const request = ((method: string, _payload: unknown) =>
+        Effect.sync(() => {
+          if (method === "thread/read") {
+            return makeCodexMetadataResponseFixture("provider-thread-1");
+          }
+          if (method === "thread/turns/list") {
+            turnsListCalls += 1;
+            return {
+              data: [makeCodexSummaryTurnFixture(`turn-${turnsListCalls}`)],
+              nextCursor: "repeated-cursor",
+            };
+          }
+          throw new Error(`Unexpected method: ${method}`);
+        })) as CodexBoundedThreadSnapshotClient["request"];
+
+      const exit = yield* readCodexBoundedSummaryThreadWithClient({
+        client: { request },
+        providerThreadId: "provider-thread-1",
+      }).pipe(Effect.exit);
+
+      assert.equal(exit._tag, "Failure");
+      assert.equal(turnsListCalls, 2);
+    }),
+  );
+
+  effectIt.effect("enforces both page and retained-turn caps", () =>
+    Effect.gen(function* () {
+      let pageBoundCalls = 0;
+      const pageBoundRequest = ((method: string, _payload: unknown) =>
+        Effect.sync(() => {
+          if (method === "thread/read") {
+            return makeCodexMetadataResponseFixture("provider-thread-pages");
+          }
+          if (method === "thread/turns/list") {
+            pageBoundCalls += 1;
+            return {
+              data: [makeCodexSummaryTurnFixture(`turn-${pageBoundCalls}`)],
+              nextCursor: `cursor-${pageBoundCalls}`,
+            };
+          }
+          throw new Error(`Unexpected method: ${method}`);
+        })) as CodexBoundedThreadSnapshotClient["request"];
+      const pageBoundResponse = yield* readCodexBoundedSummaryThreadWithClient({
+        client: { request: pageBoundRequest },
+        providerThreadId: "provider-thread-pages",
+      });
+
+      assert.equal(pageBoundCalls, CODEX_SUMMARY_HISTORY_MAX_PAGES);
+      assert.equal(pageBoundResponse.thread.turns.length, CODEX_SUMMARY_HISTORY_MAX_PAGES);
+
+      let turnBoundCalls = 0;
+      const turnBoundRequest = ((method: string, _payload: unknown) =>
+        Effect.sync(() => {
+          if (method === "thread/read") {
+            return makeCodexMetadataResponseFixture("provider-thread-turns");
+          }
+          if (method === "thread/turns/list") {
+            turnBoundCalls += 1;
+            return {
+              data: Array.from({ length: CODEX_SUMMARY_HISTORY_MAX_TURNS + 10 }, (_, index) =>
+                makeCodexSummaryTurnFixture(`turn-${index}`),
+              ),
+              nextCursor: "ignored-after-turn-cap",
+            };
+          }
+          throw new Error(`Unexpected method: ${method}`);
+        })) as CodexBoundedThreadSnapshotClient["request"];
+      const turnBoundResponse = yield* readCodexBoundedSummaryThreadWithClient({
+        client: { request: turnBoundRequest },
+        providerThreadId: "provider-thread-turns",
+      });
+
+      assert.equal(turnBoundCalls, 1);
+      assert.equal(turnBoundResponse.thread.turns.length, CODEX_SUMMARY_HISTORY_MAX_TURNS);
+    }),
+  );
+
+  it("contains no live full-history thread/read request", () => {
+    const runtimeSource = readFileSync(
+      new URL("./CodexSessionRuntime.ts", import.meta.url),
+      "utf8",
+    );
+    assert.doesNotMatch(runtimeSource, /^\s*includeTurns:\s*true,\s*$/m);
+  });
 });
 
 describe("Codex notification emission timestamps", () => {

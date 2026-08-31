@@ -6,11 +6,13 @@ import * as Exit from "effect/Exit";
 import {
   attachCommandIdToMutatingProviderDaemonRequest,
   guardRemoteProviderThreadOperation,
+  isRetryableProviderDaemonControlError,
   isVoidProviderDaemonRpcMethod,
   ProviderDaemonRpcResponseError,
   providerDaemonReplayCursorForHealth,
   providerDaemonRequestThreadIds,
   remoteProviderCursorProjectorForConfig,
+  requestProviderDaemonRpcJsonWithStableRetry,
   resolveProviderDaemonReplayCursor,
   toRemoteRequestError,
 } from "./RemoteProviderService.ts";
@@ -20,6 +22,72 @@ import {
 } from "./ProviderDaemonRuntimeCursor.ts";
 
 describe("RemoteProviderService", () => {
+  it.each([
+    { code: "ECONNRESET", message: "socket hang up" },
+    { code: "EPIPE", message: "write EPIPE" },
+  ])("retries one reset with the identical durable command identity: $code", async (fixture) => {
+    const bodies: string[] = [];
+    const requestJson = async (
+      _endpoint: Parameters<typeof requestProviderDaemonRpcJsonWithStableRetry>[0],
+      _path: string,
+      options: { readonly body?: string } = {},
+    ) => {
+      bodies.push(options.body ?? "");
+      if (bodies.length === 1) {
+        throw Object.assign(new Error(fixture.message), { code: fixture.code });
+      }
+      return { statusCode: 200, body: '{"ok":true}' };
+    };
+
+    await requestProviderDaemonRpcJsonWithStableRetry(
+      {
+        httpBaseUrl: "http://127.0.0.1:3774",
+        token: "provider-daemon-test-token-000000000000000000000000",
+      },
+      {
+        method: "restartProviderRuntime",
+        payload: { instanceId: ProviderInstanceId.make("codex") },
+      },
+      requestJson,
+    );
+
+    assert.equal(bodies.length, 2);
+    assert.equal(bodies[0], bodies[1]);
+    const decoded = JSON.parse(bodies[0] ?? "null") as { readonly commandId?: unknown };
+    assert.equal(typeof decoded.commandId, "string");
+  });
+
+  it("does not retry timeouts or failures that are not connection resets", async () => {
+    let attempts = 0;
+    const requestJson = async () => {
+      attempts += 1;
+      throw Object.assign(new Error("provider daemon request timed out"), { code: "ETIMEDOUT" });
+    };
+
+    let observedError: unknown;
+    try {
+      await requestProviderDaemonRpcJsonWithStableRetry(
+        {
+          httpBaseUrl: "http://127.0.0.1:3774",
+          token: "provider-daemon-test-token-000000000000000000000000",
+        },
+        { method: "listSessions", payload: {} },
+        requestJson,
+      );
+    } catch (cause) {
+      observedError = cause;
+    }
+
+    assert.equal(attempts, 1);
+    assert.instanceOf(observedError, Error);
+    assert.match(observedError.message, /timed out/u);
+    assert.isFalse(
+      isRetryableProviderDaemonControlError(
+        Object.assign(new Error("provider daemon request timed out"), { code: "ETIMEDOUT" }),
+      ),
+    );
+  });
+
   it("adds commandId to restartProviderRuntime daemon RPC requests", () => {
     const request = attachCommandIdToMutatingProviderDaemonRequest({
       method: "restartProviderRuntime",

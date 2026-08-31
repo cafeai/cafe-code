@@ -23,10 +23,10 @@ import {
   parseRequestEntries,
 } from "./protocolMethodEntries.ts";
 
-// Codex 0.150.0 release commit. Keep generation attached to an immutable
+// Codex 0.151.0 release commit. Keep generation attached to an immutable
 // upstream commit rather than a moving tag so a reinstall cannot silently
 // change Cafe's protocol boundary.
-const UPSTREAM_REF = "3b3b4f8fb3f6403e72c2d0533ed0d2f309c59717";
+const UPSTREAM_REF = "78c290807ce710180111df227df3b7a4fe845452";
 const USER_AGENT = "effect-codex-app-server-generator";
 const GITHUB_API_BASE =
   "https://api.github.com/repos/openai/codex/contents/codex-rs/app-server-protocol";
@@ -744,6 +744,7 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
   ].join("\n");
 
   const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const { generatedDir, metaOutputPath, namespacesOutputPath, schemaOutputPath } =
     yield* getGeneratedPaths();
   yield* fs.writeFileString(schemaOutputPath, schemaOutput);
@@ -755,9 +756,16 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
   yield* Effect.service(ChildProcessSpawner.ChildProcessSpawner).pipe(
     Effect.flatMap((spawner) =>
       spawner.spawn(
-        ChildProcess.make("oxfmt", [generatedDir], {
-          shell: process.platform === "win32",
-        }),
+        // Invoke the repository-pinned formatter through Node instead of a
+        // package-manager command shim. This keeps generation shell-free and
+        // works on Windows, where `.cmd` shims cannot be spawned directly by
+        // Effect's child-process API, as well as source launches whose PATH
+        // intentionally contains no workspace `node_modules/.bin` entry.
+        ChildProcess.make(
+          process.execPath,
+          [path.join(import.meta.dirname, "../../../node_modules/oxfmt/bin/oxfmt"), generatedDir],
+          { shell: false },
+        ),
       ),
     ),
     Effect.flatMap((child) => child.exitCode),

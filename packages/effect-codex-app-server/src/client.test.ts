@@ -249,4 +249,45 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       );
     }),
   );
+
+  it.effect("forwards a redacted terminal protocol diagnostic to the client observer", () =>
+    Effect.gen(function* () {
+      const privateWireSentinel = "private-wire-sentinel-that-must-not-leak";
+      const observed = yield* Deferred.make<{
+        readonly tag: CodexError.CodexAppServerError["_tag"];
+        readonly maxBytes: number | null;
+      }>();
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const { stdio, input } = yield* makeInMemoryStdio();
+          yield* CodexClient.make(stdio, {
+            maxIncomingLineBytes: 32,
+            onTermination: (error) =>
+              Deferred.succeed(observed, {
+                tag: error._tag,
+                maxBytes:
+                  error._tag === "CodexAppServerIncomingMessageTooLargeError"
+                    ? error.maxBytes
+                    : null,
+              }).pipe(Effect.asVoid),
+          });
+
+          // Exercise the client boundary rather than the protocol constructor
+          // directly: this proves the public option is forwarded to the
+          // protocol reader. The callback records only the allowlisted error
+          // discriminator and configured byte limit, never provider wire data.
+          yield* Queue.offer(input, encoder.encode('{"id":1,"result":"'));
+          yield* Queue.offer(input, encoder.encode(privateWireSentinel));
+
+          const diagnostic = yield* Deferred.await(observed);
+          assert.deepEqual(diagnostic, {
+            tag: "CodexAppServerIncomingMessageTooLargeError",
+            maxBytes: 32,
+          });
+          assert.equal(JSON.stringify(diagnostic).includes(privateWireSentinel), false);
+        }),
+      );
+    }),
+  );
 });

@@ -10,9 +10,9 @@ import { requestProviderDaemonJson, streamProviderDaemonNdjson } from "./provide
 const servers: http.Server[] = [];
 
 async function serve(
-  handler: (response: http.ServerResponse) => void,
+  handler: (request: http.IncomingMessage, response: http.ServerResponse) => void,
 ): Promise<{ readonly endpoint: ProviderDaemonClientConfig; readonly close: () => Promise<void> }> {
-  const server = http.createServer((_request, response) => handler(response));
+  const server = http.createServer(handler);
   servers.push(server);
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -46,8 +46,23 @@ afterEach(async () => {
 });
 
 describe("requestProviderDaemonJson", () => {
+  it("uses a fresh socket for each short-lived JSON control request", async () => {
+    const sockets: http.IncomingMessage["socket"][] = [];
+    const fixture = await serve((request, response) => {
+      sockets.push(request.socket);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end('{"ok":true}');
+    });
+
+    await requestProviderDaemonJson(fixture.endpoint, "/rpc");
+    await requestProviderDaemonJson(fixture.endpoint, "/rpc");
+
+    expect(sockets).toHaveLength(2);
+    expect(sockets[0]).not.toBe(sockets[1]);
+  });
+
   it("rejects an oversized response before buffering it without bound", async () => {
-    const fixture = await serve((response) => {
+    const fixture = await serve((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ value: "x".repeat(128) }));
     });
@@ -60,7 +75,7 @@ describe("requestProviderDaemonJson", () => {
   it("keeps split UTF-8 response bytes intact below the cap", async () => {
     const encoded = Buffer.from('{"text":"🙂"}', "utf8");
     const emojiStart = encoded.indexOf(Buffer.from("🙂", "utf8"));
-    const fixture = await serve((response) => {
+    const fixture = await serve((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
       response.write(encoded.subarray(0, emojiStart + 2));
       response.end(encoded.subarray(emojiStart + 2));
@@ -75,7 +90,7 @@ describe("requestProviderDaemonJson", () => {
   it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, -1, 1.5])(
     "rejects an invalid response cap before opening a connection: %s",
     async (maxResponseBytes) => {
-      const fixture = await serve((response) => {
+      const fixture = await serve((_request, response) => {
         response.writeHead(200, { "content-type": "application/json" });
         response.end('{"ok":true}');
       });
@@ -94,7 +109,7 @@ describe("streamProviderDaemonNdjson", () => {
     { maxPendingBytes: Number.NaN },
     { maxPendingBytes: Number.POSITIVE_INFINITY },
   ])("rejects invalid finite-buffer configuration: %j", async (invalidLimits) => {
-    const fixture = await serve((response) => {
+    const fixture = await serve((_request, response) => {
       response.writeHead(200, { "content-type": "application/x-ndjson" });
       response.end('{"cursor":1}\n');
     });
@@ -108,7 +123,7 @@ describe("streamProviderDaemonNdjson", () => {
   });
 
   it("serializes async record handling and preserves order", async () => {
-    const fixture = await serve((response) => {
+    const fixture = await serve((_request, response) => {
       response.writeHead(200, { "content-type": "application/x-ndjson" });
       response.end('{"cursor":1}\n{"cursor":2}\n{"cursor":3}\n');
     });
@@ -134,7 +149,7 @@ describe("streamProviderDaemonNdjson", () => {
   it("decodes UTF-8 safely when a character is split across chunks", async () => {
     const encoded = Buffer.from('{"text":"🙂"}\n', "utf8");
     const emojiStart = encoded.indexOf(Buffer.from("🙂", "utf8"));
-    const fixture = await serve((response) => {
+    const fixture = await serve((_request, response) => {
       response.writeHead(200, { "content-type": "application/x-ndjson" });
       response.write(encoded.subarray(0, emojiStart + 2));
       response.end(encoded.subarray(emojiStart + 2));
@@ -151,7 +166,7 @@ describe("streamProviderDaemonNdjson", () => {
   });
 
   it("rejects a line before unbounded pending data can accumulate", async () => {
-    const fixture = await serve((response) => {
+    const fixture = await serve((_request, response) => {
       response.writeHead(200, { "content-type": "application/x-ndjson" });
       response.end(`${"x".repeat(65)}\n`);
     });
@@ -166,7 +181,7 @@ describe("streamProviderDaemonNdjson", () => {
   });
 
   it("yields to unrelated scheduler work during a complete-line burst", async () => {
-    const fixture = await serve((response) => {
+    const fixture = await serve((_request, response) => {
       response.writeHead(200, { "content-type": "application/x-ndjson" });
       response.end(
         Array.from({ length: 96 }, (_, index) => `{"cursor":${index + 1}}`).join("\n") + "\n",

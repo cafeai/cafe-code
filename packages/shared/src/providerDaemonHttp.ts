@@ -46,6 +46,7 @@ function requestOptions(
   path: string,
   method: "GET" | "POST",
   headers: Record<string, string>,
+  connection: "pooled" | "fresh" = "pooled",
 ): http.RequestOptions {
   const url = new URL(
     path,
@@ -55,6 +56,16 @@ function requestOptions(
     method,
     path: `${url.pathname}${url.search}`,
     headers,
+    // JSON control requests are short lived and can be separated by more than
+    // Node's default five-second server keep-alive budget. Reusing the process
+    // global agent in that situation creates a narrow race where the daemon
+    // closes an idle socket while the backend writes the next authenticated
+    // command, producing EPIPE/ECONNRESET before an RPC envelope is available.
+    // A one-shot local connection is cheap for loopback/IPC and removes that
+    // stale-socket state entirely. The long-lived NDJSON event stream keeps the
+    // normal pooled path and is therefore unaffected by this control-plane
+    // policy.
+    ...(connection === "fresh" ? { agent: false as const } : {}),
   } satisfies http.RequestOptions;
 
   if (endpoint.transport === "ipc" && endpoint.socketPath !== undefined) {
@@ -108,32 +119,35 @@ export function requestProviderDaemonJson(
       settled = true;
       reject(cause);
     };
-    const request = http.request(requestOptions(endpoint, path, method, headers), (response) => {
-      const chunks: Buffer[] = [];
-      let responseBytes = 0;
-      response.on("data", (chunk: Buffer) => {
-        if (settled) return;
-        responseBytes += chunk.byteLength;
-        if (responseBytes > maxResponseBytes) {
-          const cause = new RangeError(
-            `provider daemon JSON response exceeds ${maxResponseBytes} bytes`,
-          );
-          settleReject(cause);
-          response.destroy(cause);
-          return;
-        }
-        chunks.push(chunk);
-      });
-      response.on("error", settleReject);
-      response.on("end", () => {
-        if (settled) return;
-        settled = true;
-        resolve({
-          statusCode: response.statusCode ?? 0,
-          body: Buffer.concat(chunks).toString("utf8"),
+    const request = http.request(
+      requestOptions(endpoint, path, method, headers, "fresh"),
+      (response) => {
+        const chunks: Buffer[] = [];
+        let responseBytes = 0;
+        response.on("data", (chunk: Buffer) => {
+          if (settled) return;
+          responseBytes += chunk.byteLength;
+          if (responseBytes > maxResponseBytes) {
+            const cause = new RangeError(
+              `provider daemon JSON response exceeds ${maxResponseBytes} bytes`,
+            );
+            settleReject(cause);
+            response.destroy(cause);
+            return;
+          }
+          chunks.push(chunk);
         });
-      });
-    });
+        response.on("error", settleReject);
+        response.on("end", () => {
+          if (settled) return;
+          settled = true;
+          resolve({
+            statusCode: response.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString("utf8"),
+          });
+        });
+      },
+    );
 
     request.on("error", settleReject);
     request.setTimeout(options.timeoutMs ?? 30_000, () => {

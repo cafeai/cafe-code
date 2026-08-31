@@ -154,6 +154,60 @@ export const isVoidProviderDaemonRpcMethod = (
   method: ProviderDaemonRpcRequest["method"],
 ): boolean => VOID_RPC_METHODS.has(method);
 
+type ProviderDaemonControlRequester = typeof requestProviderDaemonJson;
+
+const RETRYABLE_PROVIDER_DAEMON_CONTROL_ERROR_CODES = new Set(["ECONNRESET", "EPIPE"]);
+
+/**
+ * Classify only transport resets that occur before Cafe has decoded a daemon
+ * RPC envelope. Do not use message substring matching here: daemon-side
+ * structured errors, schema failures, timeouts, and provider failures must not
+ * be replayed merely because their human-readable text happens to mention a
+ * connection.
+ */
+export function isRetryableProviderDaemonControlError(cause: unknown): boolean {
+  if (cause === null || typeof cause !== "object" || !("code" in cause)) {
+    return false;
+  }
+  const code = cause.code;
+  return typeof code === "string" && RETRYABLE_PROVIDER_DAEMON_CONTROL_ERROR_CODES.has(code);
+}
+
+/**
+ * Send one RPC request with a single reset-only retry.
+ *
+ * The mutation command id and encoded JSON are deliberately constructed once,
+ * before either transport attempt. A daemon may have durably executed the
+ * first request even when its response socket resets; replaying byte-identical
+ * input lets the daemon CommandLedger return that existing result instead of
+ * performing the mutation twice. Never move command-id attachment into the
+ * attempt loop or wrap the outer `rpc` Effect in a generic retry policy.
+ */
+export async function requestProviderDaemonRpcJsonWithStableRetry<
+  M extends ProviderDaemonRpcRequest["method"],
+>(
+  daemonConfig: ProviderDaemonClientConfig,
+  request: Extract<ProviderDaemonRpcRequest, { readonly method: M }>,
+  requestJson: ProviderDaemonControlRequester = requestProviderDaemonJson,
+) {
+  const requestWithCommandId = attachCommandIdToMutatingProviderDaemonRequest(request);
+  const body = encodeRpcRequestJson(requestWithCommandId);
+  const attempt = () =>
+    requestJson(daemonConfig, PROVIDER_DAEMON_RPC_PATH, {
+      method: "POST",
+      body,
+    });
+
+  try {
+    return await attempt();
+  } catch (cause) {
+    if (!isRetryableProviderDaemonControlError(cause)) {
+      throw cause;
+    }
+    return attempt();
+  }
+}
+
 /** Reject locally retired identities before evaluating the HTTP request. */
 export const guardRemoteProviderThreadOperation = <A, E, R>(input: {
   readonly retiredThreadIds: ReadonlySet<string>;
@@ -181,11 +235,7 @@ const rpc = <M extends ProviderDaemonRpcRequest["method"]>(
 ) =>
   Effect.tryPromise({
     try: async () => {
-      const requestWithCommandId = attachCommandIdToMutatingProviderDaemonRequest(request);
-      const response = await requestProviderDaemonJson(daemonConfig, PROVIDER_DAEMON_RPC_PATH, {
-        method: "POST",
-        body: encodeRpcRequestJson(requestWithCommandId),
-      });
+      const response = await requestProviderDaemonRpcJsonWithStableRetry(daemonConfig, request);
       const envelope = decodeRpcEnvelopeJson(response.body);
       if (!envelope.ok) {
         const rootCause = envelope.error.diagnostics?.causeChain.find(
