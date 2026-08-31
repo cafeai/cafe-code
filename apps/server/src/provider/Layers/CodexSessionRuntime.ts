@@ -191,10 +191,29 @@ const decodeV2ThreadStartResponse = Schema.decodeUnknownEffect(
 const decodeV2ThreadResumeResponse = Schema.decodeUnknownEffect(
   EffectCodexSchema.V2ThreadResumeResponse,
 );
+// Codex 0.151 added bounded resume hydration after Cafe's generated 0.150
+// protocol snapshot was pinned. Keep this compatibility schema deliberately
+// narrow: Cafe asks for one turn with no items, and only reads that page back.
+// Unknown provider fields remain owned by the generated response decoder.
+const CodexThreadResumeInitialTurnsPageResponse = Schema.Struct({
+  initialTurnsPage: Schema.optionalKey(
+    Schema.Union([EffectCodexSchema.V2ThreadResumeResponse__TurnsPage, Schema.Null]),
+  ),
+});
+const decodeCodexThreadResumeInitialTurnsPageResponse = Schema.decodeUnknownEffect(
+  CodexThreadResumeInitialTurnsPageResponse,
+);
 
 type CodexThreadStartParamsWithRuntimeWorkspaceRoots =
   typeof CodexThreadStartParamsWithRuntimeWorkspaceRoots.Type;
 type CodexThreadResumeParamsWithRuntimeWorkspaceRoots = EffectCodexSchema.V2ThreadResumeParams & {
+  /**
+   * Codex 0.151+ can omit the legacy full `thread.turns` snapshot and return a
+   * bounded recent page instead. This prevents multi-hour threads from turning
+   * one newline-delimited JSON-RPC response into an unbounded memory event.
+   */
+  readonly excludeTurns?: boolean;
+  readonly initialTurnsPage?: EffectCodexSchema.V2ThreadResumeParams__ThreadResumeInitialTurnsPageParams | null;
   readonly environments?: ReadonlyArray<{
     readonly environmentId: string;
     readonly cwd: string;
@@ -1989,7 +2008,26 @@ const requestCodexThreadOpen = <M extends CodexThreadOpenMethod>(
           CodexErrors.CodexAppServerError
         >;
       }
-      return decodeV2ThreadResumeResponse(rawResponse).pipe(
+      return Effect.all({
+        response: decodeV2ThreadResumeResponse(rawResponse),
+        recentTurns: decodeCodexThreadResumeInitialTurnsPageResponse(rawResponse),
+      }).pipe(
+        Effect.map(({ response, recentTurns }) => {
+          const initialTurnsPage = recentTurns.initialTurnsPage;
+          if (initialTurnsPage === undefined || initialTurnsPage === null) {
+            return response;
+          }
+          // Normalize the bounded page into the generated 0.150 response shape
+          // so the existing active-turn recovery and snapshot backfill paths do
+          // not need a second pagination-specific lifecycle implementation.
+          return {
+            ...response,
+            thread: {
+              ...response.thread,
+              turns: initialTurnsPage.data,
+            },
+          };
+        }),
         Effect.mapError((error) =>
           toProtocolParseError("Invalid thread/resume response payload", error),
         ),
@@ -2028,6 +2066,16 @@ export const openCodexThread = (input: {
   return requestCodexThreadOpen(input.client, "thread/resume", {
     threadId: resumeThreadId,
     ...startParams,
+    // Upstream deprecated full-history resume hydration for paginated threads.
+    // One newest turn, with item bodies omitted, is sufficient to recover an
+    // active turn id/status while keeping the response bounded independently
+    // of thread age. Cafe hydrates detailed history through its normal reads.
+    excludeTurns: true,
+    initialTurnsPage: {
+      itemsView: "notLoaded",
+      limit: 1,
+      sortDirection: "desc",
+    },
   }).pipe(
     Effect.catchIf(isRecoverableThreadResumeError, (error) =>
       Effect.logWarning("codex app-server thread resume fell back to fresh start", {

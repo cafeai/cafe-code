@@ -2755,6 +2755,70 @@ describe("selectCodexActiveSnapshotTurn", () => {
 });
 
 describe("openCodexThread", () => {
+  it("resumes with one metadata-only recent turn instead of the full thread history", async () => {
+    const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+    const response = {
+      ...makeThreadOpenResponse("existing-thread"),
+      thread: {
+        ...makeThreadOpenResponse("existing-thread").thread,
+        status: { type: "active", activeFlags: [] },
+        turns: [],
+      },
+      initialTurnsPage: {
+        data: [
+          {
+            id: "active-turn",
+            items: [],
+            itemsView: "notLoaded",
+            status: "inProgress",
+          },
+        ],
+        nextCursor: "older-turns",
+      },
+    };
+    const client = {
+      raw: {
+        request: (method: "thread/start" | "thread/resume", payload: unknown) => {
+          calls.push({ method, payload });
+          return Effect.succeed(response);
+        },
+      },
+    };
+
+    const opened = await Effect.runPromise(
+      openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: "existing-thread",
+      }),
+    );
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.method, "thread/resume");
+    assert.deepStrictEqual(
+      calls[0]?.payload && typeof calls[0].payload === "object"
+        ? {
+            excludeTurns: Reflect.get(calls[0].payload, "excludeTurns"),
+            initialTurnsPage: Reflect.get(calls[0].payload, "initialTurnsPage"),
+          }
+        : null,
+      {
+        excludeTurns: true,
+        initialTurnsPage: {
+          itemsView: "notLoaded",
+          limit: 1,
+          sortDirection: "desc",
+        },
+      },
+    );
+    assert.deepStrictEqual(opened.thread.turns, response.initialTurnsPage.data);
+    assert.equal(selectCodexActiveSnapshotTurn(opened.thread)?.id, "active-turn");
+  });
+
   it("falls back to thread/start when resume fails recoverably", async () => {
     const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
     const started = makeThreadOpenResponse("fresh-thread");

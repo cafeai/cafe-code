@@ -99,6 +99,8 @@ const CODEX_REJECTED_RESUME_CURSOR_PATTERN =
 const CLAUDE_REJECTED_RESUME_CURSOR_PATTERN =
   /\b(?:no conversation found with session id|no message found with message\.uuid|invalid resume|resume session .*not found|conversation .*not found)\b/i;
 const CLAUDE_PROCESS_EXITED_PATTERN = /\bClaude Code process exited with code\b/i;
+const CODEX_OVERSIZED_RESUME_RESPONSE_ERROR_TAG = "CodexAppServerIncomingMessageTooLargeError";
+const MAX_NESTED_ERROR_TAG_DEPTH = 8;
 
 /**
  * Hook for tests that want to override the canonical event logger pulled
@@ -264,6 +266,32 @@ function errorMessageChain(error: unknown): string {
   return String(error);
 }
 
+/**
+ * Inspect only the finite tagged-error chain Cafe itself constructs.
+ *
+ * Provider error text is not an authority boundary: it may be localized or
+ * attacker-controlled. The Codex protocol reader raises a dedicated tagged
+ * error before retaining an oversized line, and the adapter wraps that error
+ * without changing its `cause`. A depth and cycle bound keep this structural
+ * classification safe even if a future adapter supplies a malformed cause.
+ */
+function hasNestedErrorTag(error: unknown, expectedTag: string): boolean {
+  const visited = new Set<object>();
+  let current: unknown = error;
+  for (let depth = 0; depth < MAX_NESTED_ERROR_TAG_DEPTH; depth += 1) {
+    if (typeof current !== "object" || current === null || visited.has(current)) {
+      return false;
+    }
+    visited.add(current);
+    const record = current as Readonly<Record<string, unknown>>;
+    if (record._tag === expectedTag) {
+      return true;
+    }
+    current = record.cause;
+  }
+  return false;
+}
+
 function isRejectedResumeCursorError(input: {
   readonly provider: ProviderDriverKind;
   readonly error: unknown;
@@ -274,7 +302,10 @@ function isRejectedResumeCursorError(input: {
 
   const message = errorMessageChain(input.error);
   if (input.provider === ProviderDriverKind.make("codex")) {
-    return CODEX_REJECTED_RESUME_CURSOR_PATTERN.test(message);
+    return (
+      hasNestedErrorTag(input.error, CODEX_OVERSIZED_RESUME_RESPONSE_ERROR_TAG) ||
+      CODEX_REJECTED_RESUME_CURSOR_PATTERN.test(message)
+    );
   }
 
   if (input.provider === ProviderDriverKind.make("claudeAgent")) {
@@ -294,7 +325,7 @@ function isRejectedResumeCursorError(input: {
 
 function rejectedResumeCursorRecoveryReason(provider: ProviderDriverKind): string {
   return provider === ProviderDriverKind.make("codex")
-    ? "Provider rejected the persisted Codex rollout id; starting a fresh session."
+    ? "Persisted Codex resume state could not be loaded safely; starting a fresh session."
     : "Provider rejected the persisted Claude resume session; starting a fresh session.";
 }
 

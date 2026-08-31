@@ -2076,6 +2076,38 @@ const make = Effect.gen(function* () {
     },
   );
 
+  /**
+   * A provider process may emit `starting` and thread `idle` notifications
+   * before its resume request fails. Those events remain in the daemon journal
+   * after the failed adapter scope is gone. They are not proof that a usable
+   * session exists, so a previous start failure may be cleared only when the
+   * current ProviderService can name a matching registered session.
+   */
+  const hasRegisteredSessionForFailureRecovery = Effect.fn(
+    "hasRegisteredSessionForFailureRecovery",
+  )(function* (event: ProviderRuntimeEvent) {
+    const sessions = yield* providerService.listSessions().pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider runtime ingestion could not verify failed-session recovery", {
+          threadId: event.threadId,
+          provider: event.provider,
+          providerInstanceId: event.providerInstanceId,
+          eventId: event.eventId,
+          eventType: event.type,
+          cause: Cause.pretty(cause),
+        }).pipe(Effect.as([])),
+      ),
+    );
+    return sessions.some(
+      (session) =>
+        session.threadId === event.threadId &&
+        session.provider === event.provider &&
+        (event.providerInstanceId === undefined ||
+          session.providerInstanceId === event.providerInstanceId) &&
+        (session.status === "ready" || session.status === "running"),
+    );
+  });
+
   const getSourceProposedPlanReferenceForAcceptedTurnStart = Effect.fn(
     "getSourceProposedPlanReferenceForAcceptedTurnStart",
   )(function* (threadId: ThreadId, eventTurnId: TurnId | undefined) {
@@ -2226,6 +2258,42 @@ const make = Effect.gen(function* () {
           return pendingTurnStartForThread;
         });
 
+      const failedSessionHeartbeatState = (() => {
+        if (
+          event.type === "session.state.changed" &&
+          (event.payload.state === "starting" || event.payload.state === "ready")
+        ) {
+          return event.payload.state;
+        }
+        if (event.type === "thread.state.changed" && event.payload.state === "idle") {
+          return event.payload.state;
+        }
+        return undefined;
+      })();
+      const isNonConclusiveFailedSessionHeartbeat =
+        thread.session?.activeTurnId === null &&
+        thread.session.lastError !== null &&
+        failedSessionHeartbeatState !== undefined;
+      const shouldSuppressFailedSessionHeartbeat = isNonConclusiveFailedSessionHeartbeat
+        ? !(
+            (yield* hasPendingTurnStartForThread()) ||
+            (yield* hasRegisteredSessionForFailureRecovery(event))
+          )
+        : false;
+      if (shouldSuppressFailedSessionHeartbeat) {
+        // Keep this diagnostic finite. The recorded session error already has
+        // the sanitized failure detail; duplicating it here would expose
+        // provider-controlled process output and add no reconciliation value.
+        yield* Effect.logWarning("provider runtime ingestion ignored stale startup heartbeat", {
+          threadId: thread.id,
+          provider: event.provider,
+          providerInstanceId: event.providerInstanceId,
+          eventId: event.eventId,
+          eventType: event.type,
+          runtimeState: failedSessionHeartbeatState,
+        });
+      }
+
       const conflictsWithActiveTurn =
         activeTurnId !== null && eventTurnId !== undefined && !sameId(activeTurnId, eventTurnId);
       const missingTurnForActiveTurn = activeTurnId !== null && eventTurnId === undefined;
@@ -2307,7 +2375,7 @@ const make = Effect.gen(function* () {
         explicitTerminalTurnRecovery ??
         (restoresFalseOrphanTerminal ? ("live-provider-continuation" as const) : undefined);
 
-      const shouldApplyThreadLifecycle = (() => {
+      const passesStrictProviderLifecycleGuard = (() => {
         if (!STRICT_PROVIDER_LIFECYCLE_GUARD) {
           return true;
         }
@@ -2352,6 +2420,8 @@ const make = Effect.gen(function* () {
             return true;
         }
       })();
+      const shouldApplyThreadLifecycle =
+        !shouldSuppressFailedSessionHeartbeat && passesStrictProviderLifecycleGuard;
       if (event.type === "turn.started" && shouldApplyThreadLifecycle) {
         // Only an accepted concrete provider turn may release a cancellation
         // barrier. Replayed or conflicting turn.started events are content
