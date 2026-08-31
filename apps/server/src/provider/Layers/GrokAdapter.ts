@@ -12,6 +12,7 @@ import {
   type ModelSelection,
   type ProviderRuntimeEvent,
   type ProviderSession,
+  type ProviderSessionStartInput,
   type ProviderThreadGoal,
   type ProviderThreadGoalSetInput,
   type ProviderSteerTurnInput,
@@ -2456,6 +2457,56 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
         return yield* readGoalState(ctx);
       });
 
+    const retireAndResumeForGoalMutation = (ctx: GrokSessionContext) =>
+      Effect.gen(function* () {
+        const session = ctx.session;
+        const cwd = session.cwd;
+        if (!cwd) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "thread/goal/set",
+            detail: "Grok could not resume the active session for goal control.",
+          });
+        }
+        const resumeCursor = parseGrokResume(session.resumeCursor);
+        if (!resumeCursor || resumeCursor.sessionId !== ctx.acpSessionId) {
+          /* Retirement is intentionally irreversible. Refuse to stop the live
+             child unless its opaque cursor is schema-valid and binds the
+             replacement to this exact provider-native conversation; falling
+             back to session/new here would silently fork the user's goal work. */
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "thread/goal/set",
+            detail: "Grok could not safely bind goal control to the active conversation.",
+          });
+        }
+
+        /* Stable Grok cancellation is fire-and-forget, so interruptTurn
+           deliberately retires the direct child and removes its adapter
+           context. Goal state can become authoritative before the matching
+           long-running `/goal` prompt settles; a prompt submitted immediately
+           afterward must therefore be the documented "next user intent" that
+           resumes the same native conversation in a fresh process. Capture
+           only Cafe's already-validated session configuration before
+           retirement, never reuse the cancelled child, and preserve the
+           provider-owned session id exclusively inside the opaque cursor. */
+        const resumeInput = {
+          threadId: ctx.threadId,
+          provider: PROVIDER,
+          providerInstanceId: boundInstanceId,
+          cwd,
+          runtimeMode: session.runtimeMode,
+          ...(session.interactionMode ? { interactionMode: session.interactionMode } : {}),
+          ...(session.modelSelection ? { modelSelection: session.modelSelection } : {}),
+          resumeCursor,
+        } satisfies ProviderSessionStartInput;
+        const activeTurnId = ctx.activeTurnId ?? ctx.session.activeTurnId;
+
+        yield* interruptTurn(ctx.threadId, activeTurnId);
+        yield* startSession(resumeInput);
+        return yield* requireSession(ctx.threadId);
+      });
+
     const setGoal: NonNullable<GrokAdapterShape["setGoal"]> = (input: ProviderThreadGoalSetInput) =>
       Effect.gen(function* () {
         let ctx = yield* requireSession(input.threadId);
@@ -2520,8 +2571,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
         }
 
         if (ctx.activeTurnId !== undefined || ctx.promptsInFlight > 0) {
-          yield* interruptTurn(input.threadId, ctx.activeTurnId);
-          ctx = yield* requireSession(input.threadId);
+          ctx = yield* retireAndResumeForGoalMutation(ctx);
         }
         yield* sendTurn({
           threadId: input.threadId,
@@ -2548,8 +2598,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
         const current = yield* readGoalState(ctx);
         if (!current) return { cleared: false };
         if (ctx.activeTurnId !== undefined || ctx.promptsInFlight > 0) {
-          yield* interruptTurn(threadId, ctx.activeTurnId);
-          ctx = yield* requireSession(threadId);
+          ctx = yield* retireAndResumeForGoalMutation(ctx);
         }
         yield* sendTurn({
           threadId,

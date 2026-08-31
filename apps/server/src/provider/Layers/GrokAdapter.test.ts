@@ -2114,7 +2114,16 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       const grokHome = yield* Effect.promise(() =>
         NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-goal-home-")),
       );
-      const wrapperPath = yield* Effect.promise(() => makeMockGrokWrapper());
+      const requestLogPath = NodePath.join(grokHome, "goal-requests.ndjson");
+      // Goal state is persisted before ACP resolves its long-running prompt.
+      // Keep that prompt alive so every following goal mutation deterministically
+      // exercises the retire-and-resume path on fast and slow hosts alike.
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({
+          CAFE_CODE_ACP_HANG_PROMPT_FOREVER: "1",
+          CAFE_CODE_ACP_REQUEST_LOG_PATH: requestLogPath,
+        }),
+      );
       const adapter = yield* makeTestAdapter(wrapperPath, undefined, { homePath: grokHome });
       yield* adapter.startSession({
         threadId,
@@ -2145,6 +2154,12 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
 
       assert.deepEqual(yield* adapter.clearGoal!(threadId), { cleared: true });
       assert.isNull(yield* adapter.getGoal!(threadId));
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      assert.isAtLeast(
+        requests.filter((entry) => entry.method === "session/load").length,
+        1,
+        "goal mutations must resume a fresh child after retiring an active prompt",
+      );
 
       yield* adapter.stopSession(threadId);
     }).pipe(TestClock.withLive),
