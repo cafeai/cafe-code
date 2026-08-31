@@ -686,6 +686,11 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("replays durable overlap to rebuild an unflushed assistant coalescer after restart", async () => {
+    // Keep this overlap test independent of CI host speed. Its contract is the
+    // cursor-count boundary: event 2,000 checkpoints, while 2,001 remains in
+    // the bounded replay window until graceful disposal. A slow runner must
+    // not accidentally cross the separate elapsed-time boundary first.
+    vi.spyOn(performance, "now").mockReturnValue(0);
     const databasePath = path.join(
       makeTempDir("t3-provider-ingestion-restart-"),
       "orchestration.sqlite",
