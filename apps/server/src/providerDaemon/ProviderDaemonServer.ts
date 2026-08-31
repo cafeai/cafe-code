@@ -24,6 +24,7 @@ import {
   type ProviderDaemonTransport,
   type ProviderRuntimeEvent as ProviderRuntimeEventValue,
   type ProviderRuntimeProcessMode,
+  type ThreadId,
 } from "@cafecode/contracts";
 import { PROVIDER_PIPELINE_POLICY, utf8ByteLength } from "@cafecode/shared/providerPipelinePolicy";
 import {
@@ -45,6 +46,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   isProviderSubagentDetailReadFailureReason,
   makeProviderSubagentDetailReadError,
+  ProviderValidationError,
   type ProviderServiceError,
   type ProviderSubagentDetailReadFailureReason,
 } from "../provider/Errors.ts";
@@ -69,6 +71,7 @@ import {
   summarizeProviderDaemonError,
 } from "./ErrorDiagnostics.ts";
 import { ProviderRuntimeInventory } from "./ProviderRuntimeInventory.ts";
+import { purgeProviderDaemonThreadPersistence } from "./ProviderDaemonThreadPurge.ts";
 
 const MAX_RPC_BODY_BYTES = 5 * 1024 * 1024;
 const PROVIDER_DAEMON_EVENT_JOURNAL_CAPACITY = 50_000;
@@ -807,6 +810,7 @@ function redactProviderSubagentDetailReadError(error: unknown) {
 const executeRpcRequest = (
   providerService: ProviderServiceShape,
   request: ProviderDaemonRpcRequestValue,
+  purgeThread: (threadId: ThreadId) => Effect.Effect<void, ProviderServiceError>,
 ): Effect.Effect<unknown, ProviderServiceError> => {
   switch (request.method) {
     case "startSession":
@@ -830,7 +834,12 @@ const executeRpcRequest = (
     case "stopSession":
       return providerService.stopSession(request.payload);
     case "quiesceThreadForHardDelete":
-      return providerService.quiesceThreadForHardDelete(request.payload);
+      // Provider quiescence installs the in-memory runtime fence first. Only
+      // then may daemon-owned journals be fenced and purged, ensuring a late
+      // provider callback cannot recreate prompt/output material.
+      return providerService
+        .quiesceThreadForHardDelete(request.payload)
+        .pipe(Effect.andThen(purgeThread(request.payload.threadId)));
     case "restartProviderRuntime":
       return providerService.restartProviderRuntime(request.payload);
     case "listSessions":
@@ -1172,6 +1181,22 @@ export const runProviderDaemonServer = (
       ownerKey: mode,
     });
     const commandLedger = yield* makeProviderDaemonCommandLedger({ ownerKey: mode });
+    const purgeThread = (threadId: ThreadId): Effect.Effect<void, ProviderServiceError> =>
+      journal.startupMaintenance.pipe(
+        // Hard delete is an explicit post-readiness operation. Waiting for the
+        // bounded journal maintenance prevents a legacy installation with an
+        // unpruned multi-million-row journal from turning its on-demand typed
+        // hydration into another readiness/startup regression.
+        Effect.andThen(purgeProviderDaemonThreadPersistence({ threadId })),
+        Effect.provideService(SqlClient.SqlClient, sql),
+        Effect.mapError(
+          () =>
+            new ProviderValidationError({
+              operation: "ProviderDaemonServer.quiesceThreadForHardDelete",
+              issue: "provider-daemon-hard-delete-purge-failed",
+            }),
+        ),
+      );
     const leases = new Map<string, ProviderDaemonLease>();
     const rpcMetrics = initialRpcMetrics();
     const shouldPersistSupervisorBridgeCursor =
@@ -1579,7 +1604,7 @@ export const runProviderDaemonServer = (
                 Effect.flatMap((rpcRequest) =>
                   commandLedger.runOnce(
                     rpcRequest,
-                    executeRpcRequest(providerService, rpcRequest).pipe(
+                    executeRpcRequest(providerService, rpcRequest, purgeThread).pipe(
                       Effect.map(
                         (value): ProviderDaemonRpcEnvelope => ({
                           ok: true,

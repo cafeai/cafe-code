@@ -41,6 +41,7 @@ function terminalEvidence(
   return {
     threadId,
     acceptedTurnId: staleTurnId,
+    intentSequence: 1,
     message: message(),
     turnState: "interrupted",
     turnCompletedAt: completedAt,
@@ -213,12 +214,14 @@ describe("Codex terminal steer recovery", () => {
       threadId: ThreadId.make("thread:turn"),
       turnId: TurnId.make("message"),
       messageId: MessageId.make("tail"),
+      intentSequence: 1,
       createdAt,
     });
     const right = buildCodexSteerAcceptedActivityCommand({
       threadId: ThreadId.make("thread"),
       turnId: TurnId.make("turn:message"),
       messageId: MessageId.make("tail"),
+      intentSequence: 1,
       createdAt,
     });
 
@@ -230,6 +233,7 @@ describe("Codex terminal steer recovery", () => {
       threadId: ThreadId.make("thread:turn"),
       acceptedTurnId: TurnId.make("message"),
       messageId: MessageId.make("tail"),
+      intentSequence: 1,
       recoveredTurnId: TurnId.make("recovered-left"),
       createdAt,
     });
@@ -237,6 +241,7 @@ describe("Codex terminal steer recovery", () => {
       threadId: ThreadId.make("thread"),
       acceptedTurnId: TurnId.make("turn:message"),
       messageId: MessageId.make("tail"),
+      intentSequence: 1,
       recoveredTurnId: TurnId.make("recovered-right"),
       createdAt,
     });
@@ -248,6 +253,7 @@ describe("Codex terminal steer recovery", () => {
       threadId: ThreadId.make("thread:turn"),
       acceptedTurnId: TurnId.make("message"),
       messageId: MessageId.make("tail"),
+      intentSequence: 1,
       // Provider response data is evidence, not part of the original intent
       // identity. A retry must converge on the first durable receipt.
       recoveredTurnId: TurnId.make("another-provider-response"),
@@ -260,12 +266,14 @@ describe("Codex terminal steer recovery", () => {
       threadId,
       turnId: staleTurnId,
       messageId: MessageId.make("message-\ud800"),
+      intentSequence: 1,
       createdAt,
     });
     const loneLowSurrogate = buildCodexSteerAcceptedActivityCommand({
       threadId,
       turnId: staleTurnId,
       messageId: MessageId.make("message-\udc00"),
+      intentSequence: 1,
       createdAt,
     });
     expect(loneHighSurrogate.commandId).not.toBe(loneLowSurrogate.commandId);
@@ -276,6 +284,7 @@ describe("Codex terminal steer recovery", () => {
       threadId,
       turnId: staleTurnId,
       messageId,
+      intentSequence: 1,
       clientCorrelationId,
       createdAt,
     });
@@ -284,6 +293,7 @@ describe("Codex terminal steer recovery", () => {
       threadId,
       acceptedTurnId: staleTurnId,
       messageId,
+      intentSequence: 1,
       recoveredTurnId,
       clientCorrelationId,
       createdAt,
@@ -293,6 +303,7 @@ describe("Codex terminal steer recovery", () => {
       provider: "codex",
       messageId,
       acceptedTurnId: staleTurnId,
+      intentSequence: 1,
       clientCorrelationId,
     });
     expect(recovered.activity).toMatchObject({
@@ -314,6 +325,7 @@ describe("Codex terminal steer recovery", () => {
     const delivered = buildCodexSteerDeliveredActivityCommand({
       threadId,
       messageId,
+      intentSequence: 41,
       deliveredTurnId,
       reason: "turn-start-after-provider-no-active-turn",
       createdAt,
@@ -321,6 +333,7 @@ describe("Codex terminal steer recovery", () => {
     const repeated = buildCodexSteerDeliveredActivityCommand({
       threadId,
       messageId,
+      intentSequence: 41,
       deliveredTurnId: TurnId.make("turn-repeated-provider-response"),
       reason: "turn-start-after-provider-no-active-turn",
       createdAt,

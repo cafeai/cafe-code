@@ -12,6 +12,7 @@ import {
   ProviderRuntimeEvent,
   ProviderSession,
   ProviderInstanceId,
+  RuntimeTaskId,
 } from "@cafecode/contracts";
 import {
   ApprovalRequestId,
@@ -34,11 +35,15 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import {
+  makeSqlitePersistenceLive,
+  SqlitePersistenceMemory,
+} from "../../persistence/Layers/Sqlite.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -58,6 +63,10 @@ import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts"
 import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import {
+  PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
+  attachProviderDaemonRuntimeEventCursor,
+} from "../../providerDaemon/ProviderDaemonRuntimeCursor.ts";
 import {
   buildCodexSteerAcceptedActivityCommand,
   CODEX_TERMINAL_STEER_RECOVERY,
@@ -121,6 +130,10 @@ function isLegacyTurnCompletedEvent(
     event.payload === undefined &&
     typeof event.status === "string"
   );
+}
+
+function withDaemonCursor(event: LegacyProviderRuntimeEvent, cursor: number): ProviderRuntimeEvent {
+  return attachProviderDaemonRuntimeEventCursor(event as ProviderRuntimeEvent, cursor);
 }
 
 function createProviderServiceHarness() {
@@ -233,7 +246,8 @@ describe("ProviderRuntimeIngestion", () => {
     | OrchestrationEngineService
     | ProviderRuntimeIngestionService
     | ProjectionSnapshotQuery
-    | RuntimeReceiptBus,
+    | RuntimeReceiptBus
+    | SqlClient.SqlClient,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -245,7 +259,7 @@ describe("ProviderRuntimeIngestion", () => {
     return dir;
   }
 
-  afterEach(async () => {
+  async function disposeCurrentHarness(): Promise<void> {
     if (scope) {
       await Effect.runPromise(Scope.close(scope, Exit.void));
     }
@@ -254,6 +268,10 @@ describe("ProviderRuntimeIngestion", () => {
       await runtime.dispose();
     }
     runtime = null;
+  }
+
+  afterEach(async () => {
+    await disposeCurrentHarness();
     for (const dir of tempDirs.splice(0)) {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -261,6 +279,14 @@ describe("ProviderRuntimeIngestion", () => {
 
   async function createHarness(options?: {
     serverSettings?: Partial<ServerSettings>;
+    databasePath?: string;
+    /**
+     * Live provider-progress correlation must stay on the compact steer
+     * ledgers. A broad acceptance-evidence projection read can synchronously
+     * scan a mature thread's activity/event history and starve desktop
+     * readiness, so focused tests can make that legacy path fatal.
+     */
+    failOnCodexSteerAcceptanceEvidenceRead?: boolean;
     dispatchGate?: (
       command: OrchestrationCommand,
       dispatch: OrchestrationEngineShape["dispatch"],
@@ -269,13 +295,17 @@ describe("ProviderRuntimeIngestion", () => {
     const workspaceRoot = makeTempDir("t3-provider-project-");
     fs.mkdirSync(path.join(workspaceRoot, ".git"));
     const provider = createProviderServiceHarness();
+    const persistenceLayer =
+      options?.databasePath === undefined
+        ? SqlitePersistenceMemory
+        : makeSqlitePersistenceLive(options.databasePath);
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
       Layer.provide(OrchestrationProjectionPipelineLive),
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
       Layer.provide(RepositoryIdentityResolverTest),
-      Layer.provide(SqlitePersistenceMemory),
+      Layer.provide(persistenceLayer),
     );
     const orchestrationEngineLayer = options?.dispatchGate
       ? Layer.effect(
@@ -289,14 +319,31 @@ describe("ProviderRuntimeIngestion", () => {
           }),
         ).pipe(Layer.provide(orchestrationLayer))
       : orchestrationLayer;
-    const projectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
+    const baseProjectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
       Layer.provide(RepositoryIdentityResolverTest),
-      Layer.provide(SqlitePersistenceMemory),
+      Layer.provide(persistenceLayer),
     );
+    const projectionSnapshotLayer = options?.failOnCodexSteerAcceptanceEvidenceRead
+      ? Layer.effect(
+          ProjectionSnapshotQuery,
+          Effect.gen(function* () {
+            const query = yield* ProjectionSnapshotQuery;
+            return {
+              ...query,
+              getCodexSteerAcceptanceEvidence: (input) =>
+                input?.exactAcceptedBarrier !== undefined
+                  ? query.getCodexSteerAcceptanceEvidence(input)
+                  : Effect.die(
+                      "Live provider ingestion must not read broad Codex acceptance evidence",
+                    ),
+            };
+          }),
+        ).pipe(Layer.provide(baseProjectionSnapshotLayer))
+      : baseProjectionSnapshotLayer;
     const layer = ProviderRuntimeIngestionLive.pipe(
       Layer.provideMerge(orchestrationEngineLayer),
       Layer.provideMerge(projectionSnapshotLayer),
-      Layer.provideMerge(SqlitePersistenceMemory),
+      Layer.provideMerge(persistenceLayer),
       Layer.provideMerge(RuntimeReceiptBusLive),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
@@ -308,6 +355,7 @@ describe("ProviderRuntimeIngestion", () => {
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const ingestion = await runtime.runPromise(Effect.service(ProviderRuntimeIngestionService));
     const receiptBus = await runtime.runPromise(Effect.service(RuntimeReceiptBus));
+    const sql = await runtime.runPromise(Effect.service(SqlClient.SqlClient));
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(ingestion.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(ingestion.drain);
@@ -378,6 +426,45 @@ describe("ProviderRuntimeIngestion", () => {
       setProviderSession: provider.setSession,
       receiptBus,
       drain,
+      setDurableProviderDaemonCursor: (cursor: number) =>
+        Effect.runPromise(
+          sql`
+            INSERT INTO projection_state (projector, last_applied_sequence, updated_at)
+            VALUES (
+              ${PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR},
+              ${cursor},
+              ${"2026-01-01T00:00:00.000Z"}
+            )
+            ON CONFLICT (projector)
+            DO UPDATE SET
+              last_applied_sequence = excluded.last_applied_sequence,
+              updated_at = excluded.updated_at
+          `,
+        ),
+      readDurableProviderDaemonCursor: () =>
+        Effect.runPromise(
+          sql<{ readonly lastAppliedSequence: number }>`
+            SELECT last_applied_sequence AS "lastAppliedSequence"
+            FROM projection_state
+            WHERE projector = ${PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR}
+          `,
+        ).then((rows) => rows[0]?.lastAppliedSequence ?? null),
+      readPendingAcceptedSteerCount: (threadId: ThreadId) =>
+        Effect.runPromise(
+          sql<{ readonly count: number }>`
+            SELECT COUNT(*) AS count
+            FROM orchestration_pending_codex_steer_acceptances
+            WHERE thread_id = ${threadId}
+          `,
+        ).then((rows) => rows[0]?.count ?? 0),
+      readUnsettledSteerIntentCount: (threadId: ThreadId) =>
+        Effect.runPromise(
+          sql<{ readonly count: number }>`
+            SELECT COUNT(*) AS count
+            FROM orchestration_unsettled_codex_steer_intents
+            WHERE thread_id = ${threadId}
+          `,
+        ).then((rows) => rows[0]?.count ?? 0),
       retireThreadForHardDelete: ingestion.retireThreadForHardDelete,
     };
   }
@@ -469,6 +556,320 @@ describe("ProviderRuntimeIngestion", () => {
     expect(afterLateEvent?.activities.map((activity) => activity.id)).toEqual([
       asEventId("evt-hard-delete-ingestion-in-flight"),
     ]);
+  });
+
+  it("yields a Node macrotask while draining synchronous provider catch-up work", async () => {
+    const eventCount = 6;
+    let processedActivityCount = 0;
+    let observedActivityCount = -1;
+    let resolveMacrotask!: () => void;
+    const macrotaskObserved = new Promise<void>((resolve) => {
+      resolveMacrotask = resolve;
+    });
+    const harness = await createHarness({
+      dispatchGate: (command, dispatch) => {
+        if (command.type !== "thread.activity.append") {
+          return dispatch(command);
+        }
+        processedActivityCount += 1;
+        if (processedActivityCount === 1) {
+          setImmediate(() => {
+            observedActivityCount = processedActivityCount;
+            resolveMacrotask();
+          });
+        }
+
+        // Node SQLite is synchronous. Model one projection turn that exceeds
+        // the shared elapsed-time budget so the worker must explicitly yield
+        // the event loop before it drains the remaining replay records.
+        const busyUntil = performance.now() + 10;
+        while (performance.now() < busyUntil) {
+          // Intentionally synchronous test work.
+        }
+        return dispatch(command);
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    for (let index = 0; index < eventCount; index += 1) {
+      harness.emit({
+        type: "task.started",
+        eventId: asEventId(`evt-ingestion-fairness-${index}`),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-ingestion-fairness"),
+        payload: {
+          taskId: `task-ingestion-fairness-${index}`,
+          taskType: "plan",
+        },
+      });
+    }
+
+    await Promise.all([macrotaskObserved, harness.drain()]);
+    expect(observedActivityCount).toBeGreaterThanOrEqual(1);
+    expect(observedActivityCount).toBeLessThan(eventCount);
+    expect(processedActivityCount).toBe(eventCount);
+  });
+
+  it("checkpoints a sub-interval replay before admitting its next work turn", async () => {
+    let activityCount = 0;
+    let releaseSecondDispatch!: () => void;
+    let observeSecondDispatch!: () => void;
+    const secondDispatchEntered = new Promise<void>((resolve) => {
+      observeSecondDispatch = resolve;
+    });
+    const secondDispatchRelease = new Promise<void>((resolve) => {
+      releaseSecondDispatch = resolve;
+    });
+    const harness = await createHarness({
+      dispatchGate: (command, dispatch) => {
+        if (command.type !== "thread.activity.append") {
+          return dispatch(command);
+        }
+        activityCount += 1;
+        if (activityCount === 1) {
+          // Cross the elapsed-time work-turn boundary with far fewer than the
+          // legacy 1,000-event cursor interval.
+          const busyUntil = performance.now() + 10;
+          while (performance.now() < busyUntil) {
+            // Intentionally synchronous test work.
+          }
+          return dispatch(command);
+        }
+        observeSecondDispatch();
+        return Effect.promise(() => secondDispatchRelease).pipe(Effect.andThen(dispatch(command)));
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+    const makeEvent = (index: number, cursor: number) =>
+      withDaemonCursor(
+        {
+          type: "task.started",
+          eventId: asEventId(`evt-bounded-cursor-${index}`),
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: now,
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-bounded-cursor"),
+          payload: {
+            taskId: RuntimeTaskId.make(`task-bounded-cursor-${index}`),
+            taskType: "plan",
+          },
+        },
+        cursor,
+      );
+
+    harness.emit(makeEvent(1, 100));
+    harness.emit(makeEvent(2, 101));
+    await secondDispatchEntered;
+
+    // The second event has not reached its durable dispatch point. The first
+    // event nevertheless crossed a real work-turn boundary and must already
+    // be recoverable without waiting for 900 more journal records or a graceful
+    // scope finalizer.
+    expect(await harness.readDurableProviderDaemonCursor()).toBe(100);
+
+    releaseSecondDispatch();
+    await harness.drain();
+    // The next incomplete work turn remains pending until its own boundary or
+    // the scope finalizer. That is the intended bound: an abrupt failure can
+    // replay one short work turn, but it can no longer discard every record in
+    // a catch-up page merely because the legacy 1,000-event interval was not
+    // reached.
+    expect(await harness.readDurableProviderDaemonCursor()).toBe(100);
+  });
+
+  it("replays durable overlap to rebuild an unflushed assistant coalescer after restart", async () => {
+    const databasePath = path.join(
+      makeTempDir("t3-provider-ingestion-restart-"),
+      "orchestration.sqlite",
+    );
+    const harnessOptions = {
+      databasePath,
+      serverSettings: { enableAssistantStreaming: true },
+    } as const;
+    const firstHarness = await createHarness(harnessOptions);
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-replay-coalescer");
+    const itemId = asItemId("item-replay-coalescer");
+
+    firstHarness.emit(
+      withDaemonCursor(
+        {
+          type: "turn.started",
+          eventId: asEventId("evt-replay-coalescer-started"),
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: now,
+          threadId,
+          turnId,
+        },
+        999,
+      ),
+    );
+    firstHarness.emit(
+      withDaemonCursor(
+        {
+          type: "content.delta",
+          eventId: asEventId("evt-replay-coalescer-first"),
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: now,
+          threadId,
+          turnId,
+          itemId,
+          payload: {
+            streamKind: "assistant_text",
+            delta: "first",
+          },
+        },
+        1_000,
+      ),
+    );
+    await waitForThread(firstHarness.readModel, (thread) =>
+      thread.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-replay-coalescer" && message.text === "first",
+      ),
+    );
+
+    const replayedBufferedEvents = [
+      withDaemonCursor(
+        {
+          type: "content.delta",
+          eventId: asEventId("evt-replay-coalescer-buffered-a"),
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: now,
+          threadId,
+          turnId,
+          itemId,
+          payload: {
+            streamKind: "assistant_text",
+            delta: " buffered",
+          },
+        },
+        2_000,
+      ),
+      withDaemonCursor(
+        {
+          type: "content.delta",
+          eventId: asEventId("evt-replay-coalescer-buffered-b"),
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: now,
+          threadId,
+          turnId,
+          itemId,
+          payload: {
+            streamKind: "assistant_text",
+            delta: " more",
+          },
+        },
+        2_001,
+      ),
+    ] as const;
+    for (const event of replayedBufferedEvents) {
+      firstHarness.emit(event);
+    }
+    await firstHarness.drain();
+
+    const beforeRestart = (await firstHarness.readModel()).threads.find(
+      (thread) => thread.id === threadId,
+    );
+    expect(
+      beforeRestart?.messages.find(
+        (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-replay-coalescer",
+      )?.text,
+    ).toBe("first");
+    expect(await firstHarness.readDurableProviderDaemonCursor()).toBe(2_000);
+
+    // Graceful backend replacement forces the pending cursor (2,001) to disk,
+    // but the two suffix deltas still exist only in the old process's
+    // coalescer. The daemon overlap must replay them into the replacement even
+    // though their cursors are at or below that durable checkpoint.
+    await disposeCurrentHarness();
+    const restartedHarness = await createHarness(harnessOptions);
+    expect(await restartedHarness.readDurableProviderDaemonCursor()).toBe(2_001);
+
+    for (const event of replayedBufferedEvents) {
+      restartedHarness.emit(event);
+    }
+    restartedHarness.emit(
+      withDaemonCursor(
+        {
+          type: "turn.completed",
+          eventId: asEventId("evt-replay-coalescer-completed"),
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: now,
+          threadId,
+          turnId,
+          payload: { state: "completed" },
+        },
+        2_002,
+      ),
+    );
+
+    const completedThread = await waitForThread(
+      restartedHarness.readModel,
+      (thread) =>
+        thread.session?.status === "ready" &&
+        thread.messages.some(
+          (message: ProviderRuntimeTestMessage) =>
+            message.id === "assistant:item-replay-coalescer" && !message.streaming,
+        ),
+    );
+    const completedMessage = completedThread.messages.find(
+      (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-replay-coalescer",
+    );
+    expect(completedMessage?.text).toBe("first buffered more");
+    expect(completedMessage?.streaming).toBe(false);
+    expect(await restartedHarness.readDurableProviderDaemonCursor()).toBe(2_001);
+  });
+
+  it("never replaces a concurrently advanced daemon cursor with an older replay cursor", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    await harness.setDurableProviderDaemonCursor(5_000);
+
+    harness.emit(
+      attachProviderDaemonRuntimeEventCursor(
+        {
+          type: "task.started",
+          eventId: asEventId("evt-stale-daemon-cursor"),
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: now,
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-stale-daemon-cursor"),
+          payload: {
+            taskId: RuntimeTaskId.make("task-stale-daemon-cursor"),
+            taskType: "plan",
+          },
+        },
+        1_000,
+      ),
+    );
+
+    await harness.drain();
+    expect(await harness.readDurableProviderDaemonCursor()).toBe(5_000);
+
+    harness.emit(
+      attachProviderDaemonRuntimeEventCursor(
+        {
+          type: "task.started",
+          eventId: asEventId("evt-new-daemon-cursor"),
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: now,
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-new-daemon-cursor"),
+          payload: {
+            taskId: RuntimeTaskId.make("task-new-daemon-cursor"),
+            taskType: "plan",
+          },
+        },
+        6_000,
+      ),
+    );
+
+    await harness.drain();
+    expect(await harness.readDurableProviderDaemonCursor()).toBe(6_000);
   });
 
   it("maps turn started/completed events into thread session updates", async () => {
@@ -1735,6 +2136,7 @@ describe("ProviderRuntimeIngestion", () => {
     const recoveryDispatches: OrchestrationCommand[] = [];
     let captureRecoveryDispatches = false;
     const harness = await createHarness({
+      failOnCodexSteerAcceptanceEvidenceRead: true,
       dispatchGate: (command, dispatch) => {
         if (captureRecoveryDispatches && command.type === "thread.turn.steer") {
           recoveryDispatches.push(command);
@@ -1767,7 +2169,7 @@ describe("ProviderRuntimeIngestion", () => {
     // Persist the original user message against the active turn, then record
     // the trusted command-boundary acceptance that ProviderCommandReactor
     // writes only after the provider service call returns successfully.
-    await Effect.runPromise(
+    const steerReceipt = await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.steer",
         commandId: CommandId.make("cmd-original-terminal-unprocessed-steer"),
@@ -1790,11 +2192,11 @@ describe("ProviderRuntimeIngestion", () => {
           threadId,
           turnId: staleTurnId,
           messageId,
+          intentSequence: steerReceipt.sequence,
           createdAt: steerSubmittedAt,
         }),
       ),
     );
-
     const terminalEvent = {
       type: "turn.completed",
       eventId: asEventId("evt-terminal-unprocessed-steer-turn-interrupted"),
@@ -1836,7 +2238,7 @@ describe("ProviderRuntimeIngestion", () => {
         text: prompt,
         attachments: [],
       },
-      terminalRecovery: { staleTurnId },
+      terminalRecovery: { staleTurnId, intentSequence: steerReceipt.sequence },
       createdAt: turnInterruptedAt,
     });
     expect(recoveryDispatches[0]?.commandId).toMatch(
@@ -5305,7 +5707,9 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("restores a restart-time Codex steer message id from exact accepted evidence", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({
+      failOnCodexSteerAcceptanceEvidenceRead: true,
+    });
     const threadId = asThreadId("thread-1");
     const turnId = asTurnId("turn-restarted-steer-accepted");
     const messageId = asMessageId("message-restarted-steer-accepted");
@@ -5320,7 +5724,7 @@ describe("ProviderRuntimeIngestion", () => {
       turnId,
     });
     await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === turnId);
-    await Effect.runPromise(
+    const steerReceipt = await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.steer",
         commandId: CommandId.make("cmd-restarted-steer-accepted-intent"),
@@ -5340,11 +5744,13 @@ describe("ProviderRuntimeIngestion", () => {
           threadId,
           turnId,
           messageId,
+          intentSequence: steerReceipt.sequence,
           clientCorrelationId,
           createdAt: "2026-01-01T00:00:02.100Z",
         }),
       ),
     );
+    expect(await harness.readPendingAcceptedSteerCount(threadId)).toBe(1);
 
     harness.emit({
       type: "task.progress",
@@ -5380,6 +5786,8 @@ describe("ProviderRuntimeIngestion", () => {
       },
     });
     expect(JSON.stringify(activity?.payload)).not.toContain("sensitive steer text");
+    await harness.drain();
+    expect(await harness.readPendingAcceptedSteerCount(threadId)).toBe(0);
   });
 
   it("restores a restart-time Codex steer message id from an exact unsettled intent", async () => {
@@ -5412,6 +5820,38 @@ describe("ProviderRuntimeIngestion", () => {
         createdAt: "2026-01-01T00:00:02.000Z",
       }),
     );
+    expect(await harness.readUnsettledSteerIntentCount(threadId)).toBe(1);
+
+    // Model a prior backend that durably appended exact provider progress but
+    // crashed before its post-dispatch compact-ledger prune. Live ingestion
+    // must correlate the current notification from the raw compact candidate
+    // set instead of running startup's historical settled-evidence scan,
+    // which would retire the candidate before the current activity can be
+    // enriched and used for the exact post-dispatch prune.
+    const historicalActivityId = "historical-restarted-steer-unsettled-processing";
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(
+          `provider:codex:${threadId}:${historicalActivityId}:thread-activity-append:${historicalActivityId}`,
+        ),
+        threadId,
+        activity: {
+          id: EventId.make(historicalActivityId),
+          tone: "info",
+          kind: "task.progress",
+          summary: "Historical correlated processing evidence",
+          payload: {
+            taskId: `codex-turn-steer-processing:${clientCorrelationId}`,
+            usage: { messageId, clientCorrelationId },
+          },
+          turnId,
+          createdAt: "2026-01-01T00:00:02.500Z",
+        },
+        createdAt: "2026-01-01T00:00:02.500Z",
+      }),
+    );
+    expect(await harness.readUnsettledSteerIntentCount(threadId)).toBe(1);
 
     harness.emit({
       type: "task.progress",
@@ -5447,6 +5887,8 @@ describe("ProviderRuntimeIngestion", () => {
       },
     });
     expect(JSON.stringify(activity?.payload)).not.toContain("unsettled prompt");
+    await harness.drain();
+    expect(await harness.readUnsettledSteerIntentCount(threadId)).toBe(0);
   });
 
   it("fails closed for unrelated, cross-thread, and task-token-mismatched Codex progress", async () => {
@@ -5469,7 +5911,7 @@ describe("ProviderRuntimeIngestion", () => {
       harness.readModel,
       (thread) => thread.session?.activeTurnId === sourceTurnId,
     );
-    await Effect.runPromise(
+    const steerReceipt = await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.steer",
         commandId: CommandId.make("cmd-restarted-steer-source-intent"),
@@ -5482,6 +5924,18 @@ describe("ProviderRuntimeIngestion", () => {
         },
         createdAt: "2026-01-01T00:00:02.000Z",
       }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch(
+        buildCodexSteerAcceptedActivityCommand({
+          threadId: sourceThreadId,
+          turnId: sourceTurnId,
+          messageId: sourceMessageId,
+          intentSequence: steerReceipt.sequence,
+          clientCorrelationId: sourceToken,
+          createdAt: "2026-01-01T00:00:02.050Z",
+        }),
+      ),
     );
 
     const crossThreadId = asThreadId("thread-2");
@@ -5542,6 +5996,22 @@ describe("ProviderRuntimeIngestion", () => {
         },
       });
     }
+    harness.emit({
+      type: "task.progress",
+      eventId: asEventId("evt-restarted-steer-forged-raw-message"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId: sourceThreadId,
+      turnId: sourceTurnId,
+      payload: {
+        taskId: `codex-turn-steer-processing:${sourceToken}`,
+        description: "Provider attempted to supply Cafe's raw message identity.",
+        usage: {
+          clientCorrelationId: sourceToken,
+          messageId: sourceMessageId,
+        },
+      },
+    });
     await harness.drain();
 
     const snapshot = await harness.readModel();
@@ -5554,6 +6024,16 @@ describe("ProviderRuntimeIngestion", () => {
       expect(payload?.messageId).toBeUndefined();
       expect(usage?.messageId).toBeUndefined();
     }
+    const forgedActivity = snapshot.threads
+      .find((thread) => thread.id === sourceThreadId)
+      ?.activities.find((candidate) => candidate.id === "evt-restarted-steer-forged-raw-message");
+    expect(forgedActivity?.payload).toMatchObject({
+      usage: {
+        clientCorrelationId: sourceToken,
+        messageId: sourceMessageId,
+      },
+    });
+    expect(await harness.readPendingAcceptedSteerCount(sourceThreadId)).toBe(1);
   });
 
   it("preserves structured subagent presentation across the durable task lifecycle", async () => {

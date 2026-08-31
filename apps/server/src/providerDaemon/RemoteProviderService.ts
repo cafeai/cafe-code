@@ -50,6 +50,9 @@ import {
   PROVIDER_SUPERVISOR_RUNTIME_CURSOR_PROJECTOR,
   rewindProviderDaemonCursorForReplay,
 } from "./ProviderDaemonRuntimeCursor.ts";
+import { providerDaemonRequestThreadIds } from "./ProviderDaemonThreadIdentity.ts";
+
+export { providerDaemonRequestThreadIds } from "./ProviderDaemonThreadIdentity.ts";
 
 const decodeRpcEnvelopeJson = Schema.decodeUnknownSync(
   Schema.fromJsonString(ProviderDaemonRpcEnvelope),
@@ -89,6 +92,7 @@ const MUTATING_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "rollbackConversation",
 ]);
 const PROVIDER_DAEMON_REPLAY_OVERLAP_EVENTS = 1_000;
+const PROVIDER_DAEMON_REPLAY_HEALTH_TIMEOUT_MS = 5_000;
 
 function providerDaemonUrl(config: ProviderDaemonClientConfig, path: string): URL {
   return new URL(
@@ -149,48 +153,6 @@ export const attachCommandIdToMutatingProviderDaemonRequest = <
 export const isVoidProviderDaemonRpcMethod = (
   method: ProviderDaemonRpcRequest["method"],
 ): boolean => VOID_RPC_METHODS.has(method);
-
-/**
- * Identify every immutable Cafe thread that one daemon RPC can mutate or
- * inspect. Keeping this exhaustive and next to the transport means a future
- * thread-scoped RPC cannot silently bypass the backend's permanent-delete
- * fence. Forks deliberately include both identities: the native allocation
- * reads the source while its durable binding is written under the target.
- */
-export const providerDaemonRequestThreadIds = (
-  request: ProviderDaemonRpcRequest,
-): ReadonlyArray<ThreadId> => {
-  switch (request.method) {
-    case "startSession":
-    case "sendTurn":
-    case "steerTurn":
-    case "interruptTurn":
-    case "respondToRequest":
-    case "respondToUserInput":
-    case "snoozeUserInput":
-    case "stopSession":
-    case "quiesceThreadForHardDelete":
-    case "getGoal":
-    case "setGoal":
-    case "clearGoal":
-    case "rollbackConversation":
-    case "readSubagentDetail":
-      return [request.payload.threadId];
-    case "forkSession":
-      return [request.payload.sourceThreadId, request.payload.targetThreadId];
-    case "discardSessionFork":
-      return [request.payload.fork.targetThreadId];
-    case "restartProviderRuntime":
-    case "listSessions":
-    case "getCapabilities":
-    case "getInstanceInfo":
-      return [];
-    default: {
-      const unreachable: never = request;
-      return unreachable;
-    }
-  }
-};
 
 /** Reject locally retired identities before evaluating the HTTP request. */
 export const guardRemoteProviderThreadOperation = <A, E, R>(input: {
@@ -264,7 +226,15 @@ async function readRemoteHealth(
 ): Promise<typeof ProviderDaemonHealth.Type> {
   const response = await requestProviderDaemonJson(daemonConfig, PROVIDER_DAEMON_HEALTH_PATH, {
     method: "GET",
+    // Startup must never inherit the transport helper's much larger general
+    // request budget. Health only informs replay policy; if it is inconclusive,
+    // the caller safely falls back to the bounded overlap instead of delaying
+    // backend readiness for an unhealthy daemon.
+    timeoutMs: PROVIDER_DAEMON_REPLAY_HEALTH_TIMEOUT_MS,
   });
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw new Error(`provider daemon health failed with HTTP ${response.statusCode}`);
+  }
   return decodeHealthJson(response.body);
 }
 
@@ -286,6 +256,72 @@ export function remoteProviderCursorProjectorForConfig(config: {
   return config.providerDaemon !== undefined
     ? PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR
     : PROVIDER_SUPERVISOR_RUNTIME_CURSOR_PROJECTOR;
+}
+
+/**
+ * Select the daemon journal cursor used by a freshly constructed bridge.
+ *
+ * Overlap replay exists to reconstruct process-local streaming/coalescer state
+ * for sessions that survived a backend restart. An authoritative idle health
+ * snapshot proves there is no such live state to recover, so replaying the same
+ * 1,000 durable rows only creates startup work and can starve readiness on a
+ * large journal. Any active-session count or inconclusive health read retains
+ * the conservative overlap. The latter fail-closed policy favors recovering a
+ * possibly live stream over the idle-startup optimization.
+ */
+export function providerDaemonReplayCursorForHealth(input: {
+  readonly persistedCursor: number;
+  readonly activeSessionCount: number | undefined;
+  readonly overlapEvents?: number;
+}): number {
+  const normalizedPersistedCursor = rewindProviderDaemonCursorForReplay(input.persistedCursor, 0);
+  if (input.activeSessionCount === 0) {
+    return normalizedPersistedCursor;
+  }
+  return rewindProviderDaemonCursorForReplay(
+    normalizedPersistedCursor,
+    input.overlapEvents ?? PROVIDER_DAEMON_REPLAY_OVERLAP_EVENTS,
+  );
+}
+
+/**
+ * Execute the bounded health decision while preserving the conservative
+ * overlap on an ordinary transport failure. Keeping this Effect boundary in a
+ * directly exercised helper is intentional: Effect's public combinator names
+ * vary between major versions, and a helper-only cursor test would not execute
+ * a misspelled/unsupported recovery combinator during CI.
+ */
+export function resolveProviderDaemonReplayCursor<E, R>(input: {
+  readonly persistedCursor: number;
+  readonly projector: string;
+  readonly health: Effect.Effect<
+    Pick<typeof ProviderDaemonHealth.Type, "activeSessionCount">,
+    E,
+    R
+  >;
+}): Effect.Effect<number, never, R> {
+  return input.health.pipe(
+    Effect.map((health) =>
+      providerDaemonReplayCursorForHealth({
+        persistedCursor: input.persistedCursor,
+        activeSessionCount: health.activeSessionCount,
+      }),
+    ),
+    Effect.catch(() => {
+      const fallbackCursor = providerDaemonReplayCursorForHealth({
+        persistedCursor: input.persistedCursor,
+        activeSessionCount: undefined,
+      });
+      // Do not attach the raw transport cause: Unix socket paths and other
+      // local endpoint details are not appropriate for routine diagnostics.
+      return Effect.logWarning("provider daemon replay health read was inconclusive", {
+        projector: input.projector,
+        replayPolicy: "bounded-overlap",
+        afterCursor: fallbackCursor,
+        replayOverlapEvents: PROVIDER_DAEMON_REPLAY_OVERLAP_EVENTS,
+      }).pipe(Effect.as(fallbackCursor));
+    }),
+  );
 }
 
 const makeRemoteProviderService = Effect.gen(function* () {
@@ -337,14 +373,18 @@ const makeRemoteProviderService = Effect.gen(function* () {
         }).pipe(Effect.as(Option.none())),
       ),
     );
-  let eventCursor = Option.match(initialProjectionState, {
-    onNone: () => 0,
-    onSome: (state) =>
-      rewindProviderDaemonCursorForReplay(
-        state.lastAppliedSequence,
-        PROVIDER_DAEMON_REPLAY_OVERLAP_EVENTS,
-      ),
-  });
+  let eventCursor = 0;
+  if (Option.isSome(initialProjectionState)) {
+    const persistedCursor = initialProjectionState.value.lastAppliedSequence;
+    eventCursor = yield* resolveProviderDaemonReplayCursor({
+      persistedCursor,
+      projector: remoteCursorProjector,
+      health: Effect.tryPromise({
+        try: () => readRemoteHealth(daemonConfig),
+        catch: (cause) => toRemoteRequestError("health", cause),
+      }),
+    });
+  }
 
   if (
     Option.isNone(initialProjectionState) &&

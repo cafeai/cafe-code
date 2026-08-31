@@ -1007,6 +1007,7 @@ const ThreadTurnSteerCommand = Schema.Struct({
   terminalRecovery: Schema.optional(
     Schema.Struct({
       staleTurnId: TurnId,
+      intentSequence: NonNegativeInt,
     }),
   ),
   createdAt: IsoDateTime,
@@ -1466,6 +1467,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
   terminalSteerRecovery: Schema.optional(
     Schema.Struct({
       staleTurnId: TurnId,
+      intentSequence: NonNegativeInt,
     }),
   ),
   createdAt: IsoDateTime,
@@ -1490,6 +1492,7 @@ export const ThreadTurnSteerRequestedPayload = Schema.Struct({
   terminalSteerRecovery: Schema.optional(
     Schema.Struct({
       staleTurnId: TurnId,
+      intentSequence: NonNegativeInt,
     }),
   ),
   createdAt: IsoDateTime,

@@ -19,6 +19,7 @@ import {
   type ProviderRuntimeEvent,
 } from "@cafecode/contracts";
 import { readCafeCodeEnv } from "@cafecode/shared/compatEnv";
+import { PROVIDER_PIPELINE_POLICY } from "@cafecode/shared/providerPipelinePolicy";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -64,6 +65,14 @@ import {
   buildTerminalCodexSteerRecoveryCommands,
   codexSteerAcceptanceEvidenceFromProjection,
 } from "../codexSteerRecovery.ts";
+import {
+  pruneAcceptedCodexSteerCandidateAfterDurableProcessing,
+  pruneCodexSteerIntentAfterDurableProcessing,
+  readAcceptedCodexSteerRecoveryBarriers,
+  type PersistedAcceptedCodexSteerBarrier,
+  type PersistedCodexSteerProcessingSource,
+  type PersistedUnsettledCodexSteerIntent,
+} from "../codexSteerIntentLedger.ts";
 import { sanitizeProviderToolData } from "@cafecode/shared/activityPayloadSanitizer";
 import { ServerSettingsService } from "../../serverSettings.ts";
 
@@ -106,6 +115,7 @@ const PROCESSED_RUNTIME_EVENT_IDS_TTL = Duration.minutes(120);
 const HARD_DELETED_THREAD_CACHE_CAPACITY = 10_000;
 const HARD_DELETED_THREAD_CACHE_TTL = Duration.minutes(30);
 const PROVIDER_DAEMON_RUNTIME_CURSOR_PERSIST_INTERVAL = 1_000;
+const PROVIDER_RUNTIME_INGESTION_FAIRNESS_DELAY_MS = 1;
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const STREAMED_MESSAGE_IDS_CACHE_CAPACITY = 20_000;
 const STREAMED_MESSAGE_IDS_TTL = Duration.minutes(120);
@@ -120,6 +130,27 @@ const STREAMING_ASSISTANT_DELTA_FLUSH_CHARS = 48;
 const STREAMING_ASSISTANT_PUNCTUATION_FLUSH_REGEX = /[.!?。！？]\s*$/u;
 const STRICT_PROVIDER_LIFECYCLE_GUARD =
   readCafeCodeEnv(process.env, "CAFE_CODE_STRICT_PROVIDER_LIFECYCLE_GUARD") !== "0";
+
+/**
+ * Yield a real Node timer turn rather than only yielding to Effect's scheduler.
+ *
+ * Node's SQLite driver is synchronous. During bounded daemon catch-up, a long
+ * sequence of otherwise asynchronous Effects can therefore remain entirely in
+ * one JavaScript turn. A recursively scheduled `setImmediate` still lets the
+ * ingestion Promise continuation regain the Effect executor before HTTP work
+ * waiting behind the shared SQLite client receives a fair turn. A minimal
+ * timer delay crosses both the poll and timer phases, which lets readiness,
+ * WebSocket handshakes, and renderer queries enter that queue without changing
+ * the ingestion worker's strict one-event-at-a-time ordering.
+ */
+function yieldProviderRuntimeIngestionEventLoop(): Effect.Effect<void> {
+  return Effect.promise(
+    () =>
+      new Promise<void>((resolve) =>
+        setTimeout(resolve, PROVIDER_RUNTIME_INGESTION_FAIRNESS_DELAY_MS),
+      ),
+  );
+}
 
 type RuntimeIngestionDomainEvent = Extract<
   OrchestrationEvent,
@@ -938,6 +969,21 @@ function readCodexSteerProcessingToken(event: ProviderRuntimeEvent): string | un
   return token;
 }
 
+interface EnrichedCodexSteerProcessingActivities {
+  readonly activities: ReadonlyArray<OrchestrationThreadActivity>;
+  /**
+   * Exact compact-ledger rows that may be retired only after every enriched
+   * canonical activity below has been durably dispatched. Keeping the rows,
+   * rather than only a provider-supplied correlation string, makes the delete
+   * resistant to reconnect reordering and stale ingestion fibers.
+   */
+  readonly settlement: {
+    readonly acceptedCandidates: ReadonlyArray<PersistedAcceptedCodexSteerBarrier>;
+    readonly unsettledIntents: ReadonlyArray<PersistedUnsettledCodexSteerIntent>;
+    readonly source: PersistedCodexSteerProcessingSource;
+  } | null;
+}
+
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const orchestrationEngine = yield* OrchestrationEngineService;
@@ -952,22 +998,30 @@ const make = Effect.gen(function* () {
   const enrichCodexSteerProcessingActivities = (
     event: ProviderRuntimeEvent,
     activities: ReadonlyArray<OrchestrationThreadActivity>,
-  ) => {
+  ): Effect.Effect<EnrichedCodexSteerProcessingActivities> => {
+    const unchanged = {
+      activities,
+      settlement: null,
+    } satisfies EnrichedCodexSteerProcessingActivities;
     const clientCorrelationId = readCodexSteerProcessingToken(event);
     if (clientCorrelationId === undefined) {
-      return Effect.succeed(activities);
+      return Effect.succeed(unchanged);
     }
 
     return Effect.gen(function* () {
       const eventTurnId = toTurnId(event.turnId);
-      const [acceptanceEvidence, unsettledIntents] = yield* Effect.all([
-        projectionSnapshotQuery.getCodexSteerAcceptanceEvidence({
-          threadId: event.threadId,
-          ...(eventTurnId !== undefined ? { acceptedTurnId: eventTurnId } : {}),
-        }),
+      const [unsettledIntents, pendingAcceptedCandidates] = yield* Effect.all([
         projectionSnapshotQuery.getUnsettledCodexSteerIntentEvents({
           threadId: event.threadId,
+          // The current provider notification is itself the candidate
+          // processing evidence. Do not synchronously rescan historical
+          // activity projections here: after enrichment the canonical event
+          // is dispatched first, then the exact sequence/time-bound ledger
+          // prune below validates that durable event. Startup recovery keeps
+          // the default reconciliation path for crash fallback.
+          reconcileDurableProcessing: false,
         }),
+        readAcceptedCodexSteerRecoveryBarriers(sql, [event.threadId]),
       ]);
 
       // Keep candidates keyed by the exact Cafe entity id. The same original
@@ -976,19 +1030,23 @@ const make = Effect.gen(function* () {
       // matching one token must fail closed, even though SHA-256 makes that
       // condition computationally infeasible under honest persisted data.
       const candidatesById = new Map<string, MessageId>();
-      for (const evidence of acceptanceEvidence) {
+      for (const candidate of pendingAcceptedCandidates) {
         if (
-          evidence.threadId !== event.threadId ||
-          evidence.clientCorrelationId !== clientCorrelationId ||
-          buildCodexSteerClientCorrelationId(evidence.messageId) !== clientCorrelationId
+          eventTurnId === undefined ||
+          candidate.threadId !== event.threadId ||
+          candidate.acceptedTurnId !== eventTurnId ||
+          candidate.clientCorrelationId !== clientCorrelationId ||
+          buildCodexSteerClientCorrelationId(candidate.messageId) !== clientCorrelationId
         ) {
           continue;
         }
-        candidatesById.set(evidence.messageId, evidence.messageId);
+        candidatesById.set(candidate.messageId, candidate.messageId);
       }
       for (const intent of unsettledIntents) {
         if (
           intent.threadId !== event.threadId ||
+          eventTurnId === undefined ||
+          intent.expectedTurnId !== eventTurnId ||
           buildCodexSteerClientCorrelationId(intent.messageId) !== clientCorrelationId
         ) {
           continue;
@@ -997,14 +1055,15 @@ const make = Effect.gen(function* () {
       }
 
       if (candidatesById.size !== 1) {
-        return activities;
+        return unchanged;
       }
       const messageId = candidatesById.values().next().value;
       if (messageId === undefined) {
-        return activities;
+        return unchanged;
       }
 
-      return activities.map((activity): OrchestrationThreadActivity => {
+      let processingSource: PersistedCodexSteerProcessingSource | undefined;
+      const enrichedActivities = activities.map((activity): OrchestrationThreadActivity => {
         if (activity.kind !== "task.progress") {
           return activity;
         }
@@ -1021,6 +1080,15 @@ const make = Effect.gen(function* () {
         // The raw MessageId is restored only in Cafe's canonical activity.
         // Codex-owned runtime state, task ids, diagnostics, and logs retain the
         // fixed-size opaque token across process restarts.
+        processingSource = {
+          threadId: event.threadId,
+          activityId: activity.id,
+          turnId: activity.turnId,
+          createdAt: activity.createdAt,
+          messageId,
+          clientCorrelationId,
+          taskId: payload.taskId,
+        };
         return {
           ...activity,
           payload: {
@@ -1033,18 +1101,68 @@ const make = Effect.gen(function* () {
           },
         };
       });
+
+      if (processingSource === undefined) {
+        return unchanged;
+      }
+
+      // A non-null correlation is mandatory here. Legacy null-correlation
+      // acceptances cannot be converted into delete authority from a provider
+      // progress event, even when the provider guesses Cafe's MessageId. The
+      // hash binding was already checked while selecting `messageId`; repeat
+      // it at the destructive boundary so future refactors fail closed.
+      if (buildCodexSteerClientCorrelationId(messageId) !== clientCorrelationId) {
+        return unchanged;
+      }
+
+      return {
+        activities: enrichedActivities,
+        settlement: {
+          source: processingSource,
+          acceptedCandidates: pendingAcceptedCandidates.filter(
+            (candidate) =>
+              eventTurnId !== undefined &&
+              candidate.threadId === event.threadId &&
+              candidate.messageId === messageId &&
+              candidate.acceptedTurnId === eventTurnId &&
+              candidate.clientCorrelationId === clientCorrelationId &&
+              buildCodexSteerClientCorrelationId(candidate.messageId) ===
+                candidate.clientCorrelationId,
+          ),
+          unsettledIntents: unsettledIntents.filter(
+            (candidate) =>
+              eventTurnId !== undefined &&
+              candidate.threadId === event.threadId &&
+              candidate.messageId === messageId &&
+              candidate.expectedTurnId === eventTurnId,
+          ),
+        },
+      } satisfies EnrichedCodexSteerProcessingActivities;
     }).pipe(
       Effect.catchCause(() =>
         Effect.logWarning("Codex restart steer correlation enrichment failed closed", {
           threadId: event.threadId,
           eventId: event.eventId,
           turnId: event.turnId,
-        }).pipe(Effect.as(activities)),
+        }).pipe(Effect.as(unchanged)),
       ),
     );
   };
-  let lastPersistedProviderDaemonCursor = 0;
-  let pendingProviderDaemonCursor = 0;
+  const initialProviderDaemonCursorState = yield* projectionStateRepository
+    .getByProjector({ projector: PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR })
+    .pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider runtime ingestion cursor hydration failed", {
+          projector: PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
+          cause: Cause.pretty(cause),
+        }).pipe(Effect.as(Option.none())),
+      ),
+    );
+  let lastPersistedProviderDaemonCursor = Option.match(initialProviderDaemonCursorState, {
+    onNone: () => 0,
+    onSome: (state) => Math.max(0, Math.trunc(state.lastAppliedSequence)),
+  });
+  let pendingProviderDaemonCursor = lastPersistedProviderDaemonCursor;
   // Codex app-server owns goal continuation and emits the next turn itself.
   // This bounded set bridges the intentional gap between one turn completing
   // and the next goal turn starting, without manufacturing a Cafe prompt.
@@ -1096,27 +1214,62 @@ const make = Effect.gen(function* () {
         return;
       }
 
-      const cursorToPersist = pendingProviderDaemonCursor;
-      yield* projectionStateRepository
-        .upsert({
-          projector: PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
-          lastAppliedSequence: cursorToPersist,
-          updatedAt: DateTime.formatIso(yield* DateTime.now),
-        })
-        .pipe(
-          Effect.tap(() =>
-            Effect.sync(() => {
-              lastPersistedProviderDaemonCursor = cursorToPersist;
-            }),
-          ),
-          Effect.catchCause((cause) =>
-            Effect.logWarning("provider runtime ingestion cursor persist failed", {
-              projector: PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
-              cursor: cursorToPersist,
-              cause: Cause.pretty(cause),
-            }),
-          ),
+      yield* Effect.gen(function* () {
+        const cursorToPersist = pendingProviderDaemonCursor;
+        const updatedAt = DateTime.formatIso(yield* DateTime.now);
+        // A read-then-upsert fence is not sufficient here: a short-lived old
+        // backend can race a replacement between those two statements and
+        // overwrite the replacement's newer checkpoint. Keep the maximum in
+        // one SQLite statement so the durable cursor is monotonic across every
+        // desktop restart/adoption overlap. Preserve the timestamp when the
+        // candidate loses that race so diagnostics describe real progress.
+        const [persisted] = yield* sql<{ readonly lastAppliedSequence: number }>`
+          INSERT INTO projection_state (
+            projector,
+            last_applied_sequence,
+            updated_at
+          )
+          VALUES (
+            ${PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR},
+            ${cursorToPersist},
+            ${updatedAt}
+          )
+          ON CONFLICT (projector)
+          DO UPDATE SET
+            last_applied_sequence = MAX(
+              projection_state.last_applied_sequence,
+              excluded.last_applied_sequence
+            ),
+            updated_at = CASE
+              WHEN excluded.last_applied_sequence > projection_state.last_applied_sequence
+                THEN excluded.updated_at
+              ELSE projection_state.updated_at
+            END
+          RETURNING last_applied_sequence AS "lastAppliedSequence"
+        `;
+        if (
+          persisted === undefined ||
+          !Number.isSafeInteger(persisted.lastAppliedSequence) ||
+          persisted.lastAppliedSequence < 0
+        ) {
+          return yield* Effect.die(
+            "Provider runtime ingestion cursor UPSERT returned an invalid sequence.",
+          );
+        }
+        lastPersistedProviderDaemonCursor = persisted.lastAppliedSequence;
+        pendingProviderDaemonCursor = Math.max(
+          pendingProviderDaemonCursor,
+          persisted.lastAppliedSequence,
         );
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("provider runtime ingestion cursor persist failed", {
+            projector: PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
+            cursor: pendingProviderDaemonCursor,
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      );
     });
 
   yield* Effect.addFinalizer(() =>
@@ -2747,11 +2900,11 @@ const make = Effect.gen(function* () {
         }
       }
 
-      const activities = yield* enrichCodexSteerProcessingActivities(
+      const enrichedActivities = yield* enrichCodexSteerProcessingActivities(
         event,
         runtimeEventToActivities(event),
       );
-      yield* Effect.forEach(activities, (activity) =>
+      yield* Effect.forEach(enrichedActivities.activities, (activity) =>
         orchestrationEngine.dispatch({
           type: "thread.activity.append",
           commandId: providerCommandId(event, "thread-activity-append", activity.id),
@@ -2761,21 +2914,69 @@ const make = Effect.gen(function* () {
         }),
       ).pipe(Effect.asVoid);
 
+      const settlement = enrichedActivities.settlement;
+      if (settlement !== null) {
+        // Never prune before the canonical provider activity is durable. If
+        // Cafe crashes between dispatch and these exact deletes, command
+        // idempotency makes the replay harmless and startup's strict evidence
+        // fallback performs the same cleanup. A failed delete also prevents
+        // the provider cursor from advancing, so reconnect retries it.
+        yield* Effect.forEach(
+          settlement.acceptedCandidates,
+          (candidate) =>
+            pruneAcceptedCodexSteerCandidateAfterDurableProcessing(
+              sql,
+              candidate,
+              settlement.source,
+            ),
+          { discard: true },
+        );
+        yield* Effect.forEach(
+          settlement.unsettledIntents,
+          (candidate) =>
+            pruneCodexSteerIntentAfterDurableProcessing(sql, candidate, settlement.source),
+          { discard: true },
+        );
+      }
+
       if (event.provider === "codex" && event.type === "turn.completed") {
         const terminalTurnId = toTurnId(event.turnId);
         if (terminalTurnId !== undefined) {
-          // Query exact durable evidence rather than the 500-row UI activity
-          // tail. Long tool-heavy turns can evict either acceptance or
-          // processing rows from that snapshot and must never change replay
-          // authority. The provider-owned active turn is read separately so a
-          // newer turn fences recovery before the guarded command is emitted.
-          const [projectionEvidence, providerSessionsOption] = yield* Effect.all([
-            projectionSnapshotQuery.getCodexSteerAcceptanceEvidence({
-              threadId: thread.id,
-              acceptedTurnId: terminalTurnId,
-            }),
+          // Discover only authenticated, still-pending acceptance identities
+          // from the compact ledger. A broad thread/turn acceptance query can
+          // synchronously scan millions of activities/events during daemon
+          // replay and starve desktop readiness. Each candidate below is then
+          // revalidated through its immutable event/activity primary keys.
+          const [acceptedCandidates, providerSessionsOption] = yield* Effect.all([
+            readAcceptedCodexSteerRecoveryBarriers(sql, [thread.id]),
             providerService.listSessions().pipe(Effect.option),
           ]);
+          const terminalAcceptedCandidates = acceptedCandidates.filter(
+            (candidate) =>
+              candidate.threadId === thread.id && candidate.acceptedTurnId === terminalTurnId,
+          );
+          const projectionEvidence = (yield* Effect.forEach(
+            terminalAcceptedCandidates,
+            (candidate) =>
+              projectionSnapshotQuery.getCodexSteerAcceptanceEvidence({
+                exactAcceptedBarrier: {
+                  _tag: "accepted",
+                  threadId: candidate.threadId,
+                  eventSequence: candidate.sequence,
+                  intentSequence: candidate.intentSequence,
+                  intentCreatedAt: candidate.intentCreatedAt,
+                  activityId: candidate.activityId,
+                  acceptedTurnId: candidate.acceptedTurnId,
+                  clientCorrelationId: candidate.clientCorrelationId,
+                  messageId: candidate.messageId,
+                  acceptedAt: candidate.acceptedAt,
+                },
+              }),
+            // The compact ledger is normally empty or contains one row for
+            // this turn. Serialize exact primary-key reads so corrupted
+            // local state cannot amplify SQLite work during startup replay.
+            { concurrency: 1 },
+          )).flat();
           if (Option.isNone(providerSessionsOption)) {
             yield* Effect.logWarning(
               "Codex terminal steer recovery skipped without provider session evidence",
@@ -2832,30 +3033,32 @@ const make = Effect.gen(function* () {
       });
     });
 
+  const publishTurnIngestionQuiesced = (event: ProviderRuntimeEvent) => {
+    const turnId = toTurnId(event.turnId);
+    if (event.type !== "turn.completed" || !turnId) {
+      return Effect.void;
+    }
+
+    // This is the synchronization boundary for independent provider-event
+    // consumers. By publishing only after processRuntimeEvent, replay dedupe,
+    // and daemon cursor persistence have completed, checkpoint terminalization
+    // can wait for text/proposed-plan buffers to flush without relying on
+    // arbitrary quiet-time delays.
+    return receiptBus.publish({
+      type: "provider.turn.ingestion-quiesced",
+      threadId: event.threadId,
+      turnId,
+      provider: event.provider,
+      ...(event.providerInstanceId ? { providerInstanceId: event.providerInstanceId } : {}),
+      sourceEventId: event.eventId,
+      createdAt: event.createdAt,
+    });
+  };
+
   const processRuntimeEventOnce = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
       const eventKey = providerRuntimeEventKey(event);
-      const publishTurnIngestionQuiesced = () => {
-        const turnId = toTurnId(event.turnId);
-        if (event.type !== "turn.completed" || !turnId) {
-          return Effect.void;
-        }
-
-        // This is the synchronization boundary for independent provider-event
-        // consumers. By publishing only after processRuntimeEvent, replay
-        // dedupe, and daemon cursor persistence have completed, checkpoint
-        // terminalization can wait for text/proposed-plan buffers to flush
-        // without relying on arbitrary quiet-time delays.
-        return receiptBus.publish({
-          type: "provider.turn.ingestion-quiesced",
-          threadId: event.threadId,
-          turnId,
-          provider: event.provider,
-          ...(event.providerInstanceId ? { providerInstanceId: event.providerInstanceId } : {}),
-          sourceEventId: event.eventId,
-          createdAt: event.createdAt,
-        });
-      };
+      const providerDaemonCursor = readProviderDaemonRuntimeEventCursor(event);
       const alreadyProcessed = yield* Cache.getOption(processedRuntimeEventIds, eventKey);
       if (Option.isSome(alreadyProcessed)) {
         const replayedProviderDaemonCursor = readProviderDaemonRuntimeEventCursor(event);
@@ -2873,7 +3076,7 @@ const make = Effect.gen(function* () {
             threadId: event.threadId,
           }),
         );
-        yield* publishTurnIngestionQuiesced();
+        yield* publishTurnIngestionQuiesced(event);
         return;
       }
 
@@ -2882,7 +3085,6 @@ const make = Effect.gen(function* () {
       // mark also protects buffered assistant/proposed-plan state that can be
       // mutated before an orchestration command is dispatched.
       yield* Cache.set(processedRuntimeEventIds, eventKey, true);
-      const providerDaemonCursor = readProviderDaemonRuntimeEventCursor(event);
       if (providerDaemonCursor !== undefined) {
         // Record only after the canonical event has been fully processed. The
         // diagnostics cursor therefore never outruns chat/orchestration state,
@@ -2890,7 +3092,7 @@ const make = Effect.gen(function* () {
         recordProviderRuntimeIngestionCursor(providerDaemonCursor);
         yield* persistProviderDaemonCursor(providerDaemonCursor);
       }
-      yield* publishTurnIngestionQuiesced();
+      yield* publishTurnIngestionQuiesced(event);
     });
 
   const processInput = (input: RuntimeIngestionInput) =>
@@ -2914,6 +3116,32 @@ const make = Effect.gen(function* () {
       }),
     );
 
+  let workTurnRecords = 0;
+  let workTurnStartedAt = performance.now();
+  const accountIngestionWork = (): Effect.Effect<void> =>
+    Effect.suspend(() => {
+      workTurnRecords += 1;
+      if (
+        workTurnRecords < PROVIDER_PIPELINE_POLICY.workTurnMaxRecords &&
+        performance.now() - workTurnStartedAt < PROVIDER_PIPELINE_POLICY.workTurnMaxElapsedMs
+      ) {
+        return Effect.void;
+      }
+      workTurnRecords = 0;
+      workTurnStartedAt = performance.now();
+      // Persist at the same bounded work-turn boundary that yields HTTP a
+      // macrotask. A count-only 1,000-event checkpoint loses all useful
+      // progress when a replay contains fewer records and a later pathological
+      // synchronous SQLite read wedges the backend. This write occurs only
+      // after each event has been fully projected, remains monotonic across
+      // overlapping backend processes, and caps crash replay to one work turn
+      // (32 records or roughly 8ms of admitted work) without putting a write on
+      // every token event.
+      return persistProviderDaemonCursor(pendingProviderDaemonCursor, { force: true }).pipe(
+        Effect.andThen(yieldProviderRuntimeIngestionEventLoop()),
+      );
+    });
+
   const processInputSafely = (input: RuntimeIngestionInput) =>
     processInput(input).pipe(
       Effect.catchCause((cause) => {
@@ -2927,6 +3155,7 @@ const make = Effect.gen(function* () {
           cause: Cause.pretty(cause),
         });
       }),
+      Effect.flatMap(() => accountIngestionWork()),
     );
 
   const worker = yield* makeDrainableWorker(processInputSafely);

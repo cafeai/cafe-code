@@ -209,6 +209,7 @@ describe("ProviderSessionReaper", () => {
                 ? Option.some(input.readModel.threads.find((thread) => thread.id === threadId)!)
                 : Option.none(),
             ),
+          getPostTerminalStaleSteerCandidates: () => Effect.die("unused"),
           getPostTerminalStaleSteerCandidateThreadIds: () => Effect.die("unused"),
           getCodexSteerAcceptanceEvidence: () => Effect.die("unused"),
           getUnsettledCodexSteerIntentEvents: () => Effect.die("unused"),

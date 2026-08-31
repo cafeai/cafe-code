@@ -52,12 +52,21 @@ import { ProjectionThreadSession } from "../../persistence/Services/ProjectionTh
 import { ProjectionThread } from "../../persistence/Services/ProjectionThreads.ts";
 import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIdentityResolver.ts";
 import { buildCodexSteerClientCorrelationId } from "../../provider/codexSteerCorrelation.ts";
+import {
+  hydrateAndReadUnsettledCodexSteerIntents,
+  pruneSettledAcceptedCodexSteerRecoveryCandidate,
+  pruneSettledCodexSteerIntent,
+  readAcceptedCodexSteerRecoveryBarriers,
+  type PersistedUnsettledCodexSteerIntent,
+} from "../codexSteerIntentLedger.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import {
   ProjectionSnapshotQuery,
+  type ProjectionAcceptedCodexSteerCandidate,
   type ProjectionCodexSteerAcceptanceEvidence,
   type ProjectionCodexSteerAcceptanceEvidenceInput,
   type ProjectionCodexSteerIntentRecoveryBarriers,
+  type ProjectionLegacyCodexSteerCandidate,
   type ProjectionSnapshotCounts,
   type ProjectionThreadCheckpointContext,
   type ProjectionSnapshotQueryShape,
@@ -133,13 +142,20 @@ const ThreadIdLookupInput = Schema.Struct({
   threadId: ThreadId,
 });
 const CodexSteerAcceptanceEvidenceLookupInput = Schema.Struct({
+  exactLookup: Schema.Boolean,
   threadId: Schema.NullOr(ThreadId),
   acceptedTurnId: Schema.NullOr(TurnId),
   messageId: Schema.NullOr(MessageId),
+  exactEventSequence: Schema.NullOr(NonNegativeInt),
+  exactIntentSequence: Schema.NullOr(NonNegativeInt),
+  exactActivityId: Schema.NullOr(Schema.String),
+  exactClientCorrelationId: Schema.NullOr(Schema.String),
+  exactAcceptedAt: Schema.NullOr(IsoDateTime),
 });
 const CodexSteerAcceptanceEvidenceRowSchema = Schema.Struct({
   threadId: ThreadId,
   acceptedTurnId: TurnId,
+  intentSequence: NonNegativeInt,
   clientCorrelationId: Schema.NullOr(Schema.String),
   messageId: MessageId,
   messageTurnId: Schema.NullOr(TurnId),
@@ -152,16 +168,6 @@ const CodexSteerAcceptanceEvidenceRowSchema = Schema.Struct({
   recoveryObserved: NonNegativeInt,
   interruptRequested: NonNegativeInt,
   sessionStopRequested: NonNegativeInt,
-});
-const UnsettledCodexSteerIntentEventRowSchema = Schema.Struct({
-  sequence: NonNegativeInt,
-  threadId: ThreadId,
-  messageId: MessageId,
-  expectedTurnId: Schema.NullOr(TurnId),
-  createdAt: IsoDateTime,
-});
-const UnsettledCodexSteerIntentLookupInput = Schema.Struct({
-  threadId: Schema.NullOr(ThreadId),
 });
 const CodexSteerIntentRecoveryBarrierLookupInput = Schema.Struct({
   sequence: NonNegativeInt,
@@ -176,13 +182,32 @@ const CodexSteerIntentRecoveryBarrierRowSchema = Schema.Struct({
   sessionStopRequested: NonNegativeInt,
 });
 const CodexSteerProcessingEvidenceLookupInput = Schema.Struct({
+  candidateSequence: NonNegativeInt,
+  candidateCreatedAt: IsoDateTime,
   threadId: ThreadId,
+  expectedTurnId: Schema.NullOr(TurnId),
   messageId: MessageId,
   clientCorrelationId: Schema.String,
   taskId: Schema.String,
 });
 const CodexSteerProcessingEvidenceRowSchema = Schema.Struct({
   processingObserved: NonNegativeInt,
+});
+const CodexSteerAcceptedBarrierCandidateLookupInput = Schema.Struct({
+  sequence: NonNegativeInt,
+  intentSequence: NonNegativeInt,
+  intentCreatedAt: IsoDateTime,
+  threadId: ThreadId,
+  activityId: Schema.String,
+  acceptedTurnId: TurnId,
+  clientCorrelationId: Schema.NullOr(Schema.String),
+  messageId: MessageId,
+  acceptedAt: IsoDateTime,
+});
+const CodexSteerAcceptedBarrierCandidateRowSchema = Schema.Struct({
+  isCandidate: NonNegativeInt,
+  processingObserved: NonNegativeInt,
+  recoveryObserved: NonNegativeInt,
 });
 const ThreadTurnActivityPageLookupInput = OrchestrationThreadTurnActivityPageInput;
 const ThreadTurnLookupInput = Schema.Struct({
@@ -1110,217 +1135,243 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
-  const listPostTerminalStaleSteerCandidateThreadRows = SqlSchema.findAll({
+  const listActiveCodexThreadIdRows = SqlSchema.findAll({
     Request: Schema.Void,
     Result: ProjectionThreadIdLookupRowSchema,
     execute: () =>
       sql`
-        SELECT
-          DISTINCT threads.thread_id AS "threadId"
+        SELECT threads.thread_id AS "threadId"
         FROM projection_threads AS threads
-        LEFT JOIN projection_turns AS latest_turns
-          ON latest_turns.thread_id = threads.thread_id
-          AND latest_turns.turn_id = threads.latest_turn_id
         INNER JOIN projection_thread_sessions AS sessions
           ON sessions.thread_id = threads.thread_id
         WHERE threads.deleted_at IS NULL
           AND threads.archived_at IS NULL
           AND sessions.provider_name = 'codex'
-          AND (
-            (
-              latest_turns.completed_at IS NOT NULL
-              AND latest_turns.state IN ('completed', 'error', 'interrupted')
-              AND EXISTS (
-                SELECT 1
-                FROM projection_thread_messages AS messages
-                WHERE messages.thread_id = threads.thread_id
-                  AND messages.turn_id = latest_turns.turn_id
-                  AND messages.role = 'user'
-                  AND messages.created_at > latest_turns.completed_at
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM projection_thread_activities AS recovered
-                    WHERE recovered.thread_id = messages.thread_id
-                      AND recovered.kind = 'provider.turn.steer.recovered'
-                      AND json_extract(recovered.payload_json, '$.provider') = 'codex'
-                      AND json_extract(recovered.payload_json, '$.messageId') =
-                        messages.message_id
-                      AND json_extract(recovered.payload_json, '$.acceptedTurnId') =
-                        latest_turns.turn_id
-                      AND json_extract(recovered.payload_json, '$.recoveredTurnId') =
-                        recovered.turn_id
-                      AND EXISTS (
-                        SELECT 1
-                        FROM orchestration_events AS recovered_event
-                        WHERE recovered_event.aggregate_kind = 'thread'
-                          AND recovered_event.stream_id = recovered.thread_id
-                          AND recovered_event.event_type = 'thread.activity-appended'
-                          AND recovered_event.actor_kind = 'server'
-                          AND json_extract(recovered_event.payload_json, '$.threadId') =
-                            recovered.thread_id
-                          AND json_extract(recovered_event.payload_json, '$.activity.id') =
-                            recovered.activity_id
-                          AND json_extract(recovered_event.payload_json, '$.activity.kind') =
-                            recovered.kind
-                          AND json_extract(recovered_event.payload_json, '$.activity.turnId') =
-                            recovered.turn_id
-                          AND json_extract(
-                            recovered_event.payload_json,
-                            '$.activity.payload.provider'
-                          ) = 'codex'
-                          AND json_extract(
-                            recovered_event.payload_json,
-                            '$.activity.payload.messageId'
-                          ) = messages.message_id
-                          AND json_extract(
-                            recovered_event.payload_json,
-                            '$.activity.payload.acceptedTurnId'
-                          ) = latest_turns.turn_id
-                          AND json_extract(
-                            recovered_event.payload_json,
-                            '$.activity.payload.recoveredTurnId'
-                          ) = recovered.turn_id
-                          AND json_extract(
-                            recovered_event.payload_json,
-                            '$.activity.payload.clientCorrelationId'
-                          ) IS json_extract(recovered.payload_json, '$.clientCorrelationId')
-                        LIMIT 1
-                      )
-                    LIMIT 1
-                  )
-                LIMIT 1
-              )
+        ORDER BY threads.thread_id ASC
+      `,
+  });
+
+  /**
+   * Decide whether one already-authenticated compact acceptance barrier still
+   * needs terminal recovery. Every lookup starts from the activity primary key
+   * and exact thread/turn/message tuple supplied by the ledger helper; unlike
+   * the retired discovery branch, it never searches the event journal.
+   *
+   * Provider progress may suppress this prefilter under the historical
+   * correlation contract, but permanent pruning is stricter: a non-null
+   * correlation must also carry the exact MessageId. That distinction keeps a
+   * provider-authored partial observation from destroying Cafe's only durable
+   * recovery candidate. Trusted recovered evidence may settle it directly.
+   */
+  const findPostTerminalAcceptedSteerCandidateRow = SqlSchema.findOne({
+    Request: CodexSteerAcceptedBarrierCandidateLookupInput,
+    Result: CodexSteerAcceptedBarrierCandidateRowSchema,
+    execute: ({
+      sequence,
+      intentSequence,
+      intentCreatedAt,
+      threadId,
+      activityId,
+      acceptedTurnId,
+      clientCorrelationId,
+      messageId,
+      acceptedAt,
+    }) =>
+      sql`
+        WITH exact_accepted AS (
+          SELECT 1
+          FROM orchestration_pending_codex_steer_acceptances AS pending
+          INNER JOIN orchestration_events AS intent
+            ON intent.sequence = pending.intent_sequence
+          INNER JOIN projection_thread_activities AS accepted
+            ON accepted.activity_id = ${activityId}
+          INNER JOIN projection_turns AS accepted_turn
+            ON accepted_turn.thread_id = accepted.thread_id
+            AND accepted_turn.turn_id = accepted.turn_id
+          INNER JOIN projection_thread_messages AS accepted_message
+            ON accepted_message.thread_id = accepted.thread_id
+            AND accepted_message.message_id = ${messageId}
+            AND accepted_message.role = 'user'
+          WHERE pending.sequence = ${sequence}
+            AND pending.intent_sequence = ${intentSequence}
+            AND pending.thread_id = ${threadId}
+            AND pending.activity_id = ${activityId}
+            AND pending.accepted_turn_id = ${acceptedTurnId}
+            AND pending.message_id = ${messageId}
+            AND pending.client_correlation_id IS ${clientCorrelationId}
+            AND pending.accepted_at = ${acceptedAt}
+            AND intent.aggregate_kind = 'thread'
+            AND intent.stream_id = ${threadId}
+            AND intent.event_type IN (
+              'thread.turn-start-requested',
+              'thread.turn-steer-requested'
             )
-            OR EXISTS (
+            AND intent.actor_kind IN ('client', 'server')
+            AND json_extract(intent.payload_json, '$.threadId') = ${threadId}
+            AND json_extract(intent.payload_json, '$.messageId') = ${messageId}
+            AND json_extract(intent.payload_json, '$.createdAt') = intent.occurred_at
+            AND intent.occurred_at = ${intentCreatedAt}
+            AND accepted.thread_id = ${threadId}
+            AND accepted.turn_id = ${acceptedTurnId}
+            AND accepted.kind = 'provider.turn.steer.accepted'
+            AND accepted.created_at = ${acceptedAt}
+            AND json_extract(accepted.payload_json, '$.provider') = 'codex'
+            AND json_extract(accepted.payload_json, '$.messageId') = ${messageId}
+            AND json_extract(accepted.payload_json, '$.acceptedTurnId') = ${acceptedTurnId}
+            AND json_extract(accepted.payload_json, '$.clientCorrelationId') IS
+              ${clientCorrelationId}
+            AND accepted_turn.completed_at IS NOT NULL
+            AND accepted_turn.state IN ('completed', 'error', 'interrupted')
+          LIMIT 1
+        ),
+        evidence AS (
+          SELECT
+            EXISTS (
               SELECT 1
-              FROM projection_thread_activities AS accepted
-              INNER JOIN projection_turns AS accepted_turn
-                ON accepted_turn.thread_id = accepted.thread_id
-                AND accepted_turn.turn_id = accepted.turn_id
-              INNER JOIN projection_thread_messages AS accepted_message
-                ON accepted_message.thread_id = accepted.thread_id
-                AND accepted_message.role = 'user'
-                AND accepted_message.message_id = json_extract(accepted.payload_json, '$.messageId')
-              WHERE accepted.thread_id = threads.thread_id
-                AND accepted.kind = 'provider.turn.steer.accepted'
-                AND json_extract(accepted.payload_json, '$.provider') = 'codex'
-                AND json_extract(accepted.payload_json, '$.acceptedTurnId') = accepted.turn_id
+              FROM projection_thread_activities AS processing
+              INNER JOIN orchestration_events AS processing_event
+                ON processing_event.command_id =
+                  'provider:codex:' || processing.thread_id || ':' ||
+                  processing.activity_id || ':thread-activity-append:' ||
+                  processing.activity_id
+                AND processing_event.sequence > ${intentSequence}
+                AND processing_event.aggregate_kind = 'thread'
+                AND processing_event.stream_id = processing.thread_id
+                AND processing_event.event_type = 'thread.activity-appended'
+                AND processing_event.actor_kind = 'provider'
+                AND json_extract(processing_event.payload_json, '$.threadId') =
+                  processing.thread_id
+                AND json_extract(processing_event.payload_json, '$.activity.id') =
+                  processing.activity_id
+                AND json_extract(processing_event.payload_json, '$.activity.kind') =
+                  processing.kind
+                AND json_extract(processing_event.payload_json, '$.activity.turnId') IS
+                  processing.turn_id
+                AND json_extract(processing_event.payload_json, '$.activity.createdAt') =
+                  processing.created_at
+                AND json_extract(processing_event.payload_json, '$.activity.payload') =
+                  json(processing.payload_json)
+              WHERE processing.thread_id = ${threadId}
+                AND processing.turn_id = ${acceptedTurnId}
+                AND processing.kind = 'task.progress'
+                AND processing.created_at >= ${intentCreatedAt}
                 AND (
-                  json_type(accepted.payload_json, '$.clientCorrelationId') IS NULL
-                  OR json_type(accepted.payload_json, '$.clientCorrelationId') = 'text'
-                )
-                AND accepted_turn.completed_at IS NOT NULL
-                AND accepted_turn.state IN ('completed', 'error', 'interrupted')
-                AND EXISTS (
-                  SELECT 1
-                  FROM orchestration_events AS accepted_event
-                  WHERE accepted_event.aggregate_kind = 'thread'
-                    AND accepted_event.stream_id = accepted.thread_id
-                    AND accepted_event.event_type = 'thread.activity-appended'
-                    AND accepted_event.actor_kind = 'server'
-                    AND json_extract(accepted_event.payload_json, '$.threadId') = accepted.thread_id
-                    AND json_extract(accepted_event.payload_json, '$.activity.id') = accepted.activity_id
-                    AND json_extract(accepted_event.payload_json, '$.activity.kind') = accepted.kind
-                    AND json_extract(accepted_event.payload_json, '$.activity.turnId') = accepted.turn_id
-                    AND json_extract(accepted_event.payload_json, '$.activity.payload.provider') = 'codex'
-                    AND json_extract(accepted_event.payload_json, '$.activity.payload.messageId') =
-                      json_extract(accepted.payload_json, '$.messageId')
-                    AND json_extract(accepted_event.payload_json, '$.activity.payload.acceptedTurnId') =
-                      accepted.turn_id
+                  (
+                    ${clientCorrelationId} IS NOT NULL
+                    AND json_extract(processing.payload_json, '$.taskId') =
+                      'codex-turn-steer-processing:' || ${clientCorrelationId}
                     AND json_extract(
-                      accepted_event.payload_json,
-                      '$.activity.payload.clientCorrelationId'
-                    ) IS json_extract(accepted.payload_json, '$.clientCorrelationId')
-                  LIMIT 1
-                )
-                AND NOT EXISTS (
-                  SELECT 1
-                  FROM projection_thread_activities AS processing
-                  WHERE processing.thread_id = accepted.thread_id
-                    AND processing.turn_id = accepted.turn_id
-                    AND processing.kind = 'task.progress'
+                      processing.payload_json,
+                      '$.usage.clientCorrelationId'
+                    ) = ${clientCorrelationId}
                     AND (
-                      (
-                        json_extract(accepted.payload_json, '$.clientCorrelationId') IS NOT NULL
-                        AND json_extract(processing.payload_json, '$.taskId') =
-                          'codex-turn-steer-processing:' ||
-                            json_extract(accepted.payload_json, '$.clientCorrelationId')
-                        AND json_extract(
-                          processing.payload_json,
-                          '$.usage.clientCorrelationId'
-                        ) = json_extract(accepted.payload_json, '$.clientCorrelationId')
-                        AND (
-                          json_extract(processing.payload_json, '$.usage.messageId') IS NULL
-                          OR json_extract(processing.payload_json, '$.usage.messageId') =
-                            json_extract(accepted.payload_json, '$.messageId')
-                        )
-                      )
-                      OR (
-                        json_extract(accepted.payload_json, '$.clientCorrelationId') IS NULL
-                        AND json_extract(processing.payload_json, '$.taskId') =
-                          'codex-turn-steer-processing:' ||
-                            json_extract(accepted.payload_json, '$.messageId')
-                        AND json_extract(processing.payload_json, '$.usage.messageId') =
-                          json_extract(accepted.payload_json, '$.messageId')
-                      )
+                      json_extract(processing.payload_json, '$.usage.messageId') IS NULL
+                      OR json_extract(processing.payload_json, '$.usage.messageId') = ${messageId}
                     )
-                  LIMIT 1
-                )
-                AND NOT EXISTS (
-                  SELECT 1
-                  FROM projection_thread_activities AS recovered
-                  WHERE recovered.thread_id = accepted.thread_id
-                    AND recovered.kind = 'provider.turn.steer.recovered'
-                    AND json_extract(recovered.payload_json, '$.provider') = 'codex'
-                    AND json_extract(recovered.payload_json, '$.messageId') =
-                      json_extract(accepted.payload_json, '$.messageId')
-                    AND json_extract(recovered.payload_json, '$.acceptedTurnId') = accepted.turn_id
-                    AND json_extract(recovered.payload_json, '$.recoveredTurnId') = recovered.turn_id
-                    AND json_extract(recovered.payload_json, '$.clientCorrelationId') IS
-                      json_extract(accepted.payload_json, '$.clientCorrelationId')
-                    AND EXISTS (
-                      SELECT 1
-                      FROM orchestration_events AS recovered_event
-                      WHERE recovered_event.aggregate_kind = 'thread'
-                        AND recovered_event.stream_id = recovered.thread_id
-                        AND recovered_event.event_type = 'thread.activity-appended'
-                        AND recovered_event.actor_kind = 'server'
-                        AND json_extract(recovered_event.payload_json, '$.threadId') =
-                          recovered.thread_id
-                        AND json_extract(recovered_event.payload_json, '$.activity.id') =
-                          recovered.activity_id
-                        AND json_extract(recovered_event.payload_json, '$.activity.kind') =
-                          recovered.kind
-                        AND json_extract(recovered_event.payload_json, '$.activity.turnId') =
-                          recovered.turn_id
-                        AND json_extract(
-                          recovered_event.payload_json,
-                          '$.activity.payload.provider'
-                        ) = 'codex'
-                        AND json_extract(
-                          recovered_event.payload_json,
-                          '$.activity.payload.messageId'
-                        ) = json_extract(recovered.payload_json, '$.messageId')
-                        AND json_extract(
-                          recovered_event.payload_json,
-                          '$.activity.payload.acceptedTurnId'
-                        ) = json_extract(recovered.payload_json, '$.acceptedTurnId')
-                        AND json_extract(
-                          recovered_event.payload_json,
-                          '$.activity.payload.recoveredTurnId'
-                        ) = recovered.turn_id
-                        AND json_extract(
-                          recovered_event.payload_json,
-                          '$.activity.payload.clientCorrelationId'
-                        ) IS json_extract(recovered.payload_json, '$.clientCorrelationId')
-                      LIMIT 1
-                    )
-                  LIMIT 1
+                  )
+                  OR (
+                    ${clientCorrelationId} IS NULL
+                    AND json_extract(processing.payload_json, '$.taskId') =
+                      'codex-turn-steer-processing:' || ${messageId}
+                    AND json_extract(processing.payload_json, '$.usage.messageId') = ${messageId}
+                  )
                 )
               LIMIT 1
-            )
-          )
-        ORDER BY threads.thread_id ASC
+            ) AS processing_observed,
+            EXISTS (
+              SELECT 1
+              FROM projection_thread_activities AS processing
+              INNER JOIN orchestration_events AS processing_event
+                ON processing_event.command_id =
+                  'provider:codex:' || processing.thread_id || ':' ||
+                  processing.activity_id || ':thread-activity-append:' ||
+                  processing.activity_id
+                AND processing_event.sequence > ${intentSequence}
+                AND processing_event.aggregate_kind = 'thread'
+                AND processing_event.stream_id = processing.thread_id
+                AND processing_event.event_type = 'thread.activity-appended'
+                AND processing_event.actor_kind = 'provider'
+                AND json_extract(processing_event.payload_json, '$.threadId') =
+                  processing.thread_id
+                AND json_extract(processing_event.payload_json, '$.activity.id') =
+                  processing.activity_id
+                AND json_extract(processing_event.payload_json, '$.activity.kind') =
+                  processing.kind
+                AND json_extract(processing_event.payload_json, '$.activity.turnId') IS
+                  processing.turn_id
+                AND json_extract(processing_event.payload_json, '$.activity.createdAt') =
+                  processing.created_at
+                AND json_extract(processing_event.payload_json, '$.activity.payload') =
+                  json(processing.payload_json)
+              WHERE processing.thread_id = ${threadId}
+                AND processing.turn_id = ${acceptedTurnId}
+                AND processing.kind = 'task.progress'
+                AND processing.created_at >= ${intentCreatedAt}
+                AND (
+                  (
+                    ${clientCorrelationId} IS NOT NULL
+                    AND json_extract(processing.payload_json, '$.taskId') =
+                      'codex-turn-steer-processing:' || ${clientCorrelationId}
+                    AND json_extract(
+                      processing.payload_json,
+                      '$.usage.clientCorrelationId'
+                    ) = ${clientCorrelationId}
+                    AND json_extract(processing.payload_json, '$.usage.messageId') = ${messageId}
+                  )
+                  OR (
+                    ${clientCorrelationId} IS NULL
+                    AND json_extract(processing.payload_json, '$.taskId') =
+                      'codex-turn-steer-processing:' || ${messageId}
+                    AND json_extract(processing.payload_json, '$.usage.messageId') = ${messageId}
+                  )
+                )
+              LIMIT 1
+            ) AS prunable_processing_observed,
+            EXISTS (
+              SELECT 1
+              FROM projection_thread_activities AS recovered
+              INNER JOIN orchestration_codex_steer_recovery_barriers AS recovery_barrier
+                ON recovery_barrier.sequence > ${sequence}
+                AND recovery_barrier.thread_id = ${threadId}
+                AND recovery_barrier.barrier_kind = 'provider.turn.steer.recovered'
+                AND recovery_barrier.candidate_sequence = ${intentSequence}
+                AND recovery_barrier.activity_id = recovered.activity_id
+                AND recovery_barrier.message_id = ${messageId}
+                AND recovery_barrier.turn_id = recovered.turn_id
+                AND recovery_barrier.accepted_turn_id = ${acceptedTurnId}
+                AND recovery_barrier.client_correlation_id IS ${clientCorrelationId}
+                AND recovery_barrier.activity_created_at = recovered.created_at
+              WHERE recovered.thread_id = ${threadId}
+                AND recovered.kind = 'provider.turn.steer.recovered'
+                AND recovered.created_at >= ${acceptedAt}
+                AND json_extract(recovered.payload_json, '$.provider') = 'codex'
+                AND json_extract(recovered.payload_json, '$.messageId') = ${messageId}
+                AND json_extract(recovered.payload_json, '$.acceptedTurnId') = ${acceptedTurnId}
+                AND json_extract(recovered.payload_json, '$.recoveredTurnId') = recovered.turn_id
+                AND json_extract(recovered.payload_json, '$.clientCorrelationId') IS
+                  ${clientCorrelationId}
+              LIMIT 1
+            ) AS recovery_observed
+        )
+        SELECT
+          CASE
+            WHEN EXISTS (SELECT 1 FROM exact_accepted)
+              AND evidence.processing_observed = 0
+              AND evidence.recovery_observed = 0
+            THEN 1
+            ELSE 0
+          END AS "isCandidate",
+          CASE
+            WHEN EXISTS (SELECT 1 FROM exact_accepted)
+            THEN evidence.prunable_processing_observed
+            ELSE 0
+          END AS "processingObserved",
+          CASE
+            WHEN EXISTS (SELECT 1 FROM exact_accepted)
+            THEN evidence.recovery_observed
+            ELSE 0
+          END AS "recoveryObserved"
+        FROM evidence
       `,
   });
 
@@ -1334,11 +1385,68 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const listCodexSteerAcceptanceEvidenceRows = SqlSchema.findAll({
     Request: CodexSteerAcceptanceEvidenceLookupInput,
     Result: CodexSteerAcceptanceEvidenceRowSchema,
-    execute: ({ threadId, acceptedTurnId, messageId }) =>
-      sql`
+    execute: ({
+      exactLookup,
+      threadId,
+      acceptedTurnId,
+      messageId,
+      exactEventSequence,
+      exactIntentSequence,
+      exactActivityId,
+      exactClientCorrelationId,
+      exactAcceptedAt,
+    }) => {
+      // Do not express the exact form as `(parameter IS NULL OR column =
+      // parameter)`: SQLite cannot reliably select the primary-key access
+      // path through that shape. Startup supplies both immutable primary keys,
+      // so emit plain equalities and keep work independent of thread age.
+      const acceptedIdentityPredicate = exactLookup
+        ? sql`
+            accepted.activity_id = ${exactActivityId}
+            AND accepted.thread_id = ${threadId}
+            AND accepted.turn_id = ${acceptedTurnId}
+            AND accepted.created_at = ${exactAcceptedAt}
+            AND json_extract(accepted.payload_json, '$.messageId') = ${messageId}
+            AND json_extract(accepted.payload_json, '$.clientCorrelationId') IS
+              ${exactClientCorrelationId}
+          `
+        : sql`
+            (${threadId} IS NULL OR accepted.thread_id = ${threadId})
+            AND (${acceptedTurnId} IS NULL OR accepted.turn_id = ${acceptedTurnId})
+            AND (
+              ${messageId} IS NULL
+              OR json_extract(accepted.payload_json, '$.messageId') = ${messageId}
+            )
+          `;
+      const acceptedEventIdentityPredicate = exactLookup
+        ? sql`accepted_event.sequence = ${exactEventSequence}`
+        : sql`
+            accepted_event.aggregate_kind = 'thread'
+            AND accepted_event.stream_id = accepted.thread_id
+            AND accepted_event.event_type = 'thread.activity-appended'
+          `;
+      const acceptedIntentIdentityPredicate = exactLookup
+        ? sql`accepted_intent.sequence = ${exactIntentSequence}`
+        : sql`
+            accepted_intent.sequence = json_extract(accepted.payload_json, '$.intentSequence')
+          `;
+      const acceptedIntentPayloadPredicate = exactLookup
+        ? sql`
+            (
+              json_extract(accepted.payload_json, '$.intentSequence') =
+                accepted_intent.sequence
+              OR json_type(accepted.payload_json, '$.intentSequence') IS NULL
+            )
+          `
+        : sql`
+            json_extract(accepted.payload_json, '$.intentSequence') = accepted_intent.sequence
+          `;
+
+      return sql`
         SELECT
           accepted.thread_id AS "threadId",
           accepted.turn_id AS "acceptedTurnId",
+          accepted_intent.sequence AS "intentSequence",
           json_extract(accepted.payload_json, '$.clientCorrelationId') AS "clientCorrelationId",
           json_extract(accepted.payload_json, '$.messageId') AS "messageId",
           message.turn_id AS "messageTurnId",
@@ -1350,9 +1458,30 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           EXISTS (
             SELECT 1
             FROM projection_thread_activities AS processing
+            INNER JOIN orchestration_events AS processing_event
+              ON processing_event.command_id =
+                'provider:codex:' || processing.thread_id || ':' ||
+                processing.activity_id || ':thread-activity-append:' || processing.activity_id
+              AND processing_event.sequence > accepted_intent.sequence
+              AND processing_event.aggregate_kind = 'thread'
+              AND processing_event.stream_id = processing.thread_id
+              AND processing_event.event_type = 'thread.activity-appended'
+              AND processing_event.actor_kind = 'provider'
+              AND json_extract(processing_event.payload_json, '$.threadId') =
+                processing.thread_id
+              AND json_extract(processing_event.payload_json, '$.activity.id') =
+                processing.activity_id
+              AND json_extract(processing_event.payload_json, '$.activity.kind') = processing.kind
+              AND json_extract(processing_event.payload_json, '$.activity.turnId') IS
+                processing.turn_id
+              AND json_extract(processing_event.payload_json, '$.activity.createdAt') =
+                processing.created_at
+              AND json_extract(processing_event.payload_json, '$.activity.payload') =
+                json(processing.payload_json)
             WHERE processing.thread_id = accepted.thread_id
               AND processing.turn_id = accepted.turn_id
               AND processing.kind = 'task.progress'
+              AND processing.created_at >= accepted_intent.occurred_at
               AND (
                 (
                   json_extract(accepted.payload_json, '$.clientCorrelationId') IS NOT NULL
@@ -1388,12 +1517,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 json_extract(accepted.payload_json, '$.messageId')
               AND json_extract(recovered.payload_json, '$.acceptedTurnId') = accepted.turn_id
               AND json_extract(recovered.payload_json, '$.recoveredTurnId') = recovered.turn_id
+              AND json_extract(recovered.payload_json, '$.intentSequence') =
+                accepted_intent.sequence
               AND json_extract(recovered.payload_json, '$.clientCorrelationId') IS
                 json_extract(accepted.payload_json, '$.clientCorrelationId')
               AND EXISTS (
                 SELECT 1
                 FROM orchestration_events AS recovered_event
                 WHERE recovered_event.aggregate_kind = 'thread'
+                  AND recovered_event.sequence > accepted_event.sequence
                   AND recovered_event.stream_id = recovered.thread_id
                   AND recovered_event.event_type = 'thread.activity-appended'
                   AND recovered_event.actor_kind = 'server'
@@ -1417,6 +1549,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                     recovered_event.payload_json,
                     '$.activity.payload.recoveredTurnId'
                   ) = recovered.turn_id
+                  AND json_extract(
+                    recovered_event.payload_json,
+                    '$.activity.payload.intentSequence'
+                  ) = accepted_intent.sequence
                   AND json_extract(
                     recovered_event.payload_json,
                     '$.activity.payload.clientCorrelationId'
@@ -1459,7 +1595,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           ) AS "sessionStopRequested"
         FROM projection_thread_activities AS accepted
         INNER JOIN orchestration_events AS accepted_event
-          ON accepted_event.aggregate_kind = 'thread'
+          ON ${acceptedEventIdentityPredicate}
+          AND accepted_event.aggregate_kind = 'thread'
           AND accepted_event.stream_id = accepted.thread_id
           AND accepted_event.event_type = 'thread.activity-appended'
           AND accepted_event.actor_kind = 'server'
@@ -1476,6 +1613,21 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             accepted_event.payload_json,
             '$.activity.payload.clientCorrelationId'
           ) IS json_extract(accepted.payload_json, '$.clientCorrelationId')
+        INNER JOIN orchestration_events AS accepted_intent
+          ON ${acceptedIntentIdentityPredicate}
+          AND accepted_intent.sequence < accepted_event.sequence
+          AND accepted_intent.aggregate_kind = 'thread'
+          AND accepted_intent.stream_id = accepted.thread_id
+          AND accepted_intent.event_type IN (
+            'thread.turn-start-requested',
+            'thread.turn-steer-requested'
+          )
+          AND accepted_intent.actor_kind IN ('client', 'server')
+          AND json_extract(accepted_intent.payload_json, '$.threadId') = accepted.thread_id
+          AND json_extract(accepted_intent.payload_json, '$.messageId') =
+            json_extract(accepted.payload_json, '$.messageId')
+          AND json_extract(accepted_intent.payload_json, '$.createdAt') =
+            accepted_intent.occurred_at
         INNER JOIN projection_thread_messages AS message
           ON message.thread_id = accepted.thread_id
           AND message.message_id = json_extract(accepted.payload_json, '$.messageId')
@@ -1486,327 +1638,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         WHERE accepted.kind = 'provider.turn.steer.accepted'
           AND json_extract(accepted.payload_json, '$.provider') = 'codex'
           AND json_extract(accepted.payload_json, '$.acceptedTurnId') = accepted.turn_id
+          AND ${acceptedIntentPayloadPredicate}
           AND (
             json_type(accepted.payload_json, '$.clientCorrelationId') IS NULL
             OR json_type(accepted.payload_json, '$.clientCorrelationId') = 'text'
           )
-          AND (${threadId} IS NULL OR accepted.thread_id = ${threadId})
-          AND (${acceptedTurnId} IS NULL OR accepted.turn_id = ${acceptedTurnId})
-          AND (
-            ${messageId} IS NULL
-            OR json_extract(accepted.payload_json, '$.messageId') = ${messageId}
-          )
+          AND ${acceptedIdentityPredicate}
         ORDER BY accepted.created_at ASC, accepted.thread_id ASC, accepted.turn_id ASC,
           json_extract(accepted.payload_json, '$.messageId') ASC
-      `,
-  });
-
-  /**
-   * Discover event-store intents, not projected message tails. A crash can
-   * happen after the canonical steer event commits but before the reactor
-   * reaches provider I/O, so there may be no acceptance activity to drive the
-   * older recovery query. Only authenticated client/server events for active
-   * Codex threads are eligible; provider-authored lookalikes never become
-   * replay authority. Successful delivery stays correlated by the immutable
-   * Cafe message id for renderer settlement, while pre-I/O attempts and queue
-   * failures additionally bind the exact intent sequence because an automatic
-   * retry intentionally reuses MessageId. Activity outcomes require a later,
-   * exact server-authored event join before they can suppress startup replay.
-   */
-  const listUnsettledCodexSteerIntentEventRows = SqlSchema.findAll({
-    Request: UnsettledCodexSteerIntentLookupInput,
-    Result: UnsettledCodexSteerIntentEventRowSchema,
-    execute: ({ threadId }) =>
-      sql`
-        SELECT
-          intent.sequence AS "sequence",
-          intent.stream_id AS "threadId",
-          json_extract(intent.payload_json, '$.messageId') AS "messageId",
-          json_extract(intent.payload_json, '$.expectedTurnId') AS "expectedTurnId",
-          intent.occurred_at AS "createdAt"
-        FROM orchestration_events AS intent
-        INNER JOIN projection_threads AS threads
-          ON threads.thread_id = intent.stream_id
-        INNER JOIN projection_thread_sessions AS sessions
-          ON sessions.thread_id = intent.stream_id
-        WHERE intent.aggregate_kind = 'thread'
-          AND intent.event_type = 'thread.turn-steer-requested'
-          AND intent.actor_kind IN ('client', 'server')
-          AND threads.deleted_at IS NULL
-          AND threads.archived_at IS NULL
-          AND sessions.provider_name = 'codex'
-          AND (${threadId} IS NULL OR intent.stream_id = ${threadId})
-          AND json_extract(intent.payload_json, '$.threadId') = intent.stream_id
-          AND json_type(intent.payload_json, '$.messageId') = 'text'
-          AND (
-            json_type(intent.payload_json, '$.expectedTurnId') IS NULL
-            OR json_type(intent.payload_json, '$.expectedTurnId') IN ('text', 'null')
-          )
-          AND json_extract(intent.payload_json, '$.createdAt') = intent.occurred_at
-          AND NOT EXISTS (
-            SELECT 1
-            FROM projection_thread_activities AS accepted
-            WHERE accepted.thread_id = intent.stream_id
-              AND accepted.kind = 'provider.turn.steer.accepted'
-              AND json_extract(accepted.payload_json, '$.provider') = 'codex'
-              AND json_extract(accepted.payload_json, '$.messageId') =
-                json_extract(intent.payload_json, '$.messageId')
-              AND json_extract(accepted.payload_json, '$.acceptedTurnId') = accepted.turn_id
-              AND (
-                json_type(accepted.payload_json, '$.clientCorrelationId') IS NULL
-                OR json_type(accepted.payload_json, '$.clientCorrelationId') = 'text'
-              )
-              AND EXISTS (
-                SELECT 1
-                FROM orchestration_events AS accepted_event
-                WHERE accepted_event.aggregate_kind = 'thread'
-                  AND accepted_event.sequence > intent.sequence
-                  AND accepted_event.stream_id = accepted.thread_id
-                  AND accepted_event.event_type = 'thread.activity-appended'
-                  AND accepted_event.actor_kind = 'server'
-                  AND json_extract(accepted_event.payload_json, '$.threadId') =
-                    accepted.thread_id
-                  AND json_extract(accepted_event.payload_json, '$.activity.id') =
-                    accepted.activity_id
-                  AND json_extract(accepted_event.payload_json, '$.activity.kind') = accepted.kind
-                  AND json_extract(accepted_event.payload_json, '$.activity.turnId') IS
-                    accepted.turn_id
-                  AND json_extract(accepted_event.payload_json, '$.activity.payload.provider') =
-                    'codex'
-                  AND json_extract(accepted_event.payload_json, '$.activity.payload.messageId') =
-                    json_extract(accepted.payload_json, '$.messageId')
-                  AND json_extract(
-                    accepted_event.payload_json,
-                    '$.activity.payload.acceptedTurnId'
-                  ) = accepted.turn_id
-                  AND json_extract(
-                    accepted_event.payload_json,
-                    '$.activity.payload.clientCorrelationId'
-                  ) IS json_extract(accepted.payload_json, '$.clientCorrelationId')
-                LIMIT 1
-              )
-            LIMIT 1
-          )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM projection_thread_activities AS failed
-            WHERE failed.thread_id = intent.stream_id
-              AND failed.kind = 'provider.turn.steer.failed'
-              AND json_extract(failed.payload_json, '$.messageId') =
-                json_extract(intent.payload_json, '$.messageId')
-              AND (
-                json_type(failed.payload_json, '$.intentSequence') IS NULL
-                OR json_extract(failed.payload_json, '$.intentSequence') = intent.sequence
-              )
-              AND EXISTS (
-                SELECT 1
-                FROM orchestration_events AS failed_event
-                WHERE failed_event.aggregate_kind = 'thread'
-                  AND failed_event.sequence > intent.sequence
-                  AND failed_event.stream_id = failed.thread_id
-                  AND failed_event.event_type = 'thread.activity-appended'
-                  AND failed_event.actor_kind = 'server'
-                  AND json_extract(failed_event.payload_json, '$.threadId') = failed.thread_id
-                  AND json_extract(failed_event.payload_json, '$.activity.id') = failed.activity_id
-                  AND json_extract(failed_event.payload_json, '$.activity.kind') = failed.kind
-                  AND json_extract(failed_event.payload_json, '$.activity.turnId') IS
-                    failed.turn_id
-                  AND json_extract(failed_event.payload_json, '$.activity.payload.messageId') =
-                    json_extract(failed.payload_json, '$.messageId')
-                  AND json_extract(
-                    failed_event.payload_json,
-                    '$.activity.payload.intentSequence'
-                  ) IS json_extract(failed.payload_json, '$.intentSequence')
-                LIMIT 1
-              )
-            LIMIT 1
-          )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM projection_thread_activities AS recovered
-            WHERE recovered.thread_id = intent.stream_id
-              AND recovered.kind = 'provider.turn.steer.recovered'
-              AND json_extract(recovered.payload_json, '$.provider') = 'codex'
-              AND json_extract(recovered.payload_json, '$.messageId') =
-                json_extract(intent.payload_json, '$.messageId')
-              AND json_extract(recovered.payload_json, '$.acceptedTurnId') IS NOT NULL
-              AND json_extract(recovered.payload_json, '$.recoveredTurnId') = recovered.turn_id
-              AND EXISTS (
-                SELECT 1
-                FROM orchestration_events AS recovered_event
-                WHERE recovered_event.aggregate_kind = 'thread'
-                  AND recovered_event.sequence > intent.sequence
-                  AND recovered_event.stream_id = recovered.thread_id
-                  AND recovered_event.event_type = 'thread.activity-appended'
-                  AND recovered_event.actor_kind = 'server'
-                  AND json_extract(recovered_event.payload_json, '$.threadId') =
-                    recovered.thread_id
-                  AND json_extract(recovered_event.payload_json, '$.activity.id') =
-                    recovered.activity_id
-                  AND json_extract(recovered_event.payload_json, '$.activity.kind') =
-                    recovered.kind
-                  AND json_extract(recovered_event.payload_json, '$.activity.turnId') IS
-                    recovered.turn_id
-                  AND json_extract(recovered_event.payload_json, '$.activity.payload.provider') =
-                    'codex'
-                  AND json_extract(recovered_event.payload_json, '$.activity.payload.messageId') =
-                    json_extract(recovered.payload_json, '$.messageId')
-                  AND json_extract(
-                    recovered_event.payload_json,
-                    '$.activity.payload.acceptedTurnId'
-                  ) = json_extract(recovered.payload_json, '$.acceptedTurnId')
-                  AND json_extract(
-                    recovered_event.payload_json,
-                    '$.activity.payload.recoveredTurnId'
-                  ) = recovered.turn_id
-                  AND json_extract(
-                    recovered_event.payload_json,
-                    '$.activity.payload.clientCorrelationId'
-                  ) IS json_extract(recovered.payload_json, '$.clientCorrelationId')
-                LIMIT 1
-              )
-            LIMIT 1
-          )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM projection_thread_activities AS delivered
-            WHERE delivered.thread_id = intent.stream_id
-              AND delivered.kind = 'provider.turn.steer.delivered'
-              AND json_extract(delivered.payload_json, '$.provider') = 'codex'
-              AND json_extract(delivered.payload_json, '$.messageId') =
-                json_extract(intent.payload_json, '$.messageId')
-              AND json_extract(delivered.payload_json, '$.deliveredTurnId') = delivered.turn_id
-              AND json_extract(delivered.payload_json, '$.delivery') = 'next-turn'
-              AND json_extract(delivered.payload_json, '$.reason') IN (
-                'turn-start-after-no-local-active-turn',
-                'turn-start-after-missing-active-turn-id',
-                'turn-start-after-provider-no-active-turn'
-              )
-              AND EXISTS (
-                SELECT 1
-                FROM orchestration_events AS delivered_event
-                WHERE delivered_event.aggregate_kind = 'thread'
-                  AND delivered_event.sequence > intent.sequence
-                  AND delivered_event.stream_id = delivered.thread_id
-                  AND delivered_event.event_type = 'thread.activity-appended'
-                  AND delivered_event.actor_kind = 'server'
-                  AND json_extract(delivered_event.payload_json, '$.threadId') =
-                    delivered.thread_id
-                  AND json_extract(delivered_event.payload_json, '$.activity.id') =
-                    delivered.activity_id
-                  AND json_extract(delivered_event.payload_json, '$.activity.kind') =
-                    delivered.kind
-                  AND json_extract(delivered_event.payload_json, '$.activity.turnId') IS
-                    delivered.turn_id
-                  AND json_extract(delivered_event.payload_json, '$.activity.payload.provider') =
-                    'codex'
-                  AND json_extract(delivered_event.payload_json, '$.activity.payload.messageId') =
-                    json_extract(delivered.payload_json, '$.messageId')
-                  AND json_extract(
-                    delivered_event.payload_json,
-                    '$.activity.payload.deliveredTurnId'
-                  ) = delivered.turn_id
-                  AND json_extract(delivered_event.payload_json, '$.activity.payload.delivery') =
-                    'next-turn'
-                  AND json_extract(delivered_event.payload_json, '$.activity.payload.reason') =
-                    json_extract(delivered.payload_json, '$.reason')
-                LIMIT 1
-              )
-            LIMIT 1
-          )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM projection_thread_activities AS attempted
-            WHERE attempted.thread_id = intent.stream_id
-              AND attempted.kind = 'provider.turn.steer.delivery-attempted'
-              AND json_extract(attempted.payload_json, '$.provider') = 'codex'
-              AND json_extract(attempted.payload_json, '$.messageId') =
-                json_extract(intent.payload_json, '$.messageId')
-              AND json_type(attempted.payload_json, '$.intentSequence') = 'integer'
-              AND json_extract(attempted.payload_json, '$.intentSequence') = intent.sequence
-              AND json_extract(attempted.payload_json, '$.deliveryState') = 'attempted'
-              AND (
-                (
-                  json_extract(attempted.payload_json, '$.delivery') = 'live-steer'
-                  AND json_extract(attempted.payload_json, '$.reason') = 'live-steer'
-                  AND json_extract(attempted.payload_json, '$.expectedTurnId') = attempted.turn_id
-                )
-                OR (
-                  json_extract(attempted.payload_json, '$.delivery') = 'next-turn'
-                  AND json_extract(attempted.payload_json, '$.reason') IN (
-                    'turn-start-after-no-local-active-turn',
-                    'turn-start-after-missing-active-turn-id',
-                    'turn-start-after-provider-no-active-turn',
-                    'turn-start-after-terminal-unprocessed-steer'
-                  )
-                  AND json_extract(attempted.payload_json, '$.staleTurnId') IS attempted.turn_id
-                )
-              )
-              AND EXISTS (
-                SELECT 1
-                FROM orchestration_events AS attempted_event
-                WHERE attempted_event.aggregate_kind = 'thread'
-                  AND attempted_event.sequence > intent.sequence
-                  AND attempted_event.stream_id = attempted.thread_id
-                  AND attempted_event.event_type = 'thread.activity-appended'
-                  AND attempted_event.actor_kind = 'server'
-                  AND json_extract(attempted_event.payload_json, '$.threadId') =
-                    attempted.thread_id
-                  AND json_extract(attempted_event.payload_json, '$.activity.id') =
-                    attempted.activity_id
-                  AND json_extract(attempted_event.payload_json, '$.activity.kind') = attempted.kind
-                  AND json_extract(attempted_event.payload_json, '$.activity.turnId') IS
-                    attempted.turn_id
-                  AND json_extract(attempted_event.payload_json, '$.activity.payload.provider') =
-                    'codex'
-                  AND json_extract(attempted_event.payload_json, '$.activity.payload.messageId') =
-                    json_extract(attempted.payload_json, '$.messageId')
-                  AND json_extract(
-                    attempted_event.payload_json,
-                    '$.activity.payload.intentSequence'
-                  ) = intent.sequence
-                  AND json_extract(
-                    attempted_event.payload_json,
-                    '$.activity.payload.intentSequence'
-                  ) = json_extract(attempted.payload_json, '$.intentSequence')
-                  AND json_extract(attempted_event.payload_json, '$.activity.payload.delivery') =
-                    json_extract(attempted.payload_json, '$.delivery')
-                  AND json_extract(
-                    attempted_event.payload_json,
-                    '$.activity.payload.deliveryState'
-                  ) = 'attempted'
-                  AND json_extract(attempted_event.payload_json, '$.activity.payload.reason') =
-                    json_extract(attempted.payload_json, '$.reason')
-                  AND json_extract(
-                    attempted_event.payload_json,
-                    '$.activity.payload.expectedTurnId'
-                  ) IS json_extract(attempted.payload_json, '$.expectedTurnId')
-                  AND json_extract(
-                    attempted_event.payload_json,
-                    '$.activity.payload.staleTurnId'
-                  ) IS json_extract(attempted.payload_json, '$.staleTurnId')
-                LIMIT 1
-              )
-            LIMIT 1
-          )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM orchestration_events AS later_intent
-            WHERE later_intent.sequence > intent.sequence
-              AND later_intent.aggregate_kind = 'thread'
-              AND later_intent.stream_id = intent.stream_id
-              AND later_intent.event_type IN (
-                'thread.turn-start-requested',
-                'thread.turn-steer-requested'
-              )
-              AND later_intent.actor_kind IN ('client', 'server')
-              AND json_extract(later_intent.payload_json, '$.threadId') = intent.stream_id
-              AND json_extract(later_intent.payload_json, '$.messageId') =
-                json_extract(intent.payload_json, '$.messageId')
-            LIMIT 1
-          )
-        ORDER BY intent.sequence ASC
-      `,
+      `;
+    },
   });
 
   /**
@@ -1816,17 +1657,60 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
    * discovery query would let a wrong-token activity suppress an undelivered
    * intent. Binding the independently derived token, exact task id, and raw
    * message identity here makes all three fields agree before replay settles.
+   * The indexed deterministic provider command id then binds the projection
+   * row back to its immutable source event, and that event must be newer than
+   * this exact candidate generation. Wall-clock timestamps are insufficient:
+   * reconnect replay can deliver an older observation after a newer intent.
    */
   const findExactCodexSteerProcessingEvidenceRow = SqlSchema.findOne({
     Request: CodexSteerProcessingEvidenceLookupInput,
     Result: CodexSteerProcessingEvidenceRowSchema,
-    execute: ({ threadId, messageId, clientCorrelationId, taskId }) =>
+    execute: ({
+      candidateSequence,
+      candidateCreatedAt,
+      threadId,
+      expectedTurnId,
+      messageId,
+      clientCorrelationId,
+      taskId,
+    }) =>
       sql`
         SELECT EXISTS (
           SELECT 1
+          -- This join order is a startup-liveness boundary, not merely a
+          -- planner hint. On mature ledgers SQLite otherwise starts from
+          -- idx_orch_events_stream_sequence and synchronously scans every
+          -- later event in a long-running thread before it considers the
+          -- selective task-progress projection predicate. CROSS JOIN keeps
+          -- the small thread/kind/created-at candidate set outermost, then the
+          -- immutable source event is one command-id index probe per row.
           FROM projection_thread_activities AS processing
+            INDEXED BY idx_projection_thread_activities_thread_turn_kind_created_id
+          CROSS JOIN orchestration_events AS processing_event
+            INDEXED BY idx_orch_events_command_id
+            ON processing_event.command_id =
+              'provider:codex:' || processing.thread_id || ':' ||
+              processing.activity_id || ':thread-activity-append:' || processing.activity_id
+            AND processing_event.sequence > ${candidateSequence}
+            AND processing_event.aggregate_kind = 'thread'
+            AND processing_event.stream_id = processing.thread_id
+            AND processing_event.event_type = 'thread.activity-appended'
+            AND processing_event.actor_kind = 'provider'
+            AND json_extract(processing_event.payload_json, '$.threadId') =
+              processing.thread_id
+            AND json_extract(processing_event.payload_json, '$.activity.id') =
+              processing.activity_id
+            AND json_extract(processing_event.payload_json, '$.activity.kind') = processing.kind
+            AND json_extract(processing_event.payload_json, '$.activity.turnId') IS
+              processing.turn_id
+            AND json_extract(processing_event.payload_json, '$.activity.createdAt') =
+              processing.created_at
+            AND json_extract(processing_event.payload_json, '$.activity.payload') =
+              json(processing.payload_json)
           WHERE processing.thread_id = ${threadId}
+            AND processing.turn_id IS ${expectedTurnId}
             AND processing.kind = 'task.progress'
+            AND processing.created_at >= ${candidateCreatedAt}
             AND json_type(processing.payload_json, '$.taskId') = 'text'
             AND json_extract(processing.payload_json, '$.taskId') = ${taskId}
             AND json_type(processing.payload_json, '$.usage.clientCorrelationId') = 'text'
@@ -1971,8 +1855,18 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         latest_task_plan_activity_id AS (
           SELECT activity_id
           FROM projection_thread_activities
+            INDEXED BY idx_projection_thread_activities_thread_kind_created_id
           WHERE thread_id = ${threadId}
             AND kind = 'turn.plan.updated'
+          -- The thread-recent index matches this ordering but does not contain
+          -- the kind column. On a mature thread with no plan (or only a very old plan),
+          -- SQLite can otherwise walk hundreds of thousands of recent activity
+          -- entries and perform a table lookup for each one before proving that
+          -- no newer plan exists. NodeSqlite executes synchronously, so that
+          -- cold scan also starves HTTP and WebSocket liveness. Force the
+          -- thread+kind index to bound the candidate set to plan rows; sorting
+          -- that normally tiny set is substantially safer than scanning the
+          -- full thread history.
           ORDER BY
             CASE WHEN sequence IS NULL THEN 0 ELSE 1 END DESC,
             sequence DESC,
@@ -3408,24 +3302,137 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       } satisfies OrchestrationThreadShell);
     });
 
+  const getPostTerminalStaleSteerCandidates: ProjectionSnapshotQueryShape["getPostTerminalStaleSteerCandidates"] =
+    (providedActiveCodexThreadIds, providedLegacyCandidateThreadIds = []) =>
+      Effect.gen(function* () {
+        const activeCodexThreadIds =
+          providedActiveCodexThreadIds ??
+          (yield* listActiveCodexThreadIdRows(undefined).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getPostTerminalStaleSteerCandidates:listActiveCodexThreads:query",
+                "ProjectionSnapshotQuery.getPostTerminalStaleSteerCandidates:listActiveCodexThreads:decodeRows",
+              ),
+            ),
+            Effect.map((rows) => rows.map((row) => row.threadId)),
+          ));
+
+        // The old query placed the complete correlated recovery predicate on
+        // a global projection/event scan. Mature installations can retain
+        // millions of activity rows, and fresh databases no longer create the
+        // retired JSON expression indexes which happened to mask that shape.
+        // Legacy candidates are derived from the lightweight shell snapshot
+        // by the startup owner. Never rediscover them with a per-thread scan:
+        // mature threads may contain millions of messages and activities, and
+        // that old bootstrap fan-out can block node:sqlite's synchronous main
+        // thread even when both compact ledgers are empty.
+        const uniqueThreadIds = [...new Set(activeCodexThreadIds)];
+        const activeThreadIdSet = new Set(uniqueThreadIds);
+        const legacyCandidates = [...new Set(providedLegacyCandidateThreadIds)]
+          .filter((threadId) => activeThreadIdSet.has(threadId))
+          .map(
+            (threadId) =>
+              ({ _tag: "legacy", threadId }) satisfies ProjectionLegacyCodexSteerCandidate,
+          );
+        const acceptedBarriers = yield* hydrateAndReadUnsettledCodexSteerIntents(
+          sql,
+          uniqueThreadIds,
+        ).pipe(
+          Effect.flatMap(() => readAcceptedCodexSteerRecoveryBarriers(sql, uniqueThreadIds)),
+          Effect.mapError(
+            toPersistenceSqlError(
+              "ProjectionSnapshotQuery.getPostTerminalStaleSteerCandidates:readAcceptedLedger",
+            ),
+          ),
+        );
+        const acceptedCandidateRows = yield* Effect.forEach(
+          acceptedBarriers,
+          (barrier) =>
+            findPostTerminalAcceptedSteerCandidateRow(barrier).pipe(
+              Effect.mapError(
+                toPersistenceSqlOrDecodeError(
+                  "ProjectionSnapshotQuery.getPostTerminalStaleSteerCandidates:acceptedCandidateQuery",
+                  "ProjectionSnapshotQuery.getPostTerminalStaleSteerCandidates:acceptedCandidateDecodeRow",
+                ),
+              ),
+              Effect.flatMap((row) => {
+                const correlationIsCanonical =
+                  barrier.clientCorrelationId !== null &&
+                  barrier.clientCorrelationId ===
+                    buildCodexSteerClientCorrelationId(barrier.messageId);
+                const mayPrune =
+                  row.recoveryObserved > 0 ||
+                  (row.processingObserved > 0 && correlationIsCanonical);
+                if (mayPrune) {
+                  return pruneSettledAcceptedCodexSteerRecoveryCandidate(sql, barrier).pipe(
+                    Effect.mapError(
+                      toPersistenceSqlError(
+                        "ProjectionSnapshotQuery.getPostTerminalStaleSteerCandidates:pruneSettledAcceptedCandidate",
+                      ),
+                    ),
+                    Effect.as(null),
+                  );
+                }
+                return Effect.succeed(
+                  row.isCandidate > 0
+                    ? ({
+                        _tag: "accepted",
+                        threadId: barrier.threadId,
+                        eventSequence: barrier.sequence,
+                        intentSequence: barrier.intentSequence,
+                        intentCreatedAt: barrier.intentCreatedAt,
+                        activityId: barrier.activityId,
+                        acceptedTurnId: barrier.acceptedTurnId,
+                        clientCorrelationId: barrier.clientCorrelationId,
+                        messageId: barrier.messageId,
+                        acceptedAt: barrier.acceptedAt,
+                      } satisfies ProjectionAcceptedCodexSteerCandidate)
+                    : null,
+                );
+              }),
+            ),
+          { concurrency: 4 },
+        );
+        return [
+          ...legacyCandidates,
+          ...acceptedCandidateRows.flatMap((candidate) => (candidate === null ? [] : [candidate])),
+        ].toSorted((left, right) => {
+          const threadOrder = left.threadId.localeCompare(right.threadId);
+          if (threadOrder !== 0) {
+            return threadOrder;
+          }
+          if (left._tag !== right._tag) {
+            return left._tag === "legacy" ? -1 : 1;
+          }
+          return left._tag === "accepted" && right._tag === "accepted"
+            ? left.eventSequence - right.eventSequence
+            : 0;
+        });
+      });
+
   const getPostTerminalStaleSteerCandidateThreadIds: ProjectionSnapshotQueryShape["getPostTerminalStaleSteerCandidateThreadIds"] =
-    () =>
-      listPostTerminalStaleSteerCandidateThreadRows(undefined).pipe(
-        Effect.mapError(
-          toPersistenceSqlOrDecodeError(
-            "ProjectionSnapshotQuery.getPostTerminalStaleSteerCandidateThreadIds:query",
-            "ProjectionSnapshotQuery.getPostTerminalStaleSteerCandidateThreadIds:decodeRows",
+    (activeCodexThreadIds, legacyCandidateThreadIds) =>
+      getPostTerminalStaleSteerCandidates(activeCodexThreadIds, legacyCandidateThreadIds).pipe(
+        Effect.map((candidates) =>
+          [...new Set(candidates.map((candidate) => candidate.threadId))].toSorted((left, right) =>
+            left.localeCompare(right),
           ),
         ),
-        Effect.map((rows) => rows.map((row) => row.threadId)),
       );
 
   const getCodexSteerAcceptanceEvidence: ProjectionSnapshotQueryShape["getCodexSteerAcceptanceEvidence"] =
-    (input: ProjectionCodexSteerAcceptanceEvidenceInput = {}) =>
-      listCodexSteerAcceptanceEvidenceRows({
-        threadId: input.threadId ?? null,
-        acceptedTurnId: input.acceptedTurnId ?? null,
-        messageId: input.messageId ?? null,
+    (input: ProjectionCodexSteerAcceptanceEvidenceInput = {}) => {
+      const exactAcceptedBarrier = input.exactAcceptedBarrier;
+      return listCodexSteerAcceptanceEvidenceRows({
+        exactLookup: exactAcceptedBarrier !== undefined,
+        threadId: exactAcceptedBarrier?.threadId ?? input.threadId ?? null,
+        acceptedTurnId: exactAcceptedBarrier?.acceptedTurnId ?? input.acceptedTurnId ?? null,
+        messageId: exactAcceptedBarrier?.messageId ?? input.messageId ?? null,
+        exactEventSequence: exactAcceptedBarrier?.eventSequence ?? null,
+        exactIntentSequence: exactAcceptedBarrier?.intentSequence ?? null,
+        exactActivityId: exactAcceptedBarrier?.activityId ?? null,
+        exactClientCorrelationId: exactAcceptedBarrier?.clientCorrelationId ?? null,
+        exactAcceptedAt: exactAcceptedBarrier?.acceptedAt ?? null,
       }).pipe(
         Effect.mapError(
           toPersistenceSqlOrDecodeError(
@@ -3438,6 +3445,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             rows.map((row) => ({
               threadId: row.threadId,
               acceptedTurnId: row.acceptedTurnId,
+              intentSequence: row.intentSequence,
               clientCorrelationId: row.clientCorrelationId,
               messageId: row.messageId,
               messageTurnId: row.messageTurnId,
@@ -3453,23 +3461,43 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             })),
         ),
       );
+    };
 
   const getUnsettledCodexSteerIntentEvents: ProjectionSnapshotQueryShape["getUnsettledCodexSteerIntentEvents"] =
     (input) =>
-      listUnsettledCodexSteerIntentEventRows({ threadId: input?.threadId ?? null }).pipe(
+      listActiveCodexThreadIdRows(undefined).pipe(
         Effect.mapError(
           toPersistenceSqlOrDecodeError(
-            "ProjectionSnapshotQuery.getUnsettledCodexSteerIntentEvents:query",
-            "ProjectionSnapshotQuery.getUnsettledCodexSteerIntentEvents:decodeRows",
+            "ProjectionSnapshotQuery.getUnsettledCodexSteerIntentEvents:listActiveCodexThreads:query",
+            "ProjectionSnapshotQuery.getUnsettledCodexSteerIntentEvents:listActiveCodexThreads:decodeRows",
           ),
         ),
-        Effect.flatMap((rows) =>
-          Effect.forEach(
+        Effect.map((rows) =>
+          rows
+            .map((row) => row.threadId)
+            .filter((threadId) => input?.threadId === undefined || threadId === input.threadId),
+        ),
+        Effect.flatMap((activeCodexThreadIds) =>
+          hydrateAndReadUnsettledCodexSteerIntents(sql, activeCodexThreadIds),
+        ),
+        Effect.mapError(
+          toPersistenceSqlError(
+            "ProjectionSnapshotQuery.getUnsettledCodexSteerIntentEvents:readLedger",
+          ),
+        ),
+        Effect.flatMap((rows) => {
+          if (input?.reconcileDurableProcessing === false) {
+            return Effect.succeed<ReadonlyArray<PersistedUnsettledCodexSteerIntent | null>>(rows);
+          }
+          return Effect.forEach(
             rows,
             (row) => {
               const clientCorrelationId = buildCodexSteerClientCorrelationId(row.messageId);
               return findExactCodexSteerProcessingEvidenceRow({
+                candidateSequence: row.sequence,
+                candidateCreatedAt: row.createdAt,
                 threadId: row.threadId,
+                expectedTurnId: row.expectedTurnId,
                 messageId: row.messageId,
                 clientCorrelationId,
                 taskId: `codex-turn-steer-processing:${clientCorrelationId}`,
@@ -3480,15 +3508,26 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                     "ProjectionSnapshotQuery.getUnsettledCodexSteerIntentEvents:processingDecodeRow",
                   ),
                 ),
-                Effect.map((processing) => (processing.processingObserved > 0 ? null : row)),
+                Effect.flatMap((processing) =>
+                  processing.processingObserved > 0
+                    ? pruneSettledCodexSteerIntent(sql, row).pipe(
+                        Effect.mapError(
+                          toPersistenceSqlError(
+                            "ProjectionSnapshotQuery.getUnsettledCodexSteerIntentEvents:pruneProcessedCandidate",
+                          ),
+                        ),
+                        Effect.as(null),
+                      )
+                    : Effect.succeed(row),
+                ),
               );
             },
             // Genuine crash-before-I/O candidates are rare. Keep the exact
             // evidence lookups bounded so corrupt or adversarial ledgers cannot
             // turn startup reconciliation into unbounded SQLite contention.
             { concurrency: 8 },
-          ),
-        ),
+          );
+        }),
         Effect.map(
           (rows): ReadonlyArray<ProjectionUnsettledCodexSteerIntentEvent> =>
             rows.flatMap((row) =>
@@ -3823,6 +3862,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getFirstActiveThreadIdByProjectId,
     getThreadCheckpointContext,
     getThreadShellById,
+    getPostTerminalStaleSteerCandidates,
     getPostTerminalStaleSteerCandidateThreadIds,
     getCodexSteerAcceptanceEvidence,
     getUnsettledCodexSteerIntentEvents,

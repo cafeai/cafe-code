@@ -8,8 +8,10 @@ import {
   guardRemoteProviderThreadOperation,
   isVoidProviderDaemonRpcMethod,
   ProviderDaemonRpcResponseError,
+  providerDaemonReplayCursorForHealth,
   providerDaemonRequestThreadIds,
   remoteProviderCursorProjectorForConfig,
+  resolveProviderDaemonReplayCursor,
   toRemoteRequestError,
 } from "./RemoteProviderService.ts";
 import {
@@ -162,6 +164,55 @@ describe("RemoteProviderService", () => {
       PROVIDER_SUPERVISOR_RUNTIME_CURSOR_PROJECTOR,
     );
   });
+
+  it("resumes at the exact durable cursor when daemon health proves the runtime is idle", () => {
+    assert.equal(
+      providerDaemonReplayCursorForHealth({
+        persistedCursor: 44_289_959,
+        activeSessionCount: 0,
+      }),
+      44_289_959,
+    );
+  });
+
+  it("retains the bounded overlap while daemon sessions are active", () => {
+    assert.equal(
+      providerDaemonReplayCursorForHealth({
+        persistedCursor: 44_289_959,
+        activeSessionCount: 2,
+      }),
+      44_288_959,
+    );
+  });
+
+  it("fails closed to the bounded overlap when daemon health is inconclusive", () => {
+    assert.equal(
+      providerDaemonReplayCursorForHealth({
+        persistedCursor: 44_289_959,
+        activeSessionCount: undefined,
+      }),
+      44_288_959,
+    );
+    assert.equal(
+      providerDaemonReplayCursorForHealth({
+        persistedCursor: 500,
+        activeSessionCount: undefined,
+      }),
+      0,
+    );
+  });
+
+  it.effect("executes the production Effect recovery path for inconclusive health", () =>
+    Effect.gen(function* () {
+      const cursor = yield* resolveProviderDaemonReplayCursor({
+        persistedCursor: 44_289_959,
+        projector: PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
+        health: Effect.fail(new Error("synthetic health failure")),
+      });
+
+      assert.equal(cursor, 44_288_959);
+    }),
+  );
 
   it("retains a typed remote RPC error tag on adapter request errors", () => {
     const error = toRemoteRequestError(

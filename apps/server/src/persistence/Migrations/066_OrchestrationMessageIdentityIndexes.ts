@@ -1,36 +1,18 @@
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-export default Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient;
-
-  // User MessageIds are durable idempotency identities, including after a
-  // checkpoint revert removes the message from the detail projection. Keep
-  // engine admission on an exact indexed lookup over the append-only ledger
-  // instead of scanning a long-running thread's entire event history.
-  yield* sql`
-    CREATE INDEX IF NOT EXISTS idx_orch_events_thread_message_identity
-    ON orchestration_events(
-      stream_id,
-      json_extract(payload_json, '$.messageId'),
-      sequence DESC
-    )
-    WHERE aggregate_kind = 'thread'
-      AND event_type = 'thread.message-sent'
-  `;
-
-  // Retry authority and successful delivery receipts carry the same identity
-  // one level deeper inside an activity payload. This companion partial index
-  // keeps recovery authorization proportional to one MessageId rather than to
-  // every tool/work-log activity accumulated by the thread.
-  yield* sql`
-    CREATE INDEX IF NOT EXISTS idx_orch_events_thread_activity_message_identity
-    ON orchestration_events(
-      stream_id,
-      json_extract(payload_json, '$.activity.payload.messageId'),
-      sequence DESC
-    )
-    WHERE aggregate_kind = 'thread'
-      AND event_type = 'thread.activity-appended'
-  `;
-});
+/**
+ * Retired before broad release.
+ *
+ * The original migration created JSON expression indexes over the complete
+ * append-only event ledger. On a mature Cafe database that turns application
+ * startup into a multi-minute, database-wide scan while holding SQLite's sole
+ * writer lock. The desktop provider daemon and main backend legitimately open
+ * the same database concurrently, so the second process then failed with
+ * SQLITE_BUSY and entered a restart loop.
+ *
+ * Keep migration id 66 as a no-op because migration ids are durable history:
+ * reusing or removing it would make already-upgraded databases diverge. The
+ * cheap schema-only replacement is migration 68, which records identities at
+ * append time and hydrates older identities per thread after readiness.
+ */
+export default Effect.void;

@@ -12,6 +12,8 @@ import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import { providerDaemonRequestThreadIds } from "./ProviderDaemonThreadIdentity.ts";
+
 const encodeProviderDaemonRpcEnvelopeJson = Schema.encodeSync(
   Schema.fromJsonString(ProviderDaemonRpcEnvelope),
 );
@@ -402,6 +404,28 @@ export const makeProviderDaemonCommandLedger = (options?: {
         ),
       );
 
+    const hasRetiredThread = (request: ProviderDaemonRpcRequestValue): Effect.Effect<boolean> =>
+      Effect.gen(function* () {
+        for (const threadId of providerDaemonRequestThreadIds(request)) {
+          const rows = yield* sql<{ readonly retired: number }>`
+            SELECT 1 AS retired
+            FROM hard_deleted_threads
+            WHERE thread_id = ${threadId}
+            LIMIT 1
+          `;
+          if (rows.length > 0) {
+            return true;
+          }
+        }
+        return false;
+      }).pipe(Effect.orDie);
+
+    const retiredThreadEnvelope = (): ProviderDaemonRpcEnvelopeValue =>
+      commandError(
+        "ProviderDaemonThreadRetired",
+        "The requested thread was permanently deleted and cannot accept provider commands.",
+      );
+
     const requireCommandId = (
       request: ProviderDaemonRpcRequestValue,
     ): ProviderDaemonRpcEnvelopeValue | string =>
@@ -428,6 +452,16 @@ export const makeProviderDaemonCommandLedger = (options?: {
           return commandId;
         }
         const storedCommandId = storageCommandId(commandId);
+        // A repeated quiesce request is how a caller safely resumes a bounded
+        // legacy purge after a disconnect, so it remains executable after the
+        // tombstone exists. Every other thread-scoped mutation is rejected
+        // before its prompt-bearing request JSON reaches the ledger.
+        if (yield* hasRetiredThread(request)) {
+          if (request.method === "quiesceThreadForHardDelete") {
+            return yield* execute;
+          }
+          return retiredThreadEnvelope();
+        }
         const existingExit = yield* Effect.exit(readCommand(commandId));
         if (Exit.isFailure(existingExit)) {
           return yield* commandLedgerPersistenceError("readCommand", existingExit.cause);
@@ -447,25 +481,48 @@ export const makeProviderDaemonCommandLedger = (options?: {
         }
 
         const now = DateTime.formatIso(yield* DateTime.now);
-        const insertExit = yield* Effect.exit(sql`
-        INSERT INTO provider_daemon_commands (
-          command_id,
-          method,
-          status,
-          request_json,
-          created_at,
-          updated_at
-        )
-        VALUES (
-          ${storedCommandId},
-          ${request.method},
-          'running',
-          ${encodeProviderDaemonRpcRequestJson(request)},
-          ${now},
-          ${now}
-        )
-      `);
+        const requestThreadIds = providerDaemonRequestThreadIds(request);
+        const insertExit = yield* Effect.exit(
+          sql.withTransaction(
+            Effect.gen(function* () {
+              yield* sql`
+                INSERT INTO provider_daemon_commands (
+                  command_id,
+                  method,
+                  status,
+                  request_json,
+                  created_at,
+                  updated_at
+                )
+                VALUES (
+                  ${storedCommandId},
+                  ${request.method},
+                  'running',
+                  ${encodeProviderDaemonRpcRequestJson(request)},
+                  ${now},
+                  ${now}
+                )
+              `;
+              for (const threadId of requestThreadIds) {
+                yield* sql`
+                  INSERT INTO provider_daemon_command_threads (command_id, thread_id)
+                  VALUES (${storedCommandId}, ${threadId})
+                `;
+              }
+              yield* sql`
+                INSERT INTO provider_daemon_indexed_commands (command_id)
+                VALUES (${storedCommandId})
+              `;
+            }),
+          ),
+        );
         if (Exit.isFailure(insertExit)) {
+          // The permanent fence may have raced the preflight read. Re-check it
+          // after SQLite rolls back the body+identity transaction and return a
+          // fixed redacted error instead of exposing SQL or request material.
+          if (yield* hasRetiredThread(request)) {
+            return retiredThreadEnvelope();
+          }
           return yield* commandLedgerPersistenceError("insertRunningCommand", insertExit.cause);
         }
 

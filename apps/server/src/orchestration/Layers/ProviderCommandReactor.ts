@@ -821,6 +821,7 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly staleTurnId: TurnId;
     readonly messageId: MessageId;
+    readonly intentSequence: number;
     readonly createdAt: string;
   }) =>
     orchestrationEngine.dispatch(
@@ -828,6 +829,7 @@ const make = Effect.gen(function* () {
         threadId: input.threadId,
         acceptedTurnId: input.staleTurnId,
         messageId: input.messageId,
+        intentSequence: input.intentSequence,
         createdAt: input.createdAt,
         reason: "newer-turn-active",
       }),
@@ -940,15 +942,26 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly turnId: TurnId;
     readonly messageId: MessageId;
+    readonly intentSequence: number;
     readonly clientCorrelationId?: string;
     readonly createdAt: string;
   }) {
-    yield* orchestrationEngine.dispatch(buildCodexSteerAcceptedActivityCommand(input));
+    const acceptedCommand = buildCodexSteerAcceptedActivityCommand(input);
+    const acceptedReceipt = yield* orchestrationEngine.dispatch(acceptedCommand);
     const [projectionEvidence, recoveryLiveness] = yield* Effect.all([
       projectionSnapshotQuery.getCodexSteerAcceptanceEvidence({
-        threadId: input.threadId,
-        acceptedTurnId: input.turnId,
-        messageId: input.messageId,
+        exactAcceptedBarrier: {
+          _tag: "accepted",
+          threadId: input.threadId,
+          eventSequence: acceptedReceipt.sequence,
+          intentSequence: input.intentSequence,
+          intentCreatedAt: input.createdAt,
+          activityId: acceptedCommand.activity.id,
+          acceptedTurnId: input.turnId,
+          clientCorrelationId: input.clientCorrelationId ?? null,
+          messageId: input.messageId,
+          acceptedAt: input.createdAt,
+        },
       }),
       resolveCodexSteerRecoveryLiveness(input.threadId),
     ]);
@@ -969,7 +982,9 @@ const make = Effect.gen(function* () {
     });
     const acceptedEvidence = durableEvidence.find(
       (evidence) =>
-        evidence.acceptedTurnId === input.turnId && evidence.message.id === input.messageId,
+        evidence.intentSequence === input.intentSequence &&
+        evidence.acceptedTurnId === input.turnId &&
+        evidence.message.id === input.messageId,
     );
     const acceptedTurnIsTerminal =
       acceptedEvidence !== undefined &&
@@ -996,6 +1011,7 @@ const make = Effect.gen(function* () {
       readonly threadId: ThreadId;
       readonly staleTurnId: TurnId;
       readonly messageId: MessageId;
+      readonly intentSequence: number;
       readonly createdAt: string;
     }) {
       const [projectionEvidence, recoveryLiveness, currentThread] = yield* Effect.all([
@@ -1012,6 +1028,7 @@ const make = Effect.gen(function* () {
         .find(
           (candidate) =>
             candidate.acceptedTurnId === input.staleTurnId &&
+            candidate.intentSequence === input.intentSequence &&
             candidate.message.id === input.messageId,
         );
       if (evidence === undefined) {
@@ -1065,6 +1082,7 @@ const make = Effect.gen(function* () {
         threadId: input.evidence.threadId,
         acceptedTurnId: input.evidence.acceptedTurnId,
         messageId: input.evidence.message.id,
+        intentSequence: input.evidence.intentSequence,
         recoveredTurnId: input.recoveredTurnId,
         ...(input.evidence.clientCorrelationId !== undefined
           ? { clientCorrelationId: input.evidence.clientCorrelationId }
@@ -1882,6 +1900,7 @@ const make = Effect.gen(function* () {
     function* (input: {
       readonly threadId: ThreadId;
       readonly messageId: MessageId;
+      readonly intentSequence: number;
       readonly turn: ProviderTurnStartResult;
       readonly createdAt: string;
     }) {
@@ -1890,6 +1909,7 @@ const make = Effect.gen(function* () {
           threadId: input.threadId,
           turnId: input.turn.turnId,
           messageId: input.messageId,
+          intentSequence: input.intentSequence,
           clientCorrelationId: input.turn.clientCorrelationId,
           createdAt: input.createdAt,
         });
@@ -1912,18 +1932,39 @@ const make = Effect.gen(function* () {
     // Match Codex CLI/TUI stale-steer recovery without bootstrapping every
     // historical message and work-log row. A terminal Codex thread is not by
     // itself a recovery candidate: mature workspaces can have dozens of those,
-    // including multi-gigabyte transcripts. SQL first proves that the latest
-    // turn contains a user message recorded after completion; only those exact
-    // thread ids may cross the bounded thread-detail boundary below.
+    // including multi-gigabyte transcripts. The shell snapshot first proves a
+    // newest user message exists after the latest terminal turn; only those
+    // exact thread ids may cross the bounded thread-detail boundary below.
+    const shellSnapshot = yield* projectionSnapshotQuery.getShellSnapshot();
+    const terminalStates = new Set(["completed", "error", "interrupted"]);
+    const activeCodexThreads = shellSnapshot.threads.filter(
+      (thread) => thread.session?.providerName === "codex",
+    );
+    const activeCodexThreadIds = activeCodexThreads.map((thread) => thread.id);
+    // The shell projection already maintains the timestamp of the newest user
+    // message. Use that O(thread-count) fact to admit the legacy repair path;
+    // the bounded detail read below remains the exact validator. This avoids a
+    // synchronous SQLite history scan for every mature Codex thread at boot.
+    const legacyCandidateThreadIds = activeCodexThreads.flatMap((thread) => {
+      const latestTurn = thread.latestTurn;
+      return latestTurn !== null &&
+        latestTurn.completedAt !== null &&
+        terminalStates.has(latestTurn.state) &&
+        thread.latestUserMessageAt !== null &&
+        thread.latestUserMessageAt > latestTurn.completedAt
+        ? [thread.id]
+        : [];
+    });
+    const staleSteerCandidates = yield* projectionSnapshotQuery.getPostTerminalStaleSteerCandidates(
+      activeCodexThreadIds,
+      legacyCandidateThreadIds,
+    );
     const staleSteerCandidateThreadIds = new Set(
-      yield* projectionSnapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(),
+      staleSteerCandidates.map((candidate) => candidate.threadId),
     );
     if (staleSteerCandidateThreadIds.size === 0) {
       return;
     }
-
-    const shellSnapshot = yield* projectionSnapshotQuery.getShellSnapshot();
-    const terminalStates = new Set(["completed", "error", "interrupted"]);
     const recoveredAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
     let recoveredCount = 0;
 
@@ -1942,11 +1983,22 @@ const make = Effect.gen(function* () {
           }
           const providerActiveTurnId =
             recoveryLiveness._tag === "active" ? recoveryLiveness.activeTurnId : null;
-          const projectionEvidence = yield* projectionSnapshotQuery.getCodexSteerAcceptanceEvidence(
-            {
-              threadId: threadShell.id,
-            },
+          const acceptedCandidates = staleSteerCandidates.flatMap((candidate) =>
+            candidate._tag === "accepted" && candidate.threadId === threadShell.id
+              ? [candidate]
+              : [],
           );
+          const projectionEvidence = (yield* Effect.forEach(
+            acceptedCandidates,
+            (candidate) =>
+              projectionSnapshotQuery.getCodexSteerAcceptanceEvidence({
+                exactAcceptedBarrier: candidate,
+              }),
+            // Compact pending acceptances are normally zero or one per
+            // thread. Keep the exact primary-key reads serialized so a
+            // manually corrupted ledger cannot amplify SQLite contention.
+            { concurrency: 1 },
+          )).flat();
           if (projectionEvidence.length > 0) {
             const trustedAcceptedSteerRecoveryCommands = buildTerminalCodexSteerRecoveryCommands({
               evidence: projectionEvidence.map(codexSteerAcceptanceEvidenceFromProjection),
@@ -1961,6 +2013,14 @@ const make = Effect.gen(function* () {
             recoveredCount += trustedAcceptedSteerRecoveryCommands.filter(
               (command) => command.type === "thread.turn.steer",
             ).length;
+            return;
+          }
+
+          if (
+            !staleSteerCandidates.some(
+              (candidate) => candidate._tag === "legacy" && candidate.threadId === threadShell.id,
+            )
+          ) {
             return;
           }
 
@@ -2298,6 +2358,7 @@ const make = Effect.gen(function* () {
             threadId: event.payload.threadId,
             staleTurnId: terminalSteerRecovery.staleTurnId,
             messageId: event.payload.messageId,
+            intentSequence: terminalSteerRecovery.intentSequence,
             createdAt: event.payload.createdAt,
           })
         : undefined;
@@ -2321,6 +2382,7 @@ const make = Effect.gen(function* () {
           threadId: event.payload.threadId,
           staleTurnId: terminalSteerRecovery.staleTurnId,
           messageId: event.payload.messageId,
+          intentSequence: event.sequence,
           createdAt: event.payload.createdAt,
         });
         return;
@@ -2520,6 +2582,7 @@ const make = Effect.gen(function* () {
               reconcileAcceptedSendTurnResult({
                 threadId: event.payload.threadId,
                 messageId: event.payload.messageId,
+                intentSequence: event.sequence,
                 turn,
                 createdAt: observedAt,
               }),
@@ -2602,6 +2665,7 @@ const make = Effect.gen(function* () {
                         threadId: event.payload.threadId,
                         turnId: turn.turnId,
                         messageId: event.payload.messageId,
+                        intentSequence: event.sequence,
                         ...(turn.clientCorrelationId !== undefined
                           ? { clientCorrelationId: turn.clientCorrelationId }
                           : {}),
@@ -2651,6 +2715,7 @@ const make = Effect.gen(function* () {
           threadId: event.payload.threadId,
           staleTurnId: event.payload.terminalSteerRecovery.staleTurnId,
           messageId: event.payload.messageId,
+          intentSequence: event.sequence,
           createdAt: event.payload.createdAt,
         }).pipe(Effect.asVoid);
       }
@@ -2708,6 +2773,7 @@ const make = Effect.gen(function* () {
                   threadId: event.payload.threadId,
                   turnId: turn.turnId,
                   messageId: event.payload.messageId,
+                  intentSequence: event.sequence,
                   ...(turn.clientCorrelationId !== undefined
                     ? { clientCorrelationId: turn.clientCorrelationId }
                     : {}),
@@ -2761,6 +2827,7 @@ const make = Effect.gen(function* () {
         threadId: event.payload.threadId,
         staleTurnId: terminalSteerRecovery.staleTurnId,
         messageId: event.payload.messageId,
+        intentSequence: terminalSteerRecovery.intentSequence,
         createdAt: event.payload.createdAt,
       });
       if (terminalRecoveryValidation.shouldDeliver !== true) {
@@ -2775,6 +2842,7 @@ const make = Effect.gen(function* () {
           threadId: event.payload.threadId,
           staleTurnId: terminalSteerRecovery.staleTurnId,
           messageId: event.payload.messageId,
+          intentSequence: event.sequence,
           createdAt: event.payload.createdAt,
         });
       }
@@ -2800,6 +2868,7 @@ const make = Effect.gen(function* () {
         threadId: event.payload.threadId,
         staleTurnId: terminalSteerRecovery.staleTurnId,
         messageId: event.payload.messageId,
+        intentSequence: terminalSteerRecovery.intentSequence,
         createdAt: event.payload.createdAt,
       });
       if (terminalRecoveryValidation.shouldDeliver !== true) {
@@ -2812,6 +2881,7 @@ const make = Effect.gen(function* () {
             threadId: event.payload.threadId,
             staleTurnId: terminalSteerRecovery.staleTurnId,
             messageId: event.payload.messageId,
+            intentSequence: event.sequence,
             createdAt: event.payload.createdAt,
           });
         }
@@ -2848,6 +2918,7 @@ const make = Effect.gen(function* () {
             const mayContinue = yield* reconcileAcceptedSendTurnResult({
               threadId: event.payload.threadId,
               messageId: event.payload.messageId,
+              intentSequence: event.sequence,
               turn,
               createdAt: event.payload.createdAt,
             });
@@ -3256,6 +3327,7 @@ const make = Effect.gen(function* () {
                 yield* reconcileAcceptedSendTurnResult({
                   threadId: event.payload.threadId,
                   messageId: event.payload.messageId,
+                  intentSequence: event.sequence,
                   turn,
                   createdAt: input.createdAt,
                 });
@@ -3269,6 +3341,7 @@ const make = Effect.gen(function* () {
                       buildCodexSteerDeliveredActivityCommand({
                         threadId: event.payload.threadId,
                         messageId: event.payload.messageId,
+                        intentSequence: event.sequence,
                         deliveredTurnId: turn.turnId,
                         reason: input.reason,
                         createdAt: input.createdAt,
@@ -3395,6 +3468,7 @@ const make = Effect.gen(function* () {
             threadId: event.payload.threadId,
             staleTurnId: terminalSteerRecovery.staleTurnId,
             messageId: event.payload.messageId,
+            intentSequence: terminalSteerRecovery.intentSequence,
             createdAt: event.payload.createdAt,
           })
         : undefined;
@@ -3420,6 +3494,7 @@ const make = Effect.gen(function* () {
           threadId: event.payload.threadId,
           staleTurnId: terminalSteerRecovery.staleTurnId,
           messageId: event.payload.messageId,
+          intentSequence: event.sequence,
           createdAt: event.payload.createdAt,
         });
       }
@@ -3467,6 +3542,7 @@ const make = Effect.gen(function* () {
                   threadId: event.payload.threadId,
                   staleTurnId: terminalSteerRecovery.staleTurnId,
                   messageId: event.payload.messageId,
+                  intentSequence: event.sequence,
                   createdAt: event.payload.createdAt,
                 });
               }
@@ -3799,6 +3875,7 @@ const make = Effect.gen(function* () {
                   threadId: event.payload.threadId,
                   turnId: turn.turnId,
                   messageId: event.payload.messageId,
+                  intentSequence: event.sequence,
                   ...(turn.clientCorrelationId !== undefined
                     ? { clientCorrelationId: turn.clientCorrelationId }
                     : {}),

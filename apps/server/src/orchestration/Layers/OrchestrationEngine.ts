@@ -40,6 +40,11 @@ import {
   OrchestrationThreadHardDeleteError,
 } from "../Errors.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
+import {
+  hydrateLegacyMessageIdentitiesForThread,
+  readLatestMessageIdentity,
+  type PersistedMessageIdentity,
+} from "../messageIdentityLedger.ts";
 import { createEmptyReadModel, projectEvent } from "../projector.ts";
 import { purgeHardDeletedThreadPersistence } from "../threadHardDelete.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
@@ -63,11 +68,6 @@ interface CommandEnvelope {
 type UserTurnMessageCommand =
   | Extract<OrchestrationCommand, { readonly type: "thread.turn.start" }>
   | Extract<OrchestrationCommand, { readonly type: "thread.turn.steer" }>;
-
-interface PersistedMessageIdentityRow {
-  readonly sequence: number;
-  readonly payloadJson: string;
-}
 
 interface PersistedSequenceRow {
   readonly sequence: number;
@@ -253,23 +253,32 @@ const makeOrchestrationEngine = Effect.gen(function* () {
       return;
     }
 
-    // The command read model caps messages for memory safety and revert can
-    // remove rows from the detail projection. The append-only event stream is
-    // therefore the authoritative identity ledger. This exact lookup runs on
-    // the engine's serialized worker before any new events are planned.
-    const existingRows = yield* sql<PersistedMessageIdentityRow>`
-      SELECT
-        sequence,
-        payload_json AS "payloadJson"
-      FROM orchestration_events
-      WHERE aggregate_kind = 'thread'
-        AND stream_id = ${command.threadId}
-        AND event_type = 'thread.message-sent'
-        AND json_extract(payload_json, '$.messageId') = ${command.message.messageId}
-      ORDER BY sequence DESC
-      LIMIT 1
-    `;
-    const existing = existingRows[0];
+    // The command read model caps messages for memory safety and checkpoint
+    // revert can remove rows from the detail projection. The append-only event
+    // stream remains authoritative, while migration 68's compact sequence
+    // ledger keeps normal admission independent of total event-store size.
+    // Existing installations are hydrated one selected thread at a time only
+    // after readiness, never by a database-wide startup migration.
+    const readIdentity = readLatestMessageIdentity(sql, {
+      threadId: command.threadId,
+      messageId: command.message.messageId,
+    }).pipe(
+      Effect.mapError(
+        toPersistenceSqlError("OrchestrationEngine.assertUserMessageIdentityAvailable:read"),
+      ),
+    );
+    let existing: PersistedMessageIdentity | undefined = yield* readIdentity;
+    if (
+      existing === undefined &&
+      commandReadModel.threads.some((thread) => thread.id === command.threadId)
+    ) {
+      yield* hydrateLegacyMessageIdentitiesForThread(sql, command.threadId).pipe(
+        Effect.mapError(
+          toPersistenceSqlError("OrchestrationEngine.assertUserMessageIdentityAvailable:hydrate"),
+        ),
+      );
+      existing = yield* readIdentity;
+    }
     if (existing === undefined) {
       return;
     }

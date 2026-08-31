@@ -11,6 +11,7 @@ import {
 } from "../attachmentStore.ts";
 import { CheckpointStore } from "../checkpointing/Services/CheckpointStore.ts";
 import { ServerConfig } from "../config.ts";
+import { purgeProviderDaemonThreadPersistence } from "../providerDaemon/ProviderDaemonThreadPurge.ts";
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
 
 export const deleteThreadAttachments = Effect.fn("deleteThreadAttachments")(function* (
@@ -120,6 +121,12 @@ export const purgeHardDeletedThreadPersistence = Effect.fn("purgeHardDeletedThre
   function* (input: { readonly threadId: ThreadId }) {
     const sql = yield* SqlClient.SqlClient;
 
+    // Desktop and daemon usually share a database, but remote/supervisor
+    // deployments may not. The authenticated daemon RPC purges its own store;
+    // this second idempotent pass covers daemon rows in the orchestration DB
+    // without assuming both processes were configured with the same file.
+    yield* purgeProviderDaemonThreadPersistence(input);
+
     yield* sql.withTransaction(
       Effect.gen(function* () {
         yield* sql`
@@ -188,6 +195,35 @@ export const purgeHardDeletedThreadPersistence = Effect.fn("purgeHardDeletedThre
         DELETE FROM orchestration_command_receipts
         WHERE aggregate_kind = 'thread'
           AND aggregate_id = ${input.threadId}
+      `;
+        yield* sql`
+        DELETE FROM orchestration_message_identity_hydration
+        WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
+        DELETE FROM orchestration_message_identities
+        WHERE thread_id = ${input.threadId}
+      `;
+        // The compact steer ledgers contain no prompt text, but their thread
+        // identities and recovery authority must still be erased explicitly.
+        // Candidate/barrier rows would also cascade from event deletion while
+        // foreign keys are enabled; explicit cleanup keeps hard delete correct
+        // for databases that were opened with FK enforcement disabled.
+        yield* sql`
+        DELETE FROM orchestration_unsettled_codex_steer_hydration
+        WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
+        DELETE FROM orchestration_unsettled_codex_steer_intents
+        WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
+        DELETE FROM orchestration_codex_steer_recovery_barriers
+        WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
+        DELETE FROM orchestration_pending_codex_steer_acceptances
+        WHERE thread_id = ${input.threadId}
       `;
         yield* sql`
         DELETE FROM orchestration_events

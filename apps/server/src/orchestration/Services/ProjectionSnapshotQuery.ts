@@ -59,7 +59,37 @@ export interface ProjectionCodexSteerAcceptanceEvidenceInput {
   readonly threadId?: ThreadId;
   readonly acceptedTurnId?: TurnId;
   readonly messageId?: MessageId;
+  /**
+   * Startup recovery already has this authenticated compact-ledger identity.
+   * Supplying it selects the accepted activity and its source event by their
+   * primary keys instead of joining every acceptance in a long-lived thread.
+   */
+  readonly exactAcceptedBarrier?: ProjectionAcceptedCodexSteerCandidate;
 }
+
+/** Exact compact-ledger identity for one trusted Codex steer acceptance. */
+export interface ProjectionAcceptedCodexSteerCandidate {
+  readonly _tag: "accepted";
+  readonly threadId: ThreadId;
+  readonly eventSequence: number;
+  readonly intentSequence: number;
+  readonly intentCreatedAt: string;
+  readonly activityId: string;
+  readonly acceptedTurnId: TurnId;
+  readonly clientCorrelationId: string | null;
+  readonly messageId: MessageId;
+  readonly acceptedAt: string;
+}
+
+/** Legacy latest-turn stale-message work has no historical acceptance. */
+export interface ProjectionLegacyCodexSteerCandidate {
+  readonly _tag: "legacy";
+  readonly threadId: ThreadId;
+}
+
+export type ProjectionPostTerminalCodexSteerCandidate =
+  | ProjectionAcceptedCodexSteerCandidate
+  | ProjectionLegacyCodexSteerCandidate;
 
 /**
  * Durable facts needed to reconcile an acknowledged Codex steer without
@@ -68,6 +98,7 @@ export interface ProjectionCodexSteerAcceptanceEvidenceInput {
 export interface ProjectionCodexSteerAcceptanceEvidence {
   readonly threadId: ThreadId;
   readonly acceptedTurnId: TurnId;
+  readonly intentSequence: number;
   /** Opaque provider correlation metadata; never prompt or attachment data. */
   readonly clientCorrelationId: string | null;
   readonly messageId: MessageId;
@@ -108,6 +139,15 @@ export interface ProjectionUnsettledCodexSteerIntentInput {
    * in the workspace; startup reconciliation intentionally omits the filter.
    */
   readonly threadId?: ThreadId;
+  /**
+   * Startup reconciliation must prove whether a durable provider-processing
+   * receipt already settled each candidate before replaying provider I/O.
+   * Live provider ingestion already holds the exact authenticated runtime
+   * correlation and performs its own post-dispatch, generation-bound prune;
+   * it may disable this historical read to keep the hot event path bounded.
+   * Defaults to true for every caller that does not opt out explicitly.
+   */
+  readonly reconcileDurableProcessing?: boolean;
 }
 
 export interface ProjectionCodexSteerIntentRecoveryBarrierInput {
@@ -232,13 +272,39 @@ export interface ProjectionSnapshotQueryShape {
   ) => Effect.Effect<Option.Option<OrchestrationThreadShell>, ProjectionRepositoryError>;
 
   /**
-   * Find active Codex threads with either the legacy latest-turn stale-message
-   * shape or trusted, unprocessed acceptance evidence on any historical
-   * terminal turn. Manual-interrupt candidates remain included so startup can
-   * settle them into the retryable queue instead of silently losing them.
+   * Find active Codex threads with either a shell-proven legacy latest-turn
+   * stale-message shape or trusted, unprocessed acceptance evidence on any
+   * historical terminal turn. Manual-interrupt candidates remain included so
+   * startup can settle them into the retryable queue instead of silently
+   * losing them.
    */
-  readonly getPostTerminalStaleSteerCandidateThreadIds: () => Effect.Effect<
-    ReadonlyArray<ThreadId>,
+  readonly getPostTerminalStaleSteerCandidateThreadIds: (
+    /**
+     * Startup already owns a lightweight shell snapshot. Passing its active
+     * Codex thread ids avoids rediscovering that bounded set. Other callers
+     * may omit the list; the implementation then reads only active Codex ids.
+     */
+    activeCodexThreadIds?: ReadonlyArray<ThreadId>,
+    /**
+     * Legacy recovery predates the compact acceptance ledger. Startup derives
+     * this small set from `latestUserMessageAt` and the latest terminal turn
+     * already present in its shell snapshot, avoiding a per-thread scan of
+     * historical messages and activities during backend bootstrap.
+     */
+    legacyCandidateThreadIds?: ReadonlyArray<ThreadId>,
+  ) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionRepositoryError>;
+
+  /**
+   * Return the exact compact identities behind post-terminal recovery. The
+   * accepted variant is deliberately richer than the compatibility thread-id
+   * view above so startup never has to rediscover an accepted activity by
+   * scanning the thread's complete history.
+   */
+  readonly getPostTerminalStaleSteerCandidates: (
+    activeCodexThreadIds?: ReadonlyArray<ThreadId>,
+    legacyCandidateThreadIds?: ReadonlyArray<ThreadId>,
+  ) => Effect.Effect<
+    ReadonlyArray<ProjectionPostTerminalCodexSteerCandidate>,
     ProjectionRepositoryError
   >;
 
@@ -256,9 +322,11 @@ export interface ProjectionSnapshotQueryShape {
   >;
 
   /**
-   * Read unbounded durable Codex steer intents that crashed before a terminal
-   * delivery outcome. Results contain identifiers only and remain ordered by
-   * the original event-store sequence for deterministic startup replay.
+   * Read durable Codex steer intents that crashed before a terminal delivery
+   * outcome from the compact append-time ledger. The first read after the
+   * ledger migration inspects only a fixed recent tail for each active Codex
+   * thread; results contain identifiers only and remain ordered by the
+   * original event-store sequence for deterministic startup replay.
    */
   readonly getUnsettledCodexSteerIntentEvents: (
     input?: ProjectionUnsettledCodexSteerIntentInput,

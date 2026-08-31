@@ -3672,6 +3672,7 @@ describe("ProviderCommandReactor", () => {
           {
             threadId,
             acceptedTurnId: staleTurnId,
+            intentSequence: 1,
             clientCorrelationId: null,
             messageId,
             messageTurnId: staleTurnId,
@@ -3709,7 +3710,7 @@ describe("ProviderCommandReactor", () => {
           text: "do not duplicate detached work",
           attachments: [],
         },
-        terminalRecovery: { staleTurnId },
+        terminalRecovery: { staleTurnId, intentSequence: 1 },
         createdAt: "2026-01-01T00:00:04.000Z",
       }),
     );
@@ -3732,6 +3733,7 @@ describe("ProviderCommandReactor", () => {
             {
               threadId,
               acceptedTurnId: staleTurnId,
+              intentSequence: 1,
               clientCorrelationId: null,
               messageId,
               messageTurnId: staleTurnId,
@@ -3787,7 +3789,7 @@ describe("ProviderCommandReactor", () => {
             text: "do not duplicate unresolved live ownership",
             attachments: [],
           },
-          terminalRecovery: { staleTurnId },
+          terminalRecovery: { staleTurnId, intentSequence: 1 },
           createdAt: "2026-01-01T00:00:04.000Z",
         }),
       );
@@ -3811,6 +3813,7 @@ describe("ProviderCommandReactor", () => {
             {
               threadId,
               acceptedTurnId: staleTurnId,
+              intentSequence: 1,
               clientCorrelationId: null,
               messageId,
               messageTurnId: staleTurnId,
@@ -3847,7 +3850,7 @@ describe("ProviderCommandReactor", () => {
             text: "do not recover through an unknown liveness boundary",
             attachments: [],
           },
-          terminalRecovery: { staleTurnId },
+          terminalRecovery: { staleTurnId, intentSequence: 1 },
           createdAt: "2026-01-01T00:00:04.000Z",
         }),
       );
@@ -3858,7 +3861,7 @@ describe("ProviderCommandReactor", () => {
     },
   );
 
-  it("queues a guarded terminal recovery when a newer turn appears before sendTurn", async () => {
+  it("selects the exact same-tuple acceptance generation before guarded recovery", async () => {
     const threadId = ThreadId.make("thread-1");
     const staleTurnId = asTurnId("turn-terminal-before-guarded-recovery");
     const newerTurnId = asTurnId("turn-newer-before-guarded-recovery");
@@ -3867,9 +3870,30 @@ describe("ProviderCommandReactor", () => {
       liveSteer: "supported",
       getCodexSteerAcceptanceEvidence: () =>
         Effect.succeed([
+          // The provider may reuse the same MessageId and turn tuple across a
+          // retry. An older recovery receipt must not suppress the newer
+          // accepted generation selected by terminalRecovery.intentSequence.
           {
             threadId,
             acceptedTurnId: staleTurnId,
+            intentSequence: 1,
+            clientCorrelationId: null,
+            messageId,
+            messageTurnId: staleTurnId,
+            messageText: "recover me safely",
+            messageAttachments: [],
+            acceptedAt: "2026-01-01T00:00:01.000Z",
+            turnState: "completed",
+            turnCompletedAt: "2026-01-01T00:00:03.000Z",
+            processingObserved: false,
+            recoveryObserved: true,
+            interruptRequested: false,
+            sessionStopRequested: false,
+          },
+          {
+            threadId,
+            acceptedTurnId: staleTurnId,
+            intentSequence: 2,
             clientCorrelationId: null,
             messageId,
             messageTurnId: staleTurnId,
@@ -3906,7 +3930,7 @@ describe("ProviderCommandReactor", () => {
           text: "recover me safely",
           attachments: [],
         },
-        terminalRecovery: { staleTurnId },
+        terminalRecovery: { staleTurnId, intentSequence: 2 },
         createdAt: "2026-01-01T00:00:04.000Z",
       }),
     );
@@ -3971,7 +3995,10 @@ describe("ProviderCommandReactor", () => {
           text: "do not replay without evidence",
           attachments: [],
         },
-        terminalRecovery: { staleTurnId: asTurnId("turn-without-trusted-evidence") },
+        terminalRecovery: {
+          staleTurnId: asTurnId("turn-without-trusted-evidence"),
+          intentSequence: 1,
+        },
         createdAt: "2026-01-01T00:00:04.000Z",
       }),
     );

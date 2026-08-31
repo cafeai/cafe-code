@@ -632,22 +632,43 @@ export const makePersistentProviderDaemonEventJournal = (options?: {
         }
 
         const emittedAt = DateTime.formatIso(yield* DateTime.now);
-        const rows = (yield* sql`
-          INSERT INTO provider_daemon_events (
-            owner_key,
-            emitted_at,
-            event_json
+        // The body and typed identity must share one SQLite writer
+        // transaction. Migration 071 fences the identity insert against the
+        // permanent tombstone; if hard delete wins first, the trigger aborts
+        // this entire transaction and no prompt/output-bearing body survives.
+        const rows = (yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              const inserted = (yield* sql`
+              INSERT INTO provider_daemon_events (
+                owner_key,
+                emitted_at,
+                event_json
+              )
+              VALUES (
+                ${ownerKey},
+                ${emittedAt},
+                ${encodeProviderRuntimeEventJson(compactedEvent)}
+              )
+              RETURNING
+                cursor,
+                emitted_at AS "emittedAt",
+                event_json AS "eventJson"
+            `) as unknown as ReadonlyArray<PersistedEventRow>;
+              const insertedRow = inserted[0];
+              if (insertedRow === undefined) {
+                return yield* Effect.die(
+                  new Error("provider daemon event insert did not return a row"),
+                );
+              }
+              yield* sql`
+              INSERT INTO provider_daemon_event_threads (cursor, thread_id)
+              VALUES (${insertedRow.cursor}, ${compactedEvent.threadId})
+            `;
+              return inserted;
+            }),
           )
-          VALUES (
-            ${ownerKey},
-            ${emittedAt},
-            ${encodeProviderRuntimeEventJson(compactedEvent)}
-          )
-          RETURNING
-            cursor,
-            emitted_at AS "emittedAt",
-            event_json AS "eventJson"
-        `.pipe(Effect.orDie)) as unknown as ReadonlyArray<PersistedEventRow>;
+          .pipe(Effect.orDie)) as unknown as ReadonlyArray<PersistedEventRow>;
         const row = rows[0];
         if (row === undefined) {
           return yield* Effect.die(new Error("provider daemon event insert did not return a row"));

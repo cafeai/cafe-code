@@ -251,6 +251,7 @@ describe("OrchestrationEngine", () => {
           getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
           getThreadCheckpointContext: () => Effect.succeed(Option.none()),
           getThreadShellById: () => Effect.succeed(Option.none()),
+          getPostTerminalStaleSteerCandidates: () => Effect.succeed([]),
           getPostTerminalStaleSteerCandidateThreadIds: () => Effect.succeed([]),
           getCodexSteerAcceptanceEvidence: () => Effect.succeed([]),
           getUnsettledCodexSteerIntentEvents: () => Effect.succeed([]),
@@ -775,6 +776,7 @@ describe("OrchestrationEngine", () => {
         },
         terminalRecovery: {
           staleTurnId: asTurnId("turn-message-identity-stale"),
+          intentSequence: 1,
         },
         createdAt: "2026-01-01T00:00:08.000Z",
       }),

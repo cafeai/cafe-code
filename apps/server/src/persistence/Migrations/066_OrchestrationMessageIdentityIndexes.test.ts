@@ -9,7 +9,7 @@ import * as TestSqliteClient from "../TestSqliteClient.ts";
 const layer = it.layer(Layer.mergeAll(TestSqliteClient.layerMemory()));
 
 layer("066_OrchestrationMessageIdentityIndexes", (it) => {
-  it.effect("indexes canonical message identities and retry receipts", () =>
+  it.effect("preserves the durable migration id without scanning the event ledger", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
 
@@ -20,8 +20,15 @@ layer("066_OrchestrationMessageIdentityIndexes", (it) => {
         PRAGMA index_list(orchestration_events)
       `;
       const indexNames = new Set(indexes.map((index) => index.name));
-      assert.ok(indexNames.has("idx_orch_events_thread_message_identity"));
-      assert.ok(indexNames.has("idx_orch_events_thread_activity_message_identity"));
+      assert.equal(indexNames.has("idx_orch_events_thread_message_identity"), false);
+      assert.equal(indexNames.has("idx_orch_events_thread_activity_message_identity"), false);
+
+      const migrationRows = yield* sql<{ readonly migrationId: number }>`
+        SELECT migration_id AS "migrationId"
+        FROM effect_sql_migrations
+        WHERE migration_id = 66
+      `;
+      assert.deepStrictEqual(migrationRows, [{ migrationId: 66 }]);
     }),
   );
 });

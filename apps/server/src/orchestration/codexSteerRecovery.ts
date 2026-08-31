@@ -27,6 +27,8 @@ export type CodexSteerNextTurnReason =
 export interface CodexSteerAcceptanceEvidence {
   readonly threadId: ThreadId;
   readonly acceptedTurnId: TurnId;
+  /** Exact authenticated turn intent generation acknowledged by Codex. */
+  readonly intentSequence: number;
   /**
    * Fixed-size opaque token echoed by Codex for the exact injected user item.
    * This is correlation metadata only and must never contain prompt content.
@@ -57,6 +59,7 @@ export interface CodexSteerRecoveryDecision {
 export function codexSteerAcceptanceEvidenceFromProjection(input: {
   readonly threadId: ThreadId;
   readonly acceptedTurnId: TurnId;
+  readonly intentSequence: number;
   readonly clientCorrelationId: string | null;
   readonly messageId: MessageId;
   readonly messageTurnId: TurnId | null;
@@ -72,6 +75,7 @@ export function codexSteerAcceptanceEvidenceFromProjection(input: {
   return {
     threadId: input.threadId,
     acceptedTurnId: input.acceptedTurnId,
+    intentSequence: input.intentSequence,
     ...(input.clientCorrelationId !== null
       ? { clientCorrelationId: input.clientCorrelationId }
       : {}),
@@ -124,11 +128,13 @@ function acceptedIdentity(input: {
   readonly threadId: ThreadId;
   readonly turnId: TurnId;
   readonly messageId: MessageId;
+  readonly intentSequence: number;
 }): string {
   return `codex-steer-accepted:${stableIdentity("accepted", [
     input.threadId,
     input.turnId,
     input.messageId,
+    String(input.intentSequence),
   ])}`;
 }
 
@@ -136,11 +142,13 @@ function recoveryIdentity(input: {
   readonly threadId: ThreadId;
   readonly acceptedTurnId: TurnId;
   readonly messageId: MessageId;
+  readonly intentSequence: number;
 }): string {
   return `terminal-unprocessed-codex-steer:${stableIdentity("terminal-recovery", [
     input.threadId,
     input.acceptedTurnId,
     input.messageId,
+    String(input.intentSequence),
   ])}`;
 }
 
@@ -148,21 +156,25 @@ function recoveredIdentity(input: {
   readonly threadId: ThreadId;
   readonly acceptedTurnId: TurnId;
   readonly messageId: MessageId;
+  readonly intentSequence: number;
 }): string {
   return `codex-steer-recovered:${stableIdentity("recovered", [
     input.threadId,
     input.acceptedTurnId,
     input.messageId,
+    String(input.intentSequence),
   ])}`;
 }
 
 function nextTurnDeliveryIdentity(input: {
   readonly threadId: ThreadId;
   readonly messageId: MessageId;
+  readonly intentSequence: number;
 }): string {
   return `codex-steer-delivered:${stableIdentity("next-turn-delivery", [
     input.threadId,
     input.messageId,
+    String(input.intentSequence),
   ])}`;
 }
 
@@ -204,6 +216,7 @@ export function buildCodexSteerAcceptedActivityCommand(input: {
   readonly threadId: ThreadId;
   readonly turnId: TurnId;
   readonly messageId: MessageId;
+  readonly intentSequence: number;
   readonly clientCorrelationId?: string;
   readonly createdAt: string;
 }): Extract<OrchestrationCommand, { type: "thread.activity.append" }> {
@@ -221,6 +234,10 @@ export function buildCodexSteerAcceptedActivityCommand(input: {
         provider: "codex",
         messageId: input.messageId,
         acceptedTurnId: input.turnId,
+        // A provider notification can race ahead of the steer ACK. Persist
+        // the authenticated request generation so processing evidence is
+        // ordered after the request, not incorrectly after this later ACK.
+        intentSequence: input.intentSequence,
         ...(input.clientCorrelationId !== undefined
           ? { clientCorrelationId: input.clientCorrelationId }
           : {}),
@@ -244,6 +261,7 @@ export function buildCodexSteerRecoveredActivityCommand(input: {
   readonly threadId: ThreadId;
   readonly acceptedTurnId: TurnId;
   readonly messageId: MessageId;
+  readonly intentSequence: number;
   readonly recoveredTurnId: TurnId;
   readonly clientCorrelationId?: string;
   readonly createdAt: string;
@@ -263,6 +281,7 @@ export function buildCodexSteerRecoveredActivityCommand(input: {
         messageId: input.messageId,
         acceptedTurnId: input.acceptedTurnId,
         recoveredTurnId: input.recoveredTurnId,
+        intentSequence: input.intentSequence,
         ...(input.clientCorrelationId !== undefined
           ? { clientCorrelationId: input.clientCorrelationId }
           : {}),
@@ -291,6 +310,7 @@ export function buildCodexSteerRecoveredActivityCommand(input: {
 export function buildCodexSteerDeliveredActivityCommand(input: {
   readonly threadId: ThreadId;
   readonly messageId: MessageId;
+  readonly intentSequence: number;
   readonly deliveredTurnId: TurnId;
   readonly reason: CodexSteerNextTurnReason;
   readonly createdAt: string;
@@ -309,6 +329,7 @@ export function buildCodexSteerDeliveredActivityCommand(input: {
         provider: "codex",
         messageId: input.messageId,
         deliveredTurnId: input.deliveredTurnId,
+        intentSequence: input.intentSequence,
         delivery: "next-turn",
         reason: input.reason,
       },
@@ -434,6 +455,7 @@ export function buildCodexSteerRecoveryQueuedCommand(input: {
   readonly threadId: ThreadId;
   readonly acceptedTurnId: TurnId;
   readonly messageId: MessageId;
+  readonly intentSequence: number;
   readonly createdAt: string;
   readonly reason: "manual-stop-barrier" | "newer-turn-active";
 }): Extract<OrchestrationCommand, { type: "thread.activity.append" }> {
@@ -454,6 +476,7 @@ export function buildCodexSteerRecoveryQueuedCommand(input: {
           ? "Codex accepted this steer before the turn stopped. Cafe Code kept the saved message queued because Stop is an explicit cancellation barrier."
           : "Codex accepted this steer for the previous turn, but newer work is already active. Cafe Code kept the saved message queued for the next safe turn.",
         messageId: input.messageId,
+        intentSequence: input.intentSequence,
         retryableFollowUp: true,
         retryAfter: "active-turn",
         staleTurnId: input.acceptedTurnId,
@@ -504,6 +527,7 @@ export function decideCodexSteerRecovery(input: {
           threadId: evidence.threadId,
           acceptedTurnId: evidence.acceptedTurnId,
           messageId: evidence.message.id,
+          intentSequence: evidence.intentSequence,
           createdAt: input.createdAt,
           reason: "manual-stop-barrier",
         }),
@@ -521,6 +545,7 @@ export function decideCodexSteerRecovery(input: {
           threadId: evidence.threadId,
           acceptedTurnId: evidence.acceptedTurnId,
           messageId: evidence.message.id,
+          intentSequence: evidence.intentSequence,
           createdAt: input.createdAt,
           reason: "newer-turn-active",
         }),
@@ -532,6 +557,7 @@ export function decideCodexSteerRecovery(input: {
     threadId: evidence.threadId,
     acceptedTurnId: evidence.acceptedTurnId,
     messageId: evidence.message.id,
+    intentSequence: evidence.intentSequence,
   });
   return {
     disposition: "recover-as-next-turn",
@@ -570,6 +596,7 @@ export function decideCodexSteerRecovery(input: {
         },
         terminalRecovery: {
           staleTurnId: evidence.acceptedTurnId,
+          intentSequence: evidence.intentSequence,
         },
         createdAt: input.createdAt,
       },

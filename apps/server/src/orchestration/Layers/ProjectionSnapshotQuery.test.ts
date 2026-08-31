@@ -1661,10 +1661,114 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           ('message-archived-post-completion', 'thread-archived-post-completion', 'turn-archived-post-completion', 'user', 'archived', 0, '2026-07-14T00:00:11.000Z', '2026-07-14T00:00:11.000Z')
       `;
 
-        assert.deepStrictEqual(yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(), [
-          ThreadId.make("thread-stale-steer-candidate"),
-        ]);
+        const shellDerivedLegacyCandidates = [ThreadId.make("thread-stale-steer-candidate")];
+        assert.deepStrictEqual(
+          yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(
+            undefined,
+            shellDerivedLegacyCandidates,
+          ),
+          shellDerivedLegacyCandidates,
+        );
 
+        const beforeCompletionCorrelationId = buildCodexSteerClientCorrelationId(
+          MessageId.make("message-before-completion"),
+        );
+        yield* sql`
+          INSERT INTO orchestration_events (
+            event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+            command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json
+          ) VALUES (
+            'intent-before-completion', 'thread', 'thread-message-before-completion', 100,
+            'thread.turn-steer-requested', '2026-07-14T00:00:09.400Z',
+            'client:intent-before-completion', NULL, NULL, 'client',
+            ${JSON.stringify({
+              threadId: "thread-message-before-completion",
+              messageId: "message-before-completion",
+              expectedTurnId: "turn-message-before-completion",
+              createdAt: "2026-07-14T00:00:09.400Z",
+            })}, '{}'
+          )
+        `;
+        const [beforeCompletionIntent] = yield* sql<{ readonly sequence: number }>`
+          SELECT sequence FROM orchestration_events
+          WHERE event_id = 'intent-before-completion'
+        `;
+        assert.isDefined(beforeCompletionIntent);
+        const beforeCompletionAcceptedPayload = {
+          provider: "codex",
+          messageId: "message-before-completion",
+          acceptedTurnId: "turn-message-before-completion",
+          intentSequence: beforeCompletionIntent!.sequence,
+          clientCorrelationId: beforeCompletionCorrelationId,
+        };
+        const beforeCompletionProcessingPayload = {
+          taskId: `codex-turn-steer-processing:${beforeCompletionCorrelationId}`,
+          usage: {
+            messageId: "message-before-completion",
+            clientCorrelationId: beforeCompletionCorrelationId,
+          },
+        };
+        // A replayed provider observation can carry a timestamp newer than a
+        // subsequently persisted candidate. Sequence, not wall-clock order,
+        // is the authoritative generation boundary: this older source event
+        // must not settle the acceptance inserted below.
+        yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        )
+        VALUES (
+          'historical-processed-steer-before-completion',
+          'thread-message-before-completion',
+          'turn-message-before-completion',
+          'info',
+          'task.progress',
+          'Reasoning update',
+          ${JSON.stringify(beforeCompletionProcessingPayload)},
+          NULL,
+          '2026-07-14T00:00:09.250Z'
+        )
+      `;
+        yield* sql`
+        INSERT INTO orchestration_events (
+          event_id,
+          aggregate_kind,
+          stream_id,
+          stream_version,
+          event_type,
+          occurred_at,
+          command_id,
+          causation_event_id,
+          correlation_id,
+          actor_kind,
+          payload_json,
+          metadata_json
+        )
+        VALUES (
+          'event-historical-processed-steer-before-completion',
+          'thread',
+          'thread-message-before-completion',
+          0,
+          'thread.activity-appended',
+          '2026-07-14T00:00:09.250Z',
+          'provider:codex:thread-message-before-completion:historical-processed-steer-before-completion:thread-activity-append:historical-processed-steer-before-completion',
+          NULL,
+          NULL,
+          'provider',
+          ${JSON.stringify({
+            threadId: "thread-message-before-completion",
+            activity: {
+              id: "historical-processed-steer-before-completion",
+              tone: "info",
+              kind: "task.progress",
+              summary: "Reasoning update",
+              payload: beforeCompletionProcessingPayload,
+              turnId: "turn-message-before-completion",
+              createdAt: "2026-07-14T00:00:09.250Z",
+            },
+          })},
+          '{}'
+        )
+      `;
         yield* sql`
         INSERT INTO projection_thread_activities (
           activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
@@ -1676,11 +1780,23 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           'info',
           'provider.turn.steer.accepted',
           'Steer accepted',
-          '{"provider":"codex","messageId":"message-before-completion","acceptedTurnId":"turn-message-before-completion"}',
+          ${JSON.stringify(beforeCompletionAcceptedPayload)},
           NULL,
           '2026-07-14T00:00:09.500Z'
         )
       `;
+        const beforeCompletionAcceptedEventPayload = {
+          threadId: "thread-message-before-completion",
+          activity: {
+            id: "accepted-steer-before-completion",
+            tone: "info",
+            kind: "provider.turn.steer.accepted",
+            summary: "Steer accepted",
+            payload: beforeCompletionAcceptedPayload,
+            turnId: "turn-message-before-completion",
+            createdAt: "2026-07-14T00:00:09.500Z",
+          },
+        };
         yield* sql`
         INSERT INTO orchestration_events (
           event_id,
@@ -1700,21 +1816,27 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           'event-accepted-steer-before-completion',
           'thread',
           'thread-message-before-completion',
-          0,
+          1,
           'thread.activity-appended',
           '2026-07-14T00:00:09.500Z',
           'server:codex-steer-accepted:thread-message-before-completion:turn-message-before-completion:message-before-completion',
           NULL,
           'server:codex-steer-accepted:thread-message-before-completion:turn-message-before-completion:message-before-completion',
           'server',
-          '{"threadId":"thread-message-before-completion","activity":{"id":"accepted-steer-before-completion","tone":"info","kind":"provider.turn.steer.accepted","summary":"Steer accepted","payload":{"provider":"codex","messageId":"message-before-completion","acceptedTurnId":"turn-message-before-completion"},"turnId":"turn-message-before-completion","createdAt":"2026-07-14T00:00:09.500Z"}}',
+          ${JSON.stringify(beforeCompletionAcceptedEventPayload)},
           '{}'
         )
       `;
-        assert.deepStrictEqual(yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(), [
-          ThreadId.make("thread-message-before-completion"),
-          ThreadId.make("thread-stale-steer-candidate"),
-        ]);
+        assert.deepStrictEqual(
+          yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(
+            undefined,
+            shellDerivedLegacyCandidates,
+          ),
+          [
+            ThreadId.make("thread-message-before-completion"),
+            ThreadId.make("thread-stale-steer-candidate"),
+          ],
+        );
 
         yield* sql`
         INSERT INTO projection_thread_activities (
@@ -1727,14 +1849,65 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           'info',
           'task.progress',
           'Reasoning update',
-          '{"taskId":"codex-turn-steer-processing:message-before-completion","usage":{"messageId":"message-before-completion"}}',
+          ${JSON.stringify(beforeCompletionProcessingPayload)},
           NULL,
-          '2026-07-14T00:00:09.750Z'
+          '2026-07-14T00:00:09.800Z'
         )
       `;
-        assert.deepStrictEqual(yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(), [
-          ThreadId.make("thread-stale-steer-candidate"),
-        ]);
+        yield* sql`
+        INSERT INTO orchestration_events (
+          event_id,
+          aggregate_kind,
+          stream_id,
+          stream_version,
+          event_type,
+          occurred_at,
+          command_id,
+          causation_event_id,
+          correlation_id,
+          actor_kind,
+          payload_json,
+          metadata_json
+        )
+        VALUES (
+          'event-processed-steer-before-completion',
+          'thread',
+          'thread-message-before-completion',
+          2,
+          'thread.activity-appended',
+          '2026-07-14T00:00:09.800Z',
+          'provider:codex:thread-message-before-completion:processed-steer-before-completion:thread-activity-append:processed-steer-before-completion',
+          NULL,
+          NULL,
+          'provider',
+          ${JSON.stringify({
+            threadId: "thread-message-before-completion",
+            activity: {
+              id: "processed-steer-before-completion",
+              tone: "info",
+              kind: "task.progress",
+              summary: "Reasoning update",
+              payload: beforeCompletionProcessingPayload,
+              turnId: "turn-message-before-completion",
+              createdAt: "2026-07-14T00:00:09.800Z",
+            },
+          })},
+          '{}'
+        )
+      `;
+        assert.deepStrictEqual(
+          yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(
+            undefined,
+            shellDerivedLegacyCandidates,
+          ),
+          shellDerivedLegacyCandidates,
+        );
+        const [prunedCanonicalProcessingCandidate] = yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count
+          FROM orchestration_pending_codex_steer_acceptances
+          WHERE message_id = 'message-before-completion'
+        `;
+        assert.equal(prunedCanonicalProcessingCandidate?.count, 0);
       }),
   );
 
@@ -1792,6 +1965,65 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           NULL
         )
       `;
+
+        // Accepted receipts bind to the authenticated request generation.
+        // Processing may arrive before the provider ACK, so recovery compares
+        // its durable event and provider timestamp with this intent, not with
+        // the later accepted activity.
+        yield* sql`
+          INSERT INTO orchestration_events (
+            event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+            command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json
+          ) VALUES
+            (
+              'intent-retargeted-acceptance', 'thread', 'thread-historical-steer', 100,
+              'thread.turn-steer-requested', '2026-08-30T12:00:03.000Z',
+              'client:intent-retargeted-acceptance', NULL, NULL, 'client',
+              ${JSON.stringify({
+                threadId: "thread-historical-steer",
+                messageId: "message-retargeted",
+                expectedTurnId: "turn-retargeted-acceptance",
+                createdAt: "2026-08-30T12:00:03.000Z",
+              })}, '{}'
+            ),
+            (
+              'intent-processed-acceptance', 'thread', 'thread-historical-steer', 101,
+              'thread.turn-steer-requested', '2026-08-30T12:01:03.000Z',
+              'client:intent-processed-acceptance', NULL, NULL, 'client',
+              ${JSON.stringify({
+                threadId: "thread-historical-steer",
+                messageId: "message-processed",
+                expectedTurnId: "turn-processed-acceptance",
+                createdAt: "2026-08-30T12:01:03.000Z",
+              })}, '{}'
+            )
+        `;
+        const [retargetedIntent] = yield* sql<{ readonly sequence: number }>`
+          SELECT sequence FROM orchestration_events
+          WHERE event_id = 'intent-retargeted-acceptance'
+        `;
+        const [processedIntent] = yield* sql<{ readonly sequence: number }>`
+          SELECT sequence FROM orchestration_events
+          WHERE event_id = 'intent-processed-acceptance'
+        `;
+        assert.isDefined(retargetedIntent);
+        assert.isDefined(processedIntent);
+        // Provider progress may be durably ingested before the steer ACK. It
+        // remains valid because it is newer than the authenticated intent in
+        // both journal sequence and provider timestamp.
+        yield* sql`
+          INSERT INTO orchestration_events (
+            event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+            command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json
+          ) VALUES (
+            'event-processing-exact', 'thread', 'thread-historical-steer', 102,
+            'thread.activity-appended', '2026-08-30T12:01:03.050Z',
+            'provider:codex:thread-historical-steer:processing-exact:thread-activity-append:processing-exact',
+            NULL, NULL, 'provider',
+            '{"threadId":"thread-historical-steer","activity":{"id":"processing-exact","tone":"info","kind":"task.progress","summary":"Reasoning update","payload":{"taskId":"codex-turn-steer-processing:message-processed","usage":{"messageId":"message-processed"}},"turnId":"turn-processed-acceptance","createdAt":"2026-08-30T12:01:03.050Z"}}',
+            '{}'
+          )
+        `;
 
         yield* sql`
         INSERT INTO projection_turns (
@@ -1895,6 +2127,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
               provider: "codex",
               messageId: "message-retargeted",
               acceptedTurnId: "turn-retargeted-acceptance",
+              intentSequence: retargetedIntent!.sequence,
               clientCorrelationId: codexClientCorrelationId,
             })},
             1, '2026-08-30T12:00:03.100Z'
@@ -1902,7 +2135,12 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           (
             'accepted-processed', 'thread-historical-steer', 'turn-processed-acceptance',
             'info', 'provider.turn.steer.accepted', 'Steer accepted',
-            '{"provider":"codex","messageId":"message-processed","acceptedTurnId":"turn-processed-acceptance"}',
+            ${JSON.stringify({
+              provider: "codex",
+              messageId: "message-processed",
+              acceptedTurnId: "turn-processed-acceptance",
+              intentSequence: processedIntent!.sequence,
+            })},
             2, '2026-08-30T12:01:03.100Z'
           ),
           (
@@ -1951,7 +2189,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             'processing-exact', 'thread-historical-steer', 'turn-processed-acceptance',
             'info', 'task.progress', 'Reasoning update',
             '{"taskId":"codex-turn-steer-processing:message-processed","usage":{"messageId":"message-processed"}}',
-            6, '2026-08-30T12:01:04.000Z'
+            6, '2026-08-30T12:01:03.050Z'
           )
       `;
 
@@ -2009,6 +2247,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
                   provider: "codex",
                   messageId: "message-retargeted",
                   acceptedTurnId: "turn-retargeted-acceptance",
+                  intentSequence: retargetedIntent!.sequence,
                   clientCorrelationId: codexClientCorrelationId,
                 },
                 turnId: "turn-retargeted-acceptance",
@@ -2021,7 +2260,23 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             'event-accepted-processed', 'thread', 'thread-historical-steer', 1,
             'thread.activity-appended', '2026-08-30T12:01:03.100Z',
             'server:accepted-processed', NULL, 'server:accepted-processed', 'server',
-            '{"threadId":"thread-historical-steer","activity":{"id":"accepted-processed","tone":"info","kind":"provider.turn.steer.accepted","summary":"Steer accepted","payload":{"provider":"codex","messageId":"message-processed","acceptedTurnId":"turn-processed-acceptance"},"turnId":"turn-processed-acceptance","createdAt":"2026-08-30T12:01:03.100Z"}}',
+            ${JSON.stringify({
+              threadId: "thread-historical-steer",
+              activity: {
+                id: "accepted-processed",
+                tone: "info",
+                kind: "provider.turn.steer.accepted",
+                summary: "Steer accepted",
+                payload: {
+                  provider: "codex",
+                  messageId: "message-processed",
+                  acceptedTurnId: "turn-processed-acceptance",
+                  intentSequence: processedIntent!.sequence,
+                },
+                turnId: "turn-processed-acceptance",
+                createdAt: "2026-08-30T12:01:03.100Z",
+              },
+            })},
             '{}'
           ),
           (
@@ -2072,6 +2327,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         assert.deepStrictEqual(retargetedEvidence, {
           threadId: ThreadId.make("thread-historical-steer"),
           acceptedTurnId: TurnId.make("turn-retargeted-acceptance"),
+          intentSequence: retargetedIntent.sequence,
           clientCorrelationId: codexClientCorrelationId,
           messageId: MessageId.make("message-retargeted"),
           messageTurnId: TurnId.make("turn-newer-latest"),
@@ -2096,6 +2352,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         assert.deepStrictEqual(processedEvidence, {
           threadId: ThreadId.make("thread-historical-steer"),
           acceptedTurnId: TurnId.make("turn-processed-acceptance"),
+          intentSequence: processedIntent.sequence,
           clientCorrelationId: null,
           messageId: MessageId.make("message-processed"),
           messageTurnId: TurnId.make("turn-processed-acceptance"),
@@ -2134,12 +2391,51 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         assert.deepStrictEqual(yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(), [
           ThreadId.make("thread-historical-steer"),
         ]);
+        const exactCandidates = yield* snapshotQuery.getPostTerminalStaleSteerCandidates();
+        const [legacyNullCorrelationPending] = yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count
+          FROM orchestration_pending_codex_steer_acceptances
+          WHERE message_id = 'message-processed'
+        `;
+        // Historical null-correlation processing may suppress duplicate I/O,
+        // but it is not cryptographically bound strongly enough to destroy
+        // Cafe's only durable accepted-recovery candidate.
+        assert.equal(legacyNullCorrelationPending?.count, 1);
+        const exactAcceptedCandidate = exactCandidates.find(
+          (candidate) => candidate._tag === "accepted",
+        );
+        assert.ok(exactAcceptedCandidate);
+        assert.equal(exactAcceptedCandidate.threadId, "thread-historical-steer");
+        assert.equal(exactAcceptedCandidate.activityId, "accepted-retargeted");
+        assert.equal(exactAcceptedCandidate.acceptedTurnId, "turn-retargeted-acceptance");
+        assert.equal(exactAcceptedCandidate.messageId, "message-retargeted");
+        assert.equal(exactAcceptedCandidate.clientCorrelationId, codexClientCorrelationId);
+        assert.equal(exactAcceptedCandidate.acceptedAt, "2026-08-30T12:00:03.100Z");
+        assert.deepStrictEqual(
+          yield* snapshotQuery.getCodexSteerAcceptanceEvidence({
+            exactAcceptedBarrier: exactAcceptedCandidate,
+          }),
+          [retargetedEvidence],
+        );
+        assert.deepStrictEqual(
+          yield* snapshotQuery.getCodexSteerAcceptanceEvidence({
+            exactAcceptedBarrier: {
+              ...exactAcceptedCandidate,
+              // The event sequence is part of the authenticated compact
+              // identity. A mismatched source event must fail closed instead
+              // of broadening to another acceptance in this long thread.
+              eventSequence: exactAcceptedCandidate.eventSequence + 1,
+            },
+          }),
+          [],
+        );
 
         const recoveredPayload = {
           provider: "codex",
           messageId: "message-retargeted",
           acceptedTurnId: "turn-retargeted-acceptance",
           recoveredTurnId: "turn-newer-latest",
+          intentSequence: retargetedIntent.sequence,
           clientCorrelationId: codexClientCorrelationId,
         };
         const recoveredEventPayload = {
@@ -2189,13 +2485,78 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           ThreadId.make("thread-historical-steer"),
         ]);
 
+        const delayedOldRecoveredPayload = {
+          ...recoveredPayload,
+          // This receipt belongs to another intent generation. Persisting it
+          // after the newer acceptance must not let journal order alone settle
+          // the newer compact candidate.
+          intentSequence: processedIntent.sequence,
+        };
+        const delayedOldRecoveredEventPayload = {
+          threadId: "thread-historical-steer",
+          activity: {
+            ...recoveredEventPayload.activity,
+            id: "recovered-retargeted-old-generation",
+            payload: delayedOldRecoveredPayload,
+          },
+        };
+        yield* sql`
+          INSERT INTO projection_thread_activities (
+            activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+          )
+          VALUES (
+            'recovered-retargeted-old-generation', 'thread-historical-steer',
+            'turn-newer-latest', 'info', 'provider.turn.steer.recovered', 'Steer recovered',
+            ${JSON.stringify(delayedOldRecoveredPayload)}, 1997, '2026-08-30T12:11:00.000Z'
+          )
+        `;
+        yield* sql`
+          INSERT INTO orchestration_events (
+            event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+            command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json
+          )
+          VALUES (
+            'event-delayed-old-recovered-retargeted', 'thread', 'thread-historical-steer', 6,
+            'thread.activity-appended', '2026-08-30T12:11:00.000Z',
+            'server:delayed-old-recovered', NULL, 'server:delayed-old-recovered', 'server',
+            ${JSON.stringify(delayedOldRecoveredEventPayload)}, '{}'
+          )
+        `;
+        // Simulate a compact barrier written by an older generation. The
+        // post-terminal lookup must bind it to the accepted intent sequence;
+        // otherwise this later journal row would erase the newer authority.
+        yield* sql`
+          INSERT INTO orchestration_codex_steer_recovery_barriers (
+            sequence, thread_id, message_id, candidate_sequence, barrier_kind,
+            activity_id, turn_id, accepted_turn_id, client_correlation_id,
+            activity_created_at
+          )
+          SELECT
+            sequence, 'thread-historical-steer', 'message-retargeted',
+            ${processedIntent.sequence}, 'provider.turn.steer.recovered',
+            'recovered-retargeted-old-generation', 'turn-newer-latest',
+            'turn-retargeted-acceptance', ${codexClientCorrelationId},
+            '2026-08-30T12:11:00.000Z'
+          FROM orchestration_events
+          WHERE event_id = 'event-delayed-old-recovered-retargeted'
+        `;
+        const delayedOldRecoveryEvidence = yield* snapshotQuery.getCodexSteerAcceptanceEvidence({
+          threadId: ThreadId.make("thread-historical-steer"),
+          acceptedTurnId: TurnId.make("turn-retargeted-acceptance"),
+          messageId: MessageId.make("message-retargeted"),
+        });
+        assert.equal(delayedOldRecoveryEvidence[0]?.recoveryObserved, false);
+        assert.deepStrictEqual(yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(), [
+          ThreadId.make("thread-historical-steer"),
+        ]);
+
         yield* sql`
         INSERT INTO orchestration_events (
           event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
           command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json
         )
         VALUES (
-          'event-trusted-recovered-retargeted', 'thread', 'thread-historical-steer', 6,
+          'event-trusted-recovered-retargeted', 'thread', 'thread-historical-steer', 7,
           'thread.activity-appended', '2026-08-30T12:11:00.000Z',
           'server:trusted-recovered', NULL, 'server:trusted-recovered', 'server',
           ${JSON.stringify(recoveredEventPayload)}, '{}'
@@ -2234,6 +2595,32 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           '2026-08-30T12:00:04.250Z'
         )
       `;
+        yield* sql`
+          INSERT INTO orchestration_events (
+            event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+            command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json
+          ) VALUES (
+            'event-processing-retargeted-exact', 'thread', 'thread-historical-steer', 200,
+            'thread.activity-appended', '2026-08-30T12:00:04.250Z',
+            'provider:codex:thread-historical-steer:processing-retargeted-exact:thread-activity-append:processing-retargeted-exact',
+            NULL, NULL, 'provider',
+            ${JSON.stringify({
+              threadId: "thread-historical-steer",
+              activity: {
+                id: "processing-retargeted-exact",
+                tone: "info",
+                kind: "task.progress",
+                summary: "Reasoning update",
+                payload: {
+                  taskId: `codex-turn-steer-processing:${codexClientCorrelationId}`,
+                  usage: { clientCorrelationId: codexClientCorrelationId },
+                },
+                turnId: "turn-retargeted-acceptance",
+                createdAt: "2026-08-30T12:00:04.250Z",
+              },
+            })}, '{}'
+          )
+        `;
         assert.deepStrictEqual(
           yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(),
           [],
@@ -2287,6 +2674,69 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         )
       `;
 
+        // Keep the exact-processing lookup outer loop on the compact,
+        // selective activity projection. Without CROSS JOIN, SQLite may
+        // reorder this query to scan every later orchestration event in the
+        // thread through idx_orch_events_stream_sequence. That blocked the
+        // Node event loop for minutes on a 44-million-event production ledger.
+        const exactProcessingPlan = yield* sql<{ readonly detail: string }>`
+          EXPLAIN QUERY PLAN
+          SELECT EXISTS (
+            SELECT 1
+            FROM projection_thread_activities AS processing
+              INDEXED BY idx_projection_thread_activities_thread_turn_kind_created_id
+            CROSS JOIN orchestration_events AS processing_event
+              INDEXED BY idx_orch_events_command_id
+              ON processing_event.command_id =
+                'provider:codex:' || processing.thread_id || ':' ||
+                processing.activity_id || ':thread-activity-append:' || processing.activity_id
+              AND processing_event.sequence > 1
+              AND processing_event.aggregate_kind = 'thread'
+              AND processing_event.stream_id = processing.thread_id
+              AND processing_event.event_type = 'thread.activity-appended'
+              AND processing_event.actor_kind = 'provider'
+              AND json_extract(processing_event.payload_json, '$.threadId') =
+                processing.thread_id
+              AND json_extract(processing_event.payload_json, '$.activity.id') =
+                processing.activity_id
+              AND json_extract(processing_event.payload_json, '$.activity.kind') =
+                processing.kind
+              AND json_extract(processing_event.payload_json, '$.activity.turnId') IS
+                processing.turn_id
+              AND json_extract(processing_event.payload_json, '$.activity.createdAt') =
+                processing.created_at
+              AND json_extract(processing_event.payload_json, '$.activity.payload') =
+                json(processing.payload_json)
+            WHERE processing.thread_id = ${recoveryThreadId}
+              AND processing.turn_id IS 'turn-unsettled-intents'
+              AND processing.kind = 'task.progress'
+              AND processing.created_at >= ${createdAt}
+              AND json_type(processing.payload_json, '$.taskId') = 'text'
+              AND json_extract(processing.payload_json, '$.taskId') = 'safe-task-id'
+              AND json_type(
+                processing.payload_json,
+                '$.usage.clientCorrelationId'
+              ) = 'text'
+              AND json_extract(
+                processing.payload_json,
+                '$.usage.clientCorrelationId'
+              ) = 'safe-correlation-id'
+              AND json_type(processing.payload_json, '$.usage.messageId') = 'text'
+              AND json_extract(processing.payload_json, '$.usage.messageId') = 'safe-message-id'
+            LIMIT 1
+          )
+        `;
+        const exactProcessingPlanDetails = exactProcessingPlan.map((row) => row.detail);
+        const processingLookupIndex = exactProcessingPlanDetails.findIndex((detail) =>
+          detail.includes("idx_projection_thread_activities_thread_turn_kind_created_id"),
+        );
+        const eventLookupIndex = exactProcessingPlanDetails.findIndex((detail) =>
+          detail.includes("idx_orch_events_command_id"),
+        );
+        assert.isTrue(processingLookupIndex >= 0);
+        assert.isTrue(eventLookupIndex > processingLookupIndex);
+        assert.notInclude(exactProcessingPlanDetails.join("\n"), "idx_orch_events_stream_sequence");
+
         let streamVersion = 0;
         const insertEvent = (input: {
           readonly eventId: string;
@@ -2299,6 +2749,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           readonly actorKind: "client" | "server" | "provider";
           readonly payload: unknown;
           readonly occurredAt?: string;
+          readonly commandId?: string;
         }) => {
           const version = streamVersion;
           streamVersion += 1;
@@ -2311,7 +2762,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             VALUES (
               ${input.eventId}, 'thread', ${recoveryThreadId}, ${version}, ${input.eventType},
               ${input.occurredAt ?? createdAt},
-              ${`${input.actorKind}:${input.eventId}`}, NULL, ${`${input.actorKind}:${input.eventId}`},
+              ${input.commandId ?? `${input.actorKind}:${input.eventId}`}, NULL,
+              ${`${input.actorKind}:${input.eventId}`},
               ${input.actorKind}, ${JSON.stringify(input.payload)}, '{}'
             )
           `;
@@ -2374,6 +2826,11 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
               eventId: `event-${input.activityId}`,
               eventType: "thread.activity-appended",
               actorKind: input.actorKind ?? "server",
+              ...(input.actorKind === "provider" && input.kind === "task.progress"
+                ? {
+                    commandId: `provider:codex:${recoveryThreadId}:${input.activityId}:thread-activity-append:${input.activityId}`,
+                  }
+                : {}),
               payload: {
                 threadId: recoveryThreadId,
                 activity: {
@@ -2413,6 +2870,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           eventId: "intent-accepted",
           messageId: "message-accepted",
         });
+        const acceptedIntentSequence = yield* readEventSequence("intent-accepted");
         yield* insertActivity({
           activityId: "accepted-intent-outcome",
           kind: "provider.turn.steer.accepted",
@@ -2420,33 +2878,142 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             provider: "codex",
             messageId: "message-accepted",
             acceptedTurnId: "turn-unsettled-intents",
+            intentSequence: acceptedIntentSequence,
             clientCorrelationId: codexClientCorrelationId,
           },
         });
+
+        // A newer generation may intentionally reuse MessageId. Historical
+        // progress with the exact same cryptographic binding must not settle
+        // a candidate whose event sequence is newer than that observation.
+        const repeatedProcessingMessageId = "message-processing-reused-generation";
+        const repeatedProcessingToken = buildCodexSteerClientCorrelationId(
+          repeatedProcessingMessageId,
+        );
+        yield* insertActivity({
+          activityId: "processing-reused-generation-old",
+          kind: "task.progress",
+          actorKind: "provider",
+          payload: {
+            taskId: `codex-turn-steer-processing:${repeatedProcessingToken}`,
+            usage: {
+              messageId: repeatedProcessingMessageId,
+              clientCorrelationId: repeatedProcessingToken,
+            },
+          },
+        });
+        yield* insertSteerIntent({
+          eventId: "intent-processing-reused-generation",
+          messageId: repeatedProcessingMessageId,
+        });
+        const repeatedProcessingSequence = yield* readEventSequence(
+          "intent-processing-reused-generation",
+        );
+        assert.equal(
+          (yield* snapshotQuery.getUnsettledCodexSteerIntentEvents()).some(
+            (candidate) => candidate.sequence === repeatedProcessingSequence,
+          ),
+          true,
+        );
+        yield* insertActivity({
+          activityId: "processing-reused-generation-new",
+          kind: "task.progress",
+          actorKind: "provider",
+          payload: {
+            taskId: `codex-turn-steer-processing:${repeatedProcessingToken}`,
+            usage: {
+              messageId: repeatedProcessingMessageId,
+              clientCorrelationId: repeatedProcessingToken,
+            },
+          },
+        });
+        assert.equal(
+          (yield* snapshotQuery.getUnsettledCodexSteerIntentEvents()).some(
+            (candidate) => candidate.sequence === repeatedProcessingSequence,
+          ),
+          false,
+        );
+
+        // The cryptographic message tuple is not sufficient on its own when
+        // a later generation can reuse MessageId. Processing must also belong
+        // to the immutable provider turn recorded by the original intent.
+        const wrongTurnMessageId = "message-processing-wrong-turn";
+        const wrongTurnToken = buildCodexSteerClientCorrelationId(wrongTurnMessageId);
+        yield* insertSteerIntent({
+          eventId: "intent-processing-wrong-turn",
+          messageId: wrongTurnMessageId,
+        });
+        const wrongTurnSequence = yield* readEventSequence("intent-processing-wrong-turn");
+        yield* insertActivity({
+          activityId: "processing-wrong-turn-outcome",
+          kind: "task.progress",
+          turnId: "turn-different-generation",
+          actorKind: "provider",
+          payload: {
+            taskId: `codex-turn-steer-processing:${wrongTurnToken}`,
+            usage: {
+              messageId: wrongTurnMessageId,
+              clientCorrelationId: wrongTurnToken,
+            },
+          },
+        });
+        assert.equal(
+          (yield* snapshotQuery.getUnsettledCodexSteerIntentEvents()).some(
+            (candidate) => candidate.sequence === wrongTurnSequence,
+          ),
+          true,
+        );
+        yield* insertActivity({
+          activityId: "processing-right-turn-outcome",
+          kind: "task.progress",
+          actorKind: "provider",
+          payload: {
+            taskId: `codex-turn-steer-processing:${wrongTurnToken}`,
+            usage: {
+              messageId: wrongTurnMessageId,
+              clientCorrelationId: wrongTurnToken,
+            },
+          },
+        });
+        assert.equal(
+          (yield* snapshotQuery.getUnsettledCodexSteerIntentEvents()).some(
+            (candidate) => candidate.sequence === wrongTurnSequence,
+          ),
+          false,
+        );
 
         yield* insertSteerIntent({
           eventId: "intent-processing",
           messageId: "message-processing",
         });
         const exactProcessingToken = buildCodexSteerClientCorrelationId("message-processing");
-        yield* sql`
-          INSERT INTO projection_thread_activities (
-            activity_id, thread_id, turn_id, tone, kind, summary,
-            payload_json, sequence, created_at
-          )
-          VALUES (
-            'processing-intent-outcome', ${recoveryThreadId}, 'turn-unsettled-intents',
-            'info', 'task.progress', 'Processing steer',
-            ${JSON.stringify({
-              taskId: `codex-turn-steer-processing:${exactProcessingToken}`,
-              usage: {
-                messageId: "message-processing",
-                clientCorrelationId: exactProcessingToken,
-              },
-            })},
-            NULL, ${createdAt}
-          )
+        yield* insertActivity({
+          activityId: "processing-intent-outcome",
+          kind: "task.progress",
+          actorKind: "provider",
+          payload: {
+            taskId: `codex-turn-steer-processing:${exactProcessingToken}`,
+            usage: {
+              messageId: "message-processing",
+              clientCorrelationId: exactProcessingToken,
+            },
+          },
+        });
+        const liveProcessingSequence = yield* readEventSequence("intent-processing");
+        const liveCandidates = yield* snapshotQuery.getUnsettledCodexSteerIntentEvents({
+          threadId: ThreadId.make(recoveryThreadId),
+          reconcileDurableProcessing: false,
+        });
+        assert.equal(
+          liveCandidates.some((candidate) => candidate.sequence === liveProcessingSequence),
+          true,
+        );
+        const [persistedLiveProcessingCandidate] = yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count
+          FROM orchestration_unsettled_codex_steer_intents
+          WHERE sequence = ${liveProcessingSequence}
         `;
+        assert.equal(persistedLiveProcessingCandidate?.count, 1);
 
         // MessageId equality alone is not processing authority. These rows
         // model both a different canonical token and a split token/task-id
@@ -2456,23 +3023,18 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           messageId: "message-processing-wrong-token",
         });
         const wrongProcessingToken = buildCodexSteerClientCorrelationId("another-message");
-        yield* sql`
-          INSERT INTO projection_thread_activities (
-            activity_id, thread_id, turn_id, tone, kind, summary,
-            payload_json, sequence, created_at
-          )
-          VALUES (
-            'processing-wrong-token-intent-outcome', ${recoveryThreadId},
-            'turn-unsettled-intents', 'info', 'task.progress', 'Processing steer',
-            ${JSON.stringify({
-              taskId: `codex-turn-steer-processing:${wrongProcessingToken}`,
-              usage: {
-                messageId: "message-processing-wrong-token",
-                clientCorrelationId: wrongProcessingToken,
-              },
-            })}, NULL, ${createdAt}
-          )
-        `;
+        yield* insertActivity({
+          activityId: "processing-wrong-token-intent-outcome",
+          kind: "task.progress",
+          actorKind: "provider",
+          payload: {
+            taskId: `codex-turn-steer-processing:${wrongProcessingToken}`,
+            usage: {
+              messageId: "message-processing-wrong-token",
+              clientCorrelationId: wrongProcessingToken,
+            },
+          },
+        });
 
         yield* insertSteerIntent({
           eventId: "intent-processing-split-binding",
@@ -2481,23 +3043,18 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         const splitBindingToken = buildCodexSteerClientCorrelationId(
           "message-processing-split-binding",
         );
-        yield* sql`
-          INSERT INTO projection_thread_activities (
-            activity_id, thread_id, turn_id, tone, kind, summary,
-            payload_json, sequence, created_at
-          )
-          VALUES (
-            'processing-split-binding-intent-outcome', ${recoveryThreadId},
-            'turn-unsettled-intents', 'info', 'task.progress', 'Processing steer',
-            ${JSON.stringify({
-              taskId: `codex-turn-steer-processing:${wrongProcessingToken}`,
-              usage: {
-                messageId: "message-processing-split-binding",
-                clientCorrelationId: splitBindingToken,
-              },
-            })}, NULL, ${createdAt}
-          )
-        `;
+        yield* insertActivity({
+          activityId: "processing-split-binding-intent-outcome",
+          kind: "task.progress",
+          actorKind: "provider",
+          payload: {
+            taskId: `codex-turn-steer-processing:${wrongProcessingToken}`,
+            usage: {
+              messageId: "message-processing-split-binding",
+              clientCorrelationId: splitBindingToken,
+            },
+          },
+        });
 
         for (const [suffix, retryableFollowUp] of [
           ["retryable", true],
@@ -2508,10 +3065,15 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             eventId: `intent-failed-${suffix}`,
             messageId: handledMessageId,
           });
+          const handledIntentSequence = yield* readEventSequence(`intent-failed-${suffix}`);
           yield* insertActivity({
             activityId: `failed-intent-${suffix}`,
             kind: "provider.turn.steer.failed",
-            payload: { messageId: handledMessageId, retryableFollowUp },
+            payload: {
+              messageId: handledMessageId,
+              intentSequence: handledIntentSequence,
+              retryableFollowUp,
+            },
           });
         }
 
@@ -2519,6 +3081,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           eventId: "intent-recovered",
           messageId: "message-recovered",
         });
+        const recoveredIntentSequence = yield* readEventSequence("intent-recovered");
         yield* insertActivity({
           activityId: "recovered-intent-outcome",
           kind: "provider.turn.steer.recovered",
@@ -2528,6 +3091,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             messageId: "message-recovered",
             acceptedTurnId: "turn-unsettled-intents",
             recoveredTurnId: "turn-recovered-intent",
+            intentSequence: recoveredIntentSequence,
             clientCorrelationId: codexClientCorrelationId,
           },
         });
@@ -2536,6 +3100,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           eventId: "intent-delivered-next-turn",
           messageId: "message-delivered-next-turn",
         });
+        const deliveredIntentSequence = yield* readEventSequence("intent-delivered-next-turn");
         yield* insertActivity({
           activityId: "delivered-next-turn-outcome",
           kind: "provider.turn.steer.delivered",
@@ -2544,6 +3109,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             provider: "codex",
             messageId: "message-delivered-next-turn",
             deliveredTurnId: "turn-delivered-next-turn",
+            intentSequence: deliveredIntentSequence,
             delivery: "next-turn",
             reason: "turn-start-after-provider-no-active-turn",
           },
@@ -2681,12 +3247,26 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         const repeatedFailureSecondSequence = yield* readEventSequence(
           "intent-repeated-failure-second",
         );
+        const exactProcessingSequence = yield* readEventSequence("intent-processing");
+        const [persistedProcessingCandidateBeforeRead] = yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count
+          FROM orchestration_unsettled_codex_steer_intents
+          WHERE sequence = ${exactProcessingSequence}
+        `;
+        assert.equal(persistedProcessingCandidateBeforeRead?.count, 1);
+        const candidatesAfterFirstRead = yield* snapshotQuery.getUnsettledCodexSteerIntentEvents();
         assert.equal(
-          (yield* snapshotQuery.getUnsettledCodexSteerIntentEvents()).some(
+          candidatesAfterFirstRead.some(
             (candidate) => candidate.sequence === repeatedFailureSecondSequence,
           ),
           true,
         );
+        const [persistedProcessingCandidateAfterRead] = yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count
+          FROM orchestration_unsettled_codex_steer_intents
+          WHERE sequence = ${exactProcessingSequence}
+        `;
+        assert.equal(persistedProcessingCandidateAfterRead?.count, 0);
         yield* insertActivity({
           activityId: "repeated-failure-second-outcome",
           kind: "provider.turn.steer.failed",
@@ -2769,6 +3349,120 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             false,
           );
         }
+
+        // Recovery and next-turn delivery receipts are also generation
+        // scoped. A delayed success from an older provider side effect must
+        // never erase a newer retry that intentionally reused MessageId.
+        const repeatedRecoveryMessageId = "message-repeated-recovery";
+        const repeatedRecoveryCorrelation =
+          buildCodexSteerClientCorrelationId(repeatedRecoveryMessageId);
+        yield* insertSteerIntent({
+          eventId: "intent-repeated-recovery-first",
+          messageId: repeatedRecoveryMessageId,
+        });
+        const repeatedRecoveryFirstSequence = yield* readEventSequence(
+          "intent-repeated-recovery-first",
+        );
+        yield* insertActivity({
+          activityId: "accepted-repeated-recovery-first",
+          kind: "provider.turn.steer.accepted",
+          payload: {
+            provider: "codex",
+            messageId: repeatedRecoveryMessageId,
+            acceptedTurnId: "turn-unsettled-intents",
+            intentSequence: repeatedRecoveryFirstSequence,
+            clientCorrelationId: repeatedRecoveryCorrelation,
+          },
+        });
+        yield* insertSteerIntent({
+          eventId: "intent-repeated-recovery-second",
+          messageId: repeatedRecoveryMessageId,
+        });
+        const repeatedRecoverySecondSequence = yield* readEventSequence(
+          "intent-repeated-recovery-second",
+        );
+        yield* insertActivity({
+          activityId: "accepted-repeated-recovery-second",
+          kind: "provider.turn.steer.accepted",
+          payload: {
+            provider: "codex",
+            messageId: repeatedRecoveryMessageId,
+            acceptedTurnId: "turn-unsettled-intents",
+            intentSequence: repeatedRecoverySecondSequence,
+            clientCorrelationId: repeatedRecoveryCorrelation,
+          },
+        });
+        yield* insertActivity({
+          activityId: "recovered-repeated-recovery-first-delayed",
+          kind: "provider.turn.steer.recovered",
+          turnId: "turn-recovered-first-delayed",
+          payload: {
+            provider: "codex",
+            messageId: repeatedRecoveryMessageId,
+            acceptedTurnId: "turn-unsettled-intents",
+            recoveredTurnId: "turn-recovered-first-delayed",
+            intentSequence: repeatedRecoveryFirstSequence,
+            clientCorrelationId: repeatedRecoveryCorrelation,
+          },
+        });
+        const pendingRepeatedRecoveries = yield* sql<{ readonly intentSequence: number }>`
+          SELECT intent_sequence AS "intentSequence"
+          FROM orchestration_pending_codex_steer_acceptances
+          WHERE thread_id = ${recoveryThreadId}
+            AND message_id = ${repeatedRecoveryMessageId}
+          ORDER BY intent_sequence ASC
+        `;
+        assert.deepStrictEqual(pendingRepeatedRecoveries, [
+          { intentSequence: repeatedRecoverySecondSequence },
+        ]);
+
+        const repeatedDeliveryMessageId = "message-repeated-delivery";
+        yield* insertSteerIntent({
+          eventId: "intent-repeated-delivery-first",
+          messageId: repeatedDeliveryMessageId,
+        });
+        const repeatedDeliveryFirstSequence = yield* readEventSequence(
+          "intent-repeated-delivery-first",
+        );
+        yield* insertSteerIntent({
+          eventId: "intent-repeated-delivery-second",
+          messageId: repeatedDeliveryMessageId,
+        });
+        const repeatedDeliverySecondSequence = yield* readEventSequence(
+          "intent-repeated-delivery-second",
+        );
+        yield* insertActivity({
+          activityId: "delivered-repeated-delivery-first-delayed",
+          kind: "provider.turn.steer.delivered",
+          turnId: "turn-delivered-first-delayed",
+          payload: {
+            provider: "codex",
+            messageId: repeatedDeliveryMessageId,
+            deliveredTurnId: "turn-delivered-first-delayed",
+            intentSequence: repeatedDeliveryFirstSequence,
+            delivery: "next-turn",
+            reason: "turn-start-after-provider-no-active-turn",
+          },
+        });
+        assert.equal(
+          (yield* snapshotQuery.getUnsettledCodexSteerIntentEvents()).some(
+            (candidate) => candidate.sequence === repeatedDeliverySecondSequence,
+          ),
+          true,
+        );
+        yield* insertActivity({
+          activityId: "delivered-repeated-delivery-second",
+          kind: "provider.turn.steer.delivered",
+          turnId: "turn-delivered-second",
+          payload: {
+            provider: "codex",
+            messageId: repeatedDeliveryMessageId,
+            deliveredTurnId: "turn-delivered-second",
+            intentSequence: repeatedDeliverySecondSequence,
+            delivery: "next-turn",
+            reason: "turn-start-after-provider-no-active-turn",
+          },
+        });
 
         yield* insertSteerIntent({
           eventId: "intent-superseded",
@@ -3273,6 +3967,223 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         assert.equal(detail.value.messages.length, THREAD_DETAIL_MESSAGE_LIMIT);
         assert.equal(detail.value.messages[0]?.id, "message-0006");
         assert.equal(detail.value.messages.at(-1)?.id, "message-2005");
+      }
+    }),
+  );
+
+  it.effect("bounds latest task-plan retention to the thread-and-kind index", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      // Exercise both pathological shapes observed in mature real profiles:
+      // a plan that fell far outside the bounded activity tail, and a thread
+      // that never emitted a plan at all. The deterministic plan assertion is
+      // the primary regression guard; the wall-clock budget catches accidental
+      // synchronous work added around this already-bounded lookup.
+      yield* sql`DELETE FROM projection_thread_activities`;
+      yield* sql`DELETE FROM projection_thread_messages`;
+      yield* sql`DELETE FROM projection_thread_sessions`;
+      yield* sql`DELETE FROM projection_thread_proposed_plans`;
+      yield* sql`DELETE FROM projection_turns`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_state`;
+
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id,
+          title,
+          workspace_root,
+          default_model_selection_json,
+          scripts_json,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES (
+          'project-mature-plan-index',
+          'Mature plan index project',
+          '/tmp/project-mature-plan-index',
+          '{"provider":"codex","model":"gpt-5-codex"}',
+          '[]',
+          '2026-04-06T00:00:00.000Z',
+          '2026-04-06T00:00:00.000Z',
+          NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id,
+          project_id,
+          title,
+          model_selection_json,
+          runtime_mode,
+          interaction_mode,
+          branch,
+          worktree_path,
+          latest_turn_id,
+          latest_user_message_at,
+          pending_approval_count,
+          pending_user_input_count,
+          has_actionable_proposed_plan,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES
+          (
+            'thread-mature-old-plan',
+            'project-mature-plan-index',
+            'Mature thread with an old plan',
+            '{"provider":"codex","model":"gpt-5-codex"}',
+            'full-access',
+            'default',
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            0,
+            0,
+            0,
+            '2026-04-06T00:00:00.000Z',
+            '2026-04-06T00:00:00.000Z',
+            NULL
+          ),
+          (
+            'thread-mature-no-plan',
+            'project-mature-plan-index',
+            'Mature thread without a plan',
+            '{"provider":"codex","model":"gpt-5-codex"}',
+            'full-access',
+            'default',
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            0,
+            0,
+            0,
+            '2026-04-06T00:00:00.000Z',
+            '2026-04-06T00:00:00.000Z',
+            NULL
+          )
+      `;
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id,
+          thread_id,
+          turn_id,
+          tone,
+          kind,
+          summary,
+          payload_json,
+          sequence,
+          created_at
+        )
+        VALUES (
+          'mature-old-plan',
+          'thread-mature-old-plan',
+          NULL,
+          'info',
+          'turn.plan.updated',
+          'Plan updated',
+          '{"plan":[{"step":"Retained old plan","status":"inProgress"}]}',
+          1,
+          '2026-04-06T00:00:01.000Z'
+        )
+      `;
+      yield* sql`
+        WITH RECURSIVE activity_numbers(index_value) AS (
+          SELECT 1
+          UNION ALL
+          SELECT index_value + 1
+          FROM activity_numbers
+          WHERE index_value < 10000
+        ),
+        mature_threads(thread_id, activity_prefix) AS (
+          VALUES
+            ('thread-mature-old-plan', 'mature-old-plan-tail'),
+            ('thread-mature-no-plan', 'mature-no-plan-tail')
+        )
+        INSERT INTO projection_thread_activities (
+          activity_id,
+          thread_id,
+          turn_id,
+          tone,
+          kind,
+          summary,
+          payload_json,
+          sequence,
+          created_at
+        )
+        SELECT
+          printf('%s-%05d', mature_threads.activity_prefix, activity_numbers.index_value),
+          mature_threads.thread_id,
+          NULL,
+          'tool',
+          'tool.completed',
+          'Mature history activity',
+          '{}',
+          activity_numbers.index_value + 1,
+          '2026-04-06T12:00:00.000Z'
+        FROM activity_numbers
+        CROSS JOIN mature_threads
+      `;
+
+      const latestPlanQueryPlan = yield* sql<{ readonly detail: string }>`
+        EXPLAIN QUERY PLAN
+        SELECT activity_id
+        FROM projection_thread_activities
+          INDEXED BY idx_projection_thread_activities_thread_kind_created_id
+        WHERE thread_id = 'thread-mature-old-plan'
+          AND kind = 'turn.plan.updated'
+        ORDER BY
+          CASE WHEN sequence IS NULL THEN 0 ELSE 1 END DESC,
+          sequence DESC,
+          created_at DESC,
+          activity_id DESC
+        LIMIT 1
+      `;
+      const latestPlanQueryPlanText = latestPlanQueryPlan.map((row) => row.detail).join("\n");
+      assert.match(
+        latestPlanQueryPlanText,
+        /idx_projection_thread_activities_thread_kind_created_id/,
+      );
+      assert.notInclude(latestPlanQueryPlanText, "idx_projection_thread_activities_thread_recent");
+
+      const detailReadStartedAt = performance.now();
+      const [oldPlanDetail, noPlanDetail] = yield* Effect.all(
+        [
+          snapshotQuery.getThreadDetailById(ThreadId.make("thread-mature-old-plan")),
+          snapshotQuery.getThreadDetailById(ThreadId.make("thread-mature-no-plan")),
+        ],
+        { concurrency: 1 },
+      );
+      const detailReadElapsedMs = performance.now() - detailReadStartedAt;
+      assert.isBelow(
+        detailReadElapsedMs,
+        3000,
+        `mature thread detail reads exceeded the synchronous liveness budget (${detailReadElapsedMs.toFixed(1)} ms)`,
+      );
+
+      assert.equal(oldPlanDetail._tag, "Some");
+      if (oldPlanDetail._tag === "Some") {
+        assert.equal(oldPlanDetail.value.activities.length, THREAD_DETAIL_ACTIVITY_LIMIT + 1);
+        assert.equal(oldPlanDetail.value.activities[0]?.id, asEventId("mature-old-plan"));
+        assert.equal(
+          oldPlanDetail.value.activities.filter((activity) => activity.kind === "turn.plan.updated")
+            .length,
+          1,
+        );
+      }
+      assert.equal(noPlanDetail._tag, "Some");
+      if (noPlanDetail._tag === "Some") {
+        assert.equal(noPlanDetail.value.activities.length, THREAD_DETAIL_ACTIVITY_LIMIT);
+        assert.equal(
+          noPlanDetail.value.activities.some((activity) => activity.kind === "turn.plan.updated"),
+          false,
+        );
       }
     }),
   );
