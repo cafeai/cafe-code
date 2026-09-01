@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 import {
   ClientSettingsPatch,
   ClientSettingsSchema,
+  CODEX_MAX_CONCURRENT_SUBAGENTS,
   CodexSettings,
   ClaudeSettings,
   GrokSettings,
@@ -409,6 +410,48 @@ describe("provider settings", () => {
       decodeServerSettingsPatch({
         providers: {
           codex: { runtimeSource: "global" },
+        },
+      }),
+    ).toThrow();
+  });
+
+  it("leaves the Codex concurrent subagent limit unset for provider resolution", () => {
+    expect(decodeCodexSettings({}).maxConcurrentSubagents).toBeUndefined();
+  });
+
+  it.each([1, 6, CODEX_MAX_CONCURRENT_SUBAGENTS])(
+    "decodes a valid Codex concurrent subagent limit of %i",
+    (maxConcurrentSubagents) => {
+      expect(decodeCodexSettings({ maxConcurrentSubagents }).maxConcurrentSubagents).toBe(
+        maxConcurrentSubagents,
+      );
+    },
+  );
+
+  it.each([0, -1, 1.5, CODEX_MAX_CONCURRENT_SUBAGENTS + 1, Number.NaN, Number.POSITIVE_INFINITY])(
+    "rejects an invalid Codex concurrent subagent limit of %s",
+    (maxConcurrentSubagents) => {
+      expect(() => decodeCodexSettings({ maxConcurrentSubagents })).toThrow();
+    },
+  );
+
+  it("saves the Codex concurrent subagent limit through legacy settings patches", () => {
+    expect(
+      decodeServerSettingsPatch({
+        providers: {
+          codex: { maxConcurrentSubagents: 12 },
+        },
+      }),
+    ).toEqual({
+      providers: {
+        codex: { maxConcurrentSubagents: 12 },
+      },
+    });
+
+    expect(() =>
+      decodeServerSettingsPatch({
+        providers: {
+          codex: { maxConcurrentSubagents: CODEX_MAX_CONCURRENT_SUBAGENTS + 1 },
         },
       }),
     ).toThrow();

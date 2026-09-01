@@ -4225,6 +4225,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? { additionalDirectories: input.additionalDirectories }
             : {}),
           binaryPath: codexConfig.binaryPath,
+          ...(codexConfig.maxConcurrentSubagents !== undefined
+            ? { maxConcurrentSubagents: codexConfig.maxConcurrentSubagents }
+            : {}),
           ...(options?.environment ? { environment: options.environment } : {}),
           ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
           ...(isCodexResumeCursorSchema(input.resumeCursor)
@@ -4718,6 +4721,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 return readTransient({
                   binaryPath: codexConfig.binaryPath,
                   appServerCwd: serverConfig.stateDir,
+                  ...(codexConfig.maxConcurrentSubagents !== undefined
+                    ? { maxConcurrentSubagents: codexConfig.maxConcurrentSubagents }
+                    : {}),
                   rootProviderThreadId: resumeCursor.threadId,
                   subagentThreadId: subagentId,
                   ...(options?.environment ? { environment: options.environment } : {}),

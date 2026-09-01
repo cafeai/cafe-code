@@ -537,6 +537,10 @@ export interface ProviderSettingsFormAnnotation {
   // validation and used as the input's `min` attribute. Omit for no lower
   // bound.
   readonly minimum?: number | undefined;
+  // Upper bound for `control: "number"` fields, enforced by the renderer's
+  // validation and used as the input's `max` attribute. Omit for no upper
+  // bound.
+  readonly maximum?: number | undefined;
   // Whether `control: "number"` fields reject non-integer input. Defaults to
   // allowing fractional values when omitted.
   readonly integerOnly?: boolean | undefined;
@@ -576,6 +580,15 @@ export function makeProviderSettingsSchema<const Fields extends Schema.Struct.Fi
 
 export const CodexAutoCompactTokenLimit = Schema.Int.check(Schema.isGreaterThan(0));
 export type CodexAutoCompactTokenLimit = typeof CodexAutoCompactTokenLimit.Type;
+
+// Codex counts only spawned agent threads against this limit; the primary
+// thread is separate. The provider default is model/backend-specific, so Cafe
+// leaves this setting absent unless the user explicitly overrides it.
+export const CODEX_MAX_CONCURRENT_SUBAGENTS = 64;
+export const CodexMaxConcurrentSubagents = Schema.Int.check(
+  Schema.isBetween({ minimum: 1, maximum: CODEX_MAX_CONCURRENT_SUBAGENTS }),
+);
+export type CodexMaxConcurrentSubagents = typeof CodexMaxConcurrentSubagents.Type;
 
 export const CodexSettings = makeProviderSettingsSchema(
   {
@@ -628,6 +641,22 @@ export const CodexSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
+    maxConcurrentSubagents: Schema.optionalKey(CodexMaxConcurrentSubagents).pipe(
+      Schema.annotateKey({
+        title: "Maximum concurrent subagents",
+        description:
+          "Optional maximum number of spawned Codex agent threads that may be open concurrently. Enter 1–64, or leave blank to let the selected Codex model and backend choose; Cafe's current default Sol backend uses 3 spawned slots. The primary agent is not counted.",
+        providerSettingsForm: {
+          control: "number",
+          step: 1,
+          minimum: 1,
+          maximum: CODEX_MAX_CONCURRENT_SUBAGENTS,
+          integerOnly: true,
+          placeholder: "Provider default",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
     autoCompactTokenLimit: Schema.optionalKey(CodexAutoCompactTokenLimit).pipe(
       Schema.annotateKey({
         title: "Auto-compact override",
@@ -644,7 +673,14 @@ export const CodexSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["runtimeSource", "binaryPath", "homePath", "shadowHomePath", "autoCompactTokenLimit"],
+    order: [
+      "runtimeSource",
+      "binaryPath",
+      "homePath",
+      "shadowHomePath",
+      "maxConcurrentSubagents",
+      "autoCompactTokenLimit",
+    ],
   },
 );
 export type CodexSettings = typeof CodexSettings.Type;
@@ -883,6 +919,7 @@ const CodexSettingsPatch = Schema.Struct({
   homePath: Schema.optionalKey(TrimmedString),
   shadowHomePath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
+  maxConcurrentSubagents: Schema.optionalKey(CodexMaxConcurrentSubagents),
   autoCompactTokenLimit: Schema.optionalKey(CodexAutoCompactTokenLimit),
 });
 

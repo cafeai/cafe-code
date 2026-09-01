@@ -1,5 +1,6 @@
 import {
   ApprovalRequestId,
+  CODEX_MAX_CONCURRENT_SUBAGENTS,
   DEFAULT_MODEL,
   EventId,
   ProviderDriverKind,
@@ -276,20 +277,70 @@ export interface CodexTransportPolicy {
   readonly observedAt?: string;
 }
 
+export interface CodexAppServerLaunchOptions {
+  readonly maxConcurrentSubagents?: number | undefined;
+  readonly transportPolicy?: CodexTransportPolicy | undefined;
+}
+
 export function buildCodexAppServerArgs(
-  transportPolicy: CodexTransportPolicy | undefined,
+  options: CodexAppServerLaunchOptions,
 ): ReadonlyArray<string> {
-  if (transportPolicy?.responsesWebsockets !== "disabled") {
-    return ["app-server", "-c", CODEX_UPDATE_PLAN_CONFIG_OVERRIDE];
+  // Provider settings are schema-decoded before adapter construction, but this
+  // builder is also exported for direct runtime use. Revalidate the bounded
+  // integer at the process boundary so a future internal caller cannot place
+  // untrusted text or an unbounded resource limit into the Windows shell-backed
+  // launch path.
+  const concurrencyArgs: ReadonlyArray<string> = (() => {
+    const maxConcurrentSubagents = options.maxConcurrentSubagents;
+    if (maxConcurrentSubagents === undefined) {
+      // Omission is meaningful: Codex may select V1 or V2 from model metadata,
+      // persisted thread history, or user configuration, and those backends
+      // intentionally have different upstream defaults. Do not erase that
+      // behavior with an implicit Cafe value.
+      return [];
+    }
+    if (
+      !Number.isInteger(maxConcurrentSubagents) ||
+      maxConcurrentSubagents < 1 ||
+      maxConcurrentSubagents > CODEX_MAX_CONCURRENT_SUBAGENTS
+    ) {
+      throw new RangeError(
+        `maxConcurrentSubagents must be an integer between 1 and ${CODEX_MAX_CONCURRENT_SUBAGENTS}.`,
+      );
+    }
+
+    // The public setting counts only spawned subagents and controls V1. Codex
+    // V2 stores a higher-precedence root-inclusive total, so emit N + 1 there
+    // as well. Supplying both structured overrides makes an explicit Cafe
+    // setting authoritative even when the user's config already contains a
+    // V2-specific value, without changing whether V1 or V2 is selected.
+    return [
+      "-c",
+      `agents.max_concurrent_threads_per_session=${maxConcurrentSubagents}`,
+      "-c",
+      `features.multi_agent_v2.max_concurrent_threads_per_session=${maxConcurrentSubagents + 1}`,
+    ];
+  })();
+
+  // These process-level overrides apply before either `thread/start` or
+  // `thread/resume`, so fresh, resumed, and recoverable-resume sessions all
+  // receive the same explicit per-provider-instance policy when configured.
+  const baseArgs = [
+    "app-server",
+    "-c",
+    CODEX_UPDATE_PLAN_CONFIG_OVERRIDE,
+    ...concurrencyArgs,
+  ] as const;
+
+  if (options.transportPolicy?.responsesWebsockets !== "disabled") {
+    return baseArgs;
   }
 
   // Codex's built-in `openai` provider cannot be overridden by config. A
   // Cafe-scoped provider id lets us keep ChatGPT/OpenAI auth and Responses API
   // behavior while turning off only the unstable Responses WebSocket transport.
   return [
-    "app-server",
-    "-c",
-    CODEX_UPDATE_PLAN_CONFIG_OVERRIDE,
+    ...baseArgs,
     "-c",
     `model_provider="${CODEX_HTTP_FALLBACK_PROVIDER_ID}"`,
     "-c",
@@ -315,6 +366,10 @@ export interface CodexSessionRuntimeOptions {
   readonly homePath?: string;
   readonly environment?: NodeJS.ProcessEnv;
   readonly transportPolicy?: CodexTransportPolicy;
+  // Optional decoded, bounded Cafe provider setting forwarded as structured
+  // Codex `-c` arguments. Absence preserves Codex's model/backend-specific
+  // defaults and any user-owned config.
+  readonly maxConcurrentSubagents?: number | undefined;
   readonly cwd: string;
   readonly runtimeMode: RuntimeMode;
   readonly model?: string;
@@ -3589,6 +3644,7 @@ export interface CodexTransientSubagentHistoryReadOptions {
   readonly environment?: NodeJS.ProcessEnv;
   readonly homePath?: string;
   readonly transportPolicy?: CodexTransportPolicy;
+  readonly maxConcurrentSubagents?: number | undefined;
 }
 
 /**
@@ -3606,7 +3662,10 @@ export const readCodexSubagentThreadTransient = Effect.fn(
       const clientContext = yield* Layer.build(
         CodexClient.layerCommand({
           command: options.binaryPath,
-          args: buildCodexAppServerArgs(options.transportPolicy),
+          args: buildCodexAppServerArgs({
+            maxConcurrentSubagents: options.maxConcurrentSubagents,
+            transportPolicy: options.transportPolicy,
+          }),
           cwd: options.appServerCwd,
           env: {
             ...(options.environment ?? process.env),
@@ -3677,7 +3736,10 @@ export const makeCodexSessionRuntime = (
       ...(options.environment ?? process.env),
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
     };
-    const appServerArgs = buildCodexAppServerArgs(options.transportPolicy);
+    const appServerArgs = buildCodexAppServerArgs({
+      maxConcurrentSubagents: options.maxConcurrentSubagents,
+      transportPolicy: options.transportPolicy,
+    });
     const appServerCwd = options.appServerCwd ?? process.cwd();
     const child = yield* spawner
       .spawn(

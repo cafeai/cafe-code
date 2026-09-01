@@ -57,6 +57,7 @@ import {
   type CodexSessionRuntimeSendTurnInput,
   type CodexSessionRuntimeSteerTurnInput,
   type CodexSessionRuntimeShape,
+  type CodexTransientSubagentHistoryReadOptions,
   type CodexThreadSnapshot,
 } from "./CodexSessionRuntime.ts";
 import { canonicalizeCodexSubagentDetail, makeCodexAdapter } from "./CodexAdapter.ts";
@@ -1030,15 +1031,26 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
   });
 
   it.effect(
-    "propagates a configured Codex auto-compact token limit into runtime options and reported usage",
+    "propagates configured Codex runtime limits into runtime options and reported usage",
     () => {
       const customRuntimeFactory = makeRuntimeFactory();
+      const configuredTransientHistoryRead = vi.fn(
+        (options: CodexTransientSubagentHistoryReadOptions): Effect.Effect<CodexThreadSnapshot> =>
+          Effect.succeed({
+            threadId: options.subagentThreadId,
+            turns: [],
+          }),
+      );
       const customLayer = Layer.effect(
         CodexAdapter,
         Effect.gen(function* () {
-          const codexConfig = decodeCodexSettings({ autoCompactTokenLimit: 150_000 });
+          const codexConfig = decodeCodexSettings({
+            autoCompactTokenLimit: 150_000,
+            maxConcurrentSubagents: 12,
+          });
           return yield* makeCodexAdapter(codexConfig, {
             makeRuntime: customRuntimeFactory.factory,
+            readTransientSubagentThread: configuredTransientHistoryRead,
           });
         }),
       ).pipe(
@@ -1058,6 +1070,16 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         const runtime = customRuntimeFactory.lastRuntime;
         assert.ok(runtime);
         assert.equal(runtime.options.autoCompactTokenLimit, 150_000);
+        assert.equal(runtime.options.maxConcurrentSubagents, 12);
+
+        const readSubagentDetail = adapter.readSubagentDetail;
+        assert.ok(readSubagentDetail);
+        yield* readSubagentDetail(
+          asThreadId("sess-custom-runtime-limits-ended"),
+          "provider-child-custom-runtime-limits",
+          { resumeCursor: { threadId: "provider-root-custom-runtime-limits" } },
+        );
+        assert.equal(configuredTransientHistoryRead.mock.calls[0]?.[0].maxConcurrentSubagents, 12);
 
         const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
 

@@ -685,39 +685,71 @@ describe("Codex notification emission timestamps", () => {
 });
 
 describe("buildCodexAppServerArgs", () => {
-  it("enables Cafe task plans for every real app-server launch", () => {
-    assert.deepStrictEqual(buildCodexAppServerArgs(undefined), [
+  it("enables Cafe task plans while preserving Codex concurrency defaults when unset", () => {
+    assert.deepStrictEqual(buildCodexAppServerArgs({}), [
       "app-server",
       "-c",
       "tools.update_plan.enabled=true",
     ]);
-    assert.deepStrictEqual(buildCodexAppServerArgs({ responsesWebsockets: "auto" }), [
+    assert.deepStrictEqual(
+      buildCodexAppServerArgs({
+        transportPolicy: { responsesWebsockets: "auto" },
+      }),
+      ["app-server", "-c", "tools.update_plan.enabled=true"],
+    );
+  });
+
+  it("overrides both V1 and root-inclusive V2 capacity when explicitly configured", () => {
+    assert.deepStrictEqual(buildCodexAppServerArgs({ maxConcurrentSubagents: 12 }), [
       "app-server",
       "-c",
       "tools.update_plan.enabled=true",
+      "-c",
+      "agents.max_concurrent_threads_per_session=12",
+      "-c",
+      "features.multi_agent_v2.max_concurrent_threads_per_session=13",
     ]);
   });
 
   it("uses a Cafe-scoped OpenAI provider when Responses WebSockets are disabled", () => {
-    assert.deepStrictEqual(buildCodexAppServerArgs({ responsesWebsockets: "disabled" }), [
-      "app-server",
-      "-c",
-      "tools.update_plan.enabled=true",
-      "-c",
-      'model_provider="cafecode-openai-http"',
-      "-c",
-      'model_providers.cafecode-openai-http.name="OpenAI"',
-      "-c",
-      'model_providers.cafecode-openai-http.wire_api="responses"',
-      "-c",
-      "model_providers.cafecode-openai-http.requires_openai_auth=true",
-      "-c",
-      'model_providers.cafecode-openai-http.env_http_headers.OpenAI-Organization="OPENAI_ORGANIZATION"',
-      "-c",
-      'model_providers.cafecode-openai-http.env_http_headers.OpenAI-Project="OPENAI_PROJECT"',
-      "-c",
-      "model_providers.cafecode-openai-http.supports_websockets=false",
-    ]);
+    assert.deepStrictEqual(
+      buildCodexAppServerArgs({
+        maxConcurrentSubagents: 24,
+        transportPolicy: { responsesWebsockets: "disabled" },
+      }),
+      [
+        "app-server",
+        "-c",
+        "tools.update_plan.enabled=true",
+        "-c",
+        "agents.max_concurrent_threads_per_session=24",
+        "-c",
+        "features.multi_agent_v2.max_concurrent_threads_per_session=25",
+        "-c",
+        'model_provider="cafecode-openai-http"',
+        "-c",
+        'model_providers.cafecode-openai-http.name="OpenAI"',
+        "-c",
+        'model_providers.cafecode-openai-http.wire_api="responses"',
+        "-c",
+        "model_providers.cafecode-openai-http.requires_openai_auth=true",
+        "-c",
+        'model_providers.cafecode-openai-http.env_http_headers.OpenAI-Organization="OPENAI_ORGANIZATION"',
+        "-c",
+        'model_providers.cafecode-openai-http.env_http_headers.OpenAI-Project="OPENAI_PROJECT"',
+        "-c",
+        "model_providers.cafecode-openai-http.supports_websockets=false",
+      ],
+    );
+  });
+
+  it("rejects subagent limits outside the decoded provider-setting bounds", () => {
+    for (const maxConcurrentSubagents of [0, 65, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.throws(
+        () => buildCodexAppServerArgs({ maxConcurrentSubagents }),
+        /maxConcurrentSubagents must be an integer between 1 and 64/,
+      );
+    }
   });
 });
 

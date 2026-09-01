@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { ProviderDriverKind } from "@cafecode/contracts";
 
 import { DRIVER_OPTION_BY_VALUE } from "./providerDriverMeta";
 import {
+  ProviderSettingsForm,
   deriveProviderSettingsFields,
   nextProviderConfigWithFieldValue,
   readProviderConfigBoolean,
@@ -20,8 +23,50 @@ describe("ProviderSettingsForm helpers", () => {
       "binaryPath",
       "homePath",
       "shadowHomePath",
+      "maxConcurrentSubagents",
       "autoCompactTokenLimit",
     ]);
+  });
+
+  it("derives the bounded Codex subagent concurrency field as an optional override", () => {
+    const codex = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")];
+    expect(codex).toBeDefined();
+
+    const field = deriveProviderSettingsFields(codex!).find(
+      (candidate) => candidate.key === "maxConcurrentSubagents",
+    );
+
+    expect(field).toMatchObject({
+      key: "maxConcurrentSubagents",
+      control: "number",
+      placeholder: "Provider default",
+      step: 1,
+      minimum: 1,
+      maximum: 64,
+      integerOnly: true,
+    });
+    expect(field?.defaultNumberValue).toBeUndefined();
+  });
+
+  it("renders numeric maximum constraints and associates descriptive help with the input", () => {
+    const codex = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")];
+    expect(codex).toBeDefined();
+
+    const markup = renderToStaticMarkup(
+      createElement(ProviderSettingsForm, {
+        definition: codex!,
+        value: undefined,
+        idPrefix: "provider-instance-codex",
+        variant: "dialog",
+        onChange: () => undefined,
+      }),
+    );
+
+    expect(markup).toMatch(
+      /<input[^>]*id="provider-instance-codex-maxConcurrentSubagents"[^>]*type="number"[^>]*step="1"[^>]*min="1"[^>]*max="64"[^>]*aria-describedby="provider-instance-codex-maxConcurrentSubagents-description"[^>]*>/,
+    );
+    expect(markup).toContain('placeholder="Provider default"');
+    expect(markup).toContain('id="provider-instance-codex-maxConcurrentSubagents-description"');
   });
 
   it("sources labels and descriptions from schema annotations", () => {
@@ -213,6 +258,38 @@ describe("ProviderSettingsForm helpers", () => {
     });
   });
 
+  it("stores a valid bounded Codex subagent concurrency override", () => {
+    const field = {
+      key: "maxConcurrentSubagents",
+      control: "number",
+      label: "Maximum concurrent subagents",
+      clearWhenEmpty: "omit",
+      step: 1,
+      minimum: 1,
+      maximum: 64,
+      integerOnly: true,
+    } as const;
+
+    expect(nextProviderConfigWithFieldValue({ forkOwned: 1 }, field, "12")).toEqual({
+      forkOwned: 1,
+      maxConcurrentSubagents: 12,
+    });
+  });
+
+  it("omits the Codex subagent concurrency override when the input is cleared", () => {
+    const codex = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")];
+    expect(codex).toBeDefined();
+
+    const field = deriveProviderSettingsFields(codex!).find(
+      (candidate) => candidate.key === "maxConcurrentSubagents",
+    );
+    expect(field).toBeDefined();
+
+    expect(
+      nextProviderConfigWithFieldValue({ forkOwned: 1, maxConcurrentSubagents: 12 }, field!, ""),
+    ).toEqual({ forkOwned: 1 });
+  });
+
   it("clears numeric fields when the input is emptied", () => {
     const field = {
       key: "autoCompactTokenLimit",
@@ -228,27 +305,49 @@ describe("ProviderSettingsForm helpers", () => {
     ).toEqual({ forkOwned: 1 });
   });
 
-  it.each(["NaN", "Infinity", "-Infinity", "1.5", "0", "-5", "abc"])(
-    "rejects invalid numeric field input %s without persisting it",
-    (rawValue) => {
-      const field = {
-        key: "autoCompactTokenLimit",
-        control: "number",
-        label: "Auto-compact token limit",
-        clearWhenEmpty: "omit",
-        minimum: 1,
-        integerOnly: true,
-      } as const;
+  it.each([
+    "NaN",
+    "Infinity",
+    "-Infinity",
+    "1.5",
+    "0",
+    "-5",
+    "abc",
+    String(Number.MAX_SAFE_INTEGER + 1),
+  ])("rejects invalid numeric field input %s without persisting it", (rawValue) => {
+    const field = {
+      key: "autoCompactTokenLimit",
+      control: "number",
+      label: "Auto-compact token limit",
+      clearWhenEmpty: "omit",
+      minimum: 1,
+      integerOnly: true,
+    } as const;
 
-      expect(
-        nextProviderConfigWithFieldValue(
-          { forkOwned: 1, autoCompactTokenLimit: 150_000 },
-          field,
-          rawValue,
-        ),
-      ).toEqual({ forkOwned: 1, autoCompactTokenLimit: 150_000 });
-    },
-  );
+    expect(
+      nextProviderConfigWithFieldValue(
+        { forkOwned: 1, autoCompactTokenLimit: 150_000 },
+        field,
+        rawValue,
+      ),
+    ).toEqual({ forkOwned: 1, autoCompactTokenLimit: 150_000 });
+  });
+
+  it("rejects numeric field input above its declared maximum", () => {
+    const field = {
+      key: "maxConcurrentSubagents",
+      control: "number",
+      label: "Maximum concurrent subagents",
+      clearWhenEmpty: "omit",
+      minimum: 1,
+      maximum: 64,
+      integerOnly: true,
+    } as const;
+
+    expect(nextProviderConfigWithFieldValue({ maxConcurrentSubagents: 12 }, field, "65")).toEqual({
+      maxConcurrentSubagents: 12,
+    });
+  });
 
   it("allows finite fractional and negative values when a numeric field declares no constraints", () => {
     const field = {
