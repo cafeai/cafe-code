@@ -125,7 +125,7 @@ export const ChatHeader = memo(function ChatHeader({
               : `Newer ${sourceUpdateState?.trackedBranch}`}
           </Badge>
         )}
-        <ConnectionStatusIndicator />
+        <ConnectionStatusIndicator environmentId={activeThreadEnvironmentId} />
         {showOpenInPicker && (
           <OpenInPicker
             keybindings={keybindings}

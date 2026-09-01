@@ -308,6 +308,15 @@ export class WsTransport {
   }
 
   private createSession(): TransportSession {
+    // A replacement protocol session owns a fresh bounded socket-retry
+    // schedule. Notify environment-scoped lifecycle models before its first
+    // URL resolution/socket attempt so their exhaustion counters reset with
+    // the transport that actually enforces the bound.
+    try {
+      this.lifecycleHandlers?.onSessionStart?.();
+    } catch {
+      // A renderer status observer must never prevent transport recovery.
+    }
     const sessionId = this.nextSessionId + 1;
     this.nextSessionId = sessionId;
     this.activeSessionId = sessionId;

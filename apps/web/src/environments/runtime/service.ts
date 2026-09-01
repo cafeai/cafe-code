@@ -79,6 +79,17 @@ import {
   decodeThreadDetailSnapshotAssembly,
   type ThreadDetailSnapshotAssembly,
 } from "./threadDetailSnapshotAssembly";
+import {
+  beginSavedEnvironmentReconnect,
+  INITIAL_SAVED_ENVIRONMENT_CONNECTION_LIFECYCLE,
+  recordSavedEnvironmentConnectionAttempt,
+  recordSavedEnvironmentConnectionOpened,
+  recordSavedEnvironmentManualDisconnect,
+  recordSavedEnvironmentTerminalError,
+  recordSavedEnvironmentTransportFailure,
+  type SavedEnvironmentConnectionLifecyclePatch,
+  type SavedEnvironmentConnectionLifecycleState,
+} from "./savedEnvironmentConnectionLifecycle";
 
 type EnvironmentServiceState = {
   readonly queryClient: QueryClient;
@@ -1013,44 +1024,57 @@ async function persistSavedEnvironmentRegistryRollback(
   });
 }
 
+function transitionSavedEnvironmentConnection(
+  environmentId: EnvironmentId,
+  transition: (
+    current: SavedEnvironmentConnectionLifecycleState,
+  ) => SavedEnvironmentConnectionLifecyclePatch,
+): void {
+  const runtimeStore = useSavedEnvironmentRuntimeStore.getState();
+  const current =
+    runtimeStore.byId?.[environmentId] ?? INITIAL_SAVED_ENVIRONMENT_CONNECTION_LIFECYCLE;
+  runtimeStore.patch(environmentId, transition(current));
+}
+
 function setRuntimeConnecting(environmentId: EnvironmentId) {
-  useSavedEnvironmentRuntimeStore.getState().patch(environmentId, {
-    connectionState: "connecting",
-    lastError: null,
-    lastErrorAt: null,
-  });
+  transitionSavedEnvironmentConnection(environmentId, beginSavedEnvironmentReconnect);
+}
+
+function recordRuntimeConnectionAttempt(environmentId: EnvironmentId) {
+  transitionSavedEnvironmentConnection(environmentId, recordSavedEnvironmentConnectionAttempt);
 }
 
 function setRuntimeConnected(environmentId: EnvironmentId) {
   const connectedAt = isoNow();
   useSavedEnvironmentRuntimeStore.getState().patch(environmentId, {
-    connectionState: "connected",
     authState: "authenticated",
-    connectedAt,
-    disconnectedAt: null,
-    lastError: null,
-    lastErrorAt: null,
+    ...recordSavedEnvironmentConnectionOpened(connectedAt),
   });
   useSavedEnvironmentRegistryStore.getState().markConnected(environmentId, connectedAt);
 }
 
-function setRuntimeDisconnected(environmentId: EnvironmentId, reason?: string | null) {
-  useSavedEnvironmentRuntimeStore.getState().patch(environmentId, {
-    connectionState: "disconnected",
-    disconnectedAt: isoNow(),
-    ...(reason && reason.trim().length > 0
-      ? {
-          lastError: reason,
-          lastErrorAt: isoNow(),
-        }
-      : {}),
-  });
+function recordRuntimeTransportFailure(environmentId: EnvironmentId, message: string | null) {
+  transitionSavedEnvironmentConnection(environmentId, (current) =>
+    recordSavedEnvironmentTransportFailure(current, {
+      message: message?.trim() || "Saved environment connection failed.",
+      nowMs: Date.now(),
+    }),
+  );
+}
+
+function setRuntimeDisconnected(environmentId: EnvironmentId) {
+  useSavedEnvironmentRuntimeStore
+    .getState()
+    .patch(environmentId, recordSavedEnvironmentManualDisconnect(isoNow()));
 }
 
 function setRuntimeError(environmentId: EnvironmentId, error: unknown) {
+  const fields = getRuntimeErrorFields(error);
   useSavedEnvironmentRuntimeStore.getState().patch(environmentId, {
-    connectionState: "error",
-    ...getRuntimeErrorFields(error),
+    ...recordSavedEnvironmentTerminalError({
+      message: fields.lastError,
+      occurredAt: fields.lastErrorAt,
+    }),
   });
 }
 
@@ -1310,13 +1334,22 @@ function createSavedEnvironmentClient(
         });
       },
       {
+        // The global WebSocket atom drives the primary-backend bootstrap and
+        // header state. Saved environments publish their lifecycle into the
+        // environment-scoped runtime store below instead, preventing an
+        // unrelated auxiliary socket from overwriting primary connection
+        // truth.
+        trackGlobalConnectionStatus: false,
         getConnectionLabel: () => getSavedEnvironmentRecord(environmentId)?.label ?? null,
         getVersionMismatchHint: () =>
           resolveServerConfigVersionMismatch(
             useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig,
           )?.hint ?? null,
-        onAttempt: () => {
+        onSessionStart: () => {
           setRuntimeConnecting(environmentId);
+        },
+        onAttempt: () => {
+          recordRuntimeConnectionAttempt(environmentId);
         },
         onOpen: () => {
           setRuntimeConnected(environmentId);
@@ -1325,11 +1358,10 @@ function createSavedEnvironmentClient(
           const mismatch = resolveServerConfigVersionMismatch(
             useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig,
           );
-          useSavedEnvironmentRuntimeStore.getState().patch(environmentId, {
-            connectionState: "error",
-            lastError: appendVersionMismatchHint("Saved environment connection failed.", mismatch),
-            lastErrorAt: isoNow(),
-          });
+          recordRuntimeTransportFailure(
+            environmentId,
+            appendVersionMismatchHint("Saved environment connection failed.", mismatch),
+          );
         },
         onClose: (
           _details: { readonly code: number; readonly reason: string },
@@ -1338,10 +1370,21 @@ function createSavedEnvironmentClient(
           if (context.intentional) {
             return;
           }
-          setRuntimeDisconnected(
+          recordRuntimeTransportFailure(
             environmentId,
             appendVersionMismatchHint(
               "Saved environment connection closed unexpectedly.",
+              resolveServerConfigVersionMismatch(
+                useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig,
+              ),
+            ),
+          );
+        },
+        onHeartbeatTimeout: () => {
+          recordRuntimeTransportFailure(
+            environmentId,
+            appendVersionMismatchHint(
+              "Saved environment connection heartbeat timed out.",
               resolveServerConfigVersionMismatch(
                 useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig,
               ),
@@ -1465,10 +1508,11 @@ async function ensureSavedEnvironmentConnection(
         useSavedEnvironmentRuntimeStore.getState().patch(record.environmentId, {
           authState: "requires-auth",
           role: null,
-          connectionState: "disconnected",
-          lastError: "Saved environment is missing its saved credential. Pair it again.",
-          lastErrorAt: isoNow(),
         });
+        setRuntimeError(
+          record.environmentId,
+          new Error("Saved environment is missing its saved credential."),
+        );
         throw new Error("Saved environment is missing its saved credential.");
       }
 

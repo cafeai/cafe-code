@@ -327,6 +327,71 @@ describe("WsTransport", () => {
     await transport.dispose();
   });
 
+  it("does not let an auxiliary transport overwrite primary connection status", async () => {
+    const primary = createTransport("ws://localhost:3020", {
+      getConnectionLabel: () => "Primary workspace",
+    });
+
+    await waitFor(() => {
+      expect(sockets).toHaveLength(1);
+    });
+    const primarySocket = getSocket();
+    primarySocket.open();
+    await waitFor(() => {
+      expect(getWsConnectionStatus()).toMatchObject({
+        connectionLabel: "Primary workspace",
+        hasConnected: true,
+        phase: "connected",
+      });
+    });
+
+    const onOpen = vi.fn();
+    const onError = vi.fn();
+    const onClose = vi.fn();
+    const auxiliary = createTransport("ws://remote.example.test", {
+      trackGlobalConnectionStatus: false,
+      getConnectionLabel: () => "Saved workspace",
+      onOpen,
+      onError,
+      onClose,
+    });
+
+    await waitFor(() => {
+      expect(sockets).toHaveLength(2);
+    });
+    // Merely starting an auxiliary connection must not regress the primary
+    // singleton from connected to connecting.
+    expect(getWsConnectionStatus()).toMatchObject({
+      connectionLabel: "Primary workspace",
+      phase: "connected",
+    });
+
+    const auxiliarySocket = getSocket();
+    auxiliarySocket.open();
+    await waitFor(() => {
+      expect(onOpen).toHaveBeenCalledOnce();
+    });
+    expect(getWsConnectionStatus()).toMatchObject({
+      connectionLabel: "Primary workspace",
+      phase: "connected",
+    });
+
+    auxiliarySocket.error();
+    auxiliarySocket.close(1013, "saved workspace unavailable");
+    await waitFor(() => {
+      expect(onError).toHaveBeenCalledOnce();
+      expect(onClose).toHaveBeenCalled();
+    });
+    expect(getWsConnectionStatus()).toMatchObject({
+      connectionLabel: "Primary workspace",
+      phase: "connected",
+    });
+    expect(getWsConnectionUiState(getWsConnectionStatus())).toBe("connected");
+
+    await auxiliary.dispose();
+    await primary.dispose();
+  });
+
   it("does not report an intentional dispose as a reconnectable disconnect", async () => {
     const onClose = vi.fn();
     const transport = createTransport("ws://localhost:3020", {
@@ -450,7 +515,9 @@ describe("WsTransport", () => {
   });
 
   it("recycles the websocket session when heartbeat recovery is requested", async () => {
-    const transport = createTransport("ws://localhost:3020");
+    const onSessionStart = vi.fn();
+    const transport = createTransport("ws://localhost:3020", { onSessionStart });
+    expect(onSessionStart).toHaveBeenCalledOnce();
 
     await waitFor(() => {
       expect(sockets).toHaveLength(1);
@@ -475,6 +542,7 @@ describe("WsTransport", () => {
     await waitFor(() => {
       expect(sockets).toHaveLength(2);
     });
+    expect(onSessionStart).toHaveBeenCalledTimes(2);
 
     const secondSocket = getSocket();
     expect(secondSocket).not.toBe(firstSocket);

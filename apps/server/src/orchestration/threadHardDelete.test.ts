@@ -838,6 +838,7 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
           (SELECT COUNT(*) FROM orchestration_unsettled_codex_steer_hydration WHERE thread_id = ${targetThreadId}) +
           (SELECT COUNT(*) FROM orchestration_unsettled_codex_steer_intents WHERE thread_id = ${targetThreadId}) +
           (SELECT COUNT(*) FROM orchestration_codex_steer_recovery_barriers WHERE thread_id = ${targetThreadId}) +
+          (SELECT COUNT(*) FROM orchestration_codex_steer_control_barriers WHERE thread_id = ${targetThreadId}) +
           (SELECT COUNT(*) FROM orchestration_pending_codex_steer_acceptances WHERE thread_id = ${targetThreadId}) +
           (SELECT COUNT(*) FROM orchestration_events WHERE aggregate_kind = 'thread' AND stream_id = ${targetThreadId}) +
           (SELECT COUNT(*) FROM orchestration_command_receipts WHERE aggregate_kind = 'thread' AND aggregate_id = ${targetThreadId})
@@ -867,6 +868,7 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
         readonly steerHydration: number;
         readonly unsettledSteers: number;
         readonly recoveryBarriers: number;
+        readonly controlBarriers: number;
         readonly pendingAcceptances: number;
       }>`
         SELECT
@@ -875,6 +877,7 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
           (SELECT COUNT(*) FROM orchestration_unsettled_codex_steer_hydration WHERE thread_id = ${survivorThreadId}) AS "steerHydration",
           (SELECT COUNT(*) FROM orchestration_unsettled_codex_steer_intents WHERE thread_id = ${survivorThreadId}) AS "unsettledSteers",
           (SELECT COUNT(*) FROM orchestration_codex_steer_recovery_barriers WHERE thread_id = ${survivorThreadId}) AS "recoveryBarriers",
+          (SELECT COUNT(*) FROM orchestration_codex_steer_control_barriers WHERE thread_id = ${survivorThreadId}) AS "controlBarriers",
           (SELECT COUNT(*) FROM orchestration_pending_codex_steer_acceptances WHERE thread_id = ${survivorThreadId}) AS "pendingAcceptances"
       `;
       // The accepted fixture intentionally lacks an intentSequence, so the
@@ -888,6 +891,7 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
           steerHydration: 1,
           unsettledSteers: 1,
           recoveryBarriers: 0,
+          controlBarriers: 0,
           pendingAcceptances: 0,
         },
       ]);

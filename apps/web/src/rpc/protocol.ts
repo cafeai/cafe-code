@@ -26,10 +26,18 @@ export interface WsProtocolCloseContext {
 }
 
 export interface WsProtocolLifecycleHandlers {
+  /**
+   * The singleton renderer connection atom represents the primary Cafe
+   * backend. Auxiliary saved-environment transports have their own scoped
+   * runtime state and must opt out so one remote socket cannot make a healthy
+   * primary chat display "Reconnecting" (or hide a real primary outage).
+   */
+  readonly trackGlobalConnectionStatus?: boolean;
   readonly getConnectionLabel?: () => string | null;
   readonly getVersionMismatchHint?: () => string | null;
   readonly isCloseIntentional?: () => boolean;
   readonly isActive?: () => boolean;
+  readonly onSessionStart?: () => void;
   readonly onAttempt?: (socketUrl: string) => void;
   readonly onOpen?: () => void;
   readonly onHeartbeatPing?: () => void;
@@ -88,6 +96,10 @@ function resolveConnectionMetadata(handlers?: WsProtocolLifecycleHandlers): WsCo
   };
 }
 
+function shouldTrackGlobalConnectionStatus(handlers?: WsProtocolLifecycleHandlers): boolean {
+  return handlers?.trackGlobalConnectionStatus !== false;
+}
+
 type ComposedWsProtocolLifecycleHandlers = Required<
   Pick<WsProtocolLifecycleHandlers, "isActive" | "onAttempt" | "onOpen" | "onError" | "onClose">
 >;
@@ -98,21 +110,29 @@ function defaultLifecycleHandlers(
   return {
     isActive: () => true,
     onAttempt: (socketUrl) => {
-      recordWsConnectionAttempt(socketUrl, resolveConnectionMetadata(handlers));
+      if (shouldTrackGlobalConnectionStatus(handlers)) {
+        recordWsConnectionAttempt(socketUrl, resolveConnectionMetadata(handlers));
+      }
     },
     onOpen: () => {
-      recordWsConnectionOpened(resolveConnectionMetadata(handlers));
+      if (shouldTrackGlobalConnectionStatus(handlers)) {
+        recordWsConnectionOpened(resolveConnectionMetadata(handlers));
+      }
     },
     onError: (message) => {
       clearAllTrackedRpcRequests();
-      recordWsConnectionErrored(message, resolveConnectionMetadata(handlers));
+      if (shouldTrackGlobalConnectionStatus(handlers)) {
+        recordWsConnectionErrored(message, resolveConnectionMetadata(handlers));
+      }
     },
     onClose: (details, context) => {
       clearAllTrackedRpcRequests();
       if (context.intentional) {
         return;
       }
-      recordWsConnectionClosed(details, resolveConnectionMetadata(handlers));
+      if (shouldTrackGlobalConnectionStatus(handlers)) {
+        recordWsConnectionClosed(details, resolveConnectionMetadata(handlers));
+      }
     },
   };
 }
@@ -308,10 +328,12 @@ export function createWsRpcProtocolLayer(
       onPingTimeout: Effect.sync(() => {
         if (lifecycle.isActive()) {
           clearAllTrackedRpcRequests();
-          recordWsConnectionErrored(
-            "WebSocket heartbeat timed out.",
-            resolveConnectionMetadata(handlers),
-          );
+          if (shouldTrackGlobalConnectionStatus(handlers)) {
+            recordWsConnectionErrored(
+              "WebSocket heartbeat timed out.",
+              resolveConnectionMetadata(handlers),
+            );
+          }
           handlers?.onHeartbeatTimeout?.();
         }
       }),

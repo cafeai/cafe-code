@@ -86,6 +86,7 @@ import Migration0068 from "./Migrations/068_OrchestrationMessageIdentityLedger.t
 import Migration0069 from "./Migrations/069_OrchestrationMessageIdentityForeignKeyIndexes.ts";
 import Migration0070 from "./Migrations/070_UnsettledCodexSteerIntentLedger.ts";
 import Migration0071 from "./Migrations/071_ProviderDaemonHardDeleteIdentity.ts";
+import Migration0072 from "./Migrations/072_CodexSteerControlBarrierLedger.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -173,6 +174,7 @@ export const migrationEntries = [
   [69, "OrchestrationMessageIdentityForeignKeyIndexes", Migration0069],
   [70, "UnsettledCodexSteerIntentLedger", Migration0070],
   [71, "ProviderDaemonHardDeleteIdentity", Migration0071],
+  [72, "CodexSteerControlBarrierLedger", Migration0072],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

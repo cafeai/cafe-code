@@ -2558,7 +2558,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         VALUES (
           'event-trusted-recovered-retargeted', 'thread', 'thread-historical-steer', 7,
           'thread.activity-appended', '2026-08-30T12:11:00.000Z',
-          'server:trusted-recovered', NULL, 'server:trusted-recovered', 'server',
+          'server:recovered-retargeted', NULL, 'server:trusted-recovered', 'server',
           ${JSON.stringify(recoveredEventPayload)}, '{}'
         )
       `;
@@ -2568,6 +2568,12 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           messageId: MessageId.make("message-retargeted"),
         });
         assert.equal(trustedRecoveryEvidence[0]?.recoveryObserved, true);
+        const exactTrustedRecoveryEvidence = yield* snapshotQuery.getCodexSteerAcceptanceEvidence({
+          exactAcceptedBarrier: exactAcceptedCandidate,
+        });
+        assert.equal(exactTrustedRecoveryEvidence[0]?.recoveryObserved, true);
+        assert.equal(exactTrustedRecoveryEvidence[0]?.interruptRequested, true);
+        assert.equal(exactTrustedRecoveryEvidence[0]?.sessionStopRequested, true);
         assert.deepStrictEqual(
           yield* snapshotQuery.getPostTerminalStaleSteerCandidateThreadIds(),
           [],
@@ -2632,7 +2638,345 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         });
         assert.equal(processedRetargeted[0]?.processingObserved, true);
         assert.equal(processedRetargeted[0]?.interruptRequested, true);
+        const exactProcessedRetargeted = yield* snapshotQuery.getCodexSteerAcceptanceEvidence({
+          exactAcceptedBarrier: exactAcceptedCandidate,
+        });
+        assert.equal(exactProcessedRetargeted[0]?.processingObserved, true);
       }),
+  );
+
+  it.effect(
+    "keeps live and terminal exact Codex steer evidence bounded across a delayed-ACK Stop race",
+    () =>
+      Effect.gen(function* () {
+        const snapshotQuery = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+
+        yield* sql`DELETE FROM orchestration_events`;
+        yield* sql`DELETE FROM projection_thread_messages`;
+        yield* sql`DELETE FROM projection_thread_activities`;
+        yield* sql`DELETE FROM projection_thread_sessions`;
+        yield* sql`DELETE FROM projection_turns`;
+        yield* sql`DELETE FROM projection_threads`;
+
+        const threadId = ThreadId.make("thread-live-exact-steer-mature");
+        const turnId = TurnId.make("turn-live-exact-steer-mature");
+        const messageId = MessageId.make("message-live-exact-steer-mature");
+        const activityId = "accepted-live-exact-steer-mature";
+        const intentCreatedAt = "2026-08-31T23:00:00.000Z";
+        const interruptedAt = "2026-08-31T23:00:01.000Z";
+        const sessionStoppedAt = "2026-08-31T23:00:01.500Z";
+        const acceptedAt = "2026-08-31T23:00:02.000Z";
+        const clientCorrelationId = buildCodexSteerClientCorrelationId(messageId);
+
+        yield* sql`
+          INSERT INTO projection_threads (
+            thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+            branch, worktree_path, latest_turn_id, latest_user_message_at,
+            pending_approval_count, pending_user_input_count, has_actionable_proposed_plan,
+            created_at, updated_at, archived_at, deleted_at
+          ) VALUES (
+            ${threadId}, 'project-stale-steer', 'Live exact steer',
+            '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+            NULL, NULL, ${turnId}, ${intentCreatedAt}, 0, 0, 0,
+            ${intentCreatedAt}, ${intentCreatedAt}, NULL, NULL
+          )
+        `;
+        yield* sql`
+          INSERT INTO projection_turns (
+            thread_id, turn_id, pending_message_id, assistant_message_id, state,
+            requested_at, started_at, completed_at, checkpoint_turn_count,
+            checkpoint_ref, checkpoint_status, checkpoint_files_json
+          ) VALUES (
+            ${threadId}, ${turnId}, NULL, NULL, 'running',
+            ${intentCreatedAt}, ${intentCreatedAt}, NULL,
+            NULL, NULL, NULL, '[]'
+          )
+        `;
+        yield* sql`
+          INSERT INTO projection_thread_messages (
+            message_id, thread_id, turn_id, role, text, attachments_json,
+            is_streaming, created_at, updated_at
+          ) VALUES (
+            ${messageId}, ${threadId}, ${turnId}, 'user', 'private mature prompt', NULL,
+            0, ${intentCreatedAt}, ${intentCreatedAt}
+          )
+        `;
+        yield* sql`
+          INSERT INTO orchestration_events (
+            event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+            command_id, causation_event_id, correlation_id, actor_kind, payload_json,
+            metadata_json
+          ) VALUES (
+            'intent-live-exact-steer-mature', 'thread', ${threadId}, 0,
+            'thread.turn-steer-requested', ${intentCreatedAt},
+            'client:intent-live-exact-steer-mature',
+            NULL, NULL, 'client', ${JSON.stringify({
+              threadId,
+              messageId,
+              expectedTurnId: turnId,
+              createdAt: intentCreatedAt,
+            })}, '{}'
+          )
+        `;
+        yield* sql`
+          INSERT INTO orchestration_events (
+            event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+            command_id, causation_event_id, correlation_id, actor_kind, payload_json,
+            metadata_json
+          ) VALUES (
+            'session-stop-before-live-exact-steer-ack', 'thread', ${threadId}, 2,
+            'thread.session-stop-requested', ${sessionStoppedAt},
+            'client:session-stop-before-live-exact-steer-ack', NULL, NULL, 'client',
+            ${JSON.stringify({ threadId, createdAt: sessionStoppedAt })}, '{}'
+          )
+        `;
+        const [intent] = yield* sql<{ readonly sequence: number }>`
+          SELECT sequence
+          FROM orchestration_events
+          WHERE event_id = 'intent-live-exact-steer-mature'
+        `;
+        assert.isDefined(intent);
+
+        // Stop commits after the exact intent but before a delayed provider
+        // ACK. Sequence is the generation fence; comparing this control with
+        // acceptedAt would incorrectly discard it.
+        yield* sql`
+          INSERT INTO orchestration_events (
+            event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+            command_id, causation_event_id, correlation_id, actor_kind, payload_json,
+            metadata_json
+          ) VALUES (
+            'interrupt-before-live-exact-steer-ack', 'thread', ${threadId}, 1,
+            'thread.turn-interrupt-requested', ${interruptedAt},
+            'client:interrupt-before-live-exact-steer-ack', NULL, NULL, 'client',
+            ${JSON.stringify({ threadId, turnId, createdAt: interruptedAt })}, '{}'
+          )
+        `;
+
+        const acceptedPayload = {
+          provider: "codex",
+          messageId,
+          acceptedTurnId: turnId,
+          intentSequence: intent.sequence,
+          clientCorrelationId,
+        };
+        yield* sql`
+          INSERT INTO projection_thread_activities (
+            activity_id, thread_id, turn_id, tone, kind, summary,
+            payload_json, sequence, created_at
+          ) VALUES (
+            ${activityId}, ${threadId}, ${turnId}, 'info', 'provider.turn.steer.accepted',
+            'Steer accepted', ${JSON.stringify(acceptedPayload)}, NULL, ${acceptedAt}
+          )
+        `;
+        yield* sql`
+          INSERT INTO orchestration_events (
+            event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+            command_id, causation_event_id, correlation_id, actor_kind, payload_json,
+            metadata_json
+          ) VALUES (
+            'event-live-exact-steer-mature', 'thread', ${threadId}, 3,
+            'thread.activity-appended', ${acceptedAt}, 'server:accepted-live-exact-steer-mature',
+            NULL, NULL, 'server', ${JSON.stringify({
+              threadId,
+              activity: {
+                id: activityId,
+                tone: "info",
+                kind: "provider.turn.steer.accepted",
+                summary: "Steer accepted",
+                payload: acceptedPayload,
+                turnId,
+                createdAt: acceptedAt,
+              },
+            })}, '{}'
+          )
+        `;
+        const [acceptedEvent] = yield* sql<{ readonly sequence: number }>`
+          SELECT sequence
+          FROM orchestration_events
+          WHERE event_id = 'event-live-exact-steer-mature'
+        `;
+        assert.isDefined(acceptedEvent);
+
+        // Model a production-aged stream after this acceptance. The former
+        // all-in-one evidence statement could make a correlated recovery
+        // subquery walk this complete suffix even though a running turn can
+        // never require terminal replay.
+        yield* sql`
+          WITH RECURSIVE event_numbers(index_value) AS (
+            SELECT 1
+            UNION ALL
+            SELECT index_value + 1
+            FROM event_numbers
+            WHERE index_value < 50000
+          )
+          INSERT INTO orchestration_events (
+            event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+            command_id, causation_event_id, correlation_id, actor_kind, payload_json,
+            metadata_json
+          )
+          SELECT
+            printf('event-live-exact-steer-mature-noise-%05d', index_value),
+            'thread', ${threadId}, index_value + 3, 'thread.title-updated',
+            '2026-09-01T00:00:00.000Z',
+            printf('client:live-exact-steer-mature-noise-%05d', index_value),
+            NULL, NULL, 'client', '{"threadId":"thread-live-exact-steer-mature"}', '{}'
+          FROM event_numbers
+        `;
+
+        const exactBasePlan = yield* sql<{ readonly detail: string }>`
+          EXPLAIN QUERY PLAN
+          SELECT accepted.activity_id
+          FROM projection_thread_activities AS accepted
+          CROSS JOIN orchestration_events AS accepted_event
+          CROSS JOIN orchestration_events AS accepted_intent
+          CROSS JOIN projection_thread_messages AS message
+          CROSS JOIN projection_turns AS accepted_turn
+          WHERE accepted.activity_id = ${activityId}
+            AND accepted.thread_id = ${threadId}
+            AND accepted.turn_id = ${turnId}
+            AND accepted_event.sequence = ${acceptedEvent.sequence}
+            AND accepted_intent.sequence = ${intent.sequence}
+            AND message.thread_id = ${threadId}
+            AND message.message_id = ${messageId}
+            AND accepted_turn.thread_id = ${threadId}
+            AND accepted_turn.turn_id = ${turnId}
+          LIMIT 1
+        `;
+        const exactBasePlanText = exactBasePlan.map((row) => row.detail).join("\n");
+        assert.match(exactBasePlanText, /projection_thread_activities.*activity_id/);
+        assert.match(exactBasePlanText, /accepted_event.*INTEGER PRIMARY KEY/);
+        assert.match(exactBasePlanText, /accepted_intent.*INTEGER PRIMARY KEY/);
+        assert.match(exactBasePlanText, /projection_thread_messages/);
+        assert.match(exactBasePlanText, /projection_turns/);
+        assert.notInclude(exactBasePlanText, "idx_orch_events_stream_sequence");
+
+        const lookupStartedAt = performance.now();
+        const evidence = yield* snapshotQuery.getCodexSteerAcceptanceEvidence({
+          exactAcceptedBarrier: {
+            _tag: "accepted",
+            threadId,
+            eventSequence: acceptedEvent.sequence,
+            intentSequence: intent.sequence,
+            intentCreatedAt,
+            activityId,
+            acceptedTurnId: turnId,
+            clientCorrelationId,
+            messageId,
+            acceptedAt,
+          },
+        });
+        const lookupElapsedMs = performance.now() - lookupStartedAt;
+        assert.isBelow(
+          lookupElapsedMs,
+          1000,
+          `live exact steer lookup exceeded the synchronous liveness budget (${lookupElapsedMs.toFixed(1)} ms)`,
+        );
+        assert.deepStrictEqual(evidence, [
+          {
+            threadId,
+            acceptedTurnId: turnId,
+            intentSequence: intent.sequence,
+            clientCorrelationId,
+            messageId,
+            messageTurnId: turnId,
+            messageText: "private mature prompt",
+            messageAttachments: [],
+            acceptedAt,
+            turnState: "running",
+            turnCompletedAt: null,
+            processingObserved: false,
+            recoveryObserved: false,
+            interruptRequested: false,
+            sessionStopRequested: false,
+          },
+        ]);
+
+        const terminalControlPlan = yield* sql<{ readonly detail: string }>`
+          EXPLAIN QUERY PLAN
+          SELECT interrupt_barrier.sequence
+          FROM orchestration_codex_steer_control_barriers AS interrupt_barrier
+            INDEXED BY idx_codex_steer_control_thread_kind_turn_sequence
+          CROSS JOIN orchestration_events AS interrupt_event
+            ON interrupt_event.sequence = interrupt_barrier.sequence
+          WHERE interrupt_barrier.thread_id = ${threadId}
+            AND interrupt_barrier.barrier_kind = 'thread.turn-interrupt-requested'
+            AND interrupt_barrier.turn_id = ${turnId}
+            AND interrupt_barrier.sequence > ${intent.sequence}
+            AND interrupt_event.actor_kind IN ('client', 'server')
+          LIMIT 1
+        `;
+        const terminalControlPlanText = terminalControlPlan.map((row) => row.detail).join("\n");
+        assert.include(
+          terminalControlPlanText,
+          "idx_codex_steer_control_thread_kind_turn_sequence",
+        );
+        assert.match(terminalControlPlanText, /interrupt_event.*INTEGER PRIMARY KEY/);
+        assert.notInclude(terminalControlPlanText, "idx_orch_events_stream_sequence");
+
+        yield* sql`
+          UPDATE projection_turns
+          SET state = 'interrupted', completed_at = ${interruptedAt}
+          WHERE thread_id = ${threadId}
+            AND turn_id = ${turnId}
+        `;
+        const terminalLookupStartedAt = performance.now();
+        const terminalEvidence = yield* snapshotQuery.getCodexSteerAcceptanceEvidence({
+          exactAcceptedBarrier: {
+            _tag: "accepted",
+            threadId,
+            eventSequence: acceptedEvent.sequence,
+            intentSequence: intent.sequence,
+            intentCreatedAt,
+            activityId,
+            acceptedTurnId: turnId,
+            clientCorrelationId,
+            messageId,
+            acceptedAt,
+          },
+        });
+        const terminalLookupElapsedMs = performance.now() - terminalLookupStartedAt;
+        assert.isBelow(
+          terminalLookupElapsedMs,
+          1000,
+          `terminal exact steer lookup exceeded the synchronous liveness budget (${terminalLookupElapsedMs.toFixed(1)} ms)`,
+        );
+        assert.equal(terminalEvidence[0]?.interruptRequested, true);
+        assert.equal(terminalEvidence[0]?.sessionStopRequested, true);
+
+        // A schema-only upgrade cannot prove whether an older intent had a
+        // pre-migration Stop. Absence from the append-time ledger therefore
+        // fails closed instead of authorizing an ambiguous automatic replay.
+        yield* sql`
+          UPDATE orchestration_codex_steer_control_barrier_state
+          SET indexed_from_sequence = ${intent.sequence + 1}
+          WHERE singleton = 1
+        `;
+        assert.deepStrictEqual(
+          yield* snapshotQuery.getCodexSteerAcceptanceEvidence({
+            exactAcceptedBarrier: {
+              _tag: "accepted",
+              threadId,
+              eventSequence: acceptedEvent.sequence,
+              intentSequence: intent.sequence,
+              intentCreatedAt,
+              activityId,
+              acceptedTurnId: turnId,
+              clientCorrelationId,
+              messageId,
+              acceptedAt,
+            },
+          }),
+          [],
+        );
+        yield* sql`
+          UPDATE orchestration_codex_steer_control_barrier_state
+          SET indexed_from_sequence = 0
+          WHERE singleton = 1
+        `;
+      }),
+    15_000,
   );
 
   it.effect(

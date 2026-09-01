@@ -944,9 +944,15 @@ const make = Effect.gen(function* () {
     readonly messageId: MessageId;
     readonly intentSequence: number;
     readonly clientCorrelationId?: string;
-    readonly createdAt: string;
+    /** Immutable timestamp carried by the original turn-start/steer intent. */
+    readonly intentCreatedAt: string;
+    /** Local observation time after the provider accepted the request. */
+    readonly acceptedAt: string;
   }) {
-    const acceptedCommand = buildCodexSteerAcceptedActivityCommand(input);
+    const acceptedCommand = buildCodexSteerAcceptedActivityCommand({
+      ...input,
+      createdAt: input.acceptedAt,
+    });
     const acceptedReceipt = yield* orchestrationEngine.dispatch(acceptedCommand);
     const [projectionEvidence, recoveryLiveness] = yield* Effect.all([
       projectionSnapshotQuery.getCodexSteerAcceptanceEvidence({
@@ -955,12 +961,12 @@ const make = Effect.gen(function* () {
           threadId: input.threadId,
           eventSequence: acceptedReceipt.sequence,
           intentSequence: input.intentSequence,
-          intentCreatedAt: input.createdAt,
+          intentCreatedAt: input.intentCreatedAt,
           activityId: acceptedCommand.activity.id,
           acceptedTurnId: input.turnId,
           clientCorrelationId: input.clientCorrelationId ?? null,
           messageId: input.messageId,
-          acceptedAt: input.createdAt,
+          acceptedAt: input.acceptedAt,
         },
       }),
       resolveCodexSteerRecoveryLiveness(input.threadId),
@@ -974,7 +980,7 @@ const make = Effect.gen(function* () {
         : buildTerminalCodexSteerRecoveryCommands({
             evidence: durableEvidence,
             providerActiveTurnId,
-            createdAt: input.createdAt,
+            createdAt: input.acceptedAt,
           });
     yield* Effect.forEach(recoveryCommands, orchestrationEngine.dispatch, {
       concurrency: 1,
@@ -1902,16 +1908,18 @@ const make = Effect.gen(function* () {
       readonly messageId: MessageId;
       readonly intentSequence: number;
       readonly turn: ProviderTurnStartResult;
-      readonly createdAt: string;
+      readonly intentCreatedAt: string;
     }) {
       if (input.turn.clientCorrelationId !== undefined) {
+        const acceptedAt = DateTime.formatIso(yield* DateTime.now);
         const acceptance = yield* recordAcceptedCodexSteer({
           threadId: input.threadId,
           turnId: input.turn.turnId,
           messageId: input.messageId,
           intentSequence: input.intentSequence,
           clientCorrelationId: input.turn.clientCorrelationId,
-          createdAt: input.createdAt,
+          intentCreatedAt: input.intentCreatedAt,
+          acceptedAt,
         });
         if (!acceptance.mayMarkAcceptedTurnRunning) {
           return false;
@@ -1920,7 +1928,7 @@ const make = Effect.gen(function* () {
       yield* markThreadRunningFromSendTurnResult({
         threadId: input.threadId,
         turnId: input.turn.turnId,
-        createdAt: input.createdAt,
+        createdAt: input.intentCreatedAt,
       });
       return true;
     },
@@ -2584,7 +2592,7 @@ const make = Effect.gen(function* () {
                 messageId: event.payload.messageId,
                 intentSequence: event.sequence,
                 turn,
-                createdAt: observedAt,
+                intentCreatedAt: event.payload.createdAt,
               }),
             ),
           );
@@ -2669,7 +2677,8 @@ const make = Effect.gen(function* () {
                         ...(turn.clientCorrelationId !== undefined
                           ? { clientCorrelationId: turn.clientCorrelationId }
                           : {}),
-                        createdAt: updatedAt,
+                        intentCreatedAt: event.payload.createdAt,
+                        acceptedAt: updatedAt,
                       })
                     : ({ mayMarkAcceptedTurnRunning: true } as const);
                 if (!steerAcceptance.mayMarkAcceptedTurnRunning) {
@@ -2777,7 +2786,8 @@ const make = Effect.gen(function* () {
                   ...(turn.clientCorrelationId !== undefined
                     ? { clientCorrelationId: turn.clientCorrelationId }
                     : {}),
-                  createdAt: observedAt,
+                  intentCreatedAt: event.payload.createdAt,
+                  acceptedAt: observedAt,
                 });
                 if (steerAcceptance.mayMarkAcceptedTurnRunning) {
                   yield* markThreadRunningFromSendTurnResult({
@@ -2920,7 +2930,7 @@ const make = Effect.gen(function* () {
               messageId: event.payload.messageId,
               intentSequence: event.sequence,
               turn,
-              createdAt: event.payload.createdAt,
+              intentCreatedAt: event.payload.createdAt,
             });
             if (!mayContinue) {
               return;
@@ -3329,7 +3339,7 @@ const make = Effect.gen(function* () {
                   messageId: event.payload.messageId,
                   intentSequence: event.sequence,
                   turn,
-                  createdAt: input.createdAt,
+                  intentCreatedAt: event.payload.createdAt,
                 });
                 if (isCodex && turn.clientCorrelationId === undefined) {
                   // This activity is the durable commit point for the external
@@ -3869,19 +3879,25 @@ const make = Effect.gen(function* () {
                 : {}),
             });
           },
-          onSuccess: (turn) =>
-            activeSession.providerName === "codex"
-              ? recordAcceptedCodexSteer({
-                  threadId: event.payload.threadId,
-                  turnId: turn.turnId,
-                  messageId: event.payload.messageId,
-                  intentSequence: event.sequence,
-                  ...(turn.clientCorrelationId !== undefined
-                    ? { clientCorrelationId: turn.clientCorrelationId }
-                    : {}),
-                  createdAt: event.payload.createdAt,
-                })
-              : Effect.void,
+          onSuccess: (turn) => {
+            if (activeSession.providerName !== "codex") {
+              return Effect.void;
+            }
+            return Effect.gen(function* () {
+              const acceptedAt = DateTime.formatIso(yield* DateTime.now);
+              yield* recordAcceptedCodexSteer({
+                threadId: event.payload.threadId,
+                turnId: turn.turnId,
+                messageId: event.payload.messageId,
+                intentSequence: event.sequence,
+                ...(turn.clientCorrelationId !== undefined
+                  ? { clientCorrelationId: turn.clientCorrelationId }
+                  : {}),
+                intentCreatedAt: event.payload.createdAt,
+                acceptedAt,
+              });
+            });
+          },
         }),
         Effect.forkScoped,
       );

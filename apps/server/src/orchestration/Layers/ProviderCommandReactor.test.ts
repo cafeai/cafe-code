@@ -65,6 +65,7 @@ import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import {
   ProjectionSnapshotQuery,
+  type ProjectionAcceptedCodexSteerCandidate,
   type ProjectionSnapshotQueryShape,
 } from "../Services/ProjectionSnapshotQuery.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -3462,7 +3463,16 @@ describe("ProviderCommandReactor", () => {
   });
 
   it("does not let a delayed steer ACK replace a newer active turn", async () => {
-    const harness = await createHarness({ liveSteer: "supported" });
+    let acceptedBarrier: ProjectionAcceptedCodexSteerCandidate | undefined;
+    const harness = await createHarness({
+      liveSteer: "supported",
+      getCodexSteerAcceptanceEvidence: (input) => {
+        if (input?.exactAcceptedBarrier !== undefined) {
+          acceptedBarrier = input.exactAcceptedBarrier;
+        }
+        return Effect.succeed([]);
+      },
+    });
     const threadId = ThreadId.make("thread-1");
     const firstTurnId = asTurnId("turn-1");
     const newerTurnId = asTurnId("turn-2");
@@ -3557,6 +3567,9 @@ describe("ProviderCommandReactor", () => {
       status: "running",
       activeTurnId: newerTurnId,
     });
+    expect(acceptedBarrier?.intentCreatedAt).toBe("2026-01-01T00:00:02.000Z");
+    expect(acceptedBarrier?.acceptedAt).not.toBe(acceptedBarrier?.intentCreatedAt);
+    expect(acceptedBarrier?.eventSequence).toBeGreaterThan(acceptedBarrier?.intentSequence ?? 0);
   });
 
   it("does not let a send marker overwrite a runtime-only newer turn", async () => {

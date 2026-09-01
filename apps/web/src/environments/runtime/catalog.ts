@@ -9,7 +9,9 @@ import type {
 import { create } from "zustand";
 
 import { ensureLocalApi } from "../../localApi";
+import type { WsReconnectPhase } from "../../rpc/wsConnectionState";
 import { getPrimaryKnownEnvironment } from "../primary";
+import { INITIAL_SAVED_ENVIRONMENT_CONNECTION_LIFECYCLE } from "./savedEnvironmentConnectionLifecycle";
 
 export interface SavedEnvironmentRecord {
   readonly environmentId: EnvironmentId;
@@ -275,6 +277,9 @@ export interface SavedEnvironmentRuntimeState {
   readonly serverConfig: ServerConfig | null;
   readonly connectedAt: string | null;
   readonly disconnectedAt: string | null;
+  readonly nextRetryAt: string | null;
+  readonly reconnectAttemptCount: number;
+  readonly reconnectPhase: WsReconnectPhase;
 }
 
 interface SavedEnvironmentRuntimeStoreState {
@@ -289,15 +294,11 @@ interface SavedEnvironmentRuntimeStoreState {
 }
 
 const DEFAULT_SAVED_ENVIRONMENT_RUNTIME_STATE: SavedEnvironmentRuntimeState = Object.freeze({
-  connectionState: "disconnected",
+  ...INITIAL_SAVED_ENVIRONMENT_CONNECTION_LIFECYCLE,
   authState: "unknown",
-  lastError: null,
-  lastErrorAt: null,
   role: null,
   descriptor: null,
   serverConfig: null,
-  connectedAt: null,
-  disconnectedAt: null,
 });
 
 function createDefaultSavedEnvironmentRuntimeState(): SavedEnvironmentRuntimeState {

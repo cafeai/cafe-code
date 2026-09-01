@@ -222,6 +222,10 @@ export const purgeHardDeletedThreadPersistence = Effect.fn("purgeHardDeletedThre
         WHERE thread_id = ${input.threadId}
       `;
         yield* sql`
+        DELETE FROM orchestration_codex_steer_control_barriers
+        WHERE thread_id = ${input.threadId}
+      `;
+        yield* sql`
         DELETE FROM orchestration_pending_codex_steer_acceptances
         WHERE thread_id = ${input.threadId}
       `;

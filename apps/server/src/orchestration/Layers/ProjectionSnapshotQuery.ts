@@ -169,6 +169,76 @@ const CodexSteerAcceptanceEvidenceRowSchema = Schema.Struct({
   interruptRequested: NonNegativeInt,
   sessionStopRequested: NonNegativeInt,
 });
+const ExactCodexSteerAcceptanceLookupInput = Schema.Struct({
+  eventSequence: NonNegativeInt,
+  intentSequence: NonNegativeInt,
+  intentCreatedAt: IsoDateTime,
+  threadId: ThreadId,
+  activityId: Schema.String,
+  acceptedTurnId: TurnId,
+  clientCorrelationId: Schema.NullOr(Schema.String),
+  messageId: MessageId,
+  acceptedAt: IsoDateTime,
+});
+const ExactCodexSteerAcceptanceRowSchema = Schema.Struct({
+  threadId: ThreadId,
+  acceptedTurnId: TurnId,
+  intentSequence: NonNegativeInt,
+  clientCorrelationId: Schema.NullOr(Schema.String),
+  messageId: MessageId,
+  messageTurnId: Schema.NullOr(TurnId),
+  messageText: Schema.String,
+  messageAttachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
+  acceptedAt: IsoDateTime,
+  turnState: Schema.Literals(["running", "completed", "error", "interrupted"]),
+  turnCompletedAt: Schema.NullOr(IsoDateTime),
+});
+const ExactCodexSteerTerminalEvidenceLookupInput = Schema.Struct({
+  eventSequence: NonNegativeInt,
+  intentSequence: NonNegativeInt,
+  intentCreatedAt: IsoDateTime,
+  threadId: ThreadId,
+  acceptedTurnId: TurnId,
+  clientCorrelationId: Schema.NullOr(Schema.String),
+  messageId: MessageId,
+  acceptedAt: IsoDateTime,
+});
+const ExactCodexSteerProcessingEvidenceRowSchema = Schema.Struct({
+  processingObserved: NonNegativeInt,
+});
+const ExactCodexSteerRecoveryEvidenceRowSchema = Schema.Struct({
+  recoveryObserved: NonNegativeInt,
+});
+const ExactCodexSteerControlEvidenceRowSchema = Schema.Struct({
+  historyComplete: NonNegativeInt,
+  interruptRequested: NonNegativeInt,
+  sessionStopRequested: NonNegativeInt,
+});
+type ExactCodexSteerAcceptanceRow = Schema.Schema.Type<typeof ExactCodexSteerAcceptanceRowSchema>;
+interface ExactCodexSteerEvidenceFlags {
+  readonly processingObserved: boolean;
+  readonly recoveryObserved: boolean;
+  readonly interruptRequested: boolean;
+  readonly sessionStopRequested: boolean;
+}
+
+const exactCodexSteerAcceptanceRowToEvidence = (
+  row: ExactCodexSteerAcceptanceRow,
+  flags: ExactCodexSteerEvidenceFlags,
+): ProjectionCodexSteerAcceptanceEvidence => ({
+  threadId: row.threadId,
+  acceptedTurnId: row.acceptedTurnId,
+  intentSequence: row.intentSequence,
+  clientCorrelationId: row.clientCorrelationId,
+  messageId: row.messageId,
+  messageTurnId: row.messageTurnId,
+  messageText: row.messageText,
+  messageAttachments: row.messageAttachments ?? [],
+  acceptedAt: row.acceptedAt,
+  turnState: row.turnState,
+  turnCompletedAt: row.turnCompletedAt,
+  ...flags,
+});
 const CodexSteerIntentRecoveryBarrierLookupInput = Schema.Struct({
   sequence: NonNegativeInt,
   threadId: ThreadId,
@@ -1376,6 +1446,113 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   });
 
   /**
+   * Authenticate one accepted-steer receipt without asking SQLite to discover
+   * any recovery evidence. The live ACK path calls this while Codex is still
+   * running, so every relation is selected by an immutable primary/unique key:
+   * activity id, accepted-event sequence, intent sequence, message identity,
+   * and thread/turn identity. Keeping recovery subqueries out of this statement
+   * is an event-loop liveness boundary. A correlated EXISTS in the former
+   * all-in-one query caused SQLite to scan a mature thread's complete event
+   * stream synchronously, starving WebSocket pings for tens of seconds.
+   */
+  const findExactCodexSteerAcceptanceRows = SqlSchema.findAll({
+    Request: ExactCodexSteerAcceptanceLookupInput,
+    Result: ExactCodexSteerAcceptanceRowSchema,
+    execute: ({
+      eventSequence,
+      intentSequence,
+      intentCreatedAt,
+      threadId,
+      activityId,
+      acceptedTurnId,
+      clientCorrelationId,
+      messageId,
+      acceptedAt,
+    }) =>
+      sql`
+        SELECT
+          accepted.thread_id AS "threadId",
+          accepted.turn_id AS "acceptedTurnId",
+          accepted_intent.sequence AS "intentSequence",
+          json_extract(accepted.payload_json, '$.clientCorrelationId') AS
+            "clientCorrelationId",
+          json_extract(accepted.payload_json, '$.messageId') AS "messageId",
+          message.turn_id AS "messageTurnId",
+          message.text AS "messageText",
+          message.attachments_json AS "messageAttachments",
+          accepted.created_at AS "acceptedAt",
+          accepted_turn.state AS "turnState",
+          accepted_turn.completed_at AS "turnCompletedAt"
+        FROM projection_thread_activities AS accepted
+        CROSS JOIN orchestration_events AS accepted_event
+        CROSS JOIN orchestration_events AS accepted_intent
+        CROSS JOIN projection_thread_messages AS message
+        CROSS JOIN projection_turns AS accepted_turn
+        WHERE accepted.activity_id = ${activityId}
+          AND accepted.thread_id = ${threadId}
+          AND accepted.turn_id = ${acceptedTurnId}
+          AND accepted.kind = 'provider.turn.steer.accepted'
+          AND accepted.created_at = ${acceptedAt}
+          AND json_extract(accepted.payload_json, '$.provider') = 'codex'
+          AND json_extract(accepted.payload_json, '$.messageId') = ${messageId}
+          AND json_extract(accepted.payload_json, '$.acceptedTurnId') = ${acceptedTurnId}
+          AND json_extract(accepted.payload_json, '$.clientCorrelationId') IS
+            ${clientCorrelationId}
+          AND (
+            json_extract(accepted.payload_json, '$.intentSequence') = ${intentSequence}
+            OR json_type(accepted.payload_json, '$.intentSequence') IS NULL
+          )
+          AND (
+            json_type(accepted.payload_json, '$.clientCorrelationId') IS NULL
+            OR json_type(accepted.payload_json, '$.clientCorrelationId') IN ('text', 'null')
+          )
+          AND accepted_event.sequence = ${eventSequence}
+          AND accepted_event.aggregate_kind = 'thread'
+          AND accepted_event.stream_id = ${threadId}
+          AND accepted_event.event_type = 'thread.activity-appended'
+          AND accepted_event.actor_kind = 'server'
+          AND json_extract(accepted_event.payload_json, '$.threadId') = ${threadId}
+          AND json_extract(accepted_event.payload_json, '$.activity.id') = ${activityId}
+          AND json_extract(accepted_event.payload_json, '$.activity.kind') = accepted.kind
+          AND json_extract(accepted_event.payload_json, '$.activity.turnId') = ${acceptedTurnId}
+          AND json_extract(accepted_event.payload_json, '$.activity.createdAt') = ${acceptedAt}
+          AND json_extract(accepted_event.payload_json, '$.activity.payload.provider') = 'codex'
+          AND json_extract(accepted_event.payload_json, '$.activity.payload.messageId') =
+            ${messageId}
+          AND json_extract(
+            accepted_event.payload_json,
+            '$.activity.payload.acceptedTurnId'
+          ) = ${acceptedTurnId}
+          AND json_extract(
+            accepted_event.payload_json,
+            '$.activity.payload.clientCorrelationId'
+          ) IS ${clientCorrelationId}
+          AND json_extract(accepted_event.payload_json, '$.activity.payload') =
+            json(accepted.payload_json)
+          AND accepted_intent.sequence = ${intentSequence}
+          AND accepted_intent.sequence < accepted_event.sequence
+          AND accepted_intent.aggregate_kind = 'thread'
+          AND accepted_intent.stream_id = ${threadId}
+          AND accepted_intent.event_type IN (
+            'thread.turn-start-requested',
+            'thread.turn-steer-requested'
+          )
+          AND accepted_intent.actor_kind IN ('client', 'server')
+          AND accepted_intent.occurred_at = ${intentCreatedAt}
+          AND json_extract(accepted_intent.payload_json, '$.threadId') = ${threadId}
+          AND json_extract(accepted_intent.payload_json, '$.messageId') = ${messageId}
+          AND json_extract(accepted_intent.payload_json, '$.createdAt') =
+            accepted_intent.occurred_at
+          AND message.thread_id = ${threadId}
+          AND message.message_id = ${messageId}
+          AND message.role = 'user'
+          AND accepted_turn.thread_id = ${threadId}
+          AND accepted_turn.turn_id = ${acceptedTurnId}
+        LIMIT 1
+      `,
+  });
+
+  /**
    * Read acceptance evidence from the complete projection history rather than
    * the bounded thread-detail tails. A projected activity is trusted only when
    * its exact id and correlation fields are backed by a server-authored
@@ -1648,6 +1825,240 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           json_extract(accepted.payload_json, '$.messageId') ASC
       `;
     },
+  });
+
+  /**
+   * Terminal-only processing evidence starts from the selective
+   * thread/turn/kind projection index, then performs one deterministic
+   * command-id lookup for each candidate activity. CROSS JOIN is intentional:
+   * without the fixed join order SQLite has previously chosen the much larger
+   * thread event stream as the outer relation on mature ledgers.
+   */
+  const findExactAcceptedCodexSteerProcessingEvidenceRow = SqlSchema.findOne({
+    Request: ExactCodexSteerTerminalEvidenceLookupInput,
+    Result: ExactCodexSteerProcessingEvidenceRowSchema,
+    execute: ({
+      intentSequence,
+      intentCreatedAt,
+      threadId,
+      acceptedTurnId,
+      clientCorrelationId,
+      messageId,
+    }) =>
+      sql`
+        SELECT EXISTS (
+          SELECT 1
+          FROM projection_thread_activities AS processing
+            INDEXED BY idx_projection_thread_activities_thread_turn_kind_created_id
+          CROSS JOIN orchestration_events AS processing_event
+            INDEXED BY idx_orch_events_command_id
+            ON processing_event.command_id =
+              'provider:codex:' || processing.thread_id || ':' ||
+              processing.activity_id || ':thread-activity-append:' || processing.activity_id
+            AND processing_event.sequence > ${intentSequence}
+            AND processing_event.aggregate_kind = 'thread'
+            AND processing_event.stream_id = processing.thread_id
+            AND processing_event.event_type = 'thread.activity-appended'
+            AND processing_event.actor_kind = 'provider'
+            AND json_extract(processing_event.payload_json, '$.threadId') = processing.thread_id
+            AND json_extract(processing_event.payload_json, '$.activity.id') =
+              processing.activity_id
+            AND json_extract(processing_event.payload_json, '$.activity.kind') = processing.kind
+            AND json_extract(processing_event.payload_json, '$.activity.turnId') IS
+              processing.turn_id
+            AND json_extract(processing_event.payload_json, '$.activity.createdAt') =
+              processing.created_at
+            AND json_extract(processing_event.payload_json, '$.activity.payload') =
+              json(processing.payload_json)
+          WHERE processing.thread_id = ${threadId}
+            AND processing.turn_id IS ${acceptedTurnId}
+            AND processing.kind = 'task.progress'
+            AND processing.created_at >= ${intentCreatedAt}
+            AND (
+              (
+                ${clientCorrelationId} IS NOT NULL
+                AND json_extract(processing.payload_json, '$.taskId') =
+                  'codex-turn-steer-processing:' || ${clientCorrelationId}
+                AND json_extract(processing.payload_json, '$.usage.clientCorrelationId') =
+                  ${clientCorrelationId}
+                AND (
+                  json_extract(processing.payload_json, '$.usage.messageId') IS NULL
+                  OR json_extract(processing.payload_json, '$.usage.messageId') = ${messageId}
+                )
+              )
+              OR (
+                ${clientCorrelationId} IS NULL
+                AND json_extract(processing.payload_json, '$.taskId') =
+                  'codex-turn-steer-processing:' || ${messageId}
+                AND json_extract(processing.payload_json, '$.usage.messageId') = ${messageId}
+              )
+            )
+          LIMIT 1
+        ) AS "processingObserved"
+      `,
+  });
+
+  /**
+   * A successful automatic recovery has a deterministic server command id.
+   * Start from the narrow thread/kind activity set and authenticate each row
+   * with a command-id index probe; never search the event stream for a JSON
+   * payload lookalike. This preserves the exact intent/message/accepted-turn
+   * generation while keeping recovery revalidation independent of thread age.
+   */
+  const findExactAcceptedCodexSteerRecoveryEvidenceRow = SqlSchema.findOne({
+    Request: ExactCodexSteerTerminalEvidenceLookupInput,
+    Result: ExactCodexSteerRecoveryEvidenceRowSchema,
+    execute: ({
+      eventSequence,
+      intentSequence,
+      threadId,
+      acceptedTurnId,
+      clientCorrelationId,
+      messageId,
+      acceptedAt,
+    }) =>
+      sql`
+        SELECT EXISTS (
+          SELECT 1
+          FROM projection_thread_activities AS recovered
+            INDEXED BY idx_projection_thread_activities_thread_kind_created_id
+          CROSS JOIN orchestration_events AS recovered_event
+            INDEXED BY idx_orch_events_command_id
+            ON recovered_event.command_id = 'server:' || recovered.activity_id
+            AND recovered_event.sequence > ${eventSequence}
+            AND recovered_event.aggregate_kind = 'thread'
+            AND recovered_event.stream_id = recovered.thread_id
+            AND recovered_event.event_type = 'thread.activity-appended'
+            AND recovered_event.actor_kind = 'server'
+            AND json_extract(recovered_event.payload_json, '$.threadId') = recovered.thread_id
+            AND json_extract(recovered_event.payload_json, '$.activity.id') = recovered.activity_id
+            AND json_extract(recovered_event.payload_json, '$.activity.kind') = recovered.kind
+            AND json_extract(recovered_event.payload_json, '$.activity.turnId') =
+              recovered.turn_id
+            AND json_extract(recovered_event.payload_json, '$.activity.createdAt') =
+              recovered.created_at
+            AND json_extract(recovered_event.payload_json, '$.activity.payload') =
+              json(recovered.payload_json)
+          WHERE recovered.thread_id = ${threadId}
+            AND recovered.kind = 'provider.turn.steer.recovered'
+            AND recovered.created_at >= ${acceptedAt}
+            AND json_extract(recovered.payload_json, '$.provider') = 'codex'
+            AND json_extract(recovered.payload_json, '$.messageId') = ${messageId}
+            AND json_extract(recovered.payload_json, '$.acceptedTurnId') = ${acceptedTurnId}
+            AND json_extract(recovered.payload_json, '$.recoveredTurnId') = recovered.turn_id
+            AND json_extract(recovered.payload_json, '$.intentSequence') = ${intentSequence}
+            AND json_extract(recovered.payload_json, '$.clientCorrelationId') IS
+              ${clientCorrelationId}
+          LIMIT 1
+        ) AS "recoveryObserved"
+      `,
+  });
+
+  /**
+   * Manual Stop is generation-ordered after the original steer intent, not
+   * after the delayed provider ACK. The append-time control ledger therefore
+   * recognizes an interrupt/session-stop that commits while `turn/steer` is
+   * still awaiting its response, without scanning the later event suffix.
+   *
+   * Every compact row is rebound to its immutable source event by INTEGER
+   * PRIMARY KEY and the complete actor/thread/type/time/turn tuple is checked
+   * again. The migration completeness fence makes historical absence
+   * non-authoritative: an intent older than the ledger returns
+   * `historyComplete = 0`, causing recovery to fail closed.
+   */
+  const findExactAcceptedCodexSteerControlEvidenceRow = SqlSchema.findOne({
+    Request: ExactCodexSteerTerminalEvidenceLookupInput,
+    Result: ExactCodexSteerControlEvidenceRowSchema,
+    execute: ({ intentSequence, threadId, acceptedTurnId }) =>
+      sql`
+        WITH
+        interrupt_without_turn_candidate AS MATERIALIZED (
+          SELECT sequence, thread_id, barrier_kind, turn_id, occurred_at
+          FROM orchestration_codex_steer_control_barriers
+            INDEXED BY idx_codex_steer_control_thread_kind_turn_sequence
+          WHERE thread_id = ${threadId}
+            AND barrier_kind = 'thread.turn-interrupt-requested'
+            AND turn_id IS NULL
+            AND sequence > ${intentSequence}
+          ORDER BY sequence ASC
+          LIMIT 1
+        ),
+        interrupt_for_turn_candidate AS MATERIALIZED (
+          SELECT sequence, thread_id, barrier_kind, turn_id, occurred_at
+          FROM orchestration_codex_steer_control_barriers
+            INDEXED BY idx_codex_steer_control_thread_kind_turn_sequence
+          WHERE thread_id = ${threadId}
+            AND barrier_kind = 'thread.turn-interrupt-requested'
+            AND turn_id = ${acceptedTurnId}
+            AND sequence > ${intentSequence}
+          ORDER BY sequence ASC
+          LIMIT 1
+        ),
+        interrupt_candidates AS MATERIALIZED (
+          SELECT * FROM interrupt_without_turn_candidate
+          UNION ALL
+          SELECT * FROM interrupt_for_turn_candidate
+        ),
+        authenticated_interrupts AS MATERIALIZED (
+          SELECT interrupt_barrier.sequence
+          FROM interrupt_candidates AS interrupt_barrier
+          CROSS JOIN orchestration_events AS interrupt_event
+            ON interrupt_event.sequence = interrupt_barrier.sequence
+            AND interrupt_event.aggregate_kind = 'thread'
+            AND interrupt_event.stream_id = interrupt_barrier.thread_id
+            AND interrupt_event.event_type = interrupt_barrier.barrier_kind
+            AND interrupt_event.actor_kind IN ('client', 'server')
+            AND interrupt_event.occurred_at = interrupt_barrier.occurred_at
+            AND json_extract(interrupt_event.payload_json, '$.threadId') =
+              interrupt_barrier.thread_id
+            AND json_extract(interrupt_event.payload_json, '$.createdAt') =
+              interrupt_event.occurred_at
+            AND json_extract(interrupt_event.payload_json, '$.turnId') IS
+              interrupt_barrier.turn_id
+        ),
+        stop_candidate AS MATERIALIZED (
+          SELECT sequence, thread_id, barrier_kind, turn_id, occurred_at
+          FROM orchestration_codex_steer_control_barriers
+            INDEXED BY idx_codex_steer_control_thread_kind_turn_sequence
+          WHERE thread_id = ${threadId}
+            AND barrier_kind = 'thread.session-stop-requested'
+            AND turn_id IS NULL
+            AND sequence > ${intentSequence}
+          ORDER BY sequence ASC
+          LIMIT 1
+        ),
+        authenticated_stop AS MATERIALIZED (
+          SELECT stop_barrier.sequence
+          FROM stop_candidate AS stop_barrier
+          CROSS JOIN orchestration_events AS stop_event
+            ON stop_event.sequence = stop_barrier.sequence
+            AND stop_event.aggregate_kind = 'thread'
+            AND stop_event.stream_id = stop_barrier.thread_id
+            AND stop_event.event_type = stop_barrier.barrier_kind
+            AND stop_event.actor_kind IN ('client', 'server')
+            AND stop_event.occurred_at = stop_barrier.occurred_at
+            AND json_extract(stop_event.payload_json, '$.threadId') = stop_barrier.thread_id
+            AND json_extract(stop_event.payload_json, '$.createdAt') = stop_event.occurred_at
+        )
+        SELECT
+          CASE
+            WHEN EXISTS (
+              SELECT 1
+              FROM orchestration_codex_steer_control_barrier_state AS control_state
+              WHERE control_state.singleton = 1
+                AND ${intentSequence} >= control_state.indexed_from_sequence
+              LIMIT 1
+            )
+              AND (SELECT COUNT(*) FROM authenticated_interrupts) =
+                (SELECT COUNT(*) FROM interrupt_candidates)
+              AND (SELECT COUNT(*) FROM authenticated_stop) =
+                (SELECT COUNT(*) FROM stop_candidate)
+            THEN 1
+            ELSE 0
+          END AS "historyComplete",
+          EXISTS (SELECT 1 FROM authenticated_interrupts) AS "interruptRequested",
+          EXISTS (SELECT 1 FROM authenticated_stop) AS "sessionStopRequested"
+      `,
   });
 
   /**
@@ -3423,43 +3834,140 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const getCodexSteerAcceptanceEvidence: ProjectionSnapshotQueryShape["getCodexSteerAcceptanceEvidence"] =
     (input: ProjectionCodexSteerAcceptanceEvidenceInput = {}) => {
       const exactAcceptedBarrier = input.exactAcceptedBarrier;
-      return listCodexSteerAcceptanceEvidenceRows({
-        exactLookup: exactAcceptedBarrier !== undefined,
-        threadId: exactAcceptedBarrier?.threadId ?? input.threadId ?? null,
-        acceptedTurnId: exactAcceptedBarrier?.acceptedTurnId ?? input.acceptedTurnId ?? null,
-        messageId: exactAcceptedBarrier?.messageId ?? input.messageId ?? null,
-        exactEventSequence: exactAcceptedBarrier?.eventSequence ?? null,
-        exactIntentSequence: exactAcceptedBarrier?.intentSequence ?? null,
-        exactActivityId: exactAcceptedBarrier?.activityId ?? null,
-        exactClientCorrelationId: exactAcceptedBarrier?.clientCorrelationId ?? null,
-        exactAcceptedAt: exactAcceptedBarrier?.acceptedAt ?? null,
-      }).pipe(
+
+      if (exactAcceptedBarrier === undefined) {
+        return listCodexSteerAcceptanceEvidenceRows({
+          exactLookup: false,
+          threadId: input.threadId ?? null,
+          acceptedTurnId: input.acceptedTurnId ?? null,
+          messageId: input.messageId ?? null,
+          exactEventSequence: null,
+          exactIntentSequence: null,
+          exactActivityId: null,
+          exactClientCorrelationId: null,
+          exactAcceptedAt: null,
+        }).pipe(
+          // Fixed, content-free attribution makes a slow historical scan
+          // distinguishable from the exact ACK path in local debug traces.
+          // Never attach thread/message ids or prompt-bearing row data.
+          Effect.withSpan("orchestration.codex_steer.acceptance_evidence.legacy_scan", {
+            attributes: {
+              "codex.steer.evidence.phase": "legacy-scan",
+            },
+          }),
+          Effect.mapError(
+            toPersistenceSqlOrDecodeError(
+              "ProjectionSnapshotQuery.getCodexSteerAcceptanceEvidence:query",
+              "ProjectionSnapshotQuery.getCodexSteerAcceptanceEvidence:decodeRows",
+            ),
+          ),
+          Effect.map(
+            (rows): ReadonlyArray<ProjectionCodexSteerAcceptanceEvidence> =>
+              rows.map((row) =>
+                exactCodexSteerAcceptanceRowToEvidence(row, {
+                  processingObserved: row.processingObserved > 0,
+                  recoveryObserved: row.recoveryObserved > 0,
+                  interruptRequested: row.interruptRequested > 0,
+                  sessionStopRequested: row.sessionStopRequested > 0,
+                }),
+              ),
+          ),
+        );
+      }
+
+      return findExactCodexSteerAcceptanceRows(exactAcceptedBarrier).pipe(
+        Effect.withSpan("orchestration.codex_steer.acceptance_evidence.exact_base", {
+          attributes: {
+            "codex.steer.evidence.phase": "exact-base",
+          },
+        }),
         Effect.mapError(
           toPersistenceSqlOrDecodeError(
-            "ProjectionSnapshotQuery.getCodexSteerAcceptanceEvidence:query",
-            "ProjectionSnapshotQuery.getCodexSteerAcceptanceEvidence:decodeRows",
+            "ProjectionSnapshotQuery.getCodexSteerAcceptanceEvidence:exactAcceptanceQuery",
+            "ProjectionSnapshotQuery.getCodexSteerAcceptanceEvidence:exactAcceptanceDecodeRows",
           ),
         ),
-        Effect.map(
-          (rows): ReadonlyArray<ProjectionCodexSteerAcceptanceEvidence> =>
-            rows.map((row) => ({
-              threadId: row.threadId,
-              acceptedTurnId: row.acceptedTurnId,
-              intentSequence: row.intentSequence,
-              clientCorrelationId: row.clientCorrelationId,
-              messageId: row.messageId,
-              messageTurnId: row.messageTurnId,
-              messageText: row.messageText,
-              messageAttachments: row.messageAttachments ?? [],
-              acceptedAt: row.acceptedAt,
-              turnState: row.turnState,
-              turnCompletedAt: row.turnCompletedAt,
-              processingObserved: row.processingObserved > 0,
-              recoveryObserved: row.recoveryObserved > 0,
-              interruptRequested: row.interruptRequested > 0,
-              sessionStopRequested: row.sessionStopRequested > 0,
-            })),
-        ),
+        Effect.flatMap((rows) => {
+          const row = rows[0];
+          if (row === undefined) {
+            return Effect.succeed<ReadonlyArray<ProjectionCodexSteerAcceptanceEvidence>>([]);
+          }
+
+          // A running accepted turn cannot require terminal replay. Returning
+          // the authenticated base row immediately is important: node:sqlite
+          // is synchronous, so even an ultimately-false historical evidence
+          // scan can prevent Effect RPC's ping/pong fibers from running and
+          // make every renderer subscription reconnect after a successful
+          // steer. Provider progress is reconciled when the turn terminates.
+          if (row.turnState === "running" && row.turnCompletedAt === null) {
+            return Effect.succeed<ReadonlyArray<ProjectionCodexSteerAcceptanceEvidence>>([
+              exactCodexSteerAcceptanceRowToEvidence(row, {
+                processingObserved: false,
+                recoveryObserved: false,
+                interruptRequested: false,
+                sessionStopRequested: false,
+              }),
+            ]).pipe(
+              Effect.withSpan(
+                "orchestration.codex_steer.acceptance_evidence.exact_classification",
+                {
+                  attributes: {
+                    "codex.steer.evidence.phase": "classification",
+                    "codex.steer.evidence.turn_state": "running",
+                  },
+                },
+              ),
+            );
+          }
+
+          const terminalLookup = {
+            eventSequence: exactAcceptedBarrier.eventSequence,
+            intentSequence: exactAcceptedBarrier.intentSequence,
+            intentCreatedAt: exactAcceptedBarrier.intentCreatedAt,
+            threadId: exactAcceptedBarrier.threadId,
+            acceptedTurnId: exactAcceptedBarrier.acceptedTurnId,
+            clientCorrelationId: exactAcceptedBarrier.clientCorrelationId,
+            messageId: exactAcceptedBarrier.messageId,
+            acceptedAt: exactAcceptedBarrier.acceptedAt,
+          };
+          return Effect.all(
+            [
+              findExactAcceptedCodexSteerProcessingEvidenceRow(terminalLookup),
+              findExactAcceptedCodexSteerRecoveryEvidenceRow(terminalLookup),
+              findExactAcceptedCodexSteerControlEvidenceRow(terminalLookup),
+            ],
+            // Keep node:sqlite statements serialized. A corrupt local ledger
+            // must not amplify one recovery candidate into concurrent main-
+            // thread work, and each statement already owns a selective index.
+            { concurrency: 1 },
+          ).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getCodexSteerAcceptanceEvidence:exactTerminalEvidenceQuery",
+                "ProjectionSnapshotQuery.getCodexSteerAcceptanceEvidence:exactTerminalEvidenceDecodeRow",
+              ),
+            ),
+            Effect.map(([processing, recovery, control]) =>
+              control.historyComplete > 0
+                ? ([
+                    exactCodexSteerAcceptanceRowToEvidence(row, {
+                      processingObserved: processing.processingObserved > 0,
+                      recoveryObserved: recovery.recoveryObserved > 0,
+                      interruptRequested: control.interruptRequested > 0,
+                      sessionStopRequested: control.sessionStopRequested > 0,
+                    }),
+                  ] satisfies ReadonlyArray<ProjectionCodexSteerAcceptanceEvidence>)
+                : [],
+            ),
+            Effect.withSpan("orchestration.codex_steer.acceptance_evidence.exact_terminal", {
+              attributes: {
+                "codex.steer.evidence.phase": "terminal-probes",
+                "codex.steer.evidence.turn_state": "terminal",
+                "codex.steer.evidence.probe_count": 3,
+              },
+            }),
+          );
+        }),
       );
     };
 
