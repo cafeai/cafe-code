@@ -72,6 +72,16 @@ const asThreadId = (value: string): ThreadId => ThreadId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
 const asEventId = (value: string): EventId => EventId.make(value);
 const asItemId = (value: string): ProviderItemId => ProviderItemId.make(value);
+const authRecoveryTaskIdForTest = (threadId: string, turnId: string): RuntimeTaskId =>
+  RuntimeTaskId.make(
+    `codex-auth-recovery-sha256:${crypto
+      .createHash("sha256")
+      .update(
+        `cafecode/codex-auth-recovery-task/v1\u0000${JSON.stringify([threadId, turnId])}`,
+        "utf8",
+      )
+      .digest("hex")}`,
+  );
 const utf8Bytes = (value: string): number => Buffer.byteLength(value, "utf8");
 const retainedDetailBytes = (detail: ReturnType<typeof canonicalizeCodexSubagentDetail>): number =>
   detail.messages.reduce(
@@ -3556,6 +3566,325 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("terminalizes Codex auth recovery without retaining provider-authored content", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 2)).pipe(
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-auth-recovery-started"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-auth-recovery"),
+        createdAt: "2026-09-01T00:00:00.000Z",
+        method: "modelProvider/authRecoveryStarted",
+        payload: {
+          threadId: "provider-thread-secret",
+          turnId: "provider-turn-secret",
+          provider: "provider-account-secret",
+          message: "provider-authored-secret-start-message",
+        },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-auth-recovery-completed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-auth-recovery"),
+        createdAt: "2026-09-01T00:00:01.000Z",
+        method: "modelProvider/authRecoveryCompleted",
+        payload: {
+          threadId: "provider-thread-secret",
+          turnId: "provider-turn-secret",
+          provider: "provider-account-secret",
+          message: "provider-authored-secret-complete-message",
+        },
+      } satisfies ProviderEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.deepStrictEqual(
+        events.map((event) => event.type),
+        ["task.started", "task.completed"],
+      );
+      const taskId = authRecoveryTaskIdForTest("provider-thread-secret", "provider-turn-secret");
+      assert.match(taskId, /^codex-auth-recovery-sha256:[0-9a-f]{64}$/u);
+      assert.equal(
+        events[0]?.type === "task.started" ? events[0].payload.taskId : undefined,
+        taskId,
+      );
+      assert.equal(
+        events[0]?.type === "task.started" ? events[0].payload.description : undefined,
+        "Codex is refreshing model-provider credentials.",
+      );
+      assert.equal(
+        events[1]?.type === "task.completed" ? events[1].payload.taskId : undefined,
+        taskId,
+      );
+      assert.equal(
+        events[1]?.type === "task.completed" ? events[1].payload.status : undefined,
+        "completed",
+      );
+      assert.equal(
+        events[1]?.type === "task.completed" ? events[1].payload.summary : undefined,
+        "Codex refreshed model-provider credentials.",
+      );
+      assert.equal(
+        events[1]?.type === "task.completed" ? events[1].payload.usage : undefined,
+        undefined,
+      );
+      assert.deepStrictEqual(events[0]?.raw?.payload, {
+        redacted: true,
+        reason: "model-provider-auth-recovery-content",
+        phase: "started",
+      });
+      assert.deepStrictEqual(events[1]?.raw?.payload, {
+        redacted: true,
+        reason: "model-provider-auth-recovery-content",
+        phase: "completed",
+      });
+      assert.equal(events[0]?.providerRefs, undefined);
+      assert.equal(events[1]?.providerRefs, undefined);
+      assert.doesNotMatch(
+        JSON.stringify(events),
+        /provider-(?:account|authored|thread|turn)-secret/,
+      );
+    }),
+  );
+
+  it.effect("stops active auth recovery before explicit adapter retirement", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const startedFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-auth-adapter-stop-start"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-parent"),
+        createdAt: "2026-09-01T00:00:00.000Z",
+        method: "modelProvider/authRecoveryStarted",
+        payload: {
+          threadId: "provider-adapter-stop-thread-secret",
+          turnId: "provider-adapter-stop-turn-secret",
+          provider: "provider-adapter-stop-account-secret",
+          message: "provider-adapter-stop-message-secret",
+        },
+      } satisfies ProviderEvent);
+
+      const started = yield* Fiber.join(startedFiber);
+      assert.equal(started._tag, "Some");
+      if (started._tag !== "Some" || started.value.type !== "task.started") {
+        return assert.fail("expected an auth recovery task start before adapter stop");
+      }
+      const terminalFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      yield* adapter.stopSession(asThreadId("thread-1"));
+      const terminal = yield* Fiber.join(terminalFiber);
+      assert.equal(terminal._tag, "Some");
+      if (terminal._tag !== "Some" || terminal.value.type !== "task.completed") {
+        return assert.fail("expected an auth recovery task terminal before adapter stop");
+      }
+      assert.equal(terminal.value.payload.status, "stopped");
+      assert.equal(terminal.value.turnId, started.value.turnId);
+      assert.equal(terminal.value.turnId, asTurnId("turn-parent"));
+      assert.equal(terminal.value.payload.usage, undefined);
+      assert.deepStrictEqual(terminal.value.raw?.payload, {
+        redacted: true,
+        reason: "model-provider-auth-recovery-terminalized",
+        terminal: "session-exit",
+        status: "stopped",
+      });
+      assert.equal(terminal.value.providerRefs, undefined);
+      assert.doesNotMatch(JSON.stringify(terminal.value), /provider-adapter-stop-/u);
+    }),
+  );
+
+  it.effect("keeps auth recovery task ids distinct when child turns reuse an id", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 4)).pipe(
+        Effect.forkChild,
+      );
+
+      for (const [index, providerThreadId] of ["provider-child-a", "provider-child-b"].entries()) {
+        yield* runtime.emit({
+          id: asEventId(`evt-auth-collision-start-${index}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-parent"),
+          createdAt: `2026-09-01T00:00:0${index}.000Z`,
+          method: "modelProvider/authRecoveryStarted",
+          payload: {
+            threadId: providerThreadId,
+            turnId: "provider-reused-turn-id",
+            provider: `provider-account-${index}`,
+            message: `provider-message-${index}`,
+          },
+        } satisfies ProviderEvent);
+        yield* runtime.emit({
+          id: asEventId(`evt-auth-collision-complete-${index}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-parent"),
+          createdAt: `2026-09-01T00:00:1${index}.000Z`,
+          method: "modelProvider/authRecoveryCompleted",
+          payload: {
+            threadId: providerThreadId,
+            turnId: "provider-reused-turn-id",
+            provider: `provider-account-${index}`,
+            message: `provider-message-${index}`,
+          },
+        } satisfies ProviderEvent);
+      }
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const firstTaskId = authRecoveryTaskIdForTest("provider-child-a", "provider-reused-turn-id");
+      const secondTaskId = authRecoveryTaskIdForTest("provider-child-b", "provider-reused-turn-id");
+      assert.notEqual(firstTaskId, secondTaskId);
+      assert.deepStrictEqual(
+        events.map((event) =>
+          event.type === "task.started" ||
+          event.type === "task.progress" ||
+          event.type === "task.completed"
+            ? event.payload.taskId
+            : undefined,
+        ),
+        [firstTaskId, firstTaskId, secondTaskId, secondTaskId],
+      );
+      assert.doesNotMatch(JSON.stringify(events), /provider-(?:child|reused|account|message)/u);
+    }),
+  );
+
+  it.effect("fails active auth recovery when the owning turn errors", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 3)).pipe(
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-auth-error-start"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-parent"),
+        createdAt: "2026-09-01T00:00:00.000Z",
+        method: "modelProvider/authRecoveryStarted",
+        payload: {
+          threadId: "provider-error-thread-secret",
+          turnId: "provider-error-turn-secret",
+          provider: "provider-error-account-secret",
+          message: "provider-error-start-message-secret",
+        },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-auth-owning-turn-error"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-parent"),
+        createdAt: "2026-09-01T00:00:01.000Z",
+        method: "error",
+        payload: {
+          threadId: "provider-error-thread-secret",
+          turnId: "provider-error-turn-secret",
+          willRetry: false,
+          error: {
+            message: "provider-terminal-error-message-secret",
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.deepStrictEqual(
+        events.map((event) => event.type),
+        ["task.started", "task.completed", "runtime.error"],
+      );
+      const taskTerminal = events[1];
+      assert.equal(
+        taskTerminal?.type === "task.completed" ? taskTerminal.payload.taskId : undefined,
+        authRecoveryTaskIdForTest("provider-error-thread-secret", "provider-error-turn-secret"),
+      );
+      assert.equal(
+        taskTerminal?.type === "task.completed" ? taskTerminal.payload.status : undefined,
+        "failed",
+      );
+      assert.deepStrictEqual(taskTerminal?.raw?.payload, {
+        redacted: true,
+        reason: "model-provider-auth-recovery-terminalized",
+        terminal: "turn-error",
+        status: "failed",
+      });
+      assert.doesNotMatch(JSON.stringify(taskTerminal), /provider-(?:error|terminal)-/u);
+    }),
+  );
+
+  it.effect("stops active auth recovery when its owning turn completes", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 3)).pipe(
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-auth-turn-complete-start"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-parent"),
+        createdAt: "2026-09-01T00:00:00.000Z",
+        method: "modelProvider/authRecoveryStarted",
+        payload: {
+          threadId: "provider-complete-thread-secret",
+          turnId: "provider-complete-turn-secret",
+          provider: "provider-complete-account-secret",
+          message: "provider-complete-start-message-secret",
+        },
+      } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-auth-owning-turn-completed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-parent"),
+        createdAt: "2026-09-01T00:00:01.000Z",
+        method: "turn/completed",
+        payload: {
+          threadId: "provider-complete-thread-secret",
+          turn: {
+            id: "provider-complete-turn-secret",
+            items: [],
+            itemsView: "notLoaded",
+            status: "completed",
+            error: null,
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.deepStrictEqual(
+        events.map((event) => event.type),
+        ["task.started", "task.completed", "turn.completed"],
+      );
+      assert.equal(
+        events[1]?.type === "task.completed" ? events[1].payload.status : undefined,
+        "stopped",
+      );
+      assert.deepStrictEqual(events[1]?.raw?.payload, {
+        redacted: true,
+        reason: "model-provider-auth-recovery-terminalized",
+        terminal: "turn-terminal",
+        status: "stopped",
+      });
+      assert.doesNotMatch(JSON.stringify(events[1]), /provider-complete-/u);
+    }),
+  );
+
   it.effect("maps Codex MCP startup status updates to visible work-log diagnostics", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
@@ -4113,7 +4442,7 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
       const runtime = runtimeFactory.lastRuntime;
       assert.ok(runtime);
 
-      const mappedEventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 2)).pipe(
+      const mappedEventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 3)).pipe(
         Effect.forkChild,
       );
       yield* runtime.emit({
@@ -4171,6 +4500,21 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
           },
         },
       } satisfies ProviderEvent);
+      yield* runtime.emit({
+        id: asEventId("evt-native-log-auth-recovery"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-logger"),
+        turnId: asTurnId("turn-native-log-auth-recovery"),
+        createdAt: "2026-09-01T00:00:02.000Z",
+        method: "modelProvider/authRecoveryStarted",
+        payload: {
+          threadId: "provider-thread-native-log-secret",
+          turnId: "provider-turn-native-log-secret",
+          provider: "native-log-secret-provider-account",
+          message: "native-log-secret-provider-message",
+        },
+      } satisfies ProviderEvent);
       yield* Fiber.join(mappedEventsFiber);
 
       yield* Scope.close(scope, Exit.void);
@@ -4181,6 +4525,7 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
       const contents = fs.readFileSync(threadLogPath, "utf8");
       assert.match(contents, /NTIVE: .*"model":"gpt-5\.4"/);
       assert.match(contents, /"reason":"subagent-provider-content"/);
+      assert.match(contents, /"reason":"model-provider-auth-recovery-content"/);
       assert.doesNotMatch(contents, /native-log-secret/);
     } finally {
       if (!scopeClosed) {

@@ -226,6 +226,11 @@ export type CodexTurnStartParamsWithExperimentalFields =
   typeof CodexTurnStartParamsWithExperimentalFields.Type;
 const formatSchemaIssue = SchemaIssue.makeFormatterDefault();
 const CODEX_HTTP_FALLBACK_PROVIDER_ID = "cafecode-openai-http";
+// Codex 0.152 changed `update_plan` from default-on to explicit opt-in. Cafe's
+// Tasks surface is a first-class client capability, so every app-server that
+// can own a real Cafe session opts in at process startup. Keep the lightweight
+// provider-status probe independent: it never starts a thread or exposes tools.
+const CODEX_UPDATE_PLAN_CONFIG_OVERRIDE = "tools.update_plan.enabled=true";
 
 export type CodexResumeCursor = typeof CodexResumeCursorSchema.Type;
 type CodexServiceTier = NonNullable<EffectCodexSchema.V2ThreadStartParams["serviceTier"]>;
@@ -275,7 +280,7 @@ export function buildCodexAppServerArgs(
   transportPolicy: CodexTransportPolicy | undefined,
 ): ReadonlyArray<string> {
   if (transportPolicy?.responsesWebsockets !== "disabled") {
-    return ["app-server"];
+    return ["app-server", "-c", CODEX_UPDATE_PLAN_CONFIG_OVERRIDE];
   }
 
   // Codex's built-in `openai` provider cannot be overridden by config. A
@@ -283,6 +288,8 @@ export function buildCodexAppServerArgs(
   // behavior while turning off only the unstable Responses WebSocket transport.
   return [
     "app-server",
+    "-c",
+    CODEX_UPDATE_PLAN_CONFIG_OVERRIDE,
     "-c",
     `model_provider="${CODEX_HTTP_FALLBACK_PROVIDER_ID}"`,
     "-c",
@@ -2286,6 +2293,8 @@ function readNotificationThreadId(notification: CodexServerNotification): string
     case "thread/compacted":
     case "model/rerouted":
     case "model/verification":
+    case "modelProvider/authRecoveryStarted":
+    case "modelProvider/authRecoveryCompleted":
     case "model/safetyBuffering/updated":
     case "turn/moderationMetadata":
     case "thread/realtime/started":
@@ -2325,6 +2334,8 @@ export function readCodexNotificationRouteFields(notification: CodexServerNotifi
     case "turn/completed":
     case "model/rerouted":
     case "model/verification":
+    case "modelProvider/authRecoveryStarted":
+    case "modelProvider/authRecoveryCompleted":
     case "model/safetyBuffering/updated":
     case "turn/moderationMetadata":
     case "autoApprovalReview/strictReviewRequired":
@@ -2642,7 +2653,12 @@ export function isCodexChildConversationWorkNotification(
     method === "thread/queue/changed" ||
     method === "thread/project/updated" ||
     method === "warning" ||
-    method === "guardianWarning"
+    method === "guardianWarning" ||
+    // Credential recovery is turn-scoped metadata, not proof that a child is
+    // doing work. In particular, a replayed completion can arrive after the
+    // child turn is already terminal and must never resurrect its liveness.
+    method === "modelProvider/authRecoveryStarted" ||
+    method === "modelProvider/authRecoveryCompleted"
   ) {
     return false;
   }
@@ -2895,6 +2911,57 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+export function sanitizeCodexProtocolDiagnosticPayload(input: {
+  readonly direction?: string;
+  readonly stage: string;
+  readonly payload: unknown;
+}): unknown {
+  if (input.direction === "incoming" && input.stage === "raw") {
+    // A raw JSONL record can contain prompts, credentials, provider-authored
+    // text, and opaque cursors before any method-aware decoder runs. Logging
+    // only its bounded byte count preserves framing diagnostics without ever
+    // copying wire content into the backend log.
+    return {
+      redacted: true,
+      diagnosticClass: "incoming-raw-protocol-content",
+      byteLength:
+        typeof input.payload === "string" ? Buffer.byteLength(input.payload, "utf8") : null,
+    };
+  }
+
+  const payload = readRecord(input.payload);
+  const method = payload ? readString(payload.method) : undefined;
+  if (
+    method !== "modelProvider/authRecoveryStarted" &&
+    method !== "modelProvider/authRecoveryCompleted"
+  ) {
+    return input.payload;
+  }
+
+  const phase = method === "modelProvider/authRecoveryStarted" ? "started" : "completed";
+  if (input.stage === "decoded") {
+    return {
+      method,
+      phase,
+      diagnosticClass: "notification-payload-redacted",
+    };
+  }
+  if (input.stage !== "decode_failed") {
+    return input.payload;
+  }
+
+  // Effect Schema's decode issue can contain the rejected `actual` value.
+  // Auth-recovery payloads contain provider/account identifiers and an
+  // upstream-authored message, so this method-specific boundary records only
+  // finite classifier fields. General protocol diagnostics retain their
+  // existing detail because they do not cross this credential-bearing schema.
+  return {
+    method,
+    phase,
+    errorClass: "notification-schema-decode-failed",
+  };
 }
 
 function readString(value: unknown): string | undefined {
@@ -3655,7 +3722,7 @@ export const makeCodexSessionRuntime = (
           providerInstanceId: options.providerInstanceId ?? PROVIDER,
           direction: event.direction,
           stage: event.stage,
-          payload: event.payload,
+          payload: sanitizeCodexProtocolDiagnosticPayload(event),
         }),
       onTermination: (error) => {
         const diagnostic = {

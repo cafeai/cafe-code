@@ -457,12 +457,29 @@ function runtimeEventCarriesActiveTurnWork(event: ProviderRuntimeEvent): boolean
     case "turn.proposed.delta":
     case "item.started":
     case "item.updated":
-    case "task.started":
-    case "task.progress":
     case "hook.started":
     case "hook.progress":
     case "tool.progress":
       return true;
+    case "task.started":
+      // Codex credential recovery belongs to the model-provider control plane,
+      // not the assistant turn. The adapter intentionally projects a bounded,
+      // visible task row so the user can understand a temporary credential
+      // refresh, but that row must never repair an orphaned turn, replace a
+      // conflicting active turn, or refresh a settled session to `running`.
+      // The corresponding task.completed edge is already non-liveness data.
+      // Keep this discriminator canonical instead of parsing provider-authored
+      // descriptions or opaque task ids.
+      if (event.payload.taskType === "provider-auth-recovery") {
+        return false;
+      }
+      return event.payload.visibility !== "ambient";
+    case "task.progress":
+      // Ambient provider work is intentionally absent from the root task
+      // surface and is not proof that the root turn is still live. Treating a
+      // visibility-only snapshot as active work could resurrect a completed
+      // turn or keep a stale session running indefinitely.
+      return event.payload.visibility !== "ambient";
     default:
       return false;
   }
@@ -676,6 +693,7 @@ function runtimeEventToActivities(
           payload: {
             taskId: event.payload.taskId,
             ...(event.payload.taskType ? { taskType: event.payload.taskType } : {}),
+            ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
             ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
             ...(event.payload.description
               ? { detail: truncateDetail(event.payload.description) }
@@ -698,6 +716,7 @@ function runtimeEventToActivities(
           payload: {
             taskId: event.payload.taskId,
             detail: truncateDetail(event.payload.summary ?? event.payload.description),
+            ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
             ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
             ...(event.payload.summary ? { summary: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.lastToolName ? { lastToolName: event.payload.lastToolName } : {}),
@@ -731,6 +750,7 @@ function runtimeEventToActivities(
           payload: {
             taskId: event.payload.taskId,
             status: event.payload.status,
+            ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
             ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
             ...(event.payload.summary ? { detail: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
@@ -2548,12 +2568,15 @@ const make = Effect.gen(function* () {
             case "turn.proposed.delta":
             case "item.started":
             case "item.updated":
-            case "task.started":
-            case "task.progress":
             case "hook.started":
             case "hook.progress":
             case "tool.progress":
               return "running";
+            case "task.started":
+            case "task.progress":
+              return event.payload.visibility === "ambient"
+                ? (thread.session?.status ?? "ready")
+                : "running";
             case "turn.started":
               return "running";
             case "session.exited":

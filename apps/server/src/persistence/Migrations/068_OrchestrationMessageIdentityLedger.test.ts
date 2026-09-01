@@ -15,6 +15,7 @@ import {
   hydrateLegacyMessageIdentitiesForThread,
   readLatestMessageIdentity,
 } from "../../orchestration/messageIdentityLedger.ts";
+import { purgeHardDeletedThreadPersistence } from "../../orchestration/threadHardDelete.ts";
 import { runMigrations } from "../Migrations.ts";
 import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 import * as TestSqliteClient from "../TestSqliteClient.ts";
@@ -35,14 +36,19 @@ function observeChildTermination(child: ChildProcess): ChildTermination {
     const finish = () => {
       if (settled) return;
       settled = true;
+      child.off("exit", finish);
       child.off("close", finish);
       resolve();
     };
 
     // `error` is not terminal: Node may emit it for a failed IPC send or kill
-    // while the child is still alive. `close` follows both normal exit and a
-    // failed spawn after stdio/IPC are closed, so it is the only safe point at
-    // which the SQLite handle can no longer remain live in this fixture.
+    // while the child is still alive. Process `exit` is sufficient for this
+    // fixture because the operating system has closed every native SQLite file
+    // handle at that point; `close` remains the failed-spawn/stdio fallback.
+    // Some Vitest worker configurations observe `exit` without a later `close`
+    // for an IPC child, so waiting exclusively for `close` would manufacture a
+    // five-second cleanup failure after a healthy child already returned zero.
+    child.once("exit", finish);
     child.once("close", finish);
   });
 }
@@ -92,7 +98,12 @@ async function stopSqliteWriterFixture(
     child.kill("SIGKILL");
   }
   if (!(await waitForPromiseWithin(termination, SQLITE_WRITER_FIXTURE_FORCED_EXIT_MS))) {
-    throw new Error("SQLite writer fixture did not exit after forced termination.");
+    throw new Error(
+      `SQLite writer fixture did not exit after forced termination ` +
+        `(pid=${String(child.pid)}, connected=${String(child.connected)}, ` +
+        `killed=${String(child.killed)}, exitCode=${String(child.exitCode)}, ` +
+        `signalCode=${String(child.signalCode)}).`,
+    );
   }
 }
 
@@ -514,12 +525,25 @@ multiPageLayer("068 legacy hydration scheduling", (it) => {
   );
 });
 
-type HydrationContentionScenario = "advance-wal" | "retire-thread";
+type HydrationContentionScenario =
+  | "advance-wal"
+  | "retire-thread"
+  | "writer-timeout"
+  | "hydrate-then-purge"
+  | "writer-exhausted";
+
+const hydrationContentionSuffixes = {
+  "advance-wal": "write-first",
+  "retire-thread": "retire-first",
+  "writer-timeout": "retry",
+  "hydrate-then-purge": "hydrate-first",
+  "writer-exhausted": "retry-exhausted",
+} as const satisfies Record<HydrationContentionScenario, string>;
 
 async function runHydrationContentionScenario(scenario: HydrationContentionScenario) {
   const directory = mkdtempSync(join(tmpdir(), "cafecode-identity-hydration-lock-"));
   const filename = join(directory, "state.sqlite");
-  const suffix = scenario === "advance-wal" ? "retry" : "retire";
+  const suffix = hydrationContentionSuffixes[scenario];
 
   try {
     await Effect.runPromise(
@@ -572,6 +596,12 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
             )
           `;
           yield* runMigrations({ toMigrationInclusive: 68 });
+          if (scenario === "hydrate-then-purge") {
+            // The production purge spans every current persistence table. Keep
+            // the legacy row/migration-68 setup above intact, then install the
+            // remaining schema before invoking that real purge implementation.
+            yield* runMigrations();
+          }
           yield* sql`CREATE TABLE cafe_snapshot_retry_probe(value INTEGER NOT NULL)`;
 
           const [state] = yield* sql<{ readonly cutoff: number }>`
@@ -605,55 +635,190 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
             lockOwner.send({ filename });
             assert.equal(yield* Effect.promise(() => ready), "ready");
 
-            let snapshotAdvanced = false;
-            let tombstoneLookupCount = 0;
+            let contentionIntercepted = false;
+            let compactWriteAttemptCount = 0;
+            let writerLockReply: Promise<string> | undefined;
+            let terminalWriterReply: Promise<string> | undefined;
             const contendedSql = new Proxy(sql, {
               apply(target, thisArg, argumentList) {
                 const statement = Reflect.apply(target, thisArg, argumentList);
                 const [segments] = argumentList;
-                const isTombstoneLookup =
+                const isIdentityWrite =
                   Array.isArray(segments) &&
                   segments.every((segment) => typeof segment === "string") &&
-                  segments.join(" ").includes("FROM hard_deleted_threads");
-                if (!isTombstoneLookup) {
+                  segments.join(" ").includes("INSERT INTO orchestration_message_identities");
+                const isHydrationWrite =
+                  Array.isArray(segments) &&
+                  segments.every((segment) => typeof segment === "string") &&
+                  segments
+                    .join(" ")
+                    .includes("INSERT INTO orchestration_message_identity_hydration");
+                if (isIdentityWrite) {
+                  compactWriteAttemptCount += 1;
+                }
+
+                const shouldIntercept =
+                  scenario === "hydrate-then-purge" ? isHydrationWrite : isIdentityWrite;
+                if (!shouldIntercept || contentionIntercepted) {
                   return statement;
                 }
 
-                tombstoneLookupCount += 1;
-                if (snapshotAdvanced) {
-                  return statement;
-                }
-                snapshotAdvanced = true;
-                return (statement as Effect.Effect<unknown, unknown, unknown>).pipe(
-                  Effect.tap(() =>
-                    Effect.promise(async () => {
-                      const committed = readSqliteWriterFixtureReply(
-                        lockOwner,
-                        scenario === "advance-wal" ? "WAL advance" : "thread retirement",
-                      );
-                      lockOwner.send(
-                        scenario === "advance-wal"
-                          ? "write"
-                          : {
-                              type: "retire-thread",
-                              threadId,
-                              deletedAt: "2026-09-01T00:01:00.000Z",
-                            },
-                      );
-                      assert.equal(
-                        await committed,
-                        scenario === "advance-wal" ? "committed" : "retired",
-                      );
-                    }),
-                  ),
-                );
+                contentionIntercepted = true;
+                return Effect.promise(async () => {
+                  if (scenario === "hydrate-then-purge") {
+                    const attempting = readSqliteWriterFixtureReply(
+                      lockOwner,
+                      "post-hydration retirement attempt",
+                    );
+                    lockOwner.send({
+                      type: "hold-write",
+                      operation: "retire-thread",
+                      holdMs: 250,
+                      announceAttempt: true,
+                      threadId,
+                      deletedAt: "2026-09-01T00:01:00.000Z",
+                    });
+                    assert.equal(await attempting, "attempting");
+                    // Register before the parent watermark write and commit
+                    // release SQLite's writer. The child cannot publish this
+                    // reply until BEGIN IMMEDIATE has acquired that writer.
+                    writerLockReply = readSqliteWriterFixtureReply(
+                      lockOwner,
+                      "post-hydration retirement lock",
+                    );
+                    return;
+                  }
+
+                  const locked = readSqliteWriterFixtureReply(lockOwner, "writer lock");
+                  lockOwner.send({
+                    type: "hold-write",
+                    operation: scenario === "retire-thread" ? "retire-thread" : "write",
+                    holdMs: scenario === "writer-exhausted" ? 500 : 50,
+                    ...(scenario === "retire-thread"
+                      ? {
+                          threadId,
+                          deletedAt: "2026-09-01T00:01:00.000Z",
+                        }
+                      : {}),
+                  });
+                  assert.equal(await locked, "locked");
+                  terminalWriterReply = readSqliteWriterFixtureReply(
+                    lockOwner,
+                    scenario === "retire-thread" ? "thread retirement" : "WAL advance",
+                  );
+                }).pipe(Effect.andThen(statement as Effect.Effect<unknown, unknown, unknown>));
               },
             }) as unknown as SqlClient.SqlClient;
 
-            yield* hydrateLegacyMessageIdentitiesForThread(contendedSql, threadId);
-            // The first transaction must fail after its deferred snapshot is
-            // invalidated, and the fresh retry must re-read the tombstone.
-            assert.isAtLeast(tombstoneLookupCount, 2);
+            if (scenario === "writer-exhausted") {
+              const failure = yield* Effect.flip(
+                hydrateLegacyMessageIdentitiesForThread(contendedSql, threadId),
+              );
+              assert.equal(failure._tag, "SqlError");
+              if (failure._tag === "SqlError") {
+                assert.equal(failure.reason._tag, "LockTimeoutError");
+              }
+            } else {
+              yield* hydrateLegacyMessageIdentitiesForThread(contendedSql, threadId);
+            }
+            assert.isTrue(contentionIntercepted);
+            // A transaction that reads before this first compact write fails
+            // immediately with native SQLITE_BUSY while the child owns the WAL
+            // writer. The production write-first transaction waits and finishes
+            // in one attempt when the lock fits inside busy_timeout. The
+            // writer-timeout scenario deliberately exceeds that tiny test
+            // timeout and proves that only the idempotent page is retried.
+            assert.equal(
+              compactWriteAttemptCount,
+              scenario === "writer-exhausted" ? 3 : scenario === "writer-timeout" ? 2 : 1,
+            );
+
+            if (scenario === "hydrate-then-purge") {
+              assert.equal(
+                yield* Effect.promise(() => {
+                  assert.ok(writerLockReply);
+                  return writerLockReply!;
+                }),
+                "locked",
+              );
+              terminalWriterReply = readSqliteWriterFixtureReply(
+                lockOwner,
+                "post-hydration thread retirement",
+              );
+
+              // While the child owns the later, still-uncommitted tombstone
+              // transaction, WAL readers must already observe both rows from
+              // the parent's committed hydration transaction. This proves the
+              // intended hydration-first ordering without relying on sleeps.
+              const committedIdentities = yield* sql<IdentityRow>`
+                SELECT
+                  message_id AS "messageId",
+                  first_sequence AS "firstSequence",
+                  latest_sequence AS "latestSequence"
+                FROM orchestration_message_identities
+                WHERE thread_id = ${threadId}
+              `;
+              const [committedHydration] = yield* sql<{ readonly throughSequence: number }>`
+                SELECT through_sequence AS "throughSequence"
+                FROM orchestration_message_identity_hydration
+                WHERE thread_id = ${threadId}
+              `;
+              const [committedTombstone] = yield* sql<{ readonly count: number }>`
+                SELECT COUNT(*) AS count
+                FROM hard_deleted_threads
+                WHERE thread_id = ${threadId}
+              `;
+              assert.deepStrictEqual(committedIdentities, [
+                {
+                  messageId,
+                  firstSequence: state!.cutoff,
+                  latestSequence: state!.cutoff,
+                },
+              ]);
+              assert.equal(committedHydration?.throughSequence, state!.cutoff);
+              assert.equal(committedTombstone?.count, 0);
+            }
+
+            if (scenario === "writer-exhausted") {
+              // All three write-first attempts rolled back before the child
+              // releases its writer. Neither the identity nor its watermark
+              // may leak from a failed transaction.
+              assert.deepStrictEqual(
+                yield* sql`
+                  SELECT *
+                  FROM orchestration_message_identities
+                  WHERE thread_id = ${threadId}
+                `,
+                [],
+              );
+              assert.deepStrictEqual(
+                yield* sql`
+                  SELECT *
+                  FROM orchestration_message_identity_hydration
+                  WHERE thread_id = ${threadId}
+                `,
+                [],
+              );
+            }
+
+            assert.equal(
+              yield* Effect.promise(() => {
+                assert.ok(terminalWriterReply);
+                return terminalWriterReply!;
+              }),
+              scenario === "retire-thread" || scenario === "hydrate-then-purge"
+                ? "retired"
+                : "committed",
+            );
+
+            if (scenario === "hydrate-then-purge") {
+              // Exercise the real production purge after the later tombstone
+              // commits. It must remove both compact rows while preserving the
+              // permanent hard-delete fence.
+              yield* purgeHardDeletedThreadPersistence({ threadId }).pipe(
+                Effect.provideService(SqlClient.SqlClient, sql),
+              );
+            }
 
             const identities = yield* sql<IdentityRow>`
               SELECT
@@ -674,7 +839,11 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
               WHERE thread_id = ${threadId}
             `;
 
-            if (scenario === "advance-wal") {
+            if (
+              scenario !== "retire-thread" &&
+              scenario !== "hydrate-then-purge" &&
+              scenario !== "writer-exhausted"
+            ) {
               assert.deepStrictEqual(identities, [
                 {
                   messageId,
@@ -684,18 +853,31 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
               ]);
               assert.equal(hydration?.throughSequence, state!.cutoff);
               assert.equal(tombstone?.count, 0);
-            } else {
-              // A permanent tombstone committed between attempts must win. A
-              // stale backend may neither recreate the compact identity row nor
-              // leave a standalone hydration watermark after hard deletion.
+            } else if (scenario === "retire-thread" || scenario === "hydrate-then-purge") {
+              // Whether retirement acquired the writer first or waited behind
+              // hydration, the permanent tombstone and purge must win. A stale
+              // backend may neither recreate the identity row nor leave a
+              // standalone hydration watermark after hard deletion.
               assert.deepStrictEqual(identities, []);
               assert.isUndefined(hydration);
               assert.equal(tombstone?.count, 1);
+            } else {
+              assert.deepStrictEqual(identities, []);
+              assert.isUndefined(hydration);
+              assert.equal(tombstone?.count, 0);
             }
           } finally {
             yield* Effect.promise(() => stopSqliteWriterFixture(lockOwner, childTermination));
           }
-        }).pipe(Effect.provide(NodeSqliteClient.layer({ filename, busyTimeoutMs: 25 }))),
+        }).pipe(
+          Effect.provide(
+            NodeSqliteClient.layer({
+              filename,
+              busyTimeoutMs:
+                scenario === "writer-timeout" || scenario === "writer-exhausted" ? 25 : 1_000,
+            }),
+          ),
+        ),
       ),
     );
   } finally {
@@ -709,13 +891,31 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
 const HYDRATION_CONTENTION_TEST_TIMEOUT_MS = process.platform === "win32" ? 40_000 : 25_000;
 
 vitestIt(
-  "retries one legacy hydration page after transient WAL writer contention",
+  "admits a legacy hydration page without a deferred read-to-write upgrade",
   () => runHydrationContentionScenario("advance-wal"),
   HYDRATION_CONTENTION_TEST_TIMEOUT_MS,
 );
 
 vitestIt(
-  "honors a permanent tombstone committed between a failed snapshot and its retry",
+  "honors a permanent tombstone committed before the first compact write",
   () => runHydrationContentionScenario("retire-thread"),
+  HYDRATION_CONTENTION_TEST_TIMEOUT_MS,
+);
+
+vitestIt(
+  "retries only the idempotent hydration page after a bounded writer timeout",
+  () => runHydrationContentionScenario("writer-timeout"),
+  HYDRATION_CONTENTION_TEST_TIMEOUT_MS,
+);
+
+vitestIt(
+  "purges identity and watermark rows when retirement commits after hydration",
+  () => runHydrationContentionScenario("hydrate-then-purge"),
+  HYDRATION_CONTENTION_TEST_TIMEOUT_MS,
+);
+
+vitestIt(
+  "fails with a typed lock timeout and no partial rows after exhausting hydration retries",
+  () => runHydrationContentionScenario("writer-exhausted"),
   HYDRATION_CONTENTION_TEST_TIMEOUT_MS,
 );

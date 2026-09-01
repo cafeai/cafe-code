@@ -29,6 +29,7 @@ import {
   RuntimeRequestId,
   ProviderApprovalDecision,
   ThreadId,
+  type TurnId,
   ProviderSendTurnInput,
   type ProviderSessionForkResult,
   RuntimeTaskId,
@@ -120,6 +121,9 @@ const CODEX_SUBAGENT_PROGRESS_MAX_CHARS = 180;
 const CODEX_SUBAGENT_PRESENTATION_LIMIT = 4_096;
 const CODEX_SUBAGENT_RECEIVERS_PER_ITEM_LIMIT = 256;
 const CODEX_SUBAGENT_REASONING_PART_LOOKBACK = 64;
+const CODEX_AUTH_RECOVERY_TASK_ID_HASH_PREFIX = "codex-auth-recovery-sha256:";
+const CODEX_AUTH_RECOVERY_TASK_ID_HASH_DOMAIN = "cafecode/codex-auth-recovery-task/v1";
+const CODEX_ACTIVE_AUTH_RECOVERY_TASK_LIMIT = 4_096;
 
 class CodexTransportPolicyFileError extends Data.TaggedError("CodexTransportPolicyFileError")<{
   readonly cause: unknown;
@@ -154,6 +158,7 @@ interface CodexAdapterSessionContext {
   readonly runtime: CodexSessionRuntimeShape;
   readonly eventFiber: Fiber.Fiber<void, never>;
   readonly transportPolicyApplied: boolean;
+  readonly activeAuthRecoveryTasksById: Map<string, TurnId | null>;
   pendingTransportPolicyRetirement?: {
     readonly fallbackEventId: string;
     readonly observedAt: string;
@@ -1189,6 +1194,22 @@ function hashTextSha256(text: string): string {
   return Crypto.createHash("sha256").update(text, "utf8").digest("hex");
 }
 
+function makeCodexAuthRecoveryTaskId(
+  providerThreadId: string,
+  providerTurnId: string,
+): RuntimeTaskId {
+  // Provider thread/turn ids are opaque cursors and can encode account- or
+  // implementation-specific identity. JSON's length-delimited string encoding
+  // makes this tuple unambiguous even when either native id contains a control
+  // or delimiter character. Domain separation prevents the digest from being
+  // reusable as the hash of the same tuple in another Cafe subsystem.
+  const nativeIdentity = JSON.stringify([providerThreadId, providerTurnId]);
+  const digest = hashTextSha256(
+    `${CODEX_AUTH_RECOVERY_TASK_ID_HASH_DOMAIN}\u0000${nativeIdentity}`,
+  );
+  return RuntimeTaskId.make(`${CODEX_AUTH_RECOVERY_TASK_ID_HASH_PREFIX}${digest}`);
+}
+
 function summarizeCodexTurnDiffPayload(payload: {
   readonly threadId?: unknown;
   readonly turnId?: unknown;
@@ -1317,7 +1338,225 @@ function summarizeCodexRealtimePayload(payload: unknown): Record<string, unknown
   };
 }
 
+function summarizeCodexAuthRecoveryPayload(
+  phase: "started" | "completed",
+): Record<string, unknown> {
+  // Upstream's notification also contains a provider identifier and a
+  // provider-authored message. Neither value is required to reconcile Cafe's
+  // progress row, and both can reveal account/provider configuration. Retain
+  // only the finite lifecycle phase in native logs and canonical raw payloads.
+  return {
+    redacted: true,
+    reason: "model-provider-auth-recovery-content",
+    phase,
+  };
+}
+
+function codexAuthRecoveryRuntimeEventBase(
+  event: ProviderEvent,
+  canonicalThreadId: ThreadId,
+  diagnostic: Record<string, unknown>,
+): Omit<ProviderRuntimeEvent, "type" | "payload"> {
+  const { providerRefs: _providerRefs, ...base } = runtimeEventBase(event, canonicalThreadId, {
+    rawPayload: diagnostic,
+  });
+  // Provider refs are optional diagnostics. The owning canonical turn remains
+  // on the event for correct task projection, but duplicating the opaque native
+  // cursor under providerRefs would defeat auth recovery's redaction boundary.
+  return base;
+}
+
+function readCodexAuthRecoveryTerminal(input: ProviderEvent):
+  | {
+      readonly taskId: RuntimeTaskId;
+      readonly status: "failed" | "stopped";
+      readonly reason: "turn-error" | "turn-terminal";
+    }
+  | undefined {
+  if (input.method === "turn/completed" || input.method === "codex.subagent/turnCompleted") {
+    const payload = readPayload(EffectCodexSchema.V2TurnCompletedNotification, input.payload);
+    if (!payload) {
+      return undefined;
+    }
+    return {
+      taskId: makeCodexAuthRecoveryTaskId(payload.threadId, payload.turn.id),
+      status: payload.turn.status === "failed" ? "failed" : "stopped",
+      reason: "turn-terminal",
+    };
+  }
+
+  if (input.method === "error" || input.method === "codex.subagent/error") {
+    const payload = readPayload(EffectCodexSchema.V2ErrorNotification, input.payload);
+    if (!payload || payload.willRetry) {
+      return undefined;
+    }
+    return {
+      taskId: makeCodexAuthRecoveryTaskId(payload.threadId, payload.turnId),
+      status: "failed",
+      reason: "turn-error",
+    };
+  }
+
+  return undefined;
+}
+
+type CodexAuthRecoveryTerminalReason =
+  | "turn-error"
+  | "turn-terminal"
+  | "session-exit"
+  | "tracking-capacity";
+
+function makeCodexAuthRecoveryTerminalEvent(input: {
+  readonly event: ProviderEvent;
+  readonly canonicalThreadId: ThreadId;
+  readonly taskId: RuntimeTaskId;
+  readonly ownerTurnId: TurnId | null;
+  readonly status: "failed" | "stopped";
+  readonly reason: CodexAuthRecoveryTerminalReason;
+}): ProviderRuntimeEvent {
+  const diagnostic = {
+    redacted: true,
+    reason: "model-provider-auth-recovery-terminalized",
+    terminal: input.reason,
+    status: input.status,
+  };
+  // This is a second canonical event derived from a provider or adapter
+  // terminal edge. Give it an independent, bounded id so durable event-id
+  // deduplication cannot discard either the owning terminal or task terminal.
+  const eventId = EventId.make(
+    `codex-auth-recovery-terminal:${hashTextSha256(
+      JSON.stringify([String(input.event.id), String(input.taskId), input.reason]),
+    ).slice(0, 32)}`,
+  );
+  const summary = (() => {
+    switch (input.reason) {
+      case "turn-error":
+        return "Codex credential recovery stopped when its owning turn failed.";
+      case "turn-terminal":
+        return "Codex credential recovery stopped with its owning turn.";
+      case "session-exit":
+        return "Codex credential recovery stopped when the provider session ended.";
+      case "tracking-capacity":
+        return "Codex credential recovery was stopped to keep provider task tracking bounded.";
+    }
+  })();
+  const { turnId: _currentEventTurnId, ...base } = codexAuthRecoveryRuntimeEventBase(
+    input.event,
+    input.canonicalThreadId,
+    diagnostic,
+  );
+  return {
+    ...base,
+    // Session-exit and capacity edges can be associated with no turn or with a
+    // different child turn than the task being retired. Preserve the original
+    // canonical owner so Work Log projection can pair start and terminal rows.
+    ...(input.ownerTurnId ? { turnId: input.ownerTurnId } : {}),
+    eventId,
+    type: "task.completed",
+    payload: {
+      taskId: input.taskId,
+      status: input.status,
+      summary,
+    },
+  };
+}
+
+function reconcileCodexAuthRecoveryLifecycle(
+  event: ProviderEvent,
+  canonicalThreadId: ThreadId,
+  activeTasksById: Map<string, TurnId | null>,
+): ReadonlyArray<ProviderRuntimeEvent> {
+  if (
+    event.method === "modelProvider/authRecoveryStarted" ||
+    event.method === "modelProvider/authRecoveryCompleted"
+  ) {
+    const payload = readPayload(EffectCodexSchema.V2AuthRecoveryNotification, event.payload);
+    if (!payload) {
+      return [];
+    }
+    const taskId = makeCodexAuthRecoveryTaskId(payload.threadId, payload.turnId);
+    if (event.method === "modelProvider/authRecoveryStarted") {
+      const taskKey = String(taskId);
+      // Replayed starts do not move or reassign an existing task. Its first
+      // canonical owner is the one that rendered task.started and therefore
+      // must also own any later synthesized terminal.
+      if (!activeTasksById.has(taskKey)) {
+        activeTasksById.set(taskKey, event.turnId ?? null);
+      }
+      if (activeTasksById.size > CODEX_ACTIVE_AUTH_RECOVERY_TASK_LIMIT) {
+        const oldest = activeTasksById.entries().next().value;
+        if (oldest !== undefined) {
+          const [oldestTaskId, oldestOwnerTurnId] = oldest;
+          activeTasksById.delete(oldestTaskId);
+          return [
+            makeCodexAuthRecoveryTerminalEvent({
+              event,
+              canonicalThreadId,
+              taskId: RuntimeTaskId.make(oldestTaskId),
+              ownerTurnId: oldestOwnerTurnId,
+              status: "stopped",
+              reason: "tracking-capacity",
+            }),
+          ];
+        }
+      }
+    } else {
+      activeTasksById.delete(String(taskId));
+    }
+    return [];
+  }
+
+  if (event.method === "session/exited" || event.method === "session/closed") {
+    const terminals = Array.from(activeTasksById, ([taskId, ownerTurnId]) =>
+      makeCodexAuthRecoveryTerminalEvent({
+        event,
+        canonicalThreadId,
+        taskId: RuntimeTaskId.make(taskId),
+        ownerTurnId,
+        status: "stopped",
+        reason: "session-exit",
+      }),
+    );
+    activeTasksById.clear();
+    return terminals;
+  }
+
+  const terminal = readCodexAuthRecoveryTerminal(event);
+  if (!terminal) {
+    return [];
+  }
+  const taskKey = String(terminal.taskId);
+  if (!activeTasksById.has(taskKey)) {
+    return [];
+  }
+  const ownerTurnId = activeTasksById.get(taskKey) ?? null;
+  activeTasksById.delete(taskKey);
+
+  return [
+    makeCodexAuthRecoveryTerminalEvent({
+      event,
+      canonicalThreadId,
+      taskId: terminal.taskId,
+      ownerTurnId,
+      status: terminal.status,
+      reason: terminal.reason,
+    }),
+  ];
+}
+
 function sanitizeNativeProviderEventForLog(event: ProviderEvent): ProviderEvent {
+  if (
+    event.method === "modelProvider/authRecoveryStarted" ||
+    event.method === "modelProvider/authRecoveryCompleted"
+  ) {
+    return replaceSensitiveNativeEventPayload(
+      event,
+      summarizeCodexAuthRecoveryPayload(
+        event.method === "modelProvider/authRecoveryStarted" ? "started" : "completed",
+      ),
+    );
+  }
+
   if (event.method.startsWith("codex.subagent/")) {
     const payload = readRecordValue(event.payload);
     const thread = readRecordValue(payload?.thread);
@@ -3294,6 +3533,47 @@ function mapToRuntimeEvents(
     ];
   }
 
+  if (
+    event.method === "modelProvider/authRecoveryStarted" ||
+    event.method === "modelProvider/authRecoveryCompleted"
+  ) {
+    const payload = readPayload(EffectCodexSchema.V2AuthRecoveryNotification, event.payload);
+    if (!payload) {
+      return [];
+    }
+    const phase = event.method === "modelProvider/authRecoveryStarted" ? "started" : "completed";
+    const diagnostic = summarizeCodexAuthRecoveryPayload(phase);
+    const taskId = makeCodexAuthRecoveryTaskId(payload.threadId, payload.turnId);
+    if (phase === "started") {
+      return [
+        {
+          type: "task.started",
+          ...codexAuthRecoveryRuntimeEventBase(event, canonicalThreadId, diagnostic),
+          payload: {
+            // Upstream requires the native thread/turn tuple on both
+            // notifications. Its domain-separated digest pairs the lifecycle
+            // without retaining either cursor, the provider name, or the
+            // provider-authored message in Cafe's task key.
+            taskId,
+            taskType: "provider-auth-recovery",
+            description: "Codex is refreshing model-provider credentials.",
+          },
+        },
+      ];
+    }
+    return [
+      {
+        type: "task.completed",
+        ...codexAuthRecoveryRuntimeEventBase(event, canonicalThreadId, diagnostic),
+        payload: {
+          taskId,
+          status: "completed",
+          summary: "Codex refreshed model-provider credentials.",
+        },
+      },
+    ];
+  }
+
   if (event.method === "mcpServer/oauthLogin/completed") {
     const payload = readPayload(
       EffectCodexSchema.V2McpServerOauthLoginCompletedNotification,
@@ -3985,6 +4265,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ),
         );
         const subagentPresentationsByThreadId = new Map<string, RuntimeSubagentPresentation>();
+        // Auth recovery can fail by terminalizing its owning turn without an
+        // upstream authRecoveryCompleted notification. Retain only opaque task
+        // digests in session memory so that terminal envelopes can close those
+        // rows without persisting native thread/turn identity.
+        const activeAuthRecoveryTasksById = new Map<string, TurnId | null>();
 
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
           Effect.gen(function* () {
@@ -3999,12 +4284,22 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               ),
             );
 
-            const runtimeEvents = yield* Effect.sync(() =>
-              enrichCodexSubagentPresentations(
-                mapToRuntimeEvents(event, event.threadId, codexConfig.autoCompactTokenLimit),
+            const runtimeEvents = yield* Effect.sync(() => {
+              const mapped = mapToRuntimeEvents(
+                event,
+                event.threadId,
+                codexConfig.autoCompactTokenLimit,
+              );
+              const authRecoveryTerminals = reconcileCodexAuthRecoveryLifecycle(
+                event,
+                event.threadId,
+                activeAuthRecoveryTasksById,
+              );
+              return enrichCodexSubagentPresentations(
+                [...authRecoveryTerminals, ...mapped],
                 subagentPresentationsByThreadId,
-              ),
-            ).pipe(
+              );
+            }).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("codex.runtime.bridge.map-failed", {
                   ...bridgeEventLogContext(event, {
@@ -4134,6 +4429,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           runtime,
           eventFiber,
           transportPolicyApplied: currentTransportPolicy?.responsesWebsockets === "disabled",
+          activeAuthRecoveryTasksById,
           stopped: false,
         });
         sessionScopeTransferred = true;
@@ -4559,17 +4855,55 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     yield* nativeEventLogger.write(sanitizeNativeProviderEventForLog(event), event.threadId);
   });
 
+  const terminalizeAuthRecoveryForAdapterStop = Effect.fn(
+    "CodexAdapter.terminalizeAuthRecoveryForAdapterStop",
+  )(function* (session: CodexAdapterSessionContext) {
+    if (session.activeAuthRecoveryTasksById.size === 0) {
+      return;
+    }
+    const createdAt = DateTime.formatIso(yield* DateTime.now);
+    const stopIdentity = hashTextSha256(
+      JSON.stringify([
+        String(session.threadId),
+        Array.from(session.activeAuthRecoveryTasksById.keys()).toSorted(),
+      ]),
+    ).slice(0, 32);
+    const terminalEvents = reconcileCodexAuthRecoveryLifecycle(
+      {
+        id: EventId.make(`codex-auth-recovery-adapter-stop:${stopIdentity}`),
+        kind: "session",
+        provider: PROVIDER,
+        threadId: session.threadId,
+        createdAt,
+        method: "session/closed",
+        message: "Provider session stopped",
+      },
+      session.threadId,
+      session.activeAuthRecoveryTasksById,
+    );
+    yield* Queue.offerAll(runtimeEventQueue, terminalEvents).pipe(Effect.asVoid);
+  });
+
   const stopSessionInternal = Effect.fn("stopSessionInternal")(function* (
     session: CodexAdapterSessionContext,
   ) {
     if (session.stopped) {
       return;
     }
+    // Stop native production first, then wait for the event bridge to retire
+    // before reading its mutable recovery-task set. This ordering closes the
+    // narrow race where a notification already queued by app-server could add
+    // a task immediately after an earlier cleanup snapshot. The explicit
+    // terminal projection below remains necessary because interrupting the
+    // bridge can intentionally prevent a queued session/closed edge from being
+    // projected. Its queue is adapter-owned, so closing the session scope does
+    // not discard the resulting canonical task terminals.
     session.stopped = true;
     sessions.delete(session.threadId);
     yield* session.runtime.close.pipe(Effect.ignore);
-    yield* Effect.ignore(Scope.close(session.scope, Exit.void));
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
+    yield* terminalizeAuthRecoveryForAdapterStop(session);
+    yield* Effect.ignore(Scope.close(session.scope, Exit.void));
   });
 
   const stopSession: CodexAdapterShape["stopSession"] = (threadId) =>

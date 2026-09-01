@@ -137,24 +137,26 @@ function withDaemonCursor(event: LegacyProviderRuntimeEvent, cursor: number): Pr
   return attachProviderDaemonRuntimeEventCursor(event as ProviderRuntimeEvent, cursor);
 }
 
+const unsupportedProviderCall = () =>
+  Effect.die(new Error("Unsupported provider call in test")) as never;
+
 function createProviderServiceHarness() {
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
   const runtimeSessions: ProviderSession[] = [];
 
-  const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
   const service: ProviderServiceShape = {
-    startSession: () => unsupported(),
-    forkSession: () => unsupported(),
-    discardSessionFork: () => unsupported(),
-    sendTurn: () => unsupported(),
-    steerTurn: () => unsupported(),
-    interruptTurn: () => unsupported(),
-    respondToRequest: () => unsupported(),
-    respondToUserInput: () => unsupported(),
-    snoozeUserInput: () => unsupported(),
-    stopSession: () => unsupported(),
-    quiesceThreadForHardDelete: () => unsupported(),
-    restartProviderRuntime: () => unsupported(),
+    startSession: () => unsupportedProviderCall(),
+    forkSession: () => unsupportedProviderCall(),
+    discardSessionFork: () => unsupportedProviderCall(),
+    sendTurn: () => unsupportedProviderCall(),
+    steerTurn: () => unsupportedProviderCall(),
+    interruptTurn: () => unsupportedProviderCall(),
+    respondToRequest: () => unsupportedProviderCall(),
+    respondToUserInput: () => unsupportedProviderCall(),
+    snoozeUserInput: () => unsupportedProviderCall(),
+    stopSession: () => unsupportedProviderCall(),
+    quiesceThreadForHardDelete: () => unsupportedProviderCall(),
+    restartProviderRuntime: () => unsupportedProviderCall(),
     listSessions: () => Effect.succeed([...runtimeSessions]),
     getCapabilities: () =>
       Effect.succeed({ sessionModelSwitch: "in-session", liveSteer: "unsupported" }),
@@ -171,8 +173,8 @@ function createProviderServiceHarness() {
         },
       });
     },
-    rollbackConversation: () => unsupported(),
-    readSubagentDetail: () => unsupported(),
+    rollbackConversation: () => unsupportedProviderCall(),
+    readSubagentDetail: () => unsupportedProviderCall(),
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
     },
@@ -6150,6 +6152,7 @@ describe("ProviderRuntimeIngestion", () => {
         taskId: "provider-child-audit",
         taskType: "subagent",
         description: subagent.objective,
+        visibility: "visible",
         subagent,
       },
     });
@@ -6163,6 +6166,7 @@ describe("ProviderRuntimeIngestion", () => {
       payload: {
         taskId: "provider-child-audit",
         description: "Mapped the ingestion boundary",
+        visibility: "ambient",
         subagent,
       },
     });
@@ -6177,6 +6181,7 @@ describe("ProviderRuntimeIngestion", () => {
         taskId: "provider-child-audit",
         status: "completed",
         summary: "Audit complete",
+        visibility: "visible",
         subagent: { ...subagent, status: "completed" },
       },
     });
@@ -6191,18 +6196,272 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(activities.get("evt-subagent-started")).toMatchObject({
       summary: "Subagent started",
-      payload: { detail: subagent.objective, subagent },
+      payload: { detail: subagent.objective, visibility: "visible", subagent },
     });
     expect(activities.get("evt-subagent-progress")).toMatchObject({
       summary: "Subagent update",
-      payload: { detail: "Mapped the ingestion boundary", subagent },
+      payload: { detail: "Mapped the ingestion boundary", visibility: "ambient", subagent },
     });
     expect(activities.get("evt-subagent-completed")).toMatchObject({
       summary: "Subagent completed",
       payload: {
         detail: "Audit complete",
+        visibility: "visible",
         subagent: { ...subagent, status: "completed" },
       },
+    });
+  });
+
+  it("does not reopen a settled root turn for ambient task visibility", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-ambient-settled");
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-ambient-turn-started"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId,
+      turnId,
+      payload: {},
+    });
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-ambient-turn-completed"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId,
+      turnId,
+      payload: { state: "completed" },
+    });
+    await waitForThread(harness.readModel, (thread) => thread.session?.status === "ready");
+
+    harness.emit({
+      type: "task.progress",
+      eventId: asEventId("evt-ambient-late-progress"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      threadId,
+      turnId,
+      payload: {
+        taskId: "ambient-watcher",
+        description: "Provider watcher is still running",
+        visibility: "ambient",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "evt-ambient-late-progress"),
+    );
+    expect(thread.session?.status).toBe("ready");
+    expect(thread.session?.activeTurnId).toBeNull();
+    expect(
+      thread.activities.find((activity) => activity.id === "evt-ambient-late-progress")?.payload,
+    ).toMatchObject({ visibility: "ambient" });
+  });
+
+  it("keeps visible Codex auth-recovery diagnostics separate from a settled turn", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-auth-recovery-settled");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-auth-recovery-settled-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId,
+      turnId,
+      payload: {},
+    });
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-auth-recovery-settled-turn-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId,
+      turnId,
+      payload: { state: "completed" },
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "ready" &&
+        thread.session.activeTurnId === null &&
+        thread.latestTurn?.state === "completed",
+    );
+
+    const taskId = RuntimeTaskId.make("codex-auth-recovery-test-settled");
+    harness.emit({
+      type: "task.started",
+      eventId: asEventId("evt-auth-recovery-settled-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      threadId,
+      turnId,
+      payload: {
+        taskId,
+        taskType: "provider-auth-recovery",
+        description: "Codex is refreshing model-provider credentials.",
+      },
+    });
+    harness.emit({
+      type: "task.completed",
+      eventId: asEventId("evt-auth-recovery-settled-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId,
+      turnId,
+      payload: {
+        taskId,
+        status: "completed",
+        summary: "Codex refreshed model-provider credentials.",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "evt-auth-recovery-settled-completed"),
+    );
+    expect(thread.session?.status).toBe("ready");
+    expect(thread.session?.activeTurnId).toBeNull();
+    expect(thread.latestTurn?.state).toBe("completed");
+    expect(
+      thread.activities.find((activity) => activity.id === "evt-auth-recovery-settled-started"),
+    ).toMatchObject({
+      kind: "task.started",
+      summary: "provider-auth-recovery task started",
+      payload: { taskId, taskType: "provider-auth-recovery" },
+    });
+    expect(
+      thread.activities.find((activity) => activity.id === "evt-auth-recovery-settled-completed"),
+    ).toMatchObject({
+      kind: "task.completed",
+      summary: "Task completed",
+      payload: { taskId, status: "completed" },
+    });
+  });
+
+  it("does not use visible Codex auth recovery to repair a falsely orphaned turn", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-auth-recovery-false-orphan");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-auth-recovery-orphan-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId,
+      turnId,
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "running" && thread.session.activeTurnId === turnId,
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("server:test:auth-recovery-false-orphan-terminal"),
+        threadId,
+        session: {
+          threadId,
+          status: "interrupted",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: "Incorrect orphan repair",
+          updatedAt: "2026-01-01T00:00:01.000Z",
+        },
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "interrupted" &&
+        thread.session.activeTurnId === null &&
+        thread.latestTurn?.state === "interrupted",
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("server:test:auth-recovery-false-orphan-marker"),
+        threadId,
+        activity: {
+          id: EventId.make("activity-auth-recovery-false-orphan-marker"),
+          tone: "error",
+          kind: "runtime.warning",
+          summary: "Provider turn interrupted by restart",
+          payload: {
+            message: "Provider turn interrupted by restart",
+            detail: "Incorrect orphan repair",
+            recovery: "orphaned-active-turn",
+          },
+          turnId,
+          createdAt: "2026-01-01T00:00:01.000Z",
+        },
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId,
+      activeTurnId: turnId,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:02.000Z",
+    });
+
+    const taskId = RuntimeTaskId.make("codex-auth-recovery-test-orphan");
+    harness.emit({
+      type: "task.started",
+      eventId: asEventId("evt-auth-recovery-orphan-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      threadId,
+      turnId,
+      payload: {
+        taskId,
+        taskType: "provider-auth-recovery",
+        description: "Codex is refreshing model-provider credentials.",
+      },
+    });
+    harness.emit({
+      type: "task.completed",
+      eventId: asEventId("evt-auth-recovery-orphan-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId,
+      turnId,
+      payload: {
+        taskId,
+        status: "completed",
+        summary: "Codex refreshed model-provider credentials.",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "evt-auth-recovery-orphan-completed"),
+    );
+    expect(thread.session?.status).toBe("interrupted");
+    expect(thread.session?.activeTurnId).toBeNull();
+    expect(thread.session?.lastError).toBe("Incorrect orphan repair");
+    expect(thread.latestTurn?.state).toBe("interrupted");
+    expect(
+      thread.activities.find((activity) => activity.id === "evt-auth-recovery-orphan-started"),
+    ).toMatchObject({
+      kind: "task.started",
+      payload: { taskId, taskType: "provider-auth-recovery" },
+    });
+    expect(
+      thread.activities.find((activity) => activity.id === "evt-auth-recovery-orphan-completed"),
+    ).toMatchObject({
+      kind: "task.completed",
+      payload: { taskId, status: "completed" },
     });
   });
 

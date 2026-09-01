@@ -1282,6 +1282,72 @@ describe("ClaudeAdapterLive", () => {
     },
   );
 
+  it.effect("acknowledges only a known first-reply UUID before the result arrives", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "first prompt",
+        attachments: [],
+      });
+      yield* adapter.steerTurn({
+        threadId: session.threadId,
+        expectedTurnId: turn.turnId,
+        input: "queued steer",
+        attachments: [],
+      });
+      const messages = yield* Effect.promise(() =>
+        readPromptMessages(harness.getLastCreateQueryInput(), 2),
+      );
+      const firstUuid = messages[0]?.uuid;
+      const steerUuid = messages[1]?.uuid;
+      assert.isString(firstUuid);
+      assert.isString(steerUuid);
+      if (!firstUuid || !steerUuid) throw new Error("Expected UUID-stamped prompts.");
+
+      // Unknown provider input must not create lifecycle state. The following
+      // known UUID then marks the steer as started, allowing an uncorrelated
+      // result to retire exactly that prompt before terminal result metadata.
+      for (const [uuid, userMessageUuid] of [
+        ["unknown-first-reply", "provider-owned-unknown-uuid"],
+        ["known-first-reply", steerUuid],
+      ] as const) {
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "claude-session-first-reply-ack",
+          uuid,
+          parent_tool_use_id: null,
+          user_message_uuid: userMessageUuid,
+          event: { type: "message_start", message: { id: `message-${uuid}` } },
+        } as unknown as SDKMessage);
+      }
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        queued_turn_count: 1,
+        session_id: "claude-session-first-reply-ack",
+        uuid: "uncorrelated-result-after-first-reply",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      harness.query.interruptResponse = { still_queued: [] };
+      yield* adapter.interruptTurn(session.threadId, turn.turnId);
+      assert.deepEqual(harness.query.cancelAsyncMessageCalls, [firstUuid]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("rejects Claude steer input for a stale active turn id", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -2354,6 +2420,261 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("bounds provider-authored task and hook text in canonical and native records", () => {
+    const nativeEvents: Array<{
+      event?: {
+        method?: string;
+        payload?: unknown;
+      };
+    }> = [];
+    const harness = makeHarness({
+      nativeEventLogger: {
+        filePath: "memory://claude-bounded-native-events",
+        write: (event) => {
+          nativeEvents.push(event as (typeof nativeEvents)[number]);
+          return Effect.void;
+        },
+        close: () => Effect.void,
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const boundedEventsFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "task.progress" || event.type === "hook.completed",
+      ).pipe(Stream.take(2), Stream.runCollect, Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "exercise bounded provider text",
+        attachments: [],
+      });
+
+      const longDescription = "d".repeat(20_000);
+      const longSummary = "s".repeat(20_000);
+      const longToolName = "t".repeat(2_000);
+      const longHookOutput = "h".repeat(24_000);
+      const opaqueMultibyteTaskId = `${"🔐".repeat(600)}provider-secret-tail`;
+      const unknownSecret = "must-not-survive-native-allowlisting";
+      harness.query.emit({
+        type: "system",
+        subtype: "task_progress",
+        task_id: opaqueMultibyteTaskId,
+        description: longDescription,
+        summary: longSummary,
+        last_tool_name: longToolName,
+        usage: {
+          total_tokens: Number.MAX_VALUE,
+          tool_uses: -3,
+          duration_ms: 1,
+          secret_usage_field: unknownSecret,
+          nested: { secret: unknownSecret },
+        },
+        secret_provider_field: unknownSecret,
+        session_id: "sdk-session-bounded-provider-text",
+        uuid: "task-bounded-provider-text-progress",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "hook_response",
+        hook_id: "hook-bounded-provider-text",
+        hook_name: "PostToolUse",
+        hook_event: "PostToolUse",
+        output: longHookOutput,
+        stdout: longHookOutput,
+        stderr: longHookOutput,
+        outcome: "success",
+        secret_provider_field: unknownSecret,
+        session_id: "sdk-session-bounded-provider-text",
+        uuid: "hook-bounded-provider-text-response",
+      } as unknown as SDKMessage);
+
+      const boundedEvents = Array.from(yield* Fiber.join(boundedEventsFiber));
+      const taskEvent = boundedEvents.find((event) => event.type === "task.progress");
+      assert.equal(taskEvent?.type, "task.progress");
+      if (taskEvent?.type === "task.progress") {
+        assert.lengthOf(taskEvent.payload.description ?? "", 1_000);
+        // Canonical one-line display text also passes through Cafe's stricter
+        // 2,000-character diagnostic-line cap. Raw/native diagnostics retain
+        // the adapter's separate 4,000-character task-summary ceiling.
+        assert.lengthOf(taskEvent.payload.summary ?? "", 2_000);
+        assert.lengthOf(taskEvent.payload.lastToolName ?? "", 256);
+        assert.deepEqual(taskEvent.payload.usage, {
+          total_tokens: Number.MAX_SAFE_INTEGER,
+          tool_uses: 0,
+          duration_ms: 1,
+        });
+        const rawPayload = taskEvent.raw?.payload as Record<string, unknown> | undefined;
+        assert.lengthOf(String(rawPayload?.description ?? ""), 1_000);
+        assert.lengthOf(String(rawPayload?.summary ?? ""), 4_000);
+        assert.lengthOf(String(rawPayload?.last_tool_name ?? ""), 256);
+        assert.match(String(rawPayload?.task_id ?? ""), /^sha256:[a-f0-9]{64}$/);
+        assert.notInclude(JSON.stringify(rawPayload), "provider-secret-tail");
+        assert.notProperty(rawPayload ?? {}, "secret_provider_field");
+        assert.notInclude(JSON.stringify(rawPayload?.usage), "secret_usage_field");
+      }
+
+      const hookEvent = boundedEvents.find((event) => event.type === "hook.completed");
+      assert.equal(hookEvent?.type, "hook.completed");
+      if (hookEvent?.type === "hook.completed") {
+        assert.lengthOf(hookEvent.payload.output ?? "", 16_000);
+        assert.lengthOf(hookEvent.payload.stdout ?? "", 16_000);
+        assert.lengthOf(hookEvent.payload.stderr ?? "", 16_000);
+        const rawPayload = hookEvent.raw?.payload as Record<string, unknown> | undefined;
+        assert.lengthOf(String(rawPayload?.output ?? ""), 16_000);
+        assert.lengthOf(String(rawPayload?.stdout ?? ""), 16_000);
+        assert.lengthOf(String(rawPayload?.stderr ?? ""), 16_000);
+        assert.match(String(rawPayload?.hook_id ?? ""), /^sha256:[a-f0-9]{64}$/);
+        assert.notProperty(rawPayload ?? {}, "secret_provider_field");
+      }
+
+      for (const method of [
+        "claude/system/task_progress",
+        "claude/system/hook_response",
+      ] as const) {
+        const payload = nativeEvents.find((record) => record.event?.method === method)?.event
+          ?.payload as Record<string, unknown> | undefined;
+        assert.ok(payload, `Expected a native record for ${method}.`);
+        if (method === "claude/system/task_progress") {
+          assert.lengthOf(String(payload?.description ?? ""), 1_000);
+          assert.lengthOf(String(payload?.summary ?? ""), 4_000);
+          assert.lengthOf(String(payload?.last_tool_name ?? ""), 256);
+          assert.match(String(payload?.task_id ?? ""), /^sha256:[a-f0-9]{64}$/);
+          assert.notInclude(JSON.stringify(payload), "provider-secret-tail");
+          assert.notProperty(payload ?? {}, "secret_provider_field");
+          assert.notInclude(JSON.stringify(payload?.usage), "secret_usage_field");
+        } else {
+          assert.lengthOf(String(payload?.output ?? ""), 16_000);
+          assert.lengthOf(String(payload?.stdout ?? ""), 16_000);
+          assert.lengthOf(String(payload?.stderr ?? ""), 16_000);
+          assert.match(String(payload?.hook_id ?? ""), /^sha256:[a-f0-9]{64}$/);
+          assert.notProperty(payload ?? {}, "secret_provider_field");
+        }
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("allowlists task lifecycle fields in native diagnostics", () => {
+    const nativeEvents: Array<{ event?: { method?: string; payload?: unknown } }> = [];
+    const harness = makeHarness({
+      nativeEventLogger: {
+        filePath: "memory://claude-allowlisted-native-events",
+        write: (event) => {
+          nativeEvents.push(event as (typeof nativeEvents)[number]);
+          return Effect.void;
+        },
+        close: () => Effect.void,
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const eventsFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) =>
+          event.type === "task.started" ||
+          event.type === "task.progress" ||
+          event.type === "task.completed",
+      ).pipe(Stream.take(4), Stream.runCollect, Effect.forkChild);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const sentinel = "provider-private-sentinel";
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "native-task-start",
+        tool_use_id: "native-tool-start",
+        description: "Native allowlist task",
+        prompt: sentinel,
+        secret_provider_field: sentinel,
+        session_id: "native-session",
+        uuid: "native-start-uuid",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_updated",
+        task_id: "native-task-start",
+        patch: { status: "running", summary: "Still running", secret_patch_field: sentinel },
+        secret_provider_field: sentinel,
+        session_id: "native-session",
+        uuid: "native-update-uuid",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: "native-task-start",
+        status: "completed",
+        summary: "Done",
+        output_file: sentinel,
+        secret_provider_field: sentinel,
+        session_id: "native-session",
+        uuid: "native-notification-uuid",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [
+          {
+            task_id: "native-background-task",
+            description: "Background task",
+            secret_task_field: sentinel,
+          },
+        ],
+        secret_provider_field: sentinel,
+        session_id: "native-session",
+        uuid: "native-background-uuid",
+      } as unknown as SDKMessage);
+
+      yield* Fiber.join(eventsFiber);
+      for (const method of [
+        "claude/system/task_started",
+        "claude/system/task_updated",
+        "claude/system/task_notification",
+        "claude/system/background_tasks_changed",
+      ]) {
+        const payload = nativeEvents.find((record) => record.event?.method === method)?.event
+          ?.payload as Record<string, unknown> | undefined;
+        assert.ok(payload, `Expected a native record for ${method}.`);
+        assert.notInclude(JSON.stringify(payload), sentinel);
+        assert.notProperty(payload ?? {}, "secret_provider_field");
+      }
+      const startPayload = nativeEvents.find(
+        (record) => record.event?.method === "claude/system/task_started",
+      )?.event?.payload as Record<string, unknown>;
+      assert.notProperty(startPayload, "prompt");
+      const notificationPayload = nativeEvents.find(
+        (record) => record.event?.method === "claude/system/task_notification",
+      )?.event?.payload as Record<string, unknown>;
+      assert.notProperty(notificationPayload, "output_file");
+      const updatePayload = nativeEvents.find(
+        (record) => record.event?.method === "claude/system/task_updated",
+      )?.event?.payload as { patch?: Record<string, unknown> };
+      assert.notProperty(updatePayload.patch ?? {}, "secret_patch_field");
+      const backgroundPayload = nativeEvents.find(
+        (record) => record.event?.method === "claude/system/background_tasks_changed",
+      )?.event?.payload as { tasks?: Array<Record<string, unknown>> };
+      assert.notProperty(backgroundPayload.tasks?.[0] ?? {}, "secret_task_field");
+      const serializedNativeEvents = JSON.stringify(nativeEvents);
+      assert.notInclude(serializedNativeEvents, "native-session");
+      assert.notInclude(serializedNativeEvents, "native-tool-start");
+      assert.notInclude(serializedNativeEvents, "native-start-uuid");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect(
     "preserves structured Claude subagent presentation across task lifecycle events",
     () => {
@@ -2520,6 +2841,739 @@ describe("ClaudeAdapterLive", () => {
       );
     },
   );
+
+  it.effect("retracts and restores ambient tasks on their original owning turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const taskEventsFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) =>
+          event.type === "task.started" ||
+          event.type === "task.progress" ||
+          event.type === "task.completed",
+      ).pipe(Stream.take(5), Stream.runCollect, Effect.forkChild);
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "watch task visibility",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "task-ambient-flip",
+        tool_use_id: "tool-ambient-flip",
+        description: "Watch the live update feed",
+        subagent_type: "watcher",
+        task_type: "local_agent",
+        spawn_depth: 1,
+        session_id: "sdk-session-ambient-flip",
+        uuid: "task-ambient-visible-start",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [
+          {
+            task_id: "task-ambient-flip",
+            task_type: "local_agent",
+            description: "Watch the live update feed",
+            ambient: true,
+          },
+        ],
+        session_id: "sdk-session-ambient-flip",
+        uuid: "task-ambient-retracted",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [
+          {
+            task_id: "task-ambient-flip",
+            task_type: "local_agent",
+            description: "Watch the live update feed",
+            ambient: false,
+          },
+        ],
+        session_id: "sdk-session-ambient-flip",
+        uuid: "task-ambient-restored",
+      } as unknown as SDKMessage);
+      // A late patch can turn a previously visible task into transcript-hidden
+      // work without completing it. Cafe must emit the authoritative ambient
+      // visibility edge against the original owner turn before suppressing any
+      // nested transcript frames.
+      harness.query.emit({
+        type: "system",
+        subtype: "task_updated",
+        task_id: "task-ambient-flip",
+        patch: {
+          status: "running",
+          skip_transcript: true,
+        },
+        session_id: "sdk-session-ambient-flip",
+        uuid: "task-skip-transcript-retracted",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: "task-ambient-flip",
+        tool_use_id: "tool-ambient-flip",
+        status: "completed",
+        output_file: "/tmp/ambient-output",
+        summary: "Watcher stopped quietly.",
+        ambient: true,
+        session_id: "sdk-session-ambient-flip",
+        uuid: "task-ambient-terminal",
+      } as unknown as SDKMessage);
+
+      const events = Array.from(yield* Fiber.join(taskEventsFiber));
+      assert.deepEqual(
+        events.map((event) => [event.type, event.payload.visibility, event.turnId]),
+        [
+          ["task.started", "visible", turn.turnId],
+          ["task.progress", "ambient", turn.turnId],
+          ["task.progress", "visible", turn.turnId],
+          ["task.progress", "ambient", turn.turnId],
+          ["task.completed", "ambient", turn.turnId],
+        ],
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("reconciles shrinking background snapshots without fabricating completion", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const eventsFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "task.progress" || event.type === "task.completed",
+      ).pipe(Stream.take(5), Stream.runCollect, Effect.forkChild);
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "reconcile background snapshot membership",
+        attachments: [],
+      });
+
+      const snapshotTaskA = {
+        task_id: "snapshot-a",
+        task_type: "local_agent",
+        subagent_type: "reviewer",
+        spawn_depth: 1,
+        description: "Review snapshot-a",
+      };
+      const snapshotTaskB = {
+        ...snapshotTaskA,
+        task_id: "snapshot-b",
+        description: "Review snapshot-b",
+      };
+      harness.query.emit({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [snapshotTaskA, snapshotTaskB],
+        session_id: "snapshot-session",
+        uuid: "snapshot-full",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [snapshotTaskA],
+        session_id: "snapshot-session",
+        uuid: "snapshot-shrunk",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [],
+        session_id: "snapshot-session",
+        uuid: "snapshot-empty",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: "snapshot-b",
+        status: "completed",
+        summary: "Review B completed.",
+        session_id: "snapshot-session",
+        uuid: "snapshot-b-terminal",
+      } as unknown as SDKMessage);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.deepEqual(
+        events.map((event) => [String(event.payload.taskId), event.type, event.payload.visibility]),
+        [
+          ["snapshot-a", "task.progress", "visible"],
+          ["snapshot-b", "task.progress", "visible"],
+          ["snapshot-b", "task.progress", "ambient"],
+          ["snapshot-a", "task.progress", "ambient"],
+          ["snapshot-b", "task.completed", "visible"],
+        ],
+      );
+      assert.equal(
+        events.every((event) => event.turnId === turn.turnId),
+        true,
+      );
+      assert.equal(
+        events.filter((event) => event.type === "task.completed").length,
+        1,
+        "snapshot removal itself must never invent a terminal edge",
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps a terminal task completed when its shrinking snapshot arrives later", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const context = yield* Effect.context<never>();
+      const runFork = Effect.runForkWith(context);
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = runFork(
+        Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            runtimeEvents.push(event);
+          }),
+        ),
+      );
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "verify terminal-before-snapshot ordering",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [
+          {
+            task_id: "terminal-before-shrink",
+            task_type: "local_agent",
+            description: "Finish before the level snapshot shrinks",
+          },
+        ],
+        session_id: "terminal-before-shrink-session",
+        uuid: "terminal-before-shrink-full",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: "terminal-before-shrink",
+        status: "completed",
+        summary: "Finished before snapshot reconciliation.",
+        session_id: "terminal-before-shrink-session",
+        uuid: "terminal-before-shrink-completed",
+      } as unknown as SDKMessage);
+      // SDK 0.3.251 permits this level update to follow the terminal edge. It
+      // must not emit an ambient progress row that deletes the completed row.
+      harness.query.emit({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [],
+        session_id: "terminal-before-shrink-session",
+        uuid: "terminal-before-shrink-empty",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      const targetEvents = runtimeEvents.filter(
+        (event) =>
+          (event.type === "task.progress" || event.type === "task.completed") &&
+          event.payload.taskId === RuntimeTaskId.make("terminal-before-shrink"),
+      );
+      assert.deepEqual(
+        targetEvents.map((event) =>
+          event.type === "task.progress" || event.type === "task.completed"
+            ? [event.type, event.payload.visibility, event.turnId]
+            : [event.type, undefined, event.turnId],
+        ),
+        [
+          ["task.progress", "visible", turn.turnId],
+          ["task.completed", "visible", turn.turnId],
+        ],
+      );
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("preserves provider ambient authority across snapshot omission and completion", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const targetEventsFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) =>
+          (event.type === "task.progress" || event.type === "task.completed") &&
+          event.payload.taskId === RuntimeTaskId.make("provider-ambient-omission"),
+      ).pipe(Stream.take(3), Stream.runCollect, Effect.forkChild);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      harness.query.emit({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [
+          {
+            task_id: "provider-ambient-omission",
+            description: "Refresh hidden provider metadata",
+            ambient: true,
+          },
+        ],
+        session_id: "provider-ambient-omission-session",
+        uuid: "provider-ambient-omission-full",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [],
+        session_id: "provider-ambient-omission-session",
+        uuid: "provider-ambient-omission-empty",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: "provider-ambient-omission",
+        status: "completed",
+        summary: "Hidden metadata refresh completed.",
+        session_id: "provider-ambient-omission-session",
+        uuid: "provider-ambient-omission-completed",
+      } as unknown as SDKMessage);
+
+      const targetEvents = Array.from(yield* Fiber.join(targetEventsFiber));
+      assert.deepEqual(
+        targetEvents.map((event) =>
+          event.type === "task.progress" || event.type === "task.completed"
+            ? [event.type, event.payload.visibility]
+            : [event.type, undefined],
+        ),
+        [
+          ["task.progress", "ambient"],
+          ["task.progress", "ambient"],
+          ["task.completed", "ambient"],
+        ],
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("retracts an omitted task before a full replacement snapshot can evict it", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const targetEventsFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) =>
+          event.type === "task.progress" &&
+          event.payload.taskId === RuntimeTaskId.make("full-snapshot-eviction-target"),
+      ).pipe(Stream.take(2), Stream.runCollect, Effect.forkChild);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      harness.query.emit({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [
+          {
+            task_id: "full-snapshot-eviction-target",
+            description: "Visible task omitted by the next snapshot",
+          },
+        ],
+        session_id: "full-snapshot-eviction-session",
+        uuid: "full-snapshot-eviction-initial",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: Array.from({ length: 4_096 }, (_, index) => ({
+          task_id: `full-snapshot-replacement-${index}`,
+          description: `Replacement ${index}`,
+        })),
+        session_id: "full-snapshot-eviction-session",
+        uuid: "full-snapshot-eviction-replacement",
+      } as unknown as SDKMessage);
+
+      const targetEvents = Array.from(yield* Fiber.join(targetEventsFiber));
+      assert.deepEqual(
+        targetEvents.map((event) =>
+          event.type === "task.progress"
+            ? [event.type, event.payload.visibility]
+            : [event.type, undefined],
+        ),
+        [
+          ["task.progress", "visible"],
+          ["task.progress", "ambient"],
+        ],
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("retains live background metadata across unrelated generic binding churn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const targetTaskId = RuntimeTaskId.make("generic-churn-background-target");
+      const targetEventsFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "task.progress" && event.payload.taskId === targetTaskId,
+      ).pipe(Stream.take(2), Stream.runCollect, Effect.forkChild);
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "retain live background presentation through generic churn",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [
+          {
+            task_id: "generic-churn-background-target",
+            description: "Original retained background description",
+          },
+        ],
+        session_id: "generic-churn-background-session",
+        uuid: "generic-churn-background-initial",
+      } as unknown as SDKMessage);
+      // These unrelated task starts fill the generic 4,096-entry binding map
+      // and evict its oldest entry. The separate live-background map must keep
+      // only the bounded metadata needed for the subsequent omission edge.
+      for (let index = 0; index < 4_096; index += 1) {
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: `generic-churn-task-${index}`,
+          description: `Generic churn ${index}`,
+          session_id: "generic-churn-background-session",
+          uuid: `generic-churn-task-start-${index}`,
+        } as unknown as SDKMessage);
+      }
+      harness.query.emit({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [],
+        session_id: "generic-churn-background-session",
+        uuid: "generic-churn-background-empty",
+      } as unknown as SDKMessage);
+
+      const targetEvents = Array.from(yield* Fiber.join(targetEventsFiber));
+      assert.deepEqual(
+        targetEvents.map((event) =>
+          event.type === "task.progress"
+            ? [event.payload.visibility, event.payload.description, event.turnId]
+            : [undefined, undefined, event.turnId],
+        ),
+        [
+          ["visible", "Original retained background description", turn.turnId],
+          ["ambient", "Original retained background description", turn.turnId],
+        ],
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("restores a retained live member before a later-turn snapshot repeats it", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const targetTaskId = RuntimeTaskId.make("retained-member-turn-target");
+      const targetEventsFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "task.progress" && event.payload.taskId === targetTaskId,
+      ).pipe(Stream.take(2), Stream.runCollect, Effect.forkChild);
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const firstTurn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "start the retained background task",
+        attachments: [],
+      });
+
+      const retainedTask = {
+        task_id: "retained-member-turn-target",
+        task_type: "local_agent",
+        subagent_type: "reviewer",
+        spawn_depth: 1,
+        description: "Retained background reviewer",
+      };
+      harness.query.emit({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [retainedTask],
+        session_id: "retained-member-turn-session",
+        uuid: "retained-member-turn-initial",
+      } as unknown as SDKMessage);
+      for (let index = 0; index < 4_096; index += 1) {
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: `retained-member-generic-${index}`,
+          description: `Retained-member generic churn ${index}`,
+          session_id: "retained-member-turn-session",
+          uuid: `retained-member-generic-start-${index}`,
+        } as unknown as SDKMessage);
+      }
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        duration_ms: 1,
+        duration_api_ms: 1,
+        num_turns: 1,
+        result: "Root turn completed while background work continues.",
+        session_id: "retained-member-turn-session",
+        uuid: "retained-member-first-turn-result",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "begin an unrelated later root turn",
+        attachments: [],
+      });
+      // The task remains present. This repeated snapshot should emit no second
+      // row, and it must seed the generic binding from the retained live entry
+      // before the following progress frame is attributed.
+      harness.query.emit({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [retainedTask],
+        session_id: "retained-member-turn-session",
+        uuid: "retained-member-turn-repeated",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_progress",
+        task_id: "retained-member-turn-target",
+        description: "Retained background reviewer",
+        subagent_type: "reviewer",
+        summary: "Still working after the repeated snapshot.",
+        usage: {
+          total_tokens: 25,
+          tool_uses: 1,
+          duration_ms: 5_000,
+        },
+        session_id: "retained-member-turn-session",
+        uuid: "retained-member-turn-progress",
+      } as unknown as SDKMessage);
+
+      const targetEvents = Array.from(yield* Fiber.join(targetEventsFiber));
+      assert.equal(targetEvents.length, 2);
+      const firstStartedAt =
+        targetEvents[0]?.type === "task.progress"
+          ? targetEvents[0].payload.subagent?.startedAt
+          : undefined;
+      assert.ok(firstStartedAt);
+      assert.deepEqual(
+        targetEvents.map((event) =>
+          event.type === "task.progress"
+            ? [
+                event.payload.description,
+                event.payload.summary,
+                event.payload.subagent?.startedAt,
+                event.turnId,
+              ]
+            : [undefined, undefined, undefined, event.turnId],
+        ),
+        [
+          [
+            "Retained background reviewer",
+            "local_agent background task is running.",
+            firstStartedAt,
+            firstTurn.turnId,
+          ],
+          [
+            "Retained background reviewer",
+            "Still working after the repeated snapshot.",
+            firstStartedAt,
+            firstTurn.turnId,
+          ],
+        ],
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps a between-turn task owner null across a later unrelated turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const firstEventFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) =>
+          (event.type === "task.started" || event.type === "task.progress") &&
+          event.payload.taskId === RuntimeTaskId.make("between-turn-task"),
+      ).pipe(Stream.take(1), Stream.runCollect, Effect.forkChild);
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "between-turn-task",
+        description: "Provider housekeeping",
+        session_id: "between-turn-session",
+        uuid: "between-turn-start",
+      } as unknown as SDKMessage);
+      const firstEvent = Array.from(yield* Fiber.join(firstEventFiber))[0];
+      const secondEventFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) =>
+          event.type === "task.progress" &&
+          event.payload.taskId === RuntimeTaskId.make("between-turn-task"),
+      ).pipe(Stream.take(1), Stream.runCollect, Effect.forkChild);
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "start an unrelated root turn",
+        attachments: [],
+      });
+      harness.query.emit({
+        type: "system",
+        subtype: "task_updated",
+        task_id: "between-turn-task",
+        patch: { status: "running", skip_transcript: true },
+        session_id: "between-turn-session",
+        uuid: "between-turn-update",
+      } as unknown as SDKMessage);
+
+      const secondEvent = Array.from(yield* Fiber.join(secondEventFiber))[0];
+      const events = [firstEvent, secondEvent].filter((event) => event !== undefined);
+      assert.deepEqual(
+        events.map((event) => [
+          event.type,
+          event.turnId,
+          event.type === "task.started" || event.type === "task.progress"
+            ? event.payload.visibility
+            : undefined,
+        ]),
+        [
+          ["task.started", undefined, "visible"],
+          ["task.progress", undefined, "ambient"],
+        ],
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps ambient visibility fail-closed after its task binding is evicted", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const targetTaskId = RuntimeTaskId.make("ambient-eviction-target");
+      const targetEventsFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) =>
+          (event.type === "task.started" || event.type === "task.progress") &&
+          event.payload.taskId === targetTaskId,
+      ).pipe(Stream.take(2), Stream.runCollect, Effect.forkChild);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "ambient-eviction-target",
+        description: "Ambient target",
+        ambient: true,
+        session_id: "eviction-session",
+        uuid: "eviction-target-start",
+      } as unknown as SDKMessage);
+      // Exceed both the binding and ambient-fallback ceilings so the original
+      // identities are forgotten. Overflow changes unknown visibility to a
+      // session-level fail-closed default until an explicit visible edge arrives.
+      for (let index = 0; index < 4_096; index += 1) {
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: `eviction-filler-${index}`,
+          description: `Filler ${index}`,
+          ambient: true,
+          session_id: "eviction-session",
+          uuid: `eviction-filler-start-${index}`,
+        } as unknown as SDKMessage);
+      }
+      harness.query.emit({
+        type: "system",
+        subtype: "task_progress",
+        task_id: "ambient-eviction-target",
+        description: "Ambient target",
+        summary: "Target remains ambient after eviction.",
+        session_id: "eviction-session",
+        uuid: "eviction-target-after-eviction",
+      } as unknown as SDKMessage);
+
+      const targetEvents = Array.from(yield* Fiber.join(targetEventsFiber));
+      assert.equal(targetEvents.length, 2);
+      assert.equal(
+        targetEvents.every(
+          (event) =>
+            (event.type === "task.started" || event.type === "task.progress") &&
+            event.payload.visibility === "ambient",
+        ),
+        true,
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 
   it.effect("binds Claude task, tool, and history identities without assuming equality", () => {
     const sessionId = "00000000-0000-4000-8000-000000000901";
@@ -3412,7 +4466,7 @@ describe("ClaudeAdapterLive", () => {
     },
   );
 
-  it.effect("keeps skip_transcript Claude tasks out of inline runtime activity", () => {
+  it.effect("emits ambient visibility while keeping skip_transcript task details hidden", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const context = yield* Effect.context<never>();
@@ -3490,15 +4544,27 @@ describe("ClaudeAdapterLive", () => {
       yield* Effect.yieldNow;
       yield* Effect.yieldNow;
 
+      const taskEvents = runtimeEvents.filter(
+        (event) =>
+          event.type === "task.started" ||
+          event.type === "task.progress" ||
+          event.type === "task.completed",
+      );
+      assert.equal(taskEvents.length, 3);
       assert.equal(
-        runtimeEvents.some(
-          (event) =>
-            event.type === "task.started" ||
-            event.type === "task.progress" ||
-            event.type === "task.completed" ||
-            event.type === "turn.started" ||
-            event.type === "runtime.warning",
-        ),
+        taskEvents.every((event) => event.payload.visibility === "ambient"),
+        true,
+      );
+      assert.equal(
+        runtimeEvents.some((event) => event.type === "turn.started"),
+        false,
+      );
+      assert.equal(
+        runtimeEvents.some((event) => event.type === "runtime.warning"),
+        false,
+      );
+      assert.equal(
+        runtimeEvents.some((event) => event.type === "content.delta"),
         false,
       );
       runtimeEventsFiber.interruptUnsafe();
@@ -5536,7 +6602,7 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("bridges approval request/response lifecycle through canUseTool", () => {
+  it.effect("keeps accept-for-session permission updates strictly session-scoped", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
@@ -5593,6 +6659,16 @@ describe("ClaudeAdapterLive", () => {
               mode: "default",
               destination: "session",
             },
+            {
+              type: "addDirectories",
+              directories: ["/persistent-local-path"],
+              destination: "localSettings",
+            },
+            {
+              type: "setMode",
+              mode: "plan",
+              destination: "userSettings",
+            },
           ],
           toolUseID: "tool-use-1",
           requestId: "permission-request-1",
@@ -5620,7 +6696,7 @@ describe("ClaudeAdapterLive", () => {
       yield* adapter.respondToRequest(
         session.threadId,
         ApprovalRequestId.make(runtimeRequestId),
-        "accept",
+        "acceptForSession",
       );
 
       const resolved = yield* Stream.runHead(adapter.streamEvents);
@@ -5633,13 +6709,23 @@ describe("ClaudeAdapterLive", () => {
         return;
       }
       assert.equal(resolved.value.requestId, requested.value.requestId);
-      assert.equal(resolved.value.payload.decision, "accept");
+      assert.equal(resolved.value.payload.decision, "acceptForSession");
       assert.deepEqual(resolved.value.providerRefs, {
         providerItemId: ProviderItemId.make("tool-use-1"),
       });
 
       const permissionResult = yield* Effect.promise(() => permissionPromise);
-      assert.equal((permissionResult as PermissionResult).behavior, "allow");
+      assert.deepEqual(permissionResult as PermissionResult, {
+        behavior: "allow",
+        updatedInput: { command: "pwd" },
+        updatedPermissions: [
+          {
+            type: "setMode",
+            mode: "default",
+            destination: "session",
+          },
+        ],
+      });
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -7473,15 +8559,19 @@ describe("ClaudeAdapterLive", () => {
         true,
       );
       assert.equal(
-        nativeEvents.some(
-          (record) =>
+        nativeEvents.some((record) =>
+          /^sha256:[a-f0-9]{64}$/.test(
             String(
               (record.event as { readonly providerThreadId?: string } | undefined)
                 ?.providerThreadId,
-            ) === "sdk-session-native-log",
+            ),
+          ),
         ),
         true,
       );
+      assert.notInclude(JSON.stringify(nativeEvents), "sdk-session-native-log");
+      assert.notInclude(JSON.stringify(nativeEvents), "stream-native-log");
+      assert.notInclude(JSON.stringify(nativeEvents), "result-native-log");
       assert.equal(
         nativeEvents.some((record) => String(record.event?.turnId) === String(turn.turnId)),
         true,

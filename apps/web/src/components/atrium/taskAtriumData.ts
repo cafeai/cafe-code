@@ -130,9 +130,10 @@ function isSubagentActivity(activity: OrchestrationThreadActivity): boolean {
     (activity.kind === "task.started" ||
       activity.kind === "task.progress" ||
       activity.kind === "task.completed") &&
-    typeof fields.subagent === "object" &&
-    fields.subagent !== null &&
-    !Array.isArray(fields.subagent);
+    ((typeof fields.subagent === "object" &&
+      fields.subagent !== null &&
+      !Array.isArray(fields.subagent)) ||
+      (fields.visibility === "ambient" && typeof fields.taskId === "string"));
   return structuredLifecycle || fields.itemType === "collab_agent_tool_call";
 }
 

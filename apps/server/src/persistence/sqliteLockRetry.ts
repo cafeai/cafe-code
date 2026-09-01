@@ -18,6 +18,23 @@ function readNumericProperty(value: unknown, property: string): number | undefin
 }
 
 /**
+ * Return only SQLite's numeric result code for content-free diagnostics.
+ *
+ * Native node:sqlite uses `errcode`; other adapters can expose `errno`. Never
+ * return the original cause, message, SQL, parameters, or path from this
+ * boundary because hydration failures can occur while handling user content.
+ */
+export function readSqliteResultCode(error: unknown): number | undefined {
+  if (!SqlError.isSqlError(error)) {
+    return undefined;
+  }
+  return (
+    readNumericProperty(error.reason.cause, "errcode") ??
+    readNumericProperty(error.reason.cause, "errno")
+  );
+}
+
+/**
  * Admit retries only for SQLite's typed transient lock classification.
  *
  * In WAL mode, a deferred transaction can read successfully and then receive
@@ -45,6 +62,6 @@ export function isSqliteLockTimeoutError(error: unknown): error is SqlError.SqlE
 export function isSqliteBusySnapshotError(error: unknown): error is SqlError.SqlError {
   return (
     isSqliteLockTimeoutError(error) &&
-    readNumericProperty(error.reason.cause, "errcode") === SQLITE_BUSY_SNAPSHOT_EXTENDED_CODE
+    readSqliteResultCode(error) === SQLITE_BUSY_SNAPSHOT_EXTENDED_CODE
   );
 }

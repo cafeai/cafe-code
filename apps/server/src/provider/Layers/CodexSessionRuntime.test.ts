@@ -73,6 +73,7 @@ import {
   resolveCodexSessionRuntimeSteerClientCorrelationId,
   resolveCodexThreadSettingsSessionModel,
   resolveCodexChildConversationNotification,
+  sanitizeCodexProtocolDiagnosticPayload,
   shouldForwardCodexRootGoalNotification,
   selectCodexActiveSnapshotTurn,
   summarizeCodexAppServerChildProcesses,
@@ -684,16 +685,24 @@ describe("Codex notification emission timestamps", () => {
 });
 
 describe("buildCodexAppServerArgs", () => {
-  it("uses plain app-server args until a transport fallback policy is active", () => {
-    assert.deepStrictEqual(buildCodexAppServerArgs(undefined), ["app-server"]);
+  it("enables Cafe task plans for every real app-server launch", () => {
+    assert.deepStrictEqual(buildCodexAppServerArgs(undefined), [
+      "app-server",
+      "-c",
+      "tools.update_plan.enabled=true",
+    ]);
     assert.deepStrictEqual(buildCodexAppServerArgs({ responsesWebsockets: "auto" }), [
       "app-server",
+      "-c",
+      "tools.update_plan.enabled=true",
     ]);
   });
 
   it("uses a Cafe-scoped OpenAI provider when Responses WebSockets are disabled", () => {
     assert.deepStrictEqual(buildCodexAppServerArgs({ responsesWebsockets: "disabled" }), [
       "app-server",
+      "-c",
+      "tools.update_plan.enabled=true",
       "-c",
       'model_provider="cafecode-openai-http"',
       "-c",
@@ -709,6 +718,79 @@ describe("buildCodexAppServerArgs", () => {
       "-c",
       "model_providers.cafecode-openai-http.supports_websockets=false",
     ]);
+  });
+});
+
+describe("Codex protocol diagnostic redaction", () => {
+  it("redacts raw wire content and valid decoded auth recovery payloads", () => {
+    const raw = sanitizeCodexProtocolDiagnosticPayload({
+      direction: "incoming",
+      stage: "raw",
+      payload:
+        '{"method":"modelProvider/authRecoveryStarted","params":{"message":"raw-auth-sentinel"}}',
+    });
+    assert.deepStrictEqual(raw, {
+      redacted: true,
+      diagnosticClass: "incoming-raw-protocol-content",
+      byteLength: 87,
+    });
+    assert.doesNotMatch(JSON.stringify(raw), /raw-auth-sentinel/u);
+
+    const decoded = sanitizeCodexProtocolDiagnosticPayload({
+      direction: "incoming",
+      stage: "decoded",
+      payload: {
+        method: "modelProvider/authRecoveryCompleted",
+        params: {
+          provider: "decoded-provider-sentinel",
+          message: "decoded-message-sentinel",
+          threadId: "decoded-thread-sentinel",
+          turnId: "decoded-turn-sentinel",
+        },
+      },
+    });
+    assert.deepStrictEqual(decoded, {
+      method: "modelProvider/authRecoveryCompleted",
+      phase: "completed",
+      diagnosticClass: "notification-payload-redacted",
+    });
+    assert.doesNotMatch(
+      JSON.stringify(decoded),
+      /decoded-(?:provider|message|thread|turn)-sentinel/u,
+    );
+  });
+
+  it("removes credential-bearing values from malformed auth recovery diagnostics", () => {
+    for (const method of [
+      "modelProvider/authRecoveryStarted",
+      "modelProvider/authRecoveryCompleted",
+    ] as const) {
+      const sanitized = sanitizeCodexProtocolDiagnosticPayload({
+        stage: "decode_failed",
+        payload: {
+          detail: "schema failed against provider-message-sentinel",
+          method,
+          message: "provider-message-sentinel",
+          cause: {
+            actual: {
+              provider: "provider-account-sentinel",
+              threadId: "provider-thread-sentinel",
+              turnId: "provider-turn-sentinel",
+            },
+          },
+        },
+      });
+
+      assert.deepStrictEqual(sanitized, {
+        method,
+        phase: method === "modelProvider/authRecoveryStarted" ? "started" : "completed",
+        errorClass: "notification-schema-decode-failed",
+      });
+      assert.doesNotMatch(
+        JSON.stringify(sanitized),
+        /provider-(?:message|account|thread|turn)-sentinel/u,
+      );
+    }
   });
 });
 
@@ -889,6 +971,41 @@ describe("Codex child conversation routing", () => {
         parentTurnId,
         suppressLifecycle: true,
       },
+    );
+    assert.deepStrictEqual(
+      resolveCodexChildConversationNotification(
+        routes,
+        {
+          method: "modelProvider/authRecoveryStarted",
+          params: {
+            threadId: "thread-child",
+            turnId: "turn-child",
+            provider: "bedrock",
+            message: "Refreshing credentials.",
+          },
+        },
+        "thread-parent",
+      ),
+      {
+        parentTurnId,
+        suppressLifecycle: false,
+      },
+    );
+    assert.deepStrictEqual(
+      resolveCodexChildConversationNotification(
+        routes,
+        {
+          method: "modelProvider/authRecoveryCompleted",
+          params: {
+            threadId: "thread-parent",
+            turnId: "turn-parent",
+            provider: "bedrock",
+            message: "Credentials refreshed.",
+          },
+        },
+        "thread-parent",
+      ),
+      undefined,
     );
     assert.deepStrictEqual(
       resolveCodexChildConversationNotification(
@@ -1154,8 +1271,22 @@ describe("Codex child conversation routing", () => {
       },
       "2026-07-14T00:00:02.000Z",
     );
-    const allCompleted = updateCodexChildConversationLiveness(
+    const childAAuthCompletionReplay = updateCodexChildConversationLiveness(
       childACompleted,
+      routes,
+      {
+        method: "modelProvider/authRecoveryCompleted",
+        params: {
+          threadId: "thread-child-a",
+          turnId: "turn-child-a",
+          provider: "example-provider",
+          message: "Credentials refreshed.",
+        },
+      },
+      "2026-07-14T00:00:02.500Z",
+    );
+    const allCompleted = updateCodexChildConversationLiveness(
+      childAAuthCompletionReplay,
       routes,
       {
         method: "thread/status/changed",
@@ -1166,6 +1297,8 @@ describe("Codex child conversation routing", () => {
 
     assert.equal(childAStarted.get("thread-child-a")?.state, "active");
     assert.equal(childACompleted.get("thread-child-a")?.state, "inactive");
+    assert.equal(childAAuthCompletionReplay.get("thread-child-a")?.state, "inactive");
+    assert.equal(childAAuthCompletionReplay.get("thread-child-a")?.method, "turn/completed");
     assert.equal(allCompleted.get("thread-child-b")?.state, "inactive");
     assert.equal(
       codexAggregateTurnHasUnfinishedChildren(routes, allCompleted, parentTurnId),
@@ -1280,6 +1413,30 @@ describe("Codex child conversation routing", () => {
       false,
     );
     assert.equal(
+      isCodexChildConversationWorkNotification({
+        method: "modelProvider/authRecoveryStarted",
+        params: {
+          threadId: "thread-child",
+          turnId: "turn-child",
+          provider: "example-provider",
+          message: "Refreshing credentials.",
+        },
+      }),
+      false,
+    );
+    assert.equal(
+      isCodexChildConversationWorkNotification({
+        method: "modelProvider/authRecoveryCompleted",
+        params: {
+          threadId: "thread-child",
+          turnId: "turn-child",
+          provider: "example-provider",
+          message: "Credentials refreshed.",
+        },
+      }),
+      false,
+    );
+    assert.equal(
       isTerminalCodexChildThreadReadError(new Error("thread not loaded: child-1")),
       true,
     );
@@ -1376,6 +1533,36 @@ describe("Codex notification route fields", () => {
       }),
       {
         turnId: TurnId.make("turn-1"),
+        itemId: undefined,
+      },
+    );
+    assert.deepStrictEqual(
+      readCodexNotificationRouteFields({
+        method: "modelProvider/authRecoveryStarted",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-auth-recovery",
+          provider: "bedrock",
+          message: "Refreshing credentials.",
+        },
+      }),
+      {
+        turnId: TurnId.make("turn-auth-recovery"),
+        itemId: undefined,
+      },
+    );
+    assert.deepStrictEqual(
+      readCodexNotificationRouteFields({
+        method: "modelProvider/authRecoveryCompleted",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-auth-recovery",
+          provider: "bedrock",
+          message: "Credentials refreshed.",
+        },
+      }),
+      {
+        turnId: TurnId.make("turn-auth-recovery"),
         itemId: undefined,
       },
     );

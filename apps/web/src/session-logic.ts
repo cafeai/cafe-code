@@ -550,11 +550,23 @@ export function deriveWorkLogEntries(
   const ordered = [...activities]
     .toSorted(compareActivitiesByOrder)
     .filter((activity) => (latestTurnId ? activity.turnId === latestTurnId : true));
+  const latestTaskVisibility = new Map<string, "visible" | "ambient">();
+  for (const activity of ordered) {
+    const identity = taskActivityIdentityKey(activity);
+    if (!identity) continue;
+    const visibility = taskActivityVisibility(activity);
+    if (visibility) latestTaskVisibility.set(identity, visibility);
+  }
   const entries = ordered
     // Structured task lifecycle supersedes the old generic collab tool row.
     // Removing both here avoids rendering `Subagent task - Started /root/x`
     // next to the richer, identity-stable subagent row.
     .filter((activity) => !isSubagentWorkActivity(activity))
+    .filter((activity) => {
+      const identity = taskActivityIdentityKey(activity);
+      if (identity && latestTaskVisibility.get(identity) === "ambient") return false;
+      return !isAmbientTaskActivity(activity);
+    })
     .filter((activity) => activity.kind !== "tool.started" || isContextCompactionActivity(activity))
     .filter(
       (activity) => activity.kind !== "task.started" || isUserVisibleTaskStartedActivity(activity),
@@ -568,6 +580,45 @@ export function deriveWorkLogEntries(
     ({ activityKind: _activityKind, collapseKey: _collapseKey, ...entry }) => entry,
   );
   return collapsed;
+}
+
+function taskActivityIdentityKey(activity: OrchestrationThreadActivity): string | undefined {
+  if (
+    activity.kind !== "task.started" &&
+    activity.kind !== "task.progress" &&
+    activity.kind !== "task.completed"
+  ) {
+    return undefined;
+  }
+  const payload =
+    activity.payload && typeof activity.payload === "object" && !Array.isArray(activity.payload)
+      ? (activity.payload as Record<string, unknown>)
+      : null;
+  const taskId = typeof payload?.taskId === "string" && payload.taskId ? payload.taskId : undefined;
+  return taskId ? JSON.stringify([activity.turnId ?? null, taskId]) : undefined;
+}
+
+function taskActivityVisibility(
+  activity: OrchestrationThreadActivity,
+): "visible" | "ambient" | undefined {
+  const payload =
+    activity.payload && typeof activity.payload === "object" && !Array.isArray(activity.payload)
+      ? (activity.payload as Record<string, unknown>)
+      : null;
+  return payload?.visibility === "visible" || payload?.visibility === "ambient"
+    ? payload.visibility
+    : undefined;
+}
+
+function isAmbientTaskActivity(activity: OrchestrationThreadActivity): boolean {
+  if (
+    activity.kind !== "task.started" &&
+    activity.kind !== "task.progress" &&
+    activity.kind !== "task.completed"
+  ) {
+    return false;
+  }
+  return taskActivityVisibility(activity) === "ambient";
 }
 
 /**

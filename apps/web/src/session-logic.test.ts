@@ -772,6 +772,142 @@ describe("deriveWorkLogEntries", () => {
     expect(entries.map((entry) => entry.id)).toEqual(["task-progress", "task-complete"]);
   });
 
+  it("keeps ambient provider tasks out of the ordinary work log", () => {
+    const ambientProgress = makeActivity({
+      id: "ambient-watcher-progress",
+      createdAt: "2026-02-23T00:00:02.000Z",
+      kind: "task.progress",
+      summary: "Watcher update",
+      tone: "info",
+      payload: {
+        taskId: "provider-watcher",
+        detail: "Refreshing provider-owned metadata",
+        visibility: "ambient",
+      },
+    });
+
+    expect(deriveWorkLogEntries([ambientProgress], undefined)).toEqual([]);
+  });
+
+  it("uses the latest exact task visibility to retract and restore ordinary work-log rows", () => {
+    const turnId = TurnId.make("turn-watcher-visibility");
+    const visible = makeActivity({
+      id: "watcher-visible",
+      createdAt: "2026-02-23T00:00:01.000Z",
+      kind: "task.progress",
+      summary: "Watcher is running",
+      tone: "info",
+      turnId,
+      payload: { taskId: "provider-watcher", visibility: "visible" },
+    });
+    const ambient = makeActivity({
+      id: "watcher-ambient",
+      createdAt: "2026-02-23T00:00:02.000Z",
+      kind: "task.progress",
+      summary: "Watcher moved to ambient work",
+      tone: "info",
+      turnId,
+      payload: { taskId: "provider-watcher", visibility: "ambient" },
+    });
+    const restored = makeActivity({
+      id: "watcher-restored",
+      createdAt: "2026-02-23T00:00:03.000Z",
+      kind: "task.progress",
+      summary: "Watcher is visible again",
+      tone: "info",
+      turnId,
+      payload: { taskId: "provider-watcher", visibility: "visible" },
+    });
+    const ambientTerminal = makeActivity({
+      id: "watcher-ambient-terminal",
+      createdAt: "2026-02-23T00:00:04.000Z",
+      kind: "task.completed",
+      summary: "Watcher ended silently",
+      tone: "info",
+      turnId,
+      payload: { taskId: "provider-watcher", visibility: "ambient" },
+    });
+
+    expect(deriveWorkLogEntries([visible], turnId).map((entry) => entry.id)).toEqual([
+      "watcher-visible",
+    ]);
+    expect(deriveWorkLogEntries([visible, ambient], turnId)).toEqual([]);
+    expect(
+      deriveWorkLogEntries([visible, ambient, restored], turnId).map((entry) => entry.id),
+    ).toContain("watcher-restored");
+    expect(deriveWorkLogEntries([visible, ambient, restored, ambientTerminal], turnId)).toEqual([]);
+  });
+
+  it("retracts and restores an ambient subagent in the active composer roster", () => {
+    const turnId = TurnId.make("turn-ambient-worker");
+    const presentation = {
+      threadId: "ambient-worker",
+      label: "Watch provider state",
+      objective: "Track provider-owned background state",
+      status: "active" as const,
+      startedAt: "2026-02-23T00:00:01.000Z",
+    };
+    const started = makeActivity({
+      id: "ambient-worker-started",
+      createdAt: presentation.startedAt,
+      kind: "task.started",
+      summary: "Subagent started",
+      tone: "info",
+      turnId,
+      payload: {
+        taskId: presentation.threadId,
+        visibility: "visible",
+        subagent: presentation,
+      },
+    });
+    const hidden = makeActivity({
+      id: "ambient-worker-hidden",
+      createdAt: "2026-02-23T00:00:02.000Z",
+      kind: "task.progress",
+      summary: "Subagent visibility changed",
+      tone: "info",
+      turnId,
+      payload: {
+        taskId: presentation.threadId,
+        visibility: "ambient",
+      },
+    });
+    const restored = makeActivity({
+      id: "ambient-worker-restored",
+      createdAt: "2026-02-23T00:00:03.000Z",
+      kind: "task.progress",
+      summary: "Subagent update",
+      tone: "info",
+      turnId,
+      payload: {
+        taskId: presentation.threadId,
+        detail: "Visible again",
+        visibility: "visible",
+        subagent: presentation,
+      },
+    });
+    const hiddenTerminal = makeActivity({
+      id: "ambient-worker-hidden-terminal",
+      createdAt: "2026-02-23T00:00:04.000Z",
+      kind: "task.completed",
+      summary: "Subagent completed",
+      tone: "info",
+      turnId,
+      payload: {
+        taskId: presentation.threadId,
+        status: "completed",
+        visibility: "ambient",
+      },
+    });
+
+    expect(deriveActiveSubagentWorkEntries([started], turnId)).toHaveLength(1);
+    expect(deriveActiveSubagentWorkEntries([started, hidden], turnId)).toEqual([]);
+    expect(deriveActiveSubagentWorkEntries([started, hidden, restored], turnId)).toHaveLength(1);
+    expect(
+      deriveActiveSubagentWorkEntries([started, hidden, restored, hiddenTerminal], turnId),
+    ).toEqual([]);
+  });
+
   it("coalesces structured subagent lifecycle while ordinary task starts stay hidden", () => {
     const subagent = {
       threadId: " provider-child-locate-footer ",

@@ -9,7 +9,7 @@ import { assert, it } from "vitest";
 
 import { isMigrationLockTimeoutError, runMigrations } from "./Migrations.ts";
 import * as NodeSqliteClient from "./NodeSqliteClient.ts";
-import { isSqliteBusySnapshotError } from "./sqliteLockRetry.ts";
+import { isSqliteBusySnapshotError, readSqliteResultCode } from "./sqliteLockRetry.ts";
 
 it("runMigrations retries transient cross-process writer contention", async () => {
   await Effect.runPromise(
@@ -75,7 +75,7 @@ it("migration retry admission is limited to SQLite lock timeouts", () => {
   assert.isFalse(isMigrationLockTimeoutError(new Error("not sql")));
 });
 
-it("message hydration retry admission is limited to immediate WAL snapshot invalidation", () => {
+it("classifies immediate WAL snapshot invalidation without exposing its cause", () => {
   const busySnapshot = new SqlError.SqlError({
     reason: new SqlError.LockTimeoutError({
       cause: { code: "ERR_SQLITE_BUSY", errcode: 517 },
@@ -92,4 +92,7 @@ it("message hydration retry admission is limited to immediate WAL snapshot inval
   assert.isTrue(isSqliteBusySnapshotError(busySnapshot));
   assert.isFalse(isSqliteBusySnapshotError(exhaustedWriterTimeout));
   assert.isFalse(isSqliteBusySnapshotError(new Error("not sql")));
+  assert.equal(readSqliteResultCode(busySnapshot), 517);
+  assert.equal(readSqliteResultCode(exhaustedWriterTimeout), 5);
+  assert.isUndefined(readSqliteResultCode(new Error("not sql")));
 });

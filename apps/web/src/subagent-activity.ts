@@ -149,6 +149,20 @@ function upsertStructuredSubagent(
   payload: Record<string, unknown>,
 ): boolean {
   const presentation = record(payload.subagent);
+  const presentationId = exactOpaqueIdentity(presentation?.threadId);
+  const taskId = exactOpaqueIdentity(payload.taskId);
+
+  if (payload.visibility === "ambient") {
+    // Visibility is an authoritative lifecycle dimension, not a synthetic
+    // completion. A provider can retract a task that Cafe already displayed
+    // while the worker continues in the background. Delete every exact
+    // identity carried by the latest edge so stale visible rows cannot remain
+    // in the chat task pill or Atrium; a later visible edge recreates the row.
+    if (presentationId) byId.delete(subagentMapKey(activity, presentationId));
+    if (taskId && taskId !== presentationId) byId.delete(subagentMapKey(activity, taskId));
+    return presentation !== null || taskId !== undefined;
+  }
+
   if (!presentation) return false;
   const normalizedPath = safeLine(presentation.path, 256)?.replace(/\/+$/u, "");
   // Cafe versions before the reverse-root Codex fix persisted child-to-parent
@@ -159,7 +173,7 @@ function upsertStructuredSubagent(
   // Exact matching preserves real children such as `/root/audit` and leaves
   // Codex/Claude background-lifecycle behavior otherwise unchanged.
   if (normalizedPath === "/root") return true;
-  const id = exactOpaqueIdentity(presentation.threadId) ?? exactOpaqueIdentity(payload.taskId);
+  const id = presentationId ?? taskId;
   if (!id) return true;
 
   const key = subagentMapKey(activity, id);

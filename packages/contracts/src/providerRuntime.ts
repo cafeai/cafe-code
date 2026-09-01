@@ -570,10 +570,21 @@ export const RuntimeSubagentPresentation = Schema.Struct({
 });
 export type RuntimeSubagentPresentation = typeof RuntimeSubagentPresentation.Type;
 
+/**
+ * Provider-authoritative user-surface visibility for one task lifecycle.
+ *
+ * Older providers omit this field and therefore remain visible. `ambient` is
+ * deliberately not a terminal state: Claude may move an already-announced
+ * background task out of the transcript while it continues running.
+ */
+export const RuntimeTaskVisibility = Schema.Literals(["visible", "ambient"]);
+export type RuntimeTaskVisibility = typeof RuntimeTaskVisibility.Type;
+
 const TaskStartedPayload = Schema.Struct({
   taskId: RuntimeTaskId,
   description: Schema.optional(TrimmedNonEmptyStringSchema),
   taskType: Schema.optional(TrimmedNonEmptyStringSchema),
+  visibility: Schema.optional(RuntimeTaskVisibility),
   subagent: Schema.optional(RuntimeSubagentPresentation),
 });
 export type TaskStartedPayload = typeof TaskStartedPayload.Type;
@@ -584,6 +595,7 @@ const TaskProgressPayload = Schema.Struct({
   summary: Schema.optional(TrimmedNonEmptyStringSchema),
   usage: Schema.optional(Schema.Unknown),
   lastToolName: Schema.optional(TrimmedNonEmptyStringSchema),
+  visibility: Schema.optional(RuntimeTaskVisibility),
   subagent: Schema.optional(RuntimeSubagentPresentation),
 });
 export type TaskProgressPayload = typeof TaskProgressPayload.Type;
@@ -593,6 +605,7 @@ const TaskCompletedPayload = Schema.Struct({
   status: Schema.Literals(["completed", "failed", "stopped"]),
   summary: Schema.optional(TrimmedNonEmptyStringSchema),
   usage: Schema.optional(Schema.Unknown),
+  visibility: Schema.optional(RuntimeTaskVisibility),
   subagent: Schema.optional(RuntimeSubagentPresentation),
 });
 export type TaskCompletedPayload = typeof TaskCompletedPayload.Type;

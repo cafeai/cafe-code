@@ -234,6 +234,61 @@ describe("selectAtriumSnapshot", () => {
     ]);
   });
 
+  it("retracts ambient Claude tasks from Atrium and restores later visible work", () => {
+    const turnId = "turn-ambient-atrium" as TurnId;
+    const presentation = {
+      threadId: "claude-ambient-atrium",
+      label: "Watch provider state",
+      status: "active" as const,
+      startedAt: new Date(NOW - 65_000).toISOString(),
+    };
+    const started = {
+      ...activity("ambient-start", "task.started", "Subagent started", {
+        taskId: presentation.threadId,
+        visibility: "visible",
+        subagent: presentation,
+      }),
+      turnId,
+      createdAt: new Date(NOW - 3_000).toISOString(),
+    };
+    const hidden = {
+      ...activity("ambient-hide", "task.progress", "Subagent visibility changed", {
+        taskId: presentation.threadId,
+        visibility: "ambient",
+      }),
+      turnId,
+      createdAt: new Date(NOW - 2_000).toISOString(),
+    };
+    const restored = {
+      ...activity("ambient-restore", "task.progress", "Subagent update", {
+        taskId: presentation.threadId,
+        detail: "Visible again",
+        visibility: "visible",
+        subagent: presentation,
+      }),
+      turnId,
+      createdAt: new Date(NOW - 1_000).toISOString(),
+    };
+
+    const hiddenSnapshot = selectAtriumSnapshot(
+      buildState({ activities: [started, hidden], turnId }),
+      NOW,
+    );
+    expect(hiddenSnapshot.cards[0]?.subagents).toEqual([]);
+    expect(hiddenSnapshot.subagentCount).toBe(0);
+
+    const restoredSnapshot = selectAtriumSnapshot(
+      buildState({ activities: [started, hidden, restored], turnId }),
+      NOW,
+    );
+    expect(restoredSnapshot.cards[0]?.subagents).toHaveLength(1);
+    expect(restoredSnapshot.cards[0]?.subagents[0]).toMatchObject({
+      id: presentation.threadId,
+      detail: "Visible again",
+      running: true,
+    });
+  });
+
   it("collapses a started/completed pair into one row and marks it finished", () => {
     const snapshot = selectAtriumSnapshot(
       buildState({

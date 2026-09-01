@@ -26,6 +26,10 @@ const isAccountRateLimitPlanType = Schema.is(
 );
 const isThreadMetadataUpdateParams = Schema.is(CodexSchema.V2ThreadMetadataUpdateParams);
 const isItemStartedNotification = Schema.is(CodexSchema.V2ItemStartedNotification);
+const decodeServerNotification = Schema.decodeUnknownSync(CodexSchema.ServerNotification);
+const decodeThreadShellCommandParams = Schema.decodeUnknownSync(
+  CodexSchema.V2ThreadShellCommandParams,
+);
 
 it("tracks Codex 0.146 app-server compatibility additions", () => {
   assert.equal(
@@ -57,6 +61,42 @@ it("tracks Codex 0.146 app-server compatibility additions", () => {
       },
     }),
     true,
+  );
+});
+
+it("tracks Codex 0.152 auth recovery and shell-command timeout additions", () => {
+  const started = {
+    method: "modelProvider/authRecoveryStarted" as const,
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      provider: "example-provider",
+      message: "Refreshing credentials.",
+    },
+  };
+  const completed = {
+    method: "modelProvider/authRecoveryCompleted" as const,
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      provider: "example-provider",
+      message: "Credentials refreshed.",
+    },
+  };
+
+  assert.deepEqual(decodeServerNotification(started), started);
+  assert.deepEqual(decodeServerNotification(completed), completed);
+  assert.deepEqual(
+    decodeThreadShellCommandParams({
+      threadId: "thread-1",
+      command: "printf ready",
+      timeoutMs: 2_500,
+    }),
+    {
+      threadId: "thread-1",
+      command: "printf ready",
+      timeoutMs: 2_500,
+    },
   );
 });
 
