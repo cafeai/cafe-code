@@ -1156,6 +1156,61 @@ describe("ProviderModelPicker", () => {
     }
   });
 
+  it("shows and selects Claude Fable 5.1 when the server advertises it", async () => {
+    const providersWithFable = TEST_PROVIDERS.map((provider) =>
+      provider.instanceId === CLAUDE_INSTANCE_ID
+        ? {
+            ...provider,
+            models: [
+              ...provider.models,
+              {
+                slug: "claude-fable-5-1",
+                name: "Claude Fable 5.1",
+                isCustom: false,
+                capabilities: createModelCapabilities({
+                  optionDescriptors: [
+                    selectDescriptor("effort", "Reasoning", [
+                      { id: "low", label: "low" },
+                      { id: "medium", label: "medium" },
+                      { id: "high", label: "high", isDefault: true },
+                      { id: "xhigh", label: "xhigh" },
+                      { id: "max", label: "max" },
+                    ]),
+                    selectDescriptor("contextWindow", "Context window", [
+                      { id: "1m", label: "1m", isDefault: true },
+                    ]),
+                  ],
+                }),
+              },
+            ],
+          }
+        : provider,
+    );
+    const mounted = await mountPicker({
+      activeInstanceId: CLAUDE_INSTANCE_ID,
+      model: "claude-opus-4-6",
+      lockedProvider: ProviderDriverKind.make("claudeAgent"),
+      providers: providersWithFable,
+    });
+
+    try {
+      await page.getByRole("button").click();
+
+      await vi.waitFor(() => {
+        expect(getModelPickerListText()).toContain("Claude Fable 5.1");
+      });
+
+      await page.getByText("Claude Fable 5.1", { exact: true }).click();
+
+      expect(mounted.onInstanceModelChange).toHaveBeenCalledWith(
+        CLAUDE_INSTANCE_ID,
+        "claude-fable-5-1",
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("only shows codex spark when the server reports it", async () => {
     const providersWithoutSpark: ReadonlyArray<ServerProvider> = [
       buildCodexProvider([
