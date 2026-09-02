@@ -643,6 +643,7 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
               apply(target, thisArg, argumentList) {
                 const statement = Reflect.apply(target, thisArg, argumentList);
                 const [segments] = argumentList;
+                let waitForReleasedWriter = false;
                 const isIdentityWrite =
                   Array.isArray(segments) &&
                   segments.every((segment) => typeof segment === "string") &&
@@ -662,12 +663,30 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
                     // avoiding an inherently flaky wall-clock race between the
                     // retry backoff and a child-process timer.
                     lockOwner.send({ type: "release-write" });
+                    waitForReleasedWriter = true;
                   }
                 }
 
                 const shouldIntercept =
                   scenario === "hydrate-then-purge" ? isHydrationWrite : isIdentityWrite;
                 if (!shouldIntercept || contentionIntercepted) {
+                  if (waitForReleasedWriter) {
+                    // Sending an IPC message proves which retry released the
+                    // child, but it does not prove Windows has scheduled that
+                    // child, committed SQLite, and published the reply before
+                    // this process enters another synchronous 25 ms busy
+                    // wait. Under full CI load the second attempt could exhaust
+                    // that artificial timeout, start the third attempt, and
+                    // fail even though retry behavior was correct. Gate only
+                    // this test statement on the already-registered terminal
+                    // reply. Reaching this branch still proves attempt one
+                    // timed out (attempt two cannot be constructed otherwise),
+                    // while the production retry timing remains untouched.
+                    return Effect.promise(async () => {
+                      assert.ok(terminalWriterReply);
+                      assert.equal(await terminalWriterReply, "committed");
+                    }).pipe(Effect.andThen(statement as Effect.Effect<unknown, unknown, unknown>));
+                  }
                   return statement;
                 }
 
