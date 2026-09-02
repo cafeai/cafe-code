@@ -698,4 +698,75 @@ describe("makeManagedServerProvider", () => {
       }),
     ),
   );
+
+  it.effect("coalesces model-only refreshes and preserves health metadata", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const checkCalls = yield* Ref.make(0);
+        const releaseInitialCheck = yield* Deferred.make<void>();
+        const modelCalls = yield* Ref.make(0);
+        const modelsStarted = yield* Deferred.make<void>();
+        const releaseModels = yield* Deferred.make<void>();
+        const refreshedModels: ServerProvider["models"] = [
+          {
+            slug: "gpt-picker-refresh",
+            name: "GPT Picker Refresh",
+            isCustom: false,
+            capabilities: emptyCapabilities,
+          },
+        ];
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+          initialSnapshot: () => Effect.succeed(initialSnapshot),
+          checkProvider: Ref.update(checkCalls, (count) => count + 1).pipe(
+            Effect.flatMap(() => Deferred.await(releaseInitialCheck)),
+            Effect.as(refreshedSnapshot),
+          ),
+          refreshModels: () =>
+            Ref.update(modelCalls, (count) => count + 1).pipe(
+              Effect.tap(() => Deferred.succeed(modelsStarted, undefined).pipe(Effect.ignore)),
+              Effect.flatMap(() => Deferred.await(releaseModels)),
+              Effect.as(refreshedModels),
+            ),
+          refreshInterval: "1 hour",
+        });
+
+        const initialUpdate = yield* Stream.take(provider.streamChanges, 1).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* Effect.yieldNow;
+        yield* Deferred.succeed(releaseInitialCheck, undefined);
+        yield* Fiber.join(initialUpdate);
+
+        const refreshModels = provider.refreshModels;
+        assert.isDefined(refreshModels);
+        if (!refreshModels) {
+          return;
+        }
+
+        const refreshes = yield* Effect.all([refreshModels, refreshModels], {
+          concurrency: "unbounded",
+        }).pipe(Effect.forkChild);
+        yield* Deferred.await(modelsStarted);
+        assert.strictEqual(yield* Ref.get(checkCalls), 1);
+        assert.strictEqual(yield* Ref.get(modelCalls), 1);
+        yield* Deferred.succeed(releaseModels, undefined);
+
+        const results = yield* Fiber.join(refreshes);
+        assert.deepStrictEqual(
+          results.map((snapshot) => snapshot.models),
+          [refreshedModels, refreshedModels],
+        );
+        const latest = yield* provider.getSnapshot;
+        assert.deepStrictEqual(latest.models, refreshedModels);
+        assert.strictEqual(latest.version, refreshedSnapshot.version);
+        assert.deepStrictEqual(latest.auth, refreshedSnapshot.auth);
+        assert.strictEqual(yield* Ref.get(checkCalls), 1);
+      }),
+    ),
+  );
 });

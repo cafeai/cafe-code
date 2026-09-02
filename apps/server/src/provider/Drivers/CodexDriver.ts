@@ -27,6 +27,7 @@ import {
   type ServerProvider,
   type ServerProviderProbePhaseDiagnostics,
 } from "@cafecode/contracts";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -47,6 +48,7 @@ import {
   isCodexCliLoginStatusProbeInconclusive,
   makePendingCodexProvider,
   readCodexAccountRateLimits,
+  readCodexAppServerModels,
 } from "../Layers/CodexProvider.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
@@ -73,6 +75,10 @@ const DRIVER_KIND = ProviderDriverKind.make("codex");
 // neither path creates hidden Codex app-server sessions or repeated CLI probe
 // queues.
 const PERIODIC_SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
+// Picker-open refreshes are user-facing and opportunistic. Keep their
+// disposable app-server lifetime bounded independently of the long-lived turn
+// runtime; timeout preserves the last known-good catalogue.
+const CODEX_MODEL_LIST_REFRESH_TIMEOUT = Duration.seconds(15);
 const UPDATE_DEFINITION = {
   provider: DRIVER_KIND,
   npmPackageName: "@openai/codex",
@@ -158,6 +164,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const path = yield* Path.Path;
       const httpClient = yield* HttpClient.HttpClient;
       const eventLoggers = yield* ProviderEventLoggers;
+      const serverConfig = yield* ServerConfig;
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const layoutConfig = withDefaultCodexShadowHome({ instanceId, config });
       const homeLayout = yield* resolveCodexHomeLayout(layoutConfig);
@@ -311,6 +318,48 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
             ),
             Effect.provideService(FileSystem.FileSystem, fileSystem),
             Effect.provideService(Path.Path, path),
+          );
+        },
+        refreshModels: ({ settings, snapshot }) => {
+          if (!settings.enabled || snapshot.auth.status !== "authenticated") {
+            return Effect.succeed(undefined);
+          }
+
+          return refreshCodexShadowHome.pipe(
+            Effect.catch(() =>
+              // Shadow-home diagnostics can include credential paths. Keep
+              // this picker-triggered warning fixed and instance-scoped.
+              Effect.logWarning("codex.home.refreshBeforeModelListFailed", { instanceId }),
+            ),
+            Effect.andThen(
+              readCodexAppServerModels({
+                binaryPath: settings.binaryPath,
+                homePath: settings.homePath,
+                cwd: serverConfig.stateDir,
+                customModels: settings.customModels,
+                environment: effectiveEnvironment,
+              }).pipe(
+                Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+                Effect.scoped,
+                Effect.timeoutOption(CODEX_MODEL_LIST_REFRESH_TIMEOUT),
+                Effect.map((result) => (result._tag === "Some" ? result.value : undefined)),
+              ),
+            ),
+            Effect.catchCause((cause) => {
+              // Rebuild/shutdown interrupts the old provider scope. Preserve
+              // that control signal so its detached single-flight cannot
+              // publish or synchronize a stale catalogue into the replacement
+              // instance. Ordinary provider failures remain inconclusive.
+              if (Cause.hasInterrupts(cause)) {
+                return Effect.interrupt;
+              }
+              // Provider errors can contain command lines or private home
+              // paths. The UI keeps stale models, so diagnostics only need a
+              // bounded phase marker rather than the raw cause.
+              return Effect.logWarning("codex.modelListRefreshFailed", { instanceId }).pipe(
+                Effect.as(undefined),
+              );
+            }),
           );
         },
         enrichSnapshot: ({ snapshot, publishSnapshot }) =>

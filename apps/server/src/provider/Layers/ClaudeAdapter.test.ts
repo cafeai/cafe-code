@@ -1767,7 +1767,18 @@ describe("ClaudeAdapterLive", () => {
   });
 
   it.effect("maps Claude reasoning deltas, streamed tool inputs, and tool results", () => {
-    const harness = makeHarness();
+    const resourceUri = "mcp://private-provider/result.txt?token=do-not-persist";
+    const nativeEvents: Array<{ event?: { payload?: unknown } }> = [];
+    const harness = makeHarness({
+      nativeEventLogger: {
+        filePath: "memory://claude-resource-link-native-events",
+        write: (event) => {
+          nativeEvents.push(event as (typeof nativeEvents)[number]);
+          return Effect.void;
+        },
+        close: () => Effect.void,
+      },
+    });
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
 
@@ -1857,7 +1868,28 @@ describe("ClaudeAdapterLive", () => {
             {
               type: "tool_result",
               tool_use_id: "tool-grep-1",
-              content: "src/example.ts:1:foo",
+              // Claude Code 2.1.258 / Agent SDK 0.3.258 render an MCP
+              // resource_link into this text block while retaining the
+              // structured resourceLinks metadata beside the user message.
+              content: [
+                {
+                  type: "text",
+                  text: `src/example.ts:1:foo\n[Resource link: result.txt] ${resourceUri}`,
+                },
+              ],
+            },
+          ],
+        },
+        tool_use_result: {
+          resourceLinks: [
+            {
+              uri: resourceUri,
+              name: "result.txt",
+              title: "Search result",
+              description: `A bounded provider resource at ${resourceUri}`,
+              mimeType: "text/plain",
+              size: 42,
+              annotations: { secret: "provider-resource-annotation" },
             },
           ],
         },
@@ -1930,20 +1962,188 @@ describe("ClaudeAdapterLive", () => {
       );
       assert.equal(toolResultUpdated?.type, "item.updated");
       if (toolResultUpdated?.type === "item.updated") {
-        assert.equal(
-          (
-            toolResultUpdated.payload.data as {
-              result?: { content?: string };
-            }
-          ).result?.content,
-          "src/example.ts:1:foo",
+        const data = toolResultUpdated.payload.data as {
+          result?: { content?: Array<{ type?: string; text?: string }> };
+          resourceLinks?: Array<Record<string, unknown>>;
+        };
+        const redactedToolText = data.result?.content?.[0]?.text ?? "";
+        assert.include(redactedToolText, "src/example.ts:1:foo");
+        assert.include(redactedToolText, "[Resource link: result.txt]");
+        assert.match(redactedToolText, /\[resource URI omitted; ref sha256:[a-f0-9]{64}\]/);
+        assert.deepInclude(data.resourceLinks?.[0] ?? {}, {
+          name: "result.txt",
+          title: "Search result",
+          mimeType: "text/plain",
+          size: 42,
+          scheme: "mcp",
+        });
+        assert.match(String(data.resourceLinks?.[0]?.referenceId), /^sha256:[a-f0-9]{64}$/);
+        assert.include(redactedToolText, String(data.resourceLinks?.[0]?.referenceId));
+        assert.include(
+          String(data.resourceLinks?.[0]?.description),
+          "A bounded provider resource at [resource URI omitted; ref sha256:",
         );
+        const serializedRaw = JSON.stringify(toolResultUpdated.raw?.payload);
+        assert.notInclude(serializedRaw, resourceUri);
+        assert.notInclude(serializedRaw, "do-not-persist");
+        assert.notInclude(serializedRaw, "provider-resource-annotation");
+        assert.notInclude(serializedRaw, "src/example.ts:1:foo");
       }
+
+      const serializedRuntimeEvents = JSON.stringify(runtimeEvents);
+      assert.notInclude(serializedRuntimeEvents, resourceUri);
+      assert.notInclude(serializedRuntimeEvents, "do-not-persist");
+      assert.notInclude(serializedRuntimeEvents, "provider-resource-annotation");
+      assert.include(serializedRuntimeEvents, "src/example.ts:1:foo");
+
+      const serializedThread = JSON.stringify(yield* adapter.readThread(session.threadId));
+      assert.notInclude(serializedThread, resourceUri);
+      assert.notInclude(serializedThread, "do-not-persist");
+      assert.include(serializedThread, "src/example.ts:1:foo");
+
+      const serializedNativeEvents = JSON.stringify(nativeEvents);
+      assert.notInclude(serializedNativeEvents, resourceUri);
+      assert.notInclude(serializedNativeEvents, "do-not-persist");
+      assert.notInclude(serializedNativeEvents, "provider-resource-annotation");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
     );
   });
+
+  it.effect(
+    "quarantines tool results when resource-link metadata exceeds inspection bounds",
+    () => {
+      const overflowResourceUri =
+        "mcp://private-provider/overflow-report?bearer=entry-101-must-not-persist";
+      const nativeEvents: Array<{ event?: { payload?: unknown } }> = [];
+      const harness = makeHarness({
+        nativeEventLogger: {
+          filePath: "memory://claude-resource-link-overflow-native-events",
+          write: (event) => {
+            nativeEvents.push(event as (typeof nativeEvents)[number]);
+            return Effect.void;
+          },
+          close: () => Effect.void,
+        },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 9).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "exercise resource overflow quarantine",
+          attachments: [],
+        });
+
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "sdk-session-resource-overflow",
+          uuid: "stream-resource-overflow-tool",
+          parent_tool_use_id: null,
+          event: {
+            type: "content_block_start",
+            index: 0,
+            content_block: {
+              type: "tool_use",
+              id: "tool-resource-overflow",
+              name: "Grep",
+              input: {},
+            },
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "user",
+          session_id: "sdk-session-resource-overflow",
+          uuid: "user-resource-overflow-result",
+          parent_tool_use_id: null,
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "tool-resource-overflow",
+                // Deliberately avoid Claude's standard `[Resource link: …] URI`
+                // rendering. The URI is known only to structured entry 101, so
+                // bounded exact redaction cannot see it and must fail closed.
+                content: [
+                  {
+                    type: "text",
+                    text: `Useful-but-untrusted provider output: ${overflowResourceUri}`,
+                  },
+                ],
+              },
+            ],
+          },
+          tool_use_result: {
+            resourceLinks: [
+              ...Array.from({ length: 100 }, (_, index) => ({
+                uri: `mcp://bounded-provider/resource-${index}`,
+                name: `resource-${index}`,
+              })),
+              {
+                uri: overflowResourceUri,
+                name: "overflow-report",
+                annotations: { secret: "overflow-annotation-must-not-persist" },
+              },
+            ],
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          errors: [],
+          session_id: "sdk-session-resource-overflow",
+          uuid: "result-resource-overflow",
+        } as unknown as SDKMessage);
+
+        const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+        const toolResultUpdated = runtimeEvents.find(
+          (event) =>
+            event.type === "item.updated" &&
+            (event.payload.data as { result?: unknown } | undefined)?.result !== undefined,
+        );
+        assert.equal(toolResultUpdated?.type, "item.updated");
+        if (toolResultUpdated?.type === "item.updated") {
+          assert.deepEqual((toolResultUpdated.payload.data as { result?: unknown }).result, {
+            type: "tool_result",
+            content: "[tool result omitted: resource-link metadata exceeded safety limit]",
+          });
+        }
+
+        const serializedRuntimeEvents = JSON.stringify(runtimeEvents);
+        assert.notInclude(serializedRuntimeEvents, overflowResourceUri);
+        assert.notInclude(serializedRuntimeEvents, "entry-101-must-not-persist");
+        assert.notInclude(serializedRuntimeEvents, "overflow-annotation-must-not-persist");
+        assert.notInclude(serializedRuntimeEvents, "Useful-but-untrusted provider output");
+
+        const serializedThread = JSON.stringify(yield* adapter.readThread(session.threadId));
+        assert.notInclude(serializedThread, overflowResourceUri);
+        assert.notInclude(serializedThread, "entry-101-must-not-persist");
+        assert.notInclude(serializedThread, "Useful-but-untrusted provider output");
+        assert.include(serializedThread, "resource-link metadata exceeded safety limit");
+
+        const serializedNativeEvents = JSON.stringify(nativeEvents);
+        assert.notInclude(serializedNativeEvents, overflowResourceUri);
+        assert.notInclude(serializedNativeEvents, "entry-101-must-not-persist");
+        assert.notInclude(serializedNativeEvents, "overflow-annotation-must-not-persist");
+        assert.notInclude(serializedNativeEvents, "Useful-but-untrusted provider output");
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
 
   it.effect("falls back to a default plan step label for blank TodoWrite content", () => {
     const harness = makeHarness();
@@ -2616,6 +2816,25 @@ describe("ClaudeAdapterLive", () => {
         task_id: "native-task-start",
         status: "completed",
         summary: "Done",
+        resource_links: [
+          {
+            uri: "mcp://private-provider/report?bearer=do-not-persist",
+            name: "report",
+            description: "Provider report",
+            mimeType: "text/markdown",
+            annotations: { secret: sentinel },
+          },
+          {
+            uri: "mcp://private-provider/report?bearer=do-not-persist",
+            name: "duplicate-report",
+          },
+          { uri: "mcp://missing-name" },
+          { uri: `mcp://${"x".repeat(17_000)}`, name: "oversized-uri" },
+          ...Array.from({ length: 55 }, (_, index) => ({
+            uri: `mcp://private-provider/extra-${index}`,
+            name: `extra-${index}`,
+          })),
+        ],
         output_file: sentinel,
         secret_provider_field: sentinel,
         session_id: "native-session",
@@ -2636,7 +2855,7 @@ describe("ClaudeAdapterLive", () => {
         uuid: "native-background-uuid",
       } as unknown as SDKMessage);
 
-      yield* Fiber.join(eventsFiber);
+      const taskEvents = Array.from(yield* Fiber.join(eventsFiber));
       for (const method of [
         "claude/system/task_started",
         "claude/system/task_updated",
@@ -2657,6 +2876,24 @@ describe("ClaudeAdapterLive", () => {
         (record) => record.event?.method === "claude/system/task_notification",
       )?.event?.payload as Record<string, unknown>;
       assert.notProperty(notificationPayload, "output_file");
+      assert.notInclude(JSON.stringify(notificationPayload), "mcp://private-provider");
+      assert.notInclude(JSON.stringify(notificationPayload), "bearer=do-not-persist");
+      const completed = taskEvents.find((event) => event.type === "task.completed");
+      assert.equal(completed?.type, "task.completed");
+      if (completed?.type === "task.completed") {
+        assert.lengthOf(completed.payload.resourceLinks ?? [], 50);
+        assert.notInclude(JSON.stringify(completed.payload.resourceLinks), sentinel);
+        assert.deepInclude(completed.payload.resourceLinks?.[0] ?? {}, {
+          name: "report",
+          description: "Provider report",
+          mimeType: "text/markdown",
+          scheme: "mcp",
+        });
+        assert.match(
+          String(completed.payload.resourceLinks?.[0]?.referenceId),
+          /^sha256:[a-f0-9]{64}$/,
+        );
+      }
       const updatePayload = nativeEvents.find(
         (record) => record.event?.method === "claude/system/task_updated",
       )?.event?.payload as { patch?: Record<string, unknown> };
@@ -4920,6 +5157,8 @@ describe("ClaudeAdapterLive", () => {
               cachedInputTokens: 15_939,
               cacheWriteInputTokens: 395_871,
               outputTokens: 3,
+              reasoningOutputTokens: 0,
+              lastReasoningOutputTokens: 0,
               maxTokens: 1_000_000,
             },
           });
@@ -4937,6 +5176,8 @@ describe("ClaudeAdapterLive", () => {
               cachedInputTokens: 15_939,
               cacheWriteInputTokens: 395_871,
               outputTokens: 3,
+              reasoningOutputTokens: 0,
+              lastReasoningOutputTokens: 0,
               maxTokens: 1_000_000,
             },
           });
@@ -5730,11 +5971,24 @@ describe("ClaudeAdapterLive", () => {
           cache_creation_input_tokens: 2715,
           cache_read_input_tokens: 21144,
           output_tokens: 679,
+          output_tokens_details: {
+            thinking_tokens: 740,
+          },
         },
         modelUsage: {
           "claude-opus-4-6": {
             contextWindow: 200000,
             maxOutputTokens: 64000,
+            // Cumulative main-loop reasoning. It is already a subset of this
+            // model's output and must not inflate `outputTokens` below.
+            thinkingTokens: 900,
+          },
+          "claude-haiku-4-5": {
+            contextWindow: 200000,
+            maxOutputTokens: 64000,
+            // ModelUsage includes query-pipeline sidechains/subagents that the
+            // result.usage main-loop aggregate intentionally excludes.
+            thinkingTokens: 100,
           },
         },
       } as unknown as SDKMessage);
@@ -5752,10 +6006,104 @@ describe("ClaudeAdapterLive", () => {
             cachedInputTokens: 21144,
             cacheWriteInputTokens: 2715,
             outputTokens: 679,
+            reasoningOutputTokens: 679,
+            lastReasoningOutputTokens: 679,
+            totalReasoningOutputTokens: 1000,
             maxTokens: 200000,
           },
         });
       }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("emits explicit output and reasoning resets for each Claude message", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const usageEventsFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "thread.token-usage.updated",
+      ).pipe(Stream.take(4), Stream.runCollect, Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "exercise two message counters",
+        attachments: [],
+      });
+
+      for (const message of [
+        {
+          type: "stream_event",
+          event: {
+            type: "message_start",
+            message: { usage: { input_tokens: 10, output_tokens: 0 } },
+          },
+          session_id: "sdk-session-reasoning-reset",
+          uuid: "reasoning-reset-start-1",
+          parent_tool_use_id: null,
+        },
+        {
+          type: "stream_event",
+          event: {
+            type: "message_delta",
+            usage: {
+              output_tokens: 100,
+              output_tokens_details: { thinking_tokens: 40 },
+            },
+          },
+          session_id: "sdk-session-reasoning-reset",
+          uuid: "reasoning-reset-delta-1",
+          parent_tool_use_id: null,
+        },
+        {
+          type: "stream_event",
+          event: {
+            type: "message_start",
+            message: { usage: { input_tokens: 20, output_tokens: 0 } },
+          },
+          session_id: "sdk-session-reasoning-reset",
+          uuid: "reasoning-reset-start-2",
+          parent_tool_use_id: null,
+        },
+        {
+          type: "stream_event",
+          event: {
+            type: "message_delta",
+            usage: {
+              output_tokens: 150,
+              output_tokens_details: { thinking_tokens: 60 },
+            },
+          },
+          session_id: "sdk-session-reasoning-reset",
+          uuid: "reasoning-reset-delta-2",
+          parent_tool_use_id: null,
+        },
+      ]) {
+        harness.query.emit(message as unknown as SDKMessage);
+      }
+
+      const usageEvents = Array.from(yield* Fiber.join(usageEventsFiber));
+      assert.deepEqual(
+        usageEvents.map((event) => ({
+          outputTokens: event.payload.usage.outputTokens,
+          reasoningOutputTokens: event.payload.usage.reasoningOutputTokens,
+          lastReasoningOutputTokens: event.payload.usage.lastReasoningOutputTokens,
+        })),
+        [
+          { outputTokens: 0, reasoningOutputTokens: 0, lastReasoningOutputTokens: 0 },
+          { outputTokens: 100, reasoningOutputTokens: 40, lastReasoningOutputTokens: 40 },
+          { outputTokens: 0, reasoningOutputTokens: 0, lastReasoningOutputTokens: 0 },
+          { outputTokens: 150, reasoningOutputTokens: 60, lastReasoningOutputTokens: 60 },
+        ],
+      );
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

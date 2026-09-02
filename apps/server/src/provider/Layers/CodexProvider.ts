@@ -39,6 +39,7 @@ import {
   isCommandMissingCause,
   parseGenericCliVersion,
   spawnAndCollect,
+  terminateProbeChild,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
@@ -881,22 +882,147 @@ function parseCodexSkillsListResponse(
   });
 }
 
-const requestAllCodexModels = Effect.fn("requestAllCodexModels")(function* (
+// Model picker refreshes are fed by provider-owned, opaque cursor pages. Keep
+// both network/process work and retained memory finite even if a future or
+// compromised provider repeats cursors, ignores its own page size, or exposes
+// an unexpectedly large catalogue.
+export const CODEX_MODEL_LIST_MAX_PAGES = 32;
+export const CODEX_MODEL_LIST_MAX_MODELS = 512;
+const CODEX_MODEL_LIST_PAGE_SIZE = 100;
+const CODEX_MODEL_LIST_CHILD_TERMINATION_GRACE = Duration.seconds(1);
+
+export const requestAllCodexModelsWithClient = Effect.fn("requestAllCodexModels")(function* (
   client: CodexClient.CodexAppServerClientShape,
 ) {
   const models: ServerProviderModel[] = [];
-  let cursor: string | null | undefined = undefined;
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
 
-  do {
-    const response: CodexSchema.V2ModelListResponse = yield* client.request(
-      "model/list",
-      cursor ? { cursor } : {},
-    );
-    models.push(...parseCodexModelListResponse(response));
-    cursor = response.nextCursor;
-  } while (cursor);
+  for (let pageIndex = 0; pageIndex < CODEX_MODEL_LIST_MAX_PAGES; pageIndex += 1) {
+    const remainingCapacity = CODEX_MODEL_LIST_MAX_MODELS - models.length;
+    const response: CodexSchema.V2ModelListResponse = yield* client.request("model/list", {
+      limit: Math.min(CODEX_MODEL_LIST_PAGE_SIZE, remainingCapacity),
+      ...(cursor !== undefined ? { cursor } : {}),
+    });
+    const pageModels = parseCodexModelListResponse(response);
+    if (pageModels.length > remainingCapacity) {
+      return yield* Effect.fail(
+        CodexErrors.CodexAppServerRequestError.internalError(
+          "Codex model catalogue exceeded Cafe's bounded model limit",
+        ),
+      );
+    }
+    models.push(...pageModels);
 
-  return models;
+    const nextCursor = response.nextCursor ?? undefined;
+    if (nextCursor === undefined || nextCursor.length === 0) {
+      return models;
+    }
+    if (models.length >= CODEX_MODEL_LIST_MAX_MODELS) {
+      return yield* Effect.fail(
+        CodexErrors.CodexAppServerRequestError.internalError(
+          "Codex model catalogue exceeded Cafe's bounded model limit",
+        ),
+      );
+    }
+    if (seenCursors.has(nextCursor)) {
+      return yield* Effect.fail(
+        CodexErrors.CodexAppServerRequestError.internalError(
+          "Codex model catalogue pagination returned a repeated cursor",
+        ),
+      );
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+
+  return yield* Effect.fail(
+    CodexErrors.CodexAppServerRequestError.internalError(
+      "Codex model catalogue exceeded Cafe's bounded page limit",
+    ),
+  );
+});
+
+export function makeCodexModelListCommand(input: {
+  readonly binaryPath: string;
+  readonly homePath?: string;
+  readonly cwd: string;
+  readonly environment?: NodeJS.ProcessEnv;
+}): ChildProcess.StandardCommand {
+  const resolvedHomePath = input.homePath ? expandHomePath(input.homePath) : undefined;
+  return ChildProcess.make(input.binaryPath, ["app-server"], {
+    cwd: input.cwd,
+    env: {
+      ...(input.environment ?? process.env),
+      ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+    },
+    shell: process.platform === "win32",
+    // Match disposable CLI probe ownership: isolate the POSIX child tree and
+    // leave an unconditional SIGKILL scope-finalizer backstop. The explicit
+    // cleanup below still gives the provider one bounded graceful interval.
+    killSignal: "SIGKILL",
+    detached: process.platform !== "win32",
+  });
+}
+
+export function finalizeCodexModelListRefresh(
+  upstreamModels: ReadonlyArray<ServerProviderModel>,
+  customModels: ReadonlyArray<string>,
+): ReadonlyArray<ServerProviderModel> | undefined {
+  // Custom settings supplement provider truth; they cannot manufacture a
+  // successful refresh when the provider returned an empty catalogue.
+  return upstreamModels.length === 0
+    ? undefined
+    : appendCustomCodexModels(upstreamModels, customModels);
+}
+
+/**
+ * Read only Codex's live model catalogue.
+ *
+ * Codex 0.152 refreshes `model/list` when its native picker opens. Cafe uses
+ * the same provider boundary, but intentionally does not couple that user
+ * gesture to `account/read`, rate-limit reads, skills, or the CLI health/auth
+ * probes. The caller owns the scope and timeout so an unresponsive disposable
+ * app-server is interrupted and reaped without clearing the cached models.
+ */
+export const readCodexAppServerModels = Effect.fn("readCodexAppServerModels")(function* (input: {
+  readonly binaryPath: string;
+  readonly homePath?: string;
+  readonly cwd: string;
+  readonly customModels?: ReadonlyArray<string>;
+  readonly environment?: NodeJS.ProcessEnv;
+}) {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  return yield* Effect.acquireUseRelease(
+    spawner.spawn(makeCodexModelListCommand(input)).pipe(
+      Effect.mapError(
+        (cause) =>
+          // Deliberately omit the configured binary/home paths. Picker refresh
+          // failures are logged only as a fixed phase marker by the driver.
+          new CodexErrors.CodexAppServerSpawnError({ cause }),
+      ),
+    ),
+    (child) =>
+      Effect.gen(function* () {
+        const clientContext = yield* Layer.build(CodexClient.layerChildProcess(child));
+        const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+          Effect.provide(clientContext),
+        );
+
+        yield* client.request("initialize", buildCodexInitializeParams());
+        yield* client.notify("initialized", undefined);
+        const models = yield* requestAllCodexModelsWithClient(client);
+        // A custom-model setting must not turn an empty provider response into
+        // an apparently authoritative success. Keep the stale catalogue intact
+        // until Codex itself returns at least one model.
+        return finalizeCodexModelListRefresh(models, input.customModels ?? []);
+      }),
+    // Effect's process scope sends the configured SIGKILL as a final backstop,
+    // but its force-kill timeout does not bound the later exit wait. The
+    // acquire/use/release bracket closes the post-spawn interruption gap and
+    // explicitly waits for TERM, then KILL, before scope release.
+    (child) => terminateProbeChild(child, CODEX_MODEL_LIST_CHILD_TERMINATION_GRACE),
+  );
 });
 
 export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
@@ -978,7 +1104,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
       client.request("skills/list", {
         cwds: [input.cwd],
       }),
-      requestAllCodexModels(client),
+      requestAllCodexModelsWithClient(client),
     ],
     { concurrency: "unbounded" },
   );

@@ -754,6 +754,7 @@ function runtimeEventToActivities(
             ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
             ...(event.payload.summary ? { detail: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
+            ...(event.payload.resourceLinks ? { resourceLinks: event.payload.resourceLinks } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,

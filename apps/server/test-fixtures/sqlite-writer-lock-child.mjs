@@ -33,18 +33,21 @@ function replyAndDisconnect(message) {
   process.send(message, disconnect);
 }
 
-function replyAndExit(message) {
+function replyAndAwaitParentCleanup(message) {
   if (typeof process.send !== "function" || !process.connected) {
     process.exit(0);
+    return;
   }
-  // The parent can begin cleanup as soon as it receives the terminal reply.
-  // Bound the IPC callback race so this process-backed fixture never retains a
-  // closed SQLite handle merely because both sides disconnected concurrently.
-  const forcedExit = setTimeout(() => process.exit(0), 250);
-  process.send(message, () => {
-    clearTimeout(forcedExit);
-    disconnect();
-    process.exit(0);
+  // Keep the IPC channel alive until the parent has consumed the terminal
+  // reply and explicitly disconnects during its `finally` cleanup. Exiting in
+  // this callback is racy: under a loaded CI runner Node can publish the clean
+  // child `exit` event before the parent drains the already-sent IPC message.
+  // The parent's bounded graceful/forced termination remains the backstop if
+  // either side fails before that acknowledgement-by-disconnect occurs.
+  process.send(message, (error) => {
+    if (error != null) {
+      disconnect();
+    }
   });
 }
 
@@ -71,6 +74,7 @@ function isHeldWriteCommand(command) {
     !Number.isSafeInteger(command.holdMs) ||
     command.holdMs < 1 ||
     command.holdMs > 1_000 ||
+    (command.releaseOnCommand !== undefined && typeof command.releaseOnCommand !== "boolean") ||
     (command.announceAttempt !== undefined && typeof command.announceAttempt !== "boolean")
   ) {
     return false;
@@ -138,17 +142,37 @@ process.once("message", (input) => {
         // parent exercises node:sqlite's busy timeout. The parent process can
         // block synchronously in StatementSync without delaying this timer.
         process.send?.("locked");
-        setTimeout(() => {
+        const commitAndReply = () => {
           try {
             database.exec("COMMIT;");
             const reply = command.operation === "write" ? "committed" : "retired";
             closeDatabase();
-            replyAndExit(reply);
+            replyAndAwaitParentCleanup(reply);
           } catch {
             closeDatabase();
-            replyAndExit("failed");
+            replyAndAwaitParentCleanup("failed");
           }
-        }, command.holdMs);
+        };
+        if (command.releaseOnCommand === true) {
+          // Retry-count tests cannot use a wall-clock hold to decide which
+          // attempt wins: process scheduling varies dramatically across the
+          // three CI operating systems. An explicit release lets the parent
+          // prove the first busy timeout occurred before this writer commits.
+          process.once("message", (release) => {
+            if (
+              typeof release === "object" &&
+              release !== null &&
+              release.type === "release-write"
+            ) {
+              commitAndReply();
+              return;
+            }
+            closeDatabase();
+            replyAndAwaitParentCleanup("invalid-release");
+          });
+        } else {
+          setTimeout(commitAndReply, command.holdMs);
+        }
         return;
       }
 

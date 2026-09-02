@@ -243,6 +243,7 @@ async function mountPicker(props: {
   triggerVariant?: "ghost" | "outline";
   compact?: boolean;
   hostWidth?: number;
+  onRequestModelsRefresh?: (instanceId: ProviderInstanceId) => void;
 }) {
   const host = document.createElement("div");
   if (props.hostWidth !== undefined) {
@@ -251,6 +252,7 @@ async function mountPicker(props: {
   }
   document.body.append(host);
   const onInstanceModelChange = vi.fn();
+  const onRequestModelsRefresh = props.onRequestModelsRefresh ?? vi.fn();
   const providers = props.providers ?? TEST_PROVIDERS;
   const instanceEntries = sortProviderInstanceEntries(deriveProviderInstanceEntries(providers));
   const activeInstanceId = props.activeInstanceId ?? CODEX_INSTANCE_ID;
@@ -270,6 +272,7 @@ async function mountPicker(props: {
       modelOptionsByInstance={modelOptionsByInstance}
       {...(props.compact !== undefined ? { compact: props.compact } : {})}
       triggerVariant={props.triggerVariant}
+      onRequestModelsRefresh={onRequestModelsRefresh}
       onInstanceModelChange={onInstanceModelChange}
     />,
     { container: host },
@@ -278,6 +281,7 @@ async function mountPicker(props: {
   return {
     host,
     onInstanceModelChange,
+    onRequestModelsRefresh,
     // Back-compat alias used by callers that still assert on the old callback
     // name. Delegates to the instance-aware mock so existing expectations work.
     get onProviderModelChange() {
@@ -323,6 +327,35 @@ describe("ProviderModelPicker", () => {
     document.body.innerHTML = "";
     localStorage.clear();
     await __resetLocalApiForTests();
+  });
+
+  it("requests one bounded catalogue refresh for each closed-to-open transition", async () => {
+    const onRequestModelsRefresh = vi.fn();
+    const mounted = await mountPicker({
+      activeInstanceId: CODEX_INSTANCE_ID,
+      model: "gpt-5.6-sol",
+      lockedProvider: ProviderDriverKind.make("codex"),
+      onRequestModelsRefresh,
+    });
+
+    try {
+      const trigger = page.getByRole("button");
+      await trigger.click();
+      await vi.waitFor(() => {
+        expect(onRequestModelsRefresh).toHaveBeenCalledTimes(1);
+        expect(onRequestModelsRefresh).toHaveBeenLastCalledWith(CODEX_INSTANCE_ID);
+      });
+
+      // Rerenders while the picker remains open must not generate duplicate
+      // model/list requests; close and reopen is the next explicit refresh.
+      await userEvent.keyboard("{Escape}");
+      await trigger.click();
+      await vi.waitFor(() => {
+        expect(onRequestModelsRefresh).toHaveBeenCalledTimes(2);
+      });
+    } finally {
+      await mounted.cleanup();
+    }
   });
 
   it("uses available compact-footer width to show Daybreak Blue without clipping", async () => {

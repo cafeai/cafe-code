@@ -1334,7 +1334,14 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             auth: { status: "authenticated" },
             checkedAt: "2026-04-29T10:00:00.000Z",
             version: "1.0.0",
-            models: [],
+            models: [
+              {
+                slug: "gpt-retired-static-fallback",
+                name: "GPT Retired Static Fallback",
+                isCustom: false,
+                capabilities: null,
+              },
+            ],
             slashCommands: [],
             skills: [],
           } as const satisfies ServerProvider;
@@ -1350,6 +1357,17 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               },
               checkedAt: "2026-04-29T10:01:00.000Z",
             },
+          } as const satisfies ServerProvider;
+          const modelRefreshedProvider = {
+            ...cachedProvider,
+            models: [
+              {
+                slug: "gpt-model-refresh-only",
+                name: "GPT Model Refresh Only",
+                isCustom: false,
+                capabilities: null,
+              },
+            ],
           } as const satisfies ServerProvider;
           const instance = {
             instanceId: codexInstanceId,
@@ -1368,6 +1386,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               getSnapshot: Effect.succeed(cachedProvider),
               refresh: Effect.die(new Error("simulated refresh failure")),
               refreshAccountUsage: Effect.succeed(usageRefreshedProvider),
+              refreshModels: Effect.succeed(modelRefreshedProvider),
               streamChanges: Stream.empty,
             },
             adapter: {} as ProviderInstance["adapter"],
@@ -1408,8 +1427,138 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             assert.deepStrictEqual(yield* registry.refreshInstanceAccountUsage(codexInstanceId), [
               usageRefreshedProvider,
             ]);
+            assert.deepStrictEqual(yield* registry.refreshInstanceModels!(codexInstanceId), [
+              {
+                ...modelRefreshedProvider,
+                accountRateLimits: usageRefreshedProvider.accountRateLimits,
+              },
+            ]);
           }).pipe(Effect.provide(runtimeServices));
         }),
+      );
+
+      it.effect(
+        "keeps the internal model timeout bounded after caller disconnect without syncing a replaced instance",
+        () =>
+          Effect.gen(function* () {
+            const codexDriver = ProviderDriverKind.make("codex");
+            const codexInstanceId = ProviderInstanceId.make("codex");
+            const refreshStarted = yield* Deferred.make<void>();
+            const refreshTimedOut = yield* Deferred.make<void>();
+            const cachedProvider = {
+              instanceId: codexInstanceId,
+              driver: codexDriver,
+              status: "ready",
+              enabled: true,
+              installed: true,
+              auth: { status: "authenticated" },
+              checkedAt: "2026-04-29T10:00:00.000Z",
+              version: "1.0.0",
+              models: [
+                {
+                  slug: "gpt-current",
+                  name: "GPT Current",
+                  isCustom: false,
+                  capabilities: null,
+                },
+              ],
+              slashCommands: [],
+              skills: [],
+            } as const satisfies ServerProvider;
+            const staleModelProvider = {
+              ...cachedProvider,
+              models: [
+                {
+                  slug: "gpt-stale-old-instance",
+                  name: "GPT Stale Old Instance",
+                  isCustom: false,
+                  capabilities: null,
+                },
+              ],
+            } as const satisfies ServerProvider;
+            const makeInstance = (refreshModels: Effect.Effect<ServerProvider>) =>
+              ({
+                instanceId: codexInstanceId,
+                driverKind: codexDriver,
+                continuationIdentity: {
+                  driverKind: codexDriver,
+                  continuationKey: "codex:instance:codex",
+                },
+                displayName: undefined,
+                enabled: true,
+                snapshot: {
+                  maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+                    provider: codexDriver,
+                    packageName: null,
+                  }),
+                  getSnapshot: Effect.succeed(cachedProvider),
+                  refresh: Effect.succeed(cachedProvider),
+                  refreshModels,
+                  streamChanges: Stream.empty,
+                },
+                adapter: {} as ProviderInstance["adapter"],
+                textGeneration: {} as ProviderInstance["textGeneration"],
+              }) satisfies ProviderInstance;
+            const firstInstance = makeInstance(
+              Deferred.succeed(refreshStarted, undefined).pipe(
+                Effect.andThen(Effect.never),
+                Effect.timeoutOption("15 seconds"),
+                Effect.tap(() => Deferred.succeed(refreshTimedOut, undefined)),
+                Effect.as(staleModelProvider),
+              ),
+            );
+            const replacementInstance = makeInstance(Effect.succeed(cachedProvider));
+            const currentInstanceRef = yield* Ref.make<ProviderInstance>(firstInstance);
+            const instanceRegistryLayer = Layer.succeed(ProviderInstanceRegistry, {
+              getInstance: (instanceId) =>
+                instanceId === codexInstanceId
+                  ? Ref.get(currentInstanceRef).pipe(Effect.map((instance) => instance))
+                  : Effect.succeed(undefined),
+              listInstances: Ref.get(currentInstanceRef).pipe(
+                Effect.map((instance) => [instance] as const),
+              ),
+              listUnavailable: Effect.succeed([]),
+              streamChanges: Stream.empty,
+              subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
+                PubSub.subscribe(pubsub),
+              ),
+            });
+            const scope = yield* Scope.make();
+            yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+            const runtimeServices = yield* Layer.build(
+              ProviderRegistryLive.pipe(
+                Layer.provideMerge(instanceRegistryLayer),
+                Layer.provideMerge(
+                  ServerConfig.layerTest(process.cwd(), {
+                    prefix: "t3-provider-registry-stale-model-refresh-",
+                  }),
+                ),
+                Layer.provideMerge(NodeServices.layer),
+              ),
+            ).pipe(Scope.provide(scope));
+
+            yield* Effect.gen(function* () {
+              const registry = yield* ProviderRegistry;
+              const refreshFiber = yield* registry.refreshInstanceModels!(codexInstanceId).pipe(
+                Effect.forkChild,
+              );
+              yield* Deferred.await(refreshStarted);
+
+              // Model refresh synchronization deliberately ignores a short-lived
+              // RPC caller disconnect, but that outer uninterruptible boundary
+              // must not mask the driver's own timeout. Start interruption in a
+              // separate fiber because Fiber.interrupt waits for the bounded
+              // critical section to finish.
+              const disconnectFiber = yield* Fiber.interrupt(refreshFiber).pipe(Effect.forkChild);
+              yield* Effect.yieldNow;
+              yield* Ref.set(currentInstanceRef, replacementInstance);
+              yield* TestClock.adjust("15 seconds");
+              yield* Deferred.await(refreshTimedOut);
+              yield* Fiber.join(disconnectFiber);
+
+              assert.deepStrictEqual(yield* registry.getProviders, [cachedProvider]);
+            }).pipe(Effect.provide(runtimeServices));
+          }),
       );
 
       it.effect("keeps consuming registry changes after one sync fails", () =>
@@ -2305,9 +2454,33 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               "claude-sonnet-5",
             ],
           },
+          {
+            version: "2.1.256",
+            slugs: [
+              "claude-opus-5",
+              "claude-opus-4-7",
+              "claude-opus-4-8",
+              "claude-fable-5",
+              "claude-sonnet-5",
+            ],
+            upgrade:
+              "Claude Code v2.1.256 is too old for Claude Fable 5.1. Upgrade to v2.1.257 or newer to access it.",
+          },
+          {
+            version: "2.1.257",
+            slugs: [
+              "claude-opus-5",
+              "claude-fable-5-1",
+              "claude-opus-4-7",
+              "claude-opus-4-8",
+              "claude-fable-5",
+              "claude-sonnet-5",
+            ],
+          },
         ];
         const gatedSlugs = [
           "claude-opus-5",
+          "claude-fable-5-1",
           "claude-opus-4-7",
           "claude-opus-4-8",
           "claude-fable-5",
@@ -2352,6 +2525,43 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             ? fableContext.options.map((option) => option.id)
             : undefined,
           ["200k", "1m"],
+        );
+
+        const fable51 = getBuiltInClaudeModelsForVersion("2.1.257").find(
+          (model) => model.slug === "claude-fable-5-1",
+        );
+        const fable51Descriptors = fable51?.capabilities?.optionDescriptors ?? [];
+        const fable51Effort = fable51Descriptors.find(
+          (descriptor) => descriptor.type === "select" && descriptor.id === "effort",
+        );
+        const fable51Context = fable51Descriptors.find(
+          (descriptor) => descriptor.type === "select" && descriptor.id === "contextWindow",
+        );
+        assert.deepStrictEqual(
+          fable51Effort?.type === "select"
+            ? {
+                options: fable51Effort.options.map((option) => option.id),
+                default: fable51Effort.options.find((option) => option.isDefault),
+                currentValue: fable51Effort.currentValue,
+              }
+            : undefined,
+          {
+            options: ["low", "medium", "high", "xhigh", "max"],
+            default: { id: "high", label: "High", isDefault: true },
+            currentValue: "high",
+          },
+        );
+        assert.deepStrictEqual(
+          fable51Context?.type === "select"
+            ? {
+                options: fable51Context.options,
+                currentValue: fable51Context.currentValue,
+              }
+            : undefined,
+          {
+            options: [{ id: "1m", label: "1M", isDefault: true }],
+            currentValue: "1m",
+          },
         );
 
         const sonnet5 = getBuiltInClaudeModelsForVersion("2.1.197").find(

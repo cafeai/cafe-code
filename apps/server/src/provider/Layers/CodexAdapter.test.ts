@@ -396,6 +396,9 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   public readonly closeImpl = vi.fn(() => Promise.resolve(undefined));
 
+  /** Test-only hook that runs after the provider interrupt promise ACKs. */
+  public afterInterruptAcknowledged: Effect.Effect<void> | undefined;
+
   readonly options: CodexSessionRuntimeOptions;
 
   constructor(options: CodexSessionRuntimeOptions) {
@@ -417,7 +420,9 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   }
 
   interruptTurn(turnId?: TurnId) {
-    return Effect.promise(() => this.interruptTurnImpl(turnId));
+    return Effect.promise(() => this.interruptTurnImpl(turnId)).pipe(
+      Effect.andThen(Effect.suspend(() => this.afterInterruptAcknowledged ?? Effect.void)),
+    );
   }
 
   get forkThread() {
@@ -4382,6 +4387,52 @@ scopedLifecycleLayer("CodexAdapterLive scoped lifecycle", (it) => {
         scopedLifecycleRuntimeFactory.factory.mock.calls.length,
         initialFactoryCallCount + 2,
       );
+    }),
+  );
+
+  it.effect("forwards a delayed turn/completed received after interrupt acknowledgement", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("thread-interrupt-delayed-completed");
+      const turnId = asTurnId("turn-interrupt-delayed-completed");
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = scopedLifecycleRuntimeFactory.lastRuntime;
+      assert.ok(runtime);
+      const forwardedFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      const terminalEvent = {
+        id: asEventId("evt-interrupt-delayed-completed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId,
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "turn/completed",
+        payload: {
+          threadId: "provider-thread-interrupt-delayed-completed",
+          turn: { id: turnId, items: [], status: "interrupted" },
+        },
+      } satisfies ProviderEvent;
+
+      // The hook runs after the fake provider promise acknowledges interrupt,
+      // but before CodexAdapter can continue into retireSession. Waiting for
+      // the subscribed stream proves this is the real ACK-to-retirement race
+      // window rather than a trivial post-retirement queue injection.
+      runtime.afterInterruptAcknowledged = runtime
+        .emit(terminalEvent)
+        .pipe(Effect.andThen(Fiber.join(forwardedFiber)), Effect.asVoid);
+
+      yield* adapter.interruptTurn(threadId, turnId);
+      const forwarded = yield* Fiber.join(forwardedFiber);
+
+      assert.equal(forwarded._tag, "Some");
+      assert.equal(forwarded._tag === "Some" ? forwarded.value.type : undefined, "turn.completed");
+      assert.equal(runtime.closeImpl.mock.calls.length, 1);
+      assert.equal(yield* adapter.hasSession(threadId), false);
     }),
   );
 });

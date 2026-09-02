@@ -159,6 +159,10 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     readonly settings: Settings;
     readonly snapshot: ServerProvider;
   }) => Effect.Effect<ServerProviderAccountRateLimits | undefined, ServerSettingsError>;
+  readonly refreshModels?: (input: {
+    readonly settings: Settings;
+    readonly snapshot: ServerProvider;
+  }) => Effect.Effect<ServerProvider["models"] | undefined, ServerSettingsError>;
   readonly enrichSnapshot?: (input: {
     readonly settings: Settings;
     readonly snapshot: ServerProvider;
@@ -239,6 +243,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   const accountUsageSingleFlight = yield* makeSingleFlight<ServerProvider, ServerSettingsError>(
     scope,
   );
+  const modelListSingleFlight = yield* makeSingleFlight<ServerProvider, ServerSettingsError>(scope);
 
   const publishEnrichedSnapshot = Effect.fn("publishEnrichedSnapshot")(function* (
     generation: number,
@@ -496,6 +501,60 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     );
   });
 
+  const applyModelsBase = Effect.fn("applyModels")(function* () {
+    if (!input.refreshModels) {
+      return yield* Ref.get(snapshotStateRef).pipe(Effect.map((state) => state.snapshot));
+    }
+
+    const settings = yield* input.getSettings;
+    const currentState = yield* Ref.get(snapshotStateRef);
+    const models = yield* input.refreshModels({
+      settings,
+      snapshot: currentState.snapshot,
+    });
+    // A picker-open refresh is opportunistic. A timeout, provider restart, or
+    // transient model/list failure must leave the last known-good catalogue
+    // and the user's current selection intact instead of flashing an empty
+    // picker. The Codex callback also treats an empty upstream page as
+    // inconclusive and returns undefined for the same reason.
+    if (models === undefined) {
+      return currentState.snapshot;
+    }
+
+    const nextSnapshot: ServerProvider = {
+      ...currentState.snapshot,
+      models,
+    };
+    if (Equal.equals(currentState.snapshot, nextSnapshot)) {
+      return currentState.snapshot;
+    }
+
+    // Model refreshes can race asynchronous version enrichment in the same
+    // way as usage-only refreshes. Advance the generation and restart that
+    // enrichment from the new snapshot so a stale callback cannot restore an
+    // older model catalogue.
+    const nextGeneration = input.enrichSnapshot
+      ? currentState.enrichmentGeneration + 1
+      : currentState.enrichmentGeneration;
+    yield* Ref.set(snapshotStateRef, {
+      snapshot: nextSnapshot,
+      enrichmentGeneration: nextGeneration,
+    });
+    yield* PubSub.publish(changesPubSub, nextSnapshot);
+    yield* restartSnapshotEnrichment(settings, nextSnapshot, nextGeneration);
+    return nextSnapshot;
+  });
+
+  const refreshModelsSnapshot = Effect.fn("refreshModelsSnapshot")(function* () {
+    // Unlike account usage, a full health refresh does not necessarily query
+    // app-server model/list. Serialize the mutation but keep a dedicated
+    // single flight so overlapping picker opens share exactly one bounded
+    // provider request without skipping the catalogue refresh.
+    return yield* modelListSingleFlight.run(
+      snapshotMutationSemaphore.withPermits(1)(applyModelsBase()),
+    );
+  });
+
   yield* Stream.runForEach(input.streamSettings, (nextSettings) =>
     Effect.asVoid(applySnapshot(nextSettings)),
   ).pipe(Effect.forkScoped);
@@ -563,6 +622,14 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     ...(input.refreshAccountUsage
       ? {
           refreshAccountUsage: refreshAccountUsageSnapshot().pipe(
+            Effect.tapError(Effect.logError),
+            Effect.orDie,
+          ),
+        }
+      : {}),
+    ...(input.refreshModels
+      ? {
+          refreshModels: refreshModelsSnapshot().pipe(
             Effect.tapError(Effect.logError),
             Effect.orDie,
           ),

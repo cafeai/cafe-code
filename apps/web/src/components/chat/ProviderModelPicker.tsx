@@ -3,7 +3,7 @@ import {
   type ProviderDriverKind,
   type ResolvedKeybindingsConfig,
 } from "@cafecode/contracts";
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { VariantProps } from "class-variance-authority";
 import { ChevronDownIcon } from "lucide-react";
 import { Button, buttonVariants } from "../ui/button";
@@ -40,10 +40,14 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   triggerVariant?: VariantProps<typeof buttonVariants>["variant"];
   triggerClassName?: string;
   onOpenChange?: (open: boolean) => void;
+  onRequestModelsRefresh?: (instanceId: ProviderInstanceId) => void;
   onInstanceModelChange: (instanceId: ProviderInstanceId, model: string) => void;
 }) {
   const [uncontrolledIsMenuOpen, setUncontrolledIsMenuOpen] = useState(false);
   const isMenuOpen = props.open ?? uncontrolledIsMenuOpen;
+  const wasMenuOpenRef = useRef(false);
+  const isDisabled = props.disabled;
+  const requestModelsRefresh = props.onRequestModelsRefresh;
 
   // Resolve the active instance entry by exact routing key. The composer
   // resolves fallbacks before rendering this component; if the selected
@@ -84,6 +88,18 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       setModelPickerOpen(false);
     };
   }, [isMenuOpen]);
+
+  useEffect(() => {
+    const wasOpen = wasMenuOpenRef.current;
+    wasMenuOpenRef.current = isMenuOpen;
+    if (!wasOpen && isMenuOpen && !isDisabled) {
+      // Match Codex 0.152's picker-open model/list refresh without holding the
+      // popover closed. Existing props remain rendered while the bounded
+      // server request runs, so selection, keyboard highlight, and stale
+      // options survive both latency and failure.
+      requestModelsRefresh?.(activeInstanceId);
+    }
+  }, [activeInstanceId, isDisabled, isMenuOpen, requestModelsRefresh]);
 
   const handleInstanceModelChange = (instanceId: ProviderInstanceId, model: string) => {
     if (props.disabled) return;

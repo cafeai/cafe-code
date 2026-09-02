@@ -580,6 +580,36 @@ export type RuntimeSubagentPresentation = typeof RuntimeSubagentPresentation.Typ
 export const RuntimeTaskVisibility = Schema.Literals(["visible", "ambient"]);
 export type RuntimeTaskVisibility = typeof RuntimeTaskVisibility.Type;
 
+/**
+ * Inert metadata for a provider resource returned by reference.
+ *
+ * `referenceId` is a host-generated, domain-separated digest of the provider
+ * URI. The URI itself is deliberately excluded from the runtime contract:
+ * provider resource identifiers may contain signed query strings, local paths,
+ * or other bearer material and Cafe does not yet have a trusted open/fetch UX.
+ */
+export const RuntimeResourceLink = Schema.Struct({
+  referenceId: TrimmedNonEmptyStringSchema.check(
+    Schema.isMaxLength(80),
+    Schema.isPattern(/^sha256:[a-f0-9]{64}$/),
+  ),
+  name: TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(512)),
+  title: Schema.optional(TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(512))),
+  description: Schema.optional(TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(2_048))),
+  mimeType: Schema.optional(TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(256))),
+  size: Schema.optional(NonNegativeInt),
+  scheme: Schema.optional(
+    TrimmedNonEmptyStringSchema.check(
+      Schema.isMaxLength(32),
+      Schema.isPattern(/^[a-z][a-z0-9+.-]{0,31}$/),
+    ),
+  ),
+});
+export type RuntimeResourceLink = typeof RuntimeResourceLink.Type;
+
+export const RuntimeResourceLinks = Schema.Array(RuntimeResourceLink).check(Schema.isMaxLength(50));
+export type RuntimeResourceLinks = typeof RuntimeResourceLinks.Type;
+
 const TaskStartedPayload = Schema.Struct({
   taskId: RuntimeTaskId,
   description: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -607,6 +637,7 @@ const TaskCompletedPayload = Schema.Struct({
   usage: Schema.optional(Schema.Unknown),
   visibility: Schema.optional(RuntimeTaskVisibility),
   subagent: Schema.optional(RuntimeSubagentPresentation),
+  resourceLinks: Schema.optional(RuntimeResourceLinks),
 });
 export type TaskCompletedPayload = typeof TaskCompletedPayload.Type;
 

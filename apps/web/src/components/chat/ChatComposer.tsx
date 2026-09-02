@@ -994,6 +994,29 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const selectedCodexRateLimits = shouldSurfaceProviderAccountRateLimits(selectedProviderStatus)
     ? (selectedProviderStatus?.accountRateLimits ?? null)
     : null;
+  const requestProviderModelsRefresh = useCallback(
+    (instanceId: ProviderInstanceId) => {
+      const entry = providerInstanceEntries.find(
+        (candidate) => candidate.instanceId === instanceId,
+      );
+      if (entry?.driverKind !== ProviderDriverKind.make("codex")) {
+        return;
+      }
+
+      try {
+        void requireEnvironmentConnection(environmentId)
+          .client.server.refreshProviders({ instanceId, scope: "models" })
+          // The picker intentionally keeps its stale catalogue on failure.
+          // The server records a redacted phase marker; avoid surfacing raw
+          // provider causes in the renderer console or a disruptive toast.
+          .catch(() => undefined);
+      } catch {
+        // A connection can disappear between the pointer event and this
+        // lookup. The next picker open will retry after reconnect.
+      }
+    },
+    [environmentId, providerInstanceEntries],
+  );
   const selectedProviderModels = useMemo<ReadonlyArray<ServerProvider["models"][number]>>(
     () => selectedProviderEntry?.models ?? [],
     [selectedProviderEntry],
@@ -3070,6 +3093,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   onOpenChange={(open) => {
                     setIsComposerModelPickerOpen(open);
                   }}
+                  onRequestModelsRefresh={requestProviderModelsRefresh}
                   onInstanceModelChange={onProviderModelSelect}
                 />
 

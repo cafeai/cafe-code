@@ -655,6 +655,14 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
                     .includes("INSERT INTO orchestration_message_identity_hydration");
                 if (isIdentityWrite) {
                   compactWriteAttemptCount += 1;
+                  if (scenario === "writer-timeout" && compactWriteAttemptCount === 2) {
+                    // The child deliberately holds the WAL writer until this
+                    // second transaction attempt is constructed. Releasing it
+                    // here proves the first bounded busy timeout occurred while
+                    // avoiding an inherently flaky wall-clock race between the
+                    // retry backoff and a child-process timer.
+                    lockOwner.send({ type: "release-write" });
+                  }
                 }
 
                 const shouldIntercept =
@@ -694,6 +702,8 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
                     type: "hold-write",
                     operation: scenario === "retire-thread" ? "retire-thread" : "write",
                     holdMs: scenario === "writer-exhausted" ? 500 : 50,
+                    releaseOnCommand:
+                      scenario === "writer-timeout" || scenario === "writer-exhausted",
                     ...(scenario === "retire-thread"
                       ? {
                           threadId,
@@ -718,6 +728,11 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
               if (failure._tag === "SqlError") {
                 assert.equal(failure.reason._tag, "LockTimeoutError");
               }
+              // All three bounded attempts have now failed. Release the child
+              // only after observing that typed terminal error so the test
+              // cannot accidentally turn into a late successful retry under
+              // runner scheduling pressure.
+              lockOwner.send({ type: "release-write" });
             } else {
               yield* hydrateLegacyMessageIdentitiesForThread(contendedSql, threadId);
             }

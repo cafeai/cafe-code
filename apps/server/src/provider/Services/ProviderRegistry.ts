@@ -61,6 +61,15 @@ export interface ProviderRegistryShape {
   ) => Effect.Effect<ReadonlyArray<ServerProvider>>;
 
   /**
+   * Refresh only one instance's provider-owned model catalogue. This is a
+   * no-op for drivers that do not expose a bounded model-list path and never
+   * falls back to a full installation/authentication/account probe.
+   */
+  readonly refreshInstanceModels?: (
+    instanceId: ProviderInstanceId,
+  ) => Effect.Effect<ReadonlyArray<ServerProvider>>;
+
+  /**
    * Resolve the maintenance capabilities owned by one live provider instance.
    * Falls back to manual-only capabilities when the instance is not live.
    */

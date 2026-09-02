@@ -13,5 +13,12 @@ export interface ServerProviderShape {
    * bounded usage-only path omit this capability.
    */
   readonly refreshAccountUsage?: Effect.Effect<ServerProvider>;
+  /**
+   * Refresh only the provider-owned model catalogue. This deliberately omits
+   * installation, authentication, account-usage, and skills probes so a
+   * picker-open parity refresh cannot turn into an expensive provider health
+   * check. Providers without a bounded model-list API omit this capability.
+   */
+  readonly refreshModels?: Effect.Effect<ServerProvider>;
   readonly streamChanges: Stream.Stream<ServerProvider>;
 }

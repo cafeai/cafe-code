@@ -61,6 +61,7 @@ import {
   type RuntimeContentStreamKind,
   RuntimeItemId,
   RuntimeRequestId,
+  type RuntimeResourceLink,
   RuntimeTaskId,
   type RuntimeSubagentPresentation,
   type RuntimeTaskVisibility,
@@ -125,6 +126,20 @@ const CLAUDE_TASK_DESCRIPTION_TEXT_LIMIT = 1_000;
 const CLAUDE_TASK_SUMMARY_TEXT_LIMIT = 4_000;
 const CLAUDE_TASK_TOOL_NAME_TEXT_LIMIT = 256;
 const CLAUDE_HOOK_OUTPUT_TEXT_LIMIT = 16_000;
+// Claude Agent SDK 0.3.257 preserves MCP resource links in foreground tool
+// results and background task notifications. Mirror the upstream count and
+// serialized-size ceilings while additionally excluding raw URIs and `_meta`
+// annotations from Cafe's durable/runtime surfaces.
+const CLAUDE_RESOURCE_LINK_LIMIT = 50;
+const CLAUDE_RESOURCE_LINK_INSPECTION_LIMIT = CLAUDE_RESOURCE_LINK_LIMIT * 2;
+const CLAUDE_RESOURCE_LINK_SERIALIZED_BYTES_LIMIT = 64 * 1_024;
+const CLAUDE_RESOURCE_URI_UTF8_BYTES_LIMIT = 16 * 1_024;
+const CLAUDE_RESOURCE_LINK_HASH_DOMAIN = "cafecode/claude/resource-link/v1";
+const CLAUDE_RESOURCE_REDACTION_MAX_DEPTH = 32;
+const CLAUDE_RESOURCE_LINK_OVERFLOW_OMISSION =
+  "[tool result omitted: resource-link metadata exceeded safety limit]";
+const CLAUDE_RESOURCE_LINK_OVERFLOW_TASK_SUMMARY =
+  "Task summary omitted because resource-link metadata exceeded the safety limit.";
 const CLAUDE_SUBAGENT_LABEL_LIMIT = 96;
 const CLAUDE_SUBAGENT_OBJECTIVE_LIMIT = 240;
 const CLAUDE_SUBAGENT_ROLE_LIMIT = 80;
@@ -906,6 +921,233 @@ function boundedClaudeProviderText(value: unknown, limit: number): string | unde
   return normalized.length > limit ? `${normalized.slice(0, limit - 3)}...` : normalized;
 }
 
+function claudeResourceLinkScheme(uri: string): string | undefined {
+  // Avoid URL parsing here: MCP permits provider-defined URI schemes and Cafe
+  // only needs a non-authoritative display hint. A strict scheme prefix keeps
+  // this inert and prevents a malformed resource identifier from being treated
+  // as a path or navigable URL.
+  const match = /^([A-Za-z][A-Za-z0-9+.-]{0,31}):/.exec(uri);
+  return match?.[1]?.toLowerCase();
+}
+
+interface ClaudeResourceUriRedaction {
+  readonly uri: string;
+  readonly referenceId: string;
+}
+
+interface ClaudeResourceLinkProjection {
+  readonly links: ReadonlyArray<RuntimeResourceLink> | undefined;
+  readonly redactions: ReadonlyArray<ClaudeResourceUriRedaction>;
+  readonly hasUninspectedEntries: boolean;
+}
+
+function claudeResourceReferenceId(uri: string): string {
+  return `sha256:${createHash("sha256")
+    .update(CLAUDE_RESOURCE_LINK_HASH_DOMAIN, "utf8")
+    .update("\0", "utf8")
+    .update(uri, "utf8")
+    .digest("hex")}`;
+}
+
+function claudeResourceUriOmission(referenceId: string): string {
+  return `[resource URI omitted; ref ${referenceId}]`;
+}
+
+/**
+ * Remove resource identifiers from provider-authored text while retaining the
+ * surrounding tool output. Claude Code renders MCP resource links into API
+ * tool results as `[Resource link: label] URI`; handle that wire shape even if
+ * a future SDK message omits the parallel structured `resourceLinks` array.
+ */
+function redactClaudeResourceString(
+  value: string,
+  redactions: ReadonlyArray<ClaudeResourceUriRedaction>,
+): string {
+  const renderedLinkRedacted = value.replace(
+    /\[Resource link:([^\]\r\n]{0,512})\][ \t]+([A-Za-z][A-Za-z0-9+.-]{0,31}:[^\s]{0,16383})/g,
+    (_match, labelValue: string, uri: string) => {
+      const label = claudeSubagentDisplayLine(labelValue, 512) ?? "resource";
+      return `[Resource link: ${label}] ${claudeResourceUriOmission(
+        claudeResourceReferenceId(uri),
+      )}`;
+    },
+  );
+
+  // Longest-first replacement prevents a shorter URI that happens to prefix a
+  // second resource identifier from leaving the latter's sensitive suffix.
+  return redactions
+    .toSorted((left, right) => right.uri.length - left.uri.length)
+    .reduce(
+      (text, redaction) =>
+        text.split(redaction.uri).join(claudeResourceUriOmission(redaction.referenceId)),
+      renderedLinkRedacted,
+    );
+}
+
+/**
+ * SDK message payloads are JSON-like but provider-controlled. Clone them while
+ * redacting resource identifiers so neither the canonical item payload nor the
+ * adapter's resumable thread snapshot retains a signed URL, local path, or MCP
+ * bearer token. Cycles/depth abuse are replaced rather than copied through.
+ */
+function redactClaudeResourceUris<T>(
+  value: T,
+  redactions: ReadonlyArray<ClaudeResourceUriRedaction>,
+): T {
+  const ancestors = new WeakSet<object>();
+  const visit = (current: unknown, depth: number): unknown => {
+    if (typeof current === "string") {
+      return redactClaudeResourceString(current, redactions);
+    }
+    if (current === null || typeof current !== "object") {
+      return current;
+    }
+    if (depth >= CLAUDE_RESOURCE_REDACTION_MAX_DEPTH) {
+      return "[deep provider value omitted]";
+    }
+    if (ancestors.has(current)) {
+      return "[circular provider value omitted]";
+    }
+
+    ancestors.add(current);
+    const sanitized = Array.isArray(current)
+      ? current.map((entry) => visit(entry, depth + 1))
+      : Object.fromEntries(
+          Object.entries(current).map(([key, entry]) => [
+            redactClaudeResourceString(key, redactions),
+            visit(entry, depth + 1),
+          ]),
+        );
+    ancestors.delete(current);
+    return sanitized;
+  };
+
+  return visit(value, 0) as T;
+}
+
+/**
+ * Convert untrusted provider resource-link objects into a bounded, inert
+ * runtime representation. Raw URIs and arbitrary annotations never cross this
+ * boundary; a stable digest retains correlation without leaking signed URLs,
+ * filesystem paths, or provider bearer material.
+ */
+function projectClaudeResourceLinks(value: unknown): ClaudeResourceLinkProjection {
+  if (!Array.isArray(value)) {
+    return { links: undefined, redactions: [], hasUninspectedEntries: false };
+  }
+
+  // The SDK contract caps resource links at 50. Allow a second bounded window
+  // so malformed/duplicate entries cannot starve later valid metadata, while
+  // still preventing an adversarial array from creating unbounded work.
+  const sourceEntries = value.slice(0, CLAUDE_RESOURCE_LINK_INSPECTION_LIMIT);
+  const redactions: Array<ClaudeResourceUriRedaction> = [];
+  const seenUris = new Set<string>();
+  for (const entry of sourceEntries) {
+    const uri = trimmedStringValue(recordValue(entry)?.uri);
+    if (
+      !uri ||
+      seenUris.has(uri) ||
+      Buffer.byteLength(uri, "utf8") > CLAUDE_RESOURCE_URI_UTF8_BYTES_LIMIT
+    ) {
+      continue;
+    }
+    seenUris.add(uri);
+    redactions.push({ uri, referenceId: claudeResourceReferenceId(uri) });
+  }
+
+  const links: Array<RuntimeResourceLink> = [];
+  const seenReferences = new Set<string>();
+  let encodedBytes = 2; // JSON array brackets.
+  for (const entry of sourceEntries) {
+    if (links.length >= CLAUDE_RESOURCE_LINK_LIMIT) break;
+    const record = recordValue(entry);
+    const uri = trimmedStringValue(record?.uri);
+    const name = boundedClaudeProviderText(
+      typeof record?.name === "string"
+        ? redactClaudeResourceString(record.name, redactions)
+        : undefined,
+      512,
+    );
+    if (
+      !record ||
+      !uri ||
+      !name ||
+      Buffer.byteLength(uri, "utf8") > CLAUDE_RESOURCE_URI_UTF8_BYTES_LIMIT
+    ) {
+      continue;
+    }
+
+    const referenceId = claudeResourceReferenceId(uri);
+    if (seenReferences.has(referenceId)) continue;
+
+    const title = boundedClaudeProviderText(
+      typeof record.title === "string"
+        ? redactClaudeResourceString(record.title, redactions)
+        : undefined,
+      512,
+    );
+    const description = boundedClaudeProviderText(
+      typeof record.description === "string"
+        ? redactClaudeResourceString(record.description, redactions)
+        : undefined,
+      2_048,
+    );
+    const mimeType = boundedClaudeProviderText(
+      typeof record.mimeType === "string"
+        ? redactClaudeResourceString(record.mimeType, redactions)
+        : undefined,
+      256,
+    );
+    const size = boundedClaudeNativeNumber(record.size, true);
+    const scheme = claudeResourceLinkScheme(uri);
+    const link: RuntimeResourceLink = {
+      referenceId,
+      name,
+      ...(title ? { title } : {}),
+      ...(description ? { description } : {}),
+      ...(mimeType ? { mimeType } : {}),
+      ...(size !== undefined ? { size } : {}),
+      ...(scheme ? { scheme } : {}),
+    };
+    const candidateBytes = Buffer.byteLength(JSON.stringify(link), "utf8") + (links.length ? 1 : 0);
+    if (encodedBytes + candidateBytes > CLAUDE_RESOURCE_LINK_SERIALIZED_BYTES_LIMIT) break;
+    encodedBytes += candidateBytes;
+    seenReferences.add(referenceId);
+    links.push(link);
+  }
+  return {
+    links: links.length > 0 ? links : undefined,
+    redactions,
+    hasUninspectedEntries: value.length > CLAUDE_RESOURCE_LINK_INSPECTION_LIMIT,
+  };
+}
+
+function claudeForegroundResourceLinkProjection(message: SDKMessage): ClaudeResourceLinkProjection {
+  if (message.type !== "user") {
+    return { links: undefined, redactions: [], hasUninspectedEntries: false };
+  }
+  const toolUseResult = recordValue(
+    (message as unknown as Record<string, unknown>).tool_use_result,
+  );
+  return projectClaudeResourceLinks(toolUseResult?.resourceLinks ?? toolUseResult?.resource_links);
+}
+
+function claudeForegroundResourceLinks(
+  message: SDKMessage,
+): ReadonlyArray<RuntimeResourceLink> | undefined {
+  return claudeForegroundResourceLinkProjection(message).links;
+}
+
+function boundedClaudeNativeResourceLinks(
+  value: ReadonlyArray<RuntimeResourceLink> | undefined,
+): ReadonlyArray<Omit<RuntimeResourceLink, "description">> | undefined {
+  if (!value) return undefined;
+  // Native diagnostics intentionally omit provider prose as well as the raw
+  // URI. Canonical task/item activity retains the bounded description for the
+  // user-facing history.
+  return value.map(({ description: _description, ...link }) => link);
+}
+
 function boundedClaudeNativeIdentifier(value: unknown, identityKind: string): string | undefined {
   const normalized = trimmedStringValue(value);
   if (!normalized) return undefined;
@@ -1020,6 +1262,28 @@ function boundedClaudeNativeSystemEnvelope(
 
 function boundedClaudeNativeMessagePayload(message: SDKMessage): unknown {
   const source = message as unknown as Record<string, unknown>;
+  if (source.type === "user") {
+    const parentToolUseId = boundedClaudeNativeIdentifier(
+      source.parent_tool_use_id,
+      "parent-tool-use-id",
+    );
+    const resourceLinks = boundedClaudeNativeResourceLinks(claudeForegroundResourceLinks(message));
+    const content = recordValue(source.message)?.content;
+    const toolResultCount = Array.isArray(content)
+      ? content.filter((entry) => recordValue(entry)?.type === "tool_result").length
+      : 0;
+    return {
+      type: "user",
+      ...(parentToolUseId ? { parent_tool_use_id: parentToolUseId } : {}),
+      ...(typeof source.isSynthetic === "boolean" ? { isSynthetic: source.isSynthetic } : {}),
+      ...(source.priority === "now" || source.priority === "next" || source.priority === "later"
+        ? { priority: source.priority }
+        : {}),
+      ...(typeof source.shouldQuery === "boolean" ? { shouldQuery: source.shouldQuery } : {}),
+      ...(toolResultCount > 0 ? { tool_result_count: toolResultCount } : {}),
+      ...(resourceLinks ? { resource_links: resourceLinks } : {}),
+    };
+  }
   if (source.type === "assistant" && source.task_description !== undefined) {
     return {
       ...source,
@@ -1166,8 +1430,12 @@ function boundedClaudeNativeMessagePayload(message: SDKMessage): unknown {
       const taskId = boundedClaudeNativeIdentifier(source.task_id, "task-id");
       const toolUseId = boundedClaudeNativeIdentifier(source.tool_use_id, "tool-use-id");
       const status = boundedClaudeNativeTaskStatus(source.status);
-      const summary = boundedClaudeProviderText(source.summary, CLAUDE_TASK_SUMMARY_TEXT_LIMIT);
+      const resourceProjection = projectClaudeResourceLinks(source.resource_links);
+      const summary = resourceProjection.hasUninspectedEntries
+        ? CLAUDE_RESOURCE_LINK_OVERFLOW_TASK_SUMMARY
+        : boundedClaudeProviderText(source.summary, CLAUDE_TASK_SUMMARY_TEXT_LIMIT);
       const usage = boundedClaudeNativeTaskUsage(source.usage);
+      const resourceLinks = boundedClaudeNativeResourceLinks(resourceProjection.links);
       return {
         ...boundedClaudeNativeSystemEnvelope(source, "task_notification"),
         ...(taskId ? { task_id: taskId } : {}),
@@ -1175,6 +1443,7 @@ function boundedClaudeNativeMessagePayload(message: SDKMessage): unknown {
         ...(status ? { status } : {}),
         ...(summary ? { summary } : {}),
         ...(usage ? { usage } : {}),
+        ...(resourceLinks ? { resource_links: resourceLinks } : {}),
         ...(typeof source.skip_transcript === "boolean"
           ? { skip_transcript: source.skip_transcript }
           : {}),
@@ -1839,9 +2108,40 @@ function maxClaudeContextWindowFromModelUsage(
   return maxContextWindow;
 }
 
+/**
+ * Agent SDK 0.3.258 reports `thinkingTokens` as a subset of output tokens in
+ * each cumulative ModelUsage entry. Summing the per-model entries captures the
+ * main loop plus Task subagents, sidechains, compaction, and workflows exactly
+ * once; callers must never add this subset to output-token totals.
+ */
+function totalClaudeThinkingTokensFromModelUsage(
+  modelUsage: Record<string, ModelUsage> | undefined,
+): number | undefined {
+  if (!modelUsage) return undefined;
+
+  let observed = false;
+  let total = 0;
+  for (const value of Object.values(modelUsage)) {
+    // Keep the cast until the repository's SDK declaration includes the
+    // 0.3.258 field. Runtime messages from Claude Code 2.1.257+ already carry
+    // it, and unknown/older payloads simply take the undefined compatibility
+    // path below.
+    const thinkingTokens = boundedClaudeNativeNumber(
+      (value as unknown as Record<string, unknown>).thinkingTokens,
+      true,
+    );
+    if (thinkingTokens === undefined) continue;
+    observed = true;
+    total = Math.min(Number.MAX_SAFE_INTEGER, total + thinkingTokens);
+  }
+
+  return observed ? total : undefined;
+}
+
 function normalizeClaudeTokenUsage(
   value: unknown,
   contextWindow?: number,
+  options?: { readonly resetPerMessageCounters?: boolean },
 ): ThreadTokenUsageSnapshot | undefined {
   if (!value || typeof value !== "object") {
     return undefined;
@@ -1863,16 +2163,32 @@ function normalizeClaudeTokenUsage(
       ? usage.cache_read_input_tokens
       : 0;
   const inputTokens = freshInputTokens + cacheCreationInputTokens + cacheReadInputTokens;
-  const outputTokens =
+  const reportedOutputTokens =
     typeof usage.output_tokens === "number" && Number.isFinite(usage.output_tokens)
       ? usage.output_tokens
-      : 0;
+      : undefined;
+  const outputTokens = reportedOutputTokens ?? 0;
+  const outputTokenDetails = recordValue(usage.output_tokens_details);
+  const reportedThinkingTokens = boundedClaudeNativeNumber(
+    outputTokenDetails?.thinking_tokens ?? usage.thinking_tokens,
+    true,
+  );
+  // Claude reports thinking as a subset of output. Clamp defensively so a
+  // malformed forward-compatible frame cannot make downstream accounting add
+  // more reasoning than the provider's own output total.
+  const reasoningOutputTokens =
+    reportedThinkingTokens !== undefined
+      ? Math.min(reportedThinkingTokens, Math.max(0, Math.trunc(outputTokens)))
+      : undefined;
   const derivedTotalProcessedTokens = inputTokens + outputTokens;
   const totalProcessedTokens =
     (typeof usage.total_tokens === "number" && Number.isFinite(usage.total_tokens)
       ? usage.total_tokens
       : undefined) ?? (derivedTotalProcessedTokens > 0 ? derivedTotalProcessedTokens : undefined);
-  if (totalProcessedTokens === undefined || totalProcessedTokens <= 0) {
+  if (
+    (totalProcessedTokens === undefined || totalProcessedTokens <= 0) &&
+    options?.resetPerMessageCounters !== true
+  ) {
     return undefined;
   }
 
@@ -1880,13 +2196,22 @@ function normalizeClaudeTokenUsage(
     typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0
       ? contextWindow
       : undefined;
+  const nonNegativeTotalProcessedTokens = Math.max(0, totalProcessedTokens ?? 0);
   const usedTokens =
-    maxTokens !== undefined ? Math.min(totalProcessedTokens, maxTokens) : totalProcessedTokens;
+    maxTokens !== undefined
+      ? Math.min(nonNegativeTotalProcessedTokens, maxTokens)
+      : nonNegativeTotalProcessedTokens;
+  const includePerMessageOutput =
+    reportedOutputTokens !== undefined || options?.resetPerMessageCounters === true;
+  const normalizedReasoningOutputTokens =
+    reasoningOutputTokens ?? (options?.resetPerMessageCounters === true ? 0 : undefined);
 
   return {
     usedTokens,
     lastUsedTokens: usedTokens,
-    ...(totalProcessedTokens > usedTokens ? { totalProcessedTokens } : {}),
+    ...(nonNegativeTotalProcessedTokens > usedTokens
+      ? { totalProcessedTokens: nonNegativeTotalProcessedTokens }
+      : {}),
     ...(inputTokens > 0 ? { inputTokens } : {}),
     // Anthropic reports the cache split alongside fresh input. `inputTokens`
     // above stays the combined figure so existing readers are unaffected;
@@ -1894,7 +2219,13 @@ function normalizeClaudeTokenUsage(
     // cache reads and cache writes are priced differently from fresh input.
     ...(cacheReadInputTokens > 0 ? { cachedInputTokens: cacheReadInputTokens } : {}),
     ...(cacheCreationInputTokens > 0 ? { cacheWriteInputTokens: cacheCreationInputTokens } : {}),
-    ...(outputTokens > 0 ? { outputTokens } : {}),
+    ...(includePerMessageOutput ? { outputTokens: Math.max(0, Math.trunc(outputTokens)) } : {}),
+    ...(normalizedReasoningOutputTokens !== undefined
+      ? {
+          reasoningOutputTokens: normalizedReasoningOutputTokens,
+          lastReasoningOutputTokens: normalizedReasoningOutputTokens,
+        }
+      : {}),
     ...(maxTokens !== undefined ? { maxTokens } : {}),
     ...(typeof usage.tool_uses === "number" && Number.isFinite(usage.tool_uses)
       ? { toolUses: usage.tool_uses }
@@ -1927,13 +2258,14 @@ function hasClaudeMessageUsageCounters(value: unknown): boolean {
 function normalizeClaudeMessageTokenUsage(
   value: unknown,
   contextWindow?: number,
+  options?: { readonly resetPerMessageCounters?: boolean },
 ): ThreadTokenUsageSnapshot | undefined {
   // Claude task/subagent updates can also carry a `usage.total_tokens` shape,
   // but those counters describe the background task, not the main transcript's
   // current context window. Only message/result-style usage with Anthropic's
   // token fields is eligible for live context-window projection.
   return hasClaudeMessageUsageCounters(value)
-    ? normalizeClaudeTokenUsage(value, contextWindow)
+    ? normalizeClaudeTokenUsage(value, contextWindow, options)
     : undefined;
 }
 
@@ -1971,6 +2303,7 @@ const THREAD_TOKEN_USAGE_SNAPSHOT_KEYS = [
   "maxTokens",
   "inputTokens",
   "cachedInputTokens",
+  "totalReasoningOutputTokens",
   "outputTokens",
   "reasoningOutputTokens",
   "lastUsedTokens",
@@ -3449,11 +3782,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context: ClaudeSessionContext,
     usage: ThreadTokenUsageSnapshot,
   ) {
-    if (sameThreadTokenUsageSnapshot(context.lastKnownTokenUsage, usage)) {
+    // Once ModelUsage supplies its session-cumulative reasoning counter, keep
+    // it on intervening message_start/message_delta snapshots. Otherwise the
+    // usage service would fall back to the per-message reasoning counter and
+    // then compare the next cumulative result against the wrong watermark,
+    // double-counting main-loop thinking on every later turn.
+    const previousTotalReasoningOutputTokens =
+      context.lastKnownTokenUsage?.totalReasoningOutputTokens;
+    const normalizedUsage =
+      usage.totalReasoningOutputTokens === undefined &&
+      previousTotalReasoningOutputTokens !== undefined
+        ? {
+            ...usage,
+            totalReasoningOutputTokens: previousTotalReasoningOutputTokens,
+          }
+        : usage;
+    if (sameThreadTokenUsageSnapshot(context.lastKnownTokenUsage, normalizedUsage)) {
       return;
     }
 
-    context.lastKnownTokenUsage = usage;
+    context.lastKnownTokenUsage = normalizedUsage;
     const usageStamp = yield* makeEventStamp();
     yield* offerRuntimeEvent({
       type: "thread.token-usage.updated",
@@ -3463,7 +3811,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       threadId: context.session.threadId,
       ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
       payload: {
-        usage,
+        usage: normalizedUsage,
       },
       providerRefs: nativeProviderRefs(context),
     });
@@ -4103,6 +4451,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     options?: { readonly segmentAlreadyFinalized?: boolean },
   ) {
     const resultContextWindow = maxClaudeContextWindowFromModelUsage(result?.modelUsage);
+    const totalReasoningOutputTokens = totalClaudeThinkingTokensFromModelUsage(result?.modelUsage);
     const effectiveContextWindow =
       context.selectedContextWindowTokens ?? resultContextWindow ?? context.lastKnownContextWindow;
     if (effectiveContextWindow !== undefined) {
@@ -4122,7 +4471,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       accumulatedSnapshot?.totalProcessedTokens ?? accumulatedSnapshot?.usedTokens;
     const lastGoodUsage = context.lastKnownTokenUsage;
     const maxTokens = effectiveContextWindow;
-    const usageSnapshot: ThreadTokenUsageSnapshot | undefined = lastGoodUsage
+    const baseUsageSnapshot: ThreadTokenUsageSnapshot | undefined = lastGoodUsage
       ? {
           ...lastGoodUsage,
           ...(typeof maxTokens === "number" && Number.isFinite(maxTokens) && maxTokens > 0
@@ -4137,6 +4486,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             : {}),
         }
       : accumulatedSnapshot;
+    const usageSnapshot: ThreadTokenUsageSnapshot | undefined = baseUsageSnapshot
+      ? {
+          ...baseUsageSnapshot,
+          ...(totalReasoningOutputTokens !== undefined ? { totalReasoningOutputTokens } : {}),
+        }
+      : undefined;
 
     const turnState = context.turnState;
     if (!turnState) {
@@ -4246,6 +4601,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const normalizedUsage = normalizeClaudeMessageTokenUsage(
         claudeStreamEventUsagePayload(message),
         context.selectedContextWindowTokens ?? context.lastKnownContextWindow,
+        { resetPerMessageCounters: event.type === "message_start" },
       );
       if (normalizedUsage) {
         yield* emitThreadTokenUsageUpdate(context, normalizedUsage);
@@ -4518,11 +4874,28 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
+    const foregroundResourceProjection = claudeForegroundResourceLinkProjection(message);
+    const toolResults = toolResultBlocksFromUserMessage(message);
+    const quarantineToolResultContent = foregroundResourceProjection.hasUninspectedEntries;
+    const foregroundResourceLinks =
+      toolResults.length === 1 ? foregroundResourceProjection.links : undefined;
     if (context.turnState) {
-      context.turnState.items.push(message.message);
+      // Claude Code renders MCP links into the tool-result content before the
+      // SDK exposes this message. Store a cloned/redacted message so readThread
+      // and later resume snapshots cannot reintroduce the raw URI. If the
+      // structured envelope exceeds our bounded inspection window, omit the
+      // complete provider-authored result because an uninspected URI could have
+      // been copied into a nonstandard text shape.
+      context.turnState.items.push(
+        quarantineToolResultContent
+          ? {
+              role: "user",
+              content: [{ type: "text", text: CLAUDE_RESOURCE_LINK_OVERFLOW_OMISSION }],
+            }
+          : redactClaudeResourceUris(message.message, foregroundResourceProjection.redactions),
+      );
     }
 
-    const toolResults = toolResultBlocksFromUserMessage(message);
     const agentHistoryIdentity =
       toolResults.length === 1 ? claudeAgentOutputHistoryIdentity(message) : undefined;
     for (const toolResult of toolResults) {
@@ -4535,10 +4908,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
       const [blockKey, tool] = toolEntry;
       const itemStatus = toolResult.isError ? "failed" : "completed";
+      const redactedToolResultBlock = quarantineToolResultContent
+        ? {
+            type: "tool_result",
+            content: CLAUDE_RESOURCE_LINK_OVERFLOW_OMISSION,
+            ...(toolResult.isError ? { is_error: true } : {}),
+          }
+        : redactClaudeResourceUris(toolResult.block, foregroundResourceProjection.redactions);
+      const redactedToolResultText = quarantineToolResultContent
+        ? CLAUDE_RESOURCE_LINK_OVERFLOW_OMISSION
+        : redactClaudeResourceString(toolResult.text, foregroundResourceProjection.redactions);
       const toolData = {
         toolName: tool.toolName,
         input: tool.input,
-        result: toolResult.block,
+        result: redactedToolResultBlock,
+        ...(foregroundResourceLinks ? { resourceLinks: foregroundResourceLinks } : {}),
       };
 
       const updatedStamp = yield* makeEventStamp();
@@ -4563,12 +4947,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         raw: {
           source: "claude.sdk.message",
           method: "claude/user",
-          payload: message,
+          payload: boundedClaudeNativeMessagePayload(message),
         },
       });
 
       const streamKind = toolResultStreamKind(tool.itemType);
-      if (streamKind && toolResult.text.length > 0 && context.turnState) {
+      if (streamKind && redactedToolResultText.length > 0 && context.turnState) {
         const deltaStamp = yield* makeEventStamp();
         yield* offerRuntimeEvent({
           type: "content.delta",
@@ -4580,7 +4964,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           itemId: asRuntimeItemId(tool.itemId),
           payload: {
             streamKind,
-            delta: toolResult.text,
+            delta: redactedToolResultText,
           },
           providerRefs: nativeProviderRefs(context, {
             providerItemId: tool.itemId,
@@ -4588,7 +4972,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           raw: {
             source: "claude.sdk.message",
             method: "claude/user",
-            payload: message,
+            payload: boundedClaudeNativeMessagePayload(message),
           },
         });
       }
@@ -4615,7 +4999,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         raw: {
           source: "claude.sdk.message",
           method: "claude/user",
-          payload: message,
+          payload: boundedClaudeNativeMessagePayload(message),
         },
       });
 
@@ -5931,9 +6315,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
       case "task_notification": {
         const taskNotificationRecord = message as unknown as Record<string, unknown>;
-        const summary = claudeSubagentDisplayLine(message.summary, CLAUDE_TASK_SUMMARY_TEXT_LIMIT);
+        const resourceProjection = projectClaudeResourceLinks(
+          taskNotificationRecord.resource_links,
+        );
+        const summary = resourceProjection.hasUninspectedEntries
+          ? CLAUDE_RESOURCE_LINK_OVERFLOW_TASK_SUMMARY
+          : claudeSubagentDisplayLine(message.summary, CLAUDE_TASK_SUMMARY_TEXT_LIMIT);
         const inferredStartedAt = claudeSubagentStartedAtFromUsage(base.createdAt, message.usage);
         const usage = boundedClaudeNativeTaskUsage(message.usage);
+        const resourceLinks = resourceProjection.links;
         const requestedVisibility: RuntimeTaskVisibility | undefined =
           message.skip_transcript === true || typeof message.ambient === "boolean"
             ? message.skip_transcript === true || message.ambient === true
@@ -6004,6 +6394,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             status: message.status,
             ...(summary ? { summary } : {}),
             ...(usage ? { usage } : {}),
+            ...(resourceLinks ? { resourceLinks } : {}),
             visibility,
             ...(notificationSubagent ? { subagent: notificationSubagent } : {}),
           },

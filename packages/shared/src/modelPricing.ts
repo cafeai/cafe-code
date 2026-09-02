@@ -48,7 +48,10 @@ const BUNDLED_RATES: ReadonlyArray<readonly [prefix: string, rate: ModelRate]> =
   ["claude-opus", { input: 15, cachedInput: 1.5, cacheWrite: 18.75, output: 75 }],
   ["claude-sonnet", { input: 3, cachedInput: 0.3, cacheWrite: 3.75, output: 15 }],
   ["claude-haiku", { input: 0.8, cachedInput: 0.08, cacheWrite: 1, output: 4 }],
-  ["claude-fable", { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 }],
+  // Fable 5.1 cuts cache reads from 0.1x to 0.025x of base input, so keep its
+  // longer prefix separate from the Fable 5 family fallback.
+  ["claude-fable-5-1", { input: 10, cachedInput: 0.25, cacheWrite: 12.5, output: 50 }],
+  ["claude-fable", { input: 10, cachedInput: 1, cacheWrite: 12.5, output: 50 }],
   ["claude", { input: 3, cachedInput: 0.3, cacheWrite: 3.75, output: 15 }],
   // OpenAI
   ["gpt-5", { input: 1.25, cachedInput: 0.125, cacheWrite: 1.25, output: 10 }],

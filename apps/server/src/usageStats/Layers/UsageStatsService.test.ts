@@ -8,6 +8,7 @@ import {
   type ProviderRuntimeEvent,
   type ProviderSession,
   type ServerSettings,
+  type ThreadTokenUsageSnapshot,
 } from "@cafecode/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as Context from "effect/Context";
@@ -180,7 +181,7 @@ function providerEventBase(
 function tokenUsageEvent(
   threadId: ThreadId,
   eventId: string,
-  usage: { outputTokens?: number; totalOutputTokens?: number },
+  usage: Partial<Omit<ThreadTokenUsageSnapshot, "usedTokens">>,
   provider: ProviderDriverKind = CODEX,
 ) {
   return {
@@ -235,6 +236,68 @@ describe("UsageStatsService", () => {
         }
         const snapshot = yield* harness.service.snapshot;
         assert.equal(snapshot.totals.outputTokens, 650);
+      }),
+    ),
+  );
+
+  it.effect("counts explicit Claude reasoning resets without adding reasoning to output", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        // message_start emits zeroes before each new message. Those explicit
+        // resets make a later message whose first/final count exceeds the
+        // previous watermark unambiguous instead of silently undercounting it.
+        const messages = [
+          { outputTokens: 0, reasoningOutputTokens: 0 },
+          { outputTokens: 100, reasoningOutputTokens: 40 },
+          { outputTokens: 0, reasoningOutputTokens: 0 },
+          { outputTokens: 150, reasoningOutputTokens: 60 },
+        ];
+        for (const [index, usage] of messages.entries()) {
+          yield* harness.emitProvider(
+            tokenUsageEvent(THREAD_1, `reasoning-reset-${index}`, usage, CLAUDE),
+          );
+        }
+
+        const snapshot = yield* harness.service.snapshot;
+        assert.equal(snapshot.totals.outputTokens, 250);
+        assert.equal(snapshot.totals.reasoningOutputTokens, 100);
+      }),
+    ),
+  );
+
+  it.effect("does not double-count cumulative Claude reasoning between streamed turns", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        yield* harness.emitProvider({
+          ...providerEventBase(THREAD_1, "reasoning-session-start", CLAUDE),
+          type: "session.started",
+          payload: {},
+        });
+        const snapshots: Array<Partial<Omit<ThreadTokenUsageSnapshot, "usedTokens">>> = [
+          // First message streams before a cumulative ModelUsage result exists.
+          { reasoningOutputTokens: 0 },
+          { reasoningOutputTokens: 40 },
+          // The terminal result includes 10 additional subagent/sidechain
+          // thinking tokens. UsageStats should count only that delta here.
+          { reasoningOutputTokens: 40, totalReasoningOutputTokens: 50 },
+          // The adapter carries the cumulative field through the next
+          // message's reset/growth so per-message thinking is not recounted.
+          { reasoningOutputTokens: 0, totalReasoningOutputTokens: 50 },
+          { reasoningOutputTokens: 60, totalReasoningOutputTokens: 50 },
+          // The next terminal cumulative total accounts for the complete
+          // query pipeline exactly once.
+          { reasoningOutputTokens: 60, totalReasoningOutputTokens: 120 },
+          { reasoningOutputTokens: 60, totalReasoningOutputTokens: 120 },
+        ];
+        for (const [index, usage] of snapshots.entries()) {
+          yield* harness.emitProvider(
+            tokenUsageEvent(THREAD_1, `reasoning-total-${index}`, usage, CLAUDE),
+          );
+        }
+
+        const snapshot = yield* harness.service.snapshot;
+        assert.equal(snapshot.totals.reasoningOutputTokens, 120);
+        assert.equal(snapshot.totals.outputTokens, 0);
       }),
     ),
   );

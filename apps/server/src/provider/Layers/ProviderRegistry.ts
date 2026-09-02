@@ -284,6 +284,7 @@ const buildSnapshotSource = (instance: ProviderInstance): ProviderSnapshotSource
   getSnapshot: instance.snapshot.getSnapshot,
   refresh: instance.snapshot.refresh,
   refreshAccountUsage: instance.snapshot.refreshAccountUsage,
+  refreshModels: instance.snapshot.refreshModels,
   streamChanges: instance.snapshot.streamChanges,
 });
 
@@ -431,6 +432,7 @@ export const ProviderRegistryLive = Layer.effect(
         readonly publish?: boolean;
         readonly persist?: boolean;
         readonly replace?: boolean;
+        readonly replaceModels?: boolean;
       },
     ) {
       const nextProvidersWithUpdateState = yield* Effect.forEach(
@@ -451,11 +453,24 @@ export const ProviderRegistryLive = Layer.effect(
           for (const provider of nextProvidersWithUpdateState) {
             const key = snapshotInstanceKey(provider);
             updatedKeys.add(key);
-            mergedProviders.set(
-              key,
+            const previousProvider = mergedProviders.get(key);
+            const mergedProvider =
               options?.replace === true
                 ? provider
-                : mergeProviderSnapshot(mergedProviders.get(key), provider),
+                : mergeProviderSnapshot(previousProvider, provider);
+            mergedProviders.set(
+              key,
+              options?.replaceModels === true
+                ? {
+                    ...mergedProvider,
+                    // A successful provider-owned model/list response is the
+                    // authoritative catalogue. Do not let the generic sparse
+                    // snapshot merge resurrect retired fallback/static slugs.
+                    // Empty and failed reads never reach this path: the driver
+                    // retains its current snapshot for those inconclusive cases.
+                    models: provider.models,
+                  }
+                : mergedProvider,
             );
           }
 
@@ -486,6 +501,7 @@ export const ProviderRegistryLive = Layer.effect(
       provider: ServerProvider,
       options?: {
         readonly publish?: boolean;
+        readonly replaceModels?: boolean;
       },
     ) {
       return yield* upsertProviders([provider], options);
@@ -664,6 +680,44 @@ export const ProviderRegistryLive = Layer.effect(
       );
     });
 
+    const refreshInstanceModels = Effect.fn("refreshInstanceModels")(function* (
+      instanceId: ProviderInstanceId,
+    ) {
+      const instance = yield* instanceRegistry.getInstance(instanceId);
+      const refreshModels = instance?.snapshot.refreshModels;
+      if (!instance || !refreshModels) {
+        return yield* Ref.get(providersRef);
+      }
+
+      const providerSource = buildSnapshotSource(instance);
+      // The driver operation is independently bounded and owned by the
+      // provider scope. Once admitted, finish the authoritative sync even if a
+      // short-lived WebSocket caller disconnects; otherwise the provider's
+      // normal snapshot stream can land first and the generic merge can retain
+      // slugs that Codex just retired. Exact instance identity below prevents
+      // this bounded uninterruptible wait from writing through a rebuild.
+      return yield* Effect.uninterruptible(
+        refreshModels.pipe(
+          Effect.flatMap((nextProvider) =>
+            instanceRegistry.getInstance(instanceId).pipe(
+              Effect.flatMap((currentInstance) => {
+                if (currentInstance !== instance) {
+                  return Ref.get(providersRef);
+                }
+                return correlateSnapshotWithSource(providerSource, nextProvider).pipe(
+                  Effect.flatMap((provider) =>
+                    syncProvider(provider, {
+                      replaceModels: true,
+                    }),
+                  ),
+                );
+              }),
+            ),
+          ),
+        ),
+      );
+    });
+
     const getProviderMaintenanceCapabilitiesForInstance = Effect.fn(
       "getProviderMaintenanceCapabilitiesForInstance",
     )(function* (instanceId: ProviderInstanceId, provider: ProviderDriverKind) {
@@ -741,7 +795,19 @@ export const ProviderRegistryLive = Layer.effect(
         for (const [, instance] of newlyAdded) {
           const source = buildSnapshotSource(instance);
           yield* Stream.runForEach(source.streamChanges, (provider) =>
-            correlateSnapshotWithSource(source, provider).pipe(Effect.flatMap(syncProvider)),
+            instanceRegistry.getInstance(instance.instanceId).pipe(
+              Effect.flatMap((currentInstance) => {
+                if (currentInstance !== instance) {
+                  // A closing provider scope can have one already-buffered
+                  // publication. Never let that stale generation overwrite
+                  // the replacement instance that now owns this routing key.
+                  return Effect.void;
+                }
+                return correlateSnapshotWithSource(source, provider).pipe(
+                  Effect.flatMap(syncProvider),
+                );
+              }),
+            ),
           ).pipe(Effect.forkScoped);
         }
 
@@ -878,6 +944,8 @@ export const ProviderRegistryLive = Layer.effect(
         refreshInstance(instanceId).pipe(Effect.catchCause(recoverRefreshFailure)),
       refreshInstanceAccountUsage: (instanceId: ProviderInstanceId) =>
         refreshInstanceAccountUsage(instanceId).pipe(Effect.catchCause(recoverRefreshFailure)),
+      refreshInstanceModels: (instanceId: ProviderInstanceId) =>
+        refreshInstanceModels(instanceId).pipe(Effect.catchCause(recoverRefreshFailure)),
       getProviderMaintenanceCapabilitiesForInstance,
       setProviderMaintenanceActionState,
       updateProviderAccountRateLimits,

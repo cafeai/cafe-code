@@ -526,8 +526,12 @@ describe("wsApi", () => {
 
     const api = createLocalApi(rpcClientMock as never);
 
-    await expect(api.server.refreshProviders()).resolves.toEqual({ providers: nextProviders });
-    expect(rpcClientMock.server.refreshProviders).toHaveBeenCalledWith();
+    const input = {
+      instanceId: ProviderInstanceId.make("codex"),
+      scope: "models" as const,
+    };
+    await expect(api.server.refreshProviders(input)).resolves.toEqual({ providers: nextProviders });
+    expect(rpcClientMock.server.refreshProviders).toHaveBeenCalledWith(input);
   });
 
   it("forwards provider updates directly to the RPC client", async () => {

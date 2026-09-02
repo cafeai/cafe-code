@@ -5738,6 +5738,14 @@ describe("ProviderRuntimeIngestion", () => {
         taskId: "turn-task-1",
         status: "completed",
         summary: "<proposed_plan>\n# Plan title\n</proposed_plan>",
+        resourceLinks: [
+          {
+            referenceId: `sha256:${"a".repeat(64)}`,
+            name: "Plan evidence",
+            mimeType: "text/markdown",
+            scheme: "mcp",
+          },
+        ],
       },
     });
     harness.emit({
@@ -5792,6 +5800,14 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(completed?.kind).toBe("task.completed");
     expect(completedPayload?.detail).toBe("<proposed_plan>\n# Plan title\n</proposed_plan>");
+    expect(completedPayload?.resourceLinks).toEqual([
+      {
+        referenceId: `sha256:${"a".repeat(64)}`,
+        name: "Plan evidence",
+        mimeType: "text/markdown",
+        scheme: "mcp",
+      },
+    ]);
     expect(
       thread.proposedPlans.find(
         (entry: ProviderRuntimeTestProposedPlan) => entry.id === "plan:thread-1:turn:turn-task-1",

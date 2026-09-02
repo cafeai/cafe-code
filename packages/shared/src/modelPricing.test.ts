@@ -23,6 +23,21 @@ describe("resolveModelRate", () => {
     expect(haiku?.output).toBeLessThan(generic!.output);
   });
 
+  it("uses the distinct published cache-read rates for Fable 5.1 and Fable 5", () => {
+    expect(resolveModelRate("claude-fable-5-1")).toEqual({
+      input: 10,
+      cachedInput: 0.25,
+      cacheWrite: 12.5,
+      output: 50,
+    });
+    expect(resolveModelRate("claude-fable-5")).toEqual({
+      input: 10,
+      cachedInput: 1,
+      cacheWrite: 12.5,
+      output: 50,
+    });
+  });
+
   it("is case and whitespace insensitive", () => {
     expect(resolveModelRate("  CLAUDE-Opus-4  ")).toEqual(resolveModelRate("claude-opus-4"));
   });
@@ -34,6 +49,10 @@ describe("resolveModelRate", () => {
   it("lets a user override beat the bundled table", () => {
     const overrides = { "claude-opus-4": RATE };
     expect(resolveModelRate("claude-opus-4-5", overrides)).toEqual(RATE);
+  });
+
+  it("lets a Fable family override beat the more-specific bundled 5.1 rate", () => {
+    expect(resolveModelRate("claude-fable-5-1", { "claude-fable": RATE })).toEqual(RATE);
   });
 
   it("prices a model the bundled table has never heard of", () => {

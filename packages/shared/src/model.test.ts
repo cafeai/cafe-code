@@ -79,6 +79,13 @@ describe("normalizeModelSlug", () => {
     expect(normalizeModelSlug("5.6-luna")).toBe("gpt-5.6-luna");
     expect(normalizeModelSlug("gpt-5-codex")).toBe("gpt-5.4");
     expect(normalizeModelSlug("5.3")).toBe("gpt-5.3-codex");
+    expect(normalizeModelSlug("fable-5.1", claude)).toBe("claude-fable-5-1");
+    expect(normalizeModelSlug("fable-5-1", claude)).toBe("claude-fable-5-1");
+    expect(normalizeModelSlug("fable51", claude)).toBe("claude-fable-5-1");
+    expect(normalizeModelSlug("fable-5-1[1m]", claude)).toBe("claude-fable-5-1");
+    // Claude Code and third-party gateways may resolve their bare `fable`
+    // alias differently. Preserve Cafe's existing canonicalization unless the
+    // persisted value names 5.1 explicitly.
     expect(normalizeModelSlug("fable", claude)).toBe("claude-fable-5");
     expect(normalizeModelSlug("fable[1m]", claude)).toBe("claude-fable-5");
     expect(normalizeModelSlug("default", claude)).toBe("claude-opus-5");
