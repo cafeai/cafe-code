@@ -714,10 +714,32 @@ function makeStaticCodexReasoningCapabilities(input: {
 
 const CODEX_STANDARD_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 const CODEX_MAX_REASONING_EFFORTS = [...CODEX_STANDARD_REASONING_EFFORTS, "max"] as const;
-// Mirrors Codex app-server `model/list` from codex-cli 0.152.0. The live
+// Mirrors Codex app-server `model/list` from codex-cli 0.153.1. The live
 // app-server response remains authoritative when available; this fallback keeps
 // fresh installs usable before the full Codex probe refreshes provider cache.
 const CODEX_ULTRA_REASONING_EFFORTS = [...CODEX_MAX_REASONING_EFFORTS, "ultra"] as const;
+
+// Codex 0.153.1 ships GPT-6-Astra as a hidden, API-supported model with a
+// minimum client version of 0.153.0. Upstream intentionally excludes it from
+// the default model picker, and Cafe must not turn embedded catalog metadata
+// into an entitlement claim. Keep the exact public selection metadata here so
+// a user who explicitly configures the hidden slug gets correct controls; a
+// later visible `model/list` row remains authoritative and wins de-duplication.
+const KNOWN_HIDDEN_CODEX_MODELS: ReadonlyMap<string, ServerProviderModel> = new Map([
+  [
+    "gpt-6-astra",
+    {
+      slug: "gpt-6-astra",
+      name: "GPT-6-Astra",
+      isCustom: true,
+      capabilities: makeStaticCodexReasoningCapabilities({
+        defaultEffort: "low",
+        supportedEfforts: CODEX_ULTRA_REASONING_EFFORTS,
+        supportsFastMode: true,
+      }),
+    },
+  ],
+]);
 
 // Lightweight provider status deliberately avoids `codex app-server`; keep a
 // conservative model fallback so a fresh install still has selectable Codex
@@ -830,6 +852,11 @@ function appendCustomCodexModels(
       continue;
     }
     seen.add(slug);
+    const knownHiddenModel = KNOWN_HIDDEN_CODEX_MODELS.get(slug);
+    if (knownHiddenModel) {
+      customEntries.push(knownHiddenModel);
+      continue;
+    }
     customEntries.push({
       slug,
       name: slug,

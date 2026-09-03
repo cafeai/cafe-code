@@ -190,4 +190,57 @@ describe("Codex picker model/list refresh", () => {
       finalizeCodexModelListRefresh(upstream, ["custom-model"])?.map((model) => model.slug),
     ).toEqual(["gpt-provider", "custom-model"]);
   });
+
+  it("uses exact upstream controls only for explicitly configured hidden Astra", () => {
+    const upstream = [
+      {
+        slug: "gpt-provider",
+        name: "GPT Provider",
+        isCustom: false,
+        capabilities: null,
+      },
+    ] as const;
+
+    const models = finalizeCodexModelListRefresh(upstream, ["gpt-6-astra"]);
+    const astra = models?.find((model) => model.slug === "gpt-6-astra");
+    expect(astra).toMatchObject({
+      slug: "gpt-6-astra",
+      name: "GPT-6-Astra",
+      isCustom: true,
+    });
+    expect(astra?.capabilities?.optionDescriptors).toEqual([
+      {
+        id: "reasoningEffort",
+        label: "Reasoning",
+        type: "select",
+        options: [
+          { id: "low", label: "Low", isDefault: true },
+          { id: "medium", label: "Medium" },
+          { id: "high", label: "High" },
+          { id: "xhigh", label: "Extra High" },
+          { id: "max", label: "Max" },
+          { id: "ultra", label: "Ultra" },
+        ],
+        currentValue: "low",
+      },
+      {
+        id: "fastMode",
+        label: "Fast Mode",
+        type: "boolean",
+      },
+    ]);
+  });
+
+  it("does not replace an Astra model advertised by app-server", () => {
+    const upstreamAstra = {
+      slug: "gpt-6-astra",
+      name: "Server Astra",
+      isCustom: false,
+      capabilities: null,
+    } as const;
+
+    expect(finalizeCodexModelListRefresh([upstreamAstra], ["gpt-6-astra"])).toEqual([
+      upstreamAstra,
+    ]);
+  });
 });
