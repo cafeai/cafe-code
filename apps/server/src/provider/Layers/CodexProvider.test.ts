@@ -126,6 +126,70 @@ describe("Codex picker model/list refresh", () => {
     expect(payloads).toEqual([{ limit: 100 }, { limit: 100, cursor: "page-2" }]);
   });
 
+  it("discovers visible Astra with its live defaults and modern Fast tier", async () => {
+    // Astra's account catalogue now defaults to Medium, while the embedded
+    // pre-rollout fallback defaults to Low. Exercise the full discovery path
+    // so a custom fallback cannot override the live row or remove Ultra/Fast.
+    const efforts = ["low", "medium", "high", "xhigh", "max", "ultra"];
+    const client = makeModelListClient(() =>
+      Effect.succeed({
+        data: [
+          {
+            ...makeModel("gpt-6-astra"),
+            displayName: "GPT-6-Astra",
+            supportedReasoningEfforts: efforts.map((reasoningEffort) => ({
+              reasoningEffort,
+              description: reasoningEffort,
+            })),
+            serviceTiers: [{ id: "priority", name: "Fast", description: "Priority processing" }],
+          },
+        ],
+      }),
+    );
+
+    const discovered = await Effect.runPromise(requestAllCodexModelsWithClient(client));
+    const models = finalizeCodexModelListRefresh(discovered, ["gpt-6-astra"]);
+    expect(models).toHaveLength(1);
+    expect(models?.[0]).toMatchObject({
+      slug: "gpt-6-astra",
+      name: "GPT-6-Astra",
+      isCustom: false,
+      capabilities: {
+        optionDescriptors: [
+          {
+            id: "reasoningEffort",
+            currentValue: "medium",
+            options: efforts.map((id) => (id === "medium" ? { id, isDefault: true } : { id })),
+          },
+          { id: "fastMode", type: "boolean" },
+        ],
+      },
+    });
+  });
+
+  it("keeps legacy Fast support without mistaking another service tier for Fast", async () => {
+    const client = makeModelListClient(() =>
+      Effect.succeed({
+        data: [
+          { ...makeModel("legacy-model"), additionalSpeedTiers: ["fast"] },
+          { ...makeModel("mixed-model"), serviceTiers: [], additionalSpeedTiers: ["fast"] },
+          {
+            ...makeModel("flex-model"),
+            serviceTiers: [{ id: "flex", name: "Flex", description: "Flexible processing" }],
+          },
+          makeModel("standard-model"),
+        ],
+      }),
+    );
+
+    const models = await Effect.runPromise(requestAllCodexModelsWithClient(client));
+    expect(
+      models.map((model) =>
+        model.capabilities?.optionDescriptors?.some((option) => option.id === "fastMode"),
+      ),
+    ).toEqual([true, true, false, false]);
+  });
+
   it("fails closed on repeated cursors and bounded page/model overflow", async () => {
     let repeatedCalls = 0;
     const repeatedCursorExit = await Effect.runPromise(

@@ -125,6 +125,22 @@ const CODEX_AUTH_RECOVERY_TASK_ID_HASH_PREFIX = "codex-auth-recovery-sha256:";
 const CODEX_AUTH_RECOVERY_TASK_ID_HASH_DOMAIN = "cafecode/codex-auth-recovery-task/v1";
 const CODEX_ACTIVE_AUTH_RECOVERY_TASK_LIMIT = 4_096;
 
+function codexServiceTierOverride(
+  modelSelection: ProviderSendTurnInput["modelSelection"],
+  instanceId: ProviderInstanceId,
+): Pick<CodexSessionRuntimeOptions, "serviceTier"> {
+  if (modelSelection?.instanceId !== instanceId) {
+    return {};
+  }
+  const fastMode = getModelSelectionBooleanOptionValue(modelSelection, "fastMode");
+  // Codex rust-v0.153.3's TUI service_tiers.rs sends the catalogue wire id
+  // `priority` for Fast and `default` for explicit standard routing. Omission
+  // preserves upstream session/config defaults, so it cannot represent Off
+  // after an earlier Fast turn. Reuse this mapping for both start/resume and
+  // turn submission, without borrowing another provider instance's options.
+  return fastMode === undefined ? {} : { serviceTier: fastMode ? "priority" : "default" };
+}
+
 class CodexTransportPolicyFileError extends Data.TaggedError("CodexTransportPolicyFileError")<{
   readonly cause: unknown;
 }> {
@@ -4240,10 +4256,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ...(input.modelSelection?.instanceId === boundInstanceId
             ? { model: input.modelSelection.model }
             : {}),
-          ...(input.modelSelection?.instanceId === boundInstanceId &&
-          getModelSelectionBooleanOptionValue(input.modelSelection, "fastMode") === true
-            ? { serviceTier: "fast" }
-            : {}),
+          ...codexServiceTierOverride(input.modelSelection, boundInstanceId),
           ...(currentTransportPolicy !== undefined
             ? { transportPolicy: currentTransportPolicy }
             : {}),
@@ -4487,10 +4500,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
         : undefined;
-    const fastMode =
-      input.modelSelection?.instanceId === boundInstanceId
-        ? getModelSelectionBooleanOptionValue(input.modelSelection, "fastMode")
-        : undefined;
     return yield* session.runtime
       .sendTurn({
         ...(input.input !== undefined ? { input: input.input } : {}),
@@ -4502,7 +4511,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               effort: reasoningEffort as EffectCodexSchema.V2TurnStartParams__ReasoningEffort,
             }
           : {}),
-        ...(fastMode === true ? { serviceTier: "fast" } : {}),
+        ...codexServiceTierOverride(input.modelSelection, boundInstanceId),
         ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
         ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
       })

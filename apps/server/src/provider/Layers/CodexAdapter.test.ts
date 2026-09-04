@@ -613,10 +613,40 @@ validationLayer("CodexAdapterLive validation", (it) => {
         cwd: process.cwd(),
         model: "gpt-5.3-codex",
         providerInstanceId: ProviderInstanceId.make("codex"),
-        serviceTier: "fast",
+        serviceTier: "priority",
         threadId: asThreadId("thread-1"),
         runtimeMode: "full-access",
       });
+    }),
+  );
+
+  it.effect("preserves explicit Fast off, omitted settings, and provider identity on start", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const selections = [
+        createModelSelection(ProviderInstanceId.make("codex"), "gpt-6-astra", [
+          { id: "fastMode", value: false },
+        ]),
+        createModelSelection(ProviderInstanceId.make("codex"), "gpt-6-astra"),
+        createModelSelection(ProviderInstanceId.make("other_codex"), "gpt-6-astra", [
+          { id: "fastMode", value: true },
+        ]),
+      ];
+      const expectedTiers = ["default", undefined, undefined];
+      validationRuntimeFactory.factory.mockClear();
+      for (const [index, modelSelection] of selections.entries()) {
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId(`thread-astra-start-${index}`),
+          runtimeMode: "approval-required",
+          modelSelection,
+        });
+        const options = validationRuntimeFactory.factory.mock.calls[index]?.[0];
+        assert.ok(options);
+        assert.equal(options.serviceTier, expectedTiers[index]);
+        assert.equal(Object.hasOwn(options, "serviceTier"), index === 0);
+        assert.equal(options.model, index === 2 ? undefined : "gpt-6-astra");
+      }
     }),
   );
 
@@ -938,8 +968,55 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         input: "hello",
         model: "gpt-5.3-codex",
         effort: "high",
-        serviceTier: "fast",
+        serviceTier: "priority",
       });
+    }),
+  );
+
+  it.effect("turns Astra Fast on and off while retaining Ultra and the exact model", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-astra-fast-toggle");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "approval-required",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      assert.ok(runtime);
+      runtime.sendTurnImpl.mockClear();
+
+      for (const fastMode of [true, false, undefined]) {
+        yield* adapter.sendTurn({
+          threadId,
+          input: "Continue",
+          modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-6-astra", [
+            { id: "reasoningEffort", value: "ultra" },
+            ...(fastMode === undefined ? [] : [{ id: "fastMode", value: fastMode }]),
+          ]),
+          attachments: [],
+        });
+      }
+      yield* adapter.sendTurn({
+        threadId,
+        input: "Continue",
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("other_codex"),
+          "gpt-6-astra",
+          [{ id: "fastMode", value: false }],
+        ),
+        attachments: [],
+      });
+
+      assert.deepStrictEqual(
+        runtime.sendTurnImpl.mock.calls.map(([input]) => input),
+        [
+          { input: "Continue", model: "gpt-6-astra", effort: "ultra", serviceTier: "priority" },
+          { input: "Continue", model: "gpt-6-astra", effort: "ultra", serviceTier: "default" },
+          { input: "Continue", model: "gpt-6-astra", effort: "ultra" },
+          { input: "Continue" },
+        ],
+      );
     }),
   );
 
@@ -1030,7 +1107,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         input: "hello",
         model: "gpt-5.3-codex",
         effort: "high",
-        serviceTier: "fast",
+        serviceTier: "priority",
       });
     }).pipe(Effect.provide(customLayer));
   });

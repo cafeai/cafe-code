@@ -639,7 +639,13 @@ function mapCodexModelCapabilities(
         },
   );
   const defaultReasoning = reasoningOptions.find((option) => option.isDefault)?.id;
-  const supportsFastMode = (model.additionalSpeedTiers ?? []).includes("fast");
+  // Match ModelPreset::supports_fast_mode in Codex rust-v0.153.3
+  // (codex-rs/protocol/src/openai_models.rs). Current catalogues advertise
+  // the wire id in serviceTiers; older providers may supply only the
+  // deprecated additionalSpeedTiers alias. Either is authoritative evidence.
+  const supportsFastMode =
+    model.serviceTiers?.some((tier) => tier.id === "priority") === true ||
+    (model.additionalSpeedTiers ?? []).includes("fast");
   return createModelCapabilities({
     optionDescriptors: [
       ...(reasoningOptions.length > 0
@@ -714,12 +720,12 @@ function makeStaticCodexReasoningCapabilities(input: {
 
 const CODEX_STANDARD_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 const CODEX_MAX_REASONING_EFFORTS = [...CODEX_STANDARD_REASONING_EFFORTS, "max"] as const;
-// Mirrors Codex app-server `model/list` from codex-cli 0.153.1. The live
+// Mirrors Codex app-server `model/list` from codex-cli 0.153.3. The live
 // app-server response remains authoritative when available; this fallback keeps
 // fresh installs usable before the full Codex probe refreshes provider cache.
 const CODEX_ULTRA_REASONING_EFFORTS = [...CODEX_MAX_REASONING_EFFORTS, "ultra"] as const;
 
-// Codex 0.153.1 ships GPT-6-Astra as a hidden, API-supported model with a
+// Codex 0.153.3 ships GPT-6-Astra as a hidden, API-supported model with a
 // minimum client version of 0.153.0. Upstream intentionally excludes it from
 // the default model picker, and Cafe must not turn embedded catalog metadata
 // into an entitlement claim. Keep the exact public selection metadata here so
