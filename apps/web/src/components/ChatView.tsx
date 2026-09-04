@@ -29,7 +29,7 @@ import { CODEX_AUTO_COMPACT_POLICY_SOURCE } from "@cafecode/shared/codexCompacti
 import { truncate } from "@cafecode/shared/String";
 import { Debouncer } from "@tanstack/react-pacer";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { useNavigate, useSearch } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import { useShallow } from "zustand/react/shallow";
 import { useGitStatus } from "~/lib/gitStatusState";
 import { useDesktopDebugEnabled } from "~/lib/desktopDebugState";
@@ -37,7 +37,6 @@ import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../en
 import { readEnvironmentApi } from "../environmentApi";
 import { isElectron } from "../env";
 import { readLocalApi } from "../localApi";
-import { parseDiffRouteSearch, stripDiffSearchParams } from "../diffRouteSearch";
 import {
   collapseExpandedComposerCursor,
   parseStandaloneComposerGoalCommand,
@@ -100,9 +99,12 @@ import { useCommandPaletteStore } from "../commandPaletteStore";
 import { buildTemporaryWorktreeBranchName } from "@cafecode/shared/git";
 import { useHasOnScreenKeyboard, useIsMobile, useMediaQuery } from "../hooks/useMediaQuery";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
+import { deriveLatestContextWindowSnapshot } from "../lib/contextWindow";
+import { shouldSurfaceProviderAccountRateLimits } from "../lib/codexRateLimits";
 import { BranchToolbar } from "./BranchToolbar";
-import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
+import { resolveShortcutCommand } from "../keybindings";
 import PlanSidebar from "./PlanSidebar";
+import { SessionRail } from "./chat/SessionRail";
 import { ChevronDownIcon, TriangleAlertIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { stackedThreadToast, toastManager } from "./ui/toast";
@@ -1483,16 +1485,12 @@ type ChatViewProps =
   | {
       environmentId: EnvironmentId;
       threadId: ThreadId;
-      onDiffPanelOpen?: () => void;
-      reserveTitleBarControlInset?: boolean;
       routeKind: "server";
       draftId?: never;
     }
   | {
       environmentId: EnvironmentId;
       threadId: ThreadId;
-      onDiffPanelOpen?: () => void;
-      reserveTitleBarControlInset?: boolean;
       routeKind: "draft";
       draftId: DraftId;
     };
@@ -1826,13 +1824,7 @@ function useLocalDispatchState(input: {
 }
 
 export default function ChatView(props: ChatViewProps) {
-  const {
-    environmentId,
-    threadId,
-    routeKind,
-    onDiffPanelOpen,
-    reserveTitleBarControlInset = true,
-  } = props;
+  const { environmentId, threadId, routeKind } = props;
   const draftId = routeKind === "draft" ? props.draftId : null;
   const routeThreadRef = useMemo(
     () => scopeThreadRef(environmentId, threadId),
@@ -1859,6 +1851,8 @@ export default function ChatView(props: ChatViewProps) {
     routeKind === "server" ? store.threadPlanSidebarOpenById[routeThreadKey] : undefined,
   );
   const setPersistedPlanSidebarOpen = useUiStateStore((store) => store.setThreadPlanSidebarOpen);
+  const sessionRailDocked = useUiStateStore((store) => store.sessionRailDocked);
+  const setSessionRailDocked = useUiStateStore((store) => store.setSessionRailDocked);
   const settings = useSettings();
   const setStickyComposerModelSelection = useComposerDraftStore(
     (store) => store.setStickyModelSelection,
@@ -1866,10 +1860,6 @@ export default function ChatView(props: ChatViewProps) {
   const timestampFormat = settings.timestampFormat;
   const autoOpenPlanSidebar = settings.autoOpenPlanSidebar;
   const navigate = useNavigate();
-  const rawSearch = useSearch({
-    strict: false,
-    select: (params) => parseDiffRouteSearch(params),
-  });
   const { resolvedTheme } = useTheme();
   // Granular store selectors — avoid subscribing to prompt changes.
   const composerRuntimeMode = useComposerDraftStore(
@@ -2189,7 +2179,6 @@ export default function ChatView(props: ChatViewProps) {
     composerInteractionMode ?? activeThread?.interactionMode ?? DEFAULT_INTERACTION_MODE;
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
   const canCheckoutPullRequestIntoThread = isLocalDraftThread;
-  const diffOpen = rawSearch.diff === "1";
   // Compute the list of environments this logical project spans, used to
   // drive the environment picker in BranchToolbar.
   const allProjects = useStore(useShallow(selectProjectsAcrossEnvironments));
@@ -4255,32 +4244,6 @@ export default function ChatView(props: ChatViewProps) {
   const activeWorkspaceRoot = activeThreadWorktreePath ?? activeProjectCwd ?? undefined;
   // Default true while loading to avoid toolbar flicker.
   const isGitRepo = gitStatusQuery.data?.isRepo ?? true;
-  const shortcutLabelOptions = useMemo(() => ({ context: {} }), []);
-  const diffPanelShortcutLabel = useMemo(
-    () => shortcutLabelForCommand(keybindings, "diff.toggle", shortcutLabelOptions),
-    [keybindings, shortcutLabelOptions],
-  );
-  const onToggleDiff = useCallback(() => {
-    if (!isServerThread) {
-      return;
-    }
-    if (!diffOpen) {
-      onDiffPanelOpen?.();
-    }
-    void navigate({
-      to: "/$environmentId/$threadId",
-      params: {
-        environmentId,
-        threadId,
-      },
-      replace: true,
-      search: (previous) => {
-        const rest = stripDiffSearchParams(previous);
-        return diffOpen ? { ...rest, diff: undefined } : { ...rest, diff: "1" };
-      },
-    });
-  }, [diffOpen, environmentId, isServerThread, navigate, onDiffPanelOpen, threadId]);
-
   const envLocked = Boolean(
     activeThread &&
     (activeThread.messages.length > 0 ||
@@ -4413,6 +4376,12 @@ export default function ChatView(props: ChatViewProps) {
   const closePlanSidebar = useCallback(() => {
     setPlanSidebarOpenForCurrentThread(false);
   }, [setPlanSidebarOpenForCurrentThread]);
+  const showSessionRail = useCallback(() => {
+    setSessionRailDocked(true);
+  }, [setSessionRailDocked]);
+  const hideSessionRail = useCallback(() => {
+    setSessionRailDocked(false);
+  }, [setSessionRailDocked]);
 
   const persistThreadSettingsForNextTurn = useCallback(
     async (input: {
@@ -4831,13 +4800,6 @@ export default function ChatView(props: ChatViewProps) {
       });
       if (!command) return;
 
-      if (command === "diff.toggle") {
-        event.preventDefault();
-        event.stopPropagation();
-        onToggleDiff();
-        return;
-      }
-
       if (command === "modelPicker.toggle") {
         event.preventDefault();
         event.stopPropagation();
@@ -4847,7 +4809,7 @@ export default function ChatView(props: ChatViewProps) {
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
-  }, [activeThreadId, composerRef, keybindings, onToggleDiff]);
+  }, [activeThreadId, composerRef, keybindings]);
 
   const onRevertToTurnCount = useCallback(
     async (turnCount: number) => {
@@ -6761,6 +6723,14 @@ export default function ChatView(props: ChatViewProps) {
   }
 
   const shouldRenderPlanSidebar = planSidebarOpen && hasPlanSidebarContent;
+  const sessionRailVisible = sessionRailDocked && !shouldUsePlanSidebarSheet;
+  const canDockSessionRail = !shouldUsePlanSidebarSheet;
+  const sessionRailUsage = deriveLatestContextWindowSnapshot(threadActivities);
+  const sessionRailRateLimits = shouldSurfaceProviderAccountRateLimits(activeProviderStatus)
+    ? (activeProviderStatus?.accountRateLimits ?? null)
+    : null;
+  const shouldRenderRightColumn =
+    (shouldRenderPlanSidebar && !shouldUsePlanSidebarSheet) || sessionRailVisible;
 
   return (
     <div className="group/chat-view flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
@@ -6771,11 +6741,7 @@ export default function ChatView(props: ChatViewProps) {
         className={cn(
           "border-b border-border group-has-[[data-chat-composer-keyboard-open=true]]/chat-view:hidden",
           isElectron
-            ? cn(
-                "drag-region flex h-[52px] items-center px-3 sm:px-5 wco:h-[env(titlebar-area-height)]",
-                reserveTitleBarControlInset &&
-                  "wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]",
-              )
+            ? "drag-region flex h-[52px] items-center px-3 sm:px-5 wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]"
             : "pb-2 pl-[calc(env(safe-area-inset-left)+0.75rem)] pr-[calc(env(safe-area-inset-right)+0.75rem)] pt-2 sm:pb-3 sm:pl-[calc(env(safe-area-inset-left)+1.25rem)] sm:pr-[calc(env(safe-area-inset-right)+1.25rem)] sm:pt-3",
         )}
       >
@@ -6788,9 +6754,6 @@ export default function ChatView(props: ChatViewProps) {
           keybindings={keybindings}
           availableEditors={availableEditors}
           terminal={terminal}
-          diffToggleShortcutLabel={diffPanelShortcutLabel}
-          diffOpen={diffOpen}
-          onToggleDiff={onToggleDiff}
         />
       </header>
 
@@ -6802,7 +6765,7 @@ export default function ChatView(props: ChatViewProps) {
         environmentId={activeThread.environmentId}
         threadId={activeThread.id}
       />
-      {/* Main content area with optional plan sidebar */}
+      {/* Main content area with optional plan / session rail */}
       <div className="flex min-h-0 min-w-0 flex-1">
         {/* Chat column */}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -6911,6 +6874,8 @@ export default function ChatView(props: ChatViewProps) {
                   sidebarProposedPlan={visibleSidebarProposedPlan}
                   planSidebarLabel={planSidebarLabel}
                   planSidebarOpen={shouldRenderPlanSidebar}
+                  sessionRailVisible={sessionRailVisible}
+                  {...(canDockSessionRail ? { onShowSessionRail: showSessionRail } : {})}
                   goalControlsSupported={goalControlsSupported}
                   runtimeMode={runtimeMode}
                   interactionMode={interactionMode}
@@ -7005,17 +6970,38 @@ export default function ChatView(props: ChatViewProps) {
         </div>
         {/* end chat column */}
 
-        {/* Plan sidebar */}
-        {shouldRenderPlanSidebar && !shouldUsePlanSidebarSheet ? (
-          <PlanSidebar
-            activeProposedPlan={visibleSidebarProposedPlan}
-            label={planSidebarLabel}
-            environmentId={environmentId}
-            markdownCwd={gitCwd ?? undefined}
-            workspaceRoot={activeWorkspaceRoot}
-            mode="sidebar"
-            onClose={closePlanSidebar}
-          />
+        {shouldRenderRightColumn ? (
+          <div
+            className="flex min-h-0 w-[340px] shrink-0 flex-col border-l border-border/70 bg-card/50"
+            data-chat-right-column="true"
+          >
+            {shouldRenderPlanSidebar ? (
+              <PlanSidebar
+                activeProposedPlan={visibleSidebarProposedPlan}
+                label={planSidebarLabel}
+                environmentId={environmentId}
+                markdownCwd={gitCwd ?? undefined}
+                workspaceRoot={activeWorkspaceRoot}
+                mode="sidebar"
+                framed={false}
+                className={
+                  sessionRailVisible ? "min-h-0 flex-1 border-b border-border/60" : "min-h-0 flex-1"
+                }
+                onClose={closePlanSidebar}
+              />
+            ) : null}
+            {sessionRailVisible ? (
+              <SessionRail
+                plan={composerActivePlan}
+                subagents={activeSubagentEntries}
+                onOpenSubagentDetail={openSubagentDetail}
+                usage={sessionRailUsage}
+                rateLimits={sessionRailRateLimits}
+                onShowInComposer={hideSessionRail}
+                className="min-h-0 flex-1"
+              />
+            ) : null}
+          </div>
         ) : null}
       </div>
       {/* end horizontal flex container */}

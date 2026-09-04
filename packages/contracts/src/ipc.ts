@@ -16,8 +16,6 @@ import type {
   GitResolvePullRequestResult,
   VcsStatusInput,
   VcsStatusResult,
-  VcsWorkingTreeDiffInput,
-  VcsWorkingTreeDiffResult,
   VcsCreateRefResult,
 } from "./git.ts";
 import type { FilesystemBrowseInput, FilesystemBrowseResult } from "./filesystem.ts";
@@ -500,7 +498,6 @@ export interface EnvironmentApi {
     init: (input: VcsInitInput) => Promise<void>;
     pull: (input: VcsPullInput) => Promise<VcsPullResult>;
     refreshStatus: (input: VcsStatusInput) => Promise<VcsStatusResult>;
-    workingTreeDiff: (input: VcsWorkingTreeDiffInput) => Promise<VcsWorkingTreeDiffResult>;
     onStatus: (
       input: VcsStatusInput,
       callback: (status: VcsStatusResult) => void,

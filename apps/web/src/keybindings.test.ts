@@ -10,7 +10,6 @@ import {
   formatShortcutLabel,
   isChatNewShortcut,
   isChatNewLocalShortcut,
-  isDiffToggleShortcut,
   modelPickerJumpCommandForIndex,
   modelPickerJumpIndexFromCommand,
   isOpenFavoriteEditorShortcut,
@@ -92,11 +91,6 @@ const DEFAULT_BINDINGS = compile([
   },
   { shortcut: modShortcut("j"), command: "commandPalette.toggle" },
   {
-    shortcut: modShortcut("d"),
-    command: "diff.toggle",
-    whenAst: whenIdentifier("modelPickerOpen"),
-  },
-  {
     shortcut: modShortcut("d", { shiftKey: true }),
     command: "chat.new",
     whenAst: whenIdentifier("modelPickerOpen"),
@@ -105,11 +99,6 @@ const DEFAULT_BINDINGS = compile([
     shortcut: modShortcut("w"),
     command: "chat.newLocal",
     whenAst: whenIdentifier("modelPickerOpen"),
-  },
-  {
-    shortcut: modShortcut("d"),
-    command: "diff.toggle",
-    whenAst: whenNot(whenIdentifier("modelPickerOpen")),
   },
   {
     shortcut: modShortcut("k"),
@@ -151,17 +140,17 @@ describe("shortcutLabelForCommand", () => {
     const bindings = compile([
       {
         shortcut: modShortcut("\\"),
-        command: "diff.toggle",
+        command: "chat.newLocal",
         whenAst: whenIdentifier("modelPickerOpen"),
       },
       {
         shortcut: modShortcut("\\", { shiftKey: true }),
-        command: "diff.toggle",
+        command: "chat.newLocal",
         whenAst: whenNot(whenIdentifier("modelPickerOpen")),
       },
     ]);
     assert.strictEqual(
-      shortcutLabelForCommand(bindings, "diff.toggle", {
+      shortcutLabelForCommand(bindings, "chat.newLocal", {
         platform: "Linux",
         context: { modelPickerOpen: false },
       }),
@@ -171,7 +160,6 @@ describe("shortcutLabelForCommand", () => {
 
   it("returns effective labels for static commands", () => {
     assert.strictEqual(shortcutLabelForCommand(DEFAULT_BINDINGS, "chat.new", "MacIntel"), "⇧⌘O");
-    assert.strictEqual(shortcutLabelForCommand(DEFAULT_BINDINGS, "diff.toggle", "Linux"), "Ctrl+D");
     assert.strictEqual(
       shortcutLabelForCommand(DEFAULT_BINDINGS, "commandPalette.toggle", "MacIntel"),
       "⌘K",
@@ -227,23 +215,23 @@ describe("shortcutLabelForCommand", () => {
 
   it("respects when-context while resolving labels", () => {
     const bindings = compile([
-      { shortcut: modShortcut("d"), command: "diff.toggle" },
+      { shortcut: modShortcut("d"), command: "chat.newLocal" },
       {
         shortcut: modShortcut("d"),
-        command: "diff.toggle",
+        command: "chat.newLocal",
         whenAst: whenIdentifier("modelPickerOpen"),
       },
     ]);
 
     assert.strictEqual(
-      shortcutLabelForCommand(bindings, "diff.toggle", {
+      shortcutLabelForCommand(bindings, "chat.newLocal", {
         platform: "Linux",
         context: { modelPickerOpen: false },
       }),
       "Ctrl+D",
     );
     assert.strictEqual(
-      shortcutLabelForCommand(bindings, "diff.toggle", {
+      shortcutLabelForCommand(bindings, "chat.newLocal", {
         platform: "Linux",
         context: { modelPickerOpen: true },
       }),
@@ -368,31 +356,6 @@ describe("chat/editor shortcuts", () => {
         context: { modelPickerOpen: true },
       }),
       "commandPalette.toggle",
-    );
-  });
-
-  it("matches diff.toggle only when its when-context allows it", () => {
-    assert.isTrue(
-      isDiffToggleShortcut(event({ key: "d", metaKey: true }), DEFAULT_BINDINGS, {
-        platform: "MacIntel",
-        context: { modelPickerOpen: false },
-      }),
-    );
-    assert.isFalse(
-      isDiffToggleShortcut(
-        event({ key: "d", metaKey: true }),
-        compile([
-          {
-            shortcut: modShortcut("d"),
-            command: "diff.toggle",
-            whenAst: whenNot(whenIdentifier("modelPickerOpen")),
-          },
-        ]),
-        {
-          platform: "MacIntel",
-          context: { modelPickerOpen: true },
-        },
-      ),
     );
   });
 });

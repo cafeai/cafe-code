@@ -21,7 +21,7 @@ import { Route as SettingsProvidersRouteImport } from './routes/settings.provide
 import { Route as SettingsNotificationsRouteImport } from './routes/settings.notifications'
 import { Route as SettingsKeybindingsRouteImport } from './routes/settings.keybindings'
 import { Route as SettingsGeneralRouteImport } from './routes/settings.general'
-import { Route as SettingsFilesDiffsRouteImport } from './routes/settings.files-diffs'
+import { Route as SettingsFilesRouteImport } from './routes/settings.files'
 import { Route as SettingsDictationRouteImport } from './routes/settings.dictation'
 import { Route as SettingsDiagnosticsRouteImport } from './routes/settings.diagnostics'
 import { Route as SettingsConnectionsRouteImport } from './routes/settings.connections'
@@ -91,9 +91,9 @@ const SettingsGeneralRoute = SettingsGeneralRouteImport.update({
   path: '/general',
   getParentRoute: () => SettingsRoute,
 } as any)
-const SettingsFilesDiffsRoute = SettingsFilesDiffsRouteImport.update({
-  id: '/files-diffs',
-  path: '/files-diffs',
+const SettingsFilesRoute = SettingsFilesRouteImport.update({
+  id: '/files',
+  path: '/files',
   getParentRoute: () => SettingsRoute,
 } as any)
 const SettingsDictationRoute = SettingsDictationRouteImport.update({
@@ -154,7 +154,7 @@ export interface FileRoutesByFullPath {
   '/settings/connections': typeof SettingsConnectionsRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/settings/dictation': typeof SettingsDictationRoute
-  '/settings/files-diffs': typeof SettingsFilesDiffsRoute
+  '/settings/files': typeof SettingsFilesRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
   '/settings/notifications': typeof SettingsNotificationsRoute
@@ -176,7 +176,7 @@ export interface FileRoutesByTo {
   '/settings/connections': typeof SettingsConnectionsRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/settings/dictation': typeof SettingsDictationRoute
-  '/settings/files-diffs': typeof SettingsFilesDiffsRoute
+  '/settings/files': typeof SettingsFilesRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
   '/settings/notifications': typeof SettingsNotificationsRoute
@@ -201,7 +201,7 @@ export interface FileRoutesById {
   '/settings/connections': typeof SettingsConnectionsRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/settings/dictation': typeof SettingsDictationRoute
-  '/settings/files-diffs': typeof SettingsFilesDiffsRoute
+  '/settings/files': typeof SettingsFilesRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
   '/settings/notifications': typeof SettingsNotificationsRoute
@@ -227,7 +227,7 @@ export interface FileRouteTypes {
     | '/settings/connections'
     | '/settings/diagnostics'
     | '/settings/dictation'
-    | '/settings/files-diffs'
+    | '/settings/files'
     | '/settings/general'
     | '/settings/keybindings'
     | '/settings/notifications'
@@ -249,7 +249,7 @@ export interface FileRouteTypes {
     | '/settings/connections'
     | '/settings/diagnostics'
     | '/settings/dictation'
-    | '/settings/files-diffs'
+    | '/settings/files'
     | '/settings/general'
     | '/settings/keybindings'
     | '/settings/notifications'
@@ -273,7 +273,7 @@ export interface FileRouteTypes {
     | '/settings/connections'
     | '/settings/diagnostics'
     | '/settings/dictation'
-    | '/settings/files-diffs'
+    | '/settings/files'
     | '/settings/general'
     | '/settings/keybindings'
     | '/settings/notifications'
@@ -379,11 +379,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsGeneralRouteImport
       parentRoute: typeof SettingsRoute
     }
-    '/settings/files-diffs': {
-      id: '/settings/files-diffs'
-      path: '/files-diffs'
-      fullPath: '/settings/files-diffs'
-      preLoaderRoute: typeof SettingsFilesDiffsRouteImport
+    '/settings/files': {
+      id: '/settings/files'
+      path: '/files'
+      fullPath: '/settings/files'
+      preLoaderRoute: typeof SettingsFilesRouteImport
       parentRoute: typeof SettingsRoute
     }
     '/settings/dictation': {
@@ -474,7 +474,7 @@ interface SettingsRouteChildren {
   SettingsConnectionsRoute: typeof SettingsConnectionsRoute
   SettingsDiagnosticsRoute: typeof SettingsDiagnosticsRoute
   SettingsDictationRoute: typeof SettingsDictationRoute
-  SettingsFilesDiffsRoute: typeof SettingsFilesDiffsRoute
+  SettingsFilesRoute: typeof SettingsFilesRoute
   SettingsGeneralRoute: typeof SettingsGeneralRoute
   SettingsKeybindingsRoute: typeof SettingsKeybindingsRoute
   SettingsNotificationsRoute: typeof SettingsNotificationsRoute
@@ -493,7 +493,7 @@ const SettingsRouteChildren: SettingsRouteChildren = {
   SettingsConnectionsRoute: SettingsConnectionsRoute,
   SettingsDiagnosticsRoute: SettingsDiagnosticsRoute,
   SettingsDictationRoute: SettingsDictationRoute,
-  SettingsFilesDiffsRoute: SettingsFilesDiffsRoute,
+  SettingsFilesRoute: SettingsFilesRoute,
   SettingsGeneralRoute: SettingsGeneralRoute,
   SettingsKeybindingsRoute: SettingsKeybindingsRoute,
   SettingsNotificationsRoute: SettingsNotificationsRoute,

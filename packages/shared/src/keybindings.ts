@@ -21,7 +21,6 @@ type WhenToken =
 export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "enter", command: "composer.submit", when: "composerFocused" },
   { key: "mod+enter", command: "composer.steer", when: "composerFocused" },
-  { key: "mod+d", command: "diff.toggle" },
   { key: "mod+k", command: "commandPalette.toggle" },
   { key: "mod+n", command: "chat.new" },
   { key: "mod+shift+o", command: "chat.new" },

@@ -121,7 +121,7 @@ const SETTINGS_RESTORE_DEFAULTS_PATHS = new Set([
   "/settings/appearance",
   "/settings/ambiance",
   "/settings/chat-threads",
-  "/settings/files-diffs",
+  "/settings/files",
   "/settings/source-control",
   "/settings/system",
   "/settings/general",

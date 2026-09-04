@@ -44,18 +44,6 @@ export const VcsStatusInput = Schema.Struct({
 });
 export type VcsStatusInput = typeof VcsStatusInput.Type;
 
-export const VcsWorkingTreeDiffInput = Schema.Struct({
-  cwd: TrimmedNonEmptyStringSchema,
-  ignoreWhitespace: Schema.optional(Schema.Boolean),
-});
-export type VcsWorkingTreeDiffInput = typeof VcsWorkingTreeDiffInput.Type;
-
-export const VcsWorkingTreeDiffResult = Schema.Struct({
-  cwd: TrimmedNonEmptyStringSchema,
-  diff: Schema.String,
-});
-export type VcsWorkingTreeDiffResult = typeof VcsWorkingTreeDiffResult.Type;
-
 export const VcsPullInput = Schema.Struct({
   cwd: TrimmedNonEmptyStringSchema,
 });

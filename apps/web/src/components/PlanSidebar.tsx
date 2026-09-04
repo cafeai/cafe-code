@@ -26,6 +26,9 @@ interface PlanSidebarProps {
   markdownCwd: string | undefined;
   workspaceRoot: string | undefined;
   mode?: "sheet" | "sidebar";
+  /** When false, the parent column owns width, border, and background. */
+  framed?: boolean;
+  className?: string;
   onClose: () => void;
 }
 
@@ -36,6 +39,8 @@ const PlanSidebar = memo(function PlanSidebar({
   markdownCwd,
   workspaceRoot,
   mode = "sidebar",
+  framed = true,
+  className,
   onClose,
 }: PlanSidebarProps) {
   const [proposedPlanExpanded, setProposedPlanExpanded] = useState(false);
@@ -93,10 +98,12 @@ const PlanSidebar = memo(function PlanSidebar({
   return (
     <div
       className={cn(
-        "flex min-h-0 flex-col bg-card/50",
-        mode === "sidebar"
+        "flex min-h-0 flex-col",
+        framed && "bg-card/50",
+        framed && mode === "sidebar"
           ? "h-full w-[340px] shrink-0 border-l border-border/70"
           : "h-full w-full",
+        className,
       )}
     >
       {/* Header */}

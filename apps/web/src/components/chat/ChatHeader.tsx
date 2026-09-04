@@ -6,10 +6,7 @@ import {
   type TerminalAvailability,
 } from "@cafecode/contracts";
 import { memo } from "react";
-import { DiffIcon } from "lucide-react";
 import { Badge } from "../ui/badge";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { Toggle } from "../ui/toggle";
 import { ContentSidebarTriggerWithUnreadDot } from "../sidebar/unseenCompletions";
 import { ConnectionStatusIndicator } from "./ConnectionStatusIndicator";
 import { OpenInPicker } from "./OpenInPicker";
@@ -26,9 +23,6 @@ interface ChatHeaderProps {
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: ReadonlyArray<EditorId>;
   terminal: TerminalAvailability;
-  diffToggleShortcutLabel: string | null;
-  diffOpen: boolean;
-  onToggleDiff: () => void;
 }
 
 export function shouldShowOpenInPicker(input: {
@@ -64,9 +58,6 @@ export const ChatHeader = memo(function ChatHeader({
   keybindings,
   availableEditors,
   terminal,
-  diffToggleShortcutLabel,
-  diffOpen,
-  onToggleDiff,
 }: ChatHeaderProps) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const localShellCapabilities = getLocalShellCapabilities();
@@ -134,30 +125,6 @@ export const ChatHeader = memo(function ChatHeader({
             openInCwd={openInCwd}
           />
         )}
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Toggle
-                className="shrink-0"
-                pressed={diffOpen}
-                onPressedChange={onToggleDiff}
-                aria-label="Toggle diff panel"
-                variant="outline"
-                size="xs"
-                disabled={!isGitRepo && !diffOpen}
-              >
-                <DiffIcon className="size-3" />
-              </Toggle>
-            }
-          />
-          <TooltipPopup side="bottom">
-            {!isGitRepo && !diffOpen
-              ? "Diff panel is unavailable because this project is not a git repository."
-              : diffToggleShortcutLabel
-                ? `Toggle diff panel (${diffToggleShortcutLabel})`
-                : "Toggle diff panel"}
-          </TooltipPopup>
-        </Tooltip>
       </div>
     </div>
   );

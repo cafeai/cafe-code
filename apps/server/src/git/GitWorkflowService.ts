@@ -24,8 +24,6 @@ import {
   type VcsStatusLocalResult,
   type VcsStatusRemoteResult,
   type VcsStatusResult,
-  type VcsWorkingTreeDiffInput,
-  type VcsWorkingTreeDiffResult,
 } from "@cafecode/contracts";
 
 import { GitManager } from "./GitManager.ts";
@@ -42,9 +40,6 @@ export interface GitWorkflowServiceShape {
   readonly remoteStatus: (
     input: VcsStatusInput,
   ) => Effect.Effect<VcsStatusRemoteResult | null, GitManagerServiceError>;
-  readonly workingTreeDiff: (
-    input: VcsWorkingTreeDiffInput,
-  ) => Effect.Effect<VcsWorkingTreeDiffResult, GitManagerServiceError>;
   readonly invalidateLocalStatus: (cwd: string) => Effect.Effect<void, never>;
   readonly invalidateRemoteStatus: (cwd: string) => Effect.Effect<void, never>;
   readonly invalidateStatus: (cwd: string) => Effect.Effect<void, never>;
@@ -263,35 +258,6 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
         Effect.flatMap((isGitRepository) =>
           isGitRepository ? gitManager.remoteStatus(input) : Effect.succeed(null),
         ),
-      ),
-    workingTreeDiff: (input) =>
-      detectGitRepositoryForStatus("GitWorkflowService.workingTreeDiff", input.cwd).pipe(
-        Effect.flatMap((isGitRepository) => {
-          if (!isGitRepository) {
-            return Effect.succeed({
-              cwd: input.cwd,
-              diff: "",
-            } satisfies VcsWorkingTreeDiffResult);
-          }
-
-          return git
-            .workingTreeDiff(input.cwd, { ignoreWhitespace: input.ignoreWhitespace ?? false })
-            .pipe(
-              Effect.map(
-                (diff): VcsWorkingTreeDiffResult => ({
-                  cwd: input.cwd,
-                  diff,
-                }),
-              ),
-              Effect.mapError(
-                (error) =>
-                  new GitManagerError({
-                    operation: "GitWorkflowService.workingTreeDiff",
-                    detail: error.message,
-                  }),
-              ),
-            );
-        }),
       ),
     invalidateLocalStatus: gitManager.invalidateLocalStatus,
     invalidateRemoteStatus: gitManager.invalidateRemoteStatus,

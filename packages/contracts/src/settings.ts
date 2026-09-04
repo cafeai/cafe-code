@@ -268,8 +268,10 @@ export const DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT: SidebarThreadPreviewCount = 6
 
 export const ClientSettingsSchema = Schema.Struct({
   // The persisted key predates the composer task-progress control. It now
-  // applies only to completed authored-plan documents; runtime checklists are
-  // transient composer UI and never open the side panel.
+  // applies only to completed authored-plan documents. Runtime checklists
+  // stay in the composer popover unless the user docks the separate session
+  // rail; that placement is a local UI preference and must not follow this
+  // auto-open setting.
   autoOpenPlanSidebar: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // Per-device first-run flow. `onboardingCompleted` gates the full-screen
   // onboarding surface so it only appears on a fresh install (and never loops
@@ -290,8 +292,6 @@ export const ClientSettingsSchema = Schema.Struct({
   dismissedProviderUpdateNotificationKeys: Schema.Array(TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
-  diffIgnoreWhitespace: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-  diffWordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   interfaceScalePercent: InterfaceScalePercent.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_INTERFACE_SCALE_PERCENT)),
   ),
@@ -986,8 +986,6 @@ export const ClientSettingsPatch = Schema.Struct({
   notificationsEnabled: Schema.optionalKey(Schema.Boolean),
   confirmThreadArchive: Schema.optionalKey(Schema.Boolean),
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
-  diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
-  diffWordWrap: Schema.optionalKey(Schema.Boolean),
   interfaceScalePercent: Schema.optionalKey(InterfaceScalePercent),
   continueBackgroundAnimations: Schema.optionalKey(Schema.Boolean),
   showSidebarSearch: Schema.optionalKey(Schema.Boolean),

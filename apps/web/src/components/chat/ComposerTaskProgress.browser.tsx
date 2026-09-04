@@ -13,6 +13,8 @@ async function mountProgress(
     readonly composerBottom?: boolean;
     readonly subagents?: ReadonlyArray<WorkLogEntry>;
     readonly onOpenSubagentDetail?: (entry: WorkLogEntry, trigger: HTMLButtonElement) => void;
+    readonly sessionRailVisible?: boolean;
+    readonly onShowOnSide?: () => void;
   },
 ) {
   const host = document.createElement("div");
@@ -27,6 +29,8 @@ async function mountProgress(
       {...(options?.onOpenSubagentDetail
         ? { onOpenSubagentDetail: options.onOpenSubagentDetail }
         : {})}
+      {...(options?.sessionRailVisible ? { sessionRailVisible: true } : {})}
+      {...(options?.onShowOnSide ? { onShowOnSide: options.onShowOnSide } : {})}
     />,
     { container: host },
   );
@@ -419,6 +423,32 @@ describe("ComposerTaskProgress", () => {
     } finally {
       await mounted.cleanup();
       await page.viewport(originalViewport.width, originalViewport.height);
+    }
+  });
+
+  it("offers a dock control and hides the composer pill when the session rail is visible", async () => {
+    const onShowOnSide = vi.fn();
+    const plan: ComposerTaskProgressPlan = {
+      steps: [{ step: "Keep the live pill after docking", status: "inProgress" }],
+    };
+    const dockable = await mountProgress(plan, { onShowOnSide });
+
+    try {
+      await page.getByRole("button", { name: /Task progress/ }).click();
+      await vi.waitFor(() => expect(progressPopup()).not.toBeNull());
+      await page.getByRole("button", { name: "Show on the side" }).click();
+      expect(onShowOnSide).toHaveBeenCalledTimes(1);
+    } finally {
+      await dockable.cleanup();
+    }
+
+    const docked = await mountProgress(plan, { sessionRailVisible: true });
+    try {
+      expect(progressTrigger()).toBeNull();
+      expect(progressPopup()).toBeNull();
+      expect(document.querySelector('[data-session-rail-dock="true"]')).toBeNull();
+    } finally {
+      await docked.cleanup();
     }
   });
 });

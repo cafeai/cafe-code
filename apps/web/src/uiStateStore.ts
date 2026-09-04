@@ -26,6 +26,7 @@ export interface PersistedUiState {
   navigationSidebarOpen?: boolean;
   threadLastVisitedAtById?: Record<string, string>;
   threadPlanSidebarOpenById?: Record<string, boolean>;
+  sessionRailDocked?: boolean;
 }
 
 export interface UiProjectState {
@@ -52,8 +53,18 @@ export interface UiNavigationState {
   navigationSidebarOpen: boolean;
 }
 
+export interface UiSessionRailState {
+  /**
+   * Global composer-vs-side placement for the current-turn checklist,
+   * active subagents, and context/quota details. This is a layout
+   * preference, not the authored-plan sidebar, and it must not be
+   * inferred from `autoOpenPlanSidebar` or per-thread plan state.
+   */
+  sessionRailDocked: boolean;
+}
+
 export interface UiState
-  extends UiProjectState, UiThreadState, UiEndpointState, UiNavigationState {}
+  extends UiProjectState, UiThreadState, UiEndpointState, UiNavigationState, UiSessionRailState {}
 
 export interface SyncProjectInput {
   /** Physical project key (env + cwd). Used for manual sort order. */
@@ -75,6 +86,7 @@ const initialState: UiState = {
   threadPlanSidebarOpenById: {},
   defaultAdvertisedEndpointKey: null,
   navigationSidebarOpen: true,
+  sessionRailDocked: false,
 };
 
 const persistedCollapsedProjectCwds = new Set<string>();
@@ -183,6 +195,7 @@ export function hydratePersistedUiState(parsed: PersistedUiState): UiState {
       typeof parsed.navigationSidebarOpen === "boolean" ? parsed.navigationSidebarOpen : true,
     threadLastVisitedAtById: sanitizeThreadVisitRecord(parsed.threadLastVisitedAtById),
     threadPlanSidebarOpenById: sanitizeBooleanRecord(parsed.threadPlanSidebarOpenById),
+    sessionRailDocked: parsed.sessionRailDocked === true,
   };
 }
 
@@ -236,6 +249,7 @@ export function persistState(state: UiState): void {
         navigationSidebarOpen: state.navigationSidebarOpen,
         threadLastVisitedAtById: state.threadLastVisitedAtById,
         threadPlanSidebarOpenById: state.threadPlanSidebarOpenById,
+        sessionRailDocked: state.sessionRailDocked,
       } satisfies PersistedUiState),
     );
     if (!legacyKeysCleanedUp) {
@@ -563,6 +577,16 @@ export function setNavigationSidebarOpen(state: UiState, open: boolean): UiState
   };
 }
 
+export function setSessionRailDocked(state: UiState, docked: boolean): UiState {
+  if (state.sessionRailDocked === docked) {
+    return state;
+  }
+  return {
+    ...state,
+    sessionRailDocked: docked,
+  };
+}
+
 export function toggleProject(state: UiState, projectId: string): UiState {
   const expanded = state.projectExpandedById[projectId] ?? true;
   return {
@@ -639,6 +663,7 @@ interface UiStateStore extends UiState {
   setThreadPlanSidebarOpen: (threadId: string, open: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setNavigationSidebarOpen: (open: boolean) => void;
+  setSessionRailDocked: (docked: boolean) => void;
   toggleProject: (projectId: string) => void;
   setProjectExpanded: (projectId: string, expanded: boolean) => void;
   reorderProjects: (
@@ -661,6 +686,7 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
   setDefaultAdvertisedEndpointKey: (key) =>
     set((state) => setDefaultAdvertisedEndpointKey(state, key)),
   setNavigationSidebarOpen: (open) => set((state) => setNavigationSidebarOpen(state, open)),
+  setSessionRailDocked: (docked) => set((state) => setSessionRailDocked(state, docked)),
   toggleProject: (projectId) => set((state) => toggleProject(state, projectId)),
   setProjectExpanded: (projectId, expanded) =>
     set((state) => setProjectExpanded(state, projectId, expanded)),

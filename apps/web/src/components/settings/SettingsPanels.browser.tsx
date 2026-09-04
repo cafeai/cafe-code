@@ -1158,7 +1158,7 @@ describe("settings panels", () => {
     });
   });
 
-  it("shows detected editor icons in the Files & Diffs default editor selector", async () => {
+  it("shows detected editor icons in the Files default editor selector", async () => {
     const platformSpy = vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
     const desktopBridge = createDesktopBridgeStub();
     window.desktopBridge = desktopBridge;

@@ -35,7 +35,7 @@ export type SettingsSectionPath =
   | "/settings/appearance"
   | "/settings/ambiance"
   | "/settings/chat-threads"
-  | "/settings/files-diffs"
+  | "/settings/files"
   | "/settings/general"
   | "/settings/keybindings"
   | "/settings/notifications"
@@ -74,7 +74,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
       { label: "Ambiance", to: "/settings/ambiance", icon: CloudDrizzleIcon },
       { label: "Chat & Threads", to: "/settings/chat-threads", icon: MessageSquareIcon },
       { label: "Notifications", to: "/settings/notifications", icon: BellIcon },
-      { label: "Files & Diffs", to: "/settings/files-diffs", icon: FileTextIcon },
+      { label: "Files", to: "/settings/files", icon: FileTextIcon },
       { label: "Keybindings", to: "/settings/keybindings", icon: KeyboardIcon },
     ],
   },

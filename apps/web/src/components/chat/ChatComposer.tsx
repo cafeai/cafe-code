@@ -238,6 +238,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   compact: boolean;
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
   codexRateLimits: ServerProvider["accountRateLimits"] | null;
+  sessionRailVisible: boolean;
+  onShowSessionRail?: () => void;
   isPreparingWorktree: boolean;
   pendingAction: {
     questionIndex: number;
@@ -264,10 +266,11 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
 }) {
   return (
     <>
-      {props.activeContextWindow ? (
+      {props.activeContextWindow && !props.sessionRailVisible ? (
         <ContextWindowMeter
           usage={props.activeContextWindow}
           codexRateLimits={props.codexRateLimits}
+          {...(props.onShowSessionRail ? { onShowOnSide: props.onShowSessionRail } : {})}
         />
       ) : null}
       {props.pendingStatusLabel ? (
@@ -676,6 +679,8 @@ export interface ChatComposerProps {
   sidebarProposedPlan: LatestProposedPlanState | null;
   planSidebarLabel: string;
   planSidebarOpen: boolean;
+  sessionRailVisible?: boolean;
+  onShowSessionRail?: () => void;
   goalControlsSupported: boolean;
 
   // Mode
@@ -787,6 +792,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     sidebarProposedPlan,
     planSidebarLabel,
     planSidebarOpen,
+    sessionRailVisible = false,
+    onShowSessionRail,
     goalControlsSupported,
     runtimeMode,
     interactionMode,
@@ -3006,6 +3013,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     plan={activePlan}
                     subagents={activeSubagents}
                     onOpenSubagentDetail={onOpenSubagentDetail}
+                    sessionRailVisible={sessionRailVisible}
+                    {...(onShowSessionRail ? { onShowOnSide: onShowSessionRail } : {})}
                   />
                   {pendingUserInputs.length === 0 ? (
                     <ComposerAttachImageButton
@@ -3053,6 +3062,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 plan={activePlan}
                 subagents={activeSubagents}
                 onOpenSubagentDetail={onOpenSubagentDetail}
+                sessionRailVisible={sessionRailVisible}
+                {...(onShowSessionRail ? { onShowOnSide: onShowSessionRail } : {})}
               />
               <ComposerPendingApprovalActions
                 requestId={activePendingApproval.requestId}
@@ -3173,6 +3184,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 plan={activePlan}
                 subagents={activeSubagents}
                 onOpenSubagentDetail={onOpenSubagentDetail}
+                sessionRailVisible={sessionRailVisible}
+                {...(onShowSessionRail ? { onShowOnSide: onShowSessionRail } : {})}
               />
 
               {/* Right side: dictation plus send / stop button */}
@@ -3187,6 +3200,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   compact={isComposerPrimaryActionsCompact}
                   activeContextWindow={activeContextWindow}
                   codexRateLimits={selectedCodexRateLimits}
+                  sessionRailVisible={sessionRailVisible}
+                  {...(onShowSessionRail ? { onShowSessionRail } : {})}
                   pendingAction={pendingPrimaryAction}
                   isRunning={phase === "running"}
                   showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}

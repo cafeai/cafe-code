@@ -2,8 +2,9 @@ import type { ServerProviderAccountRateLimits } from "@cafecode/contracts";
 
 import { cn } from "~/lib/utils";
 import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/contextWindow";
-import { formatCodexRateLimitSummary } from "~/lib/codexRateLimits";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { ContextWindowDetails } from "./ContextWindowDetails";
+import { SessionPlacementButton } from "./SessionRail";
 
 function formatPercentage(value: number | null): string | null {
   if (value === null || !Number.isFinite(value)) {
@@ -18,9 +19,9 @@ function formatPercentage(value: number | null): string | null {
 export function ContextWindowMeter(props: {
   usage: ContextWindowSnapshot;
   codexRateLimits?: ServerProviderAccountRateLimits | null | undefined;
+  onShowOnSide?: () => void;
 }) {
   const { usage } = props;
-  const codexRateLimitSummary = formatCodexRateLimitSummary(props.codexRateLimits);
   const usedPercentage = formatPercentage(usage.usedPercentage);
   const normalizedPercentage = Math.max(0, Math.min(100, usage.usedPercentage ?? 0));
   const radius = 9.75;
@@ -85,74 +86,18 @@ export function ContextWindowMeter(props: {
         }
       />
       <PopoverPopup tooltipStyle side="top" align="end" className="w-max max-w-none px-3 py-2">
-        <div className="space-y-1.5 leading-tight">
-          <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
-            Context window
-          </div>
-          {usage.maxTokens !== null && usedPercentage ? (
-            <div className="whitespace-nowrap text-xs font-medium text-foreground">
-              <span>{usedPercentage}</span>
-              <span className="mx-1">⋅</span>
-              <span>{formatContextWindowTokens(usage.usedTokens)}</span>
-              <span>/</span>
-              <span>{formatContextWindowTokens(usage.maxTokens ?? null)} context used</span>
-            </div>
-          ) : (
-            <div className="text-sm text-foreground">
-              {formatContextWindowTokens(usage.usedTokens)} tokens used so far
-            </div>
-          )}
-          {(usage.totalProcessedTokens ?? null) !== null &&
-          (usage.totalProcessedTokens ?? 0) > usage.usedTokens ? (
-            <div className="text-xs text-muted-foreground">
-              Total processed: {formatContextWindowTokens(usage.totalProcessedTokens ?? null)}{" "}
-              tokens
-            </div>
-          ) : null}
-          {usage.compactsAutomatically ? (
-            <div className="text-xs text-muted-foreground">
-              {usage.autoCompactTokenLimit
-                ? `Automatically compacts around ${formatContextWindowTokens(
-                    usage.autoCompactTokenLimit,
-                  )} tokens.`
-                : "Automatically compacts its context when needed."}
-            </div>
-          ) : null}
-          {codexRateLimitSummary ? (
-            <div className="mt-2 space-y-1 border-t border-border/60 pt-2 text-xs">
-              {codexRateLimitSummary.primary ? (
-                <div className="grid grid-cols-[auto_auto] gap-x-3 whitespace-nowrap">
-                  <span className="text-muted-foreground">
-                    {codexRateLimitSummary.primary.label}
-                  </span>
-                  <span className="text-right font-medium text-foreground">
-                    {codexRateLimitSummary.primary.value}
-                  </span>
-                </div>
-              ) : null}
-              {codexRateLimitSummary.secondary ? (
-                <div className="grid grid-cols-[auto_auto] gap-x-3 whitespace-nowrap">
-                  <span className="text-muted-foreground">
-                    {codexRateLimitSummary.secondary.label}
-                  </span>
-                  <span className="text-right font-medium text-foreground">
-                    {codexRateLimitSummary.secondary.value}
-                  </span>
-                </div>
-              ) : null}
-              {codexRateLimitSummary.primaryReset ? (
-                <div className="whitespace-nowrap text-muted-foreground">
-                  {codexRateLimitSummary.primaryReset}
-                </div>
-              ) : null}
-              {codexRateLimitSummary.weeklyReset ? (
-                <div className="whitespace-nowrap text-muted-foreground">
-                  {codexRateLimitSummary.weeklyReset}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
+        <ContextWindowDetails
+          usage={usage}
+          rateLimits={props.codexRateLimits}
+          layout="popover"
+          {...(props.onShowOnSide
+            ? {
+                headerAction: (
+                  <SessionPlacementButton placement="side" onClick={props.onShowOnSide} />
+                ),
+              }
+            : {})}
+        />
       </PopoverPopup>
     </Popover>
   );

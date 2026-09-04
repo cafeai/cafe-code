@@ -1,86 +1,30 @@
-import { BotIcon, CircleCheckIcon, CircleIcon, LoaderCircleIcon } from "lucide-react";
+import { BotIcon } from "lucide-react";
 import { memo, useRef, useState } from "react";
 
 import type { WorkLogEntry } from "../../session-logic";
-import { cn } from "~/lib/utils";
-import { SubagentRosterRow, type SubagentRosterEntry } from "../subagents/SubagentRosterRow";
+import { type SubagentRosterEntry } from "../subagents/SubagentRosterRow";
 import { Button } from "../ui/button";
+import { Popover, PopoverPopup, PopoverTitle, PopoverTrigger } from "../ui/popover";
+import { SessionPlacementButton } from "./SessionRail";
+import { TaskProgressDetails } from "./TaskProgressDetails";
 import {
-  Popover,
-  PopoverDescription,
-  PopoverPopup,
-  PopoverTitle,
-  PopoverTrigger,
-} from "../ui/popover";
+  deriveTaskProgressPresentation,
+  type ComposerTaskProgressPlan,
+} from "./taskProgressPresentation";
 
-export type ComposerTaskProgressStepStatus = "pending" | "inProgress" | "completed";
-
-/**
- * The plan subset needed by the composer control. ActivePlanState is structurally
- * compatible with this type, while keeping the reusable view independent from
- * the session projection that produces the plan.
- */
-export interface ComposerTaskProgressPlan {
-  readonly explanation?: string | null;
-  readonly steps: ReadonlyArray<{
-    readonly step: string;
-    readonly status: ComposerTaskProgressStepStatus;
-  }>;
-}
-
-interface StepPresentation {
-  readonly currentIndex: number;
-  readonly completedCount: number;
-  readonly currentStepIndex: number | null;
-}
-
-function deriveStepPresentation(plan: ComposerTaskProgressPlan): StepPresentation {
-  const inProgressIndex = plan.steps.findIndex((step) => step.status === "inProgress");
-  const pendingIndex = plan.steps.findIndex((step) => step.status === "pending");
-  const currentStepIndex =
-    inProgressIndex >= 0 ? inProgressIndex : pendingIndex >= 0 ? pendingIndex : null;
-
-  return {
-    completedCount: plan.steps.filter((step) => step.status === "completed").length,
-    currentIndex: currentStepIndex === null ? plan.steps.length : currentStepIndex + 1,
-    currentStepIndex,
-  };
-}
-
-function statusForStep(
-  step: ComposerTaskProgressPlan["steps"][number],
-  index: number,
-  currentStepIndex: number | null,
-): "completed" | "current" | "pending" {
-  if (step.status === "completed") return "completed";
-  if (index === currentStepIndex) return "current";
-  return "pending";
-}
-
-const statusLabels = {
-  completed: "Completed",
-  current: "Current",
-  pending: "Pending",
-} as const;
-
-// Provider-authored plan text is rendered as ordinary React text, so markup is
-// already escaped. Remove only non-printing controls that can obscure or reorder
-// what the user sees (notably Unicode bidi overrides); preserve tabs, newlines,
-// the ZWNJ/ZWJ code points used by natural-language scripts and emoji, and every
-// printable code point.
-const UNSAFE_INVISIBLE_CONTROL_CHARACTERS =
-  // eslint-disable-next-line no-control-regex -- these are the exact non-printing code points this boundary removes
-  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200B\u200E\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/gu;
-
-function sanitizePlanText(value: string): string {
-  return value.replace(UNSAFE_INVISIBLE_CONTROL_CHARACTERS, "");
-}
+export type {
+  ComposerTaskProgressPlan,
+  ComposerTaskProgressStepStatus,
+} from "./taskProgressPresentation";
 
 /**
  * Compact task progress for the composer footer. The trigger intentionally uses
  * Base UI's unified hover/press interaction model: mouse users can inspect the
  * list without clicking, while touch users press and keyboard users focus the
  * native button before activating it with Enter or Space.
+ *
+ * When the optional session rail is docked, this control is hidden so the
+ * checklist is not shown twice.
  */
 export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
   readonly plan: ComposerTaskProgressPlan | null | undefined;
@@ -88,6 +32,8 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
   readonly onOpenSubagentDetail?:
     | ((workEntry: WorkLogEntry, trigger: HTMLButtonElement) => void)
     | undefined;
+  readonly sessionRailVisible?: boolean;
+  readonly onShowOnSide?: () => void;
 }) {
   const { plan } = props;
   const [open, setOpen] = useState(false);
@@ -97,7 +43,8 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
     (entry): entry is SubagentRosterEntry => entry.subagent !== undefined,
   );
   const hasPlan = Boolean(plan && plan.steps.length > 0);
-  if (!hasPlan && subagents.length === 0) return null;
+  const hasSubagents = subagents.length > 0;
+  if (props.sessionRailVisible || (!hasPlan && !hasSubagents)) return null;
 
   const handleOpenChange = (nextOpen: boolean, details: { readonly reason: string }) => {
     if (details.reason === "trigger-press") {
@@ -126,21 +73,59 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
   };
 
   const total = plan?.steps.length ?? 0;
-  const { completedCount, currentIndex, currentStepIndex } = plan
-    ? deriveStepPresentation(plan)
-    : { completedCount: 0, currentIndex: 0, currentStepIndex: null };
+  const { completedCount, currentIndex } = plan
+    ? deriveTaskProgressPresentation(plan)
+    : { completedCount: 0, currentIndex: 0 };
   const completionPercentage = total > 0 ? (completedCount / total) * 100 : 0;
-  const keyOccurrences = new Map<string, number>();
-  const displaySteps = (plan?.steps ?? []).map((step, index) => {
-    const text = sanitizePlanText(step.step);
-    const occurrence = (keyOccurrences.get(text) ?? 0) + 1;
-    keyOccurrences.set(text, occurrence);
-    return {
-      key: `${text}\u001F${occurrence}`,
-      status: statusForStep(step, index, currentStepIndex),
-      text,
-    };
-  });
+  const liveLabel = hasPlan
+    ? `Task progress: step ${currentIndex} of ${total}${hasSubagents ? `, ${subagents.length} active ${subagents.length === 1 ? "subagent" : "subagents"}` : ""}`
+    : `${subagents.length} active ${subagents.length === 1 ? "subagent" : "subagents"}`;
+
+  const triggerContent = (
+    <>
+      {hasPlan ? (
+        <span className="relative size-3 shrink-0" aria-hidden="true">
+          <svg className="-rotate-90 size-full" viewBox="0 0 12 12">
+            <circle
+              cx="6"
+              cy="6"
+              r="4.5"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              className="opacity-20"
+            />
+            <circle
+              cx="6"
+              cy="6"
+              r="4.5"
+              fill="none"
+              pathLength="100"
+              stroke="currentColor"
+              strokeDasharray="100"
+              strokeDashoffset={100 - completionPercentage}
+              strokeLinecap="round"
+              strokeWidth="2"
+              className="transition-[stroke-dashoffset] duration-300 motion-reduce:transition-none"
+              data-completed={completedCount}
+              data-task-progress-ring="true"
+              data-total={total}
+            />
+          </svg>
+        </span>
+      ) : (
+        <BotIcon className="size-3.5 shrink-0" aria-hidden="true" />
+      )}
+      <span aria-live="polite">
+        {hasPlan ? `Step ${currentIndex} / ${total}` : null}
+        {hasPlan && hasSubagents ? " · " : null}
+        {hasSubagents ? `${subagents.length} ${subagents.length === 1 ? "agent" : "agents"}` : null}
+      </span>
+    </>
+  );
+
+  const triggerClassName =
+    "h-6 shrink-0 gap-1.5 rounded-full border-border/60 bg-muted/35 px-2 text-muted-foreground text-xs before:rounded-full hover:bg-muted/60 hover:text-foreground";
 
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
@@ -154,57 +139,14 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
             type="button"
             size="xs"
             variant="ghost"
-            className="h-6 shrink-0 gap-1.5 rounded-full border-border/60 bg-muted/35 px-2 text-muted-foreground text-xs before:rounded-full hover:bg-muted/60 hover:text-foreground"
-            aria-label={
-              hasPlan
-                ? `Task progress: step ${currentIndex} of ${total}${subagents.length > 0 ? `, ${subagents.length} active ${subagents.length === 1 ? "subagent" : "subagents"}` : ""}. Show task list`
-                : `${subagents.length} active ${subagents.length === 1 ? "subagent" : "subagents"}. Show task list`
-            }
+            className={triggerClassName}
+            aria-label={`${liveLabel}. Show task list`}
             data-composer-task-progress="true"
             data-composer-task-progress-trigger="true"
           />
         }
       >
-        {hasPlan ? (
-          <span className="relative size-3 shrink-0" aria-hidden="true">
-            <svg className="-rotate-90 size-full" viewBox="0 0 12 12">
-              <circle
-                cx="6"
-                cy="6"
-                r="4.5"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                className="opacity-20"
-              />
-              <circle
-                cx="6"
-                cy="6"
-                r="4.5"
-                fill="none"
-                pathLength="100"
-                stroke="currentColor"
-                strokeDasharray="100"
-                strokeDashoffset={100 - completionPercentage}
-                strokeLinecap="round"
-                strokeWidth="2"
-                className="transition-[stroke-dashoffset] duration-300 motion-reduce:transition-none"
-                data-completed={completedCount}
-                data-task-progress-ring="true"
-                data-total={total}
-              />
-            </svg>
-          </span>
-        ) : (
-          <BotIcon className="size-3.5 shrink-0" aria-hidden="true" />
-        )}
-        <span aria-live="polite">
-          {hasPlan ? `Step ${currentIndex} / ${total}` : null}
-          {hasPlan && subagents.length > 0 ? " · " : null}
-          {subagents.length > 0
-            ? `${subagents.length} ${subagents.length === 1 ? "agent" : "agents"}`
-            : null}
-        </span>
+        {triggerContent}
       </PopoverTrigger>
 
       <PopoverPopup
@@ -231,11 +173,16 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
           <div className="shrink-0 border-border/70 border-b px-4 py-3">
             <div className="flex items-baseline justify-between gap-3">
               <PopoverTitle className="text-sm leading-5">Tasks</PopoverTitle>
-              <span className="shrink-0 text-muted-foreground text-xs">
-                {hasPlan ? `${completedCount} of ${total} completed` : null}
-                {hasPlan && subagents.length > 0 ? " · " : null}
-                {subagents.length > 0 ? `${subagents.length} active` : null}
-              </span>
+              <div className="flex shrink-0 items-center gap-1">
+                <span className="text-muted-foreground text-xs">
+                  {hasPlan ? `${completedCount} of ${total} completed` : null}
+                  {hasPlan && hasSubagents ? " · " : null}
+                  {hasSubagents ? `${subagents.length} active` : null}
+                </span>
+                {props.onShowOnSide ? (
+                  <SessionPlacementButton placement="side" onClick={props.onShowOnSide} />
+                ) : null}
+              </div>
             </div>
           </div>
 
@@ -246,99 +193,15 @@ export const ComposerTaskProgress = memo(function ComposerTaskProgress(props: {
             role="region"
             tabIndex={0}
           >
-            {subagents.length > 0 ? (
-              <section
-                aria-label="Active subagents"
-                className={cn(hasPlan && "mb-3 border-border/55 border-b pb-3")}
-                data-composer-subagent-list="true"
-              >
-                <p className="mb-1 text-[9px] font-medium uppercase tracking-[0.16em] text-muted-foreground/55">
-                  Active subagents
-                </p>
-                <div className="space-y-0.5">
-                  {subagents.map((entry) => (
-                    <SubagentRosterRow
-                      key={`composer-subagent:${entry.id}`}
-                      entry={entry}
-                      compact
-                      onOpen={(selectedEntry, rowTrigger) => {
-                        openModeRef.current = null;
-                        setOpen(false);
-                        props.onOpenSubagentDetail?.(
-                          selectedEntry,
-                          triggerRef.current ?? rowTrigger,
-                        );
-                      }}
-                    />
-                  ))}
-                </div>
-              </section>
-            ) : null}
-
-            {plan?.explanation ? (
-              <PopoverDescription className="mb-3 whitespace-pre-wrap break-words text-sm [overflow-wrap:anywhere]">
-                {sanitizePlanText(plan.explanation)}
-              </PopoverDescription>
-            ) : null}
-
-            {hasPlan ? (
-              <ol
-                aria-label="Task list"
-                className="space-y-3"
-                data-composer-task-progress-list="true"
-              >
-                {displaySteps.map((step) => {
-                  const { status } = step;
-                  const label = statusLabels[status];
-
-                  return (
-                    <li
-                      // Provider plans do not currently carry durable step ids. The
-                      // printable description plus its duplicate occurrence stays
-                      // stable across status updates and remains unique when a plan
-                      // intentionally repeats the same task.
-                      key={step.key}
-                      aria-current={status === "current" ? "step" : undefined}
-                      className="flex min-w-0 items-start gap-2.5"
-                      data-composer-task-progress-step="true"
-                      data-task-status={status}
-                    >
-                      <span
-                        className={cn(
-                          "mt-0.5 inline-flex size-4 shrink-0 items-center justify-center",
-                          status === "completed" && "text-emerald-600 dark:text-emerald-400",
-                          status === "current" && "text-primary",
-                          status === "pending" && "text-muted-foreground/65",
-                        )}
-                        aria-hidden="true"
-                      >
-                        {status === "completed" ? (
-                          <CircleCheckIcon className="size-4" strokeWidth={2} />
-                        ) : status === "current" ? (
-                          <LoaderCircleIcon
-                            className="size-4 animate-spin motion-reduce:animate-none"
-                            strokeWidth={2}
-                          />
-                        ) : (
-                          <CircleIcon className="size-4" strokeWidth={1.75} />
-                        )}
-                      </span>
-
-                      <div
-                        className={cn(
-                          "min-w-0 flex-1 whitespace-pre-wrap break-words text-sm leading-5 [overflow-wrap:anywhere]",
-                          status === "current" && "font-medium text-foreground",
-                          status !== "current" && "text-muted-foreground",
-                        )}
-                      >
-                        <span className="sr-only">{label}: </span>
-                        {step.text}
-                      </div>
-                    </li>
-                  );
-                })}
-              </ol>
-            ) : null}
+            <TaskProgressDetails
+              plan={plan}
+              subagents={subagents}
+              onOpenSubagentDetail={(selectedEntry, rowTrigger) => {
+                openModeRef.current = null;
+                setOpen(false);
+                props.onOpenSubagentDetail?.(selectedEntry, triggerRef.current ?? rowTrigger);
+              }}
+            />
           </div>
         </div>
       </PopoverPopup>

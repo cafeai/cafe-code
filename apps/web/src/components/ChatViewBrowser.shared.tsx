@@ -726,6 +726,7 @@ function createSnapshotWithRuntimeTaskProgress(options?: {
   readonly steps?: ReadonlyArray<RuntimeTaskStep>;
   readonly terminal?: boolean;
   readonly withAuthoredPlan?: boolean;
+  readonly withContextWindow?: boolean;
 }): OrchestrationReadModel {
   const snapshot = options?.withAuthoredPlan
     ? createSnapshotWithPlanFollowUpPrompt()
@@ -773,6 +774,25 @@ function createSnapshotWithRuntimeTaskProgress(options?: {
                 sequence: 1,
                 createdAt: isoAt(1_005),
               },
+              ...(options?.withContextWindow
+                ? [
+                    {
+                      id: EventId.make("activity-runtime-context-window"),
+                      tone: "info" as const,
+                      kind: "context-window.updated",
+                      summary: "Context window updated",
+                      payload: {
+                        usedTokens: 213_000,
+                        maxTokens: 258_000,
+                        totalProcessedTokens: 6_600_000,
+                        compactsAutomatically: true,
+                      },
+                      turnId: RUNTIME_TASK_TURN_ID,
+                      sequence: 2,
+                      createdAt: isoAt(1_006),
+                    },
+                  ]
+                : []),
             ],
             session: {
               ...thread.session,
@@ -1507,6 +1527,10 @@ function findComposerTaskProgressScroller(): HTMLElement | null {
   return document.querySelector<HTMLElement>('[data-task-list-scroll="true"]');
 }
 
+function findSessionRail(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-session-rail="true"]');
+}
+
 function findComposerProviderModelPicker(): HTMLButtonElement | null {
   return document.querySelector<HTMLButtonElement>('[data-chat-provider-model-picker="true"]');
 }
@@ -1945,6 +1969,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       projectOrder: [],
       threadPlanSidebarOpenById: {},
       threadLastVisitedAtById: {},
+      sessionRailDocked: false,
     });
     useTaskAtriumStore.getState().setOpen(false);
   });
@@ -2334,6 +2359,117 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
           },
           { timeout: 8_000, interval: 16 },
         );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("docks the runtime checklist and context usage into the session rail on a wide viewport", async () => {
+      const mounted = await mountChatView({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot: createSnapshotWithRuntimeTaskProgress({ withContextWindow: true }),
+        configureFixture: (nextFixture) => {
+          const [codexProvider] = nextFixture.serverConfig.providers;
+          if (!codexProvider) return;
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            providers: [
+              {
+                ...codexProvider,
+                accountRateLimits: {
+                  checkedAt: NOW_ISO,
+                  rateLimits: {
+                    limitId: "codex",
+                    primary: {
+                      usedPercent: 1,
+                      windowDurationMins: 10_080,
+                      resetsAt: 1_788_278_880,
+                    },
+                  },
+                },
+              },
+            ],
+          };
+        },
+      });
+
+      try {
+        const trigger = page.getByRole("button", {
+          name: /^Task progress: step 5 of 12\b/i,
+        });
+        await trigger.click();
+        await vi.waitFor(() => expect(findComposerTaskProgressPopup()).not.toBeNull());
+        await page.getByRole("button", { name: "Show on the side" }).click();
+
+        await vi.waitFor(() => {
+          expect(findSessionRail()).not.toBeNull();
+          expect(useUiStateStore.getState().sessionRailDocked).toBe(true);
+        });
+
+        const rail = findSessionRail();
+        expect(rail).not.toBeNull();
+        if (!rail) {
+          throw new Error("Session rail did not mount after docking.");
+        }
+        for (const description of RUNTIME_TASK_DESCRIPTIONS) {
+          expect(rail.textContent).toContain(description);
+        }
+        expect(rail.textContent).toContain("213k");
+        expect(rail.textContent).toContain("258k");
+        expect(rail.textContent).toContain("6.6m");
+        expect(rail.textContent).toContain("Primary window");
+        expect(findComposerTaskProgressPopup()).toBeNull();
+        expect(document.querySelector('button[aria-label^="Context window"]')).toBeNull();
+        expect(findComposerTaskProgressTrigger()).toBeNull();
+
+        await page.getByRole("button", { name: "Show in composer" }).click();
+        await vi.waitFor(() => {
+          expect(findSessionRail()).toBeNull();
+          expect(useUiStateStore.getState().sessionRailDocked).toBe(false);
+        });
+        expect(document.querySelector('button[aria-label^="Context window"]')).not.toBeNull();
+        await page.getByRole("button", { name: /^Task progress: step 5 of 12\b/i }).click();
+        await vi.waitFor(() => expect(findComposerTaskProgressPopup()).not.toBeNull());
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("keeps composer popovers when the session rail is preferred on a narrow viewport", async () => {
+      useUiStateStore.setState({ sessionRailDocked: true });
+      const mounted = await mountChatView({
+        viewport: COMPACT_FOOTER_VIEWPORT,
+        snapshot: createSnapshotWithRuntimeTaskProgress({ withContextWindow: true }),
+      });
+
+      try {
+        expect(findSessionRail()).toBeNull();
+        expect(document.querySelector('button[aria-label^="Context window"]')).not.toBeNull();
+        const trigger = page.getByRole("button", {
+          name: /^Task progress: step 5 of 12\b/i,
+        });
+        await trigger.click();
+        await vi.waitFor(() => expect(findComposerTaskProgressPopup()).not.toBeNull());
+        expect(document.querySelector('[data-session-rail-dock="true"]')).toBeNull();
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("stacks the session rail under an authored plan in the shared right column", async () => {
+      useUiStateStore.setState({ sessionRailDocked: true });
+      const mounted = await mountChatView({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot: createSnapshotWithPlanFollowUpPrompt(),
+      });
+
+      try {
+        await vi.waitFor(() => {
+          expect(document.querySelector('button[aria-label="Close plan sidebar"]')).not.toBeNull();
+          expect(findSessionRail()).not.toBeNull();
+        });
+        expect(document.querySelector('[data-chat-right-column="true"]')).not.toBeNull();
+        expect(findSessionRail()?.textContent).toContain("No tasks yet.");
       } finally {
         await mounted.cleanup();
       }

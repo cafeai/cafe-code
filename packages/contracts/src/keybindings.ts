@@ -50,7 +50,6 @@ export type ModelPickerKeybindingCommand = (typeof MODEL_PICKER_KEYBINDING_COMMA
 const STATIC_KEYBINDING_COMMANDS = [
   "composer.submit",
   "composer.steer",
-  "diff.toggle",
   "commandPalette.toggle",
   "chat.new",
   "chat.newLocal",

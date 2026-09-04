@@ -35,12 +35,6 @@ it.effect("parses keybinding rules", () =>
     });
     assert.strictEqual(parsedClose.command, "chat.new");
 
-    const parsedDiffToggle = yield* decode(KeybindingRule, {
-      key: "mod+d",
-      command: "diff.toggle",
-    });
-    assert.strictEqual(parsedDiffToggle.command, "diff.toggle");
-
     const parsedCommandPalette = yield* decode(KeybindingRule, {
       key: "mod+k",
       command: "commandPalette.toggle",
@@ -113,7 +107,7 @@ it.effect("parses keybindings array payload", () =>
   Effect.gen(function* () {
     const parsed = yield* decode(KeybindingsConfig, [
       { key: "mod+j", command: "commandPalette.toggle" },
-      { key: "mod+d", command: "diff.toggle", when: "modelPickerOpen" },
+      { key: "mod+n", command: "chat.new", when: "modelPickerOpen" },
     ]);
     assert.lengthOf(parsed, 2);
   }),
@@ -122,7 +116,7 @@ it.effect("parses keybindings array payload", () =>
 it.effect("parses resolved keybinding rules", () =>
   Effect.gen(function* () {
     const parsed = yield* decode(ResolvedKeybindingRule, {
-      command: "diff.toggle",
+      command: "chat.new",
       shortcut: {
         key: "d",
         metaKey: false,

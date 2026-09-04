@@ -38,8 +38,6 @@ import {
   VcsStatusInput,
   VcsStatusResult,
   VcsStatusStreamEvent,
-  VcsWorkingTreeDiffInput,
-  VcsWorkingTreeDiffResult,
 } from "./git.ts";
 import { KeybindingsConfigError } from "./keybindings.ts";
 import {
@@ -125,7 +123,6 @@ export const WS_METHODS = {
   // VCS methods
   vcsPull: "vcs.pull",
   vcsRefreshStatus: "vcs.refreshStatus",
-  vcsWorkingTreeDiff: "vcs.workingTreeDiff",
   vcsListRefs: "vcs.listRefs",
   vcsCreateWorktree: "vcs.createWorktree",
   vcsRemoveWorktree: "vcs.removeWorktree",
@@ -386,12 +383,6 @@ export const WsVcsRefreshStatusRpc = Rpc.make(WS_METHODS.vcsRefreshStatus, {
   error: GitManagerServiceError,
 });
 
-export const WsVcsWorkingTreeDiffRpc = Rpc.make(WS_METHODS.vcsWorkingTreeDiff, {
-  payload: VcsWorkingTreeDiffInput,
-  success: VcsWorkingTreeDiffResult,
-  error: GitManagerServiceError,
-});
-
 export const WsGitResolvePullRequestRpc = Rpc.make(WS_METHODS.gitResolvePullRequest, {
   payload: GitPullRequestRefInput,
   success: GitResolvePullRequestResult,
@@ -605,7 +596,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeVcsStatusRpc,
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,
-  WsVcsWorkingTreeDiffRpc,
   WsGitResolvePullRequestRpc,
   WsGitPreparePullRequestThreadRpc,
   WsVcsListRefsRpc,
