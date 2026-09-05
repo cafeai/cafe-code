@@ -118,6 +118,9 @@ const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJ
 const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.UnknownFromJsonString);
 
 const PROVIDER = ProviderDriverKind.make("claudeAgent");
+// SDK 0.3.259 caps merged first-reply/result correlation at 64 prompt UUIDs.
+// Bound inspection as well as retention even if a newer/untrusted CLI sends more.
+const CLAUDE_PROMPT_CORRELATION_LIMIT = 64;
 const CLAUDE_TASK_BINDING_LIMIT = 4_096;
 const CLAUDE_HIDDEN_TRANSCRIPT_TASK_LIMIT = 4_096;
 const CLAUDE_SUBAGENT_MESSAGE_DEDUPE_LIMIT = 4_096;
@@ -1759,8 +1762,40 @@ function isTerminalClaudeCommandLifecycleState(state: ClaudeCommandLifecycleStat
   return state === "completed" || state === "cancelled" || state === "discarded";
 }
 
-function claudeResultUserMessageUuid(result: SDKResultMessage): string | undefined {
-  return trimmedStringValue((result as Record<string, unknown>).user_message_uuid);
+type ClaudePromptCorrelation = {
+  readonly user_message_uuid?: unknown;
+  readonly user_message_uuids?: unknown;
+};
+
+function knownClaudePromptUuids(
+  context: ClaudeSessionContext,
+  message: ClaudePromptCorrelation,
+): ReadonlyArray<string> | undefined {
+  if (message.user_message_uuid === undefined && message.user_message_uuids === undefined) {
+    return undefined;
+  }
+
+  const known = new Set<string>();
+  const admit = (value: unknown) => {
+    // Inputs are exact Cafe-minted UUIDs. Do not trim, invent, or retain an
+    // unknown provider identity; the short length gate also bounds map hashing.
+    if (
+      typeof value === "string" &&
+      value.length === 36 &&
+      context.promptLifecycleByUuid.has(value)
+    ) {
+      known.add(value);
+    }
+  };
+  if (Array.isArray(message.user_message_uuids)) {
+    for (const uuid of message.user_message_uuids.slice(0, CLAUDE_PROMPT_CORRELATION_LIMIT)) {
+      admit(uuid);
+    }
+  }
+  // The singular representative is always part of a valid upstream batch.
+  // Retain it independently for older producers and malformed/incomplete lists.
+  admit(message.user_message_uuid);
+  return [...known];
 }
 
 function claudeResultQueuedTurnCount(result: SDKResultMessage): number | undefined {
@@ -1768,42 +1803,47 @@ function claudeResultQueuedTurnCount(result: SDKResultMessage): number | undefin
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
-function acknowledgeKnownClaudePromptStarted(
+function acknowledgeKnownClaudePromptsStarted(
   context: ClaudeSessionContext,
-  userMessageUuid: unknown,
+  message: ClaudePromptCorrelation,
 ): void {
-  const messageUuid = trimmedStringValue(userMessageUuid);
-  if (!messageUuid) return;
-  const current = context.promptLifecycleByUuid.get(messageUuid);
-  // The UUID is provider input and must never create lifecycle state. Only a
-  // UUID Cafe minted for an outstanding send may advance to started; this also
-  // ignores late first-frame replays for inputs already retired by a result.
-  if (current !== "submitted" && current !== "queued") return;
-  context.promptLifecycleByUuid.set(messageUuid, "started");
-  // A first reply frame is stronger evidence than a deferred result from an
-  // earlier coalesced segment. Drop that stale candidate so it cannot complete
-  // the active turn while this newly acknowledged prompt is still running.
-  context.deferredTurnResult = undefined;
+  for (const messageUuid of knownClaudePromptUuids(context, message) ?? []) {
+    const current = context.promptLifecycleByUuid.get(messageUuid);
+    // Only outstanding submitted/queued inputs may advance. Replayed first
+    // frames for already-started or retired input cannot revive old work.
+    if (current !== "submitted" && current !== "queued") continue;
+    context.promptLifecycleByUuid.set(messageUuid, "started");
+    // A reply or correlated thinking frame proves a later response segment
+    // started. Its predecessor's deferred result cannot complete this segment.
+    context.deferredTurnResult = undefined;
+  }
 }
 
 /**
- * Retire the Cafe-owned input represented by a Claude result.
+ * Retire exactly the Cafe-owned inputs represented by a Claude result.
  *
- * Agent SDK 0.3.216 correlates successful results with `user_message_uuid`.
- * Older CLIs and error results can omit that field, so the compatibility path
+ * SDK 0.3.259's `user_message_uuids` includes both the initial merged batch and
+ * later inputs folded into this response between tool rounds. The singular
+ * `user_message_uuid` represents only one member, not every answered steer.
+ * Source: SDKAssistantMessage / SDKPartialAssistantMessage / SDKResultMessage
+ * in @anthropic-ai/claude-agent-sdk@0.3.260/sdk.d.ts and upstream changelog:
+ * https://github.com/anthropics/claude-agent-sdk-typescript/blob/a96f6b5cbea197f23a3372709e3e549e8495fd63/CHANGELOG.md
+ * Older CLIs and error results can omit correlation, so the compatibility path
  * retires the oldest input Claude has acknowledged as started. A final fallback
  * handles pre-2.1.206 runtimes that do not emit command lifecycle frames at all.
+ * Explicit but unknown/malformed correlation must never take that fallback:
+ * a late replay or another producer's result cannot consume unrelated input.
  * Map insertion order is the provider input order and is never reconstructed
  * from prompt text, keeping this boundary content-blind and deterministic.
  */
 function consumeClaudeResultPrompt(
   context: ClaudeSessionContext,
   result: SDKResultMessage,
-): string | undefined {
-  const correlatedUuid = claudeResultUserMessageUuid(result);
-  if (correlatedUuid !== undefined) {
-    context.promptLifecycleByUuid.delete(correlatedUuid);
-    return correlatedUuid;
+): number {
+  const correlatedUuids = knownClaudePromptUuids(context, result);
+  if (correlatedUuids !== undefined) {
+    for (const uuid of correlatedUuids) context.promptLifecycleByUuid.delete(uuid);
+    return correlatedUuids.length;
   }
 
   const started = Array.from(context.promptLifecycleByUuid).find(
@@ -1811,12 +1851,12 @@ function consumeClaudeResultPrompt(
   );
   const fallback = started ?? context.promptLifecycleByUuid.entries().next().value;
   if (fallback === undefined) {
-    return undefined;
+    return 0;
   }
 
   const [messageUuid] = fallback;
   context.promptLifecycleByUuid.delete(messageUuid);
-  return messageUuid;
+  return 1;
 }
 
 function claudeTaskTerminalStatus(value: unknown): "completed" | "failed" | "stopped" | undefined {
@@ -4592,7 +4632,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const parentToolUseId = claudeParentToolUseId(message);
     const isNestedAgentStream = parentToolUseId !== undefined;
     if (!isNestedAgentStream) {
-      acknowledgeKnownClaudePromptStarted(context, message.user_message_uuid);
+      acknowledgeKnownClaudePromptsStarted(context, message);
     }
     if (isClaudeNestedStreamHidden(context, parentToolUseId)) {
       return;
@@ -5160,7 +5200,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     const parentToolUseId = claudeParentToolUseId(message);
     if (parentToolUseId === undefined) {
-      acknowledgeKnownClaudePromptStarted(context, message.user_message_uuid);
+      acknowledgeKnownClaudePromptsStarted(context, message);
     }
     if (isClaudeNestedStreamHidden(context, parentToolUseId)) {
       return;
@@ -5352,7 +5392,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       status !== "completed"
         ? (resultPrimaryError(message) ?? resultErrors[0] ?? "Claude turn failed.")
         : undefined;
-    const completedPromptUuid = consumeClaudeResultPrompt(context, message);
+    const completedPromptCount = consumeClaudeResultPrompt(context, message);
     // Claude Code 2.1.245 / Agent SDK 0.3.245 adds queued_turn_count to the
     // result boundary. Local UUID lifecycle remains the strongest attribution
     // signal, while the provider count closes the race where the next command
@@ -5440,7 +5480,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       yield* Effect.logInfo("claude.followUp.resultBoundaryDeferred", {
         threadId: context.session.threadId,
         providerInstanceId: boundInstanceId,
-        completedPromptUuid: completedPromptUuid ?? "",
+        completedPromptCount,
         pendingPromptCount,
         ...(queuedTurnCount !== undefined ? { providerQueuedTurnCount: queuedTurnCount } : {}),
         messageLifecycleAdvertised: context.capabilities.has("msg_lifecycle_v1"),
@@ -5639,7 +5679,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // approximate progress telemetry digested from redacted thinking
         // deltas. It is explicitly not authoritative billed token usage, so
         // Cafe records the raw native event but does not project a work-log
-        // warning or context-window update from it.
+        // warning or context-window update from it. SDK 0.3.260 adds prompt
+        // correlation before the first reply frame; that UUID is real liveness
+        // evidence, unlike the approximate token count. Never apply child
+        // thinking telemetry to the primary prompt queue.
+        if (claudeParentToolUseId(message) === undefined) {
+          acknowledgeKnownClaudePromptsStarted(context, message);
+        }
         return;
       case "commands_changed":
         // Claude Agent SDK 0.3.191 and later emit this when slash-command metadata

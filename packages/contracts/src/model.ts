@@ -132,7 +132,9 @@ const CLAUDE_DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
 const GROK_DRIVER_KIND = ProviderDriverKind.make("grok");
 const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
 
-export const DEFAULT_MODEL = "gpt-5.6-sol";
+// Codex rust-v0.153.4's bundled catalog defaults to Astra. This is only the
+// missing-selection fallback; explicit project/thread model slugs are retained.
+export const DEFAULT_MODEL = "gpt-6-astra";
 export const DEFAULT_GIT_TEXT_GENERATION_MODEL = "gpt-5.4-mini";
 
 export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, string>> = {

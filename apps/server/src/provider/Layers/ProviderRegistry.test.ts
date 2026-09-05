@@ -1998,7 +1998,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               mockSpawnerLayer((args) => {
                 const joined = args.join(" ");
                 if (joined === "--version") {
-                  return { stdout: "codex-cli 0.133.0\n", stderr: "", code: 0 };
+                  return { stdout: "codex-cli 0.153.4\n", stderr: "", code: 0 };
                 }
                 if (joined === "login status") {
                   return { stdout: "", stderr: "Logged in using ChatGPT\n", code: 0 };
@@ -2010,13 +2010,14 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
 
           assert.strictEqual(status.status, "ready");
           assert.strictEqual(status.installed, true);
-          assert.strictEqual(status.version, "0.133.0");
+          assert.strictEqual(status.version, "0.153.4");
           assert.strictEqual(status.auth.status, "authenticated");
           assert.strictEqual(status.auth.type, "chatgpt");
           assert.strictEqual(status.auth.label, "ChatGPT Subscription");
           assert.deepStrictEqual(
             status.models.map((model) => model.slug),
             [
+              "gpt-6-astra",
               "gpt-5.6-sol",
               "gpt-5.6-terra",
               "gpt-5.6-luna",

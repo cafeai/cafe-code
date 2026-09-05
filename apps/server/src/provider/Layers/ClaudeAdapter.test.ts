@@ -1348,6 +1348,273 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  for (const subtype of ["success", "error_during_execution"] as const) {
+    it.effect(`retires every answered prompt from a merged Claude ${subtype} result`, () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        const turn = yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "original task",
+          attachments: [],
+        });
+        for (const input of ["folded into the current reply", "wait for the next reply"]) {
+          yield* adapter.steerTurn({
+            threadId: session.threadId,
+            expectedTurnId: turn.turnId,
+            input,
+            attachments: [],
+          });
+        }
+        const messages = yield* Effect.promise(() =>
+          readPromptMessages(harness.getLastCreateQueryInput(), 3),
+        );
+        const [first, folded, pending] = messages.map((message) => message.uuid);
+        if (!first || !folded || !pending) throw new Error("Expected UUID-stamped prompts.");
+
+        // No command_lifecycle frames arrive. The result itself is authoritative
+        // for the merged/folded inputs, but cannot retire the unconsumed steer.
+        const result = {
+          type: "result",
+          subtype,
+          is_error: subtype !== "success",
+          errors: subtype === "success" ? [] : ["Recoverable response-segment error"],
+          session_id: "claude-merged-prompts",
+          uuid: "merged-result",
+          user_message_uuid: folded,
+          user_message_uuids: [first, folded, folded, "provider-owned-unknown-uuid"],
+        } as unknown as SDKMessage;
+        harness.query.emit(result);
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turn.turnId);
+        assert.equal((yield* adapter.readThread(session.threadId)).turns.length, 0);
+
+        // A delayed replay of already-retired correlation must not fall back
+        // to consuming the next submitted prompt.
+        harness.query.emit(result);
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        assert.equal((yield* adapter.listSessions())[0]?.status, "running");
+
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          session_id: "claude-merged-prompts",
+          uuid: "pending-result",
+          user_message_uuid: pending,
+          user_message_uuids: [pending],
+        } as unknown as SDKMessage);
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        const completed = (yield* adapter.listSessions())[0];
+        assert.equal(completed?.status, "ready");
+        assert.equal(completed?.activeTurnId, undefined);
+        const snapshot = yield* adapter.readThread(session.threadId);
+        assert.equal(snapshot.turns.length, 1);
+        assert.equal(snapshot.turns[0]?.id, turn.turnId);
+        assert.deepEqual(harness.query.interruptCalls, []);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+  }
+
+  for (const frameType of ["assistant", "stream_event"] as const) {
+    for (const nested of [false, true]) {
+      it.effect(
+        `correlates ${nested ? "no primary prompts from nested" : "all merged prompts from primary"} ${frameType} frames`,
+        () => {
+          const harness = makeHarness();
+          return Effect.gen(function* () {
+            const adapter = yield* ClaudeAdapter;
+            const session = yield* adapter.startSession({
+              threadId: THREAD_ID,
+              provider: ProviderDriverKind.make("claudeAgent"),
+              runtimeMode: "full-access",
+            });
+            const turn = yield* adapter.sendTurn({
+              threadId: session.threadId,
+              input: "not acknowledged by this reply",
+              attachments: [],
+            });
+            for (const input of ["first merged prompt", "last merged prompt"]) {
+              yield* adapter.steerTurn({
+                threadId: session.threadId,
+                expectedTurnId: turn.turnId,
+                input,
+                attachments: [],
+              });
+            }
+            const messages = yield* Effect.promise(() =>
+              readPromptMessages(harness.getLastCreateQueryInput(), 3),
+            );
+            const [first, merged, representative] = messages.map((message) => message.uuid);
+            if (!first || !merged || !representative) throw new Error("Expected prompt UUIDs.");
+            harness.query.emit({
+              type: frameType,
+              session_id: "claude-merged-reply",
+              uuid: "first-reply",
+              parent_tool_use_id: nested ? "subagent-tool" : null,
+              user_message_uuid: representative,
+              user_message_uuids: [merged, representative],
+              ...(frameType === "assistant"
+                ? { message: { id: "reply", content: [] } }
+                : { event: { type: "message_start", message: { id: "reply" } } }),
+            } as unknown as SDKMessage);
+            harness.query.emit({
+              type: "result",
+              subtype: "success",
+              is_error: false,
+              queued_turn_count: 1,
+              session_id: "claude-merged-reply",
+              uuid: "uncorrelated-result",
+            } as unknown as SDKMessage);
+            yield* Effect.yieldNow;
+            yield* Effect.yieldNow;
+
+            // A legacy result retires the oldest *started* input. Inspect exact
+            // survivors through the existing public stop/cancellation boundary.
+            harness.query.interruptResponse = { still_queued: [first, merged, representative] };
+            yield* adapter.interruptTurn(session.threadId, turn.turnId);
+            assert.deepEqual(
+              harness.query.cancelAsyncMessageCalls,
+              nested ? [merged, representative] : [first, representative],
+            );
+          }).pipe(
+            Effect.provideService(Random.Random, makeDeterministicRandomService()),
+            Effect.provide(harness.layer),
+          );
+        },
+      );
+    }
+  }
+
+  for (const correlation of ["unknown", "malformed", "empty", "over-limit"] as const) {
+    it.effect(`does not retire unrelated prompts from ${correlation} batch correlation`, () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        const turn = yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "must remain pending",
+          attachments: [],
+        });
+        const [message] = yield* Effect.promise(() =>
+          readPromptMessages(harness.getLastCreateQueryInput(), 1),
+        );
+        if (!message?.uuid) throw new Error("Expected prompt UUID.");
+        const foreignUuid = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+        const batches = {
+          unknown: [foreignUuid],
+          malformed: [null, 42, { uuid: message.uuid }, ` ${message.uuid}`, "x".repeat(10000)],
+          empty: [],
+          "over-limit": [...Array<string>(64).fill(foreignUuid), message.uuid],
+        };
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          session_id: "claude-untrusted-correlation",
+          uuid: "uncorrelated-result",
+          user_message_uuids: batches[correlation],
+        } as unknown as SDKMessage);
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turn.turnId);
+        harness.query.interruptResponse = { still_queued: [message.uuid, foreignUuid] };
+        yield* adapter.interruptTurn(session.threadId, turn.turnId);
+        assert.deepEqual(harness.query.cancelAsyncMessageCalls, [message.uuid]);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+  }
+
+  it.effect("treats correlated thinking as a new segment without completing it early", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "initial prompt",
+        attachments: [],
+      });
+      yield* adapter.steerTurn({
+        threadId: session.threadId,
+        expectedTurnId: turn.turnId,
+        input: "later segment",
+        attachments: [],
+      });
+      const messages = yield* Effect.promise(() =>
+        readPromptMessages(harness.getLastCreateQueryInput(), 2),
+      );
+      const [first, later] = messages.map((message) => message.uuid);
+      if (!first || !later) throw new Error("Expected prompt UUIDs.");
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        session_id: "claude-thinking-correlation",
+        uuid: "earlier-result",
+        user_message_uuid: first,
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "thinking_tokens",
+        estimated_tokens: 50,
+        estimated_tokens_delta: 50,
+        session_id: "claude-thinking-correlation",
+        uuid: "later-thinking",
+        user_message_uuid: later,
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "command_lifecycle",
+        command_uuid: later,
+        state: "completed",
+        session_id: "claude-thinking-correlation",
+        uuid: "later-command-completed",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turn.turnId);
+      assert.equal((yield* adapter.readThread(session.threadId)).turns.length, 0);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        session_id: "claude-thinking-correlation",
+        uuid: "later-result",
+        user_message_uuid: later,
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+      assert.equal((yield* adapter.readThread(session.threadId)).turns.length, 1);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("rejects Claude steer input for a stale active turn id", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -5448,6 +5715,78 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  it.effect(
+    "forwards repeated quota updates and no-response retries without ending the turn",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        const turn = yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "continue while the provider retries",
+          attachments: [],
+        });
+        const telemetryFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "account.rate-limits.updated" || event.type === "runtime.warning",
+          ),
+          Stream.take(3),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const rateLimitInfo = {
+          status: "rejected",
+          rateLimitType: "five_hour",
+          utilization: 1,
+          resetsAt: 1800000000,
+        };
+        // SDK 0.3.260 re-emits the same exceeded window during repeated 429s.
+        // Both observations must reach the provider-status consumer.
+        for (const uuid of ["quota-first", "quota-repeat"]) {
+          harness.query.emit({
+            type: "rate_limit_event",
+            rate_limit_info: rateLimitInfo,
+            session_id: "claude-current-telemetry",
+            uuid,
+          } as unknown as SDKMessage);
+        }
+        harness.query.emit({
+          type: "system",
+          subtype: "api_retry",
+          attempt: 1,
+          max_retries: 1,
+          retry_delay_ms: 500,
+          error_status: null,
+          error: "server_error",
+          no_response: { waited_ms: 180000, retry_wait_ms: 600000 },
+          session_id: "claude-current-telemetry",
+          uuid: "no-response-retry",
+        } as unknown as SDKMessage);
+        const events = Array.from(yield* Fiber.join(telemetryFiber));
+        assert.equal(
+          events.filter((event) => event.type === "account.rate-limits.updated").length,
+          2,
+        );
+        const warning = events.find((event) => event.type === "runtime.warning");
+        assert.equal(warning?.payload.message, "Claude reported an API retry.");
+        assert.deepInclude(warning?.payload.detail, {
+          no_response: { waited_ms: 180000, retry_wait_ms: 600000 },
+        });
+        assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turn.turnId);
+        assert.equal((yield* adapter.readThread(session.threadId)).turns.length, 0);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
 
   it.effect("silently ignores Claude thinking token telemetry", () => {
     const harness = makeHarness();

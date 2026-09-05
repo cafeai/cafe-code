@@ -224,6 +224,15 @@ export function resolveAppModelSelection(
   providers: ReadonlyArray<ServerProvider>,
   selectedModel: string | null | undefined,
 ): string {
+  // An empty registry is the bootstrap/reconnect gap, not evidence that a
+  // saved model disappeared. Preserve the explicit choice until a catalog
+  // can validate it; otherwise a new bundled default (such as Astra) silently
+  // replaces existing thread and draft selections before providers hydrate.
+  if (providers.length === 0) {
+    return (
+      normalizeModelSlug(selectedModel, provider) ?? getDefaultServerModel(providers, provider)
+    );
+  }
   const resolvedProvider = resolveSelectableProvider(providers, provider);
   const options = getAppModelOptions(settings, providers, resolvedProvider, selectedModel);
   return (

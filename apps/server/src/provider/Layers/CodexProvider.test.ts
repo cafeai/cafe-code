@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   CODEX_MODEL_LIST_MAX_MODELS,
   CODEX_MODEL_LIST_MAX_PAGES,
+  fallbackCodexModelsFromSettings,
   finalizeCodexModelListRefresh,
   makeCodexHealthProbeCommand,
   makeCodexModelListCommand,
@@ -110,6 +111,24 @@ describe("Codex CLI health probe command", () => {
 });
 
 describe("Codex picker model/list refresh", () => {
+  it("lists Astra first during cold-start fallback and de-duplicates custom entries", () => {
+    const models = fallbackCodexModelsFromSettings(
+      decodeCodexSettings({ customModels: ["gpt-6-astra"] }),
+    );
+    expect(models[0]).toMatchObject({
+      slug: "gpt-6-astra",
+      name: "GPT-6-Astra",
+      isCustom: false,
+      capabilities: {
+        optionDescriptors: [
+          { id: "reasoningEffort", currentValue: "low" },
+          { id: "fastMode", type: "boolean" },
+        ],
+      },
+    });
+    expect(models.filter((model) => model.slug === "gpt-6-astra")).toHaveLength(1);
+  });
+
   it("reads bounded cursor pages in provider order", async () => {
     const payloads: CodexSchema.V2ModelListParams[] = [];
     const client = makeModelListClient((payload) =>
@@ -255,7 +274,7 @@ describe("Codex picker model/list refresh", () => {
     ).toEqual(["gpt-provider", "custom-model"]);
   });
 
-  it("uses exact upstream controls only for explicitly configured hidden Astra", () => {
+  it("uses exact bundled controls for custom Astra absent from the live catalog", () => {
     const upstream = [
       {
         slug: "gpt-provider",

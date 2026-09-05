@@ -106,6 +106,13 @@ describe("normalizeModelSlug", () => {
 });
 
 describe("resolveModelSlugForProvider", () => {
+  it("defaults new Codex selections to Astra while preserving explicit Sol selections", () => {
+    const codex = ProviderDriverKind.make("codex");
+    expect(resolveModelSlugForProvider(codex, undefined)).toBe("gpt-6-astra");
+    expect(resolveModelSlugForProvider(codex, "gpt-5.6-sol")).toBe("gpt-5.6-sol");
+    expect(resolveModelSlugForProvider(codex, "gpt-5.6")).toBe("gpt-5.6-sol");
+  });
+
   it("returns defaults when the model is missing", () => {
     expect(resolveModelSlugForProvider(ProviderDriverKind.make("codex"), undefined)).toBe(
       DEFAULT_MODEL,

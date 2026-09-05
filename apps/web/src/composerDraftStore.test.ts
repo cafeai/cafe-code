@@ -1418,6 +1418,27 @@ describe("composerDraftStore provider-scoped option updates", () => {
     );
   });
 
+  it.each([CODEX_INSTANCE, CODEX_ZKM_INSTANCE])(
+    "keeps an explicit %s draft model while provider snapshots hydrate",
+    (instanceId) => {
+      const draftSelection = createModelSelection(instanceId, "gpt-5.6-sol");
+      expect(
+        deriveEffectiveComposerModelState({
+          draft: {
+            activeProvider: instanceId,
+            modelSelectionByProvider: { [instanceId]: draftSelection },
+          },
+          providers: [],
+          selectedProvider: CODEX_DRIVER,
+          selectedInstanceId: instanceId,
+          threadModelSelection: createModelSelection(instanceId, "gpt-6-astra"),
+          projectModelSelection: null,
+          settings: DEFAULT_UNIFIED_SETTINGS,
+        }).selectedModel,
+      ).toBe("gpt-5.6-sol");
+    },
+  );
+
   it("writes trait changes to the exact configured provider instance", () => {
     const store = useComposerDraftStore.getState();
     store.setModelSelection(

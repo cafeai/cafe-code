@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { deriveProviderInstanceEntries } from "./providerInstances";
 import {
   getAppModelOptionsForInstance,
+  resolveAppModelSelection,
   resolveAppModelSelectionForInstance,
   resolveAppModelSelectionState,
 } from "./modelSelection";
@@ -53,6 +54,35 @@ function settingsWithProviderInstances(): UnifiedSettings {
     },
   };
 }
+
+describe("model selection before provider hydration", () => {
+  it.each([
+    ["codex", "gpt-5.6-sol", "gpt-5.6-sol"],
+    ["codex", "gpt-5.6", "gpt-5.6-sol"],
+    ["claudeAgent", "claude-fable-5-1", "claude-fable-5-1"],
+    ["codex", null, "gpt-6-astra"],
+  ])("preserves %s selection %s without a catalog", (driver, selected, expected) => {
+    expect(
+      resolveAppModelSelection(
+        ProviderDriverKind.make(driver),
+        DEFAULT_UNIFIED_SETTINGS,
+        [],
+        selected,
+      ),
+    ).toBe(expected);
+  });
+
+  it("still validates against an available catalog", () => {
+    expect(
+      resolveAppModelSelection(
+        ProviderDriverKind.make("codex"),
+        DEFAULT_UNIFIED_SETTINGS,
+        [provider({ instanceId: "codex", models: ["gpt-6-astra"] })],
+        "unavailable-model",
+      ),
+    ).toBe("gpt-6-astra");
+  });
+});
 
 describe("instance-scoped model selection", () => {
   it("keeps custom models on the provider instance that declared them", () => {
